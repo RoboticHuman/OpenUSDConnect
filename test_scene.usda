@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Xform "Cube"
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "Geom"
+        {
+            double size = 1
+        }
+    }
+
+    def Xform "Sphere"
+    {
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Sphere "Geom"
+        {
+            double radius = 0.6
+        }
+    }
+
+    def Xform "Cone"
+    {
+        double3 xformOp:translate = (-2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cone "Geom"
+        {
+            double height = 1.4
+            double radius = 0.6
+        }
+    }
+
+    def Xform "Cylinder"
+    {
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "Geom"
+        {
+            double height = 1.4
+            double radius = 0.5
+        }
+    }
+}
