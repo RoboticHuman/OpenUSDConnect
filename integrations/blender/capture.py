@@ -30,6 +30,19 @@ LOG = logging.getLogger(__name__)
 DEFAULT_COALESCE_SECONDS = 0.15
 
 
+def sanitize_usd_name(name: str) -> str:
+    """Convert a Blender object name to a valid USD identifier.
+
+    USD identifiers must match [_a-zA-Z][_a-zA-Z0-9]*.
+    Spaces, dots, and other invalid chars are replaced with underscores.
+    """
+    import re
+    result = re.sub(r"[^_a-zA-Z0-9]", "_", name)
+    if result and result[0].isdigit():
+        result = "_" + result
+    return result or "_unnamed"
+
+
 # ---------------------------------------------------------------------------
 # Scene properties
 # ---------------------------------------------------------------------------
@@ -76,6 +89,21 @@ def _ensure_scene_props():
         S.usd_connect_net_emitter_running = bpy.props.BoolProperty(
             name="Net Emitter Running", default=False,
         )
+    if not hasattr(S, "usd_connect_auto_track"):
+        S.usd_connect_auto_track = bpy.props.BoolProperty(
+            name="Auto-track New Objects",
+            description=(
+                "Automatically register objects as USD prims when they are "
+                "first manipulated, using the root prim path below"
+            ),
+            default=False,
+        )
+    if not hasattr(S, "usd_connect_auto_track_root"):
+        S.usd_connect_auto_track_root = bpy.props.StringProperty(
+            name="Root Prim",
+            description="Parent prim path for auto-tracked objects (e.g. /World)",
+            default="/World",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +135,22 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
         if not prim_map:
             print("[USD Connect Hook] No prim map available; nothing tagged.")
             return True
+
+        # Infer root prim from the stage's default prim and update auto_track_root
+        if stage:
+            try:
+                default_prim = stage.GetDefaultPrim()
+                if default_prim and default_prim.IsValid():
+                    root_path = str(default_prim.GetPath())
+                else:
+                    # Fall back to the first root-level prim
+                    root_prims = [p for p in stage.GetPseudoRoot().GetChildren()]
+                    root_path = str(root_prims[0].GetPath()) if root_prims else None
+                if root_path:
+                    bpy.context.scene.usd_connect_auto_track_root = root_path
+                    print(f"[USD Connect Hook] Auto-track root set to {root_path}")
+            except Exception as e:
+                print(f"[USD Connect Hook] Could not infer root prim: {e}")
 
         skip_leaf_geom = bool(getattr(bpy.context.scene, "usd_connect_import_skip_leaf_geom", True))
 
@@ -283,15 +327,19 @@ class _NetworkEmitter:
 
     EPS = 1e-7  # tolerance for float comparison
 
-    def __init__(self, host: str, port: int, client_id: str = "blender-emitter", hz: float = 60.0):
+    def __init__(self, host: str, port: int, client_id: str = "blender-emitter", hz: float = 60.0,
+                 auto_track: bool = False, auto_track_root: str = "/World"):
         self.host = host
         self.port = port
         self.client_id = client_id
         self.hz = hz
+        self.auto_track = auto_track
+        self.auto_track_root = auto_track_root.rstrip("/")
         self.sock: Optional[socket.socket] = None
         self._applying_remote = False  # feedback loop guard
         self._known_prims: set = set()  # prims we've already sent ensure_prim for
         self._last_sent: dict = {}  # prim_path -> {"t": [...], "r": [...], "s": [...]}
+        self._tracked_objects: dict = {}  # obj.name -> prim_path (for deletion detection)
 
         # Lazy import to support vendored openusdconnect
         from openusdconnect.protocol import make_hello, make_txn, make_quit
@@ -306,6 +354,7 @@ class _NetworkEmitter:
         self._send_line(self.sock, self._make_hello("emitter"))
         self._known_prims.clear()
         self._last_sent.clear()
+        self._tracked_objects.clear()
         print(f"[USD Connect] Network emitter connected to {self.host}:{self.port}")
 
     def disconnect(self):
@@ -339,11 +388,23 @@ class _NetworkEmitter:
 
         Only sends ensure_prim/ensure_xform_ops once per prim.
         Only sends changed TRS fields (partial diff against last-sent cache).
+        Detects deleted objects and emits deactivate_prim events.
         """
         if self._applying_remote:
             return []
 
         events = []
+
+        # Deletion detection: check if any tracked objects have been removed from the scene
+        existing_obj_names = {obj.name for obj in bpy.data.objects}
+        deleted_names = [name for name in self._tracked_objects if name not in existing_obj_names]
+        for name in deleted_names:
+            prim_path = self._tracked_objects.pop(name)
+            self._known_prims.discard(prim_path)
+            self._last_sent.pop(prim_path, None)
+            events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
+            print(f"[USD Connect] Object deleted: {name!r} → deactivate_prim {prim_path}")
+
         for update in updates:
             id_data = update.id
             if not isinstance(id_data, bpy.types.Object):
@@ -351,7 +412,16 @@ class _NetworkEmitter:
             obj = id_data
             prim_path = obj.get("usd_prim_path")
             if not prim_path:
-                continue
+                if not self.auto_track:
+                    continue
+                # Auto-assign a prim path from the object name
+                usd_name = sanitize_usd_name(obj.name)
+                prim_path = f"{self.auto_track_root}/{usd_name}"
+                obj["usd_prim_path"] = prim_path
+                print(f"[USD Connect] Auto-tracked {obj.name!r} → {prim_path}")
+
+            # Track this object for future deletion detection
+            self._tracked_objects[obj.name] = prim_path
 
             # Compute local transform
             if obj.parent:
@@ -390,12 +460,27 @@ class _NetworkEmitter:
             if fields:
                 events.append(payload)
                 self._last_sent[prim_path] = {"t": t, "r": r, "s": s}
-            else:
-                print(f"[USD Connect] no change for {prim_path} (cached)")
 
-        if events:
-            print(f"[USD Connect] sending {len(events)} events, known={len(self._known_prims)}, cached={len(self._last_sent)}")
         return events
+
+    def send_rename(self, prim_path: str, new_name: str):
+        """Send a rename_prim event and update internal caches."""
+        if not self.sock:
+            return
+        # Update caches: old_path -> new_path
+        parent = prim_path.rsplit("/", 1)[0]
+        new_path = f"{parent}/{new_name}"
+
+        if prim_path in self._known_prims:
+            self._known_prims.discard(prim_path)
+            self._known_prims.add(new_path)
+        if prim_path in self._last_sent:
+            self._last_sent[new_path] = self._last_sent.pop(prim_path)
+        for obj_name, path in list(self._tracked_objects.items()):
+            if path == prim_path:
+                self._tracked_objects[obj_name] = new_path
+
+        self.send_events([{"k": "rename_prim", "prim": prim_path, "new_name": new_name}])
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +684,8 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 host=scene.usd_connect_emit_host,
                 port=scene.usd_connect_emit_port,
                 hz=scene.usd_connect_emit_hz,
+                auto_track=scene.usd_connect_auto_track,
+                auto_track_root=scene.usd_connect_auto_track_root,
             )
             _NET_EMITTER.connect()
             # Ensure depsgraph handler is registered
@@ -626,6 +713,54 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
+    bl_idname = "usd_connect.rename_prim"
+    bl_label = "Rename USD Prim"
+    bl_description = (
+        "Rename the USD prim for the active object. "
+        "Updates the prim path on the server via rename_prim event."
+    )
+
+    new_name: bpy.props.StringProperty(
+        name="New Name",
+        description="New prim name (leaf segment, not full path)",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and "usd_prim_path" in obj
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        current_path = obj.get("usd_prim_path", "")
+        self.new_name = current_path.rsplit("/", 1)[-1] if "/" in current_path else current_path
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        obj = context.active_object
+        old_path = obj.get("usd_prim_path", "")
+        if not old_path:
+            self.report({"ERROR"}, "Active object has no usd_prim_path")
+            return {"CANCELLED"}
+
+        new_name = self.new_name.strip()
+        if not new_name:
+            self.report({"ERROR"}, "New name cannot be empty")
+            return {"CANCELLED"}
+
+        parent = old_path.rsplit("/", 1)[0]
+        new_path = f"{parent}/{new_name}"
+
+        if _NET_EMITTER is not None and _NET_EMITTER.sock is not None:
+            _NET_EMITTER.send_rename(old_path, new_name)
+
+        obj["usd_prim_path"] = new_path
+        self.report({"INFO"}, f"Renamed: {old_path} → {new_path}")
+        return {"FINISHED"}
+
+
 class USD_CONNECT_OT_print_import_props(bpy.types.Operator):
     bl_idname = "usd_connect.print_import_props"
     bl_label = "Debug: Print USD Import Props"
@@ -649,6 +784,7 @@ _CAPTURE_CLASSES = (
     USD_CONNECT_OT_clear_diff,
     USD_CONNECT_OT_connect_emitter,
     USD_CONNECT_OT_disconnect_emitter,
+    USD_CONNECT_OT_rename_prim,
     USD_CONNECT_OT_print_import_props,
 )
 
@@ -674,6 +810,7 @@ def unregister():
         "usd_connect_import_skip_leaf_geom", "usd_connect_emit_host",
         "usd_connect_emit_port", "usd_connect_emit_hz",
         "usd_connect_net_emitter_running",
+        "usd_connect_auto_track", "usd_connect_auto_track_root",
     ):
         if hasattr(bpy.types.Scene, prop_name):
             try:

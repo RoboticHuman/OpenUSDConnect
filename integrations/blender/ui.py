@@ -73,6 +73,11 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
         col.prop(scene, "usd_connect_emit_port")
         col.prop(scene, "usd_connect_emit_hz")
 
+        col = box.column(align=True)
+        col.prop(scene, "usd_connect_auto_track")
+        if scene.usd_connect_auto_track:
+            col.prop(scene, "usd_connect_auto_track_root")
+
         row = box.row()
         if scene.usd_connect_net_emitter_running:
             row.operator("usd_connect.disconnect_emitter", icon="PAUSE")

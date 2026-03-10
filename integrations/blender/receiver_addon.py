@@ -70,6 +70,10 @@ def _process_event(ev: dict):
             _ADAPTER.set_xform_matrices(prim_path, ev)
         elif k == "delete_prim":
             _ADAPTER.delete_prim(prim_path)
+        elif k == "deactivate_prim":
+            _ADAPTER.deactivate_prim(prim_path, ev.get("active", False))
+        elif k == "rename_prim":
+            _ADAPTER.rename_prim(prim_path, ev.get("new_name", ""))
     finally:
         _APPLYING_REMOTE = False
         try:

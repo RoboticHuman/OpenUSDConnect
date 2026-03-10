@@ -37,6 +37,14 @@ class DCCAdapter(ABC):
     def delete_prim(self, prim_path: str) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
+    def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def rename_prim(self, prim_path: str, new_name: str) -> bool:
+        raise NotImplementedError
+
 
 class UsdStageAdapter(DCCAdapter):
     """Applies events to a Usd.Stage via event_apply functions.
@@ -71,6 +79,16 @@ class UsdStageAdapter(DCCAdapter):
 
     def delete_prim(self, prim_path: str) -> bool:
         self.stage.RemovePrim(prim_path)
+        return True
+
+    def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
+        from .event_apply import apply_event
+        apply_event(self.stage, {"k": "deactivate_prim", "prim": prim_path, "active": active})
+        return True
+
+    def rename_prim(self, prim_path: str, new_name: str) -> bool:
+        from .event_apply import apply_event
+        apply_event(self.stage, {"k": "rename_prim", "prim": prim_path, "new_name": new_name})
         return True
 
 
@@ -123,6 +141,24 @@ class MockAdapter(DCCAdapter):
             LOG.info("MockAdapter: deleted prim %s", prim_path)
             return True
         return False
+
+    def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            return False
+        p["active"] = active
+        LOG.info("MockAdapter: set active=%s on prim %s", active, prim_path)
+        return True
+
+    def rename_prim(self, prim_path: str, new_name: str) -> bool:
+        p = self._prims.pop(prim_path, None)
+        if p is None:
+            return False
+        parent = prim_path.rsplit("/", 1)[0]
+        new_path = f"{parent}/{new_name}"
+        self._prims[new_path] = p
+        LOG.info("MockAdapter: renamed %s -> %s", prim_path, new_path)
+        return True
 
     def get_prim(self, prim_path: str) -> dict:
         """Test helper: get stored prim state."""

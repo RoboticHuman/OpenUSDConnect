@@ -115,3 +115,31 @@ class BlenderAdapter(DCCAdapter):
         except Exception:
             LOG.exception("Failed to delete object for prim %s", prim_path)
             return False
+
+    def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
+        if not BPY_AVAILABLE:
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if not obj:
+            LOG.warning("BlenderAdapter.deactivate_prim: object not found for %s", prim_path)
+            return False
+        try:
+            obj.hide_set(not active)
+            obj.hide_render = not active
+            return True
+        except Exception:
+            LOG.exception("Failed to deactivate object for prim %s", prim_path)
+            return False
+
+    def rename_prim(self, prim_path: str, new_name: str) -> bool:
+        if not BPY_AVAILABLE:
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if not obj:
+            LOG.warning("BlenderAdapter.rename_prim: object not found for %s", prim_path)
+            return False
+        parent = prim_path.rsplit("/", 1)[0]
+        new_path = f"{parent}/{new_name}"
+        obj["usd_prim_path"] = new_path
+        LOG.info("BlenderAdapter: renamed prim path %s -> %s on object %s", prim_path, new_path, obj.name)
+        return True

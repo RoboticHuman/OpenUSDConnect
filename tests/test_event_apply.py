@@ -139,6 +139,40 @@ class TestApplyEvent:
         apply_event(stage, {"k": "delete_prim", "prim": "/World/ToDelete"})
         assert not stage.GetPrimAtPath("/World/ToDelete").IsValid()
 
+    def test_deactivate_prim(self, stage):
+        stage.DefinePrim("/World/Target", "Xform")
+        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": False})
+        prim = stage.GetPrimAtPath("/World/Target")
+        # Inactive prims are pruned from the composed view; IsValid returns False
+        assert not prim.IsActive()
+
+    def test_reactivate_prim(self, stage):
+        stage.DefinePrim("/World/Target", "Xform")
+        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": False})
+        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": True})
+        prim = stage.GetPrimAtPath("/World/Target")
+        assert prim.IsActive()
+
+    def test_rename_prim(self, stage):
+        stage.DefinePrim("/World/OldName", "Xform")
+        apply_event(stage, {"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
+        assert stage.GetPrimAtPath("/World/NewName").IsValid()
+        assert not stage.GetPrimAtPath("/World/OldName").IsValid()
+
+    def test_rename_preserves_transform(self, stage):
+        stage.DefinePrim("/World/OldName", "Xform")
+        apply_event(stage, {
+            "k": "set_xform_trs", "prim": "/World/OldName",
+            "fields": ["t"], "t": [3.0, 4.0, 5.0],
+        })
+        apply_event(stage, {"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
+        prim = stage.GetPrimAtPath("/World/NewName")
+        assert prim.IsValid()
+        xf = UsdGeom.Xformable(prim)
+        ops = {op.GetAttr().GetName(): op for op in xf.GetOrderedXformOps()}
+        t_val = ops["xformOp:translate"].Get()
+        assert abs(t_val[0] - 3.0) < 1e-6
+
 
 class TestApplyEvents:
     def test_atomic_batch(self, stage):

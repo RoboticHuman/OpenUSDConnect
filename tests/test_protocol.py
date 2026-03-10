@@ -137,3 +137,22 @@ class TestValidateEvent:
 
     def test_delete_prim_valid(self):
         assert validate_event({"k": "delete_prim", "prim": "/World/Sphere"})
+
+    def test_deactivate_prim_valid(self):
+        assert validate_event({"k": "deactivate_prim", "prim": "/World/Sphere", "active": False})
+        assert validate_event({"k": "deactivate_prim", "prim": "/World/Sphere", "active": True})
+
+    def test_deactivate_prim_missing_active(self):
+        assert not validate_event({"k": "deactivate_prim", "prim": "/World/Sphere"})
+
+    def test_deactivate_prim_active_not_bool(self):
+        assert not validate_event({"k": "deactivate_prim", "prim": "/World/Sphere", "active": 0})
+
+    def test_rename_prim_valid(self):
+        assert validate_event({"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
+
+    def test_rename_prim_missing_new_name(self):
+        assert not validate_event({"k": "rename_prim", "prim": "/World/OldName"})
+
+    def test_rename_prim_empty_new_name(self):
+        assert not validate_event({"k": "rename_prim", "prim": "/World/OldName", "new_name": ""})

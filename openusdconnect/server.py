@@ -34,7 +34,8 @@ class UsdSyncServer:
                 raise RuntimeError(f"Failed to open base USD: {base_usd_path}")
         else:
             self.stage = Usd.Stage.CreateInMemory()
-            self.stage.DefinePrim("/World", "Xform")
+            # Define a minimal root prim — name is arbitrary for an empty stage
+            self.stage.DefinePrim("/Root", "Xform")
 
         self.log_path = log_path
         self.stage_lock = threading.Lock()

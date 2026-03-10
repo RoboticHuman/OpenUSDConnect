@@ -113,6 +113,20 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
         stage.RemovePrim(prim_path)
         return
 
+    if k == "deactivate_prim":
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if prim and prim.IsValid():
+            prim.SetActive(ev.get("active", False))
+        return
+
+    if k == "rename_prim":
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if prim and prim.IsValid():
+            editor = Usd.NamespaceEditor(stage)
+            editor.RenamePrim(prim, ev["new_name"])
+            editor.ApplyEdits()
+        return
+
 
 def apply_events(stage: Usd.Stage, events: list) -> None:
     """Apply a list of events. Structural events (ensure_prim, ensure_xform_ops)

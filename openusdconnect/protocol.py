@@ -13,6 +13,8 @@ Event types (inside txn.events):
                         "t":[x,y,z], "r":[w,x,y,z], "s":[x,y,z]}
   set_xform_matrices: {"k":"set_xform_matrices","prim":"/World/Sphere",
                         "local_m":[16 floats], "world_m":[16 floats]}
+  deactivate_prim:    {"k":"deactivate_prim","prim":"/World/Sphere","active":false}
+  rename_prim:        {"k":"rename_prim","prim":"/World/OldName","new_name":"NewName"}
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ EVENT_KEYS = frozenset({
     "set_xform_trs",
     "set_xform_matrices",
     "delete_prim",
+    "deactivate_prim",
+    "rename_prim",
 })
 
 # Valid TRS field names
@@ -96,5 +100,12 @@ def validate_event(ev: dict) -> bool:
         if not is_mat16_valid(ev.get("local_m", [])):
             return False
         if not is_mat16_valid(ev.get("world_m", [])):
+            return False
+    if k == "deactivate_prim":
+        if not isinstance(ev.get("active"), bool):
+            return False
+    if k == "rename_prim":
+        new_name = ev.get("new_name")
+        if not isinstance(new_name, str) or not new_name:
             return False
     return True
