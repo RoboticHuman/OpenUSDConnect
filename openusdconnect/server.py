@@ -2,10 +2,10 @@
 
 Maintains an in-memory Usd.Stage, accepts transactions from emitters,
 applies them atomically, assigns monotonic sequence numbers, broadcasts
-to all connected receivers, and logs events to a JSONL file for replay.
+to all connected receivers, and logs events to a SQLite database for replay.
 
 CLI usage:
-    python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.jsonl
+    python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.db
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import socketserver
+import sqlite3
 import threading
 from typing import List, Optional, Set
 
@@ -25,9 +26,9 @@ LOG = logging.getLogger(__name__)
 
 
 class UsdSyncServer:
-    """Holds all shared server state: stage, sequence counter, client list, log file."""
+    """Holds all shared server state: stage, sequence counter, client list, SQLite event log."""
 
-    def __init__(self, base_usd_path: Optional[str] = None, log_path: str = "usd_events.jsonl"):
+    def __init__(self, base_usd_path: Optional[str] = None, log_path: str = "usd_events.db"):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
             if self.stage is None:
@@ -43,6 +44,23 @@ class UsdSyncServer:
         self.receivers: Set = set()
         self._seq_lock = threading.Lock()
         self._next_seq = 1
+        
+        # SQLite event log with WAL mode for concurrent reads
+        self.db_conn = self._init_db(log_path)
+        self.db_lock = threading.Lock()
+
+    def _init_db(self, db_path: str) -> sqlite3.Connection:
+        """Initialize SQLite database with events table."""
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                seq INTEGER PRIMARY KEY,
+                event TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        return conn
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -51,9 +69,14 @@ class UsdSyncServer:
             return s
 
     def append_log(self, rec: dict):
+        """Append event to SQLite database."""
         try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec) + "\n")
+            with self.db_lock:
+                self.db_conn.execute(
+                    "INSERT INTO events(seq, event) VALUES (?, ?)",
+                    (rec["seq"], json.dumps(rec))
+                )
+                self.db_conn.commit()
         except Exception:
             LOG.exception("Failed to write event log")
 
@@ -76,16 +99,19 @@ class UsdSyncServer:
                     apply_event(self.stage, ev)
 
     def replay_from(self, handler, seq_start: int):
+        """Replay events from SQLite database starting at seq_start."""
         try:
-            with open(self.log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    rec = json.loads(line)
-                    if int(rec.get("seq", 0)) >= seq_start:
-                        handler.request.sendall(
-                            (json.dumps(rec) + "\n").encode("utf-8")
-                        )
-        except FileNotFoundError:
-            pass
+            cursor = self.db_conn.cursor()
+            cursor.execute(
+                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
+                (seq_start,)
+            )
+            for row in cursor:
+                handler.request.sendall(
+                    (row[1] + "\n").encode("utf-8")
+                )
+        except Exception:
+            LOG.exception("Failed to replay events")
 
 
 class ConnectionHandler(socketserver.StreamRequestHandler):
@@ -112,10 +138,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         LOG.info("Client connected: role=%s from %s", role, self.client_address)
 
         if role == "receiver":
-            with sync_server.clients_lock:
-                sync_server.receivers.add(self)
             sync_from = int(hello.get("sync_from", 1))
-            sync_server.replay_from(self, sync_from)
+            # Hold clients_lock during replay AND add to prevent race condition.
+            # This blocks broadcasts during replay, ensuring no events slip through
+            # the gap between replay finishing and being added to broadcast set.
+            with sync_server.clients_lock:
+                sync_server.replay_from(self, sync_from)
+                sync_server.receivers.add(self)
 
         try:
             self._read_loop(sync_server)
@@ -164,7 +193,7 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def run_server(host: str = "127.0.0.1", port: int = 7200,
                base_usd_path: Optional[str] = None,
-               log_path: str = "usd_events.jsonl"):
+               log_path: str = "usd_events.db"):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
@@ -186,10 +215,16 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7200)
     ap.add_argument("--base", default=None, help="Base USD file to load")
-    ap.add_argument("--log", default="usd_events.jsonl", help="Event log file path")
+    ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
     args = ap.parse_args()
     run_server(host=args.host, port=args.port, base_usd_path=args.base, log_path=args.log)
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+

@@ -46,6 +46,7 @@ class ReceiverThread(threading.Thread):
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
         self.connected = False
+        self.last_seq: int = 0
 
     def run(self):
         try:
@@ -67,6 +68,14 @@ class ReceiverThread(threading.Thread):
                     continue
                 with self._incoming_lock:
                     self._incoming.append(line)
+                # Track last_seq for reconnect replay
+                try:
+                    parsed = json.loads(line)
+                    seq = parsed.get("seq")
+                    if seq is not None:
+                        self.last_seq = max(self.last_seq, int(seq))
+                except Exception:
+                    pass
         except Exception:
             if not self._stop_event.is_set():
                 LOG.exception("ReceiverThread: connection error")

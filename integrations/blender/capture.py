@@ -387,7 +387,8 @@ class _NetworkEmitter:
         """Build protocol events from a pre-collected list of depsgraph updates.
 
         Only sends ensure_prim/ensure_xform_ops once per prim.
-        Only sends changed TRS fields (partial diff against last-sent cache).
+        Marks observed prims active and only sends changed TRS fields
+        (partial diff against last-sent cache).
         Detects deleted objects and emits deactivate_prim events.
         """
         if self._applying_remote:
@@ -441,6 +442,11 @@ class _NetworkEmitter:
                 events.append({"k": "ensure_prim", "prim": prim_path, "typeName": "Xform"})
                 events.append({"k": "ensure_xform_ops", "prim": prim_path})
                 self._known_prims.add(prim_path)
+
+            # If an object is present and being updated locally, it must be active.
+            # Emit an explicit reactivation before TRS so stale hidden state on the
+            # server/receivers is cleared.
+            events.append({"k": "deactivate_prim", "prim": prim_path, "active": True})
 
             # Diff against last-sent values
             last = self._last_sent.get(prim_path, {})

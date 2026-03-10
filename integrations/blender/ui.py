@@ -96,8 +96,15 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
         if scene.usd_connect_recv_running:
             row.operator("usd_connect.stop_receiver", icon="PAUSE")
             box.label(text="Receiver running", icon="CHECKMARK")
+            # Show current sequence number
+            if hasattr(scene, "usd_connect_recv_last_seq"):
+                box.label(text=f"Last seq: {scene.usd_connect_recv_last_seq}")
         else:
             row.operator("usd_connect.start_receiver", icon="PLAY")
+            # Show reset button when stopped
+            if hasattr(scene, "usd_connect_recv_last_seq") and scene.usd_connect_recv_last_seq > 0:
+                box.label(text=f"Will sync from seq: {scene.usd_connect_recv_last_seq + 1}")
+                box.operator("usd_connect.reset_receiver_seq", icon="LOOP_BACK")
 
 
 _UI_CLASSES = (
