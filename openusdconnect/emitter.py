@@ -95,6 +95,7 @@ class NoticeEmitter:
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         self.last_sent_trs: Dict[str, Dict[str, List[float]]] = {}
         self.last_sent_mats: Dict[str, Dict[str, List[float]]] = {}
+        self.last_sent_visibility: Dict[str, str] = {}
 
     def _on_changed(self, notice, stage):
         for p in notice.GetResyncedPaths():
@@ -178,6 +179,22 @@ class NoticeEmitter:
                     "r": snap["r"],
                     "s": snap["s"],
                 }
+
+            # Visibility diff
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                imageable = UsdGeom.Imageable(prim)
+                vis_attr = imageable.GetVisibilityAttr()
+                if vis_attr and vis_attr.IsValid():
+                    vis_val = vis_attr.Get() or "inherited"
+                    last_vis = self.last_sent_visibility.get(prim_path)
+                    if vis_val != last_vis:
+                        events.append({
+                            "k": "set_visibility",
+                            "prim": prim_path,
+                            "visible": vis_val != "invisible",
+                        })
+                        self.last_sent_visibility[prim_path] = vis_val
 
             # Optional matrices event (diagnostic)
             if include_matrices:

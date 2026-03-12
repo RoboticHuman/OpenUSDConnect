@@ -174,6 +174,53 @@ class TestApplyEvent:
         assert abs(t_val[0] - 3.0) < 1e-6
 
 
+class TestSetVisibility:
+    def test_set_invisible(self, stage):
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": False})
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        imageable = UsdGeom.Imageable(prim)
+        assert imageable.GetVisibilityAttr().Get() == "invisible"
+
+    def test_set_visible(self, stage):
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": False})
+        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": True})
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        imageable = UsdGeom.Imageable(prim)
+        assert imageable.GetVisibilityAttr().Get() == "inherited"
+
+
+class TestSetGprimAttrs:
+    def test_sphere_radius(self, stage):
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        apply_event(stage, {"k": "set_gprim_attrs", "prim": "/World/Sphere", "attrs": {"radius": 3.0}})
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        assert abs(prim.GetAttribute("radius").Get() - 3.0) < 1e-6
+
+    def test_cone_height_and_radius(self, stage):
+        stage.DefinePrim("/World/Cone", "Cone")
+        apply_event(stage, {"k": "set_gprim_attrs", "prim": "/World/Cone", "attrs": {"height": 1.4, "radius": 0.6}})
+        prim = stage.GetPrimAtPath("/World/Cone")
+        assert abs(prim.GetAttribute("height").Get() - 1.4) < 1e-6
+        assert abs(prim.GetAttribute("radius").Get() - 0.6) < 1e-6
+
+
+class TestSetReference:
+    def test_add_reference(self, stage):
+        # Create a referenceable stage with a prim
+        ref_stage = Usd.Stage.CreateInMemory("ref.usda")
+        ref_stage.DefinePrim("/Chair", "Xform")
+        ref_layer = ref_stage.GetRootLayer()
+        ref_path = ref_layer.identifier
+
+        apply_event(stage, {"k": "set_reference", "prim": "/World/Chair",
+                            "asset_path": ref_path, "prim_path": "/Chair"})
+        prim = stage.GetPrimAtPath("/World/Chair")
+        assert prim.IsValid()
+        assert prim.HasAuthoredReferences()
+
+
 class TestApplyEvents:
     def test_atomic_batch(self, stage):
         events = [

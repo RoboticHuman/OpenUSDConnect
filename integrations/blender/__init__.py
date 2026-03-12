@@ -29,8 +29,27 @@ try:
 except Exception:
     pass
 
+# Reload submodules when the addon is re-enabled (F3 → Reload Scripts,
+# or disable/enable toggle).  Without this, Blender only notices changes
+# to __init__.py — edits in capture.py, receiver_addon.py, etc. are
+# silently ignored until a full restart.
+if "capture" in locals():
+    import importlib
+    # Reload vendored core library first (dependency)
+    from . import openusdconnect as _ouc_pkg
+    for _sub in ("protocol", "transport", "event_apply", "emitter", "receiver", "adapters", "server"):
+        _mod = getattr(_ouc_pkg, _sub, None)
+        if _mod is not None:
+            importlib.reload(_mod)
+    # Then reload addon modules
+    importlib.reload(capture)        # noqa: F821
+    importlib.reload(receiver_addon) # noqa: F821
+    importlib.reload(blender_adapter) # noqa: F821
+    importlib.reload(ui)             # noqa: F821
+
 from . import capture
 from . import receiver_addon
+from . import blender_adapter
 from . import ui
 
 

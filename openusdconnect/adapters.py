@@ -45,6 +45,18 @@ class DCCAdapter(ABC):
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
+    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+        raise NotImplementedError
+
 
 class UsdStageAdapter(DCCAdapter):
     """Applies events to a Usd.Stage via event_apply functions.
@@ -89,6 +101,24 @@ class UsdStageAdapter(DCCAdapter):
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
         from .event_apply import apply_event
         apply_event(self.stage, {"k": "rename_prim", "prim": prim_path, "new_name": new_name})
+        return True
+
+    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+        from .event_apply import apply_event
+        apply_event(self.stage, {"k": "set_visibility", "prim": prim_path, "visible": visible})
+        return True
+
+    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+        from .event_apply import apply_event
+        apply_event(self.stage, {"k": "set_gprim_attrs", "prim": prim_path, "attrs": attrs})
+        return True
+
+    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+        from .event_apply import apply_event
+        ev = {"k": "set_reference", "prim": prim_path, "asset_path": asset_path}
+        if prim_path_ref:
+            ev["prim_path"] = prim_path_ref
+        apply_event(self.stage, ev)
         return True
 
 
@@ -158,6 +188,31 @@ class MockAdapter(DCCAdapter):
         new_path = f"{parent}/{new_name}"
         self._prims[new_path] = p
         LOG.info("MockAdapter: renamed %s -> %s", prim_path, new_path)
+        return True
+
+    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            return False
+        p["visible"] = visible
+        LOG.info("MockAdapter: set visible=%s on prim %s", visible, prim_path)
+        return True
+
+    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            return False
+        p.setdefault("gprim_attrs", {}).update(attrs)
+        LOG.info("MockAdapter: set gprim attrs %s on prim %s", attrs, prim_path)
+        return True
+
+    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        p["reference"] = {"asset_path": asset_path, "prim_path": prim_path_ref}
+        LOG.info("MockAdapter: set reference %s on prim %s", asset_path, prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

@@ -10,5 +10,12 @@ dev = [
     "pytest>=9.0.2",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Blender integration tests: configure via one of:
+#   uv run pytest --blender /path/to/blender.exe
+#   BLENDER_EXE=/path/to/blender.exe uv run pytest
+#   echo /path/to/blender.exe > blender.test.cfg
+
 [project.scripts]
 openusdconnect-server = "openusdconnect.server:main"

@@ -30,6 +30,42 @@ LOG = logging.getLogger(__name__)
 DEFAULT_COALESCE_SECONDS = 0.15
 
 
+
+_USD_MESH_TYPES = ("Sphere", "Cube", "Cylinder", "Cone", "Capsule")
+
+
+def _infer_usd_type(obj) -> str:
+    """Infer the USD typeName for a Blender object at auto-track time.
+
+    Uses the Blender object's mesh vertex/face counts to identify parametric
+    primitives, since mesh data names can be renamed by the user.
+    Falls back to 'Mesh' for mesh objects or 'Xform' for non-mesh.
+    """
+    if obj.type != 'MESH' or obj.data is None:
+        return "Xform"
+    # Check mesh data name as a hint (works for freshly-created primitives)
+    mesh_name = obj.data.name
+    for usd_type in _USD_MESH_TYPES:
+        if mesh_name.startswith(usd_type):
+            return usd_type
+    return "Mesh"
+
+
+
+def _deferred_set_props(obj_name: str, prim_path: str, type_name: str):
+    """Set custom properties on next main-loop tick (outside depsgraph callback).
+
+    Looks up by name to avoid stale-reference issues.
+    """
+    def _apply():
+        obj = bpy.data.objects.get(obj_name)
+        if obj is not None:
+            obj["usd_prim_path"] = prim_path
+            obj["usd_type_name"] = type_name
+        return None  # one-shot
+    bpy.app.timers.register(_apply, first_interval=0)
+
+
 def sanitize_usd_name(name: str) -> str:
     """Convert a Blender object name to a valid USD identifier.
 
@@ -159,9 +195,21 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             prim_path_str = str(prim_path)
             if skip_leaf_geom and prim_path_str.endswith("/Geom"):
                 continue
+            # Look up prim type from the stage
+            prim_type_name = ""
+            if stage:
+                try:
+                    prim = stage.GetPrimAtPath(prim_path_str)
+                    if prim and prim.IsValid():
+                        prim_type_name = prim.GetTypeName()
+                except Exception:
+                    pass
+
             for db in data_blocks:
                 if isinstance(db, bpy.types.Object):
                     db["usd_prim_path"] = prim_path_str
+                    if prim_type_name:
+                        db["usd_type_name"] = prim_type_name
                     if stage_id:
                         db["usd_stage_id"] = stage_id
                     tagged += 1
@@ -328,18 +376,18 @@ class _NetworkEmitter:
     EPS = 1e-7  # tolerance for float comparison
 
     def __init__(self, host: str, port: int, client_id: str = "blender-emitter", hz: float = 60.0,
-                 auto_track: bool = False, auto_track_root: str = "/World"):
+                 auto_track: bool = False):
         self.host = host
         self.port = port
         self.client_id = client_id
         self.hz = hz
         self.auto_track = auto_track
-        self.auto_track_root = auto_track_root.rstrip("/")
         self.sock: Optional[socket.socket] = None
         self._applying_remote = False  # feedback loop guard
-        self._known_prims: set = set()  # prims we've already sent ensure_prim for
+        self._known_prims: set = set()  # prims we've sent ensure_prim for + deletion detection
         self._last_sent: dict = {}  # prim_path -> {"t": [...], "r": [...], "s": [...]}
-        self._tracked_objects: dict = {}  # obj.name -> prim_path (for deletion detection)
+        self._used_prim_paths: set = set()  # all prim paths in scene (for collision avoidance)
+        self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
 
         # Lazy import to support vendored openusdconnect
         from openusdconnect.protocol import make_hello, make_txn, make_quit
@@ -354,7 +402,13 @@ class _NetworkEmitter:
         self._send_line(self.sock, self._make_hello("emitter"))
         self._known_prims.clear()
         self._last_sent.clear()
-        self._tracked_objects.clear()
+        self._prim_refs.clear()
+        # Seed used-paths from scene (one-time O(N) scan, then O(1) lookups)
+        self._used_prim_paths = {
+            obj.get("usd_prim_path")
+            for obj in bpy.data.objects
+            if obj.get("usd_prim_path")
+        }
         print(f"[USD Connect] Network emitter connected to {self.host}:{self.port}")
 
     def disconnect(self):
@@ -396,33 +450,69 @@ class _NetworkEmitter:
 
         events = []
 
-        # Deletion detection: check if any tracked objects have been removed from the scene
-        existing_obj_names = {obj.name for obj in bpy.data.objects}
-        deleted_names = [name for name in self._tracked_objects if name not in existing_obj_names]
-        for name in deleted_names:
-            prim_path = self._tracked_objects.pop(name)
+        # Deletion detection: check if stored object references are still valid.
+        # Blender raises ReferenceError when accessing a deleted object's properties.
+        deleted_prims = []
+        for pp, obj_ref in list(self._prim_refs.items()):
+            try:
+                _ = obj_ref.name
+            except ReferenceError:
+                deleted_prims.append(pp)
+        for prim_path in deleted_prims:
             self._known_prims.discard(prim_path)
+            self._used_prim_paths.discard(prim_path)
             self._last_sent.pop(prim_path, None)
+            self._prim_refs.pop(prim_path, None)
             events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
-            print(f"[USD Connect] Object deleted: {name!r} → deactivate_prim {prim_path}")
+            print(f"[USD Connect] Object deleted: deactivate_prim {prim_path}")
 
         for update in updates:
             id_data = update.id
             if not isinstance(id_data, bpy.types.Object):
                 continue
             obj = id_data
+            # Check custom property first, fall back to in-memory tracking
+            # (custom properties set from depsgraph callbacks may not persist)
             prim_path = obj.get("usd_prim_path")
+            type_name = None  # set by auto-track branch if needed
+            if not prim_path:
+                # Reverse-lookup: is this object already tracked by reference?
+                for pp, ref in self._prim_refs.items():
+                    if ref is obj:
+                        prim_path = pp
+                        break
             if not prim_path:
                 if not self.auto_track:
                     continue
-                # Auto-assign a prim path from the object name
+                # Only auto-track if the object is parented under a
+                # tracked prim (i.e. under the imported USD hierarchy).
+                # This avoids capturing stray scene objects and respects
+                # the USD prim tree structure.
+                parent = getattr(obj, "parent", None)
+                if parent is None:
+                    continue
+                parent_prim = parent.get("usd_prim_path")
+                if not parent_prim:
+                    continue
+                # Derive prim path from the parent's USD path,
+                # disambiguating if the path is already taken (O(1) lookup).
                 usd_name = sanitize_usd_name(obj.name)
-                prim_path = f"{self.auto_track_root}/{usd_name}"
-                obj["usd_prim_path"] = prim_path
-                print(f"[USD Connect] Auto-tracked {obj.name!r} → {prim_path}")
+                prim_path = f"{parent_prim}/{usd_name}"
+                if prim_path in self._used_prim_paths:
+                    i = 1
+                    while f"{prim_path}_{i}" in self._used_prim_paths:
+                        i += 1
+                    prim_path = f"{prim_path}_{i}"
+                self._used_prim_paths.add(prim_path)
+                type_name = _infer_usd_type(obj)
+                # Defer custom-property writes to a timer callback — writes
+                # inside depsgraph_update_post are discarded by Blender.
+                # Look up by name to avoid stale-reference issues.
+                _deferred_set_props(obj.name, prim_path, type_name)
+                print(f"[USD Connect] Auto-tracked {obj.name!r} → {prim_path} ({type_name})")
 
-            # Track this object for future deletion detection
-            self._tracked_objects[obj.name] = prim_path
+            # Store object reference for deletion detection and re-tracking
+            self._prim_refs[prim_path] = obj
 
             # Compute local transform
             if obj.parent:
@@ -438,15 +528,14 @@ class _NetworkEmitter:
             s = [scl.x, scl.y, scl.z]
 
             # Only send structural events on first encounter
-            if prim_path not in self._known_prims:
-                events.append({"k": "ensure_prim", "prim": prim_path, "typeName": "Xform"})
+            first_encounter = prim_path not in self._known_prims
+            if first_encounter:
+                # Prefer the already-computed type_name (from auto-track) over the
+                # custom property, which may not have been written yet (deferred).
+                tn = type_name if type_name else obj.get("usd_type_name", "Xform")
+                events.append({"k": "ensure_prim", "prim": prim_path, "typeName": tn})
                 events.append({"k": "ensure_xform_ops", "prim": prim_path})
                 self._known_prims.add(prim_path)
-
-            # If an object is present and being updated locally, it must be active.
-            # Emit an explicit reactivation before TRS so stale hidden state on the
-            # server/receivers is cleared.
-            events.append({"k": "deactivate_prim", "prim": prim_path, "active": True})
 
             # Diff against last-sent values
             last = self._last_sent.get(prim_path, {})
@@ -467,6 +556,11 @@ class _NetworkEmitter:
                 events.append(payload)
                 self._last_sent[prim_path] = {"t": t, "r": r, "s": s}
 
+            # NOTE: visibility tracking removed from depsgraph handler.
+            # Both hide_get() and hide_viewport are unreliable during depsgraph
+            # callbacks.  Visibility sync should be done via a separate mechanism
+            # (e.g. timer or explicit operator) in the future.
+
         return events
 
     def send_rename(self, prim_path: str, new_name: str):
@@ -482,9 +576,10 @@ class _NetworkEmitter:
             self._known_prims.add(new_path)
         if prim_path in self._last_sent:
             self._last_sent[new_path] = self._last_sent.pop(prim_path)
-        for obj_name, path in list(self._tracked_objects.items()):
-            if path == prim_path:
-                self._tracked_objects[obj_name] = new_path
+        self._used_prim_paths.discard(prim_path)
+        self._used_prim_paths.add(new_path)
+        if prim_path in self._prim_refs:
+            self._prim_refs[new_path] = self._prim_refs.pop(prim_path)
 
         self.send_events([{"k": "rename_prim", "prim": prim_path, "new_name": new_name}])
 
@@ -540,6 +635,8 @@ def _depsgraph_handler(scene, depsgraph):
         # Network emitter
         if _NET_EMITTER is not None and _NET_EMITTER.sock is not None:
             if not _NET_EMITTER._applying_remote:
+                # Sync auto_track live from scene (toggle takes effect without reconnecting)
+                _NET_EMITTER.auto_track = getattr(scene, "usd_connect_auto_track", False)
                 events = _NET_EMITTER.build_events_from_updates(updates)
                 if events:
                     _NET_EMITTER.send_events(events)
@@ -691,7 +788,6 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 port=scene.usd_connect_emit_port,
                 hz=scene.usd_connect_emit_hz,
                 auto_track=scene.usd_connect_auto_track,
-                auto_track_root=scene.usd_connect_auto_track_root,
             )
             _NET_EMITTER.connect()
             # Ensure depsgraph handler is registered

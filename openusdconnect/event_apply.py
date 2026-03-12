@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pxr import Usd, UsdGeom, Gf, Sdf
+from pxr import Usd, UsdGeom, Gf, Sdf, Vt
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -71,11 +71,33 @@ def quatf_from_wxyz(q) -> Gf.Quatf:
     return Gf.Quatf(w, Gf.Vec3f(x, y, z))
 
 
+def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
+    """Set a single attribute on a typed gprim, coercing to the schema-defined type."""
+    attr = prim.GetAttribute(name)
+    if not attr or not attr.IsValid():
+        return
+    type_name = str(attr.GetTypeName())
+
+    if isinstance(value, list):
+        if type_name in ("float3[]", "vector3f[]"):
+            arr = Vt.Vec3fArray([Gf.Vec3f(*v) for v in value])
+            attr.Set(arr)
+        elif type_name == "int[]":
+            attr.Set(Vt.IntArray(value))
+        elif type_name == "float[]":
+            attr.Set(Vt.FloatArray(value))
+        else:
+            attr.Set(value)
+    else:
+        attr.Set(value)
+
+
 def apply_event(stage: Usd.Stage, ev: dict) -> None:
     """Apply a single event dict to a USD stage.
 
     Handles all event types: ensure_prim, ensure_xform_ops, set_xform_trs,
-    set_xform_matrices, delete_prim.
+    set_xform_matrices, delete_prim, set_visibility, set_gprim_attrs,
+    set_reference.
     """
     k = ev.get("k")
 
@@ -127,13 +149,41 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
             editor.ApplyEdits()
         return
 
+    if k == "set_visibility":
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if prim and prim.IsValid():
+            imageable = UsdGeom.Imageable(prim)
+            vis_value = "inherited" if ev.get("visible", True) else "invisible"
+            imageable.GetVisibilityAttr().Set(vis_value)
+        return
+
+    if k == "set_gprim_attrs":
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if prim and prim.IsValid():
+            for attr_name, attr_value in ev.get("attrs", {}).items():
+                _set_gprim_attr(prim, attr_name, attr_value)
+        return
+
+    if k == "set_reference":
+        prim_path = ev["prim"]
+        prim = get_or_define_prim(stage, prim_path)
+        refs = prim.GetReferences()
+        refs.ClearReferences()
+        asset_path = ev["asset_path"]
+        prim_path_ref = ev.get("prim_path", "")
+        if prim_path_ref:
+            refs.AddReference(asset_path, prim_path_ref)
+        else:
+            refs.AddReference(asset_path)
+        return
+
 
 def apply_events(stage: Usd.Stage, events: list) -> None:
     """Apply a list of events. Structural events (ensure_prim, ensure_xform_ops)
     are applied first outside a ChangeBlock, then value-setting events are
     applied inside a ChangeBlock for atomicity."""
     # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
-    structural = {"ensure_prim", "ensure_xform_ops"}
+    structural = {"ensure_prim", "ensure_xform_ops", "set_reference"}
     for ev in events:
         if ev.get("k") in structural:
             apply_event(stage, ev)

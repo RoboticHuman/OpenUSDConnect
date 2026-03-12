@@ -15,6 +15,11 @@ Event types (inside txn.events):
                         "local_m":[16 floats], "world_m":[16 floats]}
   deactivate_prim:    {"k":"deactivate_prim","prim":"/World/Sphere","active":false}
   rename_prim:        {"k":"rename_prim","prim":"/World/OldName","new_name":"NewName"}
+  set_visibility:     {"k":"set_visibility","prim":"/World/Sphere","visible":false}
+  set_gprim_attrs:    {"k":"set_gprim_attrs","prim":"/World/Sphere/Geom",
+                        "attrs":{"radius":2.0}}
+  set_reference:      {"k":"set_reference","prim":"/World/Chair",
+                        "asset_path":"./assets/chair.usd","prim_path":"/Chair"}
 """
 
 from __future__ import annotations
@@ -32,6 +37,9 @@ EVENT_KEYS = frozenset({
     "delete_prim",
     "deactivate_prim",
     "rename_prim",
+    "set_visibility",
+    "set_gprim_attrs",
+    "set_reference",
 })
 
 # Valid TRS field names
@@ -108,4 +116,21 @@ def validate_event(ev: dict) -> bool:
         new_name = ev.get("new_name")
         if not isinstance(new_name, str) or not new_name:
             return False
+    if k == "set_visibility":
+        if not isinstance(ev.get("visible"), bool):
+            return False
+    if k == "set_gprim_attrs":
+        attrs = ev.get("attrs")
+        if not isinstance(attrs, dict):
+            return False
+        if not all(isinstance(key, str) for key in attrs):
+            return False
+    if k == "set_reference":
+        asset_path = ev.get("asset_path")
+        if not isinstance(asset_path, str) or not asset_path:
+            return False
+        prim_path = ev.get("prim_path")
+        if prim_path is not None:
+            if not isinstance(prim_path, str) or not prim_path.startswith("/"):
+                return False
     return True

@@ -53,6 +53,12 @@ def _process_event(ev: dict):
 
     k = ev.get("k")
     prim_path = ev.get("prim", "")
+    extra = ""
+    if k == "set_visibility":
+        extra = f" visible={ev.get('visible')}"
+    elif k == "deactivate_prim":
+        extra = f" active={ev.get('active')}"
+    print(f"[USD Connect Recv] event: k={k} prim={prim_path}{extra}")
 
     _APPLYING_REMOTE = True
     try:
@@ -78,6 +84,12 @@ def _process_event(ev: dict):
             _ADAPTER.deactivate_prim(prim_path, ev.get("active", False))
         elif k == "rename_prim":
             _ADAPTER.rename_prim(prim_path, ev.get("new_name", ""))
+        elif k == "set_visibility":
+            _ADAPTER.set_visibility(prim_path, ev.get("visible", True))
+        elif k == "set_gprim_attrs":
+            _ADAPTER.set_gprim_attrs(prim_path, ev.get("attrs", {}))
+        elif k == "set_reference":
+            _ADAPTER.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", ""))
     finally:
         _APPLYING_REMOTE = False
         try:
@@ -88,33 +100,39 @@ def _process_event(ev: dict):
             pass
 
 
-def _process_queue_timer():
-    """Drain receiver queue on Blender main thread."""
-    global _RECEIVER, _LAST_SEQ
-    if _RECEIVER is None:
-        return None  # Unregister timer
-
-    lines = _RECEIVER.drain_queue()
+def _drain_and_process(lines):
+    """Parse, deduplicate, and apply a batch of raw JSON lines."""
+    global _LAST_SEQ
     for raw_line in lines:
         try:
             msg = json.loads(raw_line)
             seq = msg.get("seq")
-            
-            # Skip already-processed events (deduplication)
             if seq is not None:
                 seq_int = int(seq)
                 if seq_int <= _LAST_SEQ:
                     continue
                 _LAST_SEQ = seq_int
-            
             if msg.get("type") == "event":
-                ev = msg.get("event", {})
-                _process_event(ev)
+                _process_event(msg.get("event", {}))
         except Exception:
             LOG.exception("Error processing received line")
 
-    # Persist to scene property after processing all
+
+def _process_queue_timer():
+    """Drain receiver queue on Blender main thread."""
+    if _RECEIVER is None:
+        return None  # Unregister timer
+
+    lines = _RECEIVER.drain_queue()
+    _drain_and_process(lines)
+
+    # Refresh viewport once after processing all events (not per-event)
     if lines:
+        try:
+            if bpy.context.view_layer:
+                bpy.context.view_layer.update()
+        except Exception:
+            pass
         try:
             scene = bpy.context.scene
             if scene:
@@ -179,21 +197,8 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
                 pass
             
             # NOW drain any remaining queued events (thread dead, timer stopped)
-            remaining = receiver.drain_queue()
-            for raw_line in remaining:
-                try:
-                    msg = json.loads(raw_line)
-                    seq = msg.get("seq")
-                    if seq is not None:
-                        seq_int = int(seq)
-                        if seq_int <= _LAST_SEQ:
-                            continue
-                        _LAST_SEQ = seq_int
-                    if msg.get("type") == "event":
-                        _process_event(msg.get("event", {}))
-                except Exception:
-                    pass
-            
+            _drain_and_process(receiver.drain_queue())
+
             # Persist to scene property
             try:
                 context.scene.usd_connect_recv_last_seq = _LAST_SEQ

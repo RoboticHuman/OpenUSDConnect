@@ -43,11 +43,13 @@ class UsdSyncServer:
         self.clients_lock = threading.Lock()
         self.receivers: Set = set()
         self._seq_lock = threading.Lock()
-        self._next_seq = 1
-        
+
         # SQLite event log with WAL mode for concurrent reads
         self.db_conn = self._init_db(log_path)
         self.db_lock = threading.Lock()
+
+        # Resume sequence counter from existing DB
+        self._next_seq = self._load_max_seq() + 1
 
     def _init_db(self, db_path: str) -> sqlite3.Connection:
         """Initialize SQLite database with events table."""
@@ -61,6 +63,14 @@ class UsdSyncServer:
         """)
         conn.commit()
         return conn
+
+    def _load_max_seq(self) -> int:
+        """Read the highest seq from the DB, or 0 if empty."""
+        try:
+            row = self.db_conn.execute("SELECT MAX(seq) FROM events").fetchone()
+            return row[0] or 0
+        except Exception:
+            return 0
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -93,10 +103,9 @@ class UsdSyncServer:
                 self.receivers.discard(h)
 
     def apply_txn(self, events: List[dict]):
+        from .event_apply import apply_events
         with self.stage_lock:
-            with Sdf.ChangeBlock():
-                for ev in events:
-                    apply_event(self.stage, ev)
+            apply_events(self.stage, events)
 
     def replay_from(self, handler, seq_start: int):
         """Replay events from SQLite database starting at seq_start."""
