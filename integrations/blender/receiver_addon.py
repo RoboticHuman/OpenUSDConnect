@@ -46,8 +46,13 @@ def _ensure_scene_props():
 
 
 def _process_event(ev: dict):
-    """Dispatch a single event to the BlenderAdapter."""
-    global _ADAPTER, _APPLYING_REMOTE
+    """Dispatch a single event to the BlenderAdapter.
+
+    NOTE: caller is responsible for setting _APPLYING_REMOTE around the
+    entire batch — this function only dispatches, it does not toggle the
+    feedback guard.
+    """
+    global _ADAPTER
     if _ADAPTER is None:
         _ADAPTER = BlenderAdapter()
 
@@ -60,44 +65,38 @@ def _process_event(ev: dict):
         extra = f" active={ev.get('active')}"
     print(f"[USD Connect Recv] event: k={k} prim={prim_path}{extra}")
 
-    _APPLYING_REMOTE = True
-    try:
-        # Also set feedback guard on capture module if available
-        try:
-            from . import capture
-            if capture._NET_EMITTER is not None:
-                capture._NET_EMITTER._applying_remote = True
-        except Exception:
-            pass
+    if k == "ensure_prim":
+        _ADAPTER.ensure_prim(prim_path, ev.get("typeName", "Xform"))
+    elif k == "ensure_xform_ops":
+        _ADAPTER.ensure_xform_ops(prim_path)
+    elif k == "set_xform_trs":
+        _ADAPTER.set_xform_trs(prim_path, ev)
+    elif k == "set_xform_matrices":
+        _ADAPTER.set_xform_matrices(prim_path, ev)
+    elif k == "delete_prim":
+        _ADAPTER.delete_prim(prim_path)
+    elif k == "deactivate_prim":
+        _ADAPTER.deactivate_prim(prim_path, ev.get("active", False))
+    elif k == "rename_prim":
+        _ADAPTER.rename_prim(prim_path, ev.get("new_name", ""))
+    elif k == "set_visibility":
+        _ADAPTER.set_visibility(prim_path, ev.get("visible", True))
+    elif k == "set_gprim_attrs":
+        _ADAPTER.set_gprim_attrs(prim_path, ev.get("attrs", {}))
+    elif k == "set_reference":
+        _ADAPTER.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", ""))
 
-        if k == "ensure_prim":
-            _ADAPTER.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-        elif k == "ensure_xform_ops":
-            _ADAPTER.ensure_xform_ops(prim_path)
-        elif k == "set_xform_trs":
-            _ADAPTER.set_xform_trs(prim_path, ev)
-        elif k == "set_xform_matrices":
-            _ADAPTER.set_xform_matrices(prim_path, ev)
-        elif k == "delete_prim":
-            _ADAPTER.delete_prim(prim_path)
-        elif k == "deactivate_prim":
-            _ADAPTER.deactivate_prim(prim_path, ev.get("active", False))
-        elif k == "rename_prim":
-            _ADAPTER.rename_prim(prim_path, ev.get("new_name", ""))
-        elif k == "set_visibility":
-            _ADAPTER.set_visibility(prim_path, ev.get("visible", True))
-        elif k == "set_gprim_attrs":
-            _ADAPTER.set_gprim_attrs(prim_path, ev.get("attrs", {}))
-        elif k == "set_reference":
-            _ADAPTER.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", ""))
-    finally:
-        _APPLYING_REMOTE = False
-        try:
-            from . import capture
-            if capture._NET_EMITTER is not None:
-                capture._NET_EMITTER._applying_remote = False
-        except Exception:
-            pass
+
+def _set_applying_remote(value: bool):
+    """Set the feedback-loop guard on both receiver and emitter modules."""
+    global _APPLYING_REMOTE
+    _APPLYING_REMOTE = value
+    try:
+        from . import capture
+        if capture._NET_EMITTER is not None:
+            capture._NET_EMITTER._applying_remote = value
+    except Exception:
+        pass
 
 
 def _drain_and_process(lines):
@@ -124,21 +123,30 @@ def _process_queue_timer():
         return None  # Unregister timer
 
     lines = _RECEIVER.drain_queue()
-    _drain_and_process(lines)
+    if not lines:
+        return 0.01
 
-    # Refresh viewport once after processing all events (not per-event)
-    if lines:
+    # Hold the feedback guard for the entire batch INCLUDING view_layer.update()
+    # so the depsgraph handler doesn't echo received changes back to the server.
+    _set_applying_remote(True)
+    try:
+        _drain_and_process(lines)
+
+        # Refresh viewport once after processing all events (not per-event)
         try:
             if bpy.context.view_layer:
                 bpy.context.view_layer.update()
         except Exception:
             pass
-        try:
-            scene = bpy.context.scene
-            if scene:
-                scene.usd_connect_recv_last_seq = _LAST_SEQ
-        except Exception:
-            pass
+    finally:
+        _set_applying_remote(False)
+
+    try:
+        scene = bpy.context.scene
+        if scene:
+            scene.usd_connect_recv_last_seq = _LAST_SEQ
+    except Exception:
+        pass
 
     return 0.01  # Run again in 10ms
 

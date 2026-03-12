@@ -73,18 +73,22 @@ If none of the above are configured, Blender tests are automatically skipped. No
 
 ## What the Blender Tests Cover
 
-**`test_blender_adapter.py`** — Runs 15 headless tests inside Blender's Python:
+**`test_blender_adapter.py`** — Runs 19 headless tests inside Blender's Python:
 - Prim creation for each geometry type (Sphere, Cube, Cylinder, Cone, Mesh, Xform)
 - Transform application (translate, rotate, scale)
 - Visibility toggling
 - Gprim attribute mapping (radius, size, height)
 - Delete, rename, idempotency
+- `test_ensure_xform_ops_preserves_world` — MPI reset preserves world-space position
+- `test_ensure_xform_ops_identity_noop` — identity MPI skipped (no unnecessary reset)
 
-**`test_blender_integration.py`** — Full pipeline tests with two Blender processes:
+**`test_blender_integration.py`** — 4 end-to-end tests with real server + Blender processes:
 - `test_emitter_server_receiver_integration`: Manual events sent via socket -> server -> receiver Blender verifies objects arrived correctly
 - `test_autotrack_emitter_to_receiver`: Real auto-tracking via depsgraph -> server -> receiver Blender verifies objects, types, positions, and visibility
+- `test_autotrack_deferred_props`: Auto-tracked objects get `usd_prim_path`/`usd_type_name` via deferred `bpy.app.timers` (not inside depsgraph callback where writes are discarded)
+- `test_roleflip_no_axis_flip`: 3-phase role-flip test — import Y-up scene into Z-up Blender, receive events + flip to emitter, verify no axis flip on received + auto-tracked objects
 
-Both integration tests start a real sync server, run Blender processes as emitter and receiver, and assert on the results.
+All integration tests start a real sync server, run Blender processes as emitter and receiver, and assert on the results.
 
 ## Files
 

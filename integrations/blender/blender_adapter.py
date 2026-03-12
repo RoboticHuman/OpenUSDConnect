@@ -158,7 +158,24 @@ class BlenderAdapter(DCCAdapter):
         return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
-        # Blender objects have implicit TRS
+        if not BPY_AVAILABLE:
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if obj is not None and obj.parent is not None:
+            # Normalize MPI to Identity so obj.location/rotation/scale are in
+            # parent-local space — matching what the emitter sends.
+            # Imported objects may have non-identity MPI from Blender's
+            # USD importer (set to parent.world.inverse() at import time).
+            #
+            # World-preserving: compensate matrix_basis so matrix_world
+            # doesn't jump.  matrix_world = parent.world @ MPI @ basis,
+            # so new_basis = old_MPI @ old_basis keeps the product stable.
+            old_mpi = obj.matrix_parent_inverse.copy()
+            if old_mpi == mathutils.Matrix.Identity(4):
+                return True  # already identity, nothing to do
+            old_basis = obj.matrix_basis.copy()
+            obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+            obj.matrix_basis = old_mpi @ old_basis
         return True
 
     def set_xform_trs(self, prim_path: str, payload: Dict) -> bool:

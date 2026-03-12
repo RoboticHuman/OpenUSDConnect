@@ -17,6 +17,10 @@ RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_receiver_script.py")
 AUTOTRACK_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_emitter_script.py")
 AUTOTRACK_RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_receiver_script.py")
 AUTOTRACK_PROPS_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_props_emitter_script.py")
+ROLEFLIP_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_emitter_script.py")
+ROLEFLIP_RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_receiver_script.py")
+ROLEFLIP_VERIFIER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_verifier_script.py")
+TEST_SCENE_USD = os.path.join(PROJECT_ROOT, "test_scene.usda")
 
 
 def _start_server(tmp_path, port):
@@ -154,6 +158,76 @@ def test_autotrack_deferred_props(blender_exe, tmp_path):
         print(r.stdout)
         assert r.returncode == 0, f"Receiver failed:\n{r.stdout}\n{r.stderr}"
         _check_results(receiver_results, "AutoTrack Props (receiver)")
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+
+def test_roleflip_no_axis_flip(blender_exe, tmp_path):
+    """Role-flip test: Y-up USD import → emit → receive → flip roles → verify no axis flip.
+
+    This is the key integration test for the flipped-up-axis bug.
+    Three phases run sequentially against the same server:
+
+    Phase 1 (Emitter A): Import Y-up test_scene.usda into Z-up Blender
+        (creates non-identity MPI from coordinate conversion), move Cube
+        to (3,5,7), emit events.
+
+    Phase 2 (Instance B): Import same scene, receive Phase 1 events
+        (ensure_xform_ops resets MPI), verify position, then flip to emitter
+        and move Cube to (10,11,12).
+
+    Phase 3 (Verifier): Import same scene, receive ALL events, verify Cube
+        ends up at (10,11,12) with no axis flip.
+
+    Exercises all three fixes:
+    - Fix 1: world-preserving MPI reset (Phase 2 receive)
+    - Fix 2: batch-scoped feedback guard (Phase 2 flip)
+    - Fix 3: ancestor event emission (parent /World emitted before children)
+    """
+    port = 7296
+    scene = TEST_SCENE_USD
+    assert os.path.isfile(scene), f"Test scene not found: {scene}"
+
+    phase2_results = str(tmp_path / "roleflip_phase2.json")
+    phase3_results = str(tmp_path / "roleflip_phase3.json")
+    server = _start_server(tmp_path, port)
+
+    try:
+        # Phase 1: Emitter A imports and moves Cube
+        r = _run_blender(blender_exe, ROLEFLIP_EMITTER_SCRIPT, port,
+                         ["--scene", scene])
+        print("=== RoleFlip Phase 1 (Emitter A) stdout ===")
+        print(r.stdout)
+        if r.stderr:
+            print("=== stderr ===")
+            print(r.stderr)
+        assert r.returncode == 0, f"Phase 1 failed:\n{r.stdout}\n{r.stderr}"
+
+        # Phase 2: Instance B receives, verifies, flips, moves
+        r = _run_blender(blender_exe, ROLEFLIP_RECEIVER_SCRIPT, port,
+                         ["--scene", scene, "--out", phase2_results])
+        print("=== RoleFlip Phase 2 (Instance B) stdout ===")
+        print(r.stdout)
+        if r.stderr:
+            print("=== stderr ===")
+            print(r.stderr)
+        assert r.returncode == 0, f"Phase 2 failed:\n{r.stdout}\n{r.stderr}"
+        _check_results(phase2_results, "RoleFlip Phase 2")
+
+        # Phase 3: Verifier receives all events, checks final position
+        r = _run_blender(blender_exe, ROLEFLIP_VERIFIER_SCRIPT, port,
+                         ["--scene", scene, "--out", phase3_results])
+        print("=== RoleFlip Phase 3 (Verifier) stdout ===")
+        print(r.stdout)
+        if r.stderr:
+            print("=== stderr ===")
+            print(r.stderr)
+        assert r.returncode == 0, f"Phase 3 failed:\n{r.stdout}\n{r.stderr}"
+        _check_results(phase3_results, "RoleFlip Phase 3")
     finally:
         server.terminate()
         try:

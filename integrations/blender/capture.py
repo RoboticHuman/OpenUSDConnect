@@ -433,6 +433,52 @@ class _NetworkEmitter:
             LOG.exception("Failed to send events")
             self.disconnect()
 
+    def _ensure_ancestors(self, obj) -> list:
+        """Emit ensure_prim + ensure_xform_ops + set_xform_trs for any
+        ancestors of *obj* that haven't been sent yet.
+
+        Walks from obj.parent upward collecting unknown ancestors, then
+        emits events top-down so the receiver builds the hierarchy in order.
+        """
+        missing = []
+        ancestor = obj.parent
+        while ancestor is not None:
+            pp = ancestor.get("usd_prim_path")
+            if not pp or pp in self._known_prims:
+                break
+            missing.append((ancestor, pp))
+            ancestor = ancestor.parent
+
+        if not missing:
+            return []
+
+        events = []
+        # Reverse so we emit root-most ancestor first
+        for anc_obj, anc_path in reversed(missing):
+            tn = anc_obj.get("usd_type_name", "Xform")
+            events.append({"k": "ensure_prim", "prim": anc_path, "typeName": tn})
+            events.append({"k": "ensure_xform_ops", "prim": anc_path})
+            self._known_prims.add(anc_path)
+
+            # Compute and send TRS so receiver has correct ancestor state
+            if anc_obj.parent:
+                parent_inv = anc_obj.parent.matrix_world.inverted_safe()
+                local_matrix = parent_inv @ anc_obj.matrix_world
+            else:
+                local_matrix = anc_obj.matrix_world.copy()
+            loc, rot_quat, scl = local_matrix.decompose()
+            t = [loc.x, loc.y, loc.z]
+            r = [rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z]
+            s = [scl.x, scl.y, scl.z]
+            events.append({
+                "k": "set_xform_trs", "prim": anc_path,
+                "fields": ["t", "r", "s"], "t": t, "r": r, "s": s,
+            })
+            self._last_sent[anc_path] = {"t": t, "r": r, "s": s}
+            self._prim_refs[anc_path] = anc_obj
+
+        return events
+
     def build_events_from_depsgraph(self, depsgraph) -> list:
         """Build protocol events from Blender depsgraph updates."""
         return self.build_events_from_updates(list(depsgraph.updates))
@@ -530,6 +576,9 @@ class _NetworkEmitter:
             # Only send structural events on first encounter
             first_encounter = prim_path not in self._known_prims
             if first_encounter:
+                # Ensure ancestors are emitted first (top-down) so the
+                # receiver has correct parent state before child events.
+                events.extend(self._ensure_ancestors(obj))
                 # Prefer the already-computed type_name (from auto-track) over the
                 # custom property, which may not have been written yet (deferred).
                 tn = type_name if type_name else obj.get("usd_type_name", "Xform")

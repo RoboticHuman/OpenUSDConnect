@@ -23,6 +23,24 @@ class DCCAdapter(ABC):
 
     @abstractmethod
     def ensure_xform_ops(self, prim_path: str) -> bool:
+        """Prepare the object/prim for TRS application.
+
+        DCC implementations should normalize any parent-child transform
+        offset so that setting local TRS values produces the expected
+        local-to-parent transform.  **The reset must be world-preserving**:
+        the object's world-space position/orientation must not change as a
+        result of this call.  Implementations should compensate the local
+        transform (e.g. matrix_basis) when clearing the offset.
+
+        This ensures consistent behavior when objects switch between
+        emitter and receiver roles and prevents axis-flip artefacts in
+        Y-up ↔ Z-up coordinate conversion hierarchies.
+
+        Examples:
+        - Blender: new_basis = old_MPI @ old_basis, then MPI = Identity
+        - Maya: bake offsetParentMatrix into local xform, then clear it
+        - Houdini: fold pre-transform into main transform, then zero it
+        """
         raise NotImplementedError
 
     @abstractmethod

@@ -429,8 +429,10 @@ class TestAutoTrack:
         events = em.build_events_from_updates([MockDepsgraphUpdate(obj)])
 
         ensures = [e for e in events if e["k"] == "ensure_prim"]
-        assert len(ensures) == 1
-        assert ensures[0]["prim"] == "/World/Cube"
+        # Ancestor /World is emitted first, then the child
+        assert len(ensures) == 2
+        assert ensures[0]["prim"] == "/World"
+        assert ensures[1]["prim"] == "/World/Cube"
         assert obj["usd_prim_path"] == "/World/Cube"
 
     def test_auto_track_skips_unparented_object(self):
@@ -465,7 +467,9 @@ class TestAutoTrack:
         events = em.build_events_from_updates([MockDepsgraphUpdate(obj)])
 
         ensures = [e for e in events if e["k"] == "ensure_prim"]
-        assert ensures[0]["typeName"] == "Sphere"
+        # ensures[0] is ancestor /World, ensures[1] is the child
+        child_ensure = [e for e in ensures if e["prim"] == "/World/Sphere"][0]
+        assert child_ensure["typeName"] == "Sphere"
 
     def test_auto_track_nested_hierarchy(self):
         """Auto-track under a deeper parent (/World/Group/NewCube)."""
@@ -480,8 +484,11 @@ class TestAutoTrack:
         events = em.build_events_from_updates([MockDepsgraphUpdate(obj)])
 
         ensures = [e for e in events if e["k"] == "ensure_prim"]
-        assert len(ensures) == 1
-        assert ensures[0]["prim"] == "/World/Group/NewCube"
+        # Ancestors /World and /World/Group emitted first (top-down), then child
+        assert len(ensures) == 3
+        assert ensures[0]["prim"] == "/World"
+        assert ensures[1]["prim"] == "/World/Group"
+        assert ensures[2]["prim"] == "/World/Group/NewCube"
         assert obj["usd_prim_path"] == "/World/Group/NewCube"
 
     def test_auto_track_disambiguates_collision(self):
@@ -497,8 +504,10 @@ class TestAutoTrack:
         events = em.build_events_from_updates([MockDepsgraphUpdate(new_cube)])
 
         ensures = [e for e in events if e["k"] == "ensure_prim"]
-        assert len(ensures) == 1
-        assert ensures[0]["prim"] == "/World/Cube_1"
+        # Ancestor /World emitted first, then the child
+        child_ensures = [e for e in ensures if e["prim"] != "/World"]
+        assert len(child_ensures) == 1
+        assert child_ensures[0]["prim"] == "/World/Cube_1"
         assert new_cube["usd_prim_path"] == "/World/Cube_1"
 
     def test_auto_track_no_collision_uses_exact_name(self):
@@ -512,7 +521,8 @@ class TestAutoTrack:
         events = em.build_events_from_updates([MockDepsgraphUpdate(new_sphere)])
 
         ensures = [e for e in events if e["k"] == "ensure_prim"]
-        assert ensures[0]["prim"] == "/World/Sphere"
+        child_ensures = [e for e in ensures if e["prim"] == "/World/Sphere"]
+        assert len(child_ensures) == 1
 
     def test_auto_track_no_visibility(self):
         world = self._make_world_parent()

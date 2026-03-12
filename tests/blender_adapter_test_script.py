@@ -306,6 +306,131 @@ def test_rename_prim(r):
     r.ok(name)
 
 
+def test_ensure_xform_ops_resets_mpi(r):
+    """ensure_xform_ops resets non-identity matrix_parent_inverse to Identity."""
+    name = "test_ensure_xform_ops_resets_mpi"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    import mathutils
+
+    # Create parent and child
+    adapter.ensure_prim("/World", "Xform")
+    adapter.ensure_prim("/World/Child", "Cube")
+    child = _find_by_prim(adapter, "/World/Child")
+    if child is None:
+        r.fail(name, "child object not created")
+        return
+    if child.parent is None:
+        r.fail(name, "child has no parent")
+        return
+
+    # Simulate what Blender's USD importer does: set MPI to a non-identity matrix
+    # (e.g. a 90° X rotation that converts Y-up USD to Z-up Blender)
+    non_identity = mathutils.Matrix.Rotation(1.5708, 4, 'X')
+    child.matrix_parent_inverse = non_identity
+
+    # Verify MPI is non-identity
+    identity = mathutils.Matrix.Identity(4)
+    if child.matrix_parent_inverse == identity:
+        r.fail(name, "MPI should be non-identity before ensure_xform_ops")
+        return
+
+    # ensure_xform_ops should reset it
+    adapter.ensure_xform_ops("/World/Child")
+
+    if child.matrix_parent_inverse != identity:
+        r.fail(name, f"MPI not reset to Identity: {child.matrix_parent_inverse}")
+        return
+    r.ok(name)
+
+
+def test_ensure_xform_ops_preserves_world(r):
+    """ensure_xform_ops preserves matrix_world when resetting MPI."""
+    name = "test_ensure_xform_ops_preserves_world"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    import mathutils
+
+    # Create parent and child
+    adapter.ensure_prim("/World", "Xform")
+    parent = _find_by_prim(adapter, "/World")
+    adapter.ensure_prim("/World/Child", "Cube")
+    child = _find_by_prim(adapter, "/World/Child")
+    if child is None or child.parent is None:
+        r.fail(name, "child not created or not parented")
+        return
+
+    # Place the child at a known world position
+    child.location = (3.0, 4.0, 5.0)
+    bpy.context.view_layer.update()
+
+    # Set a non-identity MPI (simulating USD Y-up → Blender Z-up import)
+    rot_x_90 = mathutils.Matrix.Rotation(1.5708, 4, 'X')
+    child.matrix_parent_inverse = rot_x_90
+    bpy.context.view_layer.update()
+
+    # Record world position before
+    world_before = child.matrix_world.copy()
+
+    # ensure_xform_ops should reset MPI but preserve matrix_world
+    adapter.ensure_xform_ops("/World/Child")
+    bpy.context.view_layer.update()
+
+    world_after = child.matrix_world.copy()
+
+    # Compare element-by-element with tolerance
+    eps = 1e-3
+    for i in range(4):
+        for j in range(4):
+            if abs(world_before[i][j] - world_after[i][j]) > eps:
+                r.fail(name,
+                       f"matrix_world changed at [{i}][{j}]: "
+                       f"{world_before[i][j]:.4f} -> {world_after[i][j]:.4f}")
+                return
+    r.ok(name)
+
+
+def test_ensure_xform_ops_identity_noop(r):
+    """ensure_xform_ops is a no-op when MPI is already identity."""
+    name = "test_ensure_xform_ops_identity_noop"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    import mathutils
+
+    adapter.ensure_prim("/World", "Xform")
+    adapter.ensure_prim("/World/Child", "Cube")
+    child = _find_by_prim(adapter, "/World/Child")
+    if child is None or child.parent is None:
+        r.fail(name, "child not created or not parented")
+        return
+
+    child.location = (1.0, 2.0, 3.0)
+    bpy.context.view_layer.update()
+
+    # MPI is already identity (set by ensure_prim)
+    basis_before = child.matrix_basis.copy()
+    adapter.ensure_xform_ops("/World/Child")
+    basis_after = child.matrix_basis.copy()
+
+    if basis_before != basis_after:
+        r.fail(name, "matrix_basis changed when MPI was already identity")
+        return
+    r.ok(name)
+
+
+def test_ensure_xform_ops_no_parent(r):
+    """ensure_xform_ops on unparented object is a no-op (no crash)."""
+    name = "test_ensure_xform_ops_no_parent"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/Standalone", "Cube")
+    result = adapter.ensure_xform_ops("/Standalone")
+    if not result:
+        r.fail(name, "ensure_xform_ops returned False")
+        return
+    r.ok(name)
+
+
 def test_set_reference_stub(r):
     """set_reference returns True (stub)."""
     name = "test_set_reference_stub"
@@ -336,6 +461,10 @@ def main():
         test_set_gprim_attrs_cylinder,
         test_delete_prim,
         test_rename_prim,
+        test_ensure_xform_ops_resets_mpi,
+        test_ensure_xform_ops_preserves_world,
+        test_ensure_xform_ops_identity_noop,
+        test_ensure_xform_ops_no_parent,
         test_set_reference_stub,
     ]
 
