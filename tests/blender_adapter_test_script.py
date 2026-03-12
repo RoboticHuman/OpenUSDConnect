@@ -11,11 +11,14 @@ import traceback
 
 import bpy
 
-# Add project root to path so we can import openusdconnect
+# Add project root and tests dir to path
 import os
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+tests_dir = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+if tests_dir not in sys.path:
+    sys.path.insert(0, tests_dir)
 
 from integrations.blender.blender_adapter import BlenderAdapter
 
@@ -431,13 +434,80 @@ def test_ensure_xform_ops_no_parent(r):
     r.ok(name)
 
 
-def test_set_reference_stub(r):
-    """set_reference returns True (stub)."""
-    name = "test_set_reference_stub"
+def test_set_reference_imports_usd(r):
+    """set_reference imports a USD file and creates mesh objects under container."""
+    import tempfile
+    from test_asset_builder import create_chair_asset, EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT
+    name = "test_set_reference_imports_usd"
+    _clear_scene()
     adapter = BlenderAdapter()
-    result = adapter.set_reference("/World/Ref", "./asset.usd", "/Model")
+
+    # Create parent prim so parenting works
+    adapter.ensure_prim("/World", "Xform")
+    # Create the container (as would happen in normal event flow)
+    adapter.ensure_prim("/World/Asset", "Xform")
+
+    # Create the shared chair test asset
+    tmp_dir = tempfile.mkdtemp()
+    tmp_usd = os.path.join(tmp_dir, "test_chair.usda")
+    try:
+        create_chair_asset(tmp_usd)
+    except Exception as e:
+        r.fail(name, f"Failed to create test USD: {e}")
+        return
+
+    result = adapter.set_reference("/World/Asset", tmp_usd)
     if not result:
         r.fail(name, "set_reference returned False")
+        return
+
+    # Verify container has Reference type tag
+    container = adapter._find_object_by_prim("/World/Asset")
+    if container is None:
+        r.fail(name, "container not found by prim path /World/Asset")
+        return
+    if container.get("usd_type_name") != "Reference":
+        r.fail(name, f"usd_type_name={container.get('usd_type_name')}, expected Reference")
+        return
+
+    # Verify child objects match the chair asset (6 meshes, 48 vertices)
+    children = [o for o in bpy.data.objects
+                if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    mesh_children = [o for o in children if o.type == 'MESH' and o.data is not None]
+    if len(mesh_children) != EXPECTED_MESH_COUNT:
+        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes, "
+               f"got {len(mesh_children)} (types: {[o.type for o in children]})")
+        return
+
+    total_verts = sum(len(o.data.vertices) for o in mesh_children)
+    if total_verts != EXPECTED_VERTEX_COUNT:
+        r.fail(name, f"expected {EXPECTED_VERTEX_COUNT} vertices, got {total_verts}")
+        return
+
+    # Verify idempotent — calling again doesn't duplicate
+    count_before = len(bpy.data.objects)
+    adapter.set_reference("/World/Asset", tmp_usd)
+    count_after = len(bpy.data.objects)
+    if count_after != count_before:
+        r.fail(name, f"idempotent check failed: {count_before} -> {count_after} objects")
+        return
+
+    r.ok(name)
+
+
+def test_set_reference_missing_file(r):
+    """set_reference with non-existent file returns False gracefully."""
+    name = "test_set_reference_missing_file"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    result = adapter.set_reference("/World/Missing", "/nonexistent/path/fake.usda")
+    if result:
+        r.fail(name, "set_reference should return False for missing file")
+        return
+    # Verify no objects were created
+    count = sum(1 for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Missing"))
+    if count != 0:
+        r.fail(name, f"expected 0 objects, got {count}")
         return
     r.ok(name)
 
@@ -465,7 +535,8 @@ def main():
         test_ensure_xform_ops_preserves_world,
         test_ensure_xform_ops_identity_noop,
         test_ensure_xform_ops_no_parent,
-        test_set_reference_stub,
+        test_set_reference_imports_usd,
+        test_set_reference_missing_file,
     ]
 
     for t in tests:

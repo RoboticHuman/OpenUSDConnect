@@ -149,6 +149,13 @@ def _ensure_scene_props():
             description="Parent prim path for auto-tracked objects (e.g. /World)",
             default="/World",
         )
+    if not hasattr(S, "usd_connect_asset_root"):
+        S.usd_connect_asset_root = bpy.props.StringProperty(
+            name="Asset Root",
+            description="Root directory for resolving relative asset paths in set_reference events",
+            subtype="DIR_PATH",
+            default="",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +968,7 @@ def unregister():
         "usd_connect_emit_port", "usd_connect_emit_hz",
         "usd_connect_net_emitter_running",
         "usd_connect_auto_track", "usd_connect_auto_track_root",
+        "usd_connect_asset_root",
     ):
         if hasattr(bpy.types.Scene, prop_name):
             try:

@@ -7,6 +7,7 @@ obj["usd_prim_path"] custom property and sets location/rotation/scale.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Optional
 
 try:
@@ -32,6 +33,7 @@ class BlenderAdapter(DCCAdapter):
 
     def __init__(self):
         self._prim_cache: Dict[str, object] = {}  # prim_path -> bpy.types.Object
+        self._imported_refs: Dict[str, str] = {}  # prim_path -> asset_path
 
     def _find_object_by_prim(self, prim_path: str) -> Optional[object]:
         if not BPY_AVAILABLE:
@@ -299,7 +301,150 @@ class BlenderAdapter(DCCAdapter):
         return True
 
     def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
-        # Stub — future: import the referenced USD asset into Blender
-        LOG.info("BlenderAdapter.set_reference: %s -> %s (prim_path=%s) [stub]",
-                 prim_path, asset_path, prim_path_ref)
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.set_reference dry: %s -> %s", prim_path, asset_path)
+            return True
+
+        # Resolve asset_path to absolute
+        resolved = asset_path
+        if not os.path.isabs(resolved):
+            # Try scene asset root first, then base USD path dir, then CWD
+            asset_root = getattr(bpy.context.scene, "usd_connect_asset_root", "")
+            if not asset_root:
+                base_path = getattr(bpy.context.scene, "usd_connect_base_usd_path", "")
+                if base_path:
+                    asset_root = os.path.dirname(bpy.path.abspath(base_path))
+            if asset_root:
+                resolved = os.path.join(asset_root, resolved)
+            else:
+                resolved = os.path.abspath(resolved)
+
+        resolved = os.path.normpath(resolved)
+        if not os.path.isfile(resolved):
+            LOG.warning("BlenderAdapter.set_reference: file not found: %s", resolved)
+            print(f"[USD Connect] set_reference: file not found: {resolved}")
+            return False
+
+        # Deduplication: skip if already imported with same asset
+        if self._imported_refs.get(prim_path) == resolved:
+            LOG.info("BlenderAdapter.set_reference: already imported %s for %s", resolved, prim_path)
+            return True
+
+        # If different asset was previously imported, remove old child objects
+        if prim_path in self._imported_refs:
+            self._remove_imported_ref_children(prim_path)
+
+        print(f"[USD Connect] set_reference: importing {resolved} for {prim_path}")
+
+        # Find or create the container object for this prim_path.
+        # ensure_prim may have already created an Empty — we'll use it as the
+        # parent for imported geometry (matching USD's Xform + Reference pattern).
+        container = self._find_object_by_prim(prim_path)
+        if container is None:
+            # No ensure_prim preceded — create a container Empty
+            name = prim_path.strip("/").replace("/", "_") or prim_path
+            container = bpy.data.objects.new(name, None)
+            container["usd_prim_path"] = prim_path
+            container["usd_type_name"] = "Reference"
+            self._link_object(container)
+            self._prim_cache[prim_path] = container
+            # Parent under ancestor
+            parent_path = prim_path.rsplit("/", 1)[0]
+            if parent_path:
+                parent_obj = self._find_object_by_prim(parent_path)
+                if parent_obj is not None:
+                    container.parent = parent_obj
+                    container.matrix_parent_inverse = _IDENTITY_4X4.copy()
+
+        # Tag container as a reference
+        container["usd_type_name"] = "Reference"
+        container["usd_ref_asset"] = resolved
+
+        # Snapshot existing objects before import
+        before = set(bpy.data.objects)
+
+        # Import the USD file.
+        # bpy.ops.wm.usd_import requires a window context. When called from a
+        # timer callback (receiver path), we must provide one via temp_override.
+        try:
+            import_kwargs = {
+                "filepath": resolved,
+                "import_guide": False,
+                "import_visible_only": True,
+            }
+            if prim_path_ref:
+                import_kwargs["prim_path_mask"] = prim_path_ref
+
+            window = bpy.context.window
+            if window is None:
+                # Timer callbacks may not have a window — grab one explicitly
+                windows = list(bpy.context.window_manager.windows)
+                window = windows[0] if windows else None
+
+            if window is not None:
+                with bpy.context.temp_override(window=window):
+                    bpy.ops.wm.usd_import(**import_kwargs)
+            else:
+                # Last resort — try without override
+                bpy.ops.wm.usd_import(**import_kwargs)
+        except Exception as e:
+            LOG.exception("BlenderAdapter.set_reference: USD import failed for %s", resolved)
+            print(f"[USD Connect] set_reference: import failed: {e}")
+            return False
+
+        # Identify newly created objects
+        new_objs = set(bpy.data.objects) - before
+        if not new_objs:
+            LOG.warning("BlenderAdapter.set_reference: no objects imported from %s", resolved)
+            print(f"[USD Connect] set_reference: WARNING — no objects imported from {resolved}")
+            return True
+
+        print(f"[USD Connect] set_reference: imported {len(new_objs)} objects from {resolved}")
+        for obj in new_objs:
+            print(f"  imported: '{obj.name}' type={obj.type} parent={obj.parent}")
+
+        # Find the top-level roots of the imported hierarchy
+        imported_roots = [obj for obj in new_objs
+                          if obj.parent is None or obj.parent not in new_objs]
+
+        # Tag and reparent all imported objects under the container
+        for obj in new_objs:
+            obj_name = obj.name.replace(".", "_")
+            child_path = f"{prim_path}/{obj_name}"
+            obj["usd_prim_path"] = child_path
+            self._prim_cache[child_path] = obj
+
+        for root in imported_roots:
+            # Preserve the imported world transform when reparenting.
+            # The importer may have applied a Y-up → Z-up rotation on the root.
+            # We bake that into matrix_basis so it's not lost when we set
+            # matrix_parent_inverse to Identity.
+            world = root.matrix_world.copy()
+            root.parent = container
+            root.matrix_parent_inverse = _IDENTITY_4X4.copy()
+            # new world = container.world @ Identity @ basis, so
+            # basis = container.world.inv @ old_world
+            root.matrix_basis = container.matrix_world.inverted_safe() @ world
+            print(f"[USD Connect] set_reference: parented '{root.name}' under '{container.name}'")
+
+        self._imported_refs[prim_path] = resolved
+        LOG.info("BlenderAdapter.set_reference: imported %d objects from %s for %s",
+                 len(new_objs), resolved, prim_path)
         return True
+
+    def _remove_imported_ref_children(self, prim_path: str):
+        """Remove child objects previously imported for a reference prim (keep container)."""
+        if not BPY_AVAILABLE:
+            return
+        to_remove = []
+        for obj in bpy.data.objects:
+            pp = obj.get("usd_prim_path", "")
+            # Remove children, not the container itself
+            if pp.startswith(prim_path + "/"):
+                to_remove.append(obj)
+        for obj in to_remove:
+            self._prim_cache.pop(obj.get("usd_prim_path", ""), None)
+            for col in obj.users_collection:
+                col.objects.unlink(obj)
+            bpy.data.objects.remove(obj)
+        self._imported_refs.pop(prim_path, None)
