@@ -30,6 +30,15 @@ LOG = logging.getLogger(__name__)
 DEFAULT_COALESCE_SECONDS = 0.15
 
 
+def _compute_local_trs(obj):
+    """Local-to-parent TRS decomposition. Returns (loc, rot_quat, scl)."""
+    if obj.parent:
+        local_matrix = obj.parent.matrix_world.inverted_safe() @ obj.matrix_world
+    else:
+        local_matrix = obj.matrix_world.copy()
+    return local_matrix.decompose()
+
+
 
 _USD_MESH_TYPES = ("Sphere", "Cube", "Cylinder", "Cone", "Capsule")
 
@@ -288,15 +297,7 @@ class _UsdDeltaEngine:
         if not UsdGeom.Xformable(base_prim):
             return
 
-        # Compute local-to-parent transform
-        if obj.parent:
-            parent_inv = obj.parent.matrix_world.inverted_safe()
-            local_matrix = parent_inv @ obj.matrix_world
-        else:
-            local_matrix = obj.matrix_world.copy()
-
-        # Decompose to TRS (quaternion rotation)
-        loc, rot_quat, scl = local_matrix.decompose()
+        loc, rot_quat, scl = _compute_local_trs(obj)
 
         with Usd.EditContext(self.stage, self.delta_layer):
             prim = self.stage.GetPrimAtPath(path)
@@ -423,6 +424,9 @@ class _NetworkEmitter:
                 pass
             self.sock = None
 
+    def set_applying_remote(self, value: bool):
+        self._applying_remote = value
+
     def send_events(self, events: list):
         if not self.sock or not events:
             return
@@ -461,12 +465,7 @@ class _NetworkEmitter:
             self._known_prims.add(anc_path)
 
             # Compute and send TRS so receiver has correct ancestor state
-            if anc_obj.parent:
-                parent_inv = anc_obj.parent.matrix_world.inverted_safe()
-                local_matrix = parent_inv @ anc_obj.matrix_world
-            else:
-                local_matrix = anc_obj.matrix_world.copy()
-            loc, rot_quat, scl = local_matrix.decompose()
+            loc, rot_quat, scl = _compute_local_trs(anc_obj)
             t = [loc.x, loc.y, loc.z]
             r = [rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z]
             s = [scl.x, scl.y, scl.z]
@@ -510,7 +509,7 @@ class _NetworkEmitter:
             self._last_sent.pop(prim_path, None)
             self._prim_refs.pop(prim_path, None)
             events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
-            print(f"[USD Connect] Object deleted: deactivate_prim {prim_path}")
+            LOG.info("Object deleted: deactivate_prim %s", prim_path)
 
         for update in updates:
             id_data = update.id
@@ -555,19 +554,13 @@ class _NetworkEmitter:
                 # inside depsgraph_update_post are discarded by Blender.
                 # Look up by name to avoid stale-reference issues.
                 _deferred_set_props(obj.name, prim_path, type_name)
-                print(f"[USD Connect] Auto-tracked {obj.name!r} → {prim_path} ({type_name})")
+                LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
 
             # Store object reference for deletion detection and re-tracking
             self._prim_refs[prim_path] = obj
 
             # Compute local transform
-            if obj.parent:
-                parent_inv = obj.parent.matrix_world.inverted_safe()
-                local_matrix = parent_inv @ obj.matrix_world
-            else:
-                local_matrix = obj.matrix_world.copy()
-
-            loc, rot_quat, scl = local_matrix.decompose()
+            loc, rot_quat, scl = _compute_local_trs(obj)
 
             t = [loc.x, loc.y, loc.z]
             r = [rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z]
@@ -638,6 +631,12 @@ class _NetworkEmitter:
 # ---------------------------------------------------------------------------
 _ENGINE: Optional[_UsdDeltaEngine] = None
 _NET_EMITTER: Optional[_NetworkEmitter] = None
+
+
+def set_emitter_feedback_guard(value: bool):
+    """Public API for setting the emitter's feedback-loop guard."""
+    if _NET_EMITTER is not None:
+        _NET_EMITTER.set_applying_remote(value)
 
 
 def _reset_engine():

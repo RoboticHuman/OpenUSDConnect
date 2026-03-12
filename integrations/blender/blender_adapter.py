@@ -13,8 +13,10 @@ try:
     import bpy
     import mathutils
     BPY_AVAILABLE = True
+    _IDENTITY_4X4 = mathutils.Matrix.Identity(4)
 except Exception:
     BPY_AVAILABLE = False
+    _IDENTITY_4X4 = None
 
 from openusdconnect.adapters import DCCAdapter
 
@@ -137,7 +139,7 @@ class BlenderAdapter(DCCAdapter):
                 new.parent = parent_obj
                 # Identity parent inverse so location/rotation/scale are local-to-parent
                 # (matching what the emitter sends)
-                new.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+                new.matrix_parent_inverse = _IDENTITY_4X4.copy()
                 # Move the child into the parent's collection so it doesn't
                 # appear as a duplicate entry under the scene root collection.
                 parent_cols = parent_obj.users_collection
@@ -171,10 +173,10 @@ class BlenderAdapter(DCCAdapter):
             # doesn't jump.  matrix_world = parent.world @ MPI @ basis,
             # so new_basis = old_MPI @ old_basis keeps the product stable.
             old_mpi = obj.matrix_parent_inverse.copy()
-            if old_mpi == mathutils.Matrix.Identity(4):
+            if old_mpi == _IDENTITY_4X4:
                 return True  # already identity, nothing to do
             old_basis = obj.matrix_basis.copy()
-            obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+            obj.matrix_parent_inverse = _IDENTITY_4X4.copy()
             obj.matrix_basis = old_mpi @ old_basis
         return True
 

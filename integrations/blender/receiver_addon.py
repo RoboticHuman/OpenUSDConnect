@@ -30,6 +30,20 @@ _APPLYING_REMOTE = False
 # Track last sequence number across reconnects
 _LAST_SEQ: int = 0
 
+# Lazy-cached reference to the capture module (avoids per-call import overhead)
+_capture_mod = None
+
+
+def _get_capture_mod():
+    global _capture_mod
+    if _capture_mod is None:
+        try:
+            from . import capture
+            _capture_mod = capture
+        except Exception:
+            pass
+    return _capture_mod
+
 
 def _ensure_scene_props():
     if not BPY_AVAILABLE:
@@ -43,6 +57,25 @@ def _ensure_scene_props():
         S.usd_connect_recv_running = BoolProperty(name="Receiver Running", default=False)
     if not hasattr(S, "usd_connect_recv_last_seq"):
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
+
+
+def _dispatch_event(adapter, k, prim_path, ev):
+    """Route an event to the appropriate adapter method via dispatch dict."""
+    _DISPATCH = {
+        "ensure_prim":      lambda: adapter.ensure_prim(prim_path, ev.get("typeName", "Xform")),
+        "ensure_xform_ops": lambda: adapter.ensure_xform_ops(prim_path),
+        "set_xform_trs":    lambda: adapter.set_xform_trs(prim_path, ev),
+        "set_xform_matrices": lambda: adapter.set_xform_matrices(prim_path, ev),
+        "delete_prim":      lambda: adapter.delete_prim(prim_path),
+        "deactivate_prim":  lambda: adapter.deactivate_prim(prim_path, ev.get("active", False)),
+        "rename_prim":      lambda: adapter.rename_prim(prim_path, ev.get("new_name", "")),
+        "set_visibility":   lambda: adapter.set_visibility(prim_path, ev.get("visible", True)),
+        "set_gprim_attrs":  lambda: adapter.set_gprim_attrs(prim_path, ev.get("attrs", {})),
+        "set_reference":    lambda: adapter.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", "")),
+    }
+    handler = _DISPATCH.get(k)
+    if handler:
+        handler()
 
 
 def _process_event(ev: dict):
@@ -63,40 +96,21 @@ def _process_event(ev: dict):
         extra = f" visible={ev.get('visible')}"
     elif k == "deactivate_prim":
         extra = f" active={ev.get('active')}"
-    print(f"[USD Connect Recv] event: k={k} prim={prim_path}{extra}")
+    LOG.debug("event: k=%s prim=%s%s", k, prim_path, extra)
 
-    if k == "ensure_prim":
-        _ADAPTER.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-    elif k == "ensure_xform_ops":
-        _ADAPTER.ensure_xform_ops(prim_path)
-    elif k == "set_xform_trs":
-        _ADAPTER.set_xform_trs(prim_path, ev)
-    elif k == "set_xform_matrices":
-        _ADAPTER.set_xform_matrices(prim_path, ev)
-    elif k == "delete_prim":
-        _ADAPTER.delete_prim(prim_path)
-    elif k == "deactivate_prim":
-        _ADAPTER.deactivate_prim(prim_path, ev.get("active", False))
-    elif k == "rename_prim":
-        _ADAPTER.rename_prim(prim_path, ev.get("new_name", ""))
-    elif k == "set_visibility":
-        _ADAPTER.set_visibility(prim_path, ev.get("visible", True))
-    elif k == "set_gprim_attrs":
-        _ADAPTER.set_gprim_attrs(prim_path, ev.get("attrs", {}))
-    elif k == "set_reference":
-        _ADAPTER.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", ""))
+    _dispatch_event(_ADAPTER, k, prim_path, ev)
 
 
 def _set_applying_remote(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
     global _APPLYING_REMOTE
     _APPLYING_REMOTE = value
-    try:
-        from . import capture
-        if capture._NET_EMITTER is not None:
-            capture._NET_EMITTER._applying_remote = value
-    except Exception:
-        pass
+    cap = _get_capture_mod()
+    if cap is not None:
+        try:
+            cap.set_emitter_feedback_guard(value)
+        except Exception:
+            pass
 
 
 def _drain_and_process(lines):
