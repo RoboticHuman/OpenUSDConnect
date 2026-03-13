@@ -495,6 +495,70 @@ def test_set_reference_imports_usd(r):
     r.ok(name)
 
 
+def test_set_reference_reimport_after_delete(r):
+    """set_reference re-imports when cached children have been deleted."""
+    import tempfile
+    from test_asset_builder import create_chair_asset, EXPECTED_MESH_COUNT
+    name = "test_set_reference_reimport_after_delete"
+    _clear_scene()
+    adapter = BlenderAdapter()
+
+    adapter.ensure_prim("/World", "Xform")
+    adapter.ensure_prim("/World/Asset", "Xform")
+
+    tmp_dir = tempfile.mkdtemp()
+    tmp_usd = os.path.join(tmp_dir, "test_chair.usda")
+    try:
+        create_chair_asset(tmp_usd)
+    except Exception as e:
+        r.fail(name, f"Failed to create test USD: {e}")
+        return
+
+    # First import
+    result = adapter.set_reference("/World/Asset", tmp_usd)
+    if not result:
+        r.fail(name, "first set_reference returned False")
+        return
+
+    children_before = [o for o in bpy.data.objects
+                       if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    if len(children_before) == 0:
+        r.fail(name, "no children after first import")
+        return
+
+    # Delete all child objects (simulating user deleting meshes in Blender)
+    for obj in children_before:
+        adapter._prim_cache.pop(obj.get("usd_prim_path", ""), None)
+        for col in obj.users_collection:
+            col.objects.unlink(obj)
+        bpy.data.objects.remove(obj)
+
+    # Verify children are gone
+    children_mid = [o for o in bpy.data.objects
+                    if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    if len(children_mid) != 0:
+        r.fail(name, f"children still exist after delete: {len(children_mid)}")
+        return
+
+    # Second import — same asset path, but stale cache should be detected
+    result2 = adapter.set_reference("/World/Asset", tmp_usd)
+    if not result2:
+        r.fail(name, "second set_reference returned False")
+        return
+
+    # Verify children were re-imported
+    children_after = [o for o in bpy.data.objects
+                      if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    mesh_children = [o for o in children_after if o.type == 'MESH' and o.data is not None]
+    if len(mesh_children) != EXPECTED_MESH_COUNT:
+        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes after re-import, "
+               f"got {len(mesh_children)}")
+        return
+
+    print(f"  info: re-imported {len(mesh_children)} meshes after stale cache detection")
+    r.ok(name)
+
+
 def test_set_reference_missing_file(r):
     """set_reference with non-existent file returns False gracefully."""
     name = "test_set_reference_missing_file"
@@ -536,6 +600,7 @@ def main():
         test_ensure_xform_ops_identity_noop,
         test_ensure_xform_ops_no_parent,
         test_set_reference_imports_usd,
+        test_set_reference_reimport_after_delete,
         test_set_reference_missing_file,
     ]
 

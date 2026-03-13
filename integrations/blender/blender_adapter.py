@@ -325,10 +325,14 @@ class BlenderAdapter(DCCAdapter):
             print(f"[USD Connect] set_reference: file not found: {resolved}")
             return False
 
-        # Deduplication: skip if already imported with same asset
+        # Deduplication: skip if already imported with same asset AND objects still exist
         if self._imported_refs.get(prim_path) == resolved:
-            LOG.info("BlenderAdapter.set_reference: already imported %s for %s", resolved, prim_path)
-            return True
+            if self._ref_children_exist(prim_path):
+                LOG.info("BlenderAdapter.set_reference: already imported %s for %s", resolved, prim_path)
+                return True
+            else:
+                LOG.info("BlenderAdapter.set_reference: stale cache for %s, re-importing", prim_path)
+                self._imported_refs.pop(prim_path, None)
 
         # If different asset was previously imported, remove old child objects
         if prim_path in self._imported_refs:
@@ -431,6 +435,20 @@ class BlenderAdapter(DCCAdapter):
         LOG.info("BlenderAdapter.set_reference: imported %d objects from %s for %s",
                  len(new_objs), resolved, prim_path)
         return True
+
+    def _ref_children_exist(self, prim_path: str) -> bool:
+        """Check if at least one child object from a previous reference import still exists."""
+        if not BPY_AVAILABLE:
+            return False
+        container = self._find_object_by_prim(prim_path)
+        if container is None:
+            return False
+        prefix = prim_path + "/"
+        for obj in bpy.data.objects:
+            pp = obj.get("usd_prim_path", "")
+            if pp.startswith(prefix):
+                return True
+        return False
 
     def _remove_imported_ref_children(self, prim_path: str):
         """Remove child objects previously imported for a reference prim (keep container)."""

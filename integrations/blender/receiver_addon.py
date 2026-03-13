@@ -171,20 +171,24 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
     bl_description = "Connect to sync server and start receiving transform events"
 
     def execute(self, context):
-        global _RECEIVER, _QUEUE_TIMER_REGISTERED, _LAST_SEQ
+        global _RECEIVER, _QUEUE_TIMER_REGISTERED, _LAST_SEQ, _ADAPTER
         if _RECEIVER is not None:
             self.report({"INFO"}, "Receiver already running")
             return {"CANCELLED"}
         scene = context.scene
         host = scene.usd_connect_recv_host
         port = scene.usd_connect_recv_port
-        
+
         # Load persisted sequence from scene property
         if _LAST_SEQ == 0 and hasattr(scene, "usd_connect_recv_last_seq"):
             _LAST_SEQ = scene.usd_connect_recv_last_seq
-        
+
         # Request replay from last known sequence + 1 (or 1 if never connected)
         sync_from = _LAST_SEQ + 1 if _LAST_SEQ > 0 else 1
+
+        # Full replay — reset adapter so all caches (including _imported_refs) are clean
+        if sync_from == 1:
+            _ADAPTER = None
         
         try:
             _RECEIVER = ReceiverThread(host=host, port=port, sync_from=sync_from)
@@ -238,8 +242,9 @@ class USD_CONNECT_OT_reset_receiver_seq(bpy.types.Operator):
     bl_description = "Reset sequence counter to force full replay on next connect"
 
     def execute(self, context):
-        global _LAST_SEQ
+        global _LAST_SEQ, _ADAPTER
         _LAST_SEQ = 0
+        _ADAPTER = None
         try:
             context.scene.usd_connect_recv_last_seq = 0
         except Exception:
