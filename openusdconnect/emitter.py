@@ -81,6 +81,31 @@ def _prim_path_from_notice_path(path_str: str) -> str | None:
     return path_str
 
 
+def _read_references(stage, prim_path):
+    """Read reference arcs authored on this stage's own layers.
+
+    Returns a list of (asset_path, prim_path_str) tuples, or empty list.
+    Only considers the root and session layers — ignores references that
+    come from composed-in layers (e.g. internal refs inside referenced assets).
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return []
+    own_layers = {stage.GetRootLayer().identifier, stage.GetSessionLayer().identifier}
+    result = []
+    for spec in prim.GetPrimStack():
+        if spec.layer.identifier not in own_layers:
+            continue
+        ref_list = spec.referenceList
+        for ref in ref_list.prependedItems:
+            result.append((ref.assetPath, str(ref.primPath)))
+        for ref in ref_list.explicitItems:
+            result.append((ref.assetPath, str(ref.primPath)))
+        for ref in ref_list.appendedItems:
+            result.append((ref.assetPath, str(ref.primPath)))
+    return result
+
+
 class NoticeEmitter:
     """Watches a Usd.Stage for changes and builds idempotent transform events.
 
@@ -108,6 +133,7 @@ class NoticeEmitter:
         self.last_sent_trs: dict[str, dict[str, list[float]]] = {}
         self.last_sent_mats: dict[str, dict[str, list[float]]] = {}
         self.last_sent_visibility: dict[str, str] = {}
+        self.last_sent_references: dict[str, list[tuple[str, str]]] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -234,6 +260,8 @@ class NoticeEmitter:
                 self.last_sent_mats[new_path] = self.last_sent_mats.pop(old_path)
             if old_path in self.last_sent_visibility:
                 self.last_sent_visibility[new_path] = self.last_sent_visibility.pop(old_path)
+            if old_path in self.last_sent_references:
+                self.last_sent_references[new_path] = self.last_sent_references.pop(old_path)
             # If dirty set had old_path, replace with new_path
             if old_path in self.dirty:
                 self.dirty.discard(old_path)
@@ -249,6 +277,7 @@ class NoticeEmitter:
             self.last_sent_trs.pop(prim_path, None)
             self.last_sent_mats.pop(prim_path, None)
             self.last_sent_visibility.pop(prim_path, None)
+            self.last_sent_references.pop(prim_path, None)
             self.dirty.discard(prim_path)
 
         # --- Dirty prims (creation + TRS changes) ---
@@ -273,6 +302,19 @@ class NoticeEmitter:
                 events.append({"k": "ensure_prim", "prim": prim_path, "typeName": type_name})
                 events.append({"k": "ensure_xform_ops", "prim": prim_path})
                 self._known_prims.add(prim_path)
+
+            # Reference diff
+            current_refs = _read_references(self.stage, prim_path)
+            last_refs = self.last_sent_references.get(prim_path, [])
+            if current_refs != last_refs:
+                ref_ev = {"k": "set_reference", "prim": prim_path, "refs": []}
+                for asset_path, ref_prim_path in current_refs:
+                    entry: dict = {"asset_path": asset_path}
+                    if ref_prim_path:
+                        entry["prim_path"] = ref_prim_path
+                    ref_ev["refs"].append(entry)
+                events.append(ref_ev)
+                self.last_sent_references[prim_path] = current_refs
 
             # TRS partial diff
             last = self.last_sent_trs.get(prim_path, {})

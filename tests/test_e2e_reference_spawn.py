@@ -120,8 +120,7 @@ class TestE2EReferenceSpawn:
                 {
                     "k": "set_reference",
                     "prim": "/World/Chair",
-                    "asset_path": asset_path,
-                    "prim_path": "/Model",
+                    "refs": [{"asset_path": asset_path, "prim_path": "/Model"}],
                 },
             ]
             send_line(emitter_sock, make_txn("test-emitter", events))
@@ -145,8 +144,8 @@ class TestE2EReferenceSpawn:
             # Verify set_reference payload
             ref_ev = [e for e in received_events if e["k"] == "set_reference"][0]
             assert ref_ev["prim"] == "/World/Chair"
-            assert ref_ev["asset_path"] == asset_path
-            assert ref_ev.get("prim_path") == "/Model"
+            assert ref_ev["refs"][0]["asset_path"] == asset_path
+            assert ref_ev["refs"][0]["prim_path"] == "/Model"
 
             # Apply events to a fresh USD stage and verify reference resolves
             verify_stage = Usd.Stage.CreateInMemory()
@@ -182,7 +181,10 @@ class TestE2EReferenceSpawn:
         adapter = UsdStageAdapter(stage)
 
         adapter.ensure_prim("/World/Furniture", "Xform")
-        adapter.set_reference("/World/Furniture", asset_path, "/Model")
+        adapter.set_reference(
+            "/World/Furniture",
+            [{"asset_path": asset_path, "prim_path": "/Model"}],
+        )
 
         furniture = stage.GetPrimAtPath("/World/Furniture")
         assert furniture.IsValid()
@@ -203,7 +205,7 @@ class TestE2EReferenceSpawn:
         adapter = UsdStageAdapter(stage)
 
         adapter.ensure_prim("/World/FullAsset", "Xform")
-        adapter.set_reference("/World/FullAsset", asset_path)
+        adapter.set_reference("/World/FullAsset", [{"asset_path": asset_path}])
 
         prim = stage.GetPrimAtPath("/World/FullAsset")
         assert prim.IsValid()

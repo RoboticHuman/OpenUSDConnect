@@ -75,8 +75,7 @@ def _dispatch_event(adapter, k, prim_path, ev):
         "set_gprim_attrs": lambda: adapter.set_gprim_attrs(prim_path, ev.get("attrs", {})),
         "set_reference": lambda: adapter.set_reference(
             prim_path,
-            ev.get("asset_path", ""),
-            ev.get("prim_path", ""),
+            ev.get("refs", []),
         ),
     }
     handler = _DISPATCH.get(k)

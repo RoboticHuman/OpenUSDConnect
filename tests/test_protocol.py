@@ -213,7 +213,7 @@ class TestValidateEvent:
             {
                 "k": "set_reference",
                 "prim": "/World/Chair",
-                "asset_path": "./assets/chair.usd",
+                "refs": [{"asset_path": "./assets/chair.usd"}],
             }
         )
 
@@ -222,23 +222,62 @@ class TestValidateEvent:
             {
                 "k": "set_reference",
                 "prim": "/World/Chair",
-                "asset_path": "./assets/chair.usd",
-                "prim_path": "/Chair",
+                "refs": [{"asset_path": "./assets/chair.usd", "prim_path": "/Chair"}],
             }
         )
 
-    def test_set_reference_missing_asset_path(self):
+    def test_set_reference_missing_refs(self):
         assert not validate_event({"k": "set_reference", "prim": "/World/Chair"})
 
-    def test_set_reference_empty_asset_path(self):
-        assert not validate_event({"k": "set_reference", "prim": "/World/Chair", "asset_path": ""})
+    def test_set_reference_refs_not_list(self):
+        assert not validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": "bad"}
+        )
 
-    def test_set_reference_bad_prim_path(self):
+    def test_set_reference_empty_refs_clears(self):
+        assert validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": []}
+        )
+
+    def test_set_reference_multiple_refs(self):
+        assert validate_event(
+            {
+                "k": "set_reference",
+                "prim": "/World/Chair",
+                "refs": [
+                    {"asset_path": "./chair.usd", "prim_path": "/Model"},
+                    {"asset_path": "./material.usd"},
+                ],
+            }
+        )
+
+    def test_set_reference_entry_not_dict(self):
+        assert not validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": ["bad"]}
+        )
+
+    def test_set_reference_internal_ref_valid(self):
+        """Same-file reference with only prim_path is valid."""
+        assert validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": [{"prim_path": "/X"}]}
+        )
+
+    def test_set_reference_entry_missing_both(self):
+        """Entry with neither asset_path nor prim_path is invalid."""
+        assert not validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": [{}]}
+        )
+
+    def test_set_reference_entry_empty_asset_path(self):
+        assert not validate_event(
+            {"k": "set_reference", "prim": "/World/Chair", "refs": [{"asset_path": ""}]}
+        )
+
+    def test_set_reference_entry_bad_prim_path(self):
         assert not validate_event(
             {
                 "k": "set_reference",
                 "prim": "/World/Chair",
-                "asset_path": "a.usd",
-                "prim_path": "no_slash",
+                "refs": [{"asset_path": "a.usd", "prim_path": "no_slash"}],
             }
         )

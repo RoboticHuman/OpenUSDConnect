@@ -493,3 +493,146 @@ class TestFirstEncounterStructuralEvents:
 
         trs2 = [e for e in events2 if e["k"] == "set_xform_trs" and e["prim"] == "/World/Obj"]
         assert len(trs2) == 1
+
+
+class TestReferenceEmission:
+    """NoticeEmitter detects and emits set_reference events."""
+
+    @staticmethod
+    def _make_ref_stage():
+        """Create a small in-memory stage suitable for referencing."""
+        ref_stage = Usd.Stage.CreateInMemory()
+        ref_stage.DefinePrim("/Model", "Xform")
+        return ref_stage
+
+    def test_reference_emitted_on_first_encounter(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+        ref_id = ref_stage.GetRootLayer().identifier
+
+        prim = stage.DefinePrim("/World/Chair", "Xform")
+        prim.GetReferences().AddReference(ref_id, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Chair"]
+        assert len(ref_evs) == 1
+        assert len(ref_evs[0]["refs"]) == 1
+        assert ref_evs[0]["refs"][0]["asset_path"] == ref_id
+        assert ref_evs[0]["refs"][0]["prim_path"] == "/Model"
+
+    def test_reference_change_emits_new_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_a = self._make_ref_stage()
+        ref_b = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/Obj", "Xform")
+        prim.GetReferences().AddReference(ref_a.GetRootLayer().identifier, "/Model")
+        emitter.build_events_for_dirty()
+
+        # Change reference
+        prim.GetReferences().ClearReferences()
+        prim.GetReferences().AddReference(ref_b.GetRootLayer().identifier, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Obj"]
+        assert len(ref_evs) == 1
+        assert ref_evs[0]["refs"][0]["asset_path"] == ref_b.GetRootLayer().identifier
+
+    def test_no_reference_no_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Plain", "Xform")
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Plain"]
+        assert len(ref_evs) == 0
+
+    def test_unchanged_reference_no_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/Stable", "Xform")
+        prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier, "/Model")
+
+        # First flush
+        emitter.build_events_for_dirty()
+
+        # Dirty the prim via TRS change (no ref change)
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Stable"]
+        assert len(ref_evs) == 0
+
+    def test_reference_cache_cleaned_on_deletion(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/Del", "Xform")
+        prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+        assert "/World/Del" in emitter.last_sent_references
+
+        stage.RemovePrim("/World/Del")
+        emitter.build_events_for_dirty()
+        assert "/World/Del" not in emitter.last_sent_references
+
+    def test_reference_cache_updated_on_rename(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/OldRef", "Xform")
+        prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+        assert "/World/OldRef" in emitter.last_sent_references
+
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, "NewRef")
+        editor.ApplyEdits()
+        emitter.build_events_for_dirty()
+
+        assert "/World/OldRef" not in emitter.last_sent_references
+        assert "/World/NewRef" in emitter.last_sent_references
+
+    def test_reference_without_prim_path(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+        ref_id = ref_stage.GetRootLayer().identifier
+
+        prim = stage.DefinePrim("/World/NoPP", "Xform")
+        prim.GetReferences().AddReference(ref_id)
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/NoPP"]
+        assert len(ref_evs) == 1
+        assert "prim_path" not in ref_evs[0]["refs"][0]
+
+    def test_reference_cleared_emits_empty_refs(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_stage = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/Clr", "Xform")
+        prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+
+        # Clear references
+        prim.GetReferences().ClearReferences()
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Clr"]
+        assert len(ref_evs) == 1
+        assert ref_evs[0]["refs"] == []
+
+    def test_multiple_references_emitted(self):
+        stage, emitter = _make_stage_and_emitter()
+        ref_a = self._make_ref_stage()
+        ref_b = self._make_ref_stage()
+
+        prim = stage.DefinePrim("/World/Multi", "Xform")
+        prim.GetReferences().AddReference(ref_a.GetRootLayer().identifier, "/Model")
+        prim.GetReferences().AddReference(ref_b.GetRootLayer().identifier, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Multi"]
+        assert len(ref_evs) == 1
+        assert len(ref_evs[0]["refs"]) == 2

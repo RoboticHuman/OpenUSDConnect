@@ -167,12 +167,18 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
         prim = get_or_define_prim(stage, prim_path)
         refs = prim.GetReferences()
         refs.ClearReferences()
-        asset_path = ev["asset_path"]
-        prim_path_ref = ev.get("prim_path", "")
-        if prim_path_ref:
-            refs.AddReference(asset_path, prim_path_ref)
-        else:
-            refs.AddReference(asset_path)
+
+        for ref_entry in ev.get("refs", []):
+            asset_path = ref_entry.get("asset_path", "")
+            prim_path_ref = ref_entry.get("prim_path", "")
+            if asset_path:
+                if prim_path_ref:
+                    refs.AddReference(asset_path, prim_path_ref)
+                else:
+                    refs.AddReference(asset_path)
+            elif prim_path_ref:
+                # Same-file (internal) reference — no asset path
+                refs.AddInternalReference(Sdf.Path(prim_path_ref))
         return
 
 

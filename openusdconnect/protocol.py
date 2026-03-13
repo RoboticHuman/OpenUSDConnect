@@ -19,7 +19,7 @@ Event types (inside txn.events):
   set_gprim_attrs:    {"k":"set_gprim_attrs","prim":"/World/Sphere/Geom",
                         "attrs":{"radius":2.0}}
   set_reference:      {"k":"set_reference","prim":"/World/Chair",
-                        "asset_path":"./assets/chair.usd","prim_path":"/Chair"}
+                        "refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}
 """
 
 from __future__ import annotations
@@ -126,11 +126,21 @@ def validate_event(ev: dict) -> bool:
         if not all(isinstance(key, str) for key in attrs):
             return False
     if k == "set_reference":
-        asset_path = ev.get("asset_path")
-        if not isinstance(asset_path, str) or not asset_path:
+        refs = ev.get("refs")
+        if not isinstance(refs, list):
             return False
-        prim_path = ev.get("prim_path")
-        if prim_path is not None:
-            if not isinstance(prim_path, str) or not prim_path.startswith("/"):
+        for entry in refs:
+            if not isinstance(entry, dict):
                 return False
+            ap = entry.get("asset_path")
+            pp = entry.get("prim_path")
+            # At least one of asset_path or prim_path must be present
+            if ap is None and pp is None:
+                return False
+            if ap is not None:
+                if not isinstance(ap, str) or not ap:
+                    return False
+            if pp is not None:
+                if not isinstance(pp, str) or not pp.startswith("/"):
+                    return False
     return True

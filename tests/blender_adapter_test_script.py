@@ -462,7 +462,8 @@ def test_set_reference_imports_usd(r):
         r.fail(name, f"Failed to create test USD: {e}")
         return
 
-    result = adapter.set_reference("/World/Asset", tmp_usd)
+    refs = [{"asset_path": tmp_usd}]
+    result = adapter.set_reference("/World/Asset", refs)
     if not result:
         r.fail(name, "set_reference returned False")
         return
@@ -496,7 +497,7 @@ def test_set_reference_imports_usd(r):
 
     # Verify idempotent — calling again doesn't duplicate
     count_before = len(bpy.data.objects)
-    adapter.set_reference("/World/Asset", tmp_usd)
+    adapter.set_reference("/World/Asset", refs)
     count_after = len(bpy.data.objects)
     if count_after != count_before:
         r.fail(name, f"idempotent check failed: {count_before} -> {count_after} objects")
@@ -527,7 +528,8 @@ def test_set_reference_reimport_after_delete(r):
         return
 
     # First import
-    result = adapter.set_reference("/World/Asset", tmp_usd)
+    refs = [{"asset_path": tmp_usd}]
+    result = adapter.set_reference("/World/Asset", refs)
     if not result:
         r.fail(name, "first set_reference returned False")
         return
@@ -555,7 +557,7 @@ def test_set_reference_reimport_after_delete(r):
         return
 
     # Second import — same asset path, but stale cache should be detected
-    result2 = adapter.set_reference("/World/Asset", tmp_usd)
+    result2 = adapter.set_reference("/World/Asset", refs)
     if not result2:
         r.fail(name, "second set_reference returned False")
         return
@@ -580,7 +582,9 @@ def test_set_reference_missing_file(r):
     name = "test_set_reference_missing_file"
     _clear_scene()
     adapter = BlenderAdapter()
-    result = adapter.set_reference("/World/Missing", "/nonexistent/path/fake.usda")
+    result = adapter.set_reference(
+        "/World/Missing", [{"asset_path": "/nonexistent/path/fake.usda"}]
+    )
     if result:
         r.fail(name, "set_reference should return False for missing file")
         return

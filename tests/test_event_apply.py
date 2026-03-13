@@ -241,22 +241,82 @@ class TestSetGprimAttrs:
 
 class TestSetReference:
     def test_add_reference(self, stage):
-        # Create a referenceable stage with a prim
         ref_stage = Usd.Stage.CreateInMemory("ref.usda")
         ref_stage.DefinePrim("/Chair", "Xform")
-        ref_layer = ref_stage.GetRootLayer()
-        ref_path = ref_layer.identifier
+        ref_path = ref_stage.GetRootLayer().identifier
 
         apply_event(
             stage,
             {
                 "k": "set_reference",
                 "prim": "/World/Chair",
-                "asset_path": ref_path,
-                "prim_path": "/Chair",
+                "refs": [{"asset_path": ref_path, "prim_path": "/Chair"}],
             },
         )
         prim = stage.GetPrimAtPath("/World/Chair")
+        assert prim.IsValid()
+        assert prim.HasAuthoredReferences()
+
+
+    def test_add_multiple_references(self, stage):
+        ref_stage_1 = Usd.Stage.CreateInMemory("ref1.usda")
+        ref_stage_1.DefinePrim("/A", "Xform")
+        ref_stage_2 = Usd.Stage.CreateInMemory("ref2.usda")
+        ref_stage_2.DefinePrim("/B", "Xform")
+
+        apply_event(
+            stage,
+            {
+                "k": "set_reference",
+                "prim": "/World/Multi",
+                "refs": [
+                    {"asset_path": ref_stage_1.GetRootLayer().identifier, "prim_path": "/A"},
+                    {"asset_path": ref_stage_2.GetRootLayer().identifier, "prim_path": "/B"},
+                ],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/Multi")
+        assert prim.IsValid()
+        assert prim.HasAuthoredReferences()
+
+    def test_clear_references(self, stage):
+        ref_stage = Usd.Stage.CreateInMemory("ref_clear.usda")
+        ref_stage.DefinePrim("/X", "Xform")
+
+        # Add a reference first
+        apply_event(
+            stage,
+            {
+                "k": "set_reference",
+                "prim": "/World/Clearable",
+                "refs": [{"asset_path": ref_stage.GetRootLayer().identifier}],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/Clearable")
+        assert prim.HasAuthoredReferences()
+
+        # Clear with empty refs
+        apply_event(
+            stage,
+            {"k": "set_reference", "prim": "/World/Clearable", "refs": []},
+        )
+        prim = stage.GetPrimAtPath("/World/Clearable")
+        assert not prim.HasAuthoredReferences()
+
+    def test_add_internal_reference(self, stage):
+        """Same-file reference (no asset_path, only prim_path)."""
+        # Define a source prim to reference
+        stage.DefinePrim("/Source", "Xform")
+
+        apply_event(
+            stage,
+            {
+                "k": "set_reference",
+                "prim": "/World/InternalRef",
+                "refs": [{"prim_path": "/Source"}],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/InternalRef")
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
 

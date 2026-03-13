@@ -74,8 +74,7 @@ def test_receive_ensure_prim_and_set_reference(r):
         {
             "k": "set_reference",
             "prim": "/World/Chair",
-            "asset_path": asset_path,
-            "prim_path": "/Model",
+            "refs": [{"asset_path": asset_path, "prim_path": "/Model"}],
         },
     ]
 
@@ -88,7 +87,7 @@ def test_receive_ensure_prim_and_set_reference(r):
         r.fail(name, "/World object not created")
         return
 
-    # Verify /World/Chair was created (initially as Xform, then replaced by reference import)
+    # Verify /World/Chair was created
     chair = adapter._find_object_by_prim("/World/Chair")
     if chair is None:
         r.fail(name, "/World/Chair object not created")
@@ -142,8 +141,7 @@ def test_receive_set_reference_missing_file(r):
     ev = {
         "k": "set_reference",
         "prim": "/World/Bad",
-        "asset_path": "/nonexistent/fake.usda",
-        "prim_path": "",
+        "refs": [{"asset_path": "/nonexistent/fake.usda"}],
     }
     _dispatch_event(adapter, "set_reference", "/World/Bad", ev)
 
@@ -172,8 +170,7 @@ def test_full_receive_pipeline(r):
         {
             "k": "set_reference",
             "prim": "/World/Chair",
-            "asset_path": asset_path,
-            "prim_path": "/Model",
+            "refs": [{"asset_path": asset_path, "prim_path": "/Model"}],
         },
     ]
 

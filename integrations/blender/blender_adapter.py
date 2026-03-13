@@ -309,18 +309,18 @@ class BlenderAdapter(DCCAdapter):
         LOG.info("BlenderAdapter: set gprim attrs %s on %s", attrs, prim_path)
         return True
 
-    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
-        if not BPY_AVAILABLE:
-            LOG.info("BlenderAdapter.set_reference dry: %s -> %s", prim_path, asset_path)
-            return True
+    def _resolve_asset_path(self, asset_path: str) -> str | None:
+        """Resolve a possibly-relative asset path to an absolute file path.
 
-        # Resolve asset_path to absolute
+        Returns the resolved path, or None if the file doesn't exist.
+        """
         resolved = asset_path
         if not os.path.isabs(resolved):
-            # Try scene asset root first, then base USD path dir, then CWD
             asset_root = getattr(bpy.context.scene, "usd_connect_asset_root", "")
             if not asset_root:
-                base_path = getattr(bpy.context.scene, "usd_connect_base_usd_path", "")
+                base_path = getattr(
+                    bpy.context.scene, "usd_connect_base_usd_path", ""
+                )
                 if base_path:
                     asset_root = os.path.dirname(bpy.path.abspath(base_path))
             if asset_root:
@@ -330,62 +330,19 @@ class BlenderAdapter(DCCAdapter):
 
         resolved = os.path.normpath(resolved)
         if not os.path.isfile(resolved):
-            LOG.warning("BlenderAdapter.set_reference: file not found: %s", resolved)
+            LOG.warning("BlenderAdapter: file not found: %s", resolved)
             print(f"[USD Connect] set_reference: file not found: {resolved}")
-            return False
+            return None
+        return resolved
 
-        # Deduplication: skip if already imported with same asset AND objects still exist
-        if self._imported_refs.get(prim_path) == resolved:
-            if self._ref_children_exist(prim_path):
-                LOG.info(
-                    "BlenderAdapter.set_reference: already imported %s for %s",
-                    resolved,
-                    prim_path,
-                )
-                return True
-            else:
-                LOG.info(
-                    "BlenderAdapter.set_reference: stale cache for %s, re-importing",
-                    prim_path,
-                )
-                self._imported_refs.pop(prim_path, None)
+    def _import_ref_asset(self, container, prim_path, resolved, prim_path_ref):
+        """Import a single USD asset and parent results under *container*.
 
-        # If different asset was previously imported, remove old child objects
-        if prim_path in self._imported_refs:
-            self._remove_imported_ref_children(prim_path)
-
+        Returns the set of newly created Blender objects (may be empty).
+        """
         print(f"[USD Connect] set_reference: importing {resolved} for {prim_path}")
-
-        # Find or create the container object for this prim_path.
-        # ensure_prim may have already created an Empty — we'll use it as the
-        # parent for imported geometry (matching USD's Xform + Reference pattern).
-        container = self._find_object_by_prim(prim_path)
-        if container is None:
-            # No ensure_prim preceded — create a container Empty
-            name = prim_path.strip("/").replace("/", "_") or prim_path
-            container = bpy.data.objects.new(name, None)
-            container["usd_prim_path"] = prim_path
-            container["usd_type_name"] = "Reference"
-            self._link_object(container)
-            self._prim_cache[prim_path] = container
-            # Parent under ancestor
-            parent_path = prim_path.rsplit("/", 1)[0]
-            if parent_path:
-                parent_obj = self._find_object_by_prim(parent_path)
-                if parent_obj is not None:
-                    container.parent = parent_obj
-                    container.matrix_parent_inverse = _IDENTITY_4X4.copy()
-
-        # Tag container as a reference
-        container["usd_type_name"] = "Reference"
-        container["usd_ref_asset"] = resolved
-
-        # Snapshot existing objects before import
         before = set(bpy.data.objects)
 
-        # Import the USD file.
-        # bpy.ops.wm.usd_import requires a window context. When called from a
-        # timer callback (receiver path), we must provide one via temp_override.
         try:
             import_kwargs = {
                 "filepath": resolved,
@@ -397,7 +354,6 @@ class BlenderAdapter(DCCAdapter):
 
             window = bpy.context.window
             if window is None:
-                # Timer callbacks may not have a window — grab one explicitly
                 windows = list(bpy.context.window_manager.windows)
                 window = windows[0] if windows else None
 
@@ -405,30 +361,32 @@ class BlenderAdapter(DCCAdapter):
                 with bpy.context.temp_override(window=window):
                     bpy.ops.wm.usd_import(**import_kwargs)
             else:
-                # Last resort — try without override
                 bpy.ops.wm.usd_import(**import_kwargs)
         except Exception as e:
-            LOG.exception("BlenderAdapter.set_reference: USD import failed for %s", resolved)
+            LOG.exception(
+                "BlenderAdapter: USD import failed for %s", resolved
+            )
             print(f"[USD Connect] set_reference: import failed: {e}")
-            return False
+            return set()
 
-        # Identify newly created objects
         new_objs = set(bpy.data.objects) - before
         if not new_objs:
-            LOG.warning("BlenderAdapter.set_reference: no objects imported from %s", resolved)
-            print(f"[USD Connect] set_reference: WARNING — no objects imported from {resolved}")
-            return True
+            LOG.warning(
+                "BlenderAdapter: no objects imported from %s", resolved
+            )
+            return set()
 
-        print(f"[USD Connect] set_reference: imported {len(new_objs)} objects from {resolved}")
-        for obj in new_objs:
-            print(f"  imported: '{obj.name}' type={obj.type} parent={obj.parent}")
+        print(
+            f"[USD Connect] set_reference: imported "
+            f"{len(new_objs)} objects from {resolved}"
+        )
 
-        # Find the top-level roots of the imported hierarchy
         imported_roots = [
-            obj for obj in new_objs if obj.parent is None or obj.parent not in new_objs
+            obj
+            for obj in new_objs
+            if obj.parent is None or obj.parent not in new_objs
         ]
 
-        # Tag and reparent all imported objects under the container
         for obj in new_objs:
             obj_name = obj.name.replace(".", "_")
             child_path = f"{prim_path}/{obj_name}"
@@ -436,23 +394,71 @@ class BlenderAdapter(DCCAdapter):
             self._prim_cache[child_path] = obj
 
         for root in imported_roots:
-            # Preserve the imported world transform when reparenting.
-            # The importer may have applied a Y-up → Z-up rotation on the root.
-            # We bake that into matrix_basis so it's not lost when we set
-            # matrix_parent_inverse to Identity.
             world = root.matrix_world.copy()
             root.parent = container
             root.matrix_parent_inverse = _IDENTITY_4X4.copy()
-            # new world = container.world @ Identity @ basis, so
-            # basis = container.world.inv @ old_world
             root.matrix_basis = container.matrix_world.inverted_safe() @ world
-            print(f"[USD Connect] set_reference: parented '{root.name}' under '{container.name}'")
 
-        self._imported_refs[prim_path] = resolved
+        return new_objs
+
+    def set_reference(self, prim_path: str, refs: list) -> bool:
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.set_reference dry: %s", prim_path)
+            return True
+
+        if len(refs) == 0:
+            self._remove_imported_ref_children(prim_path)
+            return True
+
+        # Resolve all asset paths up front so we can bail if none exist
+        resolved_refs = []
+        for ref_entry in refs:
+            asset_path = ref_entry.get("asset_path", "")
+            prim_path_ref = ref_entry.get("prim_path", "")
+            resolved = self._resolve_asset_path(asset_path)
+            if resolved is not None:
+                resolved_refs.append((resolved, prim_path_ref))
+
+        if not resolved_refs:
+            return False
+
+        # If assets were previously imported, remove old child objects
+        if prim_path in self._imported_refs:
+            self._remove_imported_ref_children(prim_path)
+
+        # Find or create the container object for this prim_path.
+        container = self._find_object_by_prim(prim_path)
+        if container is None:
+            name = prim_path.strip("/").replace("/", "_") or prim_path
+            container = bpy.data.objects.new(name, None)
+            container["usd_prim_path"] = prim_path
+            container["usd_type_name"] = "Reference"
+            self._link_object(container)
+            self._prim_cache[prim_path] = container
+            parent_path = prim_path.rsplit("/", 1)[0]
+            if parent_path:
+                parent_obj = self._find_object_by_prim(parent_path)
+                if parent_obj is not None:
+                    container.parent = parent_obj
+                    container.matrix_parent_inverse = _IDENTITY_4X4.copy()
+
+        container["usd_type_name"] = "Reference"
+
+        total_imported = 0
+        for resolved, prim_path_ref in resolved_refs:
+            new_objs = self._import_ref_asset(
+                container, prim_path, resolved, prim_path_ref
+            )
+            total_imported += len(new_objs)
+
+        # Tag container with resolved asset (for dedup on single-ref)
+        if len(resolved_refs) == 1:
+            container["usd_ref_asset"] = resolved_refs[0][0]
+            self._imported_refs[prim_path] = resolved_refs[0][0]
+
         LOG.info(
-            "BlenderAdapter.set_reference: imported %d objects from %s for %s",
-            len(new_objs),
-            resolved,
+            "BlenderAdapter.set_reference: imported %d objects for %s",
+            total_imported,
             prim_path,
         )
         return True

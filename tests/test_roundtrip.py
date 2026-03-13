@@ -236,17 +236,18 @@ class TestUsdStageAdapterNewFeatures:
         assert abs(prim.GetAttribute("radius").Get() - 1.5) < 1e-6
 
     def test_reference_via_adapter(self):
-        # Create a source stage with a prim to reference
         src_stage = Usd.Stage.CreateInMemory("source.usda")
         src_stage.DefinePrim("/Chair", "Xform")
         src_layer = src_stage.GetRootLayer()
 
-        # Create target stage and adapter
         stage = Usd.Stage.CreateInMemory()
         stage.DefinePrim("/World", "Xform")
         adapter = UsdStageAdapter(stage)
 
-        adapter.set_reference("/World/Chair", src_layer.identifier, "/Chair")
+        adapter.set_reference(
+            "/World/Chair",
+            [{"asset_path": src_layer.identifier, "prim_path": "/Chair"}],
+        )
         prim = stage.GetPrimAtPath("/World/Chair")
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
@@ -315,10 +316,8 @@ class TestStageToStageRoundtrip:
 
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
-        # Source asset
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")
         src_stage.DefinePrim("/Model", "Xform")
-        # Add a child so we can verify composition resolves
         src_stage.DefinePrim("/Model/Body", "Cube")
         src_layer = src_stage.GetRootLayer()
 
@@ -326,8 +325,7 @@ class TestStageToStageRoundtrip:
             {
                 "k": "set_reference",
                 "prim": "/World/Furniture",
-                "asset_path": src_layer.identifier,
-                "prim_path": "/Model",
+                "refs": [{"asset_path": src_layer.identifier, "prim_path": "/Model"}],
             },
         ]
 
@@ -358,8 +356,7 @@ class TestStageToStageRoundtrip:
             {
                 "k": "set_reference",
                 "prim": "/World/Ref",
-                "asset_path": src_layer.identifier,
-                "prim_path": "/Prop",
+                "refs": [{"asset_path": src_layer.identifier, "prim_path": "/Prop"}],
             },
         ]
 

@@ -71,7 +71,7 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+    def set_reference(self, prim_path: str, refs: list) -> bool:
         raise NotImplementedError
 
 
@@ -138,13 +138,10 @@ class UsdStageAdapter(DCCAdapter):
         apply_event(self.stage, {"k": "set_gprim_attrs", "prim": prim_path, "attrs": attrs})
         return True
 
-    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+    def set_reference(self, prim_path: str, refs: list) -> bool:
         from .event_apply import apply_event
 
-        ev = {"k": "set_reference", "prim": prim_path, "asset_path": asset_path}
-        if prim_path_ref:
-            ev["prim_path"] = prim_path_ref
-        apply_event(self.stage, ev)
+        apply_event(self.stage, {"k": "set_reference", "prim": prim_path, "refs": refs})
         return True
 
 
@@ -232,13 +229,13 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set gprim attrs %s on prim %s", attrs, prim_path)
         return True
 
-    def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
+    def set_reference(self, prim_path: str, refs: list) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
-        p["reference"] = {"asset_path": asset_path, "prim_path": prim_path_ref}
-        LOG.info("MockAdapter: set reference %s on prim %s", asset_path, prim_path)
+        p["references"] = list(refs)
+        LOG.info("MockAdapter: set reference on prim %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:
