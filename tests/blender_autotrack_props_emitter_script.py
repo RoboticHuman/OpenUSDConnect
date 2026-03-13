@@ -12,9 +12,9 @@ Run via:
     -- --port PORT --out RESULTS_FILE
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 
 import bpy
@@ -30,7 +30,7 @@ def main():
     port = 7200
     out_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -53,19 +53,23 @@ def main():
     bpy.app.timers.register = _capturing_register
 
     # Clear default scene
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
+    import integrations.blender.capture as capture_mod
     from integrations.blender.capture import (
-        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor,
+        NetworkSender,
+        _depsgraph_handler,
+        _ensure_scene_props,
     )
     from openusdconnect.emitter import NoticeEmitter
-    import integrations.blender.capture as capture_mod
 
     _ensure_scene_props()
 
     # Write a minimal temp USD file for the stage author
     import tempfile as _tf
+
     _tmp = _tf.NamedTemporaryFile(suffix=".usda", delete=False, mode="w")
     _tmp.write('#usda 1.0\ndef Xform "World" {}\n')
     _tmp.close()
@@ -87,7 +91,7 @@ def main():
     bpy.context.scene.usd_connect_auto_track = True
 
     # Create World root empty
-    bpy.ops.object.empty_add(type='PLAIN_AXES')
+    bpy.ops.object.empty_add(type="PLAIN_AXES")
     world = bpy.context.active_object
     world.name = "World"
     world["usd_prim_path"] = "/World"
@@ -120,11 +124,13 @@ def main():
     sphere_before = bpy.data.objects.get("AutoSphere")
 
     results["cube_no_props_before_timer"] = (
-        "PASS" if cube_before and "usd_prim_path" not in cube_before
+        "PASS"
+        if cube_before and "usd_prim_path" not in cube_before
         else "FAIL: custom props already set before timer fired"
     )
     results["sphere_no_props_before_timer"] = (
-        "PASS" if sphere_before and "usd_prim_path" not in sphere_before
+        "PASS"
+        if sphere_before and "usd_prim_path" not in sphere_before
         else "FAIL: custom props already set before timer fired"
     )
 

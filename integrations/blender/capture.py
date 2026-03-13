@@ -14,14 +14,14 @@ Architecture:
 
 from __future__ import annotations
 
-import socket
 import logging
-from typing import Optional
+import socket
 
 import bpy
 
 try:
-    from pxr import Usd, Sdf, UsdGeom, Gf, Tf
+    from pxr import Gf, Sdf, Usd, UsdGeom
+
     PXR_AVAILABLE = True
 except Exception as e:
     PXR_AVAILABLE = False
@@ -41,7 +41,6 @@ def _compute_local_trs(obj):
     return local_matrix.decompose()
 
 
-
 _USD_MESH_TYPES = ("Sphere", "Cube", "Cylinder", "Cone", "Capsule")
 
 
@@ -52,7 +51,7 @@ def _infer_usd_type(obj) -> str:
     (Sphere, Cube, etc.). Falls back to 'Mesh' for mesh objects or
     'Xform' for non-mesh.
     """
-    if obj.type != 'MESH' or obj.data is None:
+    if obj.type != "MESH" or obj.data is None:
         return "Xform"
     # Check mesh data name as a hint (works for freshly-created primitives)
     mesh_name = obj.data.name
@@ -62,18 +61,19 @@ def _infer_usd_type(obj) -> str:
     return "Mesh"
 
 
-
 def _deferred_set_props(obj_name: str, prim_path: str, type_name: str):
     """Set custom properties on next main-loop tick (outside depsgraph callback).
 
     Looks up by name to avoid stale-reference issues.
     """
+
     def _apply():
         obj = bpy.data.objects.get(obj_name)
         if obj is not None:
             obj["usd_prim_path"] = prim_path
             obj["usd_type_name"] = type_name
         return None  # one-shot
+
     bpy.app.timers.register(_apply, first_interval=0)
 
 
@@ -84,6 +84,7 @@ def sanitize_usd_name(name: str) -> str:
     Spaces, dots, and other invalid chars are replaced with underscores.
     """
     import re
+
     result = re.sub(r"[^_a-zA-Z0-9]", "_", name)
     if result and result[0].isdigit():
         result = "_" + result
@@ -104,37 +105,51 @@ def _ensure_scene_props():
         )
     if not hasattr(S, "usd_connect_emit_to_file"):
         S.usd_connect_emit_to_file = bpy.props.BoolProperty(
-            name="Emit to File", default=False,
+            name="Emit to File",
+            default=False,
         )
     if not hasattr(S, "usd_connect_emit_file_path"):
         S.usd_connect_emit_file_path = bpy.props.StringProperty(
-            name="Diff Output File", subtype="FILE_PATH", default="",
+            name="Diff Output File",
+            subtype="FILE_PATH",
+            default="",
         )
     if not hasattr(S, "usd_connect_coalesce_seconds"):
         S.usd_connect_coalesce_seconds = bpy.props.FloatProperty(
-            name="Coalesce (sec)", default=DEFAULT_COALESCE_SECONDS,
-            min=0.0, max=5.0,
+            name="Coalesce (sec)",
+            default=DEFAULT_COALESCE_SECONDS,
+            min=0.0,
+            max=5.0,
         )
     if not hasattr(S, "usd_connect_import_skip_leaf_geom"):
         S.usd_connect_import_skip_leaf_geom = bpy.props.BoolProperty(
-            name="Skip Leaf /Geom Prim Paths", default=True,
+            name="Skip Leaf /Geom Prim Paths",
+            default=True,
         )
     # Network emitter props
     if not hasattr(S, "usd_connect_emit_host"):
         S.usd_connect_emit_host = bpy.props.StringProperty(
-            name="Server Host", default="127.0.0.1",
+            name="Server Host",
+            default="127.0.0.1",
         )
     if not hasattr(S, "usd_connect_emit_port"):
         S.usd_connect_emit_port = bpy.props.IntProperty(
-            name="Server Port", default=7200, min=1, max=65535,
+            name="Server Port",
+            default=7200,
+            min=1,
+            max=65535,
         )
     if not hasattr(S, "usd_connect_emit_hz"):
         S.usd_connect_emit_hz = bpy.props.FloatProperty(
-            name="Send Rate (Hz)", default=60.0, min=1.0, max=120.0,
+            name="Send Rate (Hz)",
+            default=60.0,
+            min=1.0,
+            max=120.0,
         )
     if not hasattr(S, "usd_connect_net_emitter_running"):
         S.usd_connect_net_emitter_running = bpy.props.BoolProperty(
-            name="Net Emitter Running", default=False,
+            name="Net Emitter Running",
+            default=False,
         )
     if not hasattr(S, "usd_connect_auto_track"):
         S.usd_connect_auto_track = bpy.props.BoolProperty(
@@ -285,9 +300,7 @@ class BlenderStageAuthor:
     def seed_used_paths(self):
         """Seed used-paths from scene objects (one-time O(N) scan)."""
         self._used_prim_paths = {
-            obj.get("usd_prim_path")
-            for obj in bpy.data.objects
-            if obj.get("usd_prim_path")
+            obj.get("usd_prim_path") for obj in bpy.data.objects if obj.get("usd_prim_path")
         }
 
     def _resolve_prim_path(self, obj):
@@ -362,6 +375,7 @@ class BlenderStageAuthor:
             return
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
+
         t = find_op(xf, "translate")
         o = find_op(xf, "orient")
         s = find_op(xf, "scale")
@@ -386,6 +400,7 @@ class BlenderStageAuthor:
 
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
+
         t_op = find_op(xf, "translate")
         o_op = find_op(xf, "orient")
         s_op = find_op(xf, "scale")
@@ -509,11 +524,12 @@ class NetworkSender:
         self.host = host
         self.port = port
         self.client_id = client_id
-        self.sock: Optional[socket.socket] = None
+        self.sock: socket.socket | None = None
 
         # Lazy import to support vendored openusdconnect
-        from openusdconnect.protocol import make_hello, make_txn, make_quit
+        from openusdconnect.protocol import make_hello, make_quit, make_txn
         from openusdconnect.transport import send_line as _send_line
+
         self._make_hello = make_hello
         self._make_txn = make_txn
         self._make_quit = make_quit
@@ -547,7 +563,6 @@ class NetworkSender:
             self.disconnect()
 
 
-
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
@@ -557,12 +572,13 @@ class _State:
     Holds the three collaborating objects that form the emit pipeline:
     author -> notice_emitter -> sender.
     """
+
     __slots__ = ("author", "notice_emitter", "sender")
 
     def __init__(self):
-        self.author: Optional[BlenderStageAuthor] = None
-        self.notice_emitter = None   # Optional[NoticeEmitter]
-        self.sender: Optional[NetworkSender] = None
+        self.author: BlenderStageAuthor | None = None
+        self.notice_emitter = None  # Optional[NoticeEmitter]
+        self.sender: NetworkSender | None = None
 
 
 _state = _State()
@@ -605,17 +621,19 @@ def _depsgraph_handler(scene, depsgraph):
     try:
         updates = list(depsgraph.updates)
 
-        has_object_updates = any(
-            isinstance(update.id, bpy.types.Object)
-            for update in updates
-        )
+        has_object_updates = any(isinstance(update.id, bpy.types.Object) for update in updates)
         if not has_object_updates:
             return
 
         if _state.author is not None and _state.author.enabled:
             _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
             _state.author.on_depsgraph_update(updates)
-            if _state.notice_emitter is not None and _state.sender is not None and _state.sender.sock is not None:
+            can_send = (
+                _state.notice_emitter is not None
+                and _state.sender is not None
+                and _state.sender.sock is not None
+            )
+            if can_send:
                 events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
                 if events:
                     _state.sender.send_events(events)
@@ -623,6 +641,7 @@ def _depsgraph_handler(scene, depsgraph):
     except Exception as e:
         print("[USD Connect] depsgraph handler error:", e)
         import traceback
+
         traceback.print_exc()
 
 
@@ -774,6 +793,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
             _state.author.seed_used_paths()
 
             from openusdconnect.emitter import NoticeEmitter
+
             _state.notice_emitter = NoticeEmitter(_state.author.stage)
 
             _state.sender = NetworkSender(
@@ -785,7 +805,9 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
             _remove_handler()
             bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
             scene.usd_connect_net_emitter_running = True
-            self.report({"INFO"}, f"Connected to {scene.usd_connect_emit_host}:{scene.usd_connect_emit_port}")
+            host = scene.usd_connect_emit_host
+            port = scene.usd_connect_emit_port
+            self.report({"INFO"}, f"Connected to {host}:{port}")
         except Exception as e:
             self.report({"ERROR"}, f"Connection failed: {e}")
             return {"CANCELLED"}
@@ -849,7 +871,12 @@ class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
 
         if _state.author is not None:
             _state.author.send_rename(old_path, new_name)
-            if _state.notice_emitter is not None and _state.sender is not None and _state.sender.sock is not None:
+            can_send = (
+                _state.notice_emitter is not None
+                and _state.sender is not None
+                and _state.sender.sock is not None
+            )
+            if can_send:
                 events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
                 if events:
                     _state.sender.send_events(events)
@@ -902,12 +929,17 @@ def unregister():
     for c in reversed(_CAPTURE_CLASSES):
         bpy.utils.unregister_class(c)
     for prop_name in (
-        "usd_connect_base_usd_path", "usd_connect_emit_to_file",
-        "usd_connect_emit_file_path", "usd_connect_coalesce_seconds",
-        "usd_connect_import_skip_leaf_geom", "usd_connect_emit_host",
-        "usd_connect_emit_port", "usd_connect_emit_hz",
+        "usd_connect_base_usd_path",
+        "usd_connect_emit_to_file",
+        "usd_connect_emit_file_path",
+        "usd_connect_coalesce_seconds",
+        "usd_connect_import_skip_leaf_geom",
+        "usd_connect_emit_host",
+        "usd_connect_emit_port",
+        "usd_connect_emit_hz",
         "usd_connect_net_emitter_running",
-        "usd_connect_auto_track", "usd_connect_auto_track_root",
+        "usd_connect_auto_track",
+        "usd_connect_auto_track_root",
         "usd_connect_asset_root",
     ):
         if hasattr(bpy.types.Scene, prop_name):

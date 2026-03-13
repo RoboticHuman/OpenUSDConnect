@@ -25,6 +25,7 @@ if _addon_dir not in sys.path:
 # Make bundled pxr module available if Blender provides it
 try:
     import bpy
+
     bpy.utils.expose_bundled_modules()
 except Exception:
     pass
@@ -35,21 +36,24 @@ except Exception:
 # silently ignored until a full restart.
 if "capture" in locals():
     import importlib
+
     # Reload vendored core library first (dependency)
     from . import openusdconnect as _ouc_pkg
-    for _sub in ("protocol", "transport", "event_apply", "emitter", "receiver", "adapters", "server"):
+
+    _subs = ("protocol", "transport", "event_apply", "emitter", "receiver", "adapters", "server")
+    for _sub in _subs:
         _mod = getattr(_ouc_pkg, _sub, None)
         if _mod is not None:
             importlib.reload(_mod)
     # Then reload addon modules
-    importlib.reload(capture)        # noqa: F821
-    importlib.reload(receiver_addon) # noqa: F821
-    importlib.reload(blender_adapter) # noqa: F821
-    importlib.reload(ui)             # noqa: F821
+    importlib.reload(capture)  # noqa: F821
+    importlib.reload(receiver_addon)  # noqa: F821
+    importlib.reload(blender_adapter)  # noqa: F821
+    importlib.reload(ui)  # noqa: F821
 
 from . import capture
 from . import receiver_addon
-from . import blender_adapter
+from . import blender_adapter as blender_adapter
 from . import ui
 
 

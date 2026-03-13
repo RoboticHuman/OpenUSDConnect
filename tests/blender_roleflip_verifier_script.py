@@ -9,12 +9,14 @@ The NewCube check is the critical axis-flip test: this object was created on
 Instance A, received on Instance B, then moved by B as emitter. If the axis
 flip bug is present, the local Y/Z values will be swapped or negated.
 
-Run via: blender --background --python tests/blender_roleflip_verifier_script.py -- --port PORT --scene PATH --out RESULTS
+Run via:
+  blender --background --python tests/blender_roleflip_verifier_script.py \
+    -- --port PORT --scene PATH --out RESULTS
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 
 import bpy
@@ -30,7 +32,7 @@ def main():
     scene_path = ""
     out_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -44,13 +46,15 @@ def main():
         sys.exit(1)
 
     import mathutils
+
     identity = mathutils.Matrix.Identity(4)
 
     # Clear and import
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
     from integrations.blender.capture import USD_CONNECT_Hook, _ensure_scene_props
+
     _ensure_scene_props()
     bpy.context.scene.usd_connect_import_skip_leaf_geom = False
     bpy.utils.register_class(USD_CONNECT_Hook)
@@ -60,8 +64,8 @@ def main():
     bpy.context.view_layer.update()
 
     # Receive ALL events (Phase 1 + Phase 2)
-    from openusdconnect.receiver import ReceiverThread
     from integrations.blender.blender_adapter import BlenderAdapter
+    from openusdconnect.receiver import ReceiverThread
 
     receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
@@ -79,8 +83,7 @@ def main():
                 ev = msg.get("event", {})
                 k = ev.get("k")
                 prim = ev.get("prim", "")
-                print(f"[RoleFlip Verifier] Applying: {k} {prim} "
-                      f"{ev.get('t', '')}")
+                print(f"[RoleFlip Verifier] Applying: {k} {prim} {ev.get('t', '')}")
                 if k == "ensure_prim":
                     adapter.ensure_prim(prim, ev.get("typeName", "Xform"))
                 elif k == "ensure_xform_ops":
@@ -93,6 +96,7 @@ def main():
         except Exception as e:
             print(f"[RoleFlip Verifier] Error: {e}")
             import traceback
+
             traceback.print_exc()
 
     receiver.stop()
@@ -104,7 +108,9 @@ def main():
     bpy.context.view_layer.update()
 
     results = {}
-    results["events_applied"] = f"PASS ({events_applied})" if events_applied > 0 else "FAIL: no events"
+    results["events_applied"] = (
+        f"PASS ({events_applied})" if events_applied > 0 else "FAIL: no events"
+    )
 
     def find_by_prim(prim_path):
         for obj in bpy.data.objects:
@@ -124,14 +130,14 @@ def main():
         results["cube_found"] = "PASS"
         loc = cube.location
         world = cube.matrix_world.translation
-        print(f"[RoleFlip Verifier] Cube final local: {[round(v,3) for v in loc]}")
-        print(f"[RoleFlip Verifier] Cube final world: {[round(v,3) for v in world]}")
+        print(f"[RoleFlip Verifier] Cube final local: {[round(v, 3) for v in loc]}")
+        print(f"[RoleFlip Verifier] Cube final world: {[round(v, 3) for v in world]}")
 
         if abs(loc.x - 10.0) < tol and abs(loc.y - 11.0) < tol and abs(loc.z - 12.0) < tol:
             results["cube_final_position"] = "PASS"
         else:
             results["cube_final_position"] = (
-                f"FAIL: loc={[round(v,3) for v in loc]}, expected ~(10,11,12)"
+                f"FAIL: loc={[round(v, 3) for v in loc]}, expected ~(10,11,12)"
             )
 
         y_z_swapped = abs(loc.y - 12.0) < tol and abs(loc.z - 11.0) < tol
@@ -139,9 +145,7 @@ def main():
         if not y_z_swapped and not any_negated:
             results["cube_no_axis_flip"] = "PASS"
         else:
-            results["cube_no_axis_flip"] = (
-                f"FAIL: axis flip! loc={[round(v,3) for v in loc]}"
-            )
+            results["cube_no_axis_flip"] = f"FAIL: axis flip! loc={[round(v, 3) for v in loc]}"
 
     # --- Check /World/NewCube (auto-tracked, received object — THE KEY TEST) ---
     new_cube = find_by_prim("/World/NewCube")
@@ -154,19 +158,23 @@ def main():
         results["newcube_found"] = "PASS"
         loc = new_cube.location
         world = new_cube.matrix_world.translation
-        print(f"[RoleFlip Verifier] NewCube final local: {[round(v,3) for v in loc]}")
-        print(f"[RoleFlip Verifier] NewCube final world: {[round(v,3) for v in world]}")
-        print(f"[RoleFlip Verifier] NewCube parent: "
-              f"{new_cube.parent.name if new_cube.parent else None}")
-        print(f"[RoleFlip Verifier] NewCube MPI identity: "
-              f"{new_cube.matrix_parent_inverse == identity}")
+        print(f"[RoleFlip Verifier] NewCube final local: {[round(v, 3) for v in loc]}")
+        print(f"[RoleFlip Verifier] NewCube final world: {[round(v, 3) for v in world]}")
+        print(
+            f"[RoleFlip Verifier] NewCube parent: "
+            f"{new_cube.parent.name if new_cube.parent else None}"
+        )
+        print(
+            f"[RoleFlip Verifier] NewCube MPI identity: "
+            f"{new_cube.matrix_parent_inverse == identity}"
+        )
 
         # Phase 2 set NewCube to local (20, 21, 22)
         if abs(loc.x - 20.0) < tol and abs(loc.y - 21.0) < tol and abs(loc.z - 22.0) < tol:
             results["newcube_final_position"] = "PASS"
         else:
             results["newcube_final_position"] = (
-                f"FAIL: loc={[round(v,3) for v in loc]}, expected ~(20,21,22)"
+                f"FAIL: loc={[round(v, 3) for v in loc]}, expected ~(20,21,22)"
             )
 
         # Axis-flip detection on the received object
@@ -177,7 +185,7 @@ def main():
         else:
             results["newcube_no_axis_flip"] = (
                 f"FAIL: axis flip on received object! "
-                f"loc={[round(v,3) for v in loc]}, "
+                f"loc={[round(v, 3) for v in loc]}, "
                 f"y_z_swapped={y_z_swapped}, negated={any_negated}"
             )
 
@@ -187,8 +195,7 @@ def main():
             results["newcube_world_consistent"] = "PASS"
         else:
             results["newcube_world_consistent"] = (
-                f"FAIL: world={[round(v,3) for v in world]}, "
-                f"expected ~(20,-22,21)"
+                f"FAIL: world={[round(v, 3) for v in world]}, expected ~(20,-22,21)"
             )
 
     # Write results

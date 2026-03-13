@@ -6,7 +6,8 @@ Requires pxr (OpenUSD Python bindings). Tests are skipped if pxr is not availabl
 import pytest
 
 try:
-    from pxr import Usd, UsdGeom, Gf, Sdf
+    from pxr import Usd, UsdGeom  # noqa: F401
+
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
@@ -14,12 +15,10 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
 from openusdconnect.event_apply import (
-    get_or_define_prim,
-    find_op,
-    ensure_canonical_ops,
-    quatf_from_wxyz,
     apply_event,
     apply_events,
+    ensure_canonical_ops,
+    get_or_define_prim,
 )
 
 
@@ -106,17 +105,27 @@ class TestApplyEvent:
     def test_set_xform_trs_partial(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
         # First set full TRS
-        apply_event(stage, {
-            "k": "set_xform_trs", "prim": "/World/Sphere",
-            "fields": ["t", "r", "s"],
-            "t": [1.0, 2.0, 3.0], "r": [1.0, 0.0, 0.0, 0.0], "s": [1.0, 1.0, 1.0],
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Sphere",
+                "fields": ["t", "r", "s"],
+                "t": [1.0, 2.0, 3.0],
+                "r": [1.0, 0.0, 0.0, 0.0],
+                "s": [1.0, 1.0, 1.0],
+            },
+        )
         # Then update only translation
-        apply_event(stage, {
-            "k": "set_xform_trs", "prim": "/World/Sphere",
-            "fields": ["t"],
-            "t": [10.0, 20.0, 30.0],
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Sphere",
+                "fields": ["t"],
+                "t": [10.0, 20.0, 30.0],
+            },
+        )
         prim = stage.GetPrimAtPath("/World/Sphere")
         xf = UsdGeom.Xformable(prim)
         ops = {op.GetAttr().GetName(): op for op in xf.GetOrderedXformOps()}
@@ -128,10 +137,15 @@ class TestApplyEvent:
 
     def test_set_xform_matrices_ignored(self, stage):
         # Should not raise
-        apply_event(stage, {
-            "k": "set_xform_matrices", "prim": "/World/Sphere",
-            "local_m": [0.0] * 16, "world_m": [0.0] * 16,
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_xform_matrices",
+                "prim": "/World/Sphere",
+                "local_m": [0.0] * 16,
+                "world_m": [0.0] * 16,
+            },
+        )
 
     def test_delete_prim(self, stage):
         stage.DefinePrim("/World/ToDelete", "Xform")
@@ -161,10 +175,15 @@ class TestApplyEvent:
 
     def test_rename_preserves_transform(self, stage):
         stage.DefinePrim("/World/OldName", "Xform")
-        apply_event(stage, {
-            "k": "set_xform_trs", "prim": "/World/OldName",
-            "fields": ["t"], "t": [3.0, 4.0, 5.0],
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/OldName",
+                "fields": ["t"],
+                "t": [3.0, 4.0, 5.0],
+            },
+        )
         apply_event(stage, {"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
         prim = stage.GetPrimAtPath("/World/NewName")
         assert prim.IsValid()
@@ -194,13 +213,27 @@ class TestSetVisibility:
 class TestSetGprimAttrs:
     def test_sphere_radius(self, stage):
         stage.DefinePrim("/World/Sphere", "Sphere")
-        apply_event(stage, {"k": "set_gprim_attrs", "prim": "/World/Sphere", "attrs": {"radius": 3.0}})
+        apply_event(
+            stage,
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Sphere",
+                "attrs": {"radius": 3.0},
+            },
+        )
         prim = stage.GetPrimAtPath("/World/Sphere")
         assert abs(prim.GetAttribute("radius").Get() - 3.0) < 1e-6
 
     def test_cone_height_and_radius(self, stage):
         stage.DefinePrim("/World/Cone", "Cone")
-        apply_event(stage, {"k": "set_gprim_attrs", "prim": "/World/Cone", "attrs": {"height": 1.4, "radius": 0.6}})
+        apply_event(
+            stage,
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Cone",
+                "attrs": {"height": 1.4, "radius": 0.6},
+            },
+        )
         prim = stage.GetPrimAtPath("/World/Cone")
         assert abs(prim.GetAttribute("height").Get() - 1.4) < 1e-6
         assert abs(prim.GetAttribute("radius").Get() - 0.6) < 1e-6
@@ -214,8 +247,15 @@ class TestSetReference:
         ref_layer = ref_stage.GetRootLayer()
         ref_path = ref_layer.identifier
 
-        apply_event(stage, {"k": "set_reference", "prim": "/World/Chair",
-                            "asset_path": ref_path, "prim_path": "/Chair"})
+        apply_event(
+            stage,
+            {
+                "k": "set_reference",
+                "prim": "/World/Chair",
+                "asset_path": ref_path,
+                "prim_path": "/Chair",
+            },
+        )
         prim = stage.GetPrimAtPath("/World/Chair")
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
@@ -227,8 +267,7 @@ class TestApplyEvents:
             {"k": "ensure_prim", "prim": "/World/A", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/World/B", "typeName": "Xform"},
             {"k": "ensure_xform_ops", "prim": "/World/A"},
-            {"k": "set_xform_trs", "prim": "/World/A",
-             "fields": ["t"], "t": [5.0, 0.0, 0.0]},
+            {"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"], "t": [5.0, 0.0, 0.0]},
         ]
         apply_events(stage, events)
         assert stage.GetPrimAtPath("/World/A").IsValid()

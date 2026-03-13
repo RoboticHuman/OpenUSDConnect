@@ -10,9 +10,7 @@ All functions require pxr (OpenUSD Python bindings).
 
 from __future__ import annotations
 
-from typing import Optional
-
-from pxr import Usd, UsdGeom, Gf, Sdf, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -23,7 +21,7 @@ def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform
     return prim
 
 
-def find_op(xf: UsdGeom.Xformable, op_base: str) -> Optional[UsdGeom.XformOp]:
+def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
     """Find an xform op by its base name (e.g. 'translate', 'orient', 'scale').
 
     Handles USD version differences in GetOpName() by matching against the

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict
 
 LOG = logging.getLogger(__name__)
 
@@ -44,11 +43,11 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_xform_trs(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def set_xform_matrices(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -68,7 +67,7 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -84,26 +83,30 @@ class UsdStageAdapter(DCCAdapter):
 
     def __init__(self, stage):
         from pxr import Usd
+
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdStageAdapter requires a Usd.Stage")
         self.stage = stage
 
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
         from .event_apply import get_or_define_prim
+
         get_or_define_prim(self.stage, prim_path, type_name)
         return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
         from .event_apply import ensure_canonical_ops
+
         ensure_canonical_ops(self.stage, prim_path)
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
         from .event_apply import apply_event
+
         apply_event(self.stage, payload)
         return True
 
-    def set_xform_matrices(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
         # Diagnostic only — no action needed on USD stage
         return True
 
@@ -113,26 +116,31 @@ class UsdStageAdapter(DCCAdapter):
 
     def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
         from .event_apply import apply_event
+
         apply_event(self.stage, {"k": "deactivate_prim", "prim": prim_path, "active": active})
         return True
 
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
         from .event_apply import apply_event
+
         apply_event(self.stage, {"k": "rename_prim", "prim": prim_path, "new_name": new_name})
         return True
 
     def set_visibility(self, prim_path: str, visible: bool) -> bool:
         from .event_apply import apply_event
+
         apply_event(self.stage, {"k": "set_visibility", "prim": prim_path, "visible": visible})
         return True
 
-    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
         from .event_apply import apply_event
+
         apply_event(self.stage, {"k": "set_gprim_attrs", "prim": prim_path, "attrs": attrs})
         return True
 
     def set_reference(self, prim_path: str, asset_path: str, prim_path_ref: str = "") -> bool:
         from .event_apply import apply_event
+
         ev = {"k": "set_reference", "prim": prim_path, "asset_path": asset_path}
         if prim_path_ref:
             ev["prim_path"] = prim_path_ref
@@ -147,7 +155,7 @@ class MockAdapter(DCCAdapter):
     """
 
     def __init__(self):
-        self._prims: Dict[str, dict] = {}
+        self._prims: dict[str, dict] = {}
 
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
         if prim_path in self._prims:
@@ -164,7 +172,7 @@ class MockAdapter(DCCAdapter):
         p["ops"].update({"translate", "orient", "scale"})
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             LOG.warning("MockAdapter: set_xform_trs prim missing %s", prim_path)
@@ -176,7 +184,7 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: applied TRS to %s fields=%s", prim_path, fields)
         return True
 
-    def set_xform_matrices(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             return False
@@ -216,7 +224,7 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set visible=%s on prim %s", visible, prim_path)
         return True
 
-    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             return False

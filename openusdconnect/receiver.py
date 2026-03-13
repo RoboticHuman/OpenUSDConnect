@@ -13,7 +13,6 @@ import logging
 import socket
 import threading
 from collections import deque
-from typing import List, Optional
 
 from .protocol import make_hello
 from .transport import send_line
@@ -42,7 +41,7 @@ class ReceiverThread(threading.Thread):
         self.port = port
         self.sync_from = sync_from
         self._stop_event = threading.Event()
-        self.sock: Optional[socket.socket] = None
+        self.sock: socket.socket | None = None
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
         self.connected = False
@@ -88,7 +87,7 @@ class ReceiverThread(threading.Thread):
                 pass
             LOG.info("ReceiverThread stopped")
 
-    def drain_queue(self) -> List[str]:
+    def drain_queue(self) -> list[str]:
         """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
         result = []
         with self._incoming_lock:

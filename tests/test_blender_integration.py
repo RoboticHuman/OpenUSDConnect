@@ -16,7 +16,9 @@ EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_emitter_script.py")
 RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_receiver_script.py")
 AUTOTRACK_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_emitter_script.py")
 AUTOTRACK_RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_receiver_script.py")
-AUTOTRACK_PROPS_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_autotrack_props_emitter_script.py")
+AUTOTRACK_PROPS_EMITTER_SCRIPT = os.path.join(
+    TESTS_DIR, "blender_autotrack_props_emitter_script.py"
+)
 ROLEFLIP_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_emitter_script.py")
 ROLEFLIP_RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_receiver_script.py")
 ROLEFLIP_VERIFIER_SCRIPT = os.path.join(TESTS_DIR, "blender_roleflip_verifier_script.py")
@@ -28,9 +30,13 @@ def _start_server(tmp_path, port):
     db_path = str(tmp_path / f"events_{port}.db")
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "openusdconnect.server",
-            "--port", str(port),
-            "--log", db_path,
+            sys.executable,
+            "-m",
+            "openusdconnect.server",
+            "--port",
+            str(port),
+            "--log",
+            db_path,
         ],
         cwd=PROJECT_ROOT,
         stdout=subprocess.PIPE,
@@ -44,9 +50,13 @@ def _start_server(tmp_path, port):
 def _run_blender(blender_exe, script, port, extra_args=None):
     """Run a Blender script and return the subprocess result."""
     cmd = [
-        blender_exe, "--background",
-        "--python", script,
-        "--", "--port", str(port),
+        blender_exe,
+        "--background",
+        "--python",
+        script,
+        "--",
+        "--port",
+        str(port),
     ]
     if extra_args:
         cmd.extend(extra_args)
@@ -80,8 +90,7 @@ def test_emitter_server_receiver_integration(blender_exe, tmp_path):
         assert r.returncode == 0, f"Emitter failed:\n{r.stdout}\n{r.stderr}"
 
         # Receiver
-        r = _run_blender(blender_exe, RECEIVER_SCRIPT, port,
-                         ["--out", results_path])
+        r = _run_blender(blender_exe, RECEIVER_SCRIPT, port, ["--out", results_path])
         print("=== Receiver stdout ===")
         print(r.stdout)
         assert r.returncode == 0, f"Receiver failed:\n{r.stdout}\n{r.stderr}"
@@ -96,7 +105,7 @@ def test_emitter_server_receiver_integration(blender_exe, tmp_path):
 
 
 def test_autotrack_emitter_to_receiver(blender_exe, tmp_path):
-    """Auto-tracking: bpy.ops create -> depsgraph -> BlenderStageAuthor+NoticeEmitter+NetworkSender -> server -> receiver.
+    """Auto-tracking: bpy.ops create -> depsgraph -> emitter -> server -> receiver.
 
     Tests the real addon capture path with auto_track=True.
     """
@@ -112,8 +121,7 @@ def test_autotrack_emitter_to_receiver(blender_exe, tmp_path):
         assert r.returncode == 0, f"Emitter failed:\n{r.stdout}\n{r.stderr}"
 
         # Receiver
-        r = _run_blender(blender_exe, AUTOTRACK_RECEIVER_SCRIPT, port,
-                         ["--out", results_path])
+        r = _run_blender(blender_exe, AUTOTRACK_RECEIVER_SCRIPT, port, ["--out", results_path])
         print("=== AutoTrack Receiver stdout ===")
         print(r.stdout)
         assert r.returncode == 0, f"Receiver failed:\n{r.stdout}\n{r.stderr}"
@@ -144,16 +152,16 @@ def test_autotrack_deferred_props(blender_exe, tmp_path):
 
     try:
         # Emitter: auto-track + verify deferred custom props
-        r = _run_blender(blender_exe, AUTOTRACK_PROPS_EMITTER_SCRIPT, port,
-                         ["--out", emitter_results])
+        r = _run_blender(
+            blender_exe, AUTOTRACK_PROPS_EMITTER_SCRIPT, port, ["--out", emitter_results]
+        )
         print("=== AutoTrack Props Emitter stdout ===")
         print(r.stdout)
         assert r.returncode == 0, f"Emitter failed:\n{r.stdout}\n{r.stderr}"
         _check_results(emitter_results, "AutoTrack Props (emitter)")
 
         # Receiver: verify events were received and applied correctly
-        r = _run_blender(blender_exe, AUTOTRACK_RECEIVER_SCRIPT, port,
-                         ["--out", receiver_results])
+        r = _run_blender(blender_exe, AUTOTRACK_RECEIVER_SCRIPT, port, ["--out", receiver_results])
         print("=== AutoTrack Props Receiver stdout ===")
         print(r.stdout)
         assert r.returncode == 0, f"Receiver failed:\n{r.stdout}\n{r.stderr}"
@@ -198,8 +206,7 @@ def test_roleflip_no_axis_flip(blender_exe, tmp_path):
 
     try:
         # Phase 1: Emitter A imports and moves Cube
-        r = _run_blender(blender_exe, ROLEFLIP_EMITTER_SCRIPT, port,
-                         ["--scene", scene])
+        r = _run_blender(blender_exe, ROLEFLIP_EMITTER_SCRIPT, port, ["--scene", scene])
         print("=== RoleFlip Phase 1 (Emitter A) stdout ===")
         print(r.stdout)
         if r.stderr:
@@ -208,8 +215,9 @@ def test_roleflip_no_axis_flip(blender_exe, tmp_path):
         assert r.returncode == 0, f"Phase 1 failed:\n{r.stdout}\n{r.stderr}"
 
         # Phase 2: Instance B receives, verifies, flips, moves
-        r = _run_blender(blender_exe, ROLEFLIP_RECEIVER_SCRIPT, port,
-                         ["--scene", scene, "--out", phase2_results])
+        r = _run_blender(
+            blender_exe, ROLEFLIP_RECEIVER_SCRIPT, port, ["--scene", scene, "--out", phase2_results]
+        )
         print("=== RoleFlip Phase 2 (Instance B) stdout ===")
         print(r.stdout)
         if r.stderr:
@@ -219,8 +227,9 @@ def test_roleflip_no_axis_flip(blender_exe, tmp_path):
         _check_results(phase2_results, "RoleFlip Phase 2")
 
         # Phase 3: Verifier receives all events, checks final position
-        r = _run_blender(blender_exe, ROLEFLIP_VERIFIER_SCRIPT, port,
-                         ["--scene", scene, "--out", phase3_results])
+        r = _run_blender(
+            blender_exe, ROLEFLIP_VERIFIER_SCRIPT, port, ["--scene", scene, "--out", phase3_results]
+        )
         print("=== RoleFlip Phase 3 (Verifier) stdout ===")
         print(r.stdout)
         if r.stderr:

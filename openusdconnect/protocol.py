@@ -24,44 +24,44 @@ Event types (inside txn.events):
 
 from __future__ import annotations
 
-from typing import List
-
 PROTOCOL_VERSION = 1
 
 # Valid event keys
-EVENT_KEYS = frozenset({
-    "ensure_prim",
-    "ensure_xform_ops",
-    "set_xform_trs",
-    "set_xform_matrices",
-    "delete_prim",
-    "deactivate_prim",
-    "rename_prim",
-    "set_visibility",
-    "set_gprim_attrs",
-    "set_reference",
-})
+EVENT_KEYS = frozenset(
+    {
+        "ensure_prim",
+        "ensure_xform_ops",
+        "set_xform_trs",
+        "set_xform_matrices",
+        "delete_prim",
+        "deactivate_prim",
+        "rename_prim",
+        "set_visibility",
+        "set_gprim_attrs",
+        "set_reference",
+    }
+)
 
 # Valid TRS field names
 TRS_FIELDS = frozenset({"t", "r", "s"})
 
 
-def is_quat_valid(q: List[float]) -> bool:
+def is_quat_valid(q: list[float]) -> bool:
     """Check that q is a 4-element list of numbers [w, x, y, z]."""
     return isinstance(q, list) and len(q) == 4 and all(isinstance(v, (int, float)) for v in q)
 
 
-def is_vec3_valid(v: List[float]) -> bool:
+def is_vec3_valid(v: list[float]) -> bool:
     """Check that v is a 3-element list of numbers [x, y, z]."""
     return isinstance(v, list) and len(v) == 3 and all(isinstance(x, (int, float)) for x in v)
 
 
-def is_mat16_valid(m: List[float]) -> bool:
+def is_mat16_valid(m: list[float]) -> bool:
     """Check that m is a 16-element list of numbers (row-major 4x4 matrix)."""
     return isinstance(m, list) and len(m) == 16 and all(isinstance(x, (int, float)) for x in m)
 
 
-def clamp_fields(fields: List[str]) -> List[str]:
+def clamp_fields(fields: list[str]) -> list[str]:
     """Filter fields list to only valid TRS field names."""
     return [f for f in fields if f in TRS_FIELDS]
 
@@ -74,7 +74,7 @@ def make_hello(role: str, sync_from: int = None) -> dict:
     return msg
 
 
-def make_txn(client_id: str, events: List[dict]) -> dict:
+def make_txn(client_id: str, events: list[dict]) -> dict:
     """Build a transaction message."""
     return {"type": "txn", "client_id": client_id, "events": events}
 

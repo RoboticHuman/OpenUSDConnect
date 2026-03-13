@@ -9,9 +9,7 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
-
-from pxr import Usd, UsdGeom, Gf, Tf, Sdf
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
 # PrimResyncType enum for classifying resync notices.
 # Not available in all USD builds (e.g. Blender's bundled pxr).
@@ -21,7 +19,7 @@ except AttributeError:
     _PrimResyncType = None
 
 
-def mat_to_16(m: Gf.Matrix4d) -> List[float]:
+def mat_to_16(m: Gf.Matrix4d) -> list[float]:
     """Convert a Gf.Matrix4d to a flat 16-element row-major list."""
     out = []
     for r in range(4):
@@ -63,14 +61,14 @@ def decompose_trs_from_matrix(m: Gf.Matrix4d):
     )
 
 
-def near_list(a: Optional[List[float]], b: Optional[List[float]], eps: float) -> bool:
+def near_list(a: list[float] | None, b: list[float] | None, eps: float) -> bool:
     """Check if two float lists are element-wise within epsilon."""
     if a is None or b is None or len(a) != len(b):
         return False
-    return all(abs(float(x) - float(y)) <= eps for x, y in zip(a, b))
+    return all(abs(float(x) - float(y)) <= eps for x, y in zip(a, b, strict=True))
 
 
-def _prim_path_from_notice_path(path_str: str) -> Optional[str]:
+def _prim_path_from_notice_path(path_str: str) -> str | None:
     """Convert a USD notice path to a prim path.
 
     Property paths like '/World/Sphere.xformOp:translate' become '/World/Sphere'.
@@ -99,19 +97,17 @@ class NoticeEmitter:
 
     def __init__(self, stage: Usd.Stage):
         self.stage = stage
-        self.dirty: Set[str] = set()
-        self._known_prims: Set[str] = set()
-        self._deleted_prims: Set[str] = set()
-        self._deactivated_prims: Set[str] = set()
-        self._renamed_prims: List[Tuple[str, str]] = []  # (old_path, new_path)
+        self.dirty: set[str] = set()
+        self._known_prims: set[str] = set()
+        self._deleted_prims: set[str] = set()
+        self._deactivated_prims: set[str] = set()
+        self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppressed: bool = False
-        self.listener = Tf.Notice.Register(
-            Usd.Notice.ObjectsChanged, self._on_changed, stage
-        )
+        self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        self.last_sent_trs: Dict[str, Dict[str, List[float]]] = {}
-        self.last_sent_mats: Dict[str, Dict[str, List[float]]] = {}
-        self.last_sent_visibility: Dict[str, str] = {}
+        self.last_sent_trs: dict[str, dict[str, list[float]]] = {}
+        self.last_sent_mats: dict[str, dict[str, list[float]]] = {}
+        self.last_sent_visibility: dict[str, str] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -186,7 +182,7 @@ class NoticeEmitter:
         """Manually mark a prim as dirty (useful for DCC integrations)."""
         self.dirty.add(prim_path)
 
-    def snapshot_prim(self, prim_path: str) -> Optional[dict]:
+    def snapshot_prim(self, prim_path: str) -> dict | None:
         """Snapshot the current local transform of a prim as TRS + matrices."""
         prim = self.stage.GetPrimAtPath(prim_path)
         if not prim or not prim.IsValid():
@@ -211,7 +207,7 @@ class NoticeEmitter:
 
     def build_events_for_dirty(
         self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = True
-    ) -> List[dict]:
+    ) -> list[dict]:
         """Build events for all dirty prims, diffing against last-sent state.
 
         Returns a list of event dicts (ensure_prim, ensure_xform_ops, set_xform_trs,
@@ -220,13 +216,12 @@ class NoticeEmitter:
 
         Processing order: renames first, then deactivations/deletions, then TRS.
         """
-        events: List[dict] = []
+        events: list[dict] = []
 
         # --- Renames ---
         renamed_now = list(self._renamed_prims)
         self._renamed_prims.clear()
         for old_path, new_path in renamed_now:
-            old_name = old_path.rsplit("/", 1)[-1]
             new_name = new_path.rsplit("/", 1)[-1]
             events.append({"k": "rename_prim", "prim": old_path, "new_name": new_name})
             # Update caches to new path
@@ -313,24 +308,29 @@ class NoticeEmitter:
                     vis_val = vis_attr.Get() or "inherited"
                     last_vis = self.last_sent_visibility.get(prim_path)
                     if vis_val != last_vis:
-                        events.append({
-                            "k": "set_visibility",
-                            "prim": prim_path,
-                            "visible": vis_val != "invisible",
-                        })
+                        events.append(
+                            {
+                                "k": "set_visibility",
+                                "prim": prim_path,
+                                "visible": vis_val != "invisible",
+                            }
+                        )
                         self.last_sent_visibility[prim_path] = vis_val
 
             # Optional matrices event (diagnostic)
             if include_matrices:
                 lastm = self.last_sent_mats.get(prim_path, {})
-                if not near_list(snap["local_m16"], lastm.get("local"), eps_mat) or \
-                   not near_list(snap["world_m16"], lastm.get("world"), eps_mat):
-                    events.append({
-                        "k": "set_xform_matrices",
-                        "prim": prim_path,
-                        "local_m": snap["local_m16"],
-                        "world_m": snap["world_m16"],
-                    })
+                if not near_list(snap["local_m16"], lastm.get("local"), eps_mat) or not near_list(
+                    snap["world_m16"], lastm.get("world"), eps_mat
+                ):
+                    events.append(
+                        {
+                            "k": "set_xform_matrices",
+                            "prim": prim_path,
+                            "local_m": snap["local_m16"],
+                            "world_m": snap["world_m16"],
+                        }
+                    )
                     self.last_sent_mats[prim_path] = {
                         "local": snap["local_m16"],
                         "world": snap["world_m16"],

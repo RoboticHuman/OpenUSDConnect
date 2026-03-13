@@ -8,6 +8,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "ruff>=0.15.6",
 ]
 
 [tool.pytest.ini_options]
@@ -19,3 +20,52 @@ testpaths = ["tests"]
 
 [project.scripts]
 openusdconnect-server = "openusdconnect.server:main"
+
+# --- Ruff (linter + formatter) ---
+# Docs: https://docs.astral.sh/ruff/
+#
+# Quick reference:
+#   uv run ruff check              # lint (report only)
+#   uv run ruff check --fix        # lint + auto-fix safe issues
+#   uv run ruff format             # auto-format all files
+#   uv run ruff format --diff      # preview formatting changes
+#
+# Adding a new rule set:
+#   Browse available rules at https://docs.astral.sh/ruff/rules/
+#   Add the code prefix to the "select" list below (e.g. "SIM" for simplify).
+#
+# Ignoring a rule for a specific file:
+#   Add an entry to [tool.ruff.lint.per-file-ignores] below.
+#   Globs work: "tests/blender_*_script.py" = ["E402"]
+#
+# Ignoring a rule on a single line:
+#   Append a comment: some_code()  # noqa: E501
+#
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors (e.g. E501 line too long)
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined names)
+    "I",    # isort (import ordering)
+    "UP",   # pyupgrade (modernize syntax for target-version)
+    "B",    # bugbear (common pitfalls like mutable default args)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# E402 = "module level import not at top of file"
+# I001 = "import block is unsorted"
+# These are ignored where imports must come after sys.path setup or conditional guards.
+"integrations/blender/__init__.py" = ["E402", "I001"]
+"tests/blender_*_script.py" = ["E402"]
+"tests/test_roundtrip.py" = ["E402"]
+"tests/test_e2e_reference_spawn.py" = ["E402"]
+"tests/test_event_apply.py" = ["E402"]
+"tests/test_blender_stage_author.py" = ["E402"]
+"scripts/create_test_asset.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"

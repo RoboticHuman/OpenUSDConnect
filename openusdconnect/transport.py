@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import socket
-from typing import Generator
+from collections.abc import Generator
 
 
 def send_line(sock: socket.socket, obj: dict) -> None:

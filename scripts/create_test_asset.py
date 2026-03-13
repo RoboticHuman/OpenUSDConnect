@@ -13,10 +13,13 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(project_root, "tests"))
 
-from test_asset_builder import create_chair_asset, EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT
+from test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT, create_chair_asset
 
 output_path = sys.argv[1] if len(sys.argv) > 1 else "test_asset.usda"
 create_chair_asset(output_path)
-print(f"Created {output_path} — chair with {EXPECTED_VERTEX_COUNT} vertices across {EXPECTED_MESH_COUNT} meshes")
-print(f"  Root prim: /Model (defaultPrim)")
-print(f"  Children: /Model/Seat, /Model/Leg_0..3, /Model/Back")
+print(
+    f"Created {output_path} — chair with "
+    f"{EXPECTED_VERTEX_COUNT} vertices across {EXPECTED_MESH_COUNT} meshes"
+)
+print("  Root prim: /Model (defaultPrim)")
+print("  Children: /Model/Seat, /Model/Leg_0..3, /Model/Back")

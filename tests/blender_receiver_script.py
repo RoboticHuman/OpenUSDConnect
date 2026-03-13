@@ -2,12 +2,14 @@
 
 Connects to the sync server, receives replayed events, applies them via
 BlenderAdapter, verifies objects were created correctly, writes results to file.
-Run via: blender --background --python tests/blender_receiver_script.py -- --port PORT --out RESULTS_FILE
+Run via:
+  blender --background --python tests/blender_receiver_script.py \
+    -- --port PORT --out RESULTS_FILE
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 
 import bpy
@@ -17,8 +19,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from openusdconnect.receiver import ReceiverThread
 from integrations.blender.blender_adapter import BlenderAdapter
+from openusdconnect.receiver import ReceiverThread
 
 
 def main():
@@ -26,7 +28,7 @@ def main():
     port = 7200
     out_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])

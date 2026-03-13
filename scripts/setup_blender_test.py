@@ -14,15 +14,13 @@ and writes blender.test.cfg so pytest picks it up.
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import platform
 import re
 import shutil
-import sys
+import tarfile
 import urllib.request
 import zipfile
-import tarfile
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 BLENDER_DIR = REPO_ROOT / ".blender"
@@ -180,7 +178,7 @@ def download_and_extract(version: str) -> pathlib.Path:
     if extract_dir:
         print(f"Already extracted: {extract_dir}")
     else:
-        print(f"Extracting...")
+        print("Extracting...")
         if filename.endswith(".zip"):
             with zipfile.ZipFile(download_path, "r") as zf:
                 zf.extractall(BLENDER_DIR)
@@ -252,15 +250,18 @@ Files:
 """,
     )
     ap.add_argument(
-        "--version", default=None,
+        "--version",
+        default=None,
         help="Blender version to download (omit to auto-detect latest)",
     )
     ap.add_argument(
-        "--lts", action="store_true",
+        "--lts",
+        action="store_true",
         help="Download the latest LTS version instead of the latest stable",
     )
     ap.add_argument(
-        "--cleanup", action="store_true",
+        "--cleanup",
+        action="store_true",
         help="Remove downloaded Blender and config",
     )
     args = ap.parse_args()
@@ -281,8 +282,8 @@ Files:
     exe_path = download_and_extract(version)
     write_config(exe_path)
 
-    print(f"\nReady! Run tests with:")
-    print(f"  uv run pytest tests/ -v")
+    print("\nReady! Run tests with:")
+    print("  uv run pytest tests/ -v")
 
 
 if __name__ == "__main__":

@@ -18,18 +18,19 @@ import time
 import pytest
 
 try:
-    from pxr import Usd, UsdGeom, Gf, Sdf
+    from pxr import Usd, UsdGeom  # noqa: F401
+
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
-from openusdconnect.protocol import make_hello, make_txn, make_quit
-from openusdconnect.transport import send_line
-from openusdconnect.receiver import ReceiverThread
 from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.event_apply import apply_events
+from openusdconnect.protocol import make_hello, make_quit, make_txn
+from openusdconnect.receiver import ReceiverThread
+from openusdconnect.transport import send_line
 
 
 def _free_port():
@@ -87,9 +88,19 @@ class TestE2EReferenceSpawn:
         # Start server with a temp log to avoid replaying old events
         log_path = os.path.join(tmp_dir, "events.db")
         server_proc = subprocess.Popen(
-            [sys.executable, "-m", "openusdconnect.server",
-             "--port", str(port), "--base", base_path, "--log", log_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [
+                sys.executable,
+                "-m",
+                "openusdconnect.server",
+                "--port",
+                str(port),
+                "--base",
+                base_path,
+                "--log",
+                log_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         try:
             _wait_for_port("127.0.0.1", port)
@@ -106,8 +117,12 @@ class TestE2EReferenceSpawn:
 
             events = [
                 {"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"},
-                {"k": "set_reference", "prim": "/World/Chair",
-                 "asset_path": asset_path, "prim_path": "/Model"},
+                {
+                    "k": "set_reference",
+                    "prim": "/World/Chair",
+                    "asset_path": asset_path,
+                    "prim_path": "/Model",
+                },
             ]
             send_line(emitter_sock, make_txn("test-emitter", events))
             time.sleep(0.5)

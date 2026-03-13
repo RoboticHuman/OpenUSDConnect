@@ -8,22 +8,23 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
 
 try:
     import bpy
-    from bpy.props import IntProperty, StringProperty, BoolProperty
+    from bpy.props import BoolProperty, IntProperty, StringProperty
+
     BPY_AVAILABLE = True
 except Exception:
     BPY_AVAILABLE = False
 
 from openusdconnect.receiver import ReceiverThread
+
 from .blender_adapter import BlenderAdapter
 
 LOG = logging.getLogger(__name__)
 
-_RECEIVER: Optional[ReceiverThread] = None
-_ADAPTER: Optional[BlenderAdapter] = None
+_RECEIVER: ReceiverThread | None = None
+_ADAPTER: BlenderAdapter | None = None
 _QUEUE_TIMER_REGISTERED = False
 # Feedback loop guard: set True while applying remote events
 _APPLYING_REMOTE = False
@@ -39,6 +40,7 @@ def _get_capture_mod():
     if _capture_mod is None:
         try:
             from . import capture
+
             _capture_mod = capture
         except Exception:
             pass
@@ -62,16 +64,20 @@ def _ensure_scene_props():
 def _dispatch_event(adapter, k, prim_path, ev):
     """Route an event to the appropriate adapter method via dispatch dict."""
     _DISPATCH = {
-        "ensure_prim":      lambda: adapter.ensure_prim(prim_path, ev.get("typeName", "Xform")),
+        "ensure_prim": lambda: adapter.ensure_prim(prim_path, ev.get("typeName", "Xform")),
         "ensure_xform_ops": lambda: adapter.ensure_xform_ops(prim_path),
-        "set_xform_trs":    lambda: adapter.set_xform_trs(prim_path, ev),
+        "set_xform_trs": lambda: adapter.set_xform_trs(prim_path, ev),
         "set_xform_matrices": lambda: adapter.set_xform_matrices(prim_path, ev),
-        "delete_prim":      lambda: adapter.delete_prim(prim_path),
-        "deactivate_prim":  lambda: adapter.deactivate_prim(prim_path, ev.get("active", False)),
-        "rename_prim":      lambda: adapter.rename_prim(prim_path, ev.get("new_name", "")),
-        "set_visibility":   lambda: adapter.set_visibility(prim_path, ev.get("visible", True)),
-        "set_gprim_attrs":  lambda: adapter.set_gprim_attrs(prim_path, ev.get("attrs", {})),
-        "set_reference":    lambda: adapter.set_reference(prim_path, ev.get("asset_path", ""), ev.get("prim_path", "")),
+        "delete_prim": lambda: adapter.delete_prim(prim_path),
+        "deactivate_prim": lambda: adapter.deactivate_prim(prim_path, ev.get("active", False)),
+        "rename_prim": lambda: adapter.rename_prim(prim_path, ev.get("new_name", "")),
+        "set_visibility": lambda: adapter.set_visibility(prim_path, ev.get("visible", True)),
+        "set_gprim_attrs": lambda: adapter.set_gprim_attrs(prim_path, ev.get("attrs", {})),
+        "set_reference": lambda: adapter.set_reference(
+            prim_path,
+            ev.get("asset_path", ""),
+            ev.get("prim_path", ""),
+        ),
     }
     handler = _DISPATCH.get(k)
     if handler:
@@ -189,7 +195,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
         # Full replay — reset adapter so all caches (including _imported_refs) are clean
         if sync_from == 1:
             _ADAPTER = None
-        
+
         try:
             _RECEIVER = ReceiverThread(host=host, port=port, sync_from=sync_from)
             _RECEIVER.start()
@@ -214,14 +220,14 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
             # Grab reference and null out global FIRST to stop timer from processing
             receiver = _RECEIVER
             _RECEIVER = None  # Timer will exit on next tick
-            
+
             # Stop receiver thread (stops adding to queue)
             receiver.stop()
             try:
                 receiver.join(timeout=2.0)
             except Exception:
                 pass
-            
+
             # NOW drain any remaining queued events (thread dead, timer stopped)
             _drain_and_process(receiver.drain_queue())
 
@@ -276,7 +282,13 @@ def unregister():
     if BPY_AVAILABLE:
         for c in reversed(_RECEIVER_CLASSES):
             bpy.utils.unregister_class(c)
-    for prop_name in ("usd_connect_recv_host", "usd_connect_recv_port", "usd_connect_recv_running", "usd_connect_recv_last_seq"):
+    recv_props = (
+        "usd_connect_recv_host",
+        "usd_connect_recv_port",
+        "usd_connect_recv_running",
+        "usd_connect_recv_last_seq",
+    )
+    for prop_name in recv_props:
         if hasattr(bpy.types.Scene, prop_name):
             try:
                 delattr(bpy.types.Scene, prop_name)

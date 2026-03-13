@@ -4,8 +4,7 @@ Tests creation, deletion, deactivation, rename detection,
 suppress flag, and ChangeBlock batching — all DCC-agnostic.
 """
 
-import pytest
-from pxr import Usd, UsdGeom, Sdf, Gf
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
 
@@ -276,8 +275,7 @@ class TestParentBeforeChildOrdering:
             if parent and parent in ensure_paths:
                 parent_idx = ensure_paths.index(parent)
                 assert parent_idx < i, (
-                    f"Parent {parent} (idx={parent_idx}) should come before "
-                    f"child {path} (idx={i})"
+                    f"Parent {parent} (idx={parent_idx}) should come before child {path} (idx={i})"
                 )
 
 
@@ -360,10 +358,12 @@ class TestBaseLayerPrimTRS:
 
         # Now add orient/scale ops (simulating _ensure_xform_ops)
         from openusdconnect.event_apply import ensure_canonical_ops
+
         ensure_canonical_ops(stage, "/World/Cube")
 
         # Author rotation and scale values
         from openusdconnect.event_apply import find_op
+
         xf = UsdGeom.Xformable(prim)
         find_op(xf, "orient").Set(Gf.Quatf(0.707, 0, 0.707, 0))  # ~90° Y
         find_op(xf, "scale").Set(Gf.Vec3d(2, 2, 2))
@@ -394,6 +394,7 @@ class TestBaseLayerPrimTRS:
 
         # Add canonical ops and set non-identity values
         from openusdconnect.event_apply import ensure_canonical_ops, find_op
+
         ensure_canonical_ops(stage, "/World/Box")
 
         xf = UsdGeom.Xformable(prim)
@@ -419,14 +420,14 @@ class TestRootPrimRotationNotDoubled:
         Events from the emitter applied to a receiver stage that already
         has the same prim should result in the same transform, not doubled.
         """
-        from openusdconnect.event_apply import ensure_canonical_ops, apply_event
+        from openusdconnect.event_apply import apply_event, ensure_canonical_ops
 
         # Emitter stage: root prim with 90° X rotation
         emitter_stage = Usd.Stage.CreateInMemory()
         session = emitter_stage.GetSessionLayer()
         emitter_stage.SetEditTarget(Usd.EditTarget(session))
 
-        prim = emitter_stage.DefinePrim("/World", "Xform")
+        emitter_stage.DefinePrim("/World", "Xform")
         _, xf, t, o, s = ensure_canonical_ops(emitter_stage, "/World")
         t.Set(Gf.Vec3d(0, 0, 0))
         o.Set(Gf.Quatf(0.707, 0.707, 0, 0))  # ~90° X
@@ -441,7 +442,7 @@ class TestRootPrimRotationNotDoubled:
         recv_session = receiver_stage.GetSessionLayer()
         receiver_stage.SetEditTarget(Usd.EditTarget(recv_session))
 
-        recv_prim = receiver_stage.DefinePrim("/World", "Xform")
+        receiver_stage.DefinePrim("/World", "Xform")
         _, rxf, rt, ro, rs = ensure_canonical_ops(receiver_stage, "/World")
         rt.Set(Gf.Vec3d(0, 0, 0))
         ro.Set(Gf.Quatf(0.707, 0.707, 0, 0))  # same rotation
@@ -454,6 +455,7 @@ class TestRootPrimRotationNotDoubled:
         # Verify rotation is the same (not doubled)
         rxf2 = UsdGeom.Xformable(receiver_stage.GetPrimAtPath("/World"))
         from openusdconnect.event_apply import find_op
+
         orient = find_op(rxf2, "orient")
         q = orient.Get()
         assert abs(float(q.GetReal()) - 0.707) < 0.01

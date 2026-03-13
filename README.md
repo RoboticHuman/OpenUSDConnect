@@ -78,7 +78,7 @@ See [Testing Setup](docs/testing-setup.md) for Blender configuration and detaile
 - `test_protocol.py` — event schema validation, message construction
 - `test_event_apply.py` — prim creation, canonical xform ops, TRS application
 - `test_roundtrip.py` — emitter → adapter full pipeline, partial diffs, visibility
-- `test_network_emitter.py` — capture logic with mock bpy: auto-track, deletion detection, feedback guard
+- `test_blender_stage_author.py` — BlenderStageAuthor + NoticeEmitter integration with mock bpy: auto-track, partial diff, deletion detection, feedback guard
 
 ### Blender tests (headless, requires Blender 4.4+)
 - `test_blender_adapter.py` — 19 headless tests: prim types, TRS, visibility, gprim attrs, delete, rename, MPI world-preservation

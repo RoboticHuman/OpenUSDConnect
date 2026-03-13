@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional
 
 try:
     import bpy
     import mathutils
+
     BPY_AVAILABLE = True
     _IDENTITY_4X4 = mathutils.Matrix.Identity(4)
 except Exception:
@@ -32,10 +32,10 @@ class BlenderAdapter(DCCAdapter):
     """
 
     def __init__(self):
-        self._prim_cache: Dict[str, object] = {}  # prim_path -> bpy.types.Object
-        self._imported_refs: Dict[str, str] = {}  # prim_path -> asset_path
+        self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
+        self._imported_refs: dict[str, str] = {}  # prim_path -> asset_path
 
-    def _find_object_by_prim(self, prim_path: str) -> Optional[object]:
+    def _find_object_by_prim(self, prim_path: str) -> object | None:
         if not BPY_AVAILABLE:
             return None
         # Check cache first
@@ -77,8 +77,9 @@ class BlenderAdapter(DCCAdapter):
             except Exception:
                 pass
         if not linked:
-            print(f"[USD Connect] ERROR: Failed to link object {obj.name} for prim {obj.get('usd_prim_path')}")
-            LOG.error("Failed to link object %s for prim %s", obj.name, obj.get("usd_prim_path"))
+            prim = obj.get("usd_prim_path")
+            print(f"[USD Connect] ERROR: Failed to link object {obj.name} for prim {prim}")
+            LOG.error("Failed to link object %s for prim %s", obj.name, prim)
 
     def _create_mesh_primitive(self, name: str, type_name: str):
         """Create a Blender mesh primitive using bpy.data (no operator context needed).
@@ -86,6 +87,7 @@ class BlenderAdapter(DCCAdapter):
         Returns a new bpy.types.Object with the mesh, or None on failure.
         """
         import bmesh
+
         mesh = bpy.data.meshes.new(name + "_mesh")
         bm = bmesh.new()
         try:
@@ -94,11 +96,13 @@ class BlenderAdapter(DCCAdapter):
             elif type_name == "Cube":
                 bmesh.ops.create_cube(bm, size=2.0)
             elif type_name == "Cylinder":
-                bmesh.ops.create_cone(bm, segments=32, radius1=1.0, radius2=1.0,
-                                      depth=2.0, cap_ends=True)
+                bmesh.ops.create_cone(
+                    bm, segments=32, radius1=1.0, radius2=1.0, depth=2.0, cap_ends=True
+                )
             elif type_name == "Cone":
-                bmesh.ops.create_cone(bm, segments=32, radius1=1.0, radius2=0.0,
-                                      depth=2.0, cap_ends=True)
+                bmesh.ops.create_cone(
+                    bm, segments=32, radius1=1.0, radius2=0.0, depth=2.0, cap_ends=True
+                )
             else:
                 bm.free()
                 return None
@@ -182,7 +186,7 @@ class BlenderAdapter(DCCAdapter):
             obj.matrix_basis = old_mpi @ old_basis
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
         obj = self._find_object_by_prim(prim_path)
         if obj is None:
             LOG.warning("BlenderAdapter: object not found for prim %s", prim_path)
@@ -198,7 +202,7 @@ class BlenderAdapter(DCCAdapter):
             r = payload["r"]  # [w,x,y,z]
             if BPY_AVAILABLE:
                 q = mathutils.Quaternion((float(r[0]), float(r[1]), float(r[2]), float(r[3])))
-                if obj.rotation_mode == 'QUATERNION':
+                if obj.rotation_mode == "QUATERNION":
                     obj.rotation_quaternion = q
                 else:
                     e = q.to_euler(obj.rotation_mode)
@@ -210,7 +214,7 @@ class BlenderAdapter(DCCAdapter):
 
         return True
 
-    def set_xform_matrices(self, prim_path: str, payload: Dict) -> bool:
+    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
         # Diagnostic only
         return True
 
@@ -257,7 +261,12 @@ class BlenderAdapter(DCCAdapter):
         obj["usd_prim_path"] = new_path
         self._prim_cache.pop(prim_path, None)
         self._prim_cache[new_path] = obj
-        LOG.info("BlenderAdapter: renamed prim path %s -> %s on object %s", prim_path, new_path, obj.name)
+        LOG.info(
+            "BlenderAdapter: renamed prim path %s -> %s on object %s",
+            prim_path,
+            new_path,
+            obj.name,
+        )
         return True
 
     def set_visibility(self, prim_path: str, visible: bool) -> bool:
@@ -275,7 +284,7 @@ class BlenderAdapter(DCCAdapter):
             LOG.exception("Failed to set visibility for prim %s", prim_path)
             return False
 
-    def set_gprim_attrs(self, prim_path: str, attrs: Dict) -> bool:
+    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
         if not BPY_AVAILABLE:
             return True
         obj = self._find_object_by_prim(prim_path)
@@ -328,10 +337,17 @@ class BlenderAdapter(DCCAdapter):
         # Deduplication: skip if already imported with same asset AND objects still exist
         if self._imported_refs.get(prim_path) == resolved:
             if self._ref_children_exist(prim_path):
-                LOG.info("BlenderAdapter.set_reference: already imported %s for %s", resolved, prim_path)
+                LOG.info(
+                    "BlenderAdapter.set_reference: already imported %s for %s",
+                    resolved,
+                    prim_path,
+                )
                 return True
             else:
-                LOG.info("BlenderAdapter.set_reference: stale cache for %s, re-importing", prim_path)
+                LOG.info(
+                    "BlenderAdapter.set_reference: stale cache for %s, re-importing",
+                    prim_path,
+                )
                 self._imported_refs.pop(prim_path, None)
 
         # If different asset was previously imported, remove old child objects
@@ -408,8 +424,9 @@ class BlenderAdapter(DCCAdapter):
             print(f"  imported: '{obj.name}' type={obj.type} parent={obj.parent}")
 
         # Find the top-level roots of the imported hierarchy
-        imported_roots = [obj for obj in new_objs
-                          if obj.parent is None or obj.parent not in new_objs]
+        imported_roots = [
+            obj for obj in new_objs if obj.parent is None or obj.parent not in new_objs
+        ]
 
         # Tag and reparent all imported objects under the container
         for obj in new_objs:
@@ -432,8 +449,12 @@ class BlenderAdapter(DCCAdapter):
             print(f"[USD Connect] set_reference: parented '{root.name}' under '{container.name}'")
 
         self._imported_refs[prim_path] = resolved
-        LOG.info("BlenderAdapter.set_reference: imported %d objects from %s for %s",
-                 len(new_objs), resolved, prim_path)
+        LOG.info(
+            "BlenderAdapter.set_reference: imported %d objects from %s for %s",
+            len(new_objs),
+            resolved,
+            prim_path,
+        )
         return True
 
     def _ref_children_exist(self, prim_path: str) -> bool:

@@ -4,12 +4,14 @@ Connects to server, receives replayed events from the auto-tracking emitter,
 applies via BlenderAdapter, verifies objects were created with correct types,
 positions, and visibility.
 
-Run via: blender --background --python tests/blender_autotrack_receiver_script.py -- --port PORT --out RESULTS_FILE
+Run via:
+  blender --background --python tests/blender_autotrack_receiver_script.py \
+    -- --port PORT --out RESULTS_FILE
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 
 import bpy
@@ -18,8 +20,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from openusdconnect.receiver import ReceiverThread
 from integrations.blender.blender_adapter import BlenderAdapter
+from openusdconnect.receiver import ReceiverThread
 
 
 def main():
@@ -27,7 +29,7 @@ def main():
     port = 7200
     out_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -71,6 +73,7 @@ def main():
         except Exception as e:
             print(f"[Receiver] Error: {e}")
             import traceback
+
             traceback.print_exc()
 
     receiver.stop()
@@ -89,11 +92,17 @@ def main():
         return None
 
     # Check that events were actually received
-    results["events_received"] = f"PASS ({len(events_seen)} events)" if len(events_seen) > 0 else "FAIL: no events"
+    results["events_received"] = (
+        f"PASS ({len(events_seen)} events)" if len(events_seen) > 0 else "FAIL: no events"
+    )
 
     # Check ensure_prim events were sent with correct typeName
     ensure_prims = [e for e in events_seen if e.get("k") == "ensure_prim"]
-    results["ensure_prim_count"] = f"PASS ({len(ensure_prims)})" if len(ensure_prims) >= 2 else f"FAIL: only {len(ensure_prims)} ensure_prim events"
+    results["ensure_prim_count"] = (
+        f"PASS ({len(ensure_prims)})"
+        if len(ensure_prims) >= 2
+        else f"FAIL: only {len(ensure_prims)} ensure_prim events"
+    )
 
     # Check that auto-tracked objects got prim paths under /World (including /World itself)
     prim_paths = [e.get("prim") for e in ensure_prims]

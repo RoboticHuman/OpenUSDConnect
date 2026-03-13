@@ -10,12 +10,14 @@ The critical test: /World/NewCube was created on Instance A and received here.
 When we flip to emitter and move it, the emitter must compute the correct local
 transform relative to World's rotated coordinate space.
 
-Run via: blender --background --python tests/blender_roleflip_receiver_script.py -- --port PORT --scene PATH --out RESULTS
+Run via:
+  blender --background --python tests/blender_roleflip_receiver_script.py \
+    -- --port PORT --scene PATH --out RESULTS
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 
 import bpy
@@ -31,7 +33,7 @@ def main():
     scene_path = ""
     out_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -45,18 +47,22 @@ def main():
         sys.exit(1)
 
     import mathutils
+
     identity = mathutils.Matrix.Identity(4)
 
     # Clear and import
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
+    import integrations.blender.capture as capture_mod
     from integrations.blender.capture import (
-        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor,
+        NetworkSender,
         USD_CONNECT_Hook,
+        _depsgraph_handler,
+        _ensure_scene_props,
     )
     from openusdconnect.emitter import NoticeEmitter
-    import integrations.blender.capture as capture_mod
 
     _ensure_scene_props()
     bpy.context.scene.usd_connect_import_skip_leaf_geom = False
@@ -67,8 +73,8 @@ def main():
     bpy.context.view_layer.update()
 
     # --- Phase 2a: Receive events from Phase 1 ---
-    from openusdconnect.receiver import ReceiverThread
     from integrations.blender.blender_adapter import BlenderAdapter
+    from openusdconnect.receiver import ReceiverThread
 
     receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
@@ -86,8 +92,7 @@ def main():
                 ev = msg.get("event", {})
                 k = ev.get("k")
                 prim = ev.get("prim", "")
-                print(f"[RoleFlip B] Applying: {k} {prim} "
-                      f"{ev.get('t', '')}")
+                print(f"[RoleFlip B] Applying: {k} {prim} {ev.get('t', '')}")
                 if k == "ensure_prim":
                     adapter.ensure_prim(prim, ev.get("typeName", "Xform"))
                 elif k == "ensure_xform_ops":
@@ -100,6 +105,7 @@ def main():
         except Exception as e:
             print(f"[RoleFlip B] Error: {e}")
             import traceback
+
             traceback.print_exc()
 
     receiver.stop()
@@ -111,7 +117,9 @@ def main():
     bpy.context.view_layer.update()
 
     results = {}
-    results["events_received"] = f"PASS ({events_applied})" if events_applied > 0 else "FAIL: no events"
+    results["events_received"] = (
+        f"PASS ({events_applied})" if events_applied > 0 else "FAIL: no events"
+    )
 
     # Find objects
     def find_by_prim(prim_path):
@@ -134,9 +142,13 @@ def main():
         if abs(loc.x - 3.0) < tol and abs(loc.y - 5.0) < tol and abs(loc.z - 7.0) < tol:
             results["recv_cube_position"] = "PASS"
         else:
-            results["recv_cube_position"] = f"FAIL: loc={[round(v,3) for v in loc]}, expected ~(3,5,7)"
-        print(f"[RoleFlip B] Cube local: {[round(v,3) for v in loc]}, "
-              f"world: {[round(v,3) for v in cube.matrix_world.translation]}")
+            results["recv_cube_position"] = (
+                f"FAIL: loc={[round(v, 3) for v in loc]}, expected ~(3,5,7)"
+            )
+        print(
+            f"[RoleFlip B] Cube local: {[round(v, 3) for v in loc]}, "
+            f"world: {[round(v, 3) for v in cube.matrix_world.translation]}"
+        )
 
     # Verify /World/NewCube — the object created on Instance A and received here
     if new_cube is None:
@@ -146,26 +158,31 @@ def main():
     else:
         results["recv_newcube_found"] = "PASS"
         results["recv_newcube_parented"] = (
-            "PASS" if new_cube.parent is not None
-            else "FAIL: NewCube has no parent"
+            "PASS" if new_cube.parent is not None else "FAIL: NewCube has no parent"
         )
         loc = new_cube.location
         tol = 0.5
         if abs(loc.x - 6.0) < tol and abs(loc.y - 8.0) < tol and abs(loc.z - 10.0) < tol:
             results["recv_newcube_position"] = "PASS"
         else:
-            results["recv_newcube_position"] = f"FAIL: loc={[round(v,3) for v in loc]}, expected ~(6,8,10)"
-        print(f"[RoleFlip B] NewCube local: {[round(v,3) for v in loc]}, "
-              f"world: {[round(v,3) for v in new_cube.matrix_world.translation]}, "
-              f"MPI_identity: {new_cube.matrix_parent_inverse == identity}")
+            results["recv_newcube_position"] = (
+                f"FAIL: loc={[round(v, 3) for v in loc]}, expected ~(6,8,10)"
+            )
+        print(
+            f"[RoleFlip B] NewCube local: {[round(v, 3) for v in loc]}, "
+            f"world: {[round(v, 3) for v in new_cube.matrix_world.translation]}, "
+            f"MPI_identity: {new_cube.matrix_parent_inverse == identity}"
+        )
 
     # Debug: all objects
     for obj in bpy.data.objects:
         prim = obj.get("usd_prim_path", "")
         if prim:
-            print(f"[RoleFlip B] Post-recv {obj.name}: prim={prim}, "
-                  f"parent={obj.parent.name if obj.parent else None}, "
-                  f"MPI_id={obj.matrix_parent_inverse == identity}")
+            print(
+                f"[RoleFlip B] Post-recv {obj.name}: prim={prim}, "
+                f"parent={obj.parent.name if obj.parent else None}, "
+                f"MPI_id={obj.matrix_parent_inverse == identity}"
+            )
 
     # --- Phase 2b: Flip to emitter and move both objects ---
     print("[RoleFlip B] Flipping to emitter role")
@@ -187,8 +204,10 @@ def main():
     if cube is not None:
         cube.location = (10.0, 11.0, 12.0)
         bpy.context.view_layer.update()
-        print(f"[RoleFlip B] Cube moved to local (10,11,12), "
-              f"world={[round(v,3) for v in cube.matrix_world.translation]}")
+        print(
+            f"[RoleFlip B] Cube moved to local (10,11,12), "
+            f"world={[round(v, 3) for v in cube.matrix_world.translation]}"
+        )
         dg = bpy.context.evaluated_depsgraph_get()
         _depsgraph_handler(bpy.context.scene, dg)
 
@@ -196,8 +215,10 @@ def main():
     if new_cube is not None:
         new_cube.location = (20.0, 21.0, 22.0)
         bpy.context.view_layer.update()
-        print(f"[RoleFlip B] NewCube moved to local (20,21,22), "
-              f"world={[round(v,3) for v in new_cube.matrix_world.translation]}")
+        print(
+            f"[RoleFlip B] NewCube moved to local (20,21,22), "
+            f"world={[round(v, 3) for v in new_cube.matrix_world.translation]}"
+        )
         dg = bpy.context.evaluated_depsgraph_get()
         _depsgraph_handler(bpy.context.scene, dg)
 

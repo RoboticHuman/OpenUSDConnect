@@ -6,8 +6,8 @@ creates objects via bpy.ops, triggers depsgraph, lets the handler send events.
 Run via: blender --background --python tests/blender_autotrack_emitter_script.py -- --port PORT
 """
 
-import sys
 import os
+import sys
 import time
 
 import bpy
@@ -22,26 +22,30 @@ def main():
     argv = sys.argv
     port = 7200
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
 
     # Clear default scene
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
+    import integrations.blender.capture as capture_mod
     from integrations.blender.capture import (
-        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor,
+        NetworkSender,
+        _depsgraph_handler,
+        _ensure_scene_props,
     )
     from openusdconnect.emitter import NoticeEmitter
-    import integrations.blender.capture as capture_mod
 
     # Ensure scene properties are registered (auto_track, etc.)
     _ensure_scene_props()
 
     # Write a minimal temp USD file for the stage author
     import tempfile
+
     tmp = tempfile.NamedTemporaryFile(suffix=".usda", delete=False, mode="w")
     tmp.write('#usda 1.0\ndef Xform "World" {}\n')
     tmp.close()
@@ -66,7 +70,7 @@ def main():
     bpy.context.scene.usd_connect_auto_track = True
 
     # --- Create a World root empty (parent-based auto-tracking requires it) ---
-    bpy.ops.object.empty_add(type='PLAIN_AXES')
+    bpy.ops.object.empty_add(type="PLAIN_AXES")
     world = bpy.context.active_object
     world.name = "World"
     world["usd_prim_path"] = "/World"
@@ -108,7 +112,10 @@ def main():
     for obj in bpy.data.objects:
         prim = obj.get("usd_prim_path", "")
         usd_type = obj.get("usd_type_name", "")
-        print(f"[AutoTrack Emitter] {obj.name}: prim={prim}, type={usd_type}, loc={tuple(obj.location)}")
+        print(
+            f"[AutoTrack Emitter] {obj.name}: "
+            f"prim={prim}, type={usd_type}, loc={tuple(obj.location)}"
+        )
 
     sender.disconnect()
     capture_mod._state.author = None

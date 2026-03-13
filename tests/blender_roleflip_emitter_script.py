@@ -7,11 +7,13 @@ rotation to the World root prim for coordinate conversion.
 2. Creates a NEW cube ("NewCube") under /World via auto-tracking at local (6,8,10)
 3. Emits all events
 
-Run via: blender --background --python tests/blender_roleflip_emitter_script.py -- --port PORT --scene PATH
+Run via:
+  blender --background --python tests/blender_roleflip_emitter_script.py \
+    -- --port PORT --scene PATH
 """
 
-import sys
 import os
+import sys
 import time
 
 import bpy
@@ -26,7 +28,7 @@ def main():
     port = 7200
     scene_path = ""
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -38,15 +40,18 @@ def main():
         sys.exit(1)
 
     # Clear default scene
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
+    import integrations.blender.capture as capture_mod
     from integrations.blender.capture import (
-        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor,
+        NetworkSender,
         USD_CONNECT_Hook,
+        _depsgraph_handler,
+        _ensure_scene_props,
     )
     from openusdconnect.emitter import NoticeEmitter
-    import integrations.blender.capture as capture_mod
 
     _ensure_scene_props()
     bpy.context.scene.usd_connect_import_skip_leaf_geom = False
@@ -58,7 +63,6 @@ def main():
     bpy.context.view_layer.update()
 
     import mathutils
-    identity = mathutils.Matrix.Identity(4)
 
     # Find /World/Cube and /World
     cube = None

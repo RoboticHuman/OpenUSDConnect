@@ -4,12 +4,12 @@ from __future__ import annotations
 
 try:
     import bpy
+
     BPY_AVAILABLE = True
 except Exception:
     BPY_AVAILABLE = False
 
 try:
-    from pxr import Usd
     PXR_AVAILABLE = True
 except Exception:
     PXR_AVAILABLE = False
@@ -43,6 +43,7 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "usd_connect_base_usd_path")
 
         from . import capture
+
         author = capture._state.author
         running = bool(author and author.enabled)
         row = box.row()
@@ -108,9 +109,7 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
                 box.operator("usd_connect.reset_receiver_seq", icon="LOOP_BACK")
 
 
-_UI_CLASSES = (
-    USD_CONNECT_PT_main_panel,
-)
+_UI_CLASSES = (USD_CONNECT_PT_main_panel,)
 
 
 def register():

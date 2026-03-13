@@ -37,7 +37,8 @@ B) Same, but using overlay-root mode:
         --export composed_output.usda
 
 C) Read diff payload from stdin (useful for piping):
-    cat emitted_diff.usda | python usd_compose_diff.py --base test_scene.usda --mode session --export composed_output.usda
+    cat emitted_diff.usda | python usd_compose_diff.py \
+        --base test_scene.usda --mode session --export composed_output.usda
 
 D) Quick inspection without export (prints a couple transforms if present):
     python usd_compose_diff.py --base test_scene.usda --diff-file emitted_diff.usda --mode session
@@ -45,7 +46,8 @@ D) Quick inspection without export (prints a couple transforms if present):
 NOTES
 =====
 - Requires OpenUSD Python bindings installed and importable: `from pxr import Usd, Sdf, UsdGeom`
-- Works with diff payloads that are valid USD layer text (e.g. .usda) as emitted by ExportToString().
+- Works with diff payloads that are valid USD layer text
+  (e.g. .usda) as emitted by ExportToString().
 - This composes *opinions*; it does not "merge-save" changes back into the base file.
 """
 
@@ -53,9 +55,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Optional, Tuple
 
-from pxr import Usd, Sdf, UsdGeom
+from pxr import Sdf, Usd, UsdGeom
 
 
 # -----------------------------------------------------------------------------
@@ -71,7 +72,7 @@ from pxr import Usd, Sdf, UsdGeom
 # -----------------------------------------------------------------------------
 def open_with_diff_session_overlay(
     base_usd_path: str, diff_usda_payload: str
-) -> Tuple[Usd.Stage, dict]:
+) -> tuple[Usd.Stage, dict]:
     # 1) Open base layer from disk (resolver/path identifier)
     base_layer = Sdf.Layer.FindOrOpen(base_usd_path)
     if base_layer is None:
@@ -115,7 +116,7 @@ def open_with_diff_session_overlay(
 # -----------------------------------------------------------------------------
 def open_with_diff_overlay_root(
     base_usd_path: str, diff_usda_payload: str
-) -> Tuple[Usd.Stage, dict]:
+) -> tuple[Usd.Stage, dict]:
     base_layer = Sdf.Layer.FindOrOpen(base_usd_path)
     if base_layer is None:
         raise RuntimeError(f"Failed to open base layer: {base_usd_path}")
@@ -147,28 +148,33 @@ def open_with_diff_overlay_root(
 #   payload = load_diff_payload(diff_file="emitted_diff.usda", diff_string=None, stdin_ok=True)
 # -----------------------------------------------------------------------------
 def load_diff_payload(
-    diff_file: Optional[str],
-    diff_string: Optional[str],
+    diff_file: str | None,
+    diff_string: str | None,
     stdin_ok: bool = True,
 ) -> str:
     if diff_string and diff_string.strip():
         return diff_string
 
     if diff_file and diff_file.strip():
-        with open(diff_file, "r", encoding="utf-8") as f:
+        with open(diff_file, encoding="utf-8") as f:
             return f.read()
 
     if stdin_ok and not sys.stdin.isatty():
         return sys.stdin.read()
 
-    raise RuntimeError("No diff payload provided. Use --diff-file, --diff-string, or pipe via stdin.")
+    raise RuntimeError(
+        "No diff payload provided. Use --diff-file, --diff-string, or pipe via stdin."
+    )
 
 
 # -----------------------------------------------------------------------------
 # Helper: simple inspection
 # Prints translate/rotate/scale if present on given prim paths (best-effort).
 # -----------------------------------------------------------------------------
-def print_xform_summary(stage: Usd.Stage, prim_paths=("/World/Cube", "/World/Sphere", "/World/Cone", "/World/Cylinder")):
+def print_xform_summary(
+    stage: Usd.Stage,
+    prim_paths=("/World/Cube", "/World/Sphere", "/World/Cone", "/World/Cylinder"),
+):
     for p in prim_paths:
         prim = stage.GetPrimAtPath(p)
         if not prim or not prim.IsValid():
@@ -194,7 +200,9 @@ def print_xform_summary(stage: Usd.Stage, prim_paths=("/World/Cube", "/World/Sph
 # CLI entrypoint
 # -----------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Compose a USD diff layer (payload) on top of a base USD file.")
+    ap = argparse.ArgumentParser(
+        description="Compose a USD diff layer (payload) on top of a base USD file."
+    )
     ap.add_argument("--base", required=True, help="Base USD file path (e.g. test_scene.usda)")
     ap.add_argument(
         "--mode",
@@ -203,7 +211,11 @@ def main():
         help="Composition strategy: session (recommended) or overlay-root",
     )
     ap.add_argument("--diff-file", default=None, help="Path to diff payload file (.usda text)")
-    ap.add_argument("--diff-string", default=None, help="Diff payload as a literal string (advanced)")
+    ap.add_argument(
+        "--diff-string",
+        default=None,
+        help="Diff payload as a literal string (advanced)",
+    )
     ap.add_argument(
         "--export",
         default=None,

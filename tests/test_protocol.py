@@ -1,16 +1,15 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
-import pytest
 from openusdconnect.protocol import (
+    PROTOCOL_VERSION,
+    clamp_fields,
+    is_mat16_valid,
     is_quat_valid,
     is_vec3_valid,
-    is_mat16_valid,
-    clamp_fields,
     make_hello,
-    make_txn,
     make_quit,
+    make_txn,
     validate_event,
-    PROTOCOL_VERSION,
 )
 
 
@@ -170,26 +169,63 @@ class TestValidateEvent:
 
     # --- set_gprim_attrs ---
     def test_set_gprim_attrs_valid(self):
-        assert validate_event({"k": "set_gprim_attrs", "prim": "/World/Sphere/Geom", "attrs": {"radius": 2.0}})
+        assert validate_event(
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Sphere/Geom",
+                "attrs": {"radius": 2.0},
+            }
+        )
 
     def test_set_gprim_attrs_multiple(self):
-        assert validate_event({"k": "set_gprim_attrs", "prim": "/World/Cone/Geom", "attrs": {"height": 1.4, "radius": 0.6}})
+        assert validate_event(
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Cone/Geom",
+                "attrs": {"height": 1.4, "radius": 0.6},
+            }
+        )
 
     def test_set_gprim_attrs_missing_attrs(self):
         assert not validate_event({"k": "set_gprim_attrs", "prim": "/World/Sphere/Geom"})
 
     def test_set_gprim_attrs_not_dict(self):
-        assert not validate_event({"k": "set_gprim_attrs", "prim": "/World/Sphere/Geom", "attrs": [1, 2]})
+        assert not validate_event(
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Sphere/Geom",
+                "attrs": [1, 2],
+            }
+        )
 
     def test_set_gprim_attrs_non_string_key(self):
-        assert not validate_event({"k": "set_gprim_attrs", "prim": "/World/Sphere/Geom", "attrs": {1: 2.0}})
+        assert not validate_event(
+            {
+                "k": "set_gprim_attrs",
+                "prim": "/World/Sphere/Geom",
+                "attrs": {1: 2.0},
+            }
+        )
 
     # --- set_reference ---
     def test_set_reference_valid(self):
-        assert validate_event({"k": "set_reference", "prim": "/World/Chair", "asset_path": "./assets/chair.usd"})
+        assert validate_event(
+            {
+                "k": "set_reference",
+                "prim": "/World/Chair",
+                "asset_path": "./assets/chair.usd",
+            }
+        )
 
     def test_set_reference_with_prim_path(self):
-        assert validate_event({"k": "set_reference", "prim": "/World/Chair", "asset_path": "./assets/chair.usd", "prim_path": "/Chair"})
+        assert validate_event(
+            {
+                "k": "set_reference",
+                "prim": "/World/Chair",
+                "asset_path": "./assets/chair.usd",
+                "prim_path": "/Chair",
+            }
+        )
 
     def test_set_reference_missing_asset_path(self):
         assert not validate_event({"k": "set_reference", "prim": "/World/Chair"})
@@ -198,4 +234,11 @@ class TestValidateEvent:
         assert not validate_event({"k": "set_reference", "prim": "/World/Chair", "asset_path": ""})
 
     def test_set_reference_bad_prim_path(self):
-        assert not validate_event({"k": "set_reference", "prim": "/World/Chair", "asset_path": "a.usd", "prim_path": "no_slash"})
+        assert not validate_event(
+            {
+                "k": "set_reference",
+                "prim": "/World/Chair",
+                "asset_path": "a.usd",
+                "prim_path": "no_slash",
+            }
+        )

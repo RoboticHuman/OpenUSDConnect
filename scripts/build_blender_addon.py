@@ -12,7 +12,6 @@ Output:
 
 import os
 import shutil
-import sys
 import zipfile
 from pathlib import Path
 
@@ -51,7 +50,8 @@ def build():
                 if fname.endswith(".pyc"):
                     continue
                 full_path = Path(root) / fname
-                arcname = ADDON_NAME + "/" + str(full_path.relative_to(build_dir)).replace("\\", "/")
+                rel = str(full_path.relative_to(build_dir))
+                arcname = ADDON_NAME + "/" + rel.replace("\\", "/")
                 zf.write(full_path, arcname)
 
     # Clean build dir

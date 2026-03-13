@@ -22,4 +22,6 @@ def test_blender_e2e_reference_spawn(blender_exe):
         print(result.stdout)
     if result.stderr:
         print(result.stderr)
-    assert result.returncode == 0, f"Blender e2e spawn tests failed:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"Blender e2e spawn tests failed:\n{result.stdout}\n{result.stderr}"
+    )

@@ -22,9 +22,10 @@ if project_root not in sys.path:
 if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
+from test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT
+
 from integrations.blender.blender_adapter import BlenderAdapter
 from integrations.blender.receiver_addon import _dispatch_event
-from test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT
 
 
 class TestResult:
@@ -44,13 +45,14 @@ class TestResult:
 
 
 def _clear_scene():
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
 
 def _create_test_asset():
     """Create a USD chair asset with real mesh geometry and return its path."""
     from test_asset_builder import create_chair_asset
+
     tmp_dir = tempfile.mkdtemp()
     asset_path = os.path.join(tmp_dir, "test_chair.usda")
     create_chair_asset(asset_path)
@@ -69,8 +71,12 @@ def test_receive_ensure_prim_and_set_reference(r):
     events = [
         {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
         {"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"},
-        {"k": "set_reference", "prim": "/World/Chair",
-         "asset_path": asset_path, "prim_path": "/Model"},
+        {
+            "k": "set_reference",
+            "prim": "/World/Chair",
+            "asset_path": asset_path,
+            "prim_path": "/Model",
+        },
     ]
 
     for ev in events:
@@ -94,17 +100,21 @@ def test_receive_ensure_prim_and_set_reference(r):
         return
 
     # Verify child mesh objects were imported under the container
-    children = [o for o in bpy.data.objects
-                if o.get("usd_prim_path", "").startswith("/World/Chair/")]
+    children = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Chair/")
+    ]
     if len(children) == 0:
         r.fail(name, "no child objects imported under /World/Chair/")
         return
 
     # Verify imported meshes match expected chair geometry
-    mesh_children = [o for o in children if o.type == 'MESH' and o.data is not None]
+    mesh_children = [o for o in children if o.type == "MESH" and o.data is not None]
     if len(mesh_children) != EXPECTED_MESH_COUNT:
-        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes, "
-               f"got {len(mesh_children)} (types: {[o.type for o in children]})")
+        r.fail(
+            name,
+            f"expected {EXPECTED_MESH_COUNT} meshes, "
+            f"got {len(mesh_children)} (types: {[o.type for o in children]})",
+        )
         return
 
     total_verts = sum(len(o.data.vertices) for o in mesh_children)
@@ -122,11 +132,19 @@ def test_receive_set_reference_missing_file(r):
     _clear_scene()
 
     adapter = BlenderAdapter()
-    _dispatch_event(adapter, "ensure_prim", "/World",
-                    {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"})
+    _dispatch_event(
+        adapter,
+        "ensure_prim",
+        "/World",
+        {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+    )
 
-    ev = {"k": "set_reference", "prim": "/World/Bad",
-          "asset_path": "/nonexistent/fake.usda", "prim_path": ""}
+    ev = {
+        "k": "set_reference",
+        "prim": "/World/Bad",
+        "asset_path": "/nonexistent/fake.usda",
+        "prim_path": "",
+    }
     _dispatch_event(adapter, "set_reference", "/World/Bad", ev)
 
     # Should not crash, and no objects for /World/Bad
@@ -150,10 +168,13 @@ def test_full_receive_pipeline(r):
         {"k": "ensure_xform_ops", "prim": "/World"},
         {"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"},
         {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-        {"k": "set_xform_trs", "prim": "/World/Chair",
-         "fields": ["t"], "t": [5.0, 0.0, 3.0]},
-        {"k": "set_reference", "prim": "/World/Chair",
-         "asset_path": asset_path, "prim_path": "/Model"},
+        {"k": "set_xform_trs", "prim": "/World/Chair", "fields": ["t"], "t": [5.0, 0.0, 3.0]},
+        {
+            "k": "set_reference",
+            "prim": "/World/Chair",
+            "asset_path": asset_path,
+            "prim_path": "/Model",
+        },
     ]
 
     for ev in events:
@@ -172,12 +193,16 @@ def test_full_receive_pipeline(r):
         return
 
     # Verify imported children have mesh data matching the chair asset
-    children = [o for o in bpy.data.objects
-                if o.get("usd_prim_path", "").startswith("/World/Chair/")]
-    mesh_children = [o for o in children if o.type == 'MESH' and o.data is not None]
+    children = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Chair/")
+    ]
+    mesh_children = [o for o in children if o.type == "MESH" and o.data is not None]
     if len(mesh_children) != EXPECTED_MESH_COUNT:
-        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes, "
-               f"got {len(mesh_children)} (types: {[o.type for o in children]})")
+        r.fail(
+            name,
+            f"expected {EXPECTED_MESH_COUNT} meshes, "
+            f"got {len(mesh_children)} (types: {[o.type for o in children]})",
+        )
         return
 
     total_verts = sum(len(o.data.vertices) for o in mesh_children)

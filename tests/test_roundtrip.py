@@ -7,16 +7,17 @@ use NoticeEmitter to build events, apply events via MockAdapter.
 import pytest
 
 try:
-    from pxr import Usd, UsdGeom, Gf, Sdf
+    from pxr import Gf, Sdf, Usd, UsdGeom
+
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
-from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
-from openusdconnect.event_apply import ensure_canonical_ops, quatf_from_wxyz, apply_events
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
+from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
+from openusdconnect.event_apply import apply_events, ensure_canonical_ops
 
 
 def _create_test_stage():
@@ -64,7 +65,7 @@ class TestNoticeEmitterRoundtrip:
         emitter = NoticeEmitter(stage)
 
         # Author a change
-        prim = stage.GetPrimAtPath("/World/Sphere")
+        stage.GetPrimAtPath("/World/Sphere")
         _, _, t_op, o_op, s_op = ensure_canonical_ops(stage, "/World/Sphere")
         t_op.Set(Gf.Vec3d(3.0, 0.0, 0.0))
 
@@ -277,7 +278,9 @@ class TestStageToStageRoundtrip:
         emitter.build_events_for_dirty(include_matrices=False)
 
         # Hide the sphere
-        UsdGeom.Imageable(stage_a.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set("invisible")
+        UsdGeom.Imageable(stage_a.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
+            "invisible"
+        )
         events = emitter.build_events_for_dirty(include_matrices=False)
 
         # Apply to stage B
@@ -314,14 +317,18 @@ class TestStageToStageRoundtrip:
         """Reference arc replicates between stages."""
         # Source asset
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")
-        ref_prim = src_stage.DefinePrim("/Model", "Xform")
+        src_stage.DefinePrim("/Model", "Xform")
         # Add a child so we can verify composition resolves
         src_stage.DefinePrim("/Model/Body", "Cube")
         src_layer = src_stage.GetRootLayer()
 
         events = [
-            {"k": "set_reference", "prim": "/World/Furniture",
-             "asset_path": src_layer.identifier, "prim_path": "/Model"},
+            {
+                "k": "set_reference",
+                "prim": "/World/Furniture",
+                "asset_path": src_layer.identifier,
+                "prim_path": "/Model",
+            },
         ]
 
         stage_b = Usd.Stage.CreateInMemory()
@@ -345,12 +352,15 @@ class TestStageToStageRoundtrip:
         events = [
             {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
             {"k": "ensure_xform_ops", "prim": "/World/Sphere"},
-            {"k": "set_xform_trs", "prim": "/World/Sphere",
-             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": "set_xform_trs", "prim": "/World/Sphere", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
             {"k": "set_visibility", "prim": "/World/Sphere", "visible": False},
             {"k": "set_gprim_attrs", "prim": "/World/Sphere", "attrs": {"radius": 2.5}},
-            {"k": "set_reference", "prim": "/World/Ref",
-             "asset_path": src_layer.identifier, "prim_path": "/Prop"},
+            {
+                "k": "set_reference",
+                "prim": "/World/Ref",
+                "asset_path": src_layer.identifier,
+                "prim_path": "/Prop",
+            },
         ]
 
         stage_b = Usd.Stage.CreateInMemory()

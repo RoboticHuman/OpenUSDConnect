@@ -6,13 +6,13 @@ Exit code 0 = all tests pass, 1 = failure.
 This script runs inside Blender's Python interpreter with real bpy/bmesh.
 """
 
+# Add project root and tests dir to path
+import os
 import sys
 import traceback
 
 import bpy
 
-# Add project root and tests dir to path
-import os
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 tests_dir = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
@@ -25,7 +25,7 @@ from integrations.blender.blender_adapter import BlenderAdapter
 
 def _clear_scene():
     """Remove all objects from the scene."""
-    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
 
@@ -59,7 +59,7 @@ def test_ensure_prim_xform(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'EMPTY':
+    if obj.type != "EMPTY":
         r.fail(name, f"expected EMPTY, got {obj.type}")
         return
     if obj.get("usd_type_name") != "Xform":
@@ -78,7 +78,7 @@ def test_ensure_prim_cube(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'MESH':
+    if obj.type != "MESH":
         r.fail(name, f"expected MESH, got {obj.type}")
         return
     if len(obj.data.vertices) == 0:
@@ -100,7 +100,7 @@ def test_ensure_prim_sphere(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'MESH':
+    if obj.type != "MESH":
         r.fail(name, f"expected MESH, got {obj.type}")
         return
     if len(obj.data.vertices) < 10:
@@ -119,7 +119,7 @@ def test_ensure_prim_cylinder(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'MESH':
+    if obj.type != "MESH":
         r.fail(name, f"expected MESH, got {obj.type}")
         return
     if len(obj.data.vertices) == 0:
@@ -138,7 +138,7 @@ def test_ensure_prim_cone(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'MESH':
+    if obj.type != "MESH":
         r.fail(name, f"expected MESH, got {obj.type}")
         return
     if len(obj.data.vertices) == 0:
@@ -157,7 +157,7 @@ def test_ensure_prim_mesh(r):
     if obj is None:
         r.fail(name, "object not created")
         return
-    if obj.type != 'MESH':
+    if obj.type != "MESH":
         r.fail(name, f"expected MESH, got {obj.type}")
         return
     r.ok(name)
@@ -183,11 +183,14 @@ def test_set_xform_trs(r):
     _clear_scene()
     adapter = BlenderAdapter()
     adapter.ensure_prim("/World/Box", "Cube")
-    adapter.set_xform_trs("/World/Box", {
-        "fields": ["t", "s"],
-        "t": [3.0, 4.0, 5.0],
-        "s": [2.0, 2.0, 2.0],
-    })
+    adapter.set_xform_trs(
+        "/World/Box",
+        {
+            "fields": ["t", "s"],
+            "t": [3.0, 4.0, 5.0],
+            "s": [2.0, 2.0, 2.0],
+        },
+    )
     obj = _find_by_prim(adapter, "/World/Box")
     if obj is None:
         r.fail(name, "object not found")
@@ -329,7 +332,7 @@ def test_ensure_xform_ops_resets_mpi(r):
 
     # Simulate what Blender's USD importer does: set MPI to a non-identity matrix
     # (e.g. a 90° X rotation that converts Y-up USD to Z-up Blender)
-    non_identity = mathutils.Matrix.Rotation(1.5708, 4, 'X')
+    non_identity = mathutils.Matrix.Rotation(1.5708, 4, "X")
     child.matrix_parent_inverse = non_identity
 
     # Verify MPI is non-identity
@@ -356,7 +359,7 @@ def test_ensure_xform_ops_preserves_world(r):
 
     # Create parent and child
     adapter.ensure_prim("/World", "Xform")
-    parent = _find_by_prim(adapter, "/World")
+    _find_by_prim(adapter, "/World")
     adapter.ensure_prim("/World/Child", "Cube")
     child = _find_by_prim(adapter, "/World/Child")
     if child is None or child.parent is None:
@@ -368,7 +371,7 @@ def test_ensure_xform_ops_preserves_world(r):
     bpy.context.view_layer.update()
 
     # Set a non-identity MPI (simulating USD Y-up → Blender Z-up import)
-    rot_x_90 = mathutils.Matrix.Rotation(1.5708, 4, 'X')
+    rot_x_90 = mathutils.Matrix.Rotation(1.5708, 4, "X")
     child.matrix_parent_inverse = rot_x_90
     bpy.context.view_layer.update()
 
@@ -386,9 +389,11 @@ def test_ensure_xform_ops_preserves_world(r):
     for i in range(4):
         for j in range(4):
             if abs(world_before[i][j] - world_after[i][j]) > eps:
-                r.fail(name,
-                       f"matrix_world changed at [{i}][{j}]: "
-                       f"{world_before[i][j]:.4f} -> {world_after[i][j]:.4f}")
+                r.fail(
+                    name,
+                    f"matrix_world changed at [{i}][{j}]: "
+                    f"{world_before[i][j]:.4f} -> {world_after[i][j]:.4f}",
+                )
                 return
     r.ok(name)
 
@@ -398,7 +403,6 @@ def test_ensure_xform_ops_identity_noop(r):
     name = "test_ensure_xform_ops_identity_noop"
     _clear_scene()
     adapter = BlenderAdapter()
-    import mathutils
 
     adapter.ensure_prim("/World", "Xform")
     adapter.ensure_prim("/World/Child", "Cube")
@@ -437,7 +441,9 @@ def test_ensure_xform_ops_no_parent(r):
 def test_set_reference_imports_usd(r):
     """set_reference imports a USD file and creates mesh objects under container."""
     import tempfile
-    from test_asset_builder import create_chair_asset, EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT
+
+    from test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT, create_chair_asset
+
     name = "test_set_reference_imports_usd"
     _clear_scene()
     adapter = BlenderAdapter()
@@ -471,12 +477,16 @@ def test_set_reference_imports_usd(r):
         return
 
     # Verify child objects match the chair asset (6 meshes, 48 vertices)
-    children = [o for o in bpy.data.objects
-                if o.get("usd_prim_path", "").startswith("/World/Asset/")]
-    mesh_children = [o for o in children if o.type == 'MESH' and o.data is not None]
+    children = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Asset/")
+    ]
+    mesh_children = [o for o in children if o.type == "MESH" and o.data is not None]
     if len(mesh_children) != EXPECTED_MESH_COUNT:
-        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes, "
-               f"got {len(mesh_children)} (types: {[o.type for o in children]})")
+        r.fail(
+            name,
+            f"expected {EXPECTED_MESH_COUNT} meshes, "
+            f"got {len(mesh_children)} (types: {[o.type for o in children]})",
+        )
         return
 
     total_verts = sum(len(o.data.vertices) for o in mesh_children)
@@ -498,7 +508,9 @@ def test_set_reference_imports_usd(r):
 def test_set_reference_reimport_after_delete(r):
     """set_reference re-imports when cached children have been deleted."""
     import tempfile
-    from test_asset_builder import create_chair_asset, EXPECTED_MESH_COUNT
+
+    from test_asset_builder import EXPECTED_MESH_COUNT, create_chair_asset
+
     name = "test_set_reference_reimport_after_delete"
     _clear_scene()
     adapter = BlenderAdapter()
@@ -520,8 +532,9 @@ def test_set_reference_reimport_after_delete(r):
         r.fail(name, "first set_reference returned False")
         return
 
-    children_before = [o for o in bpy.data.objects
-                       if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    children_before = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Asset/")
+    ]
     if len(children_before) == 0:
         r.fail(name, "no children after first import")
         return
@@ -534,8 +547,9 @@ def test_set_reference_reimport_after_delete(r):
         bpy.data.objects.remove(obj)
 
     # Verify children are gone
-    children_mid = [o for o in bpy.data.objects
-                    if o.get("usd_prim_path", "").startswith("/World/Asset/")]
+    children_mid = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Asset/")
+    ]
     if len(children_mid) != 0:
         r.fail(name, f"children still exist after delete: {len(children_mid)}")
         return
@@ -547,12 +561,14 @@ def test_set_reference_reimport_after_delete(r):
         return
 
     # Verify children were re-imported
-    children_after = [o for o in bpy.data.objects
-                      if o.get("usd_prim_path", "").startswith("/World/Asset/")]
-    mesh_children = [o for o in children_after if o.type == 'MESH' and o.data is not None]
+    children_after = [
+        o for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Asset/")
+    ]
+    mesh_children = [o for o in children_after if o.type == "MESH" and o.data is not None]
     if len(mesh_children) != EXPECTED_MESH_COUNT:
-        r.fail(name, f"expected {EXPECTED_MESH_COUNT} meshes after re-import, "
-               f"got {len(mesh_children)}")
+        r.fail(
+            name, f"expected {EXPECTED_MESH_COUNT} meshes after re-import, got {len(mesh_children)}"
+        )
         return
 
     print(f"  info: re-imported {len(mesh_children)} meshes after stale cache detection")
@@ -569,7 +585,9 @@ def test_set_reference_missing_file(r):
         r.fail(name, "set_reference should return False for missing file")
         return
     # Verify no objects were created
-    count = sum(1 for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Missing"))
+    count = sum(
+        1 for o in bpy.data.objects if o.get("usd_prim_path", "").startswith("/World/Missing")
+    )
     if count != 0:
         r.fail(name, f"expected 0 objects, got {count}")
         return

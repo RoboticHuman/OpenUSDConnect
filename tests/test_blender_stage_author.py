@@ -5,9 +5,8 @@ deletion detection, and feedback guard using the new architecture.
 """
 
 import sys
-import types
 import tempfile
-import pytest
+import types
 from unittest.mock import MagicMock
 
 
@@ -16,6 +15,7 @@ from unittest.mock import MagicMock
 # ---------------------------------------------------------------------------
 class _BlenderObjectList(list):
     """list subclass that supports .get(name) lookup like bpy.data.objects."""
+
     def get(self, name):
         for obj in self:
             if getattr(obj, "name", None) == name:
@@ -41,8 +41,22 @@ def _install_bpy_mock():
     bpy.types.Object = type("Object", (), {})
     bpy.types.Scene = type("Scene", (), {})
     bpy.types.USDHook = type("USDHook", (), {"bl_idname": "", "bl_label": ""})
-    bpy.types.Operator = type("Operator", (), {"bl_idname": "", "bl_label": "", "bl_description": ""})
-    bpy.types.Panel = type("Panel", (), {"bl_idname": "", "bl_label": "", "bl_space_type": "", "bl_region_type": "", "bl_category": ""})
+    bpy.types.Operator = type(
+        "Operator",
+        (),
+        {"bl_idname": "", "bl_label": "", "bl_description": ""},
+    )
+    bpy.types.Panel = type(
+        "Panel",
+        (),
+        {
+            "bl_idname": "",
+            "bl_label": "",
+            "bl_space_type": "",
+            "bl_region_type": "",
+            "bl_category": "",
+        },
+    )
 
     bpy.props.StringProperty = lambda **kw: None
     bpy.props.IntProperty = lambda **kw: None
@@ -85,12 +99,15 @@ class _Vec3:
     def __init__(self, x, y, z):
         self.x, self.y, self.z = x, y, z
 
+
 class _Quat:
     def __init__(self, w, x, y, z):
         self.w, self.x, self.y, self.z = w, x, y, z
 
+
 class _Matrix:
     """Minimal mock of mathutils.Matrix with row iteration for change detection."""
+
     def __init__(self, loc=(0, 0, 0), rot=(1, 0, 0, 0), scl=(1, 1, 1)):
         self._loc = loc
         self._rot = rot
@@ -126,8 +143,16 @@ class _Matrix:
 class MockBlenderObject(sys.modules["bpy"].types.Object):
     """Simulates a Blender object with custom properties and transform."""
 
-    def __init__(self, name, loc=(0, 0, 0), rot=(1, 0, 0, 0), scl=(1, 1, 1),
-                 prim_path=None, type_name=None, obj_type="MESH"):
+    def __init__(
+        self,
+        name,
+        loc=(0, 0, 0),
+        rot=(1, 0, 0, 0),
+        scl=(1, 1, 1),
+        prim_path=None,
+        type_name=None,
+        obj_type="MESH",
+    ):
         self._name = name
         self.type = obj_type
         self.parent = None
@@ -166,6 +191,7 @@ class MockBlenderObject(sys.modules["bpy"].types.Object):
 
 class MockDepsgraphUpdate:
     """Simulates a single depsgraph update entry."""
+
     def __init__(self, obj):
         self.id = obj
 
@@ -213,6 +239,7 @@ def _get_events(author, emitter, updates):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestAutoTrack:
     """Test auto-track assigns prim paths based on parent hierarchy."""

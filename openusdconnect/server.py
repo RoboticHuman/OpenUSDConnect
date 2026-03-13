@@ -16,11 +16,8 @@ import logging
 import socketserver
 import sqlite3
 import threading
-from typing import List, Optional, Set
 
-from pxr import Usd, Sdf
-
-from .event_apply import apply_event
+from pxr import Usd
 
 LOG = logging.getLogger(__name__)
 
@@ -28,7 +25,7 @@ LOG = logging.getLogger(__name__)
 class UsdSyncServer:
     """Holds all shared server state: stage, sequence counter, client list, SQLite event log."""
 
-    def __init__(self, base_usd_path: Optional[str] = None, log_path: str = "usd_events.db"):
+    def __init__(self, base_usd_path: str | None = None, log_path: str = "usd_events.db"):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
             if self.stage is None:
@@ -41,7 +38,7 @@ class UsdSyncServer:
         self.log_path = log_path
         self.stage_lock = threading.Lock()
         self.clients_lock = threading.Lock()
-        self.receivers: Set = set()
+        self.receivers: set = set()
         self._seq_lock = threading.Lock()
 
         # SQLite event log with WAL mode for concurrent reads
@@ -83,8 +80,7 @@ class UsdSyncServer:
         try:
             with self.db_lock:
                 self.db_conn.execute(
-                    "INSERT INTO events(seq, event) VALUES (?, ?)",
-                    (rec["seq"], json.dumps(rec))
+                    "INSERT INTO events(seq, event) VALUES (?, ?)", (rec["seq"], json.dumps(rec))
                 )
                 self.db_conn.commit()
         except Exception:
@@ -102,8 +98,9 @@ class UsdSyncServer:
             for h in dead:
                 self.receivers.discard(h)
 
-    def apply_txn(self, events: List[dict]):
+    def apply_txn(self, events: list[dict]):
         from .event_apply import apply_events
+
         with self.stage_lock:
             apply_events(self.stage, events)
 
@@ -112,13 +109,10 @@ class UsdSyncServer:
         try:
             cursor = self.db_conn.cursor()
             cursor.execute(
-                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
-                (seq_start,)
+                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq", (seq_start,)
             )
             for row in cursor:
-                handler.request.sendall(
-                    (row[1] + "\n").encode("utf-8")
-                )
+                handler.request.sendall((row[1] + "\n").encode("utf-8"))
         except Exception:
             LOG.exception("Failed to replay events")
 
@@ -126,7 +120,7 @@ class UsdSyncServer:
 class ConnectionHandler(socketserver.StreamRequestHandler):
     """Handles a single client connection (emitter or receiver)."""
 
-    server: "ThreadedTCPServer"
+    server: ThreadedTCPServer
 
     def handle(self):
         sync_server = self.server.sync_server
@@ -200,9 +194,12 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super().__init__(server_address, handler_class)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 7200,
-               base_usd_path: Optional[str] = None,
-               log_path: str = "usd_events.db"):
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 7200,
+    base_usd_path: str | None = None,
+    log_path: str = "usd_events.db",
+):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
@@ -231,9 +228,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
