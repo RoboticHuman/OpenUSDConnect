@@ -57,20 +57,31 @@ def main():
     bpy.ops.object.delete()
 
     from integrations.blender.capture import (
-        _NetworkEmitter, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
     )
+    from openusdconnect.emitter import NoticeEmitter
     import integrations.blender.capture as capture_mod
 
     _ensure_scene_props()
 
-    emitter = _NetworkEmitter(
-        host="127.0.0.1",
-        port=port,
-        client_id="autotrack-props-test",
-        auto_track=True,
-    )
-    emitter.connect()
-    capture_mod._NET_EMITTER = emitter
+    # Write a minimal temp USD file for the stage author
+    import tempfile as _tf
+    _tmp = _tf.NamedTemporaryFile(suffix=".usda", delete=False, mode="w")
+    _tmp.write('#usda 1.0\ndef Xform "World" {}\n')
+    _tmp.close()
+
+    author = BlenderStageAuthor(base_usd_path=_tmp.name)
+    author.enabled = True
+    author.auto_track = True
+    author.seed_used_paths()
+
+    emitter_notice = NoticeEmitter(author.stage)
+    sender = NetworkSender(host="127.0.0.1", port=port)
+    sender.connect()
+
+    capture_mod._state.author = author
+    capture_mod._state.notice_emitter = emitter_notice
+    capture_mod._state.sender = sender
 
     bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
     bpy.context.scene.usd_connect_auto_track = True
@@ -171,8 +182,10 @@ def main():
     # Small delay to ensure events are sent over TCP
     time.sleep(0.5)
 
-    emitter.disconnect()
-    capture_mod._NET_EMITTER = None
+    sender.disconnect()
+    capture_mod._state.author = None
+    capture_mod._state.notice_emitter = None
+    capture_mod._state.sender = None
     bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_handler)
 
     # Write results

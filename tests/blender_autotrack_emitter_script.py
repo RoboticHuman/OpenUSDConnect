@@ -1,6 +1,6 @@
 """Blender auto-tracking emitter script for integration test.
 
-Uses the actual addon capture path: _NetworkEmitter with auto_track=True,
+Uses BlenderStageAuthor + NoticeEmitter + NetworkSender with auto_track=True,
 creates objects via bpy.ops, triggers depsgraph, lets the handler send events.
 
 Run via: blender --background --python tests/blender_autotrack_emitter_script.py -- --port PORT
@@ -31,22 +31,33 @@ def main():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete()
 
-    # Import the capture module and create a _NetworkEmitter directly
-    from integrations.blender.capture import _NetworkEmitter, _depsgraph_handler, _ensure_scene_props
+    from integrations.blender.capture import (
+        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
+    )
+    from openusdconnect.emitter import NoticeEmitter
     import integrations.blender.capture as capture_mod
 
     # Ensure scene properties are registered (auto_track, etc.)
     _ensure_scene_props()
 
-    emitter = _NetworkEmitter(
-        host="127.0.0.1",
-        port=port,
-        client_id="autotrack-test",
-        auto_track=True,
-    )
-    emitter.connect()
-    # Set the module-level _NET_EMITTER so the depsgraph handler uses it
-    capture_mod._NET_EMITTER = emitter
+    # Write a minimal temp USD file for the stage author
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".usda", delete=False, mode="w")
+    tmp.write('#usda 1.0\ndef Xform "World" {}\n')
+    tmp.close()
+
+    author = BlenderStageAuthor(base_usd_path=tmp.name)
+    author.enabled = True
+    author.auto_track = True
+    author.seed_used_paths()
+
+    emitter_notice = NoticeEmitter(author.stage)
+    sender = NetworkSender(host="127.0.0.1", port=port)
+    sender.connect()
+
+    capture_mod._state.author = author
+    capture_mod._state.notice_emitter = emitter_notice
+    capture_mod._state.sender = sender
 
     # Register the depsgraph handler
     bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
@@ -99,8 +110,10 @@ def main():
         usd_type = obj.get("usd_type_name", "")
         print(f"[AutoTrack Emitter] {obj.name}: prim={prim}, type={usd_type}, loc={tuple(obj.location)}")
 
-    emitter.disconnect()
-    capture_mod._NET_EMITTER = None
+    sender.disconnect()
+    capture_mod._state.author = None
+    capture_mod._state.notice_emitter = None
+    capture_mod._state.sender = None
     bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_handler)
     print("[AutoTrack Emitter] Done")
 

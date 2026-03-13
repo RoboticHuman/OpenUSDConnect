@@ -52,9 +52,10 @@ def main():
     bpy.ops.object.delete()
 
     from integrations.blender.capture import (
-        _NetworkEmitter, _depsgraph_handler, _ensure_scene_props,
+        BlenderStageAuthor, NetworkSender, _depsgraph_handler, _ensure_scene_props,
         USD_CONNECT_Hook,
     )
+    from openusdconnect.emitter import NoticeEmitter
     import integrations.blender.capture as capture_mod
 
     _ensure_scene_props()
@@ -168,14 +169,18 @@ def main():
 
     # --- Phase 2b: Flip to emitter and move both objects ---
     print("[RoleFlip B] Flipping to emitter role")
-    emitter = _NetworkEmitter(
-        host="127.0.0.1",
-        port=port,
-        client_id="roleflip-emitter-B",
-        auto_track=False,
-    )
-    emitter.connect()
-    capture_mod._NET_EMITTER = emitter
+    author = BlenderStageAuthor(base_usd_path=scene_path)
+    author.enabled = True
+    author.auto_track = False
+    author.seed_used_paths()
+
+    emitter_notice = NoticeEmitter(author.stage)
+    sender = NetworkSender(host="127.0.0.1", port=port)
+    sender.connect()
+
+    capture_mod._state.author = author
+    capture_mod._state.notice_emitter = emitter_notice
+    capture_mod._state.sender = sender
     bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
 
     # Move existing Cube to new position
@@ -198,8 +203,10 @@ def main():
 
     time.sleep(0.5)
 
-    emitter.disconnect()
-    capture_mod._NET_EMITTER = None
+    sender.disconnect()
+    capture_mod._state.author = None
+    capture_mod._state.notice_emitter = None
+    capture_mod._state.sender = None
     bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_handler)
     bpy.utils.unregister_class(USD_CONNECT_Hook)
 

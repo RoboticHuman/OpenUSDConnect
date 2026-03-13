@@ -1,0 +1,493 @@
+"""Headless tests for NoticeEmitter extensions.
+
+Tests creation, deletion, deactivation, rename detection,
+suppress flag, and ChangeBlock batching — all DCC-agnostic.
+"""
+
+import pytest
+from pxr import Usd, UsdGeom, Sdf, Gf
+
+from openusdconnect.emitter import NoticeEmitter
+
+
+def _make_stage_and_emitter():
+    """Create an in-memory stage with a session layer edit target and a NoticeEmitter."""
+    stage = Usd.Stage.CreateInMemory()
+    session = stage.GetSessionLayer()
+    stage.SetEditTarget(Usd.EditTarget(session))
+    emitter = NoticeEmitter(stage)
+    return stage, emitter
+
+
+class TestCreationDetection:
+    """DefinePrim triggers ensure_prim + set_xform_trs events."""
+
+    def test_define_prim_emits_creation_events(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World", "Xform")
+        stage.DefinePrim("/World/Sphere", "Sphere")
+
+        events = emitter.build_events_for_dirty()
+
+        ensure_prims = [e for e in events if e["k"] == "ensure_prim"]
+        assert len(ensure_prims) >= 1
+        prim_paths = {e["prim"] for e in ensure_prims}
+        assert "/World/Sphere" in prim_paths
+
+    def test_define_xform_prim_gets_trs(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Box", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(1, 2, 3))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Box"]
+        assert len(trs) == 1
+        assert "t" in trs[0]["fields"]
+
+    def test_creation_tracks_known_prims(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World/A", "Xform")
+        emitter.build_events_for_dirty()
+
+        assert "/World/A" in emitter._known_prims
+
+    def test_creation_uses_prim_type_name(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World/MySphere", "Sphere")
+
+        events = emitter.build_events_for_dirty()
+        ensure = [e for e in events if e["k"] == "ensure_prim" and e["prim"] == "/World/MySphere"]
+        assert len(ensure) == 1
+        assert ensure[0]["typeName"] == "Sphere"
+
+
+class TestDeletionDetection:
+    """RemovePrim triggers deactivate_prim event."""
+
+    def test_remove_prim_emits_deactivate(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World/Cube", "Xform")
+        emitter.build_events_for_dirty()
+        assert "/World/Cube" in emitter._known_prims
+
+        stage.RemovePrim("/World/Cube")
+        events = emitter.build_events_for_dirty()
+
+        deact = [e for e in events if e["k"] == "deactivate_prim"]
+        assert len(deact) == 1
+        assert deact[0]["prim"] == "/World/Cube"
+        assert deact[0]["active"] is False
+
+    def test_deletion_cleans_caches(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World/Cube", "Xform")
+        emitter.build_events_for_dirty()
+
+        stage.RemovePrim("/World/Cube")
+        emitter.build_events_for_dirty()
+
+        assert "/World/Cube" not in emitter._known_prims
+        assert "/World/Cube" not in emitter.last_sent_trs
+
+
+class TestDeactivationDetection:
+    """SetActive(False) triggers deactivate_prim event."""
+
+    def test_set_active_false_emits_deactivate(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Cone", "Xform")
+        emitter.build_events_for_dirty()
+        assert "/World/Cone" in emitter._known_prims
+
+        prim.SetActive(False)
+        events = emitter.build_events_for_dirty()
+
+        deact = [e for e in events if e["k"] == "deactivate_prim"]
+        assert len(deact) == 1
+        assert deact[0]["prim"] == "/World/Cone"
+        assert deact[0]["active"] is False
+
+    def test_deactivation_cleans_caches(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Cone", "Xform")
+        emitter.build_events_for_dirty()
+
+        prim.SetActive(False)
+        emitter.build_events_for_dirty()
+
+        assert "/World/Cone" not in emitter._known_prims
+
+
+class TestRenameDetection:
+    """NamespaceEditor.RenamePrim triggers rename_prim event."""
+
+    def test_rename_emits_rename_event(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/OldName", "Xform")
+        emitter.build_events_for_dirty()
+
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, "NewName")
+        assert editor.ApplyEdits()
+
+        events = emitter.build_events_for_dirty()
+
+        renames = [e for e in events if e["k"] == "rename_prim"]
+        assert len(renames) == 1
+        assert renames[0]["prim"] == "/World/OldName"
+        assert renames[0]["new_name"] == "NewName"
+
+    def test_rename_updates_known_prims(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/OldName", "Xform")
+        emitter.build_events_for_dirty()
+        assert "/World/OldName" in emitter._known_prims
+
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, "NewName")
+        editor.ApplyEdits()
+        emitter.build_events_for_dirty()
+
+        assert "/World/OldName" not in emitter._known_prims
+        assert "/World/NewName" in emitter._known_prims
+
+    def test_rename_updates_trs_cache(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/OldName", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(5, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+        emitter.build_events_for_dirty()
+        assert "/World/OldName" in emitter.last_sent_trs
+
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, "NewName")
+        editor.ApplyEdits()
+        emitter.build_events_for_dirty()
+
+        assert "/World/OldName" not in emitter.last_sent_trs
+        assert "/World/NewName" in emitter.last_sent_trs
+
+
+class TestSuppressFlag:
+    """Suppress flag blocks event collection."""
+
+    def test_suppress_blocks_collection(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        emitter.suppress()
+        stage.DefinePrim("/World/Hidden", "Xform")
+
+        events = emitter.build_events_for_dirty()
+        assert len(events) == 0
+
+    def test_unsuppress_resumes_collection(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        emitter.suppress()
+        stage.DefinePrim("/World/Hidden", "Xform")
+
+        emitter.unsuppress()
+        stage.DefinePrim("/World/Visible", "Xform")
+
+        events = emitter.build_events_for_dirty()
+        prim_paths = {e["prim"] for e in events if e["k"] == "ensure_prim"}
+        assert "/World/Visible" in prim_paths
+        assert "/World/Hidden" not in prim_paths
+
+
+class TestChangeBlockBatching:
+    """Multiple changes in one ChangeBlock produce a single batch of events."""
+
+    def test_changeblock_batches_multiple_changes(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        # Create prims outside ChangeBlock (structural ops)
+        prim_a = stage.DefinePrim("/World/A", "Xform")
+        prim_b = stage.DefinePrim("/World/B", "Xform")
+
+        # Flush creation events
+        emitter.build_events_for_dirty()
+
+        # Set up xform ops
+        xf_a = UsdGeom.Xformable(prim_a)
+        t_a = xf_a.AddTranslateOp()
+        xf_a.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf_a.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+
+        xf_b = UsdGeom.Xformable(prim_b)
+        t_b = xf_b.AddTranslateOp()
+        xf_b.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf_b.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+
+        # Flush ops setup events
+        emitter.build_events_for_dirty()
+
+        # Now batch value changes inside a ChangeBlock
+        with Sdf.ChangeBlock():
+            t_a.Set(Gf.Vec3d(10, 0, 0))
+            t_b.Set(Gf.Vec3d(0, 20, 0))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs"]
+        trs_prims = {e["prim"] for e in trs}
+        assert "/World/A" in trs_prims
+        assert "/World/B" in trs_prims
+
+
+class TestParentBeforeChildOrdering:
+    """Events for parent prims are emitted before child prims."""
+
+    def test_parent_emitted_before_child(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        # Create a deep hierarchy in one batch
+        stage.DefinePrim("/World", "Xform")
+        stage.DefinePrim("/World/Parent", "Xform")
+        stage.DefinePrim("/World/Parent/Child", "Xform")
+        stage.DefinePrim("/World/Parent/Child/Grandchild", "Sphere")
+
+        events = emitter.build_events_for_dirty()
+
+        # Extract ensure_prim events and verify ordering
+        ensure_prims = [e for e in events if e["k"] == "ensure_prim"]
+        ensure_paths = [e["prim"] for e in ensure_prims]
+
+        # Each path should appear after its parent
+        for i, path in enumerate(ensure_paths):
+            parent = path.rsplit("/", 1)[0]
+            if parent and parent in ensure_paths:
+                parent_idx = ensure_paths.index(parent)
+                assert parent_idx < i, (
+                    f"Parent {parent} (idx={parent_idx}) should come before "
+                    f"child {path} (idx={i})"
+                )
+
+
+class TestClearAll:
+    """clear_all() flushes without building events."""
+
+    def test_clear_all_discards_pending(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        stage.DefinePrim("/World/Temp", "Xform")
+        emitter.clear_all()
+
+        events = emitter.build_events_for_dirty()
+        assert len(events) == 0
+
+
+class TestRotationRoundTrip:
+    """Rotation authored via xform ops appears in NoticeEmitter events."""
+
+    def test_rotation_round_trip(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Rot", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(0.707, 0.707, 0, 0))  # ~90° X
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Rot"]
+        assert len(trs) == 1
+        assert "r" in trs[0]["fields"]
+        r = trs[0]["r"]
+        assert abs(r[0] - 0.707) < 0.01  # w
+        assert abs(r[1] - 0.707) < 0.01  # x
+
+
+class TestScaleRoundTrip:
+    """Non-uniform scale authored via xform ops appears in NoticeEmitter events."""
+
+    def test_scale_round_trip(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Scaled", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(2, 3, 4))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Scaled"]
+        assert len(trs) == 1
+        assert "s" in trs[0]["fields"]
+        s = trs[0]["s"]
+        assert abs(s[0] - 2.0) < 1e-6
+        assert abs(s[1] - 3.0) < 1e-6
+        assert abs(s[2] - 4.0) < 1e-6
+
+
+class TestBaseLayerPrimTRS:
+    """Prims on the base layer with only translate get full TRS after ops are added."""
+
+    def test_trs_round_trip_on_base_layer_prim(self):
+        """Simulates a base file with only xformOp:translate.
+
+        After adding orient/scale ops and authoring values, all three
+        TRS components must appear in events.
+        """
+        stage, emitter = _make_stage_and_emitter()
+
+        # Simulate a base-layer prim with only translate
+        prim = stage.DefinePrim("/World/Cube", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(1, 2, 3))
+
+        # Flush initial creation events
+        emitter.build_events_for_dirty()
+
+        # Now add orient/scale ops (simulating _ensure_xform_ops)
+        from openusdconnect.event_apply import ensure_canonical_ops
+        ensure_canonical_ops(stage, "/World/Cube")
+
+        # Author rotation and scale values
+        from openusdconnect.event_apply import find_op
+        xf = UsdGeom.Xformable(prim)
+        find_op(xf, "orient").Set(Gf.Quatf(0.707, 0, 0.707, 0))  # ~90° Y
+        find_op(xf, "scale").Set(Gf.Vec3d(2, 2, 2))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Cube"]
+        assert len(trs) == 1
+        fields = trs[0]["fields"]
+        assert "r" in fields, "Rotation field missing from events"
+        assert "s" in fields, "Scale field missing from events"
+
+    def test_existing_prim_gets_full_trs(self):
+        """Prim exists on base layer with only translate op.
+
+        After ensure_canonical_ops and writing values, NoticeEmitter
+        must emit all TRS fields (not just translate).
+        """
+        stage, emitter = _make_stage_and_emitter()
+
+        # Create prim with only translate (mimics base layer)
+        prim = stage.DefinePrim("/World/Box", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(5, 0, 0))
+
+        # Flush creation
+        emitter.build_events_for_dirty()
+
+        # Add canonical ops and set non-identity values
+        from openusdconnect.event_apply import ensure_canonical_ops, find_op
+        ensure_canonical_ops(stage, "/World/Box")
+
+        xf = UsdGeom.Xformable(prim)
+        find_op(xf, "translate").Set(Gf.Vec3d(10, 0, 0))
+        find_op(xf, "orient").Set(Gf.Quatf(0.5, 0.5, 0.5, 0.5))
+        find_op(xf, "scale").Set(Gf.Vec3d(3, 3, 3))
+
+        events = emitter.build_events_for_dirty()
+
+        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Box"]
+        assert len(trs) == 1
+        assert "t" in trs[0]["fields"]
+        assert "r" in trs[0]["fields"]
+        assert "s" in trs[0]["fields"]
+
+
+class TestRootPrimRotationNotDoubled:
+    """Root prim rotation should not be doubled when applied to receiver."""
+
+    def test_root_prim_rotation_not_doubled(self):
+        """Simulate emitter/receiver: root prim with 90° rotation.
+
+        Events from the emitter applied to a receiver stage that already
+        has the same prim should result in the same transform, not doubled.
+        """
+        from openusdconnect.event_apply import ensure_canonical_ops, apply_event
+
+        # Emitter stage: root prim with 90° X rotation
+        emitter_stage = Usd.Stage.CreateInMemory()
+        session = emitter_stage.GetSessionLayer()
+        emitter_stage.SetEditTarget(Usd.EditTarget(session))
+
+        prim = emitter_stage.DefinePrim("/World", "Xform")
+        _, xf, t, o, s = ensure_canonical_ops(emitter_stage, "/World")
+        t.Set(Gf.Vec3d(0, 0, 0))
+        o.Set(Gf.Quatf(0.707, 0.707, 0, 0))  # ~90° X
+        s.Set(Gf.Vec3d(1, 1, 1))
+
+        emitter = NoticeEmitter(emitter_stage)
+        emitter.mark_dirty("/World")
+        events = emitter.build_events_for_dirty()
+
+        # Receiver stage: same prim already exists with same rotation
+        receiver_stage = Usd.Stage.CreateInMemory()
+        recv_session = receiver_stage.GetSessionLayer()
+        receiver_stage.SetEditTarget(Usd.EditTarget(recv_session))
+
+        recv_prim = receiver_stage.DefinePrim("/World", "Xform")
+        _, rxf, rt, ro, rs = ensure_canonical_ops(receiver_stage, "/World")
+        rt.Set(Gf.Vec3d(0, 0, 0))
+        ro.Set(Gf.Quatf(0.707, 0.707, 0, 0))  # same rotation
+        rs.Set(Gf.Vec3d(1, 1, 1))
+
+        # Apply emitter events to receiver
+        for ev in events:
+            apply_event(receiver_stage, ev)
+
+        # Verify rotation is the same (not doubled)
+        rxf2 = UsdGeom.Xformable(receiver_stage.GetPrimAtPath("/World"))
+        from openusdconnect.event_apply import find_op
+        orient = find_op(rxf2, "orient")
+        q = orient.Get()
+        assert abs(float(q.GetReal()) - 0.707) < 0.01
+        assert abs(float(q.GetImaginary()[0]) - 0.707) < 0.01
+        assert abs(float(q.GetImaginary()[1])) < 0.01
+        assert abs(float(q.GetImaginary()[2])) < 0.01
+
+
+class TestFirstEncounterStructuralEvents:
+    """ensure_prim/ensure_xform_ops only emitted on first encounter."""
+
+    def test_no_structural_events_on_second_dirty(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        prim = stage.DefinePrim("/World/Obj", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+
+        # First encounter — should have ensure_prim
+        events1 = emitter.build_events_for_dirty()
+        ensure1 = [e for e in events1 if e["k"] == "ensure_prim" and e["prim"] == "/World/Obj"]
+        assert len(ensure1) == 1
+
+        # Change translate
+        xf.GetOrderedXformOps()[0].Set(Gf.Vec3d(5, 0, 0))
+        events2 = emitter.build_events_for_dirty()
+
+        ensure2 = [e for e in events2 if e["k"] == "ensure_prim" and e["prim"] == "/World/Obj"]
+        assert len(ensure2) == 0, "ensure_prim should not be emitted on subsequent updates"
+
+        ops2 = [e for e in events2 if e["k"] == "ensure_xform_ops" and e["prim"] == "/World/Obj"]
+        assert len(ops2) == 0, "ensure_xform_ops should not be emitted on subsequent updates"
+
+        trs2 = [e for e in events2 if e["k"] == "set_xform_trs" and e["prim"] == "/World/Obj"]
+        assert len(trs2) == 1

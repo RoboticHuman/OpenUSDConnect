@@ -3,18 +3,20 @@
 Captures Blender object transform edits and sends them over the network
 via the openusdconnect protocol. Also handles USD import tagging via USDHook
 and local diff capture to session layer.
+
+Architecture:
+  Blender depsgraph change
+    -> BlenderStageAuthor writes to local USD stage
+      -> Usd.Notice.ObjectsChanged fires
+        -> NoticeEmitter builds protocol events
+          -> NetworkSender sends events over TCP
 """
 
 from __future__ import annotations
 
-import time
-import json
 import socket
 import logging
-from math import degrees
 from typing import Optional
-
-from openusdconnect.emitter import near_list
 
 import bpy
 
@@ -46,9 +48,9 @@ _USD_MESH_TYPES = ("Sphere", "Cube", "Cylinder", "Cone", "Capsule")
 def _infer_usd_type(obj) -> str:
     """Infer the USD typeName for a Blender object at auto-track time.
 
-    Uses the Blender object's mesh vertex/face counts to identify parametric
-    primitives, since mesh data names can be renamed by the user.
-    Falls back to 'Mesh' for mesh objects or 'Xform' for non-mesh.
+    Checks the mesh data name prefix against known parametric types
+    (Sphere, Cube, etc.). Falls back to 'Mesh' for mesh objects or
+    'Xform' for non-mesh.
     """
     if obj.type != 'MESH' or obj.data is None:
         return "Xform"
@@ -235,17 +237,21 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
 
 
 # ---------------------------------------------------------------------------
-# Core USD delta capture engine (local session layer diffs)
+# BlenderStageAuthor — authors Blender depsgraph changes to a local USD stage
 # ---------------------------------------------------------------------------
-class _UsdDeltaEngine:
-    """Opens base USD stage, captures Blender transform edits into SessionLayer."""
+class BlenderStageAuthor:
+    """Owns a local USD stage and authors Blender depsgraph changes to it.
 
-    def __init__(self, base_usd_path: str, coalesce_seconds: float):
+    Transforms depsgraph updates into USD stage edits. The resulting
+    Usd.Notice.ObjectsChanged notices drive a NoticeEmitter, which
+    builds protocol events for network transport.
+    """
+
+    def __init__(self, base_usd_path: str):
         if not PXR_AVAILABLE:
             raise RuntimeError(f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
 
         self.base_usd_path = (base_usd_path or "").strip()
-        self.coalesce_seconds = max(0.0, float(coalesce_seconds))
 
         if not self.base_usd_path:
             raise RuntimeError("Base USD file path is empty.")
@@ -258,144 +264,252 @@ class _UsdDeltaEngine:
         if self.stage is None:
             raise RuntimeError("Failed to open USD stage from base layer")
 
-        self.base_stage = Usd.Stage.Open(self.base_layer)
         self.delta_layer = self.stage.GetSessionLayer()
         self.stage.SetEditTarget(Usd.EditTarget(self.delta_layer))
 
-        self._last_matrix = {}
-        self._pending_paths = set()
-        self._dirty = False
-        self._next_emit_time = 0.0
-        self.enabled = False
+        self._last_matrix: dict = {}
+        self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
+        self._used_prim_paths: set = set()
+        self.auto_track: bool = False
+        self.enabled: bool = False
+        self._applying_remote: bool = False
 
     def initialize_baseline(self):
+        """Snapshot current scene transforms for change detection."""
         for obj in bpy.context.scene.objects:
             if "usd_prim_path" not in obj:
                 continue
             m = tuple(v for row in obj.matrix_world for v in row)
             self._last_matrix[obj.name] = m
 
-    def usd_path_for_object(self, obj) -> Optional[str]:
-        if obj is None:
-            return None
-        p = obj.get("usd_prim_path")
-        if not p:
-            return None
-        p = str(p).strip()
-        if not p.startswith("/"):
-            return None
-        return p
+    def seed_used_paths(self):
+        """Seed used-paths from scene objects (one-time O(N) scan)."""
+        self._used_prim_paths = {
+            obj.get("usd_prim_path")
+            for obj in bpy.data.objects
+            if obj.get("usd_prim_path")
+        }
 
-    def _get_or_add_op(self, xf, op_type):
-        for op in xf.GetOrderedXformOps():
-            if op.GetOpType() == op_type:
-                return op
-        return xf.AddXformOp(op_type)
+    def _resolve_prim_path(self, obj):
+        """Resolve the prim path for a Blender object.
 
-    def author_xform_from_object(self, obj):
-        """Mirror Blender object TRS into USD xform ops using quaternion rotation."""
-        path = self.usd_path_for_object(obj)
-        if not path:
+        Returns (prim_path, type_name) or (None, None) if the object
+        should not be tracked.
+        """
+        prim_path = obj.get("usd_prim_path")
+        type_name = None
+        if not prim_path:
+            # Reverse-lookup: is this object already tracked by reference?
+            for pp, ref in self._prim_refs.items():
+                if ref is obj:
+                    prim_path = pp
+                    break
+        if not prim_path:
+            if not self.auto_track:
+                return None, None
+            parent = getattr(obj, "parent", None)
+            if parent is None:
+                return None, None
+            parent_prim = parent.get("usd_prim_path")
+            if not parent_prim:
+                return None, None
+            usd_name = sanitize_usd_name(obj.name)
+            prim_path = f"{parent_prim}/{usd_name}"
+            if prim_path in self._used_prim_paths:
+                i = 1
+                while f"{prim_path}_{i}" in self._used_prim_paths:
+                    i += 1
+                prim_path = f"{prim_path}_{i}"
+            self._used_prim_paths.add(prim_path)
+            type_name = _infer_usd_type(obj)
+            _deferred_set_props(obj.name, prim_path, type_name)
+            LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
+        return prim_path, type_name
+
+    def _ensure_ancestors_on_stage(self, obj):
+        """Ensure all ancestor prims exist on the local stage with xform ops.
+
+        Walks from obj.parent upward collecting ancestors that haven't been
+        tracked yet (not in _prim_refs), then defines/ensures them top-down.
+        This handles both missing prims AND prims that exist on the base
+        layer but lack canonical xform ops.
+        """
+        ancestors = []
+        ancestor = obj.parent
+        while ancestor is not None:
+            pp = ancestor.get("usd_prim_path")
+            if not pp:
+                break
+            if pp in self._prim_refs:
+                break  # already tracked — already has ops
+            ancestors.append((ancestor, pp))
+            ancestor = ancestor.parent
+
+        # Define/ensure top-down
+        for anc_obj, anc_path in reversed(ancestors):
+            prim = self.stage.GetPrimAtPath(anc_path)
+            if not prim or not prim.IsValid():
+                tn = anc_obj.get("usd_type_name", "Xform")
+                self.stage.DefinePrim(anc_path, tn)
+            self._ensure_xform_ops(anc_path)
+            self._author_xform(anc_path, anc_obj)
+            self._prim_refs[anc_path] = anc_obj
+
+    def _ensure_xform_ops(self, prim_path: str):
+        """Ensure canonical xform ops (translate, orient, scale) exist on prim."""
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
             return
+        xf = UsdGeom.Xformable(prim)
+        from openusdconnect.event_apply import find_op
+        t = find_op(xf, "translate")
+        o = find_op(xf, "orient")
+        s = find_op(xf, "scale")
+        if t is None:
+            t = xf.AddTranslateOp()
+        if o is None:
+            o = xf.AddOrientOp()
+        if s is None:
+            s = xf.AddScaleOp()
+        desired = [t, o, s]
+        cur = xf.GetOrderedXformOps()
+        if [op.GetAttr().GetPath() for op in cur] != [op.GetAttr().GetPath() for op in desired]:
+            xf.SetXformOpOrder(desired)
 
-        base_prim = self.base_stage.GetPrimAtPath(path)
-        if not base_prim or not base_prim.IsValid():
-            return
-        if not UsdGeom.Xformable(base_prim):
+    def _author_xform(self, prim_path: str, obj):
+        """Author TRS from Blender object to the local USD stage."""
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
             return
 
         loc, rot_quat, scl = _compute_local_trs(obj)
 
-        with Usd.EditContext(self.stage, self.delta_layer):
-            prim = self.stage.GetPrimAtPath(path)
-            if not prim or not prim.IsValid():
-                return
+        xf = UsdGeom.Xformable(prim)
+        from openusdconnect.event_apply import find_op
+        t_op = find_op(xf, "translate")
+        o_op = find_op(xf, "orient")
+        s_op = find_op(xf, "scale")
 
-            xf = UsdGeom.Xformable(prim)
-            if not xf:
-                return
-
-            t_op = self._get_or_add_op(xf, UsdGeom.XformOp.TypeTranslate)
-            o_op = self._get_or_add_op(xf, UsdGeom.XformOp.TypeOrient)
-            s_op = self._get_or_add_op(xf, UsdGeom.XformOp.TypeScale)
-
+        if t_op:
             t_op.Set(Gf.Vec3d(loc.x, loc.y, loc.z))
+        if o_op:
             o_op.Set(Gf.Quatf(rot_quat.w, Gf.Vec3f(rot_quat.x, rot_quat.y, rot_quat.z)))
+        if s_op:
             s_op.Set(Gf.Vec3d(scl.x, scl.y, scl.z))
 
-        self._pending_paths.add(path)
-        self._dirty = True
+    def _detect_deletions(self):
+        """Check stored object references for deleted objects (ReferenceError).
 
-    def export_delta_as_string(self) -> str:
-        return self.delta_layer.ExportToString()
+        For deleted objects, removes the prim from the local stage which
+        triggers NoticeEmitter deletion detection.
+        """
+        deleted_prims = []
+        for pp, obj_ref in list(self._prim_refs.items()):
+            try:
+                _ = obj_ref.name
+            except ReferenceError:
+                deleted_prims.append(pp)
 
-    def clear_delta(self):
-        self.delta_layer.Clear()
-        self._pending_paths.clear()
-        self._dirty = False
+        for prim_path in deleted_prims:
+            self._used_prim_paths.discard(prim_path)
+            self._prim_refs.pop(prim_path, None)
+            self._last_matrix.pop(prim_path, None)
+            # Remove prim from stage — triggers ObjectsChanged notice
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                prim.SetActive(False)
+            LOG.info("Object deleted: deactivating prim %s", prim_path)
 
-    def mark_for_emit(self):
-        now = time.time()
-        self._next_emit_time = max(self._next_emit_time, now + self.coalesce_seconds)
+    def on_depsgraph_update(self, updates: list):
+        """Main entry: author depsgraph changes to the local USD stage.
 
-    def on_depsgraph_update(self, depsgraph):
-        if not self.enabled:
+        This triggers Usd.Notice.ObjectsChanged, which the NoticeEmitter
+        picks up to build protocol events.
+        """
+        if not self.enabled or self._applying_remote:
             return
-        self.on_depsgraph_update_from_list(list(depsgraph.updates))
 
-    def on_depsgraph_update_from_list(self, updates):
-        """Process a pre-collected list of depsgraph updates."""
-        if not self.enabled:
-            return
-        any_change = False
+        # 1. Deletion detection
+        self._detect_deletions()
+
+        # 2. Process each updated object
         for update in updates:
             id_data = update.id
             if not isinstance(id_data, bpy.types.Object):
                 continue
             obj = id_data
-            if "usd_prim_path" not in obj:
+
+            prim_path, type_name = self._resolve_prim_path(obj)
+            if not prim_path:
                 continue
+
+            # Store object reference for deletion detection
+            self._prim_refs[prim_path] = obj
+
+            # Check if matrix actually changed
             m = tuple(v for row in obj.matrix_world for v in row)
             last = self._last_matrix.get(obj.name)
-            if last != m:
-                self._last_matrix[obj.name] = m
-                self.author_xform_from_object(obj)
-                any_change = True
-        if any_change:
-            self.mark_for_emit()
+            if last == m and self.stage.GetPrimAtPath(prim_path):
+                continue
+            self._last_matrix[obj.name] = m
 
-    def on_timer_tick(self):
-        if not self.enabled:
-            return None
-        return 0.1
+            # Ensure ancestors exist (structural — OUTSIDE ChangeBlock)
+            self._ensure_ancestors_on_stage(obj)
+
+            # Ensure prim exists on stage
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                tn = type_name if type_name else obj.get("usd_type_name", "Xform")
+                self.stage.DefinePrim(prim_path, tn)
+
+            # ALWAYS ensure canonical xform ops before authoring
+            self._ensure_xform_ops(prim_path)
+
+            # Author TRS
+            self._author_xform(prim_path, obj)
+
+    def send_rename(self, old_path: str, new_name: str):
+        """Rename prim on local stage via NamespaceEditor.
+
+        Triggers ObjectsChanged notice, which NoticeEmitter picks up
+        as a rename event.
+        """
+        prim = self.stage.GetPrimAtPath(old_path)
+        if not prim or not prim.IsValid():
+            return
+
+        parent = old_path.rsplit("/", 1)[0]
+        new_path = f"{parent}/{new_name}"
+
+        editor = Usd.NamespaceEditor(self.stage)
+        editor.RenamePrim(prim, new_name)
+        if editor.ApplyEdits():
+            # Update internal caches
+            if old_path in self._prim_refs:
+                self._prim_refs[new_path] = self._prim_refs.pop(old_path)
+            self._used_prim_paths.discard(old_path)
+            self._used_prim_paths.add(new_path)
+
+    def export_delta_as_string(self) -> str:
+        """For Emit Diff feature — export session layer as USDA string."""
+        return self.delta_layer.ExportToString()
+
+    def clear_delta(self):
+        """Clear the session layer delta."""
+        self.delta_layer.Clear()
 
 
 # ---------------------------------------------------------------------------
-# Network Emitter — sends captured edits to the server
+# NetworkSender — thin TCP sender for protocol events
 # ---------------------------------------------------------------------------
-class _NetworkEmitter:
-    """Wraps a TCP connection and sends TRS events built from Blender depsgraph changes.
+class NetworkSender:
+    """Thin TCP connection for sending protocol events to the server."""
 
-    Caches last-sent TRS per prim and only sends:
-    - ensure_prim + ensure_xform_ops on first encounter
-    - set_xform_trs with only the changed fields (partial diff)
-    """
-
-    EPS = 1e-7  # tolerance for float comparison
-
-    def __init__(self, host: str, port: int, client_id: str = "blender-emitter", hz: float = 60.0,
-                 auto_track: bool = False):
+    def __init__(self, host: str, port: int, client_id: str = "blender-emitter"):
         self.host = host
         self.port = port
         self.client_id = client_id
-        self.hz = hz
-        self.auto_track = auto_track
         self.sock: Optional[socket.socket] = None
-        self._applying_remote = False  # feedback loop guard
-        self._known_prims: set = set()  # prims we've sent ensure_prim for + deletion detection
-        self._last_sent: dict = {}  # prim_path -> {"t": [...], "r": [...], "s": [...]}
-        self._used_prim_paths: set = set()  # all prim paths in scene (for collision avoidance)
-        self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
 
         # Lazy import to support vendored openusdconnect
         from openusdconnect.protocol import make_hello, make_txn, make_quit
@@ -408,16 +522,7 @@ class _NetworkEmitter:
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
         self._send_line(self.sock, self._make_hello("emitter"))
-        self._known_prims.clear()
-        self._last_sent.clear()
-        self._prim_refs.clear()
-        # Seed used-paths from scene (one-time O(N) scan, then O(1) lookups)
-        self._used_prim_paths = {
-            obj.get("usd_prim_path")
-            for obj in bpy.data.objects
-            if obj.get("usd_prim_path")
-        }
-        print(f"[USD Connect] Network emitter connected to {self.host}:{self.port}")
+        print(f"[USD Connect] Network sender connected to {self.host}:{self.port}")
 
     def disconnect(self):
         if self.sock:
@@ -431,9 +536,6 @@ class _NetworkEmitter:
                 pass
             self.sock = None
 
-    def set_applying_remote(self, value: bool):
-        self._applying_remote = value
-
     def send_events(self, events: list):
         if not self.sock or not events:
             return
@@ -444,227 +546,56 @@ class _NetworkEmitter:
             LOG.exception("Failed to send events")
             self.disconnect()
 
-    def _ensure_ancestors(self, obj) -> list:
-        """Emit ensure_prim + ensure_xform_ops + set_xform_trs for any
-        ancestors of *obj* that haven't been sent yet.
-
-        Walks from obj.parent upward collecting unknown ancestors, then
-        emits events top-down so the receiver builds the hierarchy in order.
-        """
-        missing = []
-        ancestor = obj.parent
-        while ancestor is not None:
-            pp = ancestor.get("usd_prim_path")
-            if not pp or pp in self._known_prims:
-                break
-            missing.append((ancestor, pp))
-            ancestor = ancestor.parent
-
-        if not missing:
-            return []
-
-        events = []
-        # Reverse so we emit root-most ancestor first
-        for anc_obj, anc_path in reversed(missing):
-            tn = anc_obj.get("usd_type_name", "Xform")
-            events.append({"k": "ensure_prim", "prim": anc_path, "typeName": tn})
-            events.append({"k": "ensure_xform_ops", "prim": anc_path})
-            self._known_prims.add(anc_path)
-
-            # Compute and send TRS so receiver has correct ancestor state
-            loc, rot_quat, scl = _compute_local_trs(anc_obj)
-            t = [loc.x, loc.y, loc.z]
-            r = [rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z]
-            s = [scl.x, scl.y, scl.z]
-            events.append({
-                "k": "set_xform_trs", "prim": anc_path,
-                "fields": ["t", "r", "s"], "t": t, "r": r, "s": s,
-            })
-            self._last_sent[anc_path] = {"t": t, "r": r, "s": s}
-            self._prim_refs[anc_path] = anc_obj
-
-        return events
-
-    def build_events_from_depsgraph(self, depsgraph) -> list:
-        """Build protocol events from Blender depsgraph updates."""
-        return self.build_events_from_updates(list(depsgraph.updates))
-
-    def build_events_from_updates(self, updates) -> list:
-        """Build protocol events from a pre-collected list of depsgraph updates.
-
-        Only sends ensure_prim/ensure_xform_ops once per prim.
-        Marks observed prims active and only sends changed TRS fields
-        (partial diff against last-sent cache).
-        Detects deleted objects and emits deactivate_prim events.
-        """
-        if self._applying_remote:
-            return []
-
-        events = []
-
-        # Deletion detection: check if stored object references are still valid.
-        # Blender raises ReferenceError when accessing a deleted object's properties.
-        deleted_prims = []
-        for pp, obj_ref in list(self._prim_refs.items()):
-            try:
-                _ = obj_ref.name
-            except ReferenceError:
-                deleted_prims.append(pp)
-        for prim_path in deleted_prims:
-            self._known_prims.discard(prim_path)
-            self._used_prim_paths.discard(prim_path)
-            self._last_sent.pop(prim_path, None)
-            self._prim_refs.pop(prim_path, None)
-            events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
-            LOG.info("Object deleted: deactivate_prim %s", prim_path)
-
-        for update in updates:
-            id_data = update.id
-            if not isinstance(id_data, bpy.types.Object):
-                continue
-            obj = id_data
-            # Check custom property first, fall back to in-memory tracking
-            # (custom properties set from depsgraph callbacks may not persist)
-            prim_path = obj.get("usd_prim_path")
-            type_name = None  # set by auto-track branch if needed
-            if not prim_path:
-                # Reverse-lookup: is this object already tracked by reference?
-                for pp, ref in self._prim_refs.items():
-                    if ref is obj:
-                        prim_path = pp
-                        break
-            if not prim_path:
-                if not self.auto_track:
-                    continue
-                # Only auto-track if the object is parented under a
-                # tracked prim (i.e. under the imported USD hierarchy).
-                # This avoids capturing stray scene objects and respects
-                # the USD prim tree structure.
-                parent = getattr(obj, "parent", None)
-                if parent is None:
-                    continue
-                parent_prim = parent.get("usd_prim_path")
-                if not parent_prim:
-                    continue
-                # Derive prim path from the parent's USD path,
-                # disambiguating if the path is already taken (O(1) lookup).
-                usd_name = sanitize_usd_name(obj.name)
-                prim_path = f"{parent_prim}/{usd_name}"
-                if prim_path in self._used_prim_paths:
-                    i = 1
-                    while f"{prim_path}_{i}" in self._used_prim_paths:
-                        i += 1
-                    prim_path = f"{prim_path}_{i}"
-                self._used_prim_paths.add(prim_path)
-                type_name = _infer_usd_type(obj)
-                # Defer custom-property writes to a timer callback — writes
-                # inside depsgraph_update_post are discarded by Blender.
-                # Look up by name to avoid stale-reference issues.
-                _deferred_set_props(obj.name, prim_path, type_name)
-                LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
-
-            # Store object reference for deletion detection and re-tracking
-            self._prim_refs[prim_path] = obj
-
-            # Compute local transform
-            loc, rot_quat, scl = _compute_local_trs(obj)
-
-            t = [loc.x, loc.y, loc.z]
-            r = [rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z]
-            s = [scl.x, scl.y, scl.z]
-
-            # Only send structural events on first encounter
-            first_encounter = prim_path not in self._known_prims
-            if first_encounter:
-                # Ensure ancestors are emitted first (top-down) so the
-                # receiver has correct parent state before child events.
-                events.extend(self._ensure_ancestors(obj))
-                # Prefer the already-computed type_name (from auto-track) over the
-                # custom property, which may not have been written yet (deferred).
-                tn = type_name if type_name else obj.get("usd_type_name", "Xform")
-                events.append({"k": "ensure_prim", "prim": prim_path, "typeName": tn})
-                events.append({"k": "ensure_xform_ops", "prim": prim_path})
-                self._known_prims.add(prim_path)
-
-            # Diff against last-sent values
-            last = self._last_sent.get(prim_path, {})
-            fields = []
-            payload = {"k": "set_xform_trs", "prim": prim_path, "fields": fields}
-
-            if not near_list(t, last.get("t"), self.EPS):
-                fields.append("t")
-                payload["t"] = t
-            if not near_list(r, last.get("r"), self.EPS):
-                fields.append("r")
-                payload["r"] = r
-            if not near_list(s, last.get("s"), self.EPS):
-                fields.append("s")
-                payload["s"] = s
-
-            if fields:
-                events.append(payload)
-                self._last_sent[prim_path] = {"t": t, "r": r, "s": s}
-
-            # NOTE: visibility tracking removed from depsgraph handler.
-            # Both hide_get() and hide_viewport are unreliable during depsgraph
-            # callbacks.  Visibility sync should be done via a separate mechanism
-            # (e.g. timer or explicit operator) in the future.
-
-        return events
-
-    def send_rename(self, prim_path: str, new_name: str):
-        """Send a rename_prim event and update internal caches."""
-        if not self.sock:
-            return
-        # Update caches: old_path -> new_path
-        parent = prim_path.rsplit("/", 1)[0]
-        new_path = f"{parent}/{new_name}"
-
-        if prim_path in self._known_prims:
-            self._known_prims.discard(prim_path)
-            self._known_prims.add(new_path)
-        if prim_path in self._last_sent:
-            self._last_sent[new_path] = self._last_sent.pop(prim_path)
-        self._used_prim_paths.discard(prim_path)
-        self._used_prim_paths.add(new_path)
-        if prim_path in self._prim_refs:
-            self._prim_refs[new_path] = self._prim_refs.pop(prim_path)
-
-        self.send_events([{"k": "rename_prim", "prim": prim_path, "new_name": new_name}])
 
 
 # ---------------------------------------------------------------------------
-# Module-level engine / emitter state
+# Module-level state
 # ---------------------------------------------------------------------------
-_ENGINE: Optional[_UsdDeltaEngine] = None
-_NET_EMITTER: Optional[_NetworkEmitter] = None
+class _State:
+    """Encapsulates the runtime state for the capture subsystem.
+
+    Holds the three collaborating objects that form the emit pipeline:
+    author -> notice_emitter -> sender.
+    """
+    __slots__ = ("author", "notice_emitter", "sender")
+
+    def __init__(self):
+        self.author: Optional[BlenderStageAuthor] = None
+        self.notice_emitter = None   # Optional[NoticeEmitter]
+        self.sender: Optional[NetworkSender] = None
+
+
+_state = _State()
 
 
 def set_emitter_feedback_guard(value: bool):
-    """Public API for setting the emitter's feedback-loop guard."""
-    if _NET_EMITTER is not None:
-        _NET_EMITTER.set_applying_remote(value)
+    """Set the feedback-loop guard to prevent echo during remote event application."""
+    if _state.notice_emitter is not None:
+        if value:
+            _state.notice_emitter.suppress()
+        else:
+            _state.notice_emitter.unsuppress()
+    if _state.author is not None:
+        _state.author._applying_remote = value
 
 
-def _reset_engine():
-    global _ENGINE
-    if _ENGINE is not None:
+def _reset_stage_author():
+    if _state.author is not None:
         try:
-            _ENGINE.enabled = False
+            _state.author.enabled = False
         except Exception:
             pass
-    _ENGINE = None
+    _state.author = None
+    _state.notice_emitter = None
 
 
-def _get_engine(context) -> _UsdDeltaEngine:
-    global _ENGINE
-    if _ENGINE is None:
+def _get_stage_author(context) -> BlenderStageAuthor:
+    if _state.author is None:
         scene = context.scene
-        _ENGINE = _UsdDeltaEngine(
+        _state.author = BlenderStageAuthor(
             base_usd_path=scene.usd_connect_base_usd_path,
-            coalesce_seconds=scene.usd_connect_coalesce_seconds,
         )
-    return _ENGINE
+    return _state.author
 
 
 # ---------------------------------------------------------------------------
@@ -672,8 +603,6 @@ def _get_engine(context) -> _UsdDeltaEngine:
 # ---------------------------------------------------------------------------
 def _depsgraph_handler(scene, depsgraph):
     try:
-        # Collect updates into a list so we can iterate multiple times
-        # (depsgraph.updates may only be iterable once per callback)
         updates = list(depsgraph.updates)
 
         has_object_updates = any(
@@ -683,18 +612,14 @@ def _depsgraph_handler(scene, depsgraph):
         if not has_object_updates:
             return
 
-        # Local capture
-        if _ENGINE is not None and _ENGINE.enabled:
-            _ENGINE.on_depsgraph_update_from_list(updates)
-
-        # Network emitter
-        if _NET_EMITTER is not None and _NET_EMITTER.sock is not None:
-            if not _NET_EMITTER._applying_remote:
-                # Sync auto_track live from scene (toggle takes effect without reconnecting)
-                _NET_EMITTER.auto_track = getattr(scene, "usd_connect_auto_track", False)
-                events = _NET_EMITTER.build_events_from_updates(updates)
+        if _state.author is not None and _state.author.enabled:
+            _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
+            _state.author.on_depsgraph_update(updates)
+            if _state.notice_emitter is not None and _state.sender is not None and _state.sender.sock is not None:
+                events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
                 if events:
-                    _NET_EMITTER.send_events(events)
+                    _state.sender.send_events(events)
+
     except Exception as e:
         print("[USD Connect] depsgraph handler error:", e)
         import traceback
@@ -703,9 +628,11 @@ def _depsgraph_handler(scene, depsgraph):
 
 def _timer_tick():
     try:
-        if _ENGINE is None:
+        if _state.author is None:
             return None
-        return _ENGINE.on_timer_tick()
+        if not _state.author.enabled:
+            return None
+        return 0.1
     except Exception as e:
         print("[USD Connect] timer error:", e)
         return 0.5
@@ -754,18 +681,18 @@ class USD_CONNECT_OT_start_capture(bpy.types.Operator):
         if not PXR_AVAILABLE:
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
-        _reset_engine()
+        _reset_stage_author()
         try:
-            eng = _get_engine(context)
+            author = _get_stage_author(context)
         except Exception as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
-        eng.enabled = True
-        eng.initialize_baseline()
+        author.enabled = True
+        author.initialize_baseline()
         _remove_handler()
         bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
         bpy.app.timers.register(_timer_tick, first_interval=0.1)
-        self.report({"INFO"}, f"Capture started (base: {eng.base_usd_path})")
+        self.report({"INFO"}, f"Capture started (base: {author.base_usd_path})")
         return {"FINISHED"}
 
 
@@ -774,8 +701,8 @@ class USD_CONNECT_OT_stop_capture(bpy.types.Operator):
     bl_label = "Stop Capture"
 
     def execute(self, context):
-        if _ENGINE is not None:
-            _ENGINE.enabled = False
+        if _state.author is not None:
+            _state.author.enabled = False
         _remove_handler()
         self.report({"INFO"}, "Capture stopped")
         return {"FINISHED"}
@@ -790,10 +717,10 @@ class USD_CONNECT_OT_emit_diff(bpy.types.Operator):
         if not PXR_AVAILABLE:
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
-        if _ENGINE is None:
-            self.report({"ERROR"}, "Engine not running. Start capture first.")
+        if _state.author is None:
+            self.report({"ERROR"}, "Capture not running. Start capture first.")
             return {"CANCELLED"}
-        payload = _ENGINE.export_delta_as_string()
+        payload = _state.author.export_delta_as_string()
         print("\n========== USD DELTA (SESSION LAYER) BEGIN ==========")
         print(payload)
         print("=========== USD DELTA (SESSION LAYER) END ===========\n")
@@ -818,10 +745,10 @@ class USD_CONNECT_OT_clear_diff(bpy.types.Operator):
     bl_label = "Clear Diff"
 
     def execute(self, context):
-        if _ENGINE is None:
-            self.report({"ERROR"}, "Engine not running.")
+        if _state.author is None:
+            self.report({"ERROR"}, "Capture not running.")
             return {"CANCELLED"}
-        _ENGINE.clear_delta()
+        _state.author.clear_delta()
         self.report({"INFO"}, "Delta layer cleared.")
         return {"FINISHED"}
 
@@ -832,20 +759,29 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
     bl_description = "Connect to sync server and start sending transform events"
 
     def execute(self, context):
-        global _NET_EMITTER
         scene = context.scene
-        if _NET_EMITTER is not None and _NET_EMITTER.sock is not None:
+        if _state.sender is not None and _state.sender.sock is not None:
             self.report({"INFO"}, "Already connected")
             return {"CANCELLED"}
         try:
-            _NET_EMITTER = _NetworkEmitter(
+            if _state.author is None:
+                _state.author = BlenderStageAuthor(
+                    base_usd_path=scene.usd_connect_base_usd_path,
+                )
+            _state.author.enabled = True
+            _state.author.auto_track = scene.usd_connect_auto_track
+            _state.author.initialize_baseline()
+            _state.author.seed_used_paths()
+
+            from openusdconnect.emitter import NoticeEmitter
+            _state.notice_emitter = NoticeEmitter(_state.author.stage)
+
+            _state.sender = NetworkSender(
                 host=scene.usd_connect_emit_host,
                 port=scene.usd_connect_emit_port,
-                hz=scene.usd_connect_emit_hz,
-                auto_track=scene.usd_connect_auto_track,
             )
-            _NET_EMITTER.connect()
-            # Ensure depsgraph handler is registered
+            _state.sender.connect()
+
             _remove_handler()
             bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
             scene.usd_connect_net_emitter_running = True
@@ -861,10 +797,11 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
     bl_label = "Disconnect Emitter"
 
     def execute(self, context):
-        global _NET_EMITTER
-        if _NET_EMITTER is not None:
-            _NET_EMITTER.disconnect()
-            _NET_EMITTER = None
+        if _state.sender is not None:
+            _state.sender.disconnect()
+            _state.sender = None
+        _state.notice_emitter = None
+        _state.author = None
         context.scene.usd_connect_net_emitter_running = False
         self.report({"INFO"}, "Emitter disconnected")
         return {"FINISHED"}
@@ -910,8 +847,12 @@ class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
         parent = old_path.rsplit("/", 1)[0]
         new_path = f"{parent}/{new_name}"
 
-        if _NET_EMITTER is not None and _NET_EMITTER.sock is not None:
-            _NET_EMITTER.send_rename(old_path, new_name)
+        if _state.author is not None:
+            _state.author.send_rename(old_path, new_name)
+            if _state.notice_emitter is not None and _state.sender is not None and _state.sender.sock is not None:
+                events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
+                if events:
+                    _state.sender.send_events(events)
 
         obj["usd_prim_path"] = new_path
         self.report({"INFO"}, f"Renamed: {old_path} → {new_path}")
@@ -954,11 +895,10 @@ def register():
 
 def unregister():
     _remove_handler()
-    _reset_engine()
-    global _NET_EMITTER
-    if _NET_EMITTER is not None:
-        _NET_EMITTER.disconnect()
-        _NET_EMITTER = None
+    _reset_stage_author()
+    if _state.sender is not None:
+        _state.sender.disconnect()
+        _state.sender = None
     for c in reversed(_CAPTURE_CLASSES):
         bpy.utils.unregister_class(c)
     for prop_name in (

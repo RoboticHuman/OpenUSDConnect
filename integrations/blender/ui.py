@@ -43,17 +43,18 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "usd_connect_base_usd_path")
 
         from . import capture
-        running = bool(capture._ENGINE and capture._ENGINE.enabled)
+        author = capture._state.author
+        running = bool(author and author.enabled)
         row = box.row()
         if running:
             row.operator("usd_connect.stop_capture", icon="PAUSE")
         else:
             row.operator("usd_connect.start_capture", icon="PLAY")
 
-        if capture._ENGINE is not None:
+        if author is not None:
             sub = box.column(align=True)
-            sub.label(text=f"Base: {capture._ENGINE.base_usd_path}")
-            sub.label(text=f"Buffered prims: {len(capture._ENGINE._pending_paths)}")
+            sub.label(text=f"Base: {author.base_usd_path}")
+            sub.label(text=f"Tracked prims: {len(author._prim_refs)}")
 
         row = box.row(align=True)
         row.operator("usd_connect.emit_diff", icon="EXPORT")

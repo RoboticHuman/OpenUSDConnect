@@ -1,12 +1,14 @@
 """Download and set up a portable Blender for testing.
 
 Usage:
-    uv run python scripts/setup_blender_test.py              # latest stable (4.5.7)
-    uv run python scripts/setup_blender_test.py --version 4.4.3
+    uv run python scripts/setup_blender_test.py              # latest stable
+    uv run python scripts/setup_blender_test.py --lts        # latest LTS
+    uv run python scripts/setup_blender_test.py --version 5.0.1
     uv run python scripts/setup_blender_test.py --cleanup     # remove downloaded Blender
 
-Downloads the portable zip from download.blender.org, extracts to .blender/
-in the repo root, and writes blender.test.cfg so pytest picks it up.
+Resolves the latest version dynamically from download.blender.org.
+Downloads the portable zip, extracts to .blender/ in the repo root,
+and writes blender.test.cfg so pytest picks it up.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import argparse
 import os
 import pathlib
 import platform
+import re
 import shutil
 import sys
 import urllib.request
@@ -25,9 +28,78 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 BLENDER_DIR = REPO_ROOT / ".blender"
 CFG_FILE = REPO_ROOT / "blender.test.cfg"
 
-# download.blender.org URL pattern
 BASE_URL = "https://download.blender.org/release"
-DEFAULT_VERSION = "4.5.7"
+FALLBACK_VERSION = "5.0.1"
+
+# LTS minor versions (from blender.org/download/lts/).
+# Blender declares specific releases as LTS — not a simple even/odd rule.
+_KNOWN_LTS_MINORS = {"2.83", "2.93", "3.3", "3.6", "4.2", "4.5"}
+
+
+def _fetch_index(url: str) -> str:
+    """Fetch an HTML directory listing."""
+    req = urllib.request.Request(url, headers={"User-Agent": "OpenUSDConnect-Test/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _list_release_dirs() -> list[str]:
+    """Return sorted list of major.minor versions from download.blender.org/release/.
+
+    E.g. ["3.6", "4.0", "4.1", "4.2", "4.3", "4.4", "4.5", "5.0"]
+    """
+    html = _fetch_index(f"{BASE_URL}/")
+    dirs = re.findall(r'href="Blender(\d+\.\d+)/?"', html)
+    dirs = sorted(set(dirs), key=lambda v: tuple(int(x) for x in v.split(".")))
+    return dirs
+
+
+def _list_patch_versions(major_minor: str) -> list[str]:
+    """Return sorted list of patch versions available for a major.minor release.
+
+    Looks for files matching the current platform to determine available versions.
+    E.g. for "5.0" on windows-x64: ["5.0.0", "5.0.1"]
+    """
+    os_name, arch, ext = _detect_platform()
+    html = _fetch_index(f"{BASE_URL}/Blender{major_minor}/")
+    pattern = rf'href="blender-(\d+\.\d+\.\d+)-{os_name}-{arch}\.{ext}"'
+    versions = re.findall(pattern, html)
+    versions = sorted(set(versions), key=lambda v: tuple(int(x) for x in v.split(".")))
+    return versions
+
+
+def resolve_latest(lts: bool = False) -> str:
+    """Resolve the latest Blender version from download.blender.org.
+
+    Args:
+        lts: If True, restrict to known LTS minor versions.
+
+    Returns:
+        Full version string like "5.0.1" or "4.5.7".
+    """
+    try:
+        dirs = _list_release_dirs()
+    except Exception as e:
+        print(f"Warning: could not fetch release index ({e}), using fallback {FALLBACK_VERSION}")
+        return FALLBACK_VERSION
+
+    if lts:
+        dirs = [d for d in dirs if d in _KNOWN_LTS_MINORS]
+        if not dirs:
+            print(f"Warning: no LTS versions found, using fallback {FALLBACK_VERSION}")
+            return FALLBACK_VERSION
+
+    # Try from newest to oldest until we find one with downloadable patches
+    for major_minor in reversed(dirs):
+        try:
+            patches = _list_patch_versions(major_minor)
+            if patches:
+                return patches[-1]  # latest patch
+        except Exception:
+            continue
+
+    print(f"Warning: could not resolve any version, using fallback {FALLBACK_VERSION}")
+    return FALLBACK_VERSION
 
 
 def _detect_platform() -> tuple[str, str, str]:
@@ -53,7 +125,7 @@ def _detect_platform() -> tuple[str, str, str]:
         raise RuntimeError(f"Unsupported platform: {system}")
 
 
-def _build_url(version: str) -> str:
+def _build_url(version: str) -> tuple[str, str]:
     """Build the download URL for a given Blender version."""
     os_name, arch, ext = _detect_platform()
     major_minor = ".".join(version.split(".")[:2])
@@ -127,7 +199,7 @@ def download_and_extract(version: str) -> pathlib.Path:
 
 
 def _find_extracted_dir(version: str) -> pathlib.Path | None:
-    """Find the extracted Blender directory (e.g. blender-4.5.7-windows-x64)."""
+    """Find the extracted Blender directory (e.g. blender-5.0.1-windows-x64)."""
     for item in BLENDER_DIR.iterdir():
         if item.is_dir() and item.name.startswith(f"blender-{version}"):
             return item
@@ -167,10 +239,11 @@ def main():
     ap = argparse.ArgumentParser(
         description="Download portable Blender for testing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""
+        epilog="""
 Examples:
-  uv run python scripts/setup_blender_test.py
-  uv run python scripts/setup_blender_test.py --version 4.4.3
+  uv run python scripts/setup_blender_test.py              # latest stable
+  uv run python scripts/setup_blender_test.py --lts        # latest LTS
+  uv run python scripts/setup_blender_test.py --version 5.0.1
   uv run python scripts/setup_blender_test.py --cleanup
 
 Files:
@@ -179,8 +252,12 @@ Files:
 """,
     )
     ap.add_argument(
-        "--version", default=DEFAULT_VERSION,
-        help=f"Blender version to download (default: {DEFAULT_VERSION})",
+        "--version", default=None,
+        help="Blender version to download (omit to auto-detect latest)",
+    )
+    ap.add_argument(
+        "--lts", action="store_true",
+        help="Download the latest LTS version instead of the latest stable",
     )
     ap.add_argument(
         "--cleanup", action="store_true",
@@ -192,7 +269,16 @@ Files:
         cleanup()
         return
 
-    exe_path = download_and_extract(args.version)
+    if args.version:
+        version = args.version
+        print(f"Using specified version: {version}")
+    else:
+        label = "LTS" if args.lts else "stable"
+        print(f"Resolving latest {label} version from download.blender.org...")
+        version = resolve_latest(lts=args.lts)
+        print(f"Resolved: Blender {version}")
+
+    exe_path = download_and_extract(version)
     write_config(exe_path)
 
     print(f"\nReady! Run tests with:")

@@ -96,7 +96,7 @@ def test_emitter_server_receiver_integration(blender_exe, tmp_path):
 
 
 def test_autotrack_emitter_to_receiver(blender_exe, tmp_path):
-    """Auto-tracking: bpy.ops create -> depsgraph -> _NetworkEmitter -> server -> receiver.
+    """Auto-tracking: bpy.ops create -> depsgraph -> BlenderStageAuthor+NoticeEmitter+NetworkSender -> server -> receiver.
 
     Tests the real addon capture path with auto_track=True.
     """
