@@ -90,6 +90,90 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
         attr.Set(value)
 
 
+def _apply_set_xform_trs(stage: Usd.Stage, ev: dict) -> None:
+    prim_path = ev["prim"]
+    fields = ev.get("fields", [])
+    _, _, t_op, o_op, s_op = ensure_canonical_ops(stage, prim_path)
+
+    if "t" in fields:
+        x, y, z = ev["t"]
+        t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
+    if "r" in fields:
+        o_op.Set(quatf_from_wxyz(ev["r"]))
+    if "s" in fields:
+        x, y, z = ev["s"]
+        s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
+
+
+def _apply_rename_prim(stage: Usd.Stage, ev: dict) -> None:
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if prim and prim.IsValid():
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, ev["new_name"])
+        editor.ApplyEdits()
+
+
+def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if prim and prim.IsValid():
+        imageable = UsdGeom.Imageable(prim)
+        vis_value = "inherited" if ev.get("visible", True) else "invisible"
+        imageable.GetVisibilityAttr().Set(vis_value)
+
+
+def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if prim and prim.IsValid():
+        for attr_name, attr_value in ev.get("attrs", {}).items():
+            _set_gprim_attr(prim, attr_name, attr_value)
+
+
+def _apply_set_reference(stage: Usd.Stage, ev: dict) -> None:
+    prim_path = ev["prim"]
+    prim = get_or_define_prim(stage, prim_path)
+    refs = prim.GetReferences()
+    refs.ClearReferences()
+
+    for ref_entry in ev.get("refs", []):
+        asset_path = ref_entry.get("asset_path", "")
+        prim_path_ref = ref_entry.get("prim_path", "")
+        if asset_path:
+            if prim_path_ref:
+                refs.AddReference(asset_path, prim_path_ref)
+            else:
+                refs.AddReference(asset_path)
+        elif prim_path_ref:
+            refs.AddInternalReference(Sdf.Path(prim_path_ref))
+
+
+def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
+    prim_path = ev["prim"]
+    prim = get_or_define_prim(stage, prim_path)
+    payloads = prim.GetPayloads()
+    payloads.ClearPayloads()
+
+    for entry in ev.get("payloads", []):
+        asset_path = entry.get("asset_path", "")
+        prim_path_ref = entry.get("prim_path", "")
+        if asset_path:
+            if prim_path_ref:
+                payloads.AddPayload(asset_path, prim_path_ref)
+            else:
+                payloads.AddPayload(asset_path)
+        elif prim_path_ref:
+            payloads.AddInternalPayload(Sdf.Path(prim_path_ref))
+
+
+_EVENT_DISPATCH: dict[str, callable] = {
+    "set_xform_trs": _apply_set_xform_trs,
+    "rename_prim": _apply_rename_prim,
+    "set_visibility": _apply_set_visibility,
+    "set_gprim_attrs": _apply_set_gprim_attrs,
+    "set_reference": _apply_set_reference,
+    "set_payload": _apply_set_payload,
+}
+
+
 def apply_event(stage: Usd.Stage, ev: dict) -> None:
     """Apply a single event dict to a USD stage.
 
@@ -107,30 +191,11 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
         ensure_canonical_ops(stage, ev["prim"])
         return
 
-    if k == "set_xform_trs":
-        prim_path = ev["prim"]
-        fields = ev.get("fields", [])
-        _, _, t_op, o_op, s_op = ensure_canonical_ops(stage, prim_path)
-
-        if "t" in fields:
-            x, y, z = ev["t"]
-            t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
-
-        if "r" in fields:
-            o_op.Set(quatf_from_wxyz(ev["r"]))
-
-        if "s" in fields:
-            x, y, z = ev["s"]
-            s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
-        return
-
     if k == "set_xform_matrices":
-        # Diagnostic/optional — server stores canonical TRS, not matrices
         return
 
     if k == "delete_prim":
-        prim_path = ev["prim"]
-        stage.RemovePrim(prim_path)
+        stage.RemovePrim(ev["prim"])
         return
 
     if k == "deactivate_prim":
@@ -139,47 +204,9 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
             prim.SetActive(ev.get("active", False))
         return
 
-    if k == "rename_prim":
-        prim = stage.GetPrimAtPath(ev["prim"])
-        if prim and prim.IsValid():
-            editor = Usd.NamespaceEditor(stage)
-            editor.RenamePrim(prim, ev["new_name"])
-            editor.ApplyEdits()
-        return
-
-    if k == "set_visibility":
-        prim = stage.GetPrimAtPath(ev["prim"])
-        if prim and prim.IsValid():
-            imageable = UsdGeom.Imageable(prim)
-            vis_value = "inherited" if ev.get("visible", True) else "invisible"
-            imageable.GetVisibilityAttr().Set(vis_value)
-        return
-
-    if k == "set_gprim_attrs":
-        prim = stage.GetPrimAtPath(ev["prim"])
-        if prim and prim.IsValid():
-            for attr_name, attr_value in ev.get("attrs", {}).items():
-                _set_gprim_attr(prim, attr_name, attr_value)
-        return
-
-    if k == "set_reference":
-        prim_path = ev["prim"]
-        prim = get_or_define_prim(stage, prim_path)
-        refs = prim.GetReferences()
-        refs.ClearReferences()
-
-        for ref_entry in ev.get("refs", []):
-            asset_path = ref_entry.get("asset_path", "")
-            prim_path_ref = ref_entry.get("prim_path", "")
-            if asset_path:
-                if prim_path_ref:
-                    refs.AddReference(asset_path, prim_path_ref)
-                else:
-                    refs.AddReference(asset_path)
-            elif prim_path_ref:
-                # Same-file (internal) reference — no asset path
-                refs.AddInternalReference(Sdf.Path(prim_path_ref))
-        return
+    handler = _EVENT_DISPATCH.get(k)
+    if handler is not None:
+        handler(stage, ev)
 
 
 def apply_events(stage: Usd.Stage, events: list) -> None:
@@ -187,7 +214,7 @@ def apply_events(stage: Usd.Stage, events: list) -> None:
     are applied first outside a ChangeBlock, then value-setting events are
     applied inside a ChangeBlock for atomicity."""
     # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
-    structural = {"ensure_prim", "ensure_xform_ops", "set_reference"}
+    structural = {"ensure_prim", "ensure_xform_ops", "set_reference", "set_payload"}
     for ev in events:
         if ev.get("k") in structural:
             apply_event(stage, ev)

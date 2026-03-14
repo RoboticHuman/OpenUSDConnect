@@ -61,22 +61,6 @@ def _infer_usd_type(obj) -> str:
     return "Mesh"
 
 
-def _deferred_set_props(obj_name: str, prim_path: str, type_name: str):
-    """Set custom properties on next main-loop tick (outside depsgraph callback).
-
-    Looks up by name to avoid stale-reference issues.
-    """
-
-    def _apply():
-        obj = bpy.data.objects.get(obj_name)
-        if obj is not None:
-            obj["usd_prim_path"] = prim_path
-            obj["usd_type_name"] = type_name
-        return None  # one-shot
-
-    bpy.app.timers.register(_apply, first_interval=0)
-
-
 def sanitize_usd_name(name: str) -> str:
     """Convert a Blender object name to a valid USD identifier.
 
@@ -94,85 +78,79 @@ def sanitize_usd_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 # Scene properties
 # ---------------------------------------------------------------------------
+_SCENE_PROPS = [
+    ("usd_connect_base_usd_path", bpy.props.StringProperty, {
+        "name": "Base USD File",
+        "description": "Path to the base USD file (.usda/.usd/.usdc)",
+        "subtype": "FILE_PATH",
+        "default": "",
+    }),
+    ("usd_connect_emit_to_file", bpy.props.BoolProperty, {
+        "name": "Emit to File",
+        "default": False,
+    }),
+    ("usd_connect_emit_file_path", bpy.props.StringProperty, {
+        "name": "Diff Output File",
+        "subtype": "FILE_PATH",
+        "default": "",
+    }),
+    ("usd_connect_coalesce_seconds", bpy.props.FloatProperty, {
+        "name": "Coalesce (sec)",
+        "default": DEFAULT_COALESCE_SECONDS,
+        "min": 0.0,
+        "max": 5.0,
+    }),
+    ("usd_connect_import_skip_leaf_geom", bpy.props.BoolProperty, {
+        "name": "Skip Leaf /Geom Prim Paths",
+        "default": True,
+    }),
+    ("usd_connect_emit_host", bpy.props.StringProperty, {
+        "name": "Server Host",
+        "default": "127.0.0.1",
+    }),
+    ("usd_connect_emit_port", bpy.props.IntProperty, {
+        "name": "Server Port",
+        "default": 7200,
+        "min": 1,
+        "max": 65535,
+    }),
+    ("usd_connect_emit_hz", bpy.props.FloatProperty, {
+        "name": "Send Rate (Hz)",
+        "default": 60.0,
+        "min": 1.0,
+        "max": 120.0,
+    }),
+    ("usd_connect_net_emitter_running", bpy.props.BoolProperty, {
+        "name": "Net Emitter Running",
+        "default": False,
+    }),
+    ("usd_connect_auto_track", bpy.props.BoolProperty, {
+        "name": "Auto-track New Objects",
+        "description": (
+            "Automatically register objects as USD prims when they are "
+            "first manipulated, using the root prim path below"
+        ),
+        "default": False,
+    }),
+    ("usd_connect_auto_track_root", bpy.props.StringProperty, {
+        "name": "Root Prim",
+        "description": "Parent prim path for auto-tracked objects (e.g. /World)",
+        "default": "/World",
+    }),
+    ("usd_connect_asset_root", bpy.props.StringProperty, {
+        "name": "Asset Root",
+        "description": "Root directory for resolving relative asset paths in set_reference events",
+        "subtype": "DIR_PATH",
+        "default": "",
+    }),
+]
+
+
 def _ensure_scene_props():
     S = bpy.types.Scene
-    if not hasattr(S, "usd_connect_base_usd_path"):
-        S.usd_connect_base_usd_path = bpy.props.StringProperty(
-            name="Base USD File",
-            description="Path to the base USD file (.usda/.usd/.usdc)",
-            subtype="FILE_PATH",
-            default="",
-        )
-    if not hasattr(S, "usd_connect_emit_to_file"):
-        S.usd_connect_emit_to_file = bpy.props.BoolProperty(
-            name="Emit to File",
-            default=False,
-        )
-    if not hasattr(S, "usd_connect_emit_file_path"):
-        S.usd_connect_emit_file_path = bpy.props.StringProperty(
-            name="Diff Output File",
-            subtype="FILE_PATH",
-            default="",
-        )
-    if not hasattr(S, "usd_connect_coalesce_seconds"):
-        S.usd_connect_coalesce_seconds = bpy.props.FloatProperty(
-            name="Coalesce (sec)",
-            default=DEFAULT_COALESCE_SECONDS,
-            min=0.0,
-            max=5.0,
-        )
-    if not hasattr(S, "usd_connect_import_skip_leaf_geom"):
-        S.usd_connect_import_skip_leaf_geom = bpy.props.BoolProperty(
-            name="Skip Leaf /Geom Prim Paths",
-            default=True,
-        )
-    # Network emitter props
-    if not hasattr(S, "usd_connect_emit_host"):
-        S.usd_connect_emit_host = bpy.props.StringProperty(
-            name="Server Host",
-            default="127.0.0.1",
-        )
-    if not hasattr(S, "usd_connect_emit_port"):
-        S.usd_connect_emit_port = bpy.props.IntProperty(
-            name="Server Port",
-            default=7200,
-            min=1,
-            max=65535,
-        )
-    if not hasattr(S, "usd_connect_emit_hz"):
-        S.usd_connect_emit_hz = bpy.props.FloatProperty(
-            name="Send Rate (Hz)",
-            default=60.0,
-            min=1.0,
-            max=120.0,
-        )
-    if not hasattr(S, "usd_connect_net_emitter_running"):
-        S.usd_connect_net_emitter_running = bpy.props.BoolProperty(
-            name="Net Emitter Running",
-            default=False,
-        )
-    if not hasattr(S, "usd_connect_auto_track"):
-        S.usd_connect_auto_track = bpy.props.BoolProperty(
-            name="Auto-track New Objects",
-            description=(
-                "Automatically register objects as USD prims when they are "
-                "first manipulated, using the root prim path below"
-            ),
-            default=False,
-        )
-    if not hasattr(S, "usd_connect_auto_track_root"):
-        S.usd_connect_auto_track_root = bpy.props.StringProperty(
-            name="Root Prim",
-            description="Parent prim path for auto-tracked objects (e.g. /World)",
-            default="/World",
-        )
-    if not hasattr(S, "usd_connect_asset_root"):
-        S.usd_connect_asset_root = bpy.props.StringProperty(
-            name="Asset Root",
-            description="Root directory for resolving relative asset paths in set_reference events",
-            subtype="DIR_PATH",
-            default="",
-        )
+    for attr, prop_type, kwargs in _SCENE_PROPS:
+        if not hasattr(S, attr):
+            setattr(S, attr, prop_type(**kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -308,13 +286,20 @@ class BlenderStageAuthor:
 
         Returns (prim_path, type_name) or (None, None) if the object
         should not be tracked.
+
+        NOTE: *obj* may be the evaluated (CoW) copy from depsgraph.updates.
+        Custom property reads work on the evaluated copy (it mirrors the
+        original's authored data), but writes MUST go to ``obj.original``
+        so they persist after the next depsgraph evaluation.
         """
         prim_path = obj.get("usd_prim_path")
         type_name = None
         if not prim_path:
             # Reverse-lookup: is this object already tracked by reference?
+            # _prim_refs stores originals, so compare against obj.original.
+            obj_orig = getattr(obj, "original", obj)
             for pp, ref in self._prim_refs.items():
-                if ref is obj:
+                if ref is obj_orig:
                     prim_path = pp
                     break
         if not prim_path:
@@ -335,7 +320,12 @@ class BlenderStageAuthor:
                 prim_path = f"{prim_path}_{i}"
             self._used_prim_paths.add(prim_path)
             type_name = _infer_usd_type(obj)
-            _deferred_set_props(obj.name, prim_path, type_name)
+            # Write to the original data-block so properties persist.
+            # depsgraph.updates gives us evaluated copies — writes on those
+            # are discarded after the next evaluation cycle.
+            original = getattr(obj, "original", obj)
+            original["usd_prim_path"] = prim_path
+            original["usd_type_name"] = type_name
             LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
         return prim_path, type_name
 
@@ -458,8 +448,9 @@ class BlenderStageAuthor:
             if not prim_path:
                 continue
 
-            # Store object reference for deletion detection
-            self._prim_refs[prim_path] = obj
+            # Store the *original* (non-evaluated) object reference for
+            # deletion detection and identity lookups in _resolve_prim_path.
+            self._prim_refs[prim_path] = getattr(obj, "original", obj)
 
             # Check if matrix actually changed
             m = tuple(v for row in obj.matrix_world for v in row)
@@ -584,6 +575,19 @@ class _State:
 _state = _State()
 
 
+def _try_send_dirty_events(include_matrices: bool = False):
+    """Build and send dirty events if emitter and sender are both connected."""
+    if (
+        _state.notice_emitter is None
+        or _state.sender is None
+        or _state.sender.sock is None
+    ):
+        return
+    events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
+    if events:
+        _state.sender.send_events(events)
+
+
 def set_emitter_feedback_guard(value: bool):
     """Set the feedback-loop guard to prevent echo during remote event application."""
     if _state.notice_emitter is not None:
@@ -628,15 +632,7 @@ def _depsgraph_handler(scene, depsgraph):
         if _state.author is not None and _state.author.enabled:
             _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
             _state.author.on_depsgraph_update(updates)
-            can_send = (
-                _state.notice_emitter is not None
-                and _state.sender is not None
-                and _state.sender.sock is not None
-            )
-            if can_send:
-                events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
-                if events:
-                    _state.sender.send_events(events)
+            _try_send_dirty_events(include_matrices=False)
 
     except Exception as e:
         print("[USD Connect] depsgraph handler error:", e)
@@ -871,15 +867,7 @@ class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
 
         if _state.author is not None:
             _state.author.send_rename(old_path, new_name)
-            can_send = (
-                _state.notice_emitter is not None
-                and _state.sender is not None
-                and _state.sender.sock is not None
-            )
-            if can_send:
-                events = _state.notice_emitter.build_events_for_dirty(include_matrices=False)
-                if events:
-                    _state.sender.send_events(events)
+            _try_send_dirty_events(include_matrices=False)
 
         obj["usd_prim_path"] = new_path
         self.report({"INFO"}, f"Renamed: {old_path} → {new_path}")
@@ -928,22 +916,9 @@ def unregister():
         _state.sender = None
     for c in reversed(_CAPTURE_CLASSES):
         bpy.utils.unregister_class(c)
-    for prop_name in (
-        "usd_connect_base_usd_path",
-        "usd_connect_emit_to_file",
-        "usd_connect_emit_file_path",
-        "usd_connect_coalesce_seconds",
-        "usd_connect_import_skip_leaf_geom",
-        "usd_connect_emit_host",
-        "usd_connect_emit_port",
-        "usd_connect_emit_hz",
-        "usd_connect_net_emitter_running",
-        "usd_connect_auto_track",
-        "usd_connect_auto_track_root",
-        "usd_connect_asset_root",
-    ):
-        if hasattr(bpy.types.Scene, prop_name):
+    for attr, _, _ in _SCENE_PROPS:
+        if hasattr(bpy.types.Scene, attr):
             try:
-                delattr(bpy.types.Scene, prop_name)
+                delattr(bpy.types.Scene, attr)
             except Exception:
                 pass

@@ -112,17 +112,14 @@ class BlenderAdapter(DCCAdapter):
         mesh.update()
         return bpy.data.objects.new(name, mesh)
 
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
-        if not BPY_AVAILABLE:
-            LOG.info("BlenderAdapter.ensure_prim dry: %s", prim_path)
-            return True
-        obj = self._find_object_by_prim(prim_path)
-        if obj:
-            return True
+    def _create_blender_object(self, prim_path: str, type_name: str):
+        """Create the appropriate Blender object for a USD prim type.
+
+        Returns a new bpy.types.Object tagged with prim_path and type_name.
+        """
         name = prim_path.strip("/").replace("/", "_") or prim_path
         print(f"[USD Connect] ensure_prim: creating {type_name} '{name}' for {prim_path}")
 
-        # Create the object based on type
         new = None
         if type_name in ("Sphere", "Cube", "Cylinder", "Cone"):
             new = self._create_mesh_primitive(name, type_name)
@@ -133,34 +130,51 @@ class BlenderAdapter(DCCAdapter):
 
         new["usd_prim_path"] = prim_path
         new["usd_type_name"] = type_name
+        return new
+
+    def _parent_to_ancestor(self, obj, prim_path: str):
+        """Parent obj under the correct ancestor based on prim_path hierarchy.
+
+        Also moves the child into the parent's collection to avoid duplicates
+        under the scene root collection.
+        """
+        parent_path = prim_path.rsplit("/", 1)[0]
+        if not parent_path:
+            return
+        parent_obj = self._find_object_by_prim(parent_path)
+        if parent_obj is None:
+            return
+
+        obj.parent = parent_obj
+        obj.matrix_parent_inverse = _IDENTITY_4X4.copy()
+
+        # Move to parent's collection
+        parent_cols = parent_obj.users_collection
+        target_col = None
+        for col in parent_cols:
+            if col != bpy.context.scene.collection:
+                target_col = col
+                break
+        if target_col:
+            try:
+                target_col.objects.link(obj)
+                bpy.context.scene.collection.objects.unlink(obj)
+            except Exception:
+                LOG.warning("Failed to move %s to collection %s", obj.name, target_col.name)
+        print(f"[USD Connect] ensure_prim: parented '{obj.name}' under '{parent_obj.name}'")
+
+    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.ensure_prim dry: %s", prim_path)
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if obj:
+            return True
+
+        new = self._create_blender_object(prim_path, type_name)
         self._link_object(new)
         self._prim_cache[prim_path] = new
-
-        # Parent under the correct ancestor so local transforms are correct.
-        # e.g. /World/Cube_1 → parent is the object with usd_prim_path="/World"
-        parent_path = prim_path.rsplit("/", 1)[0]
-        if parent_path:
-            parent_obj = self._find_object_by_prim(parent_path)
-            if parent_obj is not None:
-                new.parent = parent_obj
-                # Identity parent inverse so location/rotation/scale are local-to-parent
-                # (matching what the emitter sends)
-                new.matrix_parent_inverse = _IDENTITY_4X4.copy()
-                # Move the child into the parent's collection so it doesn't
-                # appear as a duplicate entry under the scene root collection.
-                parent_cols = parent_obj.users_collection
-                target_col = None
-                for col in parent_cols:
-                    if col != bpy.context.scene.collection:
-                        target_col = col
-                        break
-                if target_col:
-                    try:
-                        target_col.objects.link(new)
-                        bpy.context.scene.collection.objects.unlink(new)
-                    except Exception:
-                        LOG.warning("Failed to move %s to collection %s", new.name, target_col.name)
-                print(f"[USD Connect] ensure_prim: parented '{new.name}' under '{parent_obj.name}'")
+        self._parent_to_ancestor(new, prim_path)
 
         print(f"[USD Connect] ensure_prim: linked {type_name} '{new.name}' for {prim_path}")
         return True
@@ -493,3 +507,13 @@ class BlenderAdapter(DCCAdapter):
                 col.objects.unlink(obj)
             bpy.data.objects.remove(obj)
         self._imported_refs.pop(prim_path, None)
+
+    def set_payload(self, prim_path: str, payloads: list) -> bool:
+        # Payloads are unloaded by default — don't import anything.
+        # Users opt-in to load payloads when ready.
+        LOG.info(
+            "BlenderAdapter: payload arc set on %s (%d entries, unloaded)",
+            prim_path,
+            len(payloads),
+        )
+        return True

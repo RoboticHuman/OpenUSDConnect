@@ -495,6 +495,132 @@ class TestFirstEncounterStructuralEvents:
         assert len(trs2) == 1
 
 
+class TestPayloadEmission:
+    """NoticeEmitter detects and emits set_payload events."""
+
+    @staticmethod
+    def _make_pay_stage():
+        """Create a small in-memory stage suitable for use as a payload."""
+        pay_stage = Usd.Stage.CreateInMemory()
+        pay_stage.DefinePrim("/Model", "Xform")
+        return pay_stage
+
+    def test_payload_emitted_on_first_encounter(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_stage = self._make_pay_stage()
+        pay_id = pay_stage.GetRootLayer().identifier
+
+        prim = stage.DefinePrim("/World/Asset", "Xform")
+        prim.GetPayloads().AddPayload(pay_id, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Asset"]
+        assert len(pay_evs) == 1
+        assert len(pay_evs[0]["payloads"]) == 1
+        assert pay_evs[0]["payloads"][0]["asset_path"] == pay_id
+        assert pay_evs[0]["payloads"][0]["prim_path"] == "/Model"
+
+    def test_payload_change_emits_new_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_a = self._make_pay_stage()
+        pay_b = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/Obj", "Xform")
+        prim.GetPayloads().AddPayload(pay_a.GetRootLayer().identifier, "/Model")
+        emitter.build_events_for_dirty()
+
+        prim.GetPayloads().ClearPayloads()
+        prim.GetPayloads().AddPayload(pay_b.GetRootLayer().identifier, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Obj"]
+        assert len(pay_evs) == 1
+        assert pay_evs[0]["payloads"][0]["asset_path"] == pay_b.GetRootLayer().identifier
+
+    def test_no_payload_no_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Plain", "Xform")
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Plain"]
+        assert len(pay_evs) == 0
+
+    def test_unchanged_payload_no_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_stage = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/Stable", "Xform")
+        prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier, "/Model")
+        emitter.build_events_for_dirty()
+
+        # Dirty the prim via TRS change (no payload change)
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Stable"]
+        assert len(pay_evs) == 0
+
+    def test_payload_cache_cleaned_on_deletion(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_stage = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/Del", "Xform")
+        prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+        assert "/World/Del" in emitter.last_sent_payloads
+
+        stage.RemovePrim("/World/Del")
+        emitter.build_events_for_dirty()
+        assert "/World/Del" not in emitter.last_sent_payloads
+
+    def test_payload_cache_updated_on_rename(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_stage = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/OldPay", "Xform")
+        prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+        assert "/World/OldPay" in emitter.last_sent_payloads
+
+        editor = Usd.NamespaceEditor(stage)
+        editor.RenamePrim(prim, "NewPay")
+        editor.ApplyEdits()
+        emitter.build_events_for_dirty()
+
+        assert "/World/OldPay" not in emitter.last_sent_payloads
+        assert "/World/NewPay" in emitter.last_sent_payloads
+
+    def test_payload_cleared_emits_empty(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_stage = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/Clr", "Xform")
+        prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier)
+        emitter.build_events_for_dirty()
+
+        prim.GetPayloads().ClearPayloads()
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Clr"]
+        assert len(pay_evs) == 1
+        assert pay_evs[0]["payloads"] == []
+
+    def test_multiple_payloads_emitted(self):
+        stage, emitter = _make_stage_and_emitter()
+        pay_a = self._make_pay_stage()
+        pay_b = self._make_pay_stage()
+
+        prim = stage.DefinePrim("/World/Multi", "Xform")
+        prim.GetPayloads().AddPayload(pay_a.GetRootLayer().identifier, "/Model")
+        prim.GetPayloads().AddPayload(pay_b.GetRootLayer().identifier, "/Model")
+
+        events = emitter.build_events_for_dirty()
+        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Multi"]
+        assert len(pay_evs) == 1
+        assert len(pay_evs[0]["payloads"]) == 2
+
+
 class TestReferenceEmission:
     """NoticeEmitter detects and emits set_reference events."""
 

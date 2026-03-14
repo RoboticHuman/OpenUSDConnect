@@ -74,6 +74,10 @@ class DCCAdapter(ABC):
     def set_reference(self, prim_path: str, refs: list) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
+    def set_payload(self, prim_path: str, payloads: list) -> bool:
+        raise NotImplementedError
+
 
 class UsdStageAdapter(DCCAdapter):
     """Applies events to a Usd.Stage via event_apply functions.
@@ -142,6 +146,15 @@ class UsdStageAdapter(DCCAdapter):
         from .event_apply import apply_event
 
         apply_event(self.stage, {"k": "set_reference", "prim": prim_path, "refs": refs})
+        return True
+
+    def set_payload(self, prim_path: str, payloads: list) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(self.stage, {"k": "set_payload", "prim": prim_path, "payloads": payloads})
+        # Payloads are unloaded by default — users opt-in to load.
+        if payloads:
+            self.stage.Unload(prim_path)
         return True
 
 
@@ -236,6 +249,15 @@ class MockAdapter(DCCAdapter):
             p = self._prims[prim_path]
         p["references"] = list(refs)
         LOG.info("MockAdapter: set reference on prim %s", prim_path)
+        return True
+
+    def set_payload(self, prim_path: str, payloads: list) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        p["payloads"] = list(payloads)
+        LOG.info("MockAdapter: set payload on prim %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

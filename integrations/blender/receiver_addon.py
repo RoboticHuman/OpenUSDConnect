@@ -61,26 +61,54 @@ def _ensure_scene_props():
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
 
 
+# Module-level dispatch table — method names resolved at call time.
+_DISPATCH_TABLE: dict[str, str] = {
+    "ensure_prim": "ensure_prim",
+    "ensure_xform_ops": "ensure_xform_ops",
+    "set_xform_trs": "set_xform_trs",
+    "set_xform_matrices": "set_xform_matrices",
+    "delete_prim": "delete_prim",
+    "deactivate_prim": "deactivate_prim",
+    "rename_prim": "rename_prim",
+    "set_visibility": "set_visibility",
+    "set_gprim_attrs": "set_gprim_attrs",
+    "set_reference": "set_reference",
+    "set_payload": "set_payload",
+}
+
+# Per-event-type argument builders (returns kwargs for the adapter method).
+def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
+    """Return (args, kwargs) for the adapter method identified by *k*."""
+    if k == "ensure_prim":
+        return (prim_path, ev.get("typeName", "Xform")), {}
+    if k == "deactivate_prim":
+        return (prim_path, ev.get("active", False)), {}
+    if k == "rename_prim":
+        return (prim_path, ev.get("new_name", "")), {}
+    if k == "set_visibility":
+        return (prim_path, ev.get("visible", True)), {}
+    if k == "set_gprim_attrs":
+        return (prim_path, ev.get("attrs", {})), {}
+    if k == "set_reference":
+        return (prim_path, ev.get("refs", [])), {}
+    if k == "set_payload":
+        return (prim_path, ev.get("payloads", [])), {}
+    # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
+    if k in ("set_xform_trs", "set_xform_matrices"):
+        return (prim_path, ev), {}
+    return (prim_path,), {}
+
+
 def _dispatch_event(adapter, k, prim_path, ev):
-    """Route an event to the appropriate adapter method via dispatch dict."""
-    _DISPATCH = {
-        "ensure_prim": lambda: adapter.ensure_prim(prim_path, ev.get("typeName", "Xform")),
-        "ensure_xform_ops": lambda: adapter.ensure_xform_ops(prim_path),
-        "set_xform_trs": lambda: adapter.set_xform_trs(prim_path, ev),
-        "set_xform_matrices": lambda: adapter.set_xform_matrices(prim_path, ev),
-        "delete_prim": lambda: adapter.delete_prim(prim_path),
-        "deactivate_prim": lambda: adapter.deactivate_prim(prim_path, ev.get("active", False)),
-        "rename_prim": lambda: adapter.rename_prim(prim_path, ev.get("new_name", "")),
-        "set_visibility": lambda: adapter.set_visibility(prim_path, ev.get("visible", True)),
-        "set_gprim_attrs": lambda: adapter.set_gprim_attrs(prim_path, ev.get("attrs", {})),
-        "set_reference": lambda: adapter.set_reference(
-            prim_path,
-            ev.get("refs", []),
-        ),
-    }
-    handler = _DISPATCH.get(k)
-    if handler:
-        handler()
+    """Route an event to the appropriate adapter method."""
+    method_name = _DISPATCH_TABLE.get(k)
+    if method_name is None:
+        return
+    method = getattr(adapter, method_name, None)
+    if method is None:
+        return
+    args, kwargs = _dispatch_args(k, prim_path, ev)
+    method(*args, **kwargs)
 
 
 def _process_event(ev: dict):

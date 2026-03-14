@@ -4,6 +4,9 @@ Tests the full pipeline without network or DCC: author transforms on a stage,
 use NoticeEmitter to build events, apply events via MockAdapter.
 """
 
+import os
+import tempfile
+
 import pytest
 
 try:
@@ -18,6 +21,28 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops
+
+
+def _create_ref_test_assets(tmp_dir):
+    """Create base scene and reference asset USD files for reference tests.
+
+    Returns (base_path, asset_path).
+    """
+    base_path = os.path.join(tmp_dir, "base_scene.usda")
+    base_stage = Usd.Stage.CreateNew(base_path)
+    UsdGeom.SetStageUpAxis(base_stage, UsdGeom.Tokens.y)
+    UsdGeom.Xform.Define(base_stage, "/World")
+    base_stage.Save()
+
+    asset_path = os.path.join(tmp_dir, "asset.usda")
+    asset_stage = Usd.Stage.CreateNew(asset_path)
+    UsdGeom.SetStageUpAxis(asset_stage, UsdGeom.Tokens.y)
+    UsdGeom.Xform.Define(asset_stage, "/Model")
+    cube = UsdGeom.Cube.Define(asset_stage, "/Model/Geom")
+    cube.GetSizeAttr().Set(2.0)
+    asset_stage.Save()
+
+    return base_path, asset_path
 
 
 def _create_test_stage():
@@ -265,6 +290,159 @@ class TestUsdStageAdapterNewFeatures:
             assert prim.GetTypeName() == type_name
 
 
+class TestPayloadRoundtrip:
+    """Payload-specific roundtrip tests."""
+
+    def test_payload_via_adapter(self):
+        """UsdStageAdapter writes the payload arc and unloads the prim."""
+        pay_stage = Usd.Stage.CreateInMemory("payload_src.usda")
+        pay_stage.DefinePrim("/Model", "Xform")
+        pay_layer = pay_stage.GetRootLayer()
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+
+        adapter.set_payload(
+            "/World/Asset",
+            [{"asset_path": pay_layer.identifier, "prim_path": "/Model"}],
+        )
+        prim = stage.GetPrimAtPath("/World/Asset")
+        assert prim.IsValid()
+        assert prim.HasAuthoredPayloads()
+
+    def test_payload_stage_to_stage(self):
+        """Emit payload on stage A, apply to stage B, verify arc."""
+        pay_stage = Usd.Stage.CreateInMemory("pay_rt.usda")
+        pay_stage.DefinePrim("/Model", "Xform")
+        pay_id = pay_stage.GetRootLayer().identifier
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+
+        prim_a = stage_a.DefinePrim("/World/Thing", "Xform")
+        prim_a.GetPayloads().AddPayload(pay_id, "/Model")
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/Thing")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        pay_evs = [e for e in events if e["k"] == "set_payload"]
+        assert len(pay_evs) == 1
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        prim_b = stage_b.GetPrimAtPath("/World/Thing")
+        assert prim_b.IsValid()
+        assert prim_b.HasAuthoredPayloads()
+
+    def test_payload_unloaded_by_default(self):
+        """After UsdStageAdapter.set_payload(), prim payload is not loaded."""
+        pay_stage = Usd.Stage.CreateInMemory("pay_unload.usda")
+        pay_stage.DefinePrim("/Model", "Xform")
+        pay_stage.DefinePrim("/Model/Child", "Cube")
+        pay_layer = pay_stage.GetRootLayer()
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+
+        adapter.set_payload(
+            "/World/Heavy",
+            [{"asset_path": pay_layer.identifier, "prim_path": "/Model"}],
+        )
+        # The payload arc is authored but the prim should be unloaded
+        prim = stage.GetPrimAtPath("/World/Heavy")
+        assert prim.IsValid()
+        assert prim.HasAuthoredPayloads()
+        # Child from payload should NOT be visible (unloaded)
+        child = stage.GetPrimAtPath("/World/Heavy/Child")
+        assert not child or not child.IsValid()
+
+    def test_payload_can_be_loaded_after_receive(self):
+        """User can manually load a payload after receive."""
+        pay_stage = Usd.Stage.CreateInMemory("pay_load.usda")
+        pay_stage.DefinePrim("/Model", "Xform")
+        pay_stage.DefinePrim("/Model/Geo", "Sphere")
+        pay_layer = pay_stage.GetRootLayer()
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+
+        adapter.set_payload(
+            "/World/Loadable",
+            [{"asset_path": pay_layer.identifier, "prim_path": "/Model"}],
+        )
+        # Initially unloaded
+        child = stage.GetPrimAtPath("/World/Loadable/Geo")
+        assert not child or not child.IsValid()
+
+        # User opts-in to load
+        stage.Load("/World/Loadable")
+        child = stage.GetPrimAtPath("/World/Loadable/Geo")
+        assert child.IsValid()
+        assert child.GetTypeName() == "Sphere"
+
+    def test_pyramid_payload_roundtrip(self):
+        """Real-world test with Pyramid asset: payload arc emit -> apply."""
+        import os
+
+        fixture_dir = os.path.join(os.path.dirname(__file__), "fixtures", "pyramid")
+        pyramid_path = os.path.join(fixture_dir, "Pyramid.usd")
+        if not os.path.isfile(pyramid_path):
+            pytest.skip("Pyramid fixture not found")
+
+        # Open the Pyramid asset — it has prepend payload = @./payload.usda@
+        src_stage = Usd.Stage.Open(pyramid_path)
+        root_prim = src_stage.GetDefaultPrim()
+        assert root_prim is not None
+        prim_path = str(root_prim.GetPath())
+
+        # Read payloads from the root prim
+        from openusdconnect.emitter import _read_payloads
+
+        payloads = _read_payloads(src_stage, prim_path)
+        assert len(payloads) >= 1, f"Expected payloads on {prim_path}, got {payloads}"
+
+        # Build the event
+        pay_ev = {"k": "set_payload", "prim": prim_path, "payloads": []}
+        for asset_path, pay_prim_path in payloads:
+            entry = {"asset_path": asset_path}
+            if pay_prim_path:
+                entry["prim_path"] = pay_prim_path
+            pay_ev["payloads"].append(entry)
+
+        # Apply to a destination stage in the same directory
+        # (so relative paths resolve)
+        from pxr import Sdf
+
+        dest_layer = Sdf.Layer.CreateNew(
+            os.path.join(fixture_dir, "_test_dest.usda")
+        )
+        dest_stage = Usd.Stage.Open(dest_layer)
+        dest_stage.DefinePrim(prim_path, "Xform")
+
+        from openusdconnect.event_apply import apply_event
+
+        apply_event(dest_stage, pay_ev)
+
+        dest_prim = dest_stage.GetPrimAtPath(prim_path)
+        assert dest_prim.HasAuthoredPayloads()
+
+        # Load the payload and verify content is accessible
+        dest_stage.Load(prim_path)
+
+        # Cleanup temp layer
+        try:
+            os.unlink(os.path.join(fixture_dir, "_test_dest.usda"))
+        except Exception:
+            pass
+
+
 class TestStageToStageRoundtrip:
     """Author on stage A -> apply_events on stage B -> verify on real USD stages."""
 
@@ -379,3 +557,47 @@ class TestStageToStageRoundtrip:
         ref = stage_b.GetPrimAtPath("/World/Ref")
         assert ref.IsValid()
         assert ref.HasAuthoredReferences()
+
+
+class TestFileBasedReferenceRoundtrip:
+    """Reference tests using real USD files on disk."""
+
+    def test_reference_applied_to_usd_stage_adapter(self):
+        """UsdStageAdapter.set_reference creates valid reference arcs with file-based assets."""
+        tmp_dir = tempfile.mkdtemp()
+        _, asset_path = _create_ref_test_assets(tmp_dir)
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+
+        adapter.ensure_prim("/World/Furniture", "Xform")
+        adapter.set_reference(
+            "/World/Furniture",
+            [{"asset_path": asset_path, "prim_path": "/Model"}],
+        )
+
+        furniture = stage.GetPrimAtPath("/World/Furniture")
+        assert furniture.IsValid()
+        assert furniture.HasAuthoredReferences()
+
+        # Verify composed child
+        geom = stage.GetPrimAtPath("/World/Furniture/Geom")
+        assert geom.IsValid()
+        assert geom.GetTypeName() == "Cube"
+
+    def test_reference_without_prim_path_ref(self):
+        """set_reference without prim_path references the whole asset."""
+        tmp_dir = tempfile.mkdtemp()
+        _, asset_path = _create_ref_test_assets(tmp_dir)
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+
+        adapter.ensure_prim("/World/FullAsset", "Xform")
+        adapter.set_reference("/World/FullAsset", [{"asset_path": asset_path}])
+
+        prim = stage.GetPrimAtPath("/World/FullAsset")
+        assert prim.IsValid()
+        assert prim.HasAuthoredReferences()

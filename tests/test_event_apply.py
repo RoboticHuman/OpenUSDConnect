@@ -321,6 +321,83 @@ class TestSetReference:
         assert prim.HasAuthoredReferences()
 
 
+class TestSetPayload:
+    def test_add_payload(self, stage):
+        pay_stage = Usd.Stage.CreateInMemory("pay.usda")
+        pay_stage.DefinePrim("/Model", "Xform")
+        pay_path = pay_stage.GetRootLayer().identifier
+
+        apply_event(
+            stage,
+            {
+                "k": "set_payload",
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": pay_path, "prim_path": "/Model"}],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/Asset")
+        assert prim.IsValid()
+        assert prim.HasAuthoredPayloads()
+
+    def test_add_multiple_payloads(self, stage):
+        pay_a = Usd.Stage.CreateInMemory("pay_a.usda")
+        pay_a.DefinePrim("/A", "Xform")
+        pay_b = Usd.Stage.CreateInMemory("pay_b.usda")
+        pay_b.DefinePrim("/B", "Xform")
+
+        apply_event(
+            stage,
+            {
+                "k": "set_payload",
+                "prim": "/World/Multi",
+                "payloads": [
+                    {"asset_path": pay_a.GetRootLayer().identifier, "prim_path": "/A"},
+                    {"asset_path": pay_b.GetRootLayer().identifier, "prim_path": "/B"},
+                ],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/Multi")
+        assert prim.IsValid()
+        assert prim.HasAuthoredPayloads()
+
+    def test_clear_payloads(self, stage):
+        pay_stage = Usd.Stage.CreateInMemory("pay_clear.usda")
+        pay_stage.DefinePrim("/X", "Xform")
+
+        apply_event(
+            stage,
+            {
+                "k": "set_payload",
+                "prim": "/World/Clearable",
+                "payloads": [{"asset_path": pay_stage.GetRootLayer().identifier}],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/Clearable")
+        assert prim.HasAuthoredPayloads()
+
+        apply_event(
+            stage,
+            {"k": "set_payload", "prim": "/World/Clearable", "payloads": []},
+        )
+        prim = stage.GetPrimAtPath("/World/Clearable")
+        assert not prim.HasAuthoredPayloads()
+
+    def test_add_internal_payload(self, stage):
+        stage.DefinePrim("/Source", "Xform")
+
+        apply_event(
+            stage,
+            {
+                "k": "set_payload",
+                "prim": "/World/InternalPay",
+                "payloads": [{"prim_path": "/Source"}],
+            },
+        )
+        prim = stage.GetPrimAtPath("/World/InternalPay")
+        assert prim.IsValid()
+        assert prim.HasAuthoredPayloads()
+
+
 class TestApplyEvents:
     def test_atomic_batch(self, stage):
         events = [

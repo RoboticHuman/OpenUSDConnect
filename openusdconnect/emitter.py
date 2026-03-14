@@ -106,6 +106,31 @@ def _read_references(stage, prim_path):
     return result
 
 
+def _read_payloads(stage, prim_path):
+    """Read payload arcs authored on this stage's own layers.
+
+    Returns a list of (asset_path, prim_path_str) tuples, or empty list.
+    Only considers the root and session layers — ignores payloads that
+    come from composed-in layers.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return []
+    own_layers = {stage.GetRootLayer().identifier, stage.GetSessionLayer().identifier}
+    result = []
+    for spec in prim.GetPrimStack():
+        if spec.layer.identifier not in own_layers:
+            continue
+        payload_list = spec.payloadList
+        for p in payload_list.prependedItems:
+            result.append((p.assetPath, str(p.primPath)))
+        for p in payload_list.explicitItems:
+            result.append((p.assetPath, str(p.primPath)))
+        for p in payload_list.appendedItems:
+            result.append((p.assetPath, str(p.primPath)))
+    return result
+
+
 class NoticeEmitter:
     """Watches a Usd.Stage for changes and builds idempotent transform events.
 
@@ -134,6 +159,7 @@ class NoticeEmitter:
         self.last_sent_mats: dict[str, dict[str, list[float]]] = {}
         self.last_sent_visibility: dict[str, str] = {}
         self.last_sent_references: dict[str, list[tuple[str, str]]] = {}
+        self.last_sent_payloads: dict[str, list[tuple[str, str]]] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -150,55 +176,53 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
 
+    def _classify_resync(self, notice, prim_path: str) -> str | None:
+        """Classify a resync path into an action.
+
+        Returns "rename", "delete", "deactivate", "dirty", or None (skip).
+        For renames, also appends to self._renamed_prims as a side effect.
+        """
+        if _PrimResyncType is not None:
+            sdf_path = Sdf.Path(prim_path)
+            resync_info = notice.GetPrimResyncType(sdf_path)
+            resync_type = resync_info[0]
+            associated_path = str(resync_info[1]) if len(resync_info) > 1 else ""
+
+            if resync_type == _PrimResyncType.Delete:
+                return "delete"
+            if resync_type == _PrimResyncType.RenameSource:
+                if associated_path and associated_path != ".":
+                    self._renamed_prims.append((prim_path, associated_path))
+                return "rename"
+            if resync_type == _PrimResyncType.RenameDestination:
+                return None
+
+        # Fallback (or "Other" resync type with PrimResyncType available)
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid():
+            if not prim.IsActive() and prim_path in self._known_prims:
+                return "deactivate"
+            return "dirty"
+        if prim_path in self._known_prims:
+            return "delete"
+        return None
+
     def _on_changed(self, notice, stage):
         if self._suppressed:
             return
 
-        # Process resync paths — classify into creation/deletion/rename/change
         for p in notice.GetResyncedPaths():
-            path_str = str(p)
-            prim_path = _prim_path_from_notice_path(path_str)
+            prim_path = _prim_path_from_notice_path(str(p))
             if not prim_path:
                 continue
+            action = self._classify_resync(notice, prim_path)
+            if action == "delete":
+                self._deleted_prims.add(prim_path)
+            elif action == "deactivate":
+                self._deactivated_prims.add(prim_path)
+            elif action == "dirty":
+                self.dirty.add(prim_path)
 
-            if _PrimResyncType is not None:
-                # Full classification via GetPrimResyncType (USD 0.26+)
-                sdf_path = Sdf.Path(prim_path)
-                resync_info = notice.GetPrimResyncType(sdf_path)
-                resync_type = resync_info[0]
-                associated_path = str(resync_info[1]) if len(resync_info) > 1 else ""
-
-                if resync_type == _PrimResyncType.Delete:
-                    self._deleted_prims.add(prim_path)
-                elif resync_type == _PrimResyncType.RenameSource:
-                    if associated_path and associated_path != ".":
-                        self._renamed_prims.append((prim_path, associated_path))
-                elif resync_type == _PrimResyncType.RenameDestination:
-                    pass  # Handled via RenameSource
-                else:
-                    # "Other" — could be creation, deactivation, or normal change
-                    prim = self.stage.GetPrimAtPath(prim_path)
-                    if prim and prim.IsValid():
-                        if not prim.IsActive() and prim_path in self._known_prims:
-                            self._deactivated_prims.add(prim_path)
-                        else:
-                            self.dirty.add(prim_path)
-                    else:
-                        if prim_path in self._known_prims:
-                            self._deleted_prims.add(prim_path)
-            else:
-                # Fallback for older USD builds without PrimResyncType
-                prim = self.stage.GetPrimAtPath(prim_path)
-                if prim and prim.IsValid():
-                    if not prim.IsActive() and prim_path in self._known_prims:
-                        self._deactivated_prims.add(prim_path)
-                    else:
-                        self.dirty.add(prim_path)
-                else:
-                    if prim_path in self._known_prims:
-                        self._deleted_prims.add(prim_path)
-
-        # Process info-only changes (property value changes on existing prims)
         for p in notice.GetChangedInfoOnlyPaths():
             prim_path = _prim_path_from_notice_path(str(p))
             if prim_path:
@@ -231,6 +255,153 @@ class NoticeEmitter:
             "s": s,
         }
 
+    def _migrate_caches(self, old_path: str, new_path: str):
+        """Migrate all per-prim caches from old_path to new_path."""
+        if old_path in self._known_prims:
+            self._known_prims.discard(old_path)
+            self._known_prims.add(new_path)
+        for cache in (self.last_sent_trs, self.last_sent_mats,
+                      self.last_sent_visibility, self.last_sent_references,
+                      self.last_sent_payloads):
+            if old_path in cache:
+                cache[new_path] = cache.pop(old_path)
+
+    def _purge_caches(self, prim_path: str):
+        """Remove all per-prim caches for a deactivated/deleted prim."""
+        self._known_prims.discard(prim_path)
+        self.last_sent_trs.pop(prim_path, None)
+        self.last_sent_mats.pop(prim_path, None)
+        self.last_sent_visibility.pop(prim_path, None)
+        self.last_sent_references.pop(prim_path, None)
+        self.last_sent_payloads.pop(prim_path, None)
+        self.dirty.discard(prim_path)
+
+    def _build_rename_events(self) -> list[dict]:
+        """Build rename events and migrate caches."""
+        events: list[dict] = []
+        renamed_now = list(self._renamed_prims)
+        self._renamed_prims.clear()
+        for old_path, new_path in renamed_now:
+            new_name = new_path.rsplit("/", 1)[-1]
+            events.append({"k": "rename_prim", "prim": old_path, "new_name": new_name})
+            self._migrate_caches(old_path, new_path)
+            if old_path in self.dirty:
+                self.dirty.discard(old_path)
+                self.dirty.add(new_path)
+        return events
+
+    def _build_deactivation_events(self) -> list[dict]:
+        """Build deactivation events for deactivated and deleted prims."""
+        events: list[dict] = []
+        deactivated_now = self._deactivated_prims | self._deleted_prims
+        self._deactivated_prims.clear()
+        self._deleted_prims.clear()
+        for prim_path in deactivated_now:
+            events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
+            self._purge_caches(prim_path)
+        return events
+
+    def _build_dirty_prim_events(
+        self, prim_path: str, snap: dict, eps_trs: float, eps_mat: float,
+        include_matrices: bool,
+    ) -> list[dict]:
+        """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
+        events: list[dict] = []
+
+        # Structural events on first encounter
+        if prim_path not in self._known_prims:
+            prim = self.stage.GetPrimAtPath(prim_path)
+            type_name = "Xform"
+            if prim and prim.IsValid():
+                tn = prim.GetTypeName()
+                if tn:
+                    type_name = tn
+            events.append({"k": "ensure_prim", "prim": prim_path, "typeName": type_name})
+            events.append({"k": "ensure_xform_ops", "prim": prim_path})
+            self._known_prims.add(prim_path)
+
+        # Reference diff
+        current_refs = _read_references(self.stage, prim_path)
+        last_refs = self.last_sent_references.get(prim_path, [])
+        if current_refs != last_refs:
+            ref_ev = {"k": "set_reference", "prim": prim_path, "refs": []}
+            for asset_path, ref_prim_path in current_refs:
+                entry: dict = {"asset_path": asset_path}
+                if ref_prim_path:
+                    entry["prim_path"] = ref_prim_path
+                ref_ev["refs"].append(entry)
+            events.append(ref_ev)
+            self.last_sent_references[prim_path] = current_refs
+
+        # Payload diff
+        current_payloads = _read_payloads(self.stage, prim_path)
+        last_payloads = self.last_sent_payloads.get(prim_path, [])
+        if current_payloads != last_payloads:
+            pay_ev: dict = {"k": "set_payload", "prim": prim_path, "payloads": []}
+            for asset_path, pay_prim_path in current_payloads:
+                entry: dict = {"asset_path": asset_path}
+                if pay_prim_path:
+                    entry["prim_path"] = pay_prim_path
+                pay_ev["payloads"].append(entry)
+            events.append(pay_ev)
+            self.last_sent_payloads[prim_path] = current_payloads
+
+        # TRS partial diff
+        last = self.last_sent_trs.get(prim_path, {})
+        fields = []
+        payload = {"k": "set_xform_trs", "prim": prim_path, "fields": fields}
+
+        if not near_list(snap["t"], last.get("t"), eps_trs):
+            fields.append("t")
+            payload["t"] = snap["t"]
+        if not near_list(snap["r"], last.get("r"), eps_trs):
+            fields.append("r")
+            payload["r"] = snap["r"]
+        if not near_list(snap["s"], last.get("s"), eps_trs):
+            fields.append("s")
+            payload["s"] = snap["s"]
+
+        if fields:
+            events.append(payload)
+            self.last_sent_trs[prim_path] = {
+                "t": snap["t"], "r": snap["r"], "s": snap["s"],
+            }
+
+        # Visibility diff
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid():
+            imageable = UsdGeom.Imageable(prim)
+            vis_attr = imageable.GetVisibilityAttr()
+            if vis_attr and vis_attr.IsValid():
+                vis_val = vis_attr.Get() or "inherited"
+                last_vis = self.last_sent_visibility.get(prim_path)
+                if vis_val != last_vis:
+                    events.append({
+                        "k": "set_visibility",
+                        "prim": prim_path,
+                        "visible": vis_val != "invisible",
+                    })
+                    self.last_sent_visibility[prim_path] = vis_val
+
+        # Optional matrices event (diagnostic)
+        if include_matrices:
+            lastm = self.last_sent_mats.get(prim_path, {})
+            if not near_list(snap["local_m16"], lastm.get("local"), eps_mat) or not near_list(
+                snap["world_m16"], lastm.get("world"), eps_mat
+            ):
+                events.append({
+                    "k": "set_xform_matrices",
+                    "prim": prim_path,
+                    "local_m": snap["local_m16"],
+                    "world_m": snap["world_m16"],
+                })
+                self.last_sent_mats[prim_path] = {
+                    "local": snap["local_m16"],
+                    "world": snap["world_m16"],
+                }
+
+        return events
+
     def build_events_for_dirty(
         self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = True
     ) -> list[dict]:
@@ -244,45 +415,11 @@ class NoticeEmitter:
         """
         events: list[dict] = []
 
-        # --- Renames ---
-        renamed_now = list(self._renamed_prims)
-        self._renamed_prims.clear()
-        for old_path, new_path in renamed_now:
-            new_name = new_path.rsplit("/", 1)[-1]
-            events.append({"k": "rename_prim", "prim": old_path, "new_name": new_name})
-            # Update caches to new path
-            if old_path in self._known_prims:
-                self._known_prims.discard(old_path)
-                self._known_prims.add(new_path)
-            if old_path in self.last_sent_trs:
-                self.last_sent_trs[new_path] = self.last_sent_trs.pop(old_path)
-            if old_path in self.last_sent_mats:
-                self.last_sent_mats[new_path] = self.last_sent_mats.pop(old_path)
-            if old_path in self.last_sent_visibility:
-                self.last_sent_visibility[new_path] = self.last_sent_visibility.pop(old_path)
-            if old_path in self.last_sent_references:
-                self.last_sent_references[new_path] = self.last_sent_references.pop(old_path)
-            # If dirty set had old_path, replace with new_path
-            if old_path in self.dirty:
-                self.dirty.discard(old_path)
-                self.dirty.add(new_path)
+        events.extend(self._build_rename_events())
+        events.extend(self._build_deactivation_events())
 
-        # --- Deactivations (from SetActive(False)) + Deletions ---
-        deactivated_now = self._deactivated_prims | self._deleted_prims
-        self._deactivated_prims.clear()
-        self._deleted_prims.clear()
-        for prim_path in deactivated_now:
-            events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
-            self._known_prims.discard(prim_path)
-            self.last_sent_trs.pop(prim_path, None)
-            self.last_sent_mats.pop(prim_path, None)
-            self.last_sent_visibility.pop(prim_path, None)
-            self.last_sent_references.pop(prim_path, None)
-            self.dirty.discard(prim_path)
-
-        # --- Dirty prims (creation + TRS changes) ---
+        # Dirty prims (creation + TRS changes)
         # Sort by path depth so parents are emitted before children.
-        # This ensures the receiver creates the hierarchy top-down.
         dirty_now = sorted(self.dirty, key=lambda p: p.count("/"))
         self.dirty.clear()
 
@@ -290,92 +427,8 @@ class NoticeEmitter:
             snap = self.snapshot_prim(prim_path)
             if snap is None:
                 continue
-
-            # Only emit structural events on first encounter
-            if prim_path not in self._known_prims:
-                prim = self.stage.GetPrimAtPath(prim_path)
-                type_name = "Xform"
-                if prim and prim.IsValid():
-                    tn = prim.GetTypeName()
-                    if tn:
-                        type_name = tn
-                events.append({"k": "ensure_prim", "prim": prim_path, "typeName": type_name})
-                events.append({"k": "ensure_xform_ops", "prim": prim_path})
-                self._known_prims.add(prim_path)
-
-            # Reference diff
-            current_refs = _read_references(self.stage, prim_path)
-            last_refs = self.last_sent_references.get(prim_path, [])
-            if current_refs != last_refs:
-                ref_ev = {"k": "set_reference", "prim": prim_path, "refs": []}
-                for asset_path, ref_prim_path in current_refs:
-                    entry: dict = {"asset_path": asset_path}
-                    if ref_prim_path:
-                        entry["prim_path"] = ref_prim_path
-                    ref_ev["refs"].append(entry)
-                events.append(ref_ev)
-                self.last_sent_references[prim_path] = current_refs
-
-            # TRS partial diff
-            last = self.last_sent_trs.get(prim_path, {})
-            fields = []
-            payload = {"k": "set_xform_trs", "prim": prim_path, "fields": fields}
-
-            if not near_list(snap["t"], last.get("t"), eps_trs):
-                fields.append("t")
-                payload["t"] = snap["t"]
-
-            if not near_list(snap["r"], last.get("r"), eps_trs):
-                fields.append("r")
-                payload["r"] = snap["r"]
-
-            if not near_list(snap["s"], last.get("s"), eps_trs):
-                fields.append("s")
-                payload["s"] = snap["s"]
-
-            if fields:
-                events.append(payload)
-                self.last_sent_trs[prim_path] = {
-                    "t": snap["t"],
-                    "r": snap["r"],
-                    "s": snap["s"],
-                }
-
-            # Visibility diff
-            prim = self.stage.GetPrimAtPath(prim_path)
-            if prim and prim.IsValid():
-                imageable = UsdGeom.Imageable(prim)
-                vis_attr = imageable.GetVisibilityAttr()
-                if vis_attr and vis_attr.IsValid():
-                    vis_val = vis_attr.Get() or "inherited"
-                    last_vis = self.last_sent_visibility.get(prim_path)
-                    if vis_val != last_vis:
-                        events.append(
-                            {
-                                "k": "set_visibility",
-                                "prim": prim_path,
-                                "visible": vis_val != "invisible",
-                            }
-                        )
-                        self.last_sent_visibility[prim_path] = vis_val
-
-            # Optional matrices event (diagnostic)
-            if include_matrices:
-                lastm = self.last_sent_mats.get(prim_path, {})
-                if not near_list(snap["local_m16"], lastm.get("local"), eps_mat) or not near_list(
-                    snap["world_m16"], lastm.get("world"), eps_mat
-                ):
-                    events.append(
-                        {
-                            "k": "set_xform_matrices",
-                            "prim": prim_path,
-                            "local_m": snap["local_m16"],
-                            "world_m": snap["world_m16"],
-                        }
-                    )
-                    self.last_sent_mats[prim_path] = {
-                        "local": snap["local_m16"],
-                        "world": snap["world_m16"],
-                    }
+            events.extend(
+                self._build_dirty_prim_events(prim_path, snap, eps_trs, eps_mat, include_matrices)
+            )
 
         return events

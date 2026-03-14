@@ -281,3 +281,45 @@ class TestValidateEvent:
                 "refs": [{"asset_path": "a.usd", "prim_path": "no_slash"}],
             }
         )
+
+    # --- set_payload ---
+    def test_set_payload_valid(self):
+        assert validate_event(
+            {
+                "k": "set_payload",
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": "./payload.usda"}],
+            }
+        )
+
+    def test_set_payload_with_prim_path(self):
+        assert validate_event(
+            {
+                "k": "set_payload",
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": "./payload.usda", "prim_path": "/Model"}],
+            }
+        )
+
+    def test_set_payload_missing_payloads(self):
+        assert not validate_event({"k": "set_payload", "prim": "/World/Asset"})
+
+    def test_set_payload_empty_clears(self):
+        assert validate_event(
+            {"k": "set_payload", "prim": "/World/Asset", "payloads": []}
+        )
+
+    def test_set_payload_internal_valid(self):
+        assert validate_event(
+            {"k": "set_payload", "prim": "/World/Asset", "payloads": [{"prim_path": "/X"}]}
+        )
+
+    def test_set_payload_entry_missing_both(self):
+        assert not validate_event(
+            {"k": "set_payload", "prim": "/World/Asset", "payloads": [{}]}
+        )
+
+    def test_set_payload_entry_empty_asset_path(self):
+        assert not validate_event(
+            {"k": "set_payload", "prim": "/World/Asset", "payloads": [{"asset_path": ""}]}
+        )

@@ -20,6 +20,8 @@ Event types (inside txn.events):
                         "attrs":{"radius":2.0}}
   set_reference:      {"k":"set_reference","prim":"/World/Chair",
                         "refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}
+  set_payload:        {"k":"set_payload","prim":"/World/Asset",
+                        "payloads":[{"asset_path":"./payload.usda","prim_path":"/Model"}]}
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ EVENT_KEYS = frozenset(
         "set_visibility",
         "set_gprim_attrs",
         "set_reference",
+        "set_payload",
     }
 )
 
@@ -135,6 +138,23 @@ def validate_event(ev: dict) -> bool:
             ap = entry.get("asset_path")
             pp = entry.get("prim_path")
             # At least one of asset_path or prim_path must be present
+            if ap is None and pp is None:
+                return False
+            if ap is not None:
+                if not isinstance(ap, str) or not ap:
+                    return False
+            if pp is not None:
+                if not isinstance(pp, str) or not pp.startswith("/"):
+                    return False
+    if k == "set_payload":
+        payloads = ev.get("payloads")
+        if not isinstance(payloads, list):
+            return False
+        for entry in payloads:
+            if not isinstance(entry, dict):
+                return False
+            ap = entry.get("asset_path")
+            pp = entry.get("prim_path")
             if ap is None and pp is None:
                 return False
             if ap is not None:
