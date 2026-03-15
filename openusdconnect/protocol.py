@@ -40,6 +40,8 @@ K_SET_VISIBILITY = "set_visibility"
 K_SET_GPRIM_ATTRS = "set_gprim_attrs"
 K_SET_REFERENCE = "set_reference"
 K_SET_PAYLOAD = "set_payload"
+K_LOAD_PAYLOAD = "load_payload"
+K_UNLOAD_PAYLOAD = "unload_payload"
 
 # Valid event keys
 EVENT_KEYS = frozenset(
@@ -55,6 +57,8 @@ EVENT_KEYS = frozenset(
         K_SET_GPRIM_ATTRS,
         K_SET_REFERENCE,
         K_SET_PAYLOAD,
+        K_LOAD_PAYLOAD,
+        K_UNLOAD_PAYLOAD,
     }
 )
 
@@ -159,6 +163,8 @@ def validate_event(ev: dict) -> bool:
             if pp is not None:
                 if not isinstance(pp, str) or not pp.startswith("/"):
                     return False
+    # load_payload and unload_payload require only "prim" (already validated above)
+
     if k == K_SET_PAYLOAD:
         payloads = ev.get("payloads")
         if not isinstance(payloads, list):

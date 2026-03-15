@@ -6,7 +6,7 @@ Requires pxr (OpenUSD Python bindings). Tests are skipped if pxr is not availabl
 import pytest
 
 try:
-    from pxr import Usd, UsdGeom  # noqa: F401
+    from pxr import Sdf, Usd, UsdGeom  # noqa: F401
 
     PXR_AVAILABLE = True
 except ImportError:
@@ -27,8 +27,10 @@ from openusdconnect.protocol import (
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_LOAD_PAYLOAD,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_UNLOAD_PAYLOAD,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -409,6 +411,49 @@ class TestSetPayload:
         prim = stage.GetPrimAtPath("/World/InternalPay")
         assert prim.IsValid()
         assert prim.HasAuthoredPayloads()
+
+    def test_load_payload(self):
+        """load_payload makes payload children visible on the stage."""
+        stage = Usd.Stage.CreateInMemory()
+        # Create a payload file
+        payload_stage = Usd.Stage.CreateInMemory()
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_stage.DefinePrim("/Model/Child", "Mesh")
+        payload_path = payload_stage.GetRootLayer().identifier
+
+        # Set payload arc
+        apply_event(stage, {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [
+            {"asset_path": payload_path, "prim_path": "/Model"}
+        ]})
+        # Unload by default
+        stage.Unload(Sdf.Path("/World/Asset"))
+        assert not stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+        # Load it
+        apply_event(stage, {"k": K_LOAD_PAYLOAD, "prim": "/World/Asset"})
+        assert stage.GetPrimAtPath("/World/Asset").IsLoaded()
+        # Children should be visible
+        child = stage.GetPrimAtPath("/World/Asset/Child")
+        assert child and child.IsValid()
+
+    def test_unload_payload(self):
+        """unload_payload hides payload children."""
+        stage = Usd.Stage.CreateInMemory()
+        payload_stage = Usd.Stage.CreateInMemory()
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_stage.DefinePrim("/Model/Child", "Mesh")
+        payload_path = payload_stage.GetRootLayer().identifier
+
+        apply_event(stage, {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [
+            {"asset_path": payload_path, "prim_path": "/Model"}
+        ]})
+        # Load first
+        stage.Load(Sdf.Path("/World/Asset"))
+        assert stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+        # Unload via event
+        apply_event(stage, {"k": K_UNLOAD_PAYLOAD, "prim": "/World/Asset"})
+        assert not stage.GetPrimAtPath("/World/Asset").IsLoaded()
 
 
 class TestApplyEvents:

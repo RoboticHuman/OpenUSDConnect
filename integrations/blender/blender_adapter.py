@@ -34,6 +34,7 @@ class BlenderAdapter(DCCAdapter):
     def __init__(self):
         self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
         self._imported_refs: dict[str, str] = {}  # prim_path -> asset_path
+        self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -533,11 +534,44 @@ class BlenderAdapter(DCCAdapter):
         self._imported_refs.pop(prim_path, None)
 
     def set_payload(self, prim_path: str, payloads: list) -> bool:
-        # Payloads are unloaded by default — don't import anything.
-        # Users opt-in to load payloads when ready.
+        self._pending_payloads[prim_path] = payloads
         LOG.info(
             "BlenderAdapter: payload arc set on %s (%d entries, unloaded)",
             prim_path,
             len(payloads),
         )
+        return True
+
+    def load_payload(self, prim_path: str) -> bool:
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.load_payload dry: %s", prim_path)
+            return True
+        payloads = self._pending_payloads.get(prim_path, [])
+        if not payloads:
+            LOG.warning("BlenderAdapter.load_payload: no pending payloads for %s", prim_path)
+            return False
+        # Dedup: skip if children already exist (same pattern as set_reference)
+        if self._ref_children_exist(prim_path):
+            LOG.info("load_payload: children already exist for %s, skipping", prim_path)
+            return True
+        # Resolve and import
+        container = self._find_object_by_prim(prim_path)
+        if container is None:
+            self.ensure_prim(prim_path)
+            container = self._find_object_by_prim(prim_path)
+        for entry in payloads:
+            asset_path = entry.get("asset_path", "")
+            prim_path_ref = entry.get("prim_path", "")
+            resolved = self._resolve_asset_path(asset_path)
+            if resolved is not None:
+                self._import_ref_asset(container, prim_path, resolved, prim_path_ref)
+        LOG.info("BlenderAdapter.load_payload: loaded %s", prim_path)
+        return True
+
+    def unload_payload(self, prim_path: str) -> bool:
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.unload_payload dry: %s", prim_path)
+            return True
+        self._remove_imported_ref_children(prim_path)
+        LOG.info("BlenderAdapter.unload_payload: unloaded %s", prim_path)
         return True

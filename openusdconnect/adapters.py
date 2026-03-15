@@ -12,11 +12,13 @@ from abc import ABC, abstractmethod
 
 from .protocol import (
     K_DEACTIVATE_PRIM,
+    K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VISIBILITY,
+    K_UNLOAD_PAYLOAD,
 )
 
 LOG = logging.getLogger(__name__)
@@ -86,6 +88,16 @@ class DCCAdapter(ABC):
     @abstractmethod
     def set_payload(self, prim_path: str, payloads: list) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def load_payload(self, prim_path: str) -> bool:
+        """Load (import) a previously set payload arc."""
+        ...
+
+    @abstractmethod
+    def unload_payload(self, prim_path: str) -> bool:
+        """Unload a payload, removing its composed children."""
+        ...
 
 
 class UsdStageAdapter(DCCAdapter):
@@ -166,6 +178,18 @@ class UsdStageAdapter(DCCAdapter):
             self.stage.Unload(prim_path)
         return True
 
+    def load_payload(self, prim_path: str) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(self.stage, {"k": K_LOAD_PAYLOAD, "prim": prim_path})
+        return True
+
+    def unload_payload(self, prim_path: str) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(self.stage, {"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
+        return True
+
 
 class MockAdapter(DCCAdapter):
     """Pure-Python mock adapter for testing without pxr.
@@ -175,6 +199,7 @@ class MockAdapter(DCCAdapter):
 
     def __init__(self):
         self._prims: dict[str, dict] = {}
+        self.calls: list[tuple] = []
 
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
         if prim_path in self._prims:
@@ -267,6 +292,14 @@ class MockAdapter(DCCAdapter):
             p = self._prims[prim_path]
         p["payloads"] = list(payloads)
         LOG.info("MockAdapter: set payload on prim %s", prim_path)
+        return True
+
+    def load_payload(self, prim_path: str) -> bool:
+        self.calls.append(("load_payload", prim_path))
+        return True
+
+    def unload_payload(self, prim_path: str) -> bool:
+        self.calls.append(("unload_payload", prim_path))
         return True
 
     def get_prim(self, prim_path: str) -> dict:

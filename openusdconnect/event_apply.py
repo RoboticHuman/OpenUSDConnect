@@ -17,6 +17,7 @@ from .protocol import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
@@ -24,6 +25,7 @@ from .protocol import (
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
 )
 
 
@@ -184,6 +186,14 @@ def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
             payloads.AddInternalPayload(Sdf.Path(prim_path_ref))
 
 
+def _apply_load_payload(stage: Usd.Stage, ev: dict) -> None:
+    stage.Load(Sdf.Path(ev["prim"]))
+
+
+def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
+    stage.Unload(Sdf.Path(ev["prim"]))
+
+
 _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_XFORM_TRS: _apply_set_xform_trs,
     K_RENAME_PRIM: _apply_rename_prim,
@@ -191,6 +201,8 @@ _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_GPRIM_ATTRS: _apply_set_gprim_attrs,
     K_SET_REFERENCE: _apply_set_reference,
     K_SET_PAYLOAD: _apply_set_payload,
+    K_LOAD_PAYLOAD: _apply_load_payload,
+    K_UNLOAD_PAYLOAD: _apply_unload_payload,
 }
 
 
@@ -234,7 +246,7 @@ def apply_events(stage: Usd.Stage, events: list) -> None:
     are applied first outside a ChangeBlock, then value-setting events are
     applied inside a ChangeBlock for atomicity."""
     # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
-    structural = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD}
+    structural = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD}
     for ev in events:
         if ev.get("k") in structural:
             apply_event(stage, ev)

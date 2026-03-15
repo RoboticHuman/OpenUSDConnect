@@ -22,6 +22,7 @@ from openusdconnect.protocol import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
@@ -29,6 +30,7 @@ from openusdconnect.protocol import (
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
 )
 from openusdconnect.receiver import ReceiverThread
 
@@ -87,6 +89,8 @@ _DISPATCH_TABLE: dict[str, str] = {
     K_SET_GPRIM_ATTRS: "set_gprim_attrs",
     K_SET_REFERENCE: "set_reference",
     K_SET_PAYLOAD: "set_payload",
+    K_LOAD_PAYLOAD: "load_payload",
+    K_UNLOAD_PAYLOAD: "unload_payload",
 }
 
 # Per-event-type argument builders (returns kwargs for the adapter method).

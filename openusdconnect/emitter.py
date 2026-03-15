@@ -15,12 +15,14 @@ from .protocol import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
 )
 
 # PrimResyncType enum for classifying resync notices.
@@ -172,6 +174,7 @@ class NoticeEmitter:
         self.last_sent_visibility: dict[str, str] = {}
         self.last_sent_references: dict[str, list[tuple[str, str]]] = {}
         self.last_sent_payloads: dict[str, list[tuple[str, str]]] = {}
+        self.last_sent_payload_loaded: dict[str, bool] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -274,7 +277,7 @@ class NoticeEmitter:
             self._known_prims.add(new_path)
         for cache in (self.last_sent_trs, self.last_sent_mats,
                       self.last_sent_visibility, self.last_sent_references,
-                      self.last_sent_payloads):
+                      self.last_sent_payloads, self.last_sent_payload_loaded):
             if old_path in cache:
                 cache[new_path] = cache.pop(old_path)
 
@@ -286,6 +289,7 @@ class NoticeEmitter:
         self.last_sent_visibility.pop(prim_path, None)
         self.last_sent_references.pop(prim_path, None)
         self.last_sent_payloads.pop(prim_path, None)
+        self.last_sent_payload_loaded.pop(prim_path, None)
         self.dirty.discard(prim_path)
 
     def _build_rename_events(self) -> list[dict]:
@@ -357,6 +361,18 @@ class NoticeEmitter:
                 pay_ev["payloads"].append(entry)
             events.append(pay_ev)
             self.last_sent_payloads[prim_path] = current_payloads
+
+        # Payload load-state diff
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid() and prim.HasAuthoredPayloads():
+            is_loaded = prim.IsLoaded()
+            was_loaded = self.last_sent_payload_loaded.get(prim_path)
+            if is_loaded != was_loaded:
+                if is_loaded:
+                    events.append({"k": K_LOAD_PAYLOAD, "prim": prim_path})
+                else:
+                    events.append({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
+                self.last_sent_payload_loaded[prim_path] = is_loaded
 
         # TRS partial diff
         last = self.last_sent_trs.get(prim_path, {})

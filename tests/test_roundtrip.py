@@ -25,10 +25,12 @@ from openusdconnect.protocol import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_GPRIM_ATTRS,
+    K_LOAD_PAYLOAD,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
 )
 
 
@@ -450,6 +452,84 @@ class TestPayloadRoundtrip:
             os.unlink(os.path.join(fixture_dir, "_test_dest.usda"))
         except Exception:
             pass
+
+    def test_load_payload_via_adapter(self):
+        """UsdStageAdapter.load_payload makes children visible."""
+        # Create payload asset
+        payload_stage = Usd.Stage.CreateInMemory()
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_stage.DefinePrim("/Model/Child", "Mesh")
+        payload_path = payload_stage.GetRootLayer().identifier
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+        adapter.ensure_prim("/World/Asset")
+        adapter.set_payload("/World/Asset", [{"asset_path": payload_path, "prim_path": "/Model"}])
+        # set_payload unloads by default
+        assert not adapter.stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+        adapter.load_payload("/World/Asset")
+        assert adapter.stage.GetPrimAtPath("/World/Asset").IsLoaded()
+        child = adapter.stage.GetPrimAtPath("/World/Asset/Child")
+        assert child and child.IsValid()
+
+    def test_unload_payload_via_adapter(self):
+        """UsdStageAdapter.unload_payload hides children."""
+        payload_stage = Usd.Stage.CreateInMemory()
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_stage.DefinePrim("/Model/Child", "Mesh")
+        payload_path = payload_stage.GetRootLayer().identifier
+
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        adapter = UsdStageAdapter(stage)
+        adapter.ensure_prim("/World/Asset")
+        adapter.set_payload("/World/Asset", [{"asset_path": payload_path, "prim_path": "/Model"}])
+        adapter.load_payload("/World/Asset")
+        assert adapter.stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+        adapter.unload_payload("/World/Asset")
+        assert not adapter.stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+    def test_load_unload_roundtrip(self):
+        """Emitter detects load/unload transitions and emits events."""
+        from openusdconnect.emitter import NoticeEmitter
+        from openusdconnect.event_apply import apply_events
+
+        # Source stage with payload
+        payload_stage = Usd.Stage.CreateInMemory()
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_path = payload_stage.GetRootLayer().identifier
+
+        src = Usd.Stage.CreateInMemory()
+        src.DefinePrim("/World/Asset", "Xform")
+        prim = src.GetPrimAtPath("/World/Asset")
+        prim.GetPayloads().AddPayload(payload_path, "/Model")
+        src.Unload(Sdf.Path("/World/Asset"))
+
+        emitter = NoticeEmitter(src)
+        emitter.mark_dirty("/World/Asset")
+        events1 = emitter.build_events_for_dirty(include_matrices=False)
+        # First encounter: should NOT emit load_payload (prim is unloaded)
+        load_events = [e for e in events1 if e["k"] == K_LOAD_PAYLOAD]
+        assert len(load_events) == 0
+
+        # Now load the payload
+        src.Load(Sdf.Path("/World/Asset"))
+        emitter.mark_dirty("/World/Asset")
+        events2 = emitter.build_events_for_dirty(include_matrices=False)
+        load_events = [e for e in events2 if e["k"] == K_LOAD_PAYLOAD]
+        assert len(load_events) == 1
+        assert load_events[0]["prim"] == "/World/Asset"
+
+        # Now unload
+        src.Unload(Sdf.Path("/World/Asset"))
+        emitter.mark_dirty("/World/Asset")
+        events3 = emitter.build_events_for_dirty(include_matrices=False)
+        unload_events = [e for e in events3 if e["k"] == K_UNLOAD_PAYLOAD]
+        assert len(unload_events) == 1
+        assert unload_events[0]["prim"] == "/World/Asset"
 
 
 class TestStageToStageRoundtrip:
