@@ -12,6 +12,20 @@ from __future__ import annotations
 
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
+from .protocol import (
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
+)
+
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
     """Get existing prim or define a new one. Idempotent."""
@@ -171,12 +185,12 @@ def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
 
 
 _EVENT_DISPATCH: dict[str, callable] = {
-    "set_xform_trs": _apply_set_xform_trs,
-    "rename_prim": _apply_rename_prim,
-    "set_visibility": _apply_set_visibility,
-    "set_gprim_attrs": _apply_set_gprim_attrs,
-    "set_reference": _apply_set_reference,
-    "set_payload": _apply_set_payload,
+    K_SET_XFORM_TRS: _apply_set_xform_trs,
+    K_RENAME_PRIM: _apply_rename_prim,
+    K_SET_VISIBILITY: _apply_set_visibility,
+    K_SET_GPRIM_ATTRS: _apply_set_gprim_attrs,
+    K_SET_REFERENCE: _apply_set_reference,
+    K_SET_PAYLOAD: _apply_set_payload,
 }
 
 
@@ -189,22 +203,22 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
     """
     k = ev.get("k")
 
-    if k == "ensure_prim":
+    if k == K_ENSURE_PRIM:
         get_or_define_prim(stage, ev["prim"], ev.get("typeName", "Xform"))
         return
 
-    if k == "ensure_xform_ops":
+    if k == K_ENSURE_XFORM_OPS:
         ensure_canonical_ops(stage, ev["prim"])
         return
 
-    if k == "set_xform_matrices":
+    if k == K_SET_XFORM_MATRICES:
         return
 
-    if k == "delete_prim":
+    if k == K_DELETE_PRIM:
         stage.RemovePrim(ev["prim"])
         return
 
-    if k == "deactivate_prim":
+    if k == K_DEACTIVATE_PRIM:
         prim = stage.GetPrimAtPath(ev["prim"])
         if prim and prim.IsValid():
             prim.SetActive(ev.get("active", False))
@@ -220,7 +234,7 @@ def apply_events(stage: Usd.Stage, events: list) -> None:
     are applied first outside a ChangeBlock, then value-setting events are
     applied inside a ChangeBlock for atomicity."""
     # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
-    structural = {"ensure_prim", "ensure_xform_ops", "set_reference", "set_payload"}
+    structural = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD}
     for ev in events:
         if ev.get("k") in structural:
             apply_event(stage, ev)

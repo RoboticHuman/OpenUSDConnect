@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+from openusdconnect.protocol import K_SET_REFERENCE, K_SET_XFORM_TRS
+
 TESTS_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 
@@ -75,9 +77,9 @@ def dump_server_log(tmp_path, port):
         k = ev.get("k", "?")
         prim = ev.get("prim", "?")
         extra = ""
-        if k == "set_reference":
+        if k == K_SET_REFERENCE:
             extra = f" refs={ev.get('refs')}"
-        elif k == "set_xform_trs":
+        elif k == K_SET_XFORM_TRS:
             extra = f" fields={ev.get('fields')}"
         print(f"  seq={seq}: {k} {prim}{extra}")
 

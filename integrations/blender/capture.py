@@ -165,11 +165,13 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
         try:
             prim_map = import_context.get_prim_map()
         except Exception:
+            LOG.debug("USDHook: prim_map not available from import_context")
             prim_map = None
 
         try:
             stage = import_context.get_stage()
         except Exception:
+            LOG.debug("USDHook: stage not available from import_context")
             stage = None
 
         stage_id = None
@@ -177,10 +179,10 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             try:
                 stage_id = stage.GetRootLayer().identifier
             except Exception:
-                pass
+                LOG.debug("USDHook: could not extract stage_id")
 
         if not prim_map:
-            print("[USD Connect Hook] No prim map available; nothing tagged.")
+            LOG.info("USDHook: No prim map available; nothing tagged.")
             return True
 
         # Infer root prim from the stage's default prim and update auto_track_root
@@ -195,9 +197,9 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                     root_path = str(root_prims[0].GetPath()) if root_prims else None
                 if root_path:
                     bpy.context.scene.usd_connect_auto_track_root = root_path
-                    print(f"[USD Connect Hook] Auto-track root set to {root_path}")
+                    LOG.info("USDHook: Auto-track root set to %s", root_path)
             except Exception as e:
-                print(f"[USD Connect Hook] Could not infer root prim: {e}")
+                LOG.warning("USDHook: Could not infer root prim: %s", e)
 
         skip_leaf_geom = bool(getattr(bpy.context.scene, "usd_connect_import_skip_leaf_geom", True))
 
@@ -214,7 +216,7 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                     if prim and prim.IsValid():
                         prim_type_name = prim.GetTypeName()
                 except Exception:
-                    pass
+                    LOG.debug("USDHook: could not look up prim type for %s", prim_path_str)
 
             for db in data_blocks:
                 if isinstance(db, bpy.types.Object):
@@ -225,7 +227,7 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                         db["usd_stage_id"] = stage_id
                     tagged += 1
 
-        print(f"[USD Connect Hook] Tagged {tagged} objects with usd_prim_path")
+        LOG.info("USDHook: Tagged %d objects with usd_prim_path", tagged)
         return True
 
 
@@ -533,17 +535,17 @@ class NetworkSender:
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
         self._send_line(self.sock, self._make_hello("emitter"))
-        print(f"[USD Connect] Network sender connected to {self.host}:{self.port}")
+        LOG.info("Network sender connected to %s:%d", self.host, self.port)
 
     def disconnect(self):
         if self.sock:
             try:
                 self._send_line(self.sock, self._make_quit())
-            except Exception:
+            except OSError:
                 pass
             try:
                 self.sock.close()
-            except Exception:
+            except OSError:
                 pass
             self.sock = None
 
@@ -638,11 +640,8 @@ def _depsgraph_handler(scene, depsgraph):
             _state.author.on_depsgraph_update(updates)
             _try_send_dirty_events(include_matrices=False)
 
-    except Exception as e:
-        print("[USD Connect] depsgraph handler error:", e)
-        import traceback
-
-        traceback.print_exc()
+    except Exception:
+        LOG.exception("depsgraph handler error")
 
 
 def _timer_tick():
@@ -652,8 +651,8 @@ def _timer_tick():
         if not _state.author.enabled:
             return None
         return 0.1
-    except Exception as e:
-        print("[USD Connect] timer error:", e)
+    except Exception:
+        LOG.exception("timer error")
         return 0.5
 
 

@@ -20,6 +20,12 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from integrations.blender.blender_adapter import BlenderAdapter
+from openusdconnect.protocol import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_TRS,
+)
 from openusdconnect.receiver import ReceiverThread
 
 
@@ -60,13 +66,13 @@ def main():
                 prim_path = ev.get("prim", "")
                 print(f"[Receiver] Processing: {k} {prim_path}")
 
-                if k == "ensure_prim":
+                if k == K_ENSURE_PRIM:
                     adapter.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-                elif k == "ensure_xform_ops":
+                elif k == K_ENSURE_XFORM_OPS:
                     adapter.ensure_xform_ops(prim_path)
-                elif k == "set_xform_trs":
+                elif k == K_SET_XFORM_TRS:
                     adapter.set_xform_trs(prim_path, ev)
-                elif k == "set_visibility":
+                elif k == K_SET_VISIBILITY:
                     adapter.set_visibility(prim_path, ev.get("visible", True))
         except Exception as e:
             print(f"[Receiver] Error processing: {e}")

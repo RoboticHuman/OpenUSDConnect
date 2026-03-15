@@ -43,7 +43,16 @@ def main():
         sys.exit(1)
 
     from integrations.blender.blender_adapter import BlenderAdapter
-    from openusdconnect.protocol import make_hello, make_quit, make_txn
+    from openusdconnect.protocol import (
+        K_ENSURE_PRIM,
+        K_ENSURE_XFORM_OPS,
+        K_SET_REFERENCE,
+        K_SET_VISIBILITY,
+        K_SET_XFORM_TRS,
+        make_hello,
+        make_quit,
+        make_txn,
+    )
     from openusdconnect.receiver import ReceiverThread
     from openusdconnect.transport import send_line
 
@@ -60,9 +69,9 @@ def main():
         make_txn(
             "manual",
             [
-                {"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair", "typeName": "Xform"},
                 {
-                    "k": "set_reference",
+                    "k": K_SET_REFERENCE,
                     "prim": "/World/Chair",
                     "refs": [{"asset_path": asset_fwd, "prim_path": "/Model"}],
                 },
@@ -94,15 +103,15 @@ def main():
         prim_path = ev.get("prim", "")
         print(f"  Processing: {k} {prim_path}")
 
-        if k == "ensure_prim":
+        if k == K_ENSURE_PRIM:
             adapter.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-        elif k == "ensure_xform_ops":
+        elif k == K_ENSURE_XFORM_OPS:
             adapter.ensure_xform_ops(prim_path)
-        elif k == "set_xform_trs":
+        elif k == K_SET_XFORM_TRS:
             adapter.set_xform_trs(prim_path, ev)
-        elif k == "set_reference":
+        elif k == K_SET_REFERENCE:
             adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == "set_visibility":
+        elif k == K_SET_VISIBILITY:
             adapter.set_visibility(prim_path, ev.get("visible", True))
 
     print("\n=== After Phase 1 (initial import) ===")
@@ -124,28 +133,28 @@ def main():
         make_txn(
             "emitter-move",
             [
-                {"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"},
-                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Chair"},
                 {
-                    "k": "set_reference",
+                    "k": K_SET_REFERENCE,
                     "prim": "/World/Chair",
                     "refs": [{"asset_path": asset_fwd, "prim_path": "/Model"}],
                 },
                 {
-                    "k": "set_xform_trs",
+                    "k": K_SET_XFORM_TRS,
                     "prim": "/World/Chair",
                     "fields": ["t"],
                     "t": [3.0, 0.0, 0.0],
                 },
                 # Children first-encounter
-                {"k": "ensure_prim", "prim": "/World/Chair/Seat", "typeName": "Mesh"},
-                {"k": "ensure_xform_ops", "prim": "/World/Chair/Seat"},
-                {"k": "ensure_prim", "prim": "/World/Chair/Back", "typeName": "Mesh"},
-                {"k": "ensure_xform_ops", "prim": "/World/Chair/Back"},
-                {"k": "ensure_prim", "prim": "/World/Chair/Leg_0", "typeName": "Mesh"},
-                {"k": "ensure_prim", "prim": "/World/Chair/Leg_1", "typeName": "Mesh"},
-                {"k": "ensure_prim", "prim": "/World/Chair/Leg_2", "typeName": "Mesh"},
-                {"k": "ensure_prim", "prim": "/World/Chair/Leg_3", "typeName": "Mesh"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Seat", "typeName": "Mesh"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Chair/Seat"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Back", "typeName": "Mesh"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Chair/Back"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_0", "typeName": "Mesh"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_1", "typeName": "Mesh"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_2", "typeName": "Mesh"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_3", "typeName": "Mesh"},
             ],
         ),
     )
@@ -167,15 +176,15 @@ def main():
         prim_path = ev.get("prim", "")
         print(f"  Processing: {k} {prim_path}")
 
-        if k == "ensure_prim":
+        if k == K_ENSURE_PRIM:
             adapter.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-        elif k == "ensure_xform_ops":
+        elif k == K_ENSURE_XFORM_OPS:
             adapter.ensure_xform_ops(prim_path)
-        elif k == "set_xform_trs":
+        elif k == K_SET_XFORM_TRS:
             adapter.set_xform_trs(prim_path, ev)
-        elif k == "set_reference":
+        elif k == K_SET_REFERENCE:
             adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == "set_visibility":
+        elif k == K_SET_VISIBILITY:
             adapter.set_visibility(prim_path, ev.get("visible", True))
 
     receiver.stop()

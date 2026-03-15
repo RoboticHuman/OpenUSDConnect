@@ -7,6 +7,16 @@ suppress flag, and ChangeBlock batching — all DCC-agnostic.
 from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
+from openusdconnect.protocol import (
+    K_DEACTIVATE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_RENAME_PRIM,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_TRS,
+)
 
 
 def _make_stage_and_emitter():
@@ -29,7 +39,7 @@ class TestCreationDetection:
 
         events = emitter.build_events_for_dirty()
 
-        ensure_prims = [e for e in events if e["k"] == "ensure_prim"]
+        ensure_prims = [e for e in events if e["k"] == K_ENSURE_PRIM]
         assert len(ensure_prims) >= 1
         prim_paths = {e["prim"] for e in ensure_prims}
         assert "/World/Sphere" in prim_paths
@@ -45,7 +55,7 @@ class TestCreationDetection:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Box"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Box"]
         assert len(trs) == 1
         assert "t" in trs[0]["fields"]
 
@@ -63,7 +73,7 @@ class TestCreationDetection:
         stage.DefinePrim("/World/MySphere", "Sphere")
 
         events = emitter.build_events_for_dirty()
-        ensure = [e for e in events if e["k"] == "ensure_prim" and e["prim"] == "/World/MySphere"]
+        ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/MySphere"]
         assert len(ensure) == 1
         assert ensure[0]["typeName"] == "Sphere"
 
@@ -81,7 +91,7 @@ class TestDeletionDetection:
         stage.RemovePrim("/World/Cube")
         events = emitter.build_events_for_dirty()
 
-        deact = [e for e in events if e["k"] == "deactivate_prim"]
+        deact = [e for e in events if e["k"] == K_DEACTIVATE_PRIM]
         assert len(deact) == 1
         assert deact[0]["prim"] == "/World/Cube"
         assert deact[0]["active"] is False
@@ -112,7 +122,7 @@ class TestDeactivationDetection:
         prim.SetActive(False)
         events = emitter.build_events_for_dirty()
 
-        deact = [e for e in events if e["k"] == "deactivate_prim"]
+        deact = [e for e in events if e["k"] == K_DEACTIVATE_PRIM]
         assert len(deact) == 1
         assert deact[0]["prim"] == "/World/Cone"
         assert deact[0]["active"] is False
@@ -144,7 +154,7 @@ class TestRenameDetection:
 
         events = emitter.build_events_for_dirty()
 
-        renames = [e for e in events if e["k"] == "rename_prim"]
+        renames = [e for e in events if e["k"] == K_RENAME_PRIM]
         assert len(renames) == 1
         assert renames[0]["prim"] == "/World/OldName"
         assert renames[0]["new_name"] == "NewName"
@@ -206,7 +216,7 @@ class TestSuppressFlag:
         stage.DefinePrim("/World/Visible", "Xform")
 
         events = emitter.build_events_for_dirty()
-        prim_paths = {e["prim"] for e in events if e["k"] == "ensure_prim"}
+        prim_paths = {e["prim"] for e in events if e["k"] == K_ENSURE_PRIM}
         assert "/World/Visible" in prim_paths
         assert "/World/Hidden" not in prim_paths
 
@@ -245,7 +255,7 @@ class TestChangeBlockBatching:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS]
         trs_prims = {e["prim"] for e in trs}
         assert "/World/A" in trs_prims
         assert "/World/B" in trs_prims
@@ -266,7 +276,7 @@ class TestParentBeforeChildOrdering:
         events = emitter.build_events_for_dirty()
 
         # Extract ensure_prim events and verify ordering
-        ensure_prims = [e for e in events if e["k"] == "ensure_prim"]
+        ensure_prims = [e for e in events if e["k"] == K_ENSURE_PRIM]
         ensure_paths = [e["prim"] for e in ensure_prims]
 
         # Each path should appear after its parent
@@ -306,7 +316,7 @@ class TestRotationRoundTrip:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Rot"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Rot"]
         assert len(trs) == 1
         assert "r" in trs[0]["fields"]
         r = trs[0]["r"]
@@ -328,7 +338,7 @@ class TestScaleRoundTrip:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Scaled"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Scaled"]
         assert len(trs) == 1
         assert "s" in trs[0]["fields"]
         s = trs[0]["s"]
@@ -370,7 +380,7 @@ class TestBaseLayerPrimTRS:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Cube"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs) == 1
         fields = trs[0]["fields"]
         assert "r" in fields, "Rotation field missing from events"
@@ -404,7 +414,7 @@ class TestBaseLayerPrimTRS:
 
         events = emitter.build_events_for_dirty()
 
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Box"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Box"]
         assert len(trs) == 1
         assert "t" in trs[0]["fields"]
         assert "r" in trs[0]["fields"]
@@ -478,20 +488,20 @@ class TestFirstEncounterStructuralEvents:
 
         # First encounter — should have ensure_prim
         events1 = emitter.build_events_for_dirty()
-        ensure1 = [e for e in events1 if e["k"] == "ensure_prim" and e["prim"] == "/World/Obj"]
+        ensure1 = [e for e in events1 if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/Obj"]
         assert len(ensure1) == 1
 
         # Change translate
         xf.GetOrderedXformOps()[0].Set(Gf.Vec3d(5, 0, 0))
         events2 = emitter.build_events_for_dirty()
 
-        ensure2 = [e for e in events2 if e["k"] == "ensure_prim" and e["prim"] == "/World/Obj"]
+        ensure2 = [e for e in events2 if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/Obj"]
         assert len(ensure2) == 0, "ensure_prim should not be emitted on subsequent updates"
 
-        ops2 = [e for e in events2 if e["k"] == "ensure_xform_ops" and e["prim"] == "/World/Obj"]
+        ops2 = [e for e in events2 if e["k"] == K_ENSURE_XFORM_OPS and e["prim"] == "/World/Obj"]
         assert len(ops2) == 0, "ensure_xform_ops should not be emitted on subsequent updates"
 
-        trs2 = [e for e in events2 if e["k"] == "set_xform_trs" and e["prim"] == "/World/Obj"]
+        trs2 = [e for e in events2 if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Obj"]
         assert len(trs2) == 1
 
 
@@ -514,7 +524,7 @@ class TestPayloadEmission:
         prim.GetPayloads().AddPayload(pay_id, "/Model")
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Asset"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Asset"]
         assert len(pay_evs) == 1
         assert len(pay_evs[0]["payloads"]) == 1
         assert pay_evs[0]["payloads"][0]["asset_path"] == pay_id
@@ -533,7 +543,7 @@ class TestPayloadEmission:
         prim.GetPayloads().AddPayload(pay_b.GetRootLayer().identifier, "/Model")
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Obj"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Obj"]
         assert len(pay_evs) == 1
         assert pay_evs[0]["payloads"][0]["asset_path"] == pay_b.GetRootLayer().identifier
 
@@ -542,7 +552,7 @@ class TestPayloadEmission:
         stage.DefinePrim("/World/Plain", "Xform")
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Plain"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Plain"]
         assert len(pay_evs) == 0
 
     def test_unchanged_payload_no_event(self):
@@ -558,7 +568,7 @@ class TestPayloadEmission:
         xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Stable"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Stable"]
         assert len(pay_evs) == 0
 
     def test_payload_cache_cleaned_on_deletion(self):
@@ -602,7 +612,7 @@ class TestPayloadEmission:
         prim.GetPayloads().ClearPayloads()
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Clr"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Clr"]
         assert len(pay_evs) == 1
         assert pay_evs[0]["payloads"] == []
 
@@ -616,7 +626,7 @@ class TestPayloadEmission:
         prim.GetPayloads().AddPayload(pay_b.GetRootLayer().identifier, "/Model")
 
         events = emitter.build_events_for_dirty()
-        pay_evs = [e for e in events if e["k"] == "set_payload" and e["prim"] == "/World/Multi"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD and e["prim"] == "/World/Multi"]
         assert len(pay_evs) == 1
         assert len(pay_evs[0]["payloads"]) == 2
 
@@ -640,7 +650,7 @@ class TestReferenceEmission:
         prim.GetReferences().AddReference(ref_id, "/Model")
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Chair"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Chair"]
         assert len(ref_evs) == 1
         assert len(ref_evs[0]["refs"]) == 1
         assert ref_evs[0]["refs"][0]["asset_path"] == ref_id
@@ -660,7 +670,7 @@ class TestReferenceEmission:
         prim.GetReferences().AddReference(ref_b.GetRootLayer().identifier, "/Model")
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Obj"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Obj"]
         assert len(ref_evs) == 1
         assert ref_evs[0]["refs"][0]["asset_path"] == ref_b.GetRootLayer().identifier
 
@@ -669,7 +679,7 @@ class TestReferenceEmission:
         stage.DefinePrim("/World/Plain", "Xform")
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Plain"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Plain"]
         assert len(ref_evs) == 0
 
     def test_unchanged_reference_no_event(self):
@@ -687,7 +697,7 @@ class TestReferenceEmission:
         xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Stable"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Stable"]
         assert len(ref_evs) == 0
 
     def test_reference_cache_cleaned_on_deletion(self):
@@ -729,7 +739,7 @@ class TestReferenceEmission:
         prim.GetReferences().AddReference(ref_id)
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/NoPP"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/NoPP"]
         assert len(ref_evs) == 1
         assert "prim_path" not in ref_evs[0]["refs"][0]
 
@@ -745,7 +755,7 @@ class TestReferenceEmission:
         prim.GetReferences().ClearReferences()
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Clr"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Clr"]
         assert len(ref_evs) == 1
         assert ref_evs[0]["refs"] == []
 
@@ -759,6 +769,6 @@ class TestReferenceEmission:
         prim.GetReferences().AddReference(ref_b.GetRootLayer().identifier, "/Model")
 
         events = emitter.build_events_for_dirty()
-        ref_evs = [e for e in events if e["k"] == "set_reference" and e["prim"] == "/World/Multi"]
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Multi"]
         assert len(ref_evs) == 1
         assert len(ref_evs[0]["refs"]) == 2

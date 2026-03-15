@@ -201,6 +201,12 @@ class MockDepsgraphUpdate:
 # ---------------------------------------------------------------------------
 from integrations.blender.capture import BlenderStageAuthor
 from openusdconnect.emitter import NoticeEmitter
+from openusdconnect.protocol import (
+    K_DEACTIVATE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_XFORM_TRS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +262,7 @@ class TestAutoTrack:
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
-        ensures = [e for e in events if e["k"] == "ensure_prim"]
+        ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         child_ensures = [e for e in ensures if e["prim"] == "/World/Cube"]
         assert len(child_ensures) == 1
         assert obj["usd_prim_path"] == "/World/Cube"
@@ -289,7 +295,7 @@ class TestAutoTrack:
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
-        ensures = [e for e in events if e["k"] == "ensure_prim"]
+        ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         child_ensure = [e for e in ensures if e["prim"] == "/World/Sphere"]
         assert len(child_ensure) == 1
         assert child_ensure[0]["typeName"] == "Sphere"
@@ -305,7 +311,7 @@ class TestAutoTrack:
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
-        ensures = [e for e in events if e["k"] == "ensure_prim"]
+        ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         ensure_paths = [e["prim"] for e in ensures]
         assert "/World" in ensure_paths
         assert "/World/Group" in ensure_paths
@@ -326,7 +332,7 @@ class TestAutoTrack:
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(new_cube)])
 
-        ensures = [e for e in events if e["k"] == "ensure_prim"]
+        ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         child_ensures = [e for e in ensures if e["prim"] != "/World"]
         assert len(child_ensures) == 1
         assert child_ensures[0]["prim"] == "/World/Cube_1"
@@ -341,7 +347,7 @@ class TestAutoTrack:
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(new_sphere)])
 
-        ensures = [e for e in events if e["k"] == "ensure_prim"]
+        ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         child_ensures = [e for e in ensures if e["prim"] == "/World/Sphere"]
         assert len(child_ensures) == 1
 
@@ -357,9 +363,9 @@ class TestFirstEncounter:
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
         kinds = [e["k"] for e in events]
-        assert "ensure_prim" in kinds
-        assert "ensure_xform_ops" in kinds
-        assert "set_xform_trs" in kinds
+        assert K_ENSURE_PRIM in kinds
+        assert K_ENSURE_XFORM_OPS in kinds
+        assert K_SET_XFORM_TRS in kinds
 
 
 class TestPartialDiff:
@@ -372,14 +378,14 @@ class TestPartialDiff:
 
         # First encounter — all fields
         events1 = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
-        trs1 = [e for e in events1 if e["k"] == "set_xform_trs" and e["prim"] == "/World/Cube"]
+        trs1 = [e for e in events1 if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs1) == 1
         assert set(trs1[0]["fields"]) == {"t", "r", "s"}
 
         # Change only translation
         obj.matrix_world = _Matrix(loc=(5, 0, 0))
         events2 = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
-        trs2 = [e for e in events2 if e["k"] == "set_xform_trs" and e["prim"] == "/World/Cube"]
+        trs2 = [e for e in events2 if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs2) == 1
         assert trs2[0]["fields"] == ["t"]
 
@@ -392,7 +398,7 @@ class TestPartialDiff:
 
         # Same transform — BlenderStageAuthor detects no matrix change, skips
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
-        trs = [e for e in events if e["k"] == "set_xform_trs" and e["prim"] == "/World/Cube"]
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs) == 0
 
 
@@ -409,7 +415,7 @@ class TestDeletionDetection:
         obj._deleted = True
         events = _get_events(author, emitter, [])
 
-        deact = [e for e in events if e["k"] == "deactivate_prim"]
+        deact = [e for e in events if e["k"] == K_DEACTIVATE_PRIM]
         assert len(deact) == 1
         assert deact[0]["prim"] == "/World/Cube"
         assert deact[0]["active"] is False

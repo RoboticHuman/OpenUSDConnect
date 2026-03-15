@@ -73,7 +73,7 @@ class ReceiverThread(threading.Thread):
                     seq = parsed.get("seq")
                     if seq is not None:
                         self.last_seq = max(self.last_seq, int(seq))
-                except Exception:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     pass
         except Exception:
             if not self._stop_event.is_set():
@@ -83,7 +83,7 @@ class ReceiverThread(threading.Thread):
             try:
                 if self.sock:
                     self.sock.close()
-            except Exception:
+            except OSError:
                 pass
             LOG.info("ReceiverThread stopped")
 
@@ -101,5 +101,5 @@ class ReceiverThread(threading.Thread):
         try:
             if self.sock:
                 self.sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
+        except OSError:
             pass

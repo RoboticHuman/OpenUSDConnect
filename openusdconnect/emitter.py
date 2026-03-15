@@ -11,6 +11,18 @@ from __future__ import annotations
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
+from .protocol import (
+    K_DEACTIVATE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_RENAME_PRIM,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
+)
+
 # PrimResyncType enum for classifying resync notices.
 # Not available in all USD builds (e.g. Blender's bundled pxr).
 try:
@@ -283,7 +295,7 @@ class NoticeEmitter:
         self._renamed_prims.clear()
         for old_path, new_path in renamed_now:
             new_name = new_path.rsplit("/", 1)[-1]
-            events.append({"k": "rename_prim", "prim": old_path, "new_name": new_name})
+            events.append({"k": K_RENAME_PRIM, "prim": old_path, "new_name": new_name})
             self._migrate_caches(old_path, new_path)
             if old_path in self.dirty:
                 self.dirty.discard(old_path)
@@ -297,7 +309,7 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._deleted_prims.clear()
         for prim_path in deactivated_now:
-            events.append({"k": "deactivate_prim", "prim": prim_path, "active": False})
+            events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
             self._purge_caches(prim_path)
         return events
 
@@ -316,15 +328,15 @@ class NoticeEmitter:
                 tn = prim.GetTypeName()
                 if tn:
                     type_name = tn
-            events.append({"k": "ensure_prim", "prim": prim_path, "typeName": type_name})
-            events.append({"k": "ensure_xform_ops", "prim": prim_path})
+            events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
+            events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._known_prims.add(prim_path)
 
         # Reference diff
         current_refs = _read_references(self.stage, prim_path)
         last_refs = self.last_sent_references.get(prim_path, [])
         if current_refs != last_refs:
-            ref_ev = {"k": "set_reference", "prim": prim_path, "refs": []}
+            ref_ev = {"k": K_SET_REFERENCE, "prim": prim_path, "refs": []}
             for asset_path, ref_prim_path in current_refs:
                 entry: dict = {"asset_path": asset_path}
                 if ref_prim_path:
@@ -337,7 +349,7 @@ class NoticeEmitter:
         current_payloads = _read_payloads(self.stage, prim_path)
         last_payloads = self.last_sent_payloads.get(prim_path, [])
         if current_payloads != last_payloads:
-            pay_ev: dict = {"k": "set_payload", "prim": prim_path, "payloads": []}
+            pay_ev: dict = {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": []}
             for asset_path, pay_prim_path in current_payloads:
                 entry: dict = {"asset_path": asset_path}
                 if pay_prim_path:
@@ -349,7 +361,7 @@ class NoticeEmitter:
         # TRS partial diff
         last = self.last_sent_trs.get(prim_path, {})
         fields = []
-        payload = {"k": "set_xform_trs", "prim": prim_path, "fields": fields}
+        payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
 
         if not near_list(snap["t"], last.get("t"), eps_trs):
             fields.append("t")
@@ -377,7 +389,7 @@ class NoticeEmitter:
                 last_vis = self.last_sent_visibility.get(prim_path)
                 if vis_val != last_vis:
                     events.append({
-                        "k": "set_visibility",
+                        "k": K_SET_VISIBILITY,
                         "prim": prim_path,
                         "visible": vis_val != "invisible",
                     })
@@ -390,7 +402,7 @@ class NoticeEmitter:
                 snap["world_m16"], lastm.get("world"), eps_mat
             ):
                 events.append({
-                    "k": "set_xform_matrices",
+                    "k": K_SET_XFORM_MATRICES,
                     "prim": prim_path,
                     "local_m": snap["local_m16"],
                     "world_m": snap["world_m16"],

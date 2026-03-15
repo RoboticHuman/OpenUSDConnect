@@ -81,6 +81,19 @@ def main():
     print(f"\n[Loopback] Starting receiver (port {port})")
 
     from integrations.blender.blender_adapter import BlenderAdapter
+    from openusdconnect.protocol import (
+        K_DEACTIVATE_PRIM,
+        K_DELETE_PRIM,
+        K_ENSURE_PRIM,
+        K_ENSURE_XFORM_OPS,
+        K_RENAME_PRIM,
+        K_SET_GPRIM_ATTRS,
+        K_SET_PAYLOAD,
+        K_SET_REFERENCE,
+        K_SET_VISIBILITY,
+        K_SET_XFORM_MATRICES,
+        K_SET_XFORM_TRS,
+    )
     from openusdconnect.receiver import ReceiverThread
 
     adapter = BlenderAdapter()
@@ -100,31 +113,31 @@ def main():
         k = ev.get("k")
         prim_path = ev.get("prim", "")
         extra = ""
-        if k == "set_reference":
+        if k == K_SET_REFERENCE:
             extra = f" refs={ev.get('refs')}"
         print(f"  Processing: {k} {prim_path}{extra}")
 
-        if k == "ensure_prim":
+        if k == K_ENSURE_PRIM:
             adapter.ensure_prim(prim_path, ev.get("typeName", "Xform"))
-        elif k == "ensure_xform_ops":
+        elif k == K_ENSURE_XFORM_OPS:
             adapter.ensure_xform_ops(prim_path)
-        elif k == "set_xform_trs":
+        elif k == K_SET_XFORM_TRS:
             adapter.set_xform_trs(prim_path, ev)
-        elif k == "set_reference":
+        elif k == K_SET_REFERENCE:
             adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == "set_visibility":
+        elif k == K_SET_VISIBILITY:
             adapter.set_visibility(prim_path, ev.get("visible", True))
-        elif k == "delete_prim":
+        elif k == K_DELETE_PRIM:
             adapter.delete_prim(prim_path)
-        elif k == "deactivate_prim":
+        elif k == K_DEACTIVATE_PRIM:
             adapter.deactivate_prim(prim_path, ev.get("active", False))
-        elif k == "set_xform_matrices":
+        elif k == K_SET_XFORM_MATRICES:
             adapter.set_xform_matrices(prim_path, ev)
-        elif k == "set_gprim_attrs":
+        elif k == K_SET_GPRIM_ATTRS:
             adapter.set_gprim_attrs(prim_path, ev.get("attrs", {}))
-        elif k == "rename_prim":
+        elif k == K_RENAME_PRIM:
             adapter.rename_prim(prim_path, ev.get("new_name", ""))
-        elif k == "set_payload":
+        elif k == K_SET_PAYLOAD:
             adapter.set_payload(prim_path, ev.get("payloads", []))
 
     receiver.stop()

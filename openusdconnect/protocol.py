@@ -28,20 +28,33 @@ from __future__ import annotations
 
 PROTOCOL_VERSION = 1
 
+# Event kind constants — use these instead of raw string literals.
+K_ENSURE_PRIM = "ensure_prim"
+K_ENSURE_XFORM_OPS = "ensure_xform_ops"
+K_SET_XFORM_TRS = "set_xform_trs"
+K_SET_XFORM_MATRICES = "set_xform_matrices"
+K_DELETE_PRIM = "delete_prim"
+K_DEACTIVATE_PRIM = "deactivate_prim"
+K_RENAME_PRIM = "rename_prim"
+K_SET_VISIBILITY = "set_visibility"
+K_SET_GPRIM_ATTRS = "set_gprim_attrs"
+K_SET_REFERENCE = "set_reference"
+K_SET_PAYLOAD = "set_payload"
+
 # Valid event keys
 EVENT_KEYS = frozenset(
     {
-        "ensure_prim",
-        "ensure_xform_ops",
-        "set_xform_trs",
-        "set_xform_matrices",
-        "delete_prim",
-        "deactivate_prim",
-        "rename_prim",
-        "set_visibility",
-        "set_gprim_attrs",
-        "set_reference",
-        "set_payload",
+        K_ENSURE_PRIM,
+        K_ENSURE_XFORM_OPS,
+        K_SET_XFORM_TRS,
+        K_SET_XFORM_MATRICES,
+        K_DELETE_PRIM,
+        K_DEACTIVATE_PRIM,
+        K_RENAME_PRIM,
+        K_SET_VISIBILITY,
+        K_SET_GPRIM_ATTRS,
+        K_SET_REFERENCE,
+        K_SET_PAYLOAD,
     }
 )
 
@@ -94,7 +107,7 @@ def validate_event(ev: dict) -> bool:
         return False
     if "prim" not in ev:
         return False
-    if k == "set_xform_trs":
+    if k == K_SET_XFORM_TRS:
         fields = ev.get("fields", [])
         if not isinstance(fields, list):
             return False
@@ -107,28 +120,28 @@ def validate_event(ev: dict) -> bool:
                 return False
             if f == "s" and not is_vec3_valid(ev.get("s", [])):
                 return False
-    if k == "set_xform_matrices":
+    if k == K_SET_XFORM_MATRICES:
         if not is_mat16_valid(ev.get("local_m", [])):
             return False
         if not is_mat16_valid(ev.get("world_m", [])):
             return False
-    if k == "deactivate_prim":
+    if k == K_DEACTIVATE_PRIM:
         if not isinstance(ev.get("active"), bool):
             return False
-    if k == "rename_prim":
+    if k == K_RENAME_PRIM:
         new_name = ev.get("new_name")
         if not isinstance(new_name, str) or not new_name:
             return False
-    if k == "set_visibility":
+    if k == K_SET_VISIBILITY:
         if not isinstance(ev.get("visible"), bool):
             return False
-    if k == "set_gprim_attrs":
+    if k == K_SET_GPRIM_ATTRS:
         attrs = ev.get("attrs")
         if not isinstance(attrs, dict):
             return False
         if not all(isinstance(key, str) for key in attrs):
             return False
-    if k == "set_reference":
+    if k == K_SET_REFERENCE:
         refs = ev.get("refs")
         if not isinstance(refs, list):
             return False
@@ -146,7 +159,7 @@ def validate_event(ev: dict) -> bool:
             if pp is not None:
                 if not isinstance(pp, str) or not pp.startswith("/"):
                     return False
-    if k == "set_payload":
+    if k == K_SET_PAYLOAD:
         payloads = ev.get("payloads")
         if not isinstance(payloads, list):
             return False

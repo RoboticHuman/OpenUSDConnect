@@ -15,7 +15,15 @@ if project_root not in sys.path:
 
 import socket
 
-from openusdconnect.protocol import make_hello, make_quit, make_txn
+from openusdconnect.protocol import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_TRS,
+    make_hello,
+    make_quit,
+    make_txn,
+)
 from openusdconnect.transport import send_line
 
 
@@ -36,25 +44,25 @@ def main():
     # Send events: create a Sphere, Cube, set transforms, set visibility
     events = [
         # Sphere at (3, 4, 5), visible
-        {"k": "ensure_prim", "prim": "/World/TestSphere", "typeName": "Sphere"},
-        {"k": "ensure_xform_ops", "prim": "/World/TestSphere"},
+        {"k": K_ENSURE_PRIM, "prim": "/World/TestSphere", "typeName": "Sphere"},
+        {"k": K_ENSURE_XFORM_OPS, "prim": "/World/TestSphere"},
         {
-            "k": "set_xform_trs",
+            "k": K_SET_XFORM_TRS,
             "prim": "/World/TestSphere",
             "fields": ["t", "s"],
             "t": [3.0, 4.0, 5.0],
             "s": [2.0, 2.0, 2.0],
         },
         # Cube at (10, 0, 0), hidden
-        {"k": "ensure_prim", "prim": "/World/TestCube", "typeName": "Cube"},
-        {"k": "ensure_xform_ops", "prim": "/World/TestCube"},
-        {"k": "set_xform_trs", "prim": "/World/TestCube", "fields": ["t"], "t": [10.0, 0.0, 0.0]},
-        {"k": "set_visibility", "prim": "/World/TestCube", "visible": False},
+        {"k": K_ENSURE_PRIM, "prim": "/World/TestCube", "typeName": "Cube"},
+        {"k": K_ENSURE_XFORM_OPS, "prim": "/World/TestCube"},
+        {"k": K_SET_XFORM_TRS, "prim": "/World/TestCube", "fields": ["t"], "t": [10.0, 0.0, 0.0]},
+        {"k": K_SET_VISIBILITY, "prim": "/World/TestCube", "visible": False},
         # Cone at origin, default transform
-        {"k": "ensure_prim", "prim": "/World/TestCone", "typeName": "Cone"},
-        {"k": "ensure_xform_ops", "prim": "/World/TestCone"},
+        {"k": K_ENSURE_PRIM, "prim": "/World/TestCone", "typeName": "Cone"},
+        {"k": K_ENSURE_XFORM_OPS, "prim": "/World/TestCone"},
         # Empty/Xform
-        {"k": "ensure_prim", "prim": "/World/TestXform", "typeName": "Xform"},
+        {"k": K_ENSURE_PRIM, "prim": "/World/TestXform", "typeName": "Xform"},
     ]
 
     txn = make_txn("integration-test-emitter", events)

@@ -17,6 +17,19 @@ try:
 except Exception:
     BPY_AVAILABLE = False
 
+from openusdconnect.protocol import (
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
+)
 from openusdconnect.receiver import ReceiverThread
 
 from .blender_adapter import BlenderAdapter
@@ -42,7 +55,7 @@ def _get_capture_mod():
             from . import capture
 
             _capture_mod = capture
-        except Exception:
+        except ImportError:
             pass
     return _capture_mod
 
@@ -63,38 +76,38 @@ def _ensure_scene_props():
 
 # Module-level dispatch table — method names resolved at call time.
 _DISPATCH_TABLE: dict[str, str] = {
-    "ensure_prim": "ensure_prim",
-    "ensure_xform_ops": "ensure_xform_ops",
-    "set_xform_trs": "set_xform_trs",
-    "set_xform_matrices": "set_xform_matrices",
-    "delete_prim": "delete_prim",
-    "deactivate_prim": "deactivate_prim",
-    "rename_prim": "rename_prim",
-    "set_visibility": "set_visibility",
-    "set_gprim_attrs": "set_gprim_attrs",
-    "set_reference": "set_reference",
-    "set_payload": "set_payload",
+    K_ENSURE_PRIM: "ensure_prim",
+    K_ENSURE_XFORM_OPS: "ensure_xform_ops",
+    K_SET_XFORM_TRS: "set_xform_trs",
+    K_SET_XFORM_MATRICES: "set_xform_matrices",
+    K_DELETE_PRIM: "delete_prim",
+    K_DEACTIVATE_PRIM: "deactivate_prim",
+    K_RENAME_PRIM: "rename_prim",
+    K_SET_VISIBILITY: "set_visibility",
+    K_SET_GPRIM_ATTRS: "set_gprim_attrs",
+    K_SET_REFERENCE: "set_reference",
+    K_SET_PAYLOAD: "set_payload",
 }
 
 # Per-event-type argument builders (returns kwargs for the adapter method).
 def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
     """Return (args, kwargs) for the adapter method identified by *k*."""
-    if k == "ensure_prim":
+    if k == K_ENSURE_PRIM:
         return (prim_path, ev.get("typeName", "Xform")), {}
-    if k == "deactivate_prim":
+    if k == K_DEACTIVATE_PRIM:
         return (prim_path, ev.get("active", False)), {}
-    if k == "rename_prim":
+    if k == K_RENAME_PRIM:
         return (prim_path, ev.get("new_name", "")), {}
-    if k == "set_visibility":
+    if k == K_SET_VISIBILITY:
         return (prim_path, ev.get("visible", True)), {}
-    if k == "set_gprim_attrs":
+    if k == K_SET_GPRIM_ATTRS:
         return (prim_path, ev.get("attrs", {})), {}
-    if k == "set_reference":
+    if k == K_SET_REFERENCE:
         return (prim_path, ev.get("refs", [])), {}
-    if k == "set_payload":
+    if k == K_SET_PAYLOAD:
         return (prim_path, ev.get("payloads", [])), {}
     # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
-    if k in ("set_xform_trs", "set_xform_matrices"):
+    if k in (K_SET_XFORM_TRS, K_SET_XFORM_MATRICES):
         return (prim_path, ev), {}
     return (prim_path,), {}
 
@@ -125,9 +138,9 @@ def _process_event(ev: dict):
     k = ev.get("k")
     prim_path = ev.get("prim", "")
     extra = ""
-    if k == "set_visibility":
+    if k == K_SET_VISIBILITY:
         extra = f" visible={ev.get('visible')}"
-    elif k == "deactivate_prim":
+    elif k == K_DEACTIVATE_PRIM:
         extra = f" active={ev.get('active')}"
     LOG.debug("event: k=%s prim=%s%s", k, prim_path, extra)
 
@@ -183,7 +196,7 @@ def _process_queue_timer():
         try:
             if bpy.context.view_layer:
                 bpy.context.view_layer.update()
-        except Exception:
+        except RuntimeError:
             pass
     finally:
         _set_applying_remote(False)
@@ -192,7 +205,7 @@ def _process_queue_timer():
         scene = bpy.context.scene
         if scene:
             scene.usd_connect_recv_last_seq = _LAST_SEQ
-    except Exception:
+    except (AttributeError, RuntimeError):
         pass
 
     return 0.01  # Run again in 10ms

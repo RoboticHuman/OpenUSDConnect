@@ -21,6 +21,15 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops
+from openusdconnect.protocol import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_TRS,
+)
 
 
 def _create_ref_test_assets(tmp_dir):
@@ -98,7 +107,7 @@ class TestNoticeEmitterRoundtrip:
         assert len(events) > 0
 
         # Check that we got a set_xform_trs event
-        trs_events = [e for e in events if e.get("k") == "set_xform_trs"]
+        trs_events = [e for e in events if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs_events) >= 1
         trs_ev = trs_events[0]
         assert "t" in trs_ev.get("fields", [])
@@ -111,7 +120,7 @@ class TestNoticeEmitterRoundtrip:
         # Now check again
         events = emitter.build_events_for_dirty()
         # Should have no TRS events
-        trs_events = [e for e in events if e.get("k") == "set_xform_trs"]
+        trs_events = [e for e in events if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs_events) == 0
 
     def test_full_roundtrip_emitter_to_mock_adapter(self):
@@ -133,11 +142,11 @@ class TestNoticeEmitterRoundtrip:
         for ev in events:
             k = ev.get("k")
             prim = ev.get("prim", "")
-            if k == "ensure_prim":
+            if k == K_ENSURE_PRIM:
                 adapter.ensure_prim(prim, ev.get("typeName", "Xform"))
-            elif k == "ensure_xform_ops":
+            elif k == K_ENSURE_XFORM_OPS:
                 adapter.ensure_xform_ops(prim)
-            elif k == "set_xform_trs":
+            elif k == K_SET_XFORM_TRS:
                 adapter.set_xform_trs(prim, ev)
 
         trs = adapter.get_trs("/World/Sphere")
@@ -185,14 +194,14 @@ class TestNoticeEmitterRoundtrip:
 
         # First flush
         events1 = emitter.build_events_for_dirty(include_matrices=False)
-        trs1 = [e for e in events1 if e.get("k") == "set_xform_trs"]
+        trs1 = [e for e in events1 if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs1) == 1
         assert set(trs1[0]["fields"]) == {"t", "r", "s"}
 
         # Change only translation
         t_op.Set(Gf.Vec3d(2.0, 0.0, 0.0))
         events2 = emitter.build_events_for_dirty(include_matrices=False)
-        trs2 = [e for e in events2 if e.get("k") == "set_xform_trs"]
+        trs2 = [e for e in events2 if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs2) == 1
         assert trs2[0]["fields"] == ["t"]
 
@@ -211,14 +220,14 @@ class TestNoticeEmitterRoundtrip:
         UsdGeom.Imageable(prim).GetVisibilityAttr().Set("invisible")
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        vis_events = [e for e in events if e.get("k") == "set_visibility"]
+        vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events) == 1
         assert vis_events[0]["visible"] is False
 
         # Make visible again
         UsdGeom.Imageable(prim).GetVisibilityAttr().Set("inherited")
         events2 = emitter.build_events_for_dirty(include_matrices=False)
-        vis_events2 = [e for e in events2 if e.get("k") == "set_visibility"]
+        vis_events2 = [e for e in events2 if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events2) == 1
         assert vis_events2[0]["visible"] is True
 
@@ -328,7 +337,7 @@ class TestPayloadRoundtrip:
         emitter.mark_dirty("/World/Thing")
         events = emitter.build_events_for_dirty(include_matrices=False)
 
-        pay_evs = [e for e in events if e["k"] == "set_payload"]
+        pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD]
         assert len(pay_evs) == 1
 
         stage_b = Usd.Stage.CreateInMemory()
@@ -409,7 +418,7 @@ class TestPayloadRoundtrip:
         assert len(payloads) >= 1, f"Expected payloads on {prim_path}, got {payloads}"
 
         # Build the event
-        pay_ev = {"k": "set_payload", "prim": prim_path, "payloads": []}
+        pay_ev = {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": []}
         for asset_path, pay_prim_path in payloads:
             entry = {"asset_path": asset_path}
             if pay_prim_path:
@@ -479,8 +488,8 @@ class TestStageToStageRoundtrip:
 
         # Manually build events (emitter doesn't emit gprim attrs yet)
         events = [
-            {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
-            {"k": "set_gprim_attrs", "prim": "/World/Sphere", "attrs": {"radius": 4.0}},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Sphere"},
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Sphere", "attrs": {"radius": 4.0}},
         ]
 
         stage_b = Usd.Stage.CreateInMemory()
@@ -501,7 +510,7 @@ class TestStageToStageRoundtrip:
 
         events = [
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/Furniture",
                 "refs": [{"asset_path": src_layer.identifier, "prim_path": "/Model"}],
             },
@@ -526,13 +535,13 @@ class TestStageToStageRoundtrip:
         src_layer = src_stage.GetRootLayer()
 
         events = [
-            {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
-            {"k": "ensure_xform_ops", "prim": "/World/Sphere"},
-            {"k": "set_xform_trs", "prim": "/World/Sphere", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
-            {"k": "set_visibility", "prim": "/World/Sphere", "visible": False},
-            {"k": "set_gprim_attrs", "prim": "/World/Sphere", "attrs": {"radius": 2.5}},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Sphere"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Sphere", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": False},
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Sphere", "attrs": {"radius": 2.5}},
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/Ref",
                 "refs": [{"asset_path": src_layer.identifier, "prim_path": "/Prop"}],
             },

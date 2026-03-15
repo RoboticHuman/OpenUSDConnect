@@ -10,6 +10,15 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
+from .protocol import (
+    K_DEACTIVATE_PRIM,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+)
+
 LOG = logging.getLogger(__name__)
 
 
@@ -121,37 +130,37 @@ class UsdStageAdapter(DCCAdapter):
     def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "deactivate_prim", "prim": prim_path, "active": active})
+        apply_event(self.stage, {"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": active})
         return True
 
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "rename_prim", "prim": prim_path, "new_name": new_name})
+        apply_event(self.stage, {"k": K_RENAME_PRIM, "prim": prim_path, "new_name": new_name})
         return True
 
     def set_visibility(self, prim_path: str, visible: bool) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "set_visibility", "prim": prim_path, "visible": visible})
+        apply_event(self.stage, {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible})
         return True
 
     def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "set_gprim_attrs", "prim": prim_path, "attrs": attrs})
+        apply_event(self.stage, {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs})
         return True
 
     def set_reference(self, prim_path: str, refs: list) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "set_reference", "prim": prim_path, "refs": refs})
+        apply_event(self.stage, {"k": K_SET_REFERENCE, "prim": prim_path, "refs": refs})
         return True
 
     def set_payload(self, prim_path: str, payloads: list) -> bool:
         from .event_apply import apply_event
 
-        apply_event(self.stage, {"k": "set_payload", "prim": prim_path, "payloads": payloads})
+        apply_event(self.stage, {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads})
         # Payloads are unloaded by default — users opt-in to load.
         if payloads:
             self.stage.Unload(prim_path)

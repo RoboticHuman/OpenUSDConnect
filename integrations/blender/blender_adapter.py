@@ -77,7 +77,7 @@ class BlenderAdapter(DCCAdapter):
         try:
             bpy.context.scene.collection.objects.link(obj)
             linked = True
-        except Exception:
+        except RuntimeError:
             pass
         # Fallback: try context collection
         if not linked:
@@ -85,11 +85,10 @@ class BlenderAdapter(DCCAdapter):
                 col = bpy.context.collection
                 col.objects.link(obj)
                 linked = True
-            except Exception:
+            except RuntimeError:
                 pass
         if not linked:
             prim = obj.get("usd_prim_path")
-            print(f"[USD Connect] ERROR: Failed to link object {obj.name} for prim {prim}")
             LOG.error("Failed to link object %s for prim %s", obj.name, prim)
 
     def _create_mesh_primitive(self, name: str, type_name: str):
@@ -129,7 +128,7 @@ class BlenderAdapter(DCCAdapter):
         Returns a new bpy.types.Object tagged with prim_path and type_name.
         """
         name = prim_path.strip("/").replace("/", "_") or prim_path
-        print(f"[USD Connect] ensure_prim: creating {type_name} '{name}' for {prim_path}")
+        LOG.info("ensure_prim: creating %s '%s' for %s", type_name, name, prim_path)
 
         new = None
         if type_name in ("Sphere", "Cube", "Cylinder", "Cone"):
@@ -170,9 +169,9 @@ class BlenderAdapter(DCCAdapter):
             try:
                 target_col.objects.link(obj)
                 bpy.context.scene.collection.objects.unlink(obj)
-            except Exception:
+            except RuntimeError:
                 LOG.warning("Failed to move %s to collection %s", obj.name, target_col.name)
-        print(f"[USD Connect] ensure_prim: parented '{obj.name}' under '{parent_obj.name}'")
+        LOG.info("ensure_prim: parented '%s' under '%s'", obj.name, parent_obj.name)
 
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
         if not BPY_AVAILABLE:
@@ -187,7 +186,7 @@ class BlenderAdapter(DCCAdapter):
         self._prim_cache[prim_path] = new
         self._parent_to_ancestor(new, prim_path)
 
-        print(f"[USD Connect] ensure_prim: linked {type_name} '{new.name}' for {prim_path}")
+        LOG.info("ensure_prim: linked %s '%s' for %s", type_name, new.name, prim_path)
         return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
@@ -255,7 +254,7 @@ class BlenderAdapter(DCCAdapter):
                 col.objects.unlink(obj)
             bpy.data.objects.remove(obj)
             return True
-        except Exception:
+        except (ReferenceError, RuntimeError):
             LOG.exception("Failed to delete object for prim %s", prim_path)
             return False
 
@@ -270,7 +269,7 @@ class BlenderAdapter(DCCAdapter):
             obj.hide_set(not active)
             obj.hide_render = not active
             return True
-        except Exception:
+        except RuntimeError:
             LOG.exception("Failed to deactivate object for prim %s", prim_path)
             return False
 
@@ -305,7 +304,7 @@ class BlenderAdapter(DCCAdapter):
             obj.hide_viewport = not visible
             obj.hide_set(not visible)
             return True
-        except Exception:
+        except RuntimeError:
             LOG.exception("Failed to set visibility for prim %s", prim_path)
             return False
 
@@ -356,7 +355,6 @@ class BlenderAdapter(DCCAdapter):
         resolved = os.path.normpath(resolved)
         if not os.path.isfile(resolved):
             LOG.warning("BlenderAdapter: file not found: %s", resolved)
-            print(f"[USD Connect] set_reference: file not found: {resolved}")
             return None
         return resolved
 
@@ -365,7 +363,7 @@ class BlenderAdapter(DCCAdapter):
 
         Returns the set of newly created Blender objects (may be empty).
         """
-        print(f"[USD Connect] set_reference: importing {resolved} for {prim_path}")
+        LOG.info("set_reference: importing %s for %s", resolved, prim_path)
         before = set(bpy.data.objects)
 
         try:
@@ -391,7 +389,6 @@ class BlenderAdapter(DCCAdapter):
             LOG.exception(
                 "BlenderAdapter: USD import failed for %s", resolved
             )
-            print(f"[USD Connect] set_reference: import failed: {e}")
             return set()
 
         new_objs = set(bpy.data.objects) - before
@@ -401,10 +398,7 @@ class BlenderAdapter(DCCAdapter):
             )
             return set()
 
-        print(
-            f"[USD Connect] set_reference: imported "
-            f"{len(new_objs)} objects from {resolved}"
-        )
+        LOG.info("set_reference: imported %d objects from %s", len(new_objs), resolved)
 
         imported_roots = [
             obj
@@ -463,9 +457,9 @@ class BlenderAdapter(DCCAdapter):
                     container["usd_type_name"] = "Reference"
                     container["usd_ref_asset"] = resolved_refs[0][0]
                     self._imported_refs[prim_path] = resolved_refs[0][0]
-                print(
-                    f"[USD Connect] set_reference: children already exist "
-                    f"for {prim_path}, skipping re-import"
+                LOG.info(
+                    "set_reference: children already exist for %s, skipping re-import",
+                    prim_path,
                 )
                 return True
             # Different asset — remove old children, re-import below

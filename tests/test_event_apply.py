@@ -20,6 +20,19 @@ from openusdconnect.event_apply import (
     ensure_canonical_ops,
     get_or_define_prim,
 )
+from openusdconnect.protocol import (
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
+)
 
 
 @pytest.fixture
@@ -67,13 +80,13 @@ class TestEnsureCanonicalOps:
 
 class TestApplyEvent:
     def test_ensure_prim(self, stage):
-        apply_event(stage, {"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"})
+        apply_event(stage, {"k": K_ENSURE_PRIM, "prim": "/World/New", "typeName": "Xform"})
         prim = stage.GetPrimAtPath("/World/New")
         assert prim.IsValid()
 
     def test_ensure_xform_ops(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
-        apply_event(stage, {"k": "ensure_xform_ops", "prim": "/World/Sphere"})
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"})
         xf = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Sphere"))
         ops = xf.GetOrderedXformOps()
         assert len(ops) == 3
@@ -81,7 +94,7 @@ class TestApplyEvent:
     def test_set_xform_trs_full(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
         ev = {
-            "k": "set_xform_trs",
+            "k": K_SET_XFORM_TRS,
             "prim": "/World/Sphere",
             "fields": ["t", "r", "s"],
             "t": [1.0, 2.0, 3.0],
@@ -108,7 +121,7 @@ class TestApplyEvent:
         apply_event(
             stage,
             {
-                "k": "set_xform_trs",
+                "k": K_SET_XFORM_TRS,
                 "prim": "/World/Sphere",
                 "fields": ["t", "r", "s"],
                 "t": [1.0, 2.0, 3.0],
@@ -120,7 +133,7 @@ class TestApplyEvent:
         apply_event(
             stage,
             {
-                "k": "set_xform_trs",
+                "k": K_SET_XFORM_TRS,
                 "prim": "/World/Sphere",
                 "fields": ["t"],
                 "t": [10.0, 20.0, 30.0],
@@ -140,7 +153,7 @@ class TestApplyEvent:
         apply_event(
             stage,
             {
-                "k": "set_xform_matrices",
+                "k": K_SET_XFORM_MATRICES,
                 "prim": "/World/Sphere",
                 "local_m": [0.0] * 16,
                 "world_m": [0.0] * 16,
@@ -150,26 +163,26 @@ class TestApplyEvent:
     def test_delete_prim(self, stage):
         stage.DefinePrim("/World/ToDelete", "Xform")
         assert stage.GetPrimAtPath("/World/ToDelete").IsValid()
-        apply_event(stage, {"k": "delete_prim", "prim": "/World/ToDelete"})
+        apply_event(stage, {"k": K_DELETE_PRIM, "prim": "/World/ToDelete"})
         assert not stage.GetPrimAtPath("/World/ToDelete").IsValid()
 
     def test_deactivate_prim(self, stage):
         stage.DefinePrim("/World/Target", "Xform")
-        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": False})
+        apply_event(stage, {"k": K_DEACTIVATE_PRIM, "prim": "/World/Target", "active": False})
         prim = stage.GetPrimAtPath("/World/Target")
         # Inactive prims are pruned from the composed view; IsValid returns False
         assert not prim.IsActive()
 
     def test_reactivate_prim(self, stage):
         stage.DefinePrim("/World/Target", "Xform")
-        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": False})
-        apply_event(stage, {"k": "deactivate_prim", "prim": "/World/Target", "active": True})
+        apply_event(stage, {"k": K_DEACTIVATE_PRIM, "prim": "/World/Target", "active": False})
+        apply_event(stage, {"k": K_DEACTIVATE_PRIM, "prim": "/World/Target", "active": True})
         prim = stage.GetPrimAtPath("/World/Target")
         assert prim.IsActive()
 
     def test_rename_prim(self, stage):
         stage.DefinePrim("/World/OldName", "Xform")
-        apply_event(stage, {"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
+        apply_event(stage, {"k": K_RENAME_PRIM, "prim": "/World/OldName", "new_name": "NewName"})
         assert stage.GetPrimAtPath("/World/NewName").IsValid()
         assert not stage.GetPrimAtPath("/World/OldName").IsValid()
 
@@ -178,13 +191,13 @@ class TestApplyEvent:
         apply_event(
             stage,
             {
-                "k": "set_xform_trs",
+                "k": K_SET_XFORM_TRS,
                 "prim": "/World/OldName",
                 "fields": ["t"],
                 "t": [3.0, 4.0, 5.0],
             },
         )
-        apply_event(stage, {"k": "rename_prim", "prim": "/World/OldName", "new_name": "NewName"})
+        apply_event(stage, {"k": K_RENAME_PRIM, "prim": "/World/OldName", "new_name": "NewName"})
         prim = stage.GetPrimAtPath("/World/NewName")
         assert prim.IsValid()
         xf = UsdGeom.Xformable(prim)
@@ -196,15 +209,15 @@ class TestApplyEvent:
 class TestSetVisibility:
     def test_set_invisible(self, stage):
         stage.DefinePrim("/World/Sphere", "Sphere")
-        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": False})
+        apply_event(stage, {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": False})
         prim = stage.GetPrimAtPath("/World/Sphere")
         imageable = UsdGeom.Imageable(prim)
         assert imageable.GetVisibilityAttr().Get() == "invisible"
 
     def test_set_visible(self, stage):
         stage.DefinePrim("/World/Sphere", "Sphere")
-        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": False})
-        apply_event(stage, {"k": "set_visibility", "prim": "/World/Sphere", "visible": True})
+        apply_event(stage, {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": False})
+        apply_event(stage, {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": True})
         prim = stage.GetPrimAtPath("/World/Sphere")
         imageable = UsdGeom.Imageable(prim)
         assert imageable.GetVisibilityAttr().Get() == "inherited"
@@ -216,7 +229,7 @@ class TestSetGprimAttrs:
         apply_event(
             stage,
             {
-                "k": "set_gprim_attrs",
+                "k": K_SET_GPRIM_ATTRS,
                 "prim": "/World/Sphere",
                 "attrs": {"radius": 3.0},
             },
@@ -229,7 +242,7 @@ class TestSetGprimAttrs:
         apply_event(
             stage,
             {
-                "k": "set_gprim_attrs",
+                "k": K_SET_GPRIM_ATTRS,
                 "prim": "/World/Cone",
                 "attrs": {"height": 1.4, "radius": 0.6},
             },
@@ -248,7 +261,7 @@ class TestSetReference:
         apply_event(
             stage,
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/Chair",
                 "refs": [{"asset_path": ref_path, "prim_path": "/Chair"}],
             },
@@ -267,7 +280,7 @@ class TestSetReference:
         apply_event(
             stage,
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/Multi",
                 "refs": [
                     {"asset_path": ref_stage_1.GetRootLayer().identifier, "prim_path": "/A"},
@@ -287,7 +300,7 @@ class TestSetReference:
         apply_event(
             stage,
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/Clearable",
                 "refs": [{"asset_path": ref_stage.GetRootLayer().identifier}],
             },
@@ -298,7 +311,7 @@ class TestSetReference:
         # Clear with empty refs
         apply_event(
             stage,
-            {"k": "set_reference", "prim": "/World/Clearable", "refs": []},
+            {"k": K_SET_REFERENCE, "prim": "/World/Clearable", "refs": []},
         )
         prim = stage.GetPrimAtPath("/World/Clearable")
         assert not prim.HasAuthoredReferences()
@@ -311,7 +324,7 @@ class TestSetReference:
         apply_event(
             stage,
             {
-                "k": "set_reference",
+                "k": K_SET_REFERENCE,
                 "prim": "/World/InternalRef",
                 "refs": [{"prim_path": "/Source"}],
             },
@@ -330,7 +343,7 @@ class TestSetPayload:
         apply_event(
             stage,
             {
-                "k": "set_payload",
+                "k": K_SET_PAYLOAD,
                 "prim": "/World/Asset",
                 "payloads": [{"asset_path": pay_path, "prim_path": "/Model"}],
             },
@@ -348,7 +361,7 @@ class TestSetPayload:
         apply_event(
             stage,
             {
-                "k": "set_payload",
+                "k": K_SET_PAYLOAD,
                 "prim": "/World/Multi",
                 "payloads": [
                     {"asset_path": pay_a.GetRootLayer().identifier, "prim_path": "/A"},
@@ -367,7 +380,7 @@ class TestSetPayload:
         apply_event(
             stage,
             {
-                "k": "set_payload",
+                "k": K_SET_PAYLOAD,
                 "prim": "/World/Clearable",
                 "payloads": [{"asset_path": pay_stage.GetRootLayer().identifier}],
             },
@@ -377,7 +390,7 @@ class TestSetPayload:
 
         apply_event(
             stage,
-            {"k": "set_payload", "prim": "/World/Clearable", "payloads": []},
+            {"k": K_SET_PAYLOAD, "prim": "/World/Clearable", "payloads": []},
         )
         prim = stage.GetPrimAtPath("/World/Clearable")
         assert not prim.HasAuthoredPayloads()
@@ -388,7 +401,7 @@ class TestSetPayload:
         apply_event(
             stage,
             {
-                "k": "set_payload",
+                "k": K_SET_PAYLOAD,
                 "prim": "/World/InternalPay",
                 "payloads": [{"prim_path": "/Source"}],
             },
@@ -401,10 +414,10 @@ class TestSetPayload:
 class TestApplyEvents:
     def test_atomic_batch(self, stage):
         events = [
-            {"k": "ensure_prim", "prim": "/World/A", "typeName": "Xform"},
-            {"k": "ensure_prim", "prim": "/World/B", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/World/A"},
-            {"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"], "t": [5.0, 0.0, 0.0]},
+            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [5.0, 0.0, 0.0]},
         ]
         apply_events(stage, events)
         assert stage.GetPrimAtPath("/World/A").IsValid()

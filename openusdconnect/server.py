@@ -68,7 +68,8 @@ class UsdSyncServer:
         try:
             row = self.db_conn.execute("SELECT MAX(seq) FROM events").fetchone()
             return row[0] or 0
-        except Exception:
+        except sqlite3.Error as e:
+            LOG.warning("Failed to load max seq: %s", e)
             return 0
 
     def assign_seq(self) -> int:
@@ -95,7 +96,8 @@ class UsdSyncServer:
             for h in self.receivers:
                 try:
                     h.request.sendall(line)
-                except Exception:
+                except OSError:
+                    LOG.debug("Broadcast failed for %s, marking as dead", h.client_address)
                     dead.append(h)
             for h in dead:
                 self.receivers.discard(h)
@@ -133,7 +135,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             return
         try:
             hello = json.loads(line.decode("utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            LOG.warning("Failed to parse hello message: %s", e)
             return
 
         if hello.get("type") != "hello":
@@ -165,7 +168,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 break
             try:
                 msg = json.loads(line.decode("utf-8"))
-            except Exception:
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                LOG.warning("Failed to parse message: %s", e)
                 continue
 
             if msg.get("type") == "quit":
