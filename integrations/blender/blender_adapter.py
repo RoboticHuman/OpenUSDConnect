@@ -34,6 +34,17 @@ class BlenderAdapter(DCCAdapter):
     def __init__(self):
         self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
         self._imported_refs: dict[str, str] = {}  # prim_path -> asset_path
+        # Rebuild caches from scene so a fresh adapter (after receiver reset)
+        # knows about objects that persist from a previous session.
+        if BPY_AVAILABLE:
+            for obj in bpy.data.objects:
+                pp = obj.get("usd_prim_path")
+                if pp:
+                    self._prim_cache[pp] = obj
+                    if obj.get("usd_type_name") == "Reference":
+                        ref_asset = obj.get("usd_ref_asset", "")
+                        if ref_asset:
+                            self._imported_refs[pp] = ref_asset
 
     def _find_object_by_prim(self, prim_path: str) -> object | None:
         if not BPY_AVAILABLE:
@@ -436,8 +447,31 @@ class BlenderAdapter(DCCAdapter):
         if not resolved_refs:
             return False
 
-        # If assets were previously imported, remove old child objects
-        if prim_path in self._imported_refs:
+        # Dedup: skip import when children already exist in the scene.
+        # Covers two cases:
+        #   1. Adapter previously imported the asset (_imported_refs has entry)
+        #   2. User imported the base scene before the adapter existed
+        #      (e.g. single-instance emitter+receiver loopback) — children
+        #      exist but _imported_refs is empty.
+        if self._ref_children_exist(prim_path):
+            prev = self._imported_refs.get(prim_path)
+            if prev is None or prev == resolved_refs[0][0]:
+                # Same asset (or unknown) and children present — skip import.
+                # Tag the container for future dedup.
+                container = self._find_object_by_prim(prim_path)
+                if container is not None and len(resolved_refs) == 1:
+                    container["usd_type_name"] = "Reference"
+                    container["usd_ref_asset"] = resolved_refs[0][0]
+                    self._imported_refs[prim_path] = resolved_refs[0][0]
+                print(
+                    f"[USD Connect] set_reference: children already exist "
+                    f"for {prim_path}, skipping re-import"
+                )
+                return True
+            # Different asset — remove old children, re-import below
+            self._remove_imported_ref_children(prim_path)
+        elif prim_path in self._imported_refs:
+            # Had a previous import but children are gone — remove stale entry
             self._remove_imported_ref_children(prim_path)
 
         # Find or create the container object for this prim_path.
@@ -455,8 +489,8 @@ class BlenderAdapter(DCCAdapter):
                 if parent_obj is not None:
                     container.parent = parent_obj
                     container.matrix_parent_inverse = _IDENTITY_4X4.copy()
-
-        container["usd_type_name"] = "Reference"
+        else:
+            container["usd_type_name"] = "Reference"
 
         total_imported = 0
         for resolved, prim_path_ref in resolved_refs:
@@ -479,33 +513,29 @@ class BlenderAdapter(DCCAdapter):
 
     def _ref_children_exist(self, prim_path: str) -> bool:
         """Check if at least one child object from a previous reference import still exists."""
-        if not BPY_AVAILABLE:
-            return False
         container = self._find_object_by_prim(prim_path)
         if container is None:
             return False
         prefix = prim_path + "/"
-        for obj in bpy.data.objects:
-            pp = obj.get("usd_prim_path", "")
-            if pp.startswith(prefix):
-                return True
-        return False
+        return any(pp.startswith(prefix) for pp in self._prim_cache)
 
     def _remove_imported_ref_children(self, prim_path: str):
         """Remove child objects previously imported for a reference prim (keep container)."""
         if not BPY_AVAILABLE:
             return
-        to_remove = []
-        for obj in bpy.data.objects:
-            pp = obj.get("usd_prim_path", "")
-            # Remove children, not the container itself
-            if pp.startswith(prim_path + "/"):
-                to_remove.append(obj)
-        for obj in to_remove:
-            self._prim_cache.pop(obj.get("usd_prim_path", ""), None)
-            for col in obj.users_collection:
-                col.objects.unlink(obj)
-            bpy.data.objects.remove(obj)
+        prefix = prim_path + "/"
+        to_remove = [
+            (pp, obj) for pp, obj in self._prim_cache.items()
+            if pp.startswith(prefix)
+        ]
+        for pp, obj in to_remove:
+            del self._prim_cache[pp]
+            try:
+                for col in obj.users_collection:
+                    col.objects.unlink(obj)
+                bpy.data.objects.remove(obj)
+            except ReferenceError:
+                pass  # already deleted
         self._imported_refs.pop(prim_path, None)
 
     def set_payload(self, prim_path: str, payloads: list) -> bool:

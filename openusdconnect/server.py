@@ -11,8 +11,10 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
+import signal
 import socketserver
 import sqlite3
 import threading
@@ -203,6 +205,18 @@ def run_server(
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
+
+    # Ensure the DB is closed even on hard kills (Stop-Process, SIGTERM).
+    def _cleanup():
+        try:
+            sync_server.db_conn.close()
+            LOG.info("Event log closed: %s", log_path)
+        except Exception:
+            LOG.exception("Failed to close event log")
+
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+
     LOG.info("Server listening on %s:%s", host, port)
     LOG.info("Event log: %s", log_path)
     if base_usd_path:

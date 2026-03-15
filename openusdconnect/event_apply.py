@@ -48,6 +48,12 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str):
     o = find_op(xf, "orient")
     s = find_op(xf, "scale")
 
+    if t is None or o is None or s is None:
+        # Composed prims (e.g. children of a reference) may lack an authored
+        # spec on the edit target layer.  OverridePrim creates an 'over' spec
+        # so AddXformOp can author attributes.
+        stage.OverridePrim(prim_path)
+
     if t is None:
         t = xf.AddTranslateOp()
     if o is None:

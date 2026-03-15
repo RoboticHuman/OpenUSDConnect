@@ -288,18 +288,20 @@ class BlenderStageAuthor:
         should not be tracked.
 
         NOTE: *obj* may be the evaluated (CoW) copy from depsgraph.updates.
-        Custom property reads work on the evaluated copy (it mirrors the
-        original's authored data), but writes MUST go to ``obj.original``
-        so they persist after the next depsgraph evaluation.
+        Custom property reads MUST go through ``obj.original`` because
+        the evaluated copy can have stale values — e.g. when
+        _import_ref_asset overwrites USDHook's tags after the last
+        depsgraph evaluation.  Writes also go to ``obj.original`` so
+        they persist after the next evaluation cycle.
         """
-        prim_path = obj.get("usd_prim_path")
+        orig = getattr(obj, "original", obj)
+        prim_path = orig.get("usd_prim_path")
         type_name = None
         if not prim_path:
             # Reverse-lookup: is this object already tracked by reference?
             # _prim_refs stores originals, so compare against obj.original.
-            obj_orig = getattr(obj, "original", obj)
             for pp, ref in self._prim_refs.items():
-                if ref is obj_orig:
+                if ref is orig:
                     prim_path = pp
                     break
         if not prim_path:
@@ -308,7 +310,8 @@ class BlenderStageAuthor:
             parent = getattr(obj, "parent", None)
             if parent is None:
                 return None, None
-            parent_prim = parent.get("usd_prim_path")
+            parent_orig = getattr(parent, "original", parent)
+            parent_prim = parent_orig.get("usd_prim_path")
             if not parent_prim:
                 return None, None
             usd_name = sanitize_usd_name(obj.name)
@@ -465,7 +468,8 @@ class BlenderStageAuthor:
             # Ensure prim exists on stage
             prim = self.stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
-                tn = type_name if type_name else obj.get("usd_type_name", "Xform")
+                obj_orig = getattr(obj, "original", obj)
+                tn = type_name if type_name else obj_orig.get("usd_type_name", "Xform")
                 self.stage.DefinePrim(prim_path, tn)
 
             # ALWAYS ensure canonical xform ops before authoring

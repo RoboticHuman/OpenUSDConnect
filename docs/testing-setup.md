@@ -90,11 +90,83 @@ If none of the above are configured, Blender tests are automatically skipped. No
 
 All integration tests start a real sync server, run Blender processes as emitter and receiver, and assert on the results.
 
+## Interactive Debugging with VS Code
+
+For hands-on debugging with breakpoints, the repo includes a launcher script that starts the sync server and one or two Blender instances with debugpy enabled, plus VS Code configs for attaching.
+
+### First-time setup
+
+1. Make sure `blender.test.cfg` exists (see Blender Test Configuration above).
+
+2. Generate the VS Code configs and launch Blender once so it writes the addon install path:
+
+```powershell
+.\scripts\start_usdconnect_debug.ps1
+```
+
+3. Once Blender opens and you see `addon installed at: ...` in the terminal, close Blender, then regenerate VS Code configs with the correct debugpy path mappings:
+
+```powershell
+uv run python scripts/setup_vscode.py
+```
+
+This reads `.blender_addon_path` (written by the bootstrap) and generates `.vscode/launch.json` and `.vscode/tasks.json` with path mappings that bridge your workspace source files to where Blender actually loads the addon from.
+
+### Launching a debug session
+
+```powershell
+# One Blender instance, waits for VS Code debugger attach
+.\scripts\start_usdconnect_debug.ps1 -WaitForDebugger
+
+# Two Blender instances (A on :5678, B on :5679)
+.\scripts\start_usdconnect_debug.ps1 -WaitForDebugger -TwoBlenders
+```
+
+The launcher starts the sync server and Blender, prints a summary table with PIDs and debug ports, then waits. When you close all Blender windows, the server is stopped automatically and the terminal is released.
+
+In VS Code, use the attach configs from the Run and Debug panel:
+
+| Config | Description |
+|--------|-------------|
+| `Attach: Blender A (debugpy :5678)` | Attach to instance A |
+| `Attach: Blender B (debugpy :5679)` | Attach to instance B |
+| `Attach All USD Connect` | Compound — attaches to both |
+
+Breakpoints work in both `integrations/blender/` and `openusdconnect/` source files.
+
+### Hot-reloading the addon
+
+After making code changes, you can rebuild the addon and push it to all running Blender instances without restarting them. From a separate terminal:
+
+```powershell
+.\scripts\start_usdconnect_debug.ps1 -Reload
+```
+
+This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each running Blender instance has a background timer that watches for this file every 2 seconds, then disables, reinstalls, and re-enables the addon automatically.
+
+### Launcher flags
+
+| Flag | Description |
+|------|-------------|
+| `-WaitForDebugger` | Blender blocks at startup until VS Code attaches |
+| `-TwoBlenders` | Launch a second Blender instance (B on port 5679) |
+| `-Reload` | Build addon + signal running instances to reload, then exit |
+| `-StartEmitter` | Auto-start the network emitter on launch |
+| `-StartReceiver` | Auto-start the network receiver on launch |
+| `-DebugPort N` | debugpy port for instance A (default 5678) |
+| `-DebugPortB N` | debugpy port for instance B (default 5679) |
+| `-ServerPort N` | Sync server port (default 7200) |
+| `-BlenderExe path` | Override Blender executable (default: from `blender.test.cfg`) |
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `blender.test.cfg` | Blender exe path (gitignored, created by setup script or manually) |
 | `.blender/` | Downloaded portable Blender (gitignored) |
+| `.blender_addon_path` | Installed addon directory (gitignored, written by bootstrap) |
 | `conftest.py` | Root pytest conftest with `blender_exe` fixture |
 | `scripts/setup_blender_test.py` | Portable Blender download/setup script |
+| `scripts/start_usdconnect_debug.ps1` | Debug session launcher (server + Blender + debugpy) |
+| `scripts/blender_bootstrap_instance.py` | Blender startup script (addon install, debugpy, reload watcher) |
+| `scripts/setup_vscode.py` | Generates `.vscode/launch.json` and `tasks.json` with correct path mappings |
