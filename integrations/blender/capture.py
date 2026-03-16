@@ -334,6 +334,22 @@ class BlenderStageAuthor:
             LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
         return prim_path, type_name
 
+    def _is_under_unloaded_payload(self, prim_path: str) -> bool:
+        """Check if any ancestor of prim_path has an unloaded payload.
+
+        When a payload is unloaded on the emitter's stage, children can't
+        be defined or authored.  This happens in the window between an
+        unload_payload and the next load_payload.
+        """
+        parts = prim_path.strip("/").split("/")
+        for i in range(1, len(parts)):
+            ancestor_path = "/" + "/".join(parts[:i])
+            prim = self.stage.GetPrimAtPath(ancestor_path)
+            if prim and prim.IsValid() and prim.HasAuthoredPayloads():
+                if not prim.IsLoaded():
+                    return True
+        return False
+
     def _ensure_ancestors_on_stage(self, obj):
         """Ensure all ancestor prims exist on the local stage with xform ops.
 
@@ -463,6 +479,12 @@ class BlenderStageAuthor:
             if last == m and self.stage.GetPrimAtPath(prim_path):
                 continue
             self._last_matrix[obj.name] = m
+
+            # Skip prims under unloaded payloads — they can't be defined
+            # on the stage.  This window exists between an unload_payload and
+            # the next load_payload when they arrive in separate transactions.
+            if self._is_under_unloaded_payload(prim_path):
+                continue
 
             # Ensure ancestors exist (structural — OUTSIDE ChangeBlock)
             self._ensure_ancestors_on_stage(obj)

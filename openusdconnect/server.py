@@ -89,6 +89,72 @@ class UsdSyncServer:
         except Exception:
             LOG.exception("Failed to write event log")
 
+    def replay_children_after_load(self, prim_path: str):
+        """After load_payload, re-broadcast the latest events for children.
+
+        Queries the event log for the most recent structural and TRS events
+        for each child of prim_path, assigns new sequence numbers, and
+        broadcasts them so receivers re-apply the authoritative state.
+
+        Also reactivates children on the server's stage that may have been
+        deactivated by _detect_deletions during a previous unload cycle.
+        """
+        from pxr import Sdf
+
+        from .protocol import (
+            K_ENSURE_PRIM,
+            K_ENSURE_XFORM_OPS,
+            K_SET_VISIBILITY,
+            K_SET_XFORM_TRS,
+        )
+
+        # Reactivate children on the server's stage (clear stale SetActive(False))
+        with self.stage_lock:
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                for child in prim.GetAllChildren():
+                    if not child.IsActive():
+                        child.SetActive(True)
+
+        prefix = prim_path + "/"
+        replay_kinds = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY}
+
+        with self.db_lock:
+            rows = self.db_conn.execute(
+                "SELECT event FROM events ORDER BY seq"
+            ).fetchall()
+
+        # Collect the latest event of each relevant kind per child prim
+        latest: dict[tuple[str, str], dict] = {}
+        for (event_json,) in rows:
+            rec = json.loads(event_json)
+            ev = rec.get("event", rec)
+            ep = ev.get("prim", "")
+            ek = ev.get("k", "")
+            if ep.startswith(prefix) and ek in replay_kinds:
+                latest[(ep, ek)] = ev
+
+        if not latest:
+            return
+
+        # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
+        kind_order = {K_ENSURE_PRIM: 0, K_ENSURE_XFORM_OPS: 1, K_SET_XFORM_TRS: 2, K_SET_VISIBILITY: 3}
+        sorted_events = sorted(
+            latest.values(),
+            key=lambda e: (e["prim"], kind_order.get(e["k"], 99)),
+        )
+
+        for ev in sorted_events:
+            rec = {"type": "event", "seq": self.assign_seq(), "event": ev}
+            self.append_log(rec)
+            self.broadcast(rec)
+
+        LOG.info(
+            "Replayed %d child events after load_payload %s",
+            len(sorted_events),
+            prim_path,
+        )
+
     def broadcast(self, rec: dict):
         line = (json.dumps(rec) + "\n").encode("utf-8")
         dead = []
@@ -190,6 +256,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 rec = {"type": "event", "seq": sync_server.assign_seq(), "event": ev}
                 sync_server.append_log(rec)
                 sync_server.broadcast(rec)
+
+            # After load_payload, re-broadcast latest child state so
+            # receivers re-apply authoritative TRS after re-import.
+            from .protocol import K_LOAD_PAYLOAD
+
+            for ev in events:
+                if ev.get("k") == K_LOAD_PAYLOAD:
+                    sync_server.replay_children_after_load(ev["prim"])
 
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):

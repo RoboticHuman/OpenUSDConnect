@@ -150,6 +150,44 @@ def _process_event(ev: dict):
 
     _dispatch_event(_ADAPTER, k, prim_path, ev)
 
+    # Keep the emitter's stage in sync with payload and reference arcs so
+    # its composed view matches what the receiver imported/removed.  This
+    # mirrors how the base-file case works: the emitter's stage has the
+    # composition arc, so children compose naturally when loaded.
+    if k in (K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD, K_SET_REFERENCE):
+        cap = _get_capture_mod()
+        if cap is not None and cap._state.author is not None:
+            from openusdconnect.event_apply import apply_event as _apply_ev
+
+            try:
+                stage = cap._state.author.stage
+                _apply_ev(stage, ev)
+
+                ne = cap._state.notice_emitter
+                prefix = prim_path + "/"
+
+                if k == K_UNLOAD_PAYLOAD and ne is not None:
+                    # Purge emitter caches for unloaded children so they're
+                    # treated as fresh first-encounters after the next load.
+                    # Without this, stale _known_prims / last_sent_visibility
+                    # cause wrong events after reload.
+                    to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
+                    for p in to_purge:
+                        ne._purge_caches(p)
+
+                elif k == K_LOAD_PAYLOAD:
+                    # Clear stale SetActive(False) opinions left by
+                    # _detect_deletions during the previous unload cycle.
+                    from pxr import Usd
+
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if prim and prim.IsValid():
+                        for child in Usd.PrimRange(prim):
+                            if not child.IsActive():
+                                child.SetActive(True)
+            except Exception:
+                LOG.debug("Could not apply %s to emitter stage", k)
+
 
 def _set_applying_remote(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
