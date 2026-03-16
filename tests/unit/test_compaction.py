@@ -1,8 +1,6 @@
 """Tests for server event log compaction."""
 
 import json
-import os
-import tempfile
 
 from openusdconnect.protocol import (
     K_DEACTIVATE_PRIM,

@@ -14,7 +14,6 @@ from openusdconnect.protocol import (
     K_RENAME_PRIM,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
 )
 

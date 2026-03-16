@@ -7,7 +7,7 @@ Skipped if Blender is not configured (see conftest.py for options).
 import os
 import subprocess
 
-TEST_SCRIPT = os.path.join(os.path.dirname(__file__), "blender_adapter_test_script.py")
+TEST_SCRIPT = os.path.join(os.path.dirname(__file__), "scripts", "blender_adapter_test_script.py")
 
 
 def test_blender_adapter_headless(blender_exe):

@@ -60,11 +60,10 @@ select = [
 # I001 = "import block is unsorted"
 # These are ignored where imports must come after sys.path setup or conditional guards.
 "integrations/blender/__init__.py" = ["E402", "I001"]
-"tests/blender_*_script.py" = ["E402"]
-"tests/test_roundtrip.py" = ["E402"]
-"tests/test_e2e_reference_spawn.py" = ["E402"]
-"tests/test_event_apply.py" = ["E402"]
-"tests/test_blender_stage_author.py" = ["E402"]
+"tests/integration/scripts/*_script.py" = ["E402"]
+"tests/unit/test_roundtrip.py" = ["E402"]
+"tests/unit/test_event_apply.py" = ["E402"]
+"tests/unit/test_blender_stage_author.py" = ["E402"]
 "scripts/create_test_asset.py" = ["E402"]
 
 [tool.ruff.format]

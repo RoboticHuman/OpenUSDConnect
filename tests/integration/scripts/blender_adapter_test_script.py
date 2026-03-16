@@ -13,8 +13,9 @@ import traceback
 
 import bpy
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-tests_dir = os.path.dirname(os.path.abspath(__file__))
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
+tests_dir = os.path.dirname(os.path.dirname(_scripts_dir))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 if tests_dir not in sys.path:
@@ -442,7 +443,7 @@ def test_set_reference_imports_usd(r):
     """set_reference imports a USD file and creates mesh objects under container."""
     import tempfile
 
-    from test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT, create_chair_asset
+    from unit.test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT, create_chair_asset
 
     name = "test_set_reference_imports_usd"
     _clear_scene()
@@ -510,7 +511,7 @@ def test_set_reference_reimport_after_delete(r):
     """set_reference re-imports when cached children have been deleted."""
     import tempfile
 
-    from test_asset_builder import EXPECTED_MESH_COUNT, create_chair_asset
+    from unit.test_asset_builder import EXPECTED_MESH_COUNT, create_chair_asset
 
     name = "test_set_reference_reimport_after_delete"
     _clear_scene()

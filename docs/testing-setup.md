@@ -2,17 +2,25 @@
 
 OpenUSDConnect has two categories of tests:
 
-- **Core tests** — protocol, event application, roundtrip (no Blender needed)
-- **Blender tests** — headless adapter tests and full two-Blender integration tests
+- **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices (no Blender needed)
+- **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
 
-## Running Core Tests
+## Running Tests
 
 ```bash
 uv sync
-uv run pytest tests/ -v -k "not blender"
+
+# All tests
+uv run pytest tests/ -v
+
+# Unit tests only (fast, no Blender needed)
+uv run pytest tests/unit/ -v
+
+# Integration tests only (requires Blender)
+uv run pytest tests/integration/ -v
 ```
 
-These test the protocol validation, USD stage event application, and emitter/adapter roundtrips using the `pxr` (OpenUSD) Python bindings.
+Unit tests cover protocol validation, USD stage event application, and emitter/adapter roundtrips using the `pxr` (OpenUSD) Python bindings.
 
 ## Blender Test Configuration
 
@@ -73,7 +81,7 @@ If none of the above are configured, Blender tests are automatically skipped. No
 
 ## What the Blender Tests Cover
 
-**`test_blender_adapter.py`** — Runs 19 headless tests inside Blender's Python:
+**`tests/integration/test_blender_adapter.py`** — Runs headless tests inside Blender's Python:
 - Prim creation for each geometry type (Sphere, Cube, Cylinder, Cone, Mesh, Xform)
 - Transform application (translate, rotate, scale)
 - Visibility toggling
@@ -82,7 +90,7 @@ If none of the above are configured, Blender tests are automatically skipped. No
 - `test_ensure_xform_ops_preserves_world` — MPI reset preserves world-space position
 - `test_ensure_xform_ops_identity_noop` — identity MPI skipped (no unnecessary reset)
 
-**`test_blender_integration.py`** — 4 end-to-end tests with real server + Blender processes:
+**`tests/integration/test_blender_integration.py`** — End-to-end tests with real server + Blender processes:
 - `test_emitter_server_receiver_integration`: Manual events sent via socket -> server -> receiver Blender verifies objects arrived correctly
 - `test_autotrack_emitter_to_receiver`: Real auto-tracking via depsgraph -> server -> receiver Blender verifies objects, types, positions, and visibility
 - `test_autotrack_deferred_props`: Auto-tracked objects get `usd_prim_path`/`usd_type_name` via deferred `bpy.app.timers` (not inside depsgraph callback where writes are discarded)
@@ -165,7 +173,7 @@ This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each run
 | `blender.test.cfg` | Blender exe path (gitignored, created by setup script or manually) |
 | `.blender/` | Downloaded portable Blender (gitignored) |
 | `.blender_addon_path` | Installed addon directory (gitignored, written by bootstrap) |
-| `conftest.py` | Root pytest conftest with `blender_exe` fixture |
+| `tests/conftest.py` | Pytest conftest with `blender_exe` fixture |
 | `scripts/setup_blender_test.py` | Portable Blender download/setup script |
 | `scripts/start_usdconnect_debug.ps1` | Debug session launcher (server + Blender + debugpy) |
 | `scripts/blender_bootstrap_instance.py` | Blender startup script (addon install, debugpy, reload watcher) |

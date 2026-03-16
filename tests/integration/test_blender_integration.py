@@ -8,9 +8,9 @@ import os
 
 from tests.helpers import read_results, run_blender, start_server, stop_server
 
-TESTS_DIR = os.path.dirname(__file__)
-EMITTER_SCRIPT = os.path.join(TESTS_DIR, "blender_emitter_script.py")
-RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "blender_receiver_script.py")
+SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "scripts")
+EMITTER_SCRIPT = os.path.join(SCRIPTS_DIR, "blender_emitter_script.py")
+RECEIVER_SCRIPT = os.path.join(SCRIPTS_DIR, "blender_receiver_script.py")
 
 
 def test_emitter_server_receiver_integration(blender_exe, tmp_path):

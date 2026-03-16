@@ -24,8 +24,8 @@ from openusdconnect.event_apply import apply_events, ensure_canonical_ops
 from openusdconnect.protocol import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
-    K_SET_GPRIM_ATTRS,
     K_LOAD_PAYLOAD,
+    K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VISIBILITY,
@@ -495,7 +495,6 @@ class TestPayloadRoundtrip:
     def test_load_unload_roundtrip(self):
         """Emitter detects load/unload transitions and emits events."""
         from openusdconnect.emitter import NoticeEmitter
-        from openusdconnect.event_apply import apply_events
 
         # Source stage with payload
         payload_stage = Usd.Stage.CreateInMemory()

@@ -19,12 +19,12 @@ from tests.helpers import (
     stop_server,
 )
 
-TESTS_DIR = os.path.dirname(__file__)
-REF_EMITTER_SCRIPT = os.path.join(TESTS_DIR, "ref_emitter_script.py")
-REF_RECEIVER_SCRIPT = os.path.join(TESTS_DIR, "ref_receiver_script.py")
-REF_LOOPBACK_SCRIPT = os.path.join(TESTS_DIR, "ref_loopback_script.py")
-REF_MANUAL_SCRIPT = os.path.join(TESTS_DIR, "ref_manual_then_move_script.py")
-TEST_ASSET = os.path.join(PROJECT_ROOT, "test_asset.usda")
+SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "scripts")
+REF_EMITTER_SCRIPT = os.path.join(SCRIPTS_DIR, "ref_emitter_script.py")
+REF_RECEIVER_SCRIPT = os.path.join(SCRIPTS_DIR, "ref_receiver_script.py")
+REF_LOOPBACK_SCRIPT = os.path.join(SCRIPTS_DIR, "ref_loopback_script.py")
+REF_MANUAL_SCRIPT = os.path.join(SCRIPTS_DIR, "ref_manual_then_move_script.py")
+TEST_ASSET = os.path.join(PROJECT_ROOT, "tests", "fixtures", "test_asset.usda")
 
 
 def _run_emitter(port):

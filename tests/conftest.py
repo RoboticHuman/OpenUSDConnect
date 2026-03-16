@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-_CFG_FILE = pathlib.Path(__file__).parent / "blender.test.cfg"
+_CFG_FILE = pathlib.Path(__file__).parent.parent / "blender.test.cfg"
 
 
 def _read_cfg() -> str:
