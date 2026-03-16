@@ -28,6 +28,8 @@ Event types (inside txn.events):
                         "payloads":[{"asset_path":"./payload.usda","prim_path":"/Model"}]}
   load_payload:       {"k":"load_payload","prim":"/World/Asset"}
   unload_payload:     {"k":"unload_payload","prim":"/World/Asset"}
+  set_variant_selections: {"k":"set_variant_selections","prim":"/World/Car",
+                        "selections":{"wheels":"wheelWide","color":"red"}}
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ K_SET_REFERENCE = "set_reference"
 K_SET_PAYLOAD = "set_payload"
 K_LOAD_PAYLOAD = "load_payload"
 K_UNLOAD_PAYLOAD = "unload_payload"
+K_SET_VARIANT_SELECTIONS = "set_variant_selections"
 
 # Valid event keys
 EVENT_KEYS = frozenset(
@@ -73,6 +76,7 @@ EVENT_KEYS = frozenset(
         K_SET_PAYLOAD,
         K_LOAD_PAYLOAD,
         K_UNLOAD_PAYLOAD,
+        K_SET_VARIANT_SELECTIONS,
     }
 )
 
@@ -82,23 +86,24 @@ EVENT_KEYS = frozenset(
 EVENT_KIND_ORDER: dict[str, int] = {
     K_ENSURE_PRIM: 0,
     K_ENSURE_XFORM_OPS: 1,
-    K_SET_REFERENCE: 2,
-    K_SET_PAYLOAD: 3,
-    K_LOAD_PAYLOAD: 4,
-    K_SET_XFORM_TRS: 5,
-    K_SET_VISIBILITY: 6,
-    K_SET_GPRIM_ATTRS: 7,
-    K_SET_XFORM_MATRICES: 8,
-    K_DEACTIVATE_PRIM: 9,
-    K_DELETE_PRIM: 10,
-    K_RENAME_PRIM: 11,
-    K_UNLOAD_PAYLOAD: 12,
+    K_SET_VARIANT_SELECTIONS: 2,  # V in LIVERPS — before R
+    K_SET_REFERENCE: 3,
+    K_SET_PAYLOAD: 4,
+    K_LOAD_PAYLOAD: 5,
+    K_SET_XFORM_TRS: 6,
+    K_SET_VISIBILITY: 7,
+    K_SET_GPRIM_ATTRS: 8,
+    K_SET_XFORM_MATRICES: 9,
+    K_DEACTIVATE_PRIM: 10,
+    K_DELETE_PRIM: 11,
+    K_RENAME_PRIM: 12,
+    K_UNLOAD_PAYLOAD: 13,
 }
 
 # Events that must be applied outside a ChangeBlock (structural ops).
 STRUCTURAL_EVENT_KINDS = frozenset({
-    K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD,
-    K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
+    K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_VARIANT_SELECTIONS,
+    K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
 })
 
 # Valid TRS field names
@@ -221,4 +226,12 @@ def validate_event(ev: dict) -> bool:
             if pp is not None:
                 if not isinstance(pp, str) or not pp.startswith("/"):
                     return False
+    if k == K_SET_VARIANT_SELECTIONS:
+        selections = ev.get("selections")
+        if not isinstance(selections, dict):
+            return False
+        if not all(isinstance(k, str) for k in selections):
+            return False
+        if not all(isinstance(v, str) for v in selections.values()):
+            return False
     return True

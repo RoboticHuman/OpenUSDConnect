@@ -30,6 +30,7 @@ from openusdconnect.protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -470,6 +471,49 @@ class TestSetPayload:
         # Unload via event
         apply_event(stage, {"k": K_UNLOAD_PAYLOAD, "prim": "/World/Asset"})
         assert not stage.GetPrimAtPath("/World/Asset").IsLoaded()
+
+
+class TestSetVariantSelections:
+    def _make_variant_stage(self):
+        """Create stage with a prim that has a 'size' variant set."""
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+        return Usd.Stage.Open(fixture)
+
+    def test_apply_variant_selection(self):
+        stage = self._make_variant_stage()
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        assert prim.GetVariantSets().GetVariantSelection("size") == "small"
+
+        apply_event(stage, {
+            "k": K_SET_VARIANT_SELECTIONS,
+            "prim": "/World/Sphere",
+            "selections": {"size": "large"},
+        })
+        assert prim.GetVariantSets().GetVariantSelection("size") == "large"
+
+    def test_variant_selection_affects_composed_value(self):
+        stage = self._make_variant_stage()
+        apply_event(stage, {
+            "k": K_SET_VARIANT_SELECTIONS,
+            "prim": "/World/Sphere",
+            "selections": {"size": "medium"},
+        })
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        radius = prim.GetAttribute("radius").Get()
+        assert abs(radius - 5.0) < 1e-6
+
+    def test_nonexistent_variant_set_ignored(self, stage):
+        stage.DefinePrim("/World/Plain", "Xform")
+        # Should not raise — just skip the non-existent set
+        apply_event(stage, {
+            "k": K_SET_VARIANT_SELECTIONS,
+            "prim": "/World/Plain",
+            "selections": {"bogus": "nope"},
+        })
 
 
 class TestApplyEvents:

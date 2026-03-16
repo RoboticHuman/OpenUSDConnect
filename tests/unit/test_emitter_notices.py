@@ -14,6 +14,7 @@ from openusdconnect.protocol import (
     K_RENAME_PRIM,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
 )
 
@@ -853,3 +854,75 @@ class TestReferenceEmission:
         ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Multi"]
         assert len(ref_evs) == 1
         assert len(ref_evs[0]["refs"]) == 2
+
+
+class TestVariantSelectionEmission:
+    """NoticeEmitter detects and emits set_variant_selections events."""
+
+    @staticmethod
+    def _make_variant_stage_and_emitter():
+        """Open the variant_sphere fixture with a session-layer emitter."""
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+        stage = Usd.Stage.Open(fixture)
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage)
+        return stage, emitter
+
+    def test_variant_emitted_on_first_encounter(self):
+        stage, emitter = self._make_variant_stage_and_emitter()
+        # Dirty the prim so it gets processed
+        emitter.mark_dirty("/World/Sphere")
+        events = emitter.build_events_for_dirty()
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 1
+        assert vsel[0]["selections"] == {"size": "small"}
+
+    def test_variant_change_detected(self):
+        stage, emitter = self._make_variant_stage_and_emitter()
+        emitter.mark_dirty("/World/Sphere")
+        emitter.build_events_for_dirty()  # first flush
+
+        # Change selection
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("large")
+        events = emitter.build_events_for_dirty()
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 1
+        assert vsel[0]["selections"]["size"] == "large"
+
+    def test_unchanged_variant_no_event(self):
+        stage, emitter = self._make_variant_stage_and_emitter()
+        emitter.mark_dirty("/World/Sphere")
+        emitter.build_events_for_dirty()  # cache the selection
+
+        # Dirty again without changing selection
+        emitter.mark_dirty("/World/Sphere")
+        events = emitter.build_events_for_dirty()
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 0
+
+    def test_variant_cache_cleaned_on_deletion(self):
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/VarObj", "Xform")
+        vset = prim.GetVariantSets().AddVariantSet("color")
+        vset.AddVariant("red")
+        vset.SetVariantSelection("red")
+
+        emitter.build_events_for_dirty()
+        assert "/World/VarObj" in emitter.last_sent_variant_selections
+
+        stage.RemovePrim("/World/VarObj")
+        emitter.build_events_for_dirty()
+        assert "/World/VarObj" not in emitter.last_sent_variant_selections
+
+    def test_no_variants_no_event(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Plain", "Xform")
+        events = emitter.build_events_for_dirty()
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 0

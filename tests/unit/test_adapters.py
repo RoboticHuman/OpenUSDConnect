@@ -3,7 +3,7 @@
 import pytest
 
 try:
-    from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: E402
+    from pxr import Usd, UsdGeom  # noqa: E402
 
     PXR_AVAILABLE = True
 except ImportError:
@@ -178,6 +178,20 @@ class TestMockAdapterPayload:
         assert a.calls == [("load_payload", "/A"), ("unload_payload", "/A")]
 
 
+class TestMockAdapterVariantSelections:
+    def test_set_variant_selections_auto_creates_prim(self):
+        a = MockAdapter()
+        assert a.set_variant_selections("/A", {"size": "large"})
+        assert a.get_prim("/A")["variant_selections"] == {"size": "large"}
+
+    def test_set_variant_selections_on_existing_prim(self):
+        a = MockAdapter()
+        a.ensure_prim("/A", "Sphere")
+        a.set_variant_selections("/A", {"color": "red"})
+        assert a.get_prim("/A")["variant_selections"] == {"color": "red"}
+        assert a.get_prim("/A")["typeName"] == "Sphere"
+
+
 class TestMockAdapterGetTrs:
     def test_missing_prim_returns_empty(self):
         a = MockAdapter()
@@ -292,3 +306,17 @@ class TestUsdStageAdapterDirectMethods:
         adapter.load_payload("/A")
         adapter.unload_payload("/A")
         # Just verify no crash — actual load/unload depends on file existing
+
+    def test_set_variant_selections(self):
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+        from openusdconnect.adapters import UsdStageAdapter
+
+        stage = Usd.Stage.Open(fixture)
+        adapter = UsdStageAdapter(stage)
+        adapter.set_variant_selections("/World/Sphere", {"size": "large"})
+        sel = stage.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSelection("size")
+        assert sel == "large"

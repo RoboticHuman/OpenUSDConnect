@@ -28,6 +28,7 @@ from openusdconnect.protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
@@ -402,7 +403,8 @@ class TestPayloadRoundtrip:
         """Real-world test with Pyramid asset: payload arc emit -> apply."""
         import os
 
-        fixture_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fixtures", "pyramid")
+        _tests_dir = os.path.dirname(os.path.dirname(__file__))
+        fixture_dir = os.path.join(_tests_dir, "fixtures", "pyramid")
         pyramid_path = os.path.join(fixture_dir, "Pyramid.usd")
         if not os.path.isfile(pyramid_path):
             pytest.skip("Pyramid fixture not found")
@@ -689,3 +691,155 @@ class TestFileBasedReferenceRoundtrip:
         prim = stage.GetPrimAtPath("/World/FullAsset")
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
+
+
+class TestVariantSelectionRoundtrip:
+    """Variant selection roundtrip: emitter detects selection -> receiver applies."""
+
+    def test_variant_selection_via_adapter(self):
+        """UsdStageAdapter applies variant selection correctly."""
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+        stage = Usd.Stage.Open(fixture)
+        adapter = UsdStageAdapter(stage)
+
+        adapter.set_variant_selections("/World/Sphere", {"size": "large"})
+        sel = stage.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSelection("size")
+        assert sel == "large"
+        # Composed radius should be 10 for "large"
+        radius = stage.GetPrimAtPath("/World/Sphere").GetAttribute("radius").Get()
+        assert abs(radius - 10.0) < 1e-6
+
+    def test_variant_selection_stage_to_stage(self):
+        """Emitter detects selection change, events applied to receiver stage."""
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+
+        # Emitter stage
+        stage_a = Usd.Stage.Open(fixture)
+        session_a = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session_a))
+        emitter = NoticeEmitter(stage_a)
+
+        # First flush — captures initial "small" selection
+        emitter.mark_dirty("/World/Sphere")
+        emitter.build_events_for_dirty(include_matrices=False)
+
+        # Change to "medium"
+        stage_a.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSet(
+            "size"
+        ).SetVariantSelection("medium")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 1
+        assert vsel[0]["selections"]["size"] == "medium"
+
+        # Apply to receiver stage
+        stage_b = Usd.Stage.Open(fixture)
+        apply_events(stage_b, events)
+
+        sel_b = stage_b.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSelection("size")
+        assert sel_b == "medium"
+        radius_b = stage_b.GetPrimAtPath("/World/Sphere").GetAttribute("radius").Get()
+        assert abs(radius_b - 5.0) < 1e-6
+
+
+class TestLIVERPS:
+    """Verify USD composition strength ordering (LIVERPS) is respected.
+
+    L(ocal) > I(nherits) > V(ariants) > R(elocates) > R(eferences) > P(ayloads) > S(pecializes)
+    Tests cover L>V, L>R, and V>R using file-based fixtures.
+    """
+
+    @staticmethod
+    def _fixture(name):
+        import os
+        return os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", name,
+        )
+
+    def test_local_beats_variant(self):
+        """Local opinion (radius=1) wins over variant opinion (radius=10)."""
+        stage = Usd.Stage.Open(self._fixture("liverps_sphere.usda"))
+        prim = stage.GetPrimAtPath("/World/Sphere")
+
+        # Default selection is "big" which sets radius=10, but local is 1.0
+        assert prim.GetVariantSets().GetVariantSelection("size") == "big"
+        assert abs(prim.GetAttribute("radius").Get() - 1.0) < 1e-6
+
+    def test_local_beats_variant_after_selection_change(self):
+        """Switching variant doesn't override the local opinion."""
+        stage = Usd.Stage.Open(self._fixture("liverps_sphere.usda"))
+        prim = stage.GetPrimAtPath("/World/Sphere")
+
+        prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("small")
+        # "small" sets radius=0.5, but local radius=1.0 still wins
+        assert abs(prim.GetAttribute("radius").Get() - 1.0) < 1e-6
+
+    def test_local_beats_reference(self):
+        """Local opinion wins over referenced opinion."""
+
+        # Create a reference asset with radius=50
+        ref_stage = Usd.Stage.CreateInMemory()
+        ref_stage.DefinePrim("/Model", "Sphere")
+        ref_stage.GetPrimAtPath("/Model").GetAttribute("radius").Set(50.0)
+        ref_id = ref_stage.GetRootLayer().identifier
+
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/A", "Sphere")
+        prim.GetReferences().AddReference(ref_id, "/Model")
+
+        # Without local opinion, reference value wins
+        assert abs(prim.GetAttribute("radius").Get() - 50.0) < 1e-6
+
+        # Add local opinion — should override reference
+        prim.GetAttribute("radius").Set(3.0)
+        assert abs(prim.GetAttribute("radius").Get() - 3.0) < 1e-6
+
+    def test_variant_beats_reference(self):
+        """Variant opinion (V) is stronger than reference opinion (R)."""
+
+        # Reference asset: radius=50
+        ref_stage = Usd.Stage.CreateInMemory()
+        ref_stage.DefinePrim("/Model", "Sphere")
+        ref_stage.GetPrimAtPath("/Model").GetAttribute("radius").Set(50.0)
+        ref_id = ref_stage.GetRootLayer().identifier
+
+        # Main stage: prim references the asset AND has a variant
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/A", "Sphere")
+        prim.GetReferences().AddReference(ref_id, "/Model")
+
+        vset = prim.GetVariantSets().AddVariantSet("override")
+        vset.AddVariant("custom")
+        vset.SetVariantSelection("custom")
+        with vset.GetVariantEditContext():
+            prim.GetAttribute("radius").Set(99.0)
+
+        # V=99 should beat R=50
+        assert abs(prim.GetAttribute("radius").Get() - 99.0) < 1e-6
+
+    def test_local_beats_payload(self):
+        """Local opinion wins over payload opinion."""
+        pay_stage = Usd.Stage.CreateInMemory()
+        pay_stage.DefinePrim("/Model", "Sphere")
+        pay_stage.GetPrimAtPath("/Model").GetAttribute("radius").Set(77.0)
+        pay_id = pay_stage.GetRootLayer().identifier
+
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/B", "Sphere")
+        prim.GetPayloads().AddPayload(pay_id, "/Model")
+
+        # Without local, payload wins
+        assert abs(prim.GetAttribute("radius").Get() - 77.0) < 1e-6
+
+        # Add local — should override
+        prim.GetAttribute("radius").Set(2.0)
+        assert abs(prim.GetAttribute("radius").Get() - 2.0) < 1e-6

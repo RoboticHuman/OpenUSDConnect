@@ -575,3 +575,34 @@ class BlenderAdapter(DCCAdapter):
         self._remove_imported_ref_children(prim_path)
         LOG.info("BlenderAdapter.unload_payload: unloaded %s", prim_path)
         return True
+
+    def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
+        """Apply variant selection changes.
+
+        If the prim has previously imported children (from a reference or
+        payload), remove them and re-import so Blender reflects the new
+        variant's geometry.  Otherwise just log — attribute-level changes
+        (radius, transforms, etc.) arrive as separate events.
+        """
+        if not BPY_AVAILABLE:
+            LOG.info("BlenderAdapter.set_variant_selections dry: %s -> %s", prim_path, selections)
+            return True
+
+        # If this prim has imported children from a ref/payload, re-import
+        # to pick up the variant's composed geometry.
+        prev_asset = self._imported_refs.get(prim_path)
+        if prev_asset and self._ref_children_exist(prim_path):
+            self._remove_imported_ref_children(prim_path)
+            container = self._find_object_by_prim(prim_path)
+            if container is not None:
+                self._import_ref_asset(container, prim_path, prev_asset, "")
+                self._imported_refs[prim_path] = prev_asset
+            LOG.info(
+                "set_variant_selections: re-imported %s after variant change %s",
+                prim_path, selections,
+            )
+        else:
+            LOG.info(
+                "BlenderAdapter.set_variant_selections: %s -> %s", prim_path, selections,
+            )
+        return True

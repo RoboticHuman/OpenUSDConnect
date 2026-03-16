@@ -17,6 +17,7 @@ from .protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_UNLOAD_PAYLOAD,
 )
@@ -98,6 +99,11 @@ class DCCAdapter(ABC):
     def unload_payload(self, prim_path: str) -> bool:
         """Unload a payload, removing its composed children."""
         ...
+
+    @abstractmethod
+    def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
+        """Set variant selections on a prim."""
+        raise NotImplementedError
 
 
 class UsdStageAdapter(DCCAdapter):
@@ -188,6 +194,15 @@ class UsdStageAdapter(DCCAdapter):
         from .event_apply import apply_event
 
         apply_event(self.stage, {"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
+        return True
+
+    def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(
+            self.stage,
+            {"k": K_SET_VARIANT_SELECTIONS, "prim": prim_path, "selections": selections},
+        )
         return True
 
 
@@ -300,6 +315,15 @@ class MockAdapter(DCCAdapter):
 
     def unload_payload(self, prim_path: str) -> bool:
         self.calls.append(("unload_payload", prim_path))
+        return True
+
+    def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        p["variant_selections"] = dict(selections)
+        LOG.info("MockAdapter: set variant selections on prim %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

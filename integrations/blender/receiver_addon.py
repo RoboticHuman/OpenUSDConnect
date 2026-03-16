@@ -27,6 +27,7 @@ from openusdconnect.protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -90,6 +91,7 @@ _DISPATCH_TABLE: dict[str, str] = {
     K_SET_VISIBILITY: "set_visibility",
     K_SET_GPRIM_ATTRS: "set_gprim_attrs",
     K_SET_REFERENCE: "set_reference",
+    K_SET_VARIANT_SELECTIONS: "set_variant_selections",
     K_SET_PAYLOAD: "set_payload",
     K_LOAD_PAYLOAD: "load_payload",
     K_UNLOAD_PAYLOAD: "unload_payload",
@@ -110,6 +112,8 @@ def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
         return (prim_path, ev.get("attrs", {})), {}
     if k == K_SET_REFERENCE:
         return (prim_path, ev.get("refs", [])), {}
+    if k == K_SET_VARIANT_SELECTIONS:
+        return (prim_path, ev.get("selections", {})), {}
     if k == K_SET_PAYLOAD:
         return (prim_path, ev.get("payloads", [])), {}
     # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
@@ -156,7 +160,10 @@ def _process_event(ev: dict):
     # its composed view matches what the receiver imported/removed.  This
     # mirrors how the base-file case works: the emitter's stage has the
     # composition arc, so children compose naturally when loaded.
-    if k in (K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD, K_SET_REFERENCE):
+    if k in (
+        K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
+        K_SET_REFERENCE, K_SET_VARIANT_SELECTIONS,
+    ):
         cap = _get_capture_mod()
         if cap is not None and cap._state.author is not None:
             from openusdconnect.event_apply import apply_event as _apply_ev

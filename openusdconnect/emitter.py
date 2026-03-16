@@ -19,6 +19,7 @@ from .protocol import (
     K_RENAME_PRIM,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -145,6 +146,24 @@ def _read_payloads(stage, prim_path):
     return result
 
 
+def _read_variant_selections(stage, prim_path):
+    """Read variant selections on a prim.
+
+    Returns a dict mapping variant set name -> selected variant name,
+    or empty dict if no variant sets or no selections.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return {}
+    vsets = prim.GetVariantSets()
+    result = {}
+    for name in vsets.GetNames():
+        sel = vsets.GetVariantSelection(name)
+        if sel:
+            result[name] = sel
+    return result
+
+
 class NoticeEmitter:
     """Watches a Usd.Stage for changes and builds idempotent transform events.
 
@@ -175,6 +194,7 @@ class NoticeEmitter:
         self.last_sent_references: dict[str, list[tuple[str, str]]] = {}
         self.last_sent_payloads: dict[str, list[tuple[str, str]]] = {}
         self.last_sent_payload_loaded: dict[str, bool] = {}
+        self.last_sent_variant_selections: dict[str, dict[str, str]] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -277,7 +297,8 @@ class NoticeEmitter:
             self._known_prims.add(new_path)
         for cache in (self.last_sent_trs, self.last_sent_mats,
                       self.last_sent_visibility, self.last_sent_references,
-                      self.last_sent_payloads, self.last_sent_payload_loaded):
+                      self.last_sent_payloads, self.last_sent_payload_loaded,
+                      self.last_sent_variant_selections):
             if old_path in cache:
                 cache[new_path] = cache.pop(old_path)
 
@@ -290,6 +311,7 @@ class NoticeEmitter:
         self.last_sent_references.pop(prim_path, None)
         self.last_sent_payloads.pop(prim_path, None)
         self.last_sent_payload_loaded.pop(prim_path, None)
+        self.last_sent_variant_selections.pop(prim_path, None)
         self.dirty.discard(prim_path)
 
     def _build_rename_events(self) -> list[dict]:
@@ -335,6 +357,17 @@ class NoticeEmitter:
             events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
             events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._known_prims.add(prim_path)
+
+        # Variant selection diff (V before R in LIVERPS)
+        current_vsel = _read_variant_selections(self.stage, prim_path)
+        last_vsel = self.last_sent_variant_selections.get(prim_path, {})
+        if current_vsel != last_vsel:
+            events.append({
+                "k": K_SET_VARIANT_SELECTIONS,
+                "prim": prim_path,
+                "selections": dict(current_vsel),
+            })
+            self.last_sent_variant_selections[prim_path] = current_vsel
 
         # Reference diff
         current_refs = _read_references(self.stage, prim_path)

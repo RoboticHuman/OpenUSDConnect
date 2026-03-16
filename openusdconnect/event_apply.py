@@ -22,6 +22,7 @@ from .protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -151,6 +152,15 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
             _set_gprim_attr(prim, attr_name, attr_value)
 
 
+def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
+    prim_path = ev["prim"]
+    prim = get_or_define_prim(stage, prim_path)
+    vsets = prim.GetVariantSets()
+    for set_name, variant_name in ev.get("selections", {}).items():
+        if vsets.HasVariantSet(set_name):
+            vsets.GetVariantSet(set_name).SetVariantSelection(variant_name)
+
+
 def _apply_set_reference(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
     prim = get_or_define_prim(stage, prim_path)
@@ -196,6 +206,7 @@ def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
 
 
 _EVENT_DISPATCH: dict[str, callable] = {
+    K_SET_VARIANT_SELECTIONS: _apply_set_variant_selections,
     K_SET_XFORM_TRS: _apply_set_xform_trs,
     K_RENAME_PRIM: _apply_rename_prim,
     K_SET_VISIBILITY: _apply_set_visibility,

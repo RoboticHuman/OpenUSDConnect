@@ -171,7 +171,10 @@ class TestCompaction:
         events = [json.loads(r[0])["event"] for r in rows]
         prims = [e["prim"] for e in events]
         # Only the rename should remain for /A
-        assert all(p != "/A" or e["k"] == "rename_prim" for p, e in zip(prims, events))
+        assert all(
+            p != "/A" or e["k"] == "rename_prim"
+            for p, e in zip(prims, events, strict=True)
+        )
 
     def test_visibility_latest_wins(self, srv):
         """Only the latest visibility event per prim survives compaction."""
@@ -208,6 +211,26 @@ class TestCompaction:
         load_events = [e for e in events if e["k"] in ("load_payload", "unload_payload")]
         assert len(load_events) == 1
         assert load_events[0]["k"] == "unload_payload"
+
+    def test_variant_selections_latest_wins(self, srv):
+        """Only the latest variant selection per prim survives compaction."""
+        self._insert_events(srv, [
+            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+            {"k": "set_variant_selections", "prim": "/A",
+             "selections": {"size": "small"}},
+        ])
+        self._insert_events(srv, [
+            {"k": "set_variant_selections", "prim": "/A",
+             "selections": {"size": "large"}},
+        ])
+
+        srv.compact_log()
+
+        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        events = [json.loads(r[0])["event"] for r in rows]
+        vsel = [e for e in events if e["k"] == "set_variant_selections"]
+        assert len(vsel) == 1
+        assert vsel[0]["selections"]["size"] == "large"
 
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""
@@ -259,7 +282,7 @@ class TestReplay:
         srv.replay_from(handler, 1)
 
         output = handler.request.getvalue().decode("utf-8")
-        lines = [json.loads(l) for l in output.strip().split("\n") if l.strip()]
+        lines = [json.loads(x) for x in output.strip().split("\n") if x.strip()]
         assert len(lines) == 3
         assert lines[0]["seq"] == 1
         assert lines[2]["seq"] == 3
@@ -285,7 +308,7 @@ class TestReplay:
         srv.replay_from(handler, 2)
 
         output = handler.request.getvalue().decode("utf-8")
-        lines = [json.loads(l) for l in output.strip().split("\n") if l.strip()]
+        lines = [json.loads(x) for x in output.strip().split("\n") if x.strip()]
         assert len(lines) == 2
         assert lines[0]["seq"] == 2
 
@@ -352,7 +375,10 @@ class TestDBResume:
         s1 = UsdSyncServer(log_path=db)
         for i in range(5):
             seq = s1.assign_seq()
-            s1.append_log({"type": "event", "seq": seq, "event": {"k": "ensure_prim", "prim": f"/P{i}"}})
+            s1.append_log({
+                "type": "event", "seq": seq,
+                "event": {"k": "ensure_prim", "prim": f"/P{i}"},
+            })
         s1.db_conn.close()
 
         # Second server should resume from seq 6

@@ -358,6 +358,42 @@ class TestValidateEvent:
     def test_unload_payload_valid(self):
         assert validate_event({"k": "unload_payload", "prim": "/World/Asset"})
 
-    # --- delete_prim ---
-    def test_delete_prim_valid(self):
-        assert validate_event({"k": K_DELETE_PRIM, "prim": "/World/Gone"})
+    # --- set_variant_selections ---
+    def test_set_variant_selections_valid(self):
+        assert validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car",
+             "selections": {"wheels": "sport"}}
+        )
+
+    def test_set_variant_selections_multiple(self):
+        assert validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car",
+             "selections": {"wheels": "sport", "color": "red"}}
+        )
+
+    def test_set_variant_selections_empty_clears(self):
+        assert validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car", "selections": {}}
+        )
+
+    def test_set_variant_selections_missing_key(self):
+        assert not validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car"}
+        )
+
+    def test_set_variant_selections_not_dict(self):
+        assert not validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car", "selections": ["bad"]}
+        )
+
+    def test_set_variant_selections_non_string_key(self):
+        assert not validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car", "selections": {1: "a"}}
+        )
+
+    def test_set_variant_selections_non_string_value(self):
+        assert not validate_event(
+            {"k": "set_variant_selections", "prim": "/World/Car",
+             "selections": {"wheels": 42}}
+        )
+
