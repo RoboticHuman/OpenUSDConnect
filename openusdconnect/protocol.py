@@ -1,10 +1,14 @@
 """Event schema, message types, and validation for JSON Lines over TCP protocol.
 
 Message types:
-  hello:  {"type":"hello","role":"emitter"|"receiver","sync_from":<int optional>}
-  txn:    {"type":"txn","client_id":"...", "events":[ <event>, ... ]}
-  event:  {"type":"event","seq":123,"event":{...}}   (server broadcasts)
-  quit:   {"type":"quit"}
+  hello:   {"type":"hello","role":"emitter"|"receiver","sync_from":<int optional>}
+  txn:     {"type":"txn","client_id":"...", "events":[ <event>, ... ]}
+  event:   {"type":"event","seq":123,"event":{...}}   (server broadcasts)
+  resync:  {"type":"resync"}  (server broadcasts after log compaction —
+           receivers must reset their sequence counter and expect a full replay)
+  compact: {"type":"compact"}  (client requests server to compact event log;
+           triggers resync broadcast to all receivers)
+  quit:    {"type":"quit"}
 
 Event types (inside txn.events):
   ensure_prim:        {"k":"ensure_prim","prim":"/World/Sphere","typeName":"Xform"}
@@ -22,11 +26,21 @@ Event types (inside txn.events):
                         "refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}
   set_payload:        {"k":"set_payload","prim":"/World/Asset",
                         "payloads":[{"asset_path":"./payload.usda","prim_path":"/Model"}]}
+  load_payload:       {"k":"load_payload","prim":"/World/Asset"}
+  unload_payload:     {"k":"unload_payload","prim":"/World/Asset"}
 """
 
 from __future__ import annotations
 
 PROTOCOL_VERSION = 1
+
+# Message type constants
+MSG_HELLO = "hello"
+MSG_TXN = "txn"
+MSG_EVENT = "event"
+MSG_RESYNC = "resync"
+MSG_COMPACT = "compact"
+MSG_QUIT = "quit"
 
 # Event kind constants — use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -62,6 +76,31 @@ EVENT_KEYS = frozenset(
     }
 )
 
+# Event application order — structural/compositional first, values second,
+# destructive last.  Follows the LIVERPS composition strength model from
+# the OpenUSD spec (section 10.4).
+EVENT_KIND_ORDER: dict[str, int] = {
+    K_ENSURE_PRIM: 0,
+    K_ENSURE_XFORM_OPS: 1,
+    K_SET_REFERENCE: 2,
+    K_SET_PAYLOAD: 3,
+    K_LOAD_PAYLOAD: 4,
+    K_SET_XFORM_TRS: 5,
+    K_SET_VISIBILITY: 6,
+    K_SET_GPRIM_ATTRS: 7,
+    K_SET_XFORM_MATRICES: 8,
+    K_DEACTIVATE_PRIM: 9,
+    K_DELETE_PRIM: 10,
+    K_RENAME_PRIM: 11,
+    K_UNLOAD_PAYLOAD: 12,
+}
+
+# Events that must be applied outside a ChangeBlock (structural ops).
+STRUCTURAL_EVENT_KINDS = frozenset({
+    K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD,
+    K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
+})
+
 # Valid TRS field names
 TRS_FIELDS = frozenset({"t", "r", "s"})
 
@@ -88,7 +127,7 @@ def clamp_fields(fields: list[str]) -> list[str]:
 
 def make_hello(role: str, sync_from: int = None) -> dict:
     """Build a hello message."""
-    msg = {"type": "hello", "role": role, "protocol_version": PROTOCOL_VERSION}
+    msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
         msg["sync_from"] = sync_from
     return msg
@@ -96,12 +135,12 @@ def make_hello(role: str, sync_from: int = None) -> dict:
 
 def make_txn(client_id: str, events: list[dict]) -> dict:
     """Build a transaction message."""
-    return {"type": "txn", "client_id": client_id, "events": events}
+    return {"type": MSG_TXN, "client_id": client_id, "events": events}
 
 
 def make_quit() -> dict:
     """Build a quit message."""
-    return {"type": "quit"}
+    return {"type": MSG_QUIT}
 
 
 def validate_event(ev: dict) -> bool:

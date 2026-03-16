@@ -11,6 +11,9 @@ from openusdconnect.protocol import (
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
+    MSG_HELLO,
+    MSG_QUIT,
+    MSG_TXN,
     PROTOCOL_VERSION,
     clamp_fields,
     is_mat16_valid,
@@ -58,7 +61,7 @@ class TestValidationHelpers:
 class TestMessageConstruction:
     def test_make_hello_emitter(self):
         msg = make_hello("emitter")
-        assert msg["type"] == "hello"
+        assert msg["type"] == MSG_HELLO
         assert msg["role"] == "emitter"
         assert msg["protocol_version"] == PROTOCOL_VERSION
         assert "sync_from" not in msg
@@ -70,13 +73,13 @@ class TestMessageConstruction:
     def test_make_txn(self):
         events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo"}]
         msg = make_txn("client-1", events)
-        assert msg["type"] == "txn"
+        assert msg["type"] == MSG_TXN
         assert msg["client_id"] == "client-1"
         assert msg["events"] == events
 
     def test_make_quit(self):
         msg = make_quit()
-        assert msg["type"] == "quit"
+        assert msg["type"] == MSG_QUIT
 
 
 class TestValidateEvent:

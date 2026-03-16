@@ -49,6 +49,7 @@ def main():
         K_SET_REFERENCE,
         K_SET_VISIBILITY,
         K_SET_XFORM_TRS,
+        MSG_EVENT,
         make_hello,
         make_quit,
         make_txn,
@@ -96,7 +97,7 @@ def main():
 
     for raw_line in lines:
         msg = json.loads(raw_line)
-        if msg.get("type") != "event":
+        if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})
         k = ev.get("k")
@@ -169,7 +170,7 @@ def main():
 
     for raw_line in lines2:
         msg = json.loads(raw_line)
-        if msg.get("type") != "event":
+        if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})
         k = ev.get("k")

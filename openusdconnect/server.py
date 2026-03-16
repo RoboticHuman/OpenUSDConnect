@@ -22,14 +22,40 @@ import threading
 from pxr import Usd
 
 from .protocol import (
+    EVENT_KIND_ORDER,
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
     K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
+    MSG_COMPACT,
+    MSG_EVENT,
+    MSG_HELLO,
+    MSG_QUIT,
+    MSG_RESYNC,
+    MSG_TXN,
 )
 
 LOG = logging.getLogger(__name__)
+
+# Event kinds where only the latest event per prim matters.
+LATEST_WINS_KINDS = frozenset({
+    K_SET_XFORM_TRS,
+    K_SET_XFORM_MATRICES,
+    K_SET_VISIBILITY,
+    K_SET_REFERENCE,
+    K_SET_PAYLOAD,
+    K_SET_GPRIM_ATTRS,
+    K_DEACTIVATE_PRIM,
+})
 
 
 class UsdSyncServer:
@@ -79,6 +105,97 @@ class UsdSyncServer:
         except sqlite3.Error as e:
             LOG.warning("Failed to load max seq: %s", e)
             return 0
+
+    def compact_log(self):
+        """Compact the event log, keeping only the latest state per prim.
+
+        For latest-wins events (TRS, visibility, etc.), only the final value
+        is kept.  Partial TRS fields are merged.  delete_prim tombstones all
+        prior events for that prim.  deactivate_prim is latest-wins (TRS
+        preserved for payload reload).
+        """
+        with self.db_lock:
+            rows = self.db_conn.execute(
+                "SELECT seq, event FROM events ORDER BY seq"
+            ).fetchall()
+
+        if not rows:
+            return
+
+        tombstoned: set[str] = set()
+        latest: dict[tuple[str, str], dict] = {}
+
+        for _seq, event_json in rows:
+            rec = json.loads(event_json)
+            ev = rec.get("event", rec)
+            prim = ev.get("prim", "")
+            k = ev.get("k", "")
+
+            if k == K_DELETE_PRIM:
+                tombstoned.add(prim)
+                latest = {key: val for key, val in latest.items() if key[0] != prim}
+                latest[(prim, k)] = ev
+                continue
+
+            if k == K_RENAME_PRIM:
+                tombstoned.add(prim)
+                latest = {key: val for key, val in latest.items() if key[0] != prim}
+                latest[(prim, k)] = ev
+                continue
+
+            if prim in tombstoned:
+                continue
+
+            # load/unload are mutually exclusive — only the last one wins.
+            if k == K_LOAD_PAYLOAD:
+                latest.pop((prim, K_UNLOAD_PAYLOAD), None)
+                latest[(prim, k)] = ev
+                continue
+            if k == K_UNLOAD_PAYLOAD:
+                latest.pop((prim, K_LOAD_PAYLOAD), None)
+                latest[(prim, k)] = ev
+                continue
+
+            if k == K_SET_XFORM_TRS:
+                prev = latest.get((prim, k))
+                if prev:
+                    for field in ("t", "r", "s"):
+                        if field in ev.get("fields", []):
+                            prev[field] = ev[field]
+                            if field not in prev["fields"]:
+                                prev["fields"].append(field)
+                else:
+                    latest[(prim, k)] = ev
+            elif k in LATEST_WINS_KINDS:
+                latest[(prim, k)] = ev
+            else:
+                latest[(prim, k)] = ev
+
+        sorted_events = sorted(
+            latest.values(),
+            key=lambda e: (e["prim"].count("/"), e["prim"], EVENT_KIND_ORDER[e["k"]]),
+        )
+
+        with self.db_lock:
+            self.db_conn.execute("DELETE FROM events")
+            with self._seq_lock:
+                self._next_seq = 1
+            for ev in sorted_events:
+                seq = self.assign_seq()
+                rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
+                self.db_conn.execute(
+                    "INSERT INTO events(seq, event) VALUES (?, ?)",
+                    (seq, json.dumps(rec)),
+                )
+            self.db_conn.commit()
+
+        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_events))
+
+        # Tell connected receivers to reset and replay from the compacted log.
+        self.broadcast({"type": MSG_RESYNC})
+        with self.clients_lock:
+            for handler in self.receivers:
+                self.replay_from(handler, 1)
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -140,14 +257,13 @@ class UsdSyncServer:
             return
 
         # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
-        kind_order = {K_ENSURE_PRIM: 0, K_ENSURE_XFORM_OPS: 1, K_SET_XFORM_TRS: 2, K_SET_VISIBILITY: 3}
         sorted_events = sorted(
             latest.values(),
-            key=lambda e: (e["prim"], kind_order.get(e["k"], 99)),
+            key=lambda e: (e["prim"], EVENT_KIND_ORDER[e["k"]]),
         )
 
         for ev in sorted_events:
-            rec = {"type": "event", "seq": self.assign_seq(), "event": ev}
+            rec = {"type": MSG_EVENT, "seq": self.assign_seq(), "event": ev}
             self.append_log(rec)
             self.broadcast(rec)
 
@@ -207,7 +323,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             LOG.warning("Failed to parse hello message: %s", e)
             return
 
-        if hello.get("type") != "hello":
+        if hello.get("type") != MSG_HELLO:
             return
 
         role = hello.get("role")
@@ -215,6 +331,17 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         if role == "receiver":
             sync_from = int(hello.get("sync_from", 1))
+
+            # If sync_from is beyond the current log (e.g., after compaction
+            # reset seq numbers), send resync so the receiver resets its
+            # sequence counter, then replay the full log.
+            max_seq = sync_server._load_max_seq()
+            if sync_from > max_seq > 0:
+                from .transport import send_line
+
+                send_line(self.request, {"type": MSG_RESYNC})
+                sync_from = 1
+
             # Hold clients_lock during replay AND add to prevent race condition.
             # This blocks broadcasts during replay, ensuring no events slip through
             # the gap between replay finishing and being added to broadcast set.
@@ -240,10 +367,15 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 LOG.warning("Failed to parse message: %s", e)
                 continue
 
-            if msg.get("type") == "quit":
+            if msg.get("type") == MSG_QUIT:
                 break
 
-            if msg.get("type") != "txn":
+            if msg.get("type") == MSG_COMPACT:
+                LOG.info("Compact requested by %s", self.client_address)
+                sync_server.compact_log()
+                continue
+
+            if msg.get("type") != MSG_TXN:
                 continue
 
             events = msg.get("events", [])
@@ -255,7 +387,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             # Sequence and broadcast each event
             for ev in events:
-                rec = {"type": "event", "seq": sync_server.assign_seq(), "event": ev}
+                rec = {"type": MSG_EVENT, "seq": sync_server.assign_seq(), "event": ev}
                 sync_server.append_log(rec)
                 sync_server.broadcast(rec)
 
@@ -279,9 +411,14 @@ def run_server(
     port: int = 7200,
     base_usd_path: str | None = None,
     log_path: str = "usd_events.db",
+    compact: bool = False,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
+
+    if compact:
+        sync_server.compact_log()
+
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
 
     # Ensure the DB is closed even on hard kills (Stop-Process, SIGTERM).
@@ -314,8 +451,15 @@ def main():
     ap.add_argument("--port", type=int, default=7200)
     ap.add_argument("--base", default=None, help="Base USD file to load")
     ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
+    ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
     args = ap.parse_args()
-    run_server(host=args.host, port=args.port, base_usd_path=args.base, log_path=args.log)
+    run_server(
+        host=args.host,
+        port=args.port,
+        base_usd_path=args.base,
+        log_path=args.log,
+        compact=args.compact,
+    )
 
 
 if __name__ == "__main__":

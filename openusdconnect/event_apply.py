@@ -26,6 +26,7 @@ from .protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    STRUCTURAL_EVENT_KINDS,
 )
 
 
@@ -246,12 +247,11 @@ def apply_events(stage: Usd.Stage, events: list) -> None:
     are applied first outside a ChangeBlock, then value-setting events are
     applied inside a ChangeBlock for atomicity."""
     # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
-    structural = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD}
     for ev in events:
-        if ev.get("k") in structural:
+        if ev.get("k") in STRUCTURAL_EVENT_KINDS:
             apply_event(stage, ev)
     # Value-setting events in a ChangeBlock
     with Sdf.ChangeBlock():
         for ev in events:
-            if ev.get("k") not in structural:
+            if ev.get("k") not in STRUCTURAL_EVENT_KINDS:
                 apply_event(stage, ev)

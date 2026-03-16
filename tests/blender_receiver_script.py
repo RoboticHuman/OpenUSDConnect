@@ -25,6 +25,7 @@ from openusdconnect.protocol import (
     K_ENSURE_XFORM_OPS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
+    MSG_EVENT,
 )
 from openusdconnect.receiver import ReceiverThread
 
@@ -60,7 +61,7 @@ def main():
     for raw_line in lines:
         try:
             msg = json.loads(raw_line)
-            if msg.get("type") == "event":
+            if msg.get("type") == MSG_EVENT:
                 ev = msg.get("event", {})
                 k = ev.get("k")
                 prim_path = ev.get("prim", "")

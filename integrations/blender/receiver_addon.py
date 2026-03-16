@@ -31,6 +31,8 @@ from openusdconnect.protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    MSG_EVENT,
+    MSG_RESYNC,
 )
 from openusdconnect.receiver import ReceiverThread
 
@@ -205,17 +207,24 @@ def _set_applying_remote(value: bool):
 
 def _drain_and_process(lines):
     """Parse, deduplicate, and apply a batch of raw JSON lines."""
-    global _LAST_SEQ
+    global _LAST_SEQ, _ADAPTER
     for raw_line in lines:
         try:
             msg = json.loads(raw_line)
+
+            if msg.get("type") == MSG_RESYNC:
+                LOG.info("Server requested resync — resetting sequence and adapter")
+                _LAST_SEQ = 0
+                _ADAPTER = None
+                continue
+
             seq = msg.get("seq")
             if seq is not None:
                 seq_int = int(seq)
                 if seq_int <= _LAST_SEQ:
                     continue
                 _LAST_SEQ = seq_int
-            if msg.get("type") == "event":
+            if msg.get("type") == MSG_EVENT:
                 _process_event(msg.get("event", {}))
         except Exception:
             LOG.exception("Error processing received line")
