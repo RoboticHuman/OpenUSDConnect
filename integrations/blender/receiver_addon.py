@@ -166,27 +166,29 @@ def _process_event(ev: dict):
                 ne = cap._state.notice_emitter
                 prefix = prim_path + "/"
 
-                if k == K_UNLOAD_PAYLOAD and ne is not None:
+                if k == K_UNLOAD_PAYLOAD:
+                    # Track unloaded payload root so emitter skips children
+                    cap._state.author._unloaded_payload_roots.add(prim_path)
                     # Purge emitter caches for unloaded children so they're
                     # treated as fresh first-encounters after the next load.
-                    # Without this, stale _known_prims / last_sent_visibility
-                    # cause wrong events after reload.
-                    to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
-                    for p in to_purge:
-                        ne._purge_caches(p)
+                    if ne is not None:
+                        to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
+                        for p in to_purge:
+                            ne._purge_caches(p)
 
                 elif k == K_LOAD_PAYLOAD:
+                    cap._state.author._unloaded_payload_roots.discard(prim_path)
                     # Clear stale SetActive(False) opinions left by
                     # _detect_deletions during the previous unload cycle.
                     from pxr import Usd
 
                     prim = stage.GetPrimAtPath(prim_path)
                     if prim and prim.IsValid():
-                        for child in Usd.PrimRange(prim):
+                        for child in Usd.PrimRange(prim, Usd.PrimAllPrimsPredicate):
                             if not child.IsActive():
                                 child.SetActive(True)
-            except Exception:
-                LOG.debug("Could not apply %s to emitter stage", k)
+            except RuntimeError:
+                LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
 
 
 def _set_applying_remote(value: bool):

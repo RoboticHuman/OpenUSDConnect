@@ -268,6 +268,7 @@ class BlenderStageAuthor:
         self.auto_track: bool = False
         self.enabled: bool = False
         self._applying_remote: bool = False
+        self._unloaded_payload_roots: set[str] = set()  # prim paths with unloaded payloads
 
     def initialize_baseline(self):
         """Snapshot current scene transforms for change detection."""
@@ -335,20 +336,11 @@ class BlenderStageAuthor:
         return prim_path, type_name
 
     def _is_under_unloaded_payload(self, prim_path: str) -> bool:
-        """Check if any ancestor of prim_path has an unloaded payload.
-
-        When a payload is unloaded on the emitter's stage, children can't
-        be defined or authored.  This happens in the window between an
-        unload_payload and the next load_payload.
-        """
-        parts = prim_path.strip("/").split("/")
-        for i in range(1, len(parts)):
-            ancestor_path = "/" + "/".join(parts[:i])
-            prim = self.stage.GetPrimAtPath(ancestor_path)
-            if prim and prim.IsValid() and prim.HasAuthoredPayloads():
-                if not prim.IsLoaded():
-                    return True
-        return False
+        """Check if prim_path is under a known unloaded payload root."""
+        return any(
+            prim_path.startswith(root + "/")
+            for root in self._unloaded_payload_roots
+        )
 
     def _ensure_ancestors_on_stage(self, obj):
         """Ensure all ancestor prims exist on the local stage with xform ops.

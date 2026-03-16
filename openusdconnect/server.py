@@ -21,6 +21,14 @@ import threading
 
 from pxr import Usd
 
+from .protocol import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_LOAD_PAYLOAD,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_TRS,
+)
+
 LOG = logging.getLogger(__name__)
 
 
@@ -99,29 +107,23 @@ class UsdSyncServer:
         Also reactivates children on the server's stage that may have been
         deactivated by _detect_deletions during a previous unload cycle.
         """
-        from pxr import Sdf
-
-        from .protocol import (
-            K_ENSURE_PRIM,
-            K_ENSURE_XFORM_OPS,
-            K_SET_VISIBILITY,
-            K_SET_XFORM_TRS,
-        )
-
         # Reactivate children on the server's stage (clear stale SetActive(False))
         with self.stage_lock:
             prim = self.stage.GetPrimAtPath(prim_path)
             if prim and prim.IsValid():
-                for child in prim.GetAllChildren():
+                for child in Usd.PrimRange(prim, Usd.PrimAllPrimsPredicate):
                     if not child.IsActive():
                         child.SetActive(True)
 
         prefix = prim_path + "/"
         replay_kinds = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY}
 
+        # Pre-filter with LIKE to avoid deserializing the entire event log.
+        like_pattern = f'%"prim": "{prefix}%'
         with self.db_lock:
             rows = self.db_conn.execute(
-                "SELECT event FROM events ORDER BY seq"
+                "SELECT event FROM events WHERE event LIKE ? ORDER BY seq",
+                (like_pattern,),
             ).fetchall()
 
         # Collect the latest event of each relevant kind per child prim
@@ -259,8 +261,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             # After load_payload, re-broadcast latest child state so
             # receivers re-apply authoritative TRS after re-import.
-            from .protocol import K_LOAD_PAYLOAD
-
             for ev in events:
                 if ev.get("k") == K_LOAD_PAYLOAD:
                     sync_server.replay_children_after_load(ev["prim"])
