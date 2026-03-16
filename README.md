@@ -13,6 +13,9 @@ uv run pytest tests/ -v -k "not blender"
 
 # Start sync server
 uv run python -m openusdconnect.server --port 7200 --base scene.usda --log events.db
+
+# Start with event log compaction
+uv run python -m openusdconnect.server --port 7200 --log events.db --compact
 ```
 
 ## Documentation
@@ -32,11 +35,13 @@ Install in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 ## Features
 
 ### Core Framework (`openusdconnect/`)
-- JSON Lines over TCP protocol with 10 event types (transform, visibility, delete, rename, etc.)
-- Authoritative sequencer server with SQLite event log and late-join replay
+- JSON Lines over TCP protocol covering transforms, visibility, references, payloads, lifecycle events, and more
+- Authoritative sequencer server with SQLite event log, late-join replay, and compaction
 - Background receiver thread with sequence-based reconnect resume
 - Stage change detection via `Usd.Notice.ObjectsChanged` with partial TRS diffing
 - Quaternion rotation using USD-native `xformOp:orient`
+- Payload composition arcs with load/unload lifecycle and TRS persistence across cycles
+- Event log compaction with resync broadcast (follows LIVERPS ordering from OpenUSD spec)
 - `DCCAdapter` ABC — plug in any DCC (Blender, Maya, Houdini, Unreal)
 - `UsdStageAdapter` for headless/server-side USD consumers
 - `MockAdapter` for testing without pxr
@@ -52,6 +57,7 @@ Install in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 - Sidebar UI: Import, Local Capture, Network Emitter, Network Receiver
 - Geometry types: Sphere, Cube, Cylinder, Cone, Mesh, Xform
 - Parametric attribute sync (radius, size, height)
+- Reference and payload import with deduplication across load/unload cycles
 - Visibility, delete, rename, deactivate sync
 
 ## Architecture
@@ -62,7 +68,7 @@ Install in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 | `openusdconnect/transport.py` | TCP send/recv (JSON Lines) |
 | `openusdconnect/event_apply.py` | Apply events to a `Usd.Stage` |
 | `openusdconnect/emitter.py` | Stage change detection and partial diffing |
-| `openusdconnect/server.py` | Authoritative TCP sequencer with replay |
+| `openusdconnect/server.py` | Authoritative TCP sequencer with replay and compaction |
 | `openusdconnect/receiver.py` | Background TCP client with event queue |
 | `openusdconnect/adapters.py` | `DCCAdapter` ABC + USD/Mock implementations |
 | `integrations/blender/` | Blender addon (capture, receiver, UI) |
@@ -77,13 +83,11 @@ See [Testing Setup](docs/testing-setup.md) for Blender configuration and detaile
 ### Core tests (no Blender needed)
 - `test_protocol.py` — event schema validation, message construction
 - `test_event_apply.py` — prim creation, canonical xform ops, TRS application
-- `test_roundtrip.py` — emitter → adapter full pipeline, partial diffs, visibility
+- `test_roundtrip.py` — emitter → adapter full pipeline, partial diffs, visibility, payload load/unload
+- `test_compaction.py` — event log compaction: TRS merging, tombstones, load/unload exclusivity
 - `test_blender_stage_author.py` — BlenderStageAuthor + NoticeEmitter integration with mock bpy: auto-track, partial diff, deletion detection, feedback guard
 
 ### Blender tests (headless, requires Blender 4.4+)
-- `test_blender_adapter.py` — 19 headless tests: prim types, TRS, visibility, gprim attrs, delete, rename, MPI world-preservation
-- `test_blender_integration.py` — 4 end-to-end tests with real server + Blender processes:
-  - emitter → server → receiver pipeline
-  - auto-track with type inference
-  - deferred custom property persistence
-  - role-flip axis-flip verification (Y-up USD scene, auto-tracked objects, 3-phase emitter/receiver/verifier)
+- `test_blender_adapter.py` — headless tests: prim types, TRS, visibility, gprim attrs, delete, rename, MPI world-preservation
+- `test_blender_integration.py` — end-to-end emitter → server → receiver pipeline
+- `test_ref_reimport.py` — reference/payload deduplication across import, reset, loopback, and manual workflows

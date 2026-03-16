@@ -16,6 +16,8 @@ The USD Connect addon enables real-time transform sync between Blender instances
 
 The zip bundles the `openusdconnect` core library, so no separate Python package installation is needed.
 
+For development, see [Testing Setup](testing-setup.md) for the debug launcher (`start_usdconnect_debug.ps1`) which supports hot-reloading the addon into running Blender instances without restarting.
+
 ## UI Overview
 
 The addon adds a **USD Connect** tab in the 3D Viewport sidebar (press `N` to toggle). It has five sections:
@@ -62,7 +64,7 @@ In a terminal:
 uv run python -m openusdconnect.server --port 7200 --base scene.usda --log events.db
 ```
 
-The server is an authoritative event sequencer. It maintains a replay log so receivers that connect late (or reconnect) get all prior events.
+The server is an authoritative event sequencer. It maintains a replay log so receivers that connect late (or reconnect) get all prior events. Use `--compact` on startup to compact the event log, or send a `compact` message from any connected client to trigger compaction at runtime.
 
 ### 2. Set up the Emitter (Blender instance A)
 
@@ -101,7 +103,10 @@ In the emitter Blender:
 | `set_xform_trs` | Object moved/rotated/scaled | Applies the transform delta |
 | `set_visibility` | Visibility toggled | Shows/hides the object |
 | `set_gprim_attrs` | Parametric attribute change | Updates radius, size, height, etc. |
-| `set_reference` | USD reference set on a prim | Adds a USD composition arc |
+| `set_reference` | USD reference set on a prim | Imports the referenced asset |
+| `set_payload` | USD payload arc set on a prim | Stores payload info (unloaded by default) |
+| `load_payload` | Payload load requested | Imports the payload asset |
+| `unload_payload` | Payload unload requested | Removes imported payload children |
 | `deactivate_prim` | Object deleted | Deactivates the prim |
 | `rename_prim` | Object renamed | Renames the prim path |
 
@@ -118,6 +123,8 @@ When **Auto-track New Objects** is enabled in the Network Emitter:
 ## Sequence Persistence
 
 The receiver remembers the last sequence number it processed. On disconnect and reconnect, it resumes from where it left off — no duplicate events. To force a full replay from the beginning, click **Reset Seq** while the receiver is stopped.
+
+If the server compacts its event log, it broadcasts a `resync` message. Receivers must handle this by resetting their sequence counter — the server then replays the compacted log. The Blender addon handles this. Other DCC integrations must implement `resync` support (see `protocol.py` for the message spec).
 
 ## Feedback Loop Guard
 
