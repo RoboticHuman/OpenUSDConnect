@@ -294,6 +294,8 @@ s.close()
 
 All integration tests start a real sync server, run Blender processes as emitter and receiver, and assert on the results.
 
+Both the debug launcher and integration tests set `BLENDER_USER_RESOURCES` to `.blender/user_data/` so the addon installs to a repo-local directory instead of your system AppData. This means the portable Blender is fully isolated — it won't interfere with any system-installed Blender.
+
 ## Interactive Debugging with VS Code
 
 For hands-on debugging with breakpoints, the repo includes a launcher script that starts the sync server and one or two Blender instances with debugpy enabled, plus VS Code configs for attaching.
@@ -368,6 +370,7 @@ This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each run
 |------|---------|
 | `blender.test.cfg` | Blender exe path (gitignored, created by setup script or manually) |
 | `.blender/` | Downloaded portable Blender (gitignored) |
+| `.blender/user_data/` | Isolated Blender user config and addon install directory (gitignored) |
 | `.blender_addon_path` | Installed addon directory (gitignored, written by bootstrap) |
 | `tests/conftest.py` | Pytest conftest with `blender_exe` fixture |
 | `scripts/setup_blender_test.py` | Portable Blender download/setup script |

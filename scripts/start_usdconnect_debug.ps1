@@ -28,6 +28,7 @@ if (-not $LogPath) {
 $AddonZip = Join-Path $RepoRoot "dist\usd_connect_blender.zip"
 $BootstrapScript = Join-Path $RepoRoot "scripts\blender_bootstrap_instance.py"
 $BlenderCfg = Join-Path $RepoRoot "blender.test.cfg"
+$BlenderUserData = Join-Path $RepoRoot ".blender\user_data"
 
 if (-not $BlenderExe) {
     if (Test-Path $BlenderCfg) {
@@ -113,6 +114,8 @@ function Start-BlenderInstance {
         $blenderArgs += "--start-receiver"
     }
 
+    # Isolate addon install to repo-local directory (not system AppData)
+    $env:BLENDER_USER_RESOURCES = $BlenderUserData
     return Start-Process -FilePath $BlenderExe -ArgumentList $blenderArgs -WorkingDirectory $RepoRoot -PassThru
 }
 

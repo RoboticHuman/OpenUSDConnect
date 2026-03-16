@@ -71,7 +71,10 @@ def run_blender(blender_exe, script, port, extra_args=None, timeout=60):
     ]
     if extra_args:
         cmd.extend(extra_args)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # Isolate Blender user data to repo-local directory (not system AppData)
+    env = os.environ.copy()
+    env["BLENDER_USER_RESOURCES"] = os.path.join(PROJECT_ROOT, ".blender", "user_data")
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def dump_server_log(tmp_path, port):
