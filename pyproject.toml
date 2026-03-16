@@ -8,6 +8,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
     "ruff>=0.15.6",
 ]
 
@@ -65,6 +66,13 @@ select = [
 "tests/unit/test_event_apply.py" = ["E402"]
 "tests/unit/test_blender_stage_author.py" = ["E402"]
 "scripts/create_test_asset.py" = ["E402"]
+
+[tool.coverage.run]
+source = ["openusdconnect"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
 
 [tool.ruff.format]
 quote-style = "double"

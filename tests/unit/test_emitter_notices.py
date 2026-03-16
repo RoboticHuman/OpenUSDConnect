@@ -504,6 +504,88 @@ class TestFirstEncounterStructuralEvents:
         assert len(trs2) == 1
 
 
+class TestSnapshotPrim:
+    """NoticeEmitter.snapshot_prim edge cases."""
+
+    def test_invalid_prim_returns_none(self):
+        stage, emitter = _make_stage_and_emitter()
+        assert emitter.snapshot_prim("/World/Missing") is None
+
+    def test_valid_prim_returns_trs(self):
+        stage, emitter = _make_stage_and_emitter()
+        from openusdconnect.event_apply import ensure_canonical_ops
+
+        stage.DefinePrim("/World/Obj", "Xform")
+        ensure_canonical_ops(stage, "/World/Obj")
+        snap = emitter.snapshot_prim("/World/Obj")
+        assert snap is not None
+        assert "t" in snap and "r" in snap and "s" in snap
+        assert "local_m16" in snap and "world_m16" in snap
+
+
+class TestMarkDirty:
+    def test_mark_dirty_adds_to_dirty_set(self):
+        stage, emitter = _make_stage_and_emitter()
+        emitter.mark_dirty("/World/Foo")
+        assert "/World/Foo" in emitter.dirty
+
+
+class TestDirtyPrimSkippedIfInvalid:
+    """build_events_for_dirty skips prims that snapshot returns None for."""
+
+    def test_dirty_invalid_prim_produces_no_events(self):
+        stage, emitter = _make_stage_and_emitter()
+        # Mark a non-existent prim as dirty
+        emitter.dirty.add("/World/Ghost")
+        events = emitter.build_events_for_dirty()
+        ghost_events = [e for e in events if e.get("prim") == "/World/Ghost"]
+        assert len(ghost_events) == 0
+
+
+class TestPrimPathFromNoticePath:
+    """Test the _prim_path_from_notice_path helper."""
+
+    def test_property_path_extracted(self):
+        from openusdconnect.emitter import _prim_path_from_notice_path
+
+        assert _prim_path_from_notice_path("/World/Sphere.xformOp:translate") == "/World/Sphere"
+
+    def test_prim_path_passthrough(self):
+        from openusdconnect.emitter import _prim_path_from_notice_path
+
+        assert _prim_path_from_notice_path("/World/Sphere") == "/World/Sphere"
+
+    def test_non_absolute_returns_none(self):
+        from openusdconnect.emitter import _prim_path_from_notice_path
+
+        assert _prim_path_from_notice_path("relative/path") is None
+
+
+class TestMatrixHelpers:
+    """Test mat_to_16 and decompose_trs_from_matrix."""
+
+    def test_mat_to_16_identity(self):
+        from openusdconnect.emitter import mat_to_16
+
+        m = Gf.Matrix4d(1)
+        result = mat_to_16(m)
+        assert len(result) == 16
+        assert result[0] == 1.0
+        assert result[5] == 1.0
+        assert result[10] == 1.0
+        assert result[15] == 1.0
+
+    def test_as_matrix_tuple(self):
+        from openusdconnect.emitter import as_matrix
+
+        assert as_matrix((42, "extra")) == 42
+
+    def test_as_matrix_direct(self):
+        from openusdconnect.emitter import as_matrix
+
+        assert as_matrix(42) == 42
+
+
 class TestPayloadEmission:
     """NoticeEmitter detects and emits set_payload events."""
 

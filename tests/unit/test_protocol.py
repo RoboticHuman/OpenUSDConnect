@@ -336,3 +336,28 @@ class TestValidateEvent:
         assert not validate_event(
             {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [{"asset_path": ""}]}
         )
+
+    def test_set_payload_entry_not_dict(self):
+        assert not validate_event(
+            {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": ["bad"]}
+        )
+
+    def test_set_payload_entry_bad_prim_path(self):
+        assert not validate_event(
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": "a.usd", "prim_path": "no_slash"}],
+            }
+        )
+
+    # --- load_payload / unload_payload ---
+    def test_load_payload_valid(self):
+        assert validate_event({"k": "load_payload", "prim": "/World/Asset"})
+
+    def test_unload_payload_valid(self):
+        assert validate_event({"k": "unload_payload", "prim": "/World/Asset"})
+
+    # --- delete_prim ---
+    def test_delete_prim_valid(self):
+        assert validate_event({"k": K_DELETE_PRIM, "prim": "/World/Gone"})

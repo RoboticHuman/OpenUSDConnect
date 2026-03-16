@@ -226,6 +226,22 @@ class TestSetVisibility:
 
 
 class TestSetGprimAttrs:
+    def test_nonexistent_attr_ignored(self, stage):
+        """Setting a non-existent attribute is a no-op."""
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        # "bogus" is not a real attribute — should not raise
+        apply_event(
+            stage,
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Sphere", "attrs": {"bogus": 1.0}},
+        )
+
+    def test_nonexistent_prim_ignored(self, stage):
+        """Setting attrs on a missing prim is a no-op."""
+        apply_event(
+            stage,
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Missing", "attrs": {"radius": 1.0}},
+        )
+
     def test_sphere_radius(self, stage):
         stage.DefinePrim("/World/Sphere", "Sphere")
         apply_event(

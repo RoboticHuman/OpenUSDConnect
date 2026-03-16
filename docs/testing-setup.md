@@ -22,6 +22,18 @@ uv run pytest tests/integration/ -v
 
 Unit tests cover protocol validation, USD stage event application, and emitter/adapter roundtrips using the `pxr` (OpenUSD) Python bindings.
 
+## Coverage Report
+
+```bash
+# Terminal summary
+uv run pytest tests/unit/ --cov
+
+# HTML report (opens htmlcov/index.html)
+uv run pytest tests/unit/ --cov --cov-report=html
+```
+
+Coverage is configured in `pyproject.toml` under `[tool.coverage.run]` to measure the `openusdconnect` package. The `htmlcov/` directory is gitignored.
+
 ## Blender Test Configuration
 
 Blender integration tests run headless (`blender --background`) and require Blender 4.4+. The test framework checks for a Blender executable in this order:

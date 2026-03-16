@@ -12,6 +12,21 @@ TESTS_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 
 
+def _wait_for_server(port, timeout=5):
+    """Poll until the server accepts TCP connections."""
+    import socket
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.1)
+            s.close()
+            return
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError(f"Server not ready on port {port} after {timeout}s")
+
+
 def start_server(tmp_path, port):
     """Start the sync server and return the subprocess."""
     db_path = str(tmp_path / f"events_{port}.db")
@@ -29,7 +44,7 @@ def start_server(tmp_path, port):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    time.sleep(1.5)
+    _wait_for_server(port)
     assert proc.poll() is None, "Server exited early"
     return proc
 

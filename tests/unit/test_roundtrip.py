@@ -402,7 +402,7 @@ class TestPayloadRoundtrip:
         """Real-world test with Pyramid asset: payload arc emit -> apply."""
         import os
 
-        fixture_dir = os.path.join(os.path.dirname(__file__), "fixtures", "pyramid")
+        fixture_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fixtures", "pyramid")
         pyramid_path = os.path.join(fixture_dir, "Pyramid.usd")
         if not os.path.isfile(pyramid_path):
             pytest.skip("Pyramid fixture not found")
