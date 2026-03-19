@@ -107,7 +107,7 @@ class TestDeletionDetection:
         emitter.build_events_for_dirty()
 
         assert "/World/Cube" not in emitter._known_prims
-        assert "/World/Cube" not in emitter.last_sent_trs
+        assert "/World/Cube" not in emitter._prim_cache
 
 
 class TestDeactivationDetection:
@@ -184,15 +184,15 @@ class TestRenameDetection:
         xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
         xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
         emitter.build_events_for_dirty()
-        assert "/World/OldName" in emitter.last_sent_trs
+        assert "trs" in emitter._prim_cache.get("/World/OldName", {})
 
         editor = Usd.NamespaceEditor(stage)
         editor.RenamePrim(prim, "NewName")
         editor.ApplyEdits()
         emitter.build_events_for_dirty()
 
-        assert "/World/OldName" not in emitter.last_sent_trs
-        assert "/World/NewName" in emitter.last_sent_trs
+        assert "/World/OldName" not in emitter._prim_cache
+        assert "trs" in emitter._prim_cache.get("/World/NewName", {})
 
 
 class TestSuppressFlag:
@@ -301,6 +301,37 @@ class TestClearAll:
 
         events = emitter.build_events_for_dirty()
         assert len(events) == 0
+
+
+class TestCleanup:
+    """cleanup() revokes notice listener and clears state."""
+
+    def test_cleanup_stops_notice_collection(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Before", "Xform")
+        assert len(emitter.dirty) > 0
+
+        emitter.cleanup()
+
+        # Changes after cleanup should not be collected
+        stage.DefinePrim("/World/After", "Xform")
+        assert "/World/After" not in emitter.dirty
+
+    def test_cleanup_clears_caches(self):
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Obj", "Sphere")
+        prim.GetAttribute("radius").Set(1.0)
+        emitter.build_events_for_dirty()
+        assert "/World/Obj" in emitter._prim_cache
+
+        emitter.cleanup()
+        assert len(emitter._prim_cache) == 0
+        assert len(emitter._known_prims) == 0
+
+    def test_cleanup_idempotent(self):
+        stage, emitter = _make_stage_and_emitter()
+        emitter.cleanup()
+        emitter.cleanup()  # should not raise
 
 
 class TestRotationRoundTrip:
@@ -661,11 +692,11 @@ class TestPayloadEmission:
         prim = stage.DefinePrim("/World/Del", "Xform")
         prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier)
         emitter.build_events_for_dirty()
-        assert "/World/Del" in emitter.last_sent_payloads
+        assert "payloads" in emitter._prim_cache.get("/World/Del", {})
 
         stage.RemovePrim("/World/Del")
         emitter.build_events_for_dirty()
-        assert "/World/Del" not in emitter.last_sent_payloads
+        assert "/World/Del" not in emitter._prim_cache
 
     def test_payload_cache_updated_on_rename(self):
         stage, emitter = _make_stage_and_emitter()
@@ -674,15 +705,15 @@ class TestPayloadEmission:
         prim = stage.DefinePrim("/World/OldPay", "Xform")
         prim.GetPayloads().AddPayload(pay_stage.GetRootLayer().identifier)
         emitter.build_events_for_dirty()
-        assert "/World/OldPay" in emitter.last_sent_payloads
+        assert "payloads" in emitter._prim_cache.get("/World/OldPay", {})
 
         editor = Usd.NamespaceEditor(stage)
         editor.RenamePrim(prim, "NewPay")
         editor.ApplyEdits()
         emitter.build_events_for_dirty()
 
-        assert "/World/OldPay" not in emitter.last_sent_payloads
-        assert "/World/NewPay" in emitter.last_sent_payloads
+        assert "/World/OldPay" not in emitter._prim_cache
+        assert "payloads" in emitter._prim_cache.get("/World/NewPay", {})
 
     def test_payload_cleared_emits_empty(self):
         stage, emitter = _make_stage_and_emitter()
@@ -790,11 +821,11 @@ class TestReferenceEmission:
         prim = stage.DefinePrim("/World/Del", "Xform")
         prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier)
         emitter.build_events_for_dirty()
-        assert "/World/Del" in emitter.last_sent_references
+        assert "references" in emitter._prim_cache.get("/World/Del", {})
 
         stage.RemovePrim("/World/Del")
         emitter.build_events_for_dirty()
-        assert "/World/Del" not in emitter.last_sent_references
+        assert "/World/Del" not in emitter._prim_cache
 
     def test_reference_cache_updated_on_rename(self):
         stage, emitter = _make_stage_and_emitter()
@@ -803,15 +834,15 @@ class TestReferenceEmission:
         prim = stage.DefinePrim("/World/OldRef", "Xform")
         prim.GetReferences().AddReference(ref_stage.GetRootLayer().identifier)
         emitter.build_events_for_dirty()
-        assert "/World/OldRef" in emitter.last_sent_references
+        assert "references" in emitter._prim_cache.get("/World/OldRef", {})
 
         editor = Usd.NamespaceEditor(stage)
         editor.RenamePrim(prim, "NewRef")
         editor.ApplyEdits()
         emitter.build_events_for_dirty()
 
-        assert "/World/OldRef" not in emitter.last_sent_references
-        assert "/World/NewRef" in emitter.last_sent_references
+        assert "/World/OldRef" not in emitter._prim_cache
+        assert "references" in emitter._prim_cache.get("/World/NewRef", {})
 
     def test_reference_without_prim_path(self):
         stage, emitter = _make_stage_and_emitter()
@@ -915,11 +946,11 @@ class TestVariantSelectionEmission:
         vset.SetVariantSelection("red")
 
         emitter.build_events_for_dirty()
-        assert "/World/VarObj" in emitter.last_sent_variant_selections
+        assert "variant_selections" in emitter._prim_cache.get("/World/VarObj", {})
 
         stage.RemovePrim("/World/VarObj")
         emitter.build_events_for_dirty()
-        assert "/World/VarObj" not in emitter.last_sent_variant_selections
+        assert "/World/VarObj" not in emitter._prim_cache
 
     def test_no_variants_no_event(self):
         stage, emitter = _make_stage_and_emitter()
@@ -984,11 +1015,11 @@ class TestGprimAttrEmission:
         prim = stage.DefinePrim("/World/Sphere", "Sphere")
         prim.GetAttribute("radius").Set(3.0)
         emitter.build_events_for_dirty()
-        assert "/World/Sphere" in emitter.last_sent_gprim_attrs
+        assert "gprim_attrs" in emitter._prim_cache.get("/World/Sphere", {})
 
         stage.RemovePrim("/World/Sphere")
         emitter.build_events_for_dirty()
-        assert "/World/Sphere" not in emitter.last_sent_gprim_attrs
+        assert "/World/Sphere" not in emitter._prim_cache
 
     def test_gprim_attr_multiple_attrs(self):
         """Multiple attrs (height + radius) on Cylinder emitted together."""

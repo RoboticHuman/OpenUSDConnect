@@ -626,7 +626,9 @@ def _reset_stage_author():
         except Exception:
             pass
     _state.author = None
-    _state.notice_emitter = None
+    if _state.notice_emitter is not None:
+        _state.notice_emitter.cleanup()
+        _state.notice_emitter = None
 
 
 def _get_stage_author(context) -> BlenderStageAuthor:
@@ -835,7 +837,9 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
         if _state.sender is not None:
             _state.sender.disconnect()
             _state.sender = None
-        _state.notice_emitter = None
+        if _state.notice_emitter is not None:
+            _state.notice_emitter.cleanup()
+            _state.notice_emitter = None
         _state.author = None
         context.scene.usd_connect_net_emitter_running = False
         self.report({"INFO"}, "Emitter disconnected")

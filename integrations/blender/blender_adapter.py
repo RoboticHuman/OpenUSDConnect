@@ -386,7 +386,7 @@ class BlenderAdapter(DCCAdapter):
                     bpy.ops.wm.usd_import(**import_kwargs)
             else:
                 bpy.ops.wm.usd_import(**import_kwargs)
-        except Exception as e:
+        except Exception:
             LOG.exception(
                 "BlenderAdapter: USD import failed for %s", resolved
             )

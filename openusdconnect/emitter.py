@@ -27,6 +27,16 @@ from .protocol import (
     K_UNLOAD_PAYLOAD,
 )
 
+# Per-prim cache keys — use these instead of raw strings to catch typos.
+_C_TRS = "trs"
+_C_MATS = "mats"
+_C_VISIBILITY = "visibility"
+_C_REFERENCES = "references"
+_C_PAYLOADS = "payloads"
+_C_PAYLOAD_LOADED = "payload_loaded"
+_C_VARIANT_SELECTIONS = "variant_selections"
+_C_GPRIM_ATTRS = "gprim_attrs"
+
 # Attribute prefixes that have dedicated event channels or are not geometry.
 _SKIP_ATTR_PREFIXES = ("xformOp:", "primvars:")
 
@@ -154,12 +164,15 @@ def _prim_path_from_notice_path(path_str: str) -> str | None:
     return path_str
 
 
-def _read_references(stage, prim_path):
-    """Read reference arcs authored on this stage's own layers.
+def _read_composition_arcs(stage, prim_path, arc_attr):
+    """Read composition arcs authored on this stage's own layers.
 
     Returns a list of (asset_path, prim_path_str) tuples, or empty list.
-    Only considers the root and session layers — ignores references that
-    come from composed-in layers (e.g. internal refs inside referenced assets).
+    Only considers the root and session layers — ignores arcs that come
+    from composed-in layers (e.g. internal refs inside referenced assets).
+
+    Args:
+        arc_attr: Spec attribute name — "referenceList" or "payloadList".
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
@@ -169,39 +182,24 @@ def _read_references(stage, prim_path):
     for spec in prim.GetPrimStack():
         if spec.layer.identifier not in own_layers:
             continue
-        ref_list = spec.referenceList
-        for ref in ref_list.prependedItems:
-            result.append((ref.assetPath, str(ref.primPath)))
-        for ref in ref_list.explicitItems:
-            result.append((ref.assetPath, str(ref.primPath)))
-        for ref in ref_list.appendedItems:
-            result.append((ref.assetPath, str(ref.primPath)))
+        arc_list = getattr(spec, arc_attr)
+        for item in arc_list.prependedItems:
+            result.append((item.assetPath, str(item.primPath)))
+        for item in arc_list.explicitItems:
+            result.append((item.assetPath, str(item.primPath)))
+        for item in arc_list.appendedItems:
+            result.append((item.assetPath, str(item.primPath)))
     return result
+
+
+def _read_references(stage, prim_path):
+    """Read reference arcs authored on this stage's own layers."""
+    return _read_composition_arcs(stage, prim_path, "referenceList")
 
 
 def _read_payloads(stage, prim_path):
-    """Read payload arcs authored on this stage's own layers.
-
-    Returns a list of (asset_path, prim_path_str) tuples, or empty list.
-    Only considers the root and session layers — ignores payloads that
-    come from composed-in layers.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return []
-    own_layers = {stage.GetRootLayer().identifier, stage.GetSessionLayer().identifier}
-    result = []
-    for spec in prim.GetPrimStack():
-        if spec.layer.identifier not in own_layers:
-            continue
-        payload_list = spec.payloadList
-        for p in payload_list.prependedItems:
-            result.append((p.assetPath, str(p.primPath)))
-        for p in payload_list.explicitItems:
-            result.append((p.assetPath, str(p.primPath)))
-        for p in payload_list.appendedItems:
-            result.append((p.assetPath, str(p.primPath)))
-    return result
+    """Read payload arcs authored on this stage's own layers."""
+    return _read_composition_arcs(stage, prim_path, "payloadList")
 
 
 def _read_variant_selections(stage, prim_path):
@@ -256,15 +254,27 @@ class NoticeEmitter:
         self._suppressed: bool = False
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        self.last_sent_trs: dict[str, dict[str, list[float]]] = {}
-        self.last_sent_mats: dict[str, dict[str, list[float]]] = {}
-        self.last_sent_visibility: dict[str, str] = {}
-        self.last_sent_references: dict[str, list[tuple[str, str]]] = {}
-        self.last_sent_payloads: dict[str, list[tuple[str, str]]] = {}
-        self.last_sent_payload_loaded: dict[str, bool] = {}
-        self.last_sent_variant_selections: dict[str, dict[str, str]] = {}
-        self.last_sent_gprim_attrs: dict[str, dict[str, object]] = {}
+        # Per-prim diff cache. Each prim_path maps to a dict with keys:
+        #   trs, mats, visibility, references, payloads, payload_loaded,
+        #   variant_selections, gprim_attrs
+        # Adding a new cache key only requires updating the diff code —
+        # _migrate_caches and _purge_caches handle all keys automatically.
+        self._prim_cache: dict[str, dict] = {}
         self._dirty_attrs: dict[str, set[str]] = {}
+
+    def cleanup(self):
+        """Deregister notice listener and clear all caches.
+
+        Call this before discarding the emitter (e.g., on DCC addon
+        unregister/reload) to prevent stale callbacks from firing.
+        """
+        if self.listener:
+            self.listener.Revoke()
+            self.listener = None
+        self._prim_cache.clear()
+        self._known_prims.clear()
+        self._dirty_attrs.clear()
+        self.dirty.clear()
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -372,24 +382,13 @@ class NoticeEmitter:
         if old_path in self._known_prims:
             self._known_prims.discard(old_path)
             self._known_prims.add(new_path)
-        for cache in (self.last_sent_trs, self.last_sent_mats,
-                      self.last_sent_visibility, self.last_sent_references,
-                      self.last_sent_payloads, self.last_sent_payload_loaded,
-                      self.last_sent_variant_selections, self.last_sent_gprim_attrs):
-            if old_path in cache:
-                cache[new_path] = cache.pop(old_path)
+        if old_path in self._prim_cache:
+            self._prim_cache[new_path] = self._prim_cache.pop(old_path)
 
     def _purge_caches(self, prim_path: str):
         """Remove all per-prim caches for a deactivated/deleted prim."""
         self._known_prims.discard(prim_path)
-        self.last_sent_trs.pop(prim_path, None)
-        self.last_sent_mats.pop(prim_path, None)
-        self.last_sent_visibility.pop(prim_path, None)
-        self.last_sent_references.pop(prim_path, None)
-        self.last_sent_payloads.pop(prim_path, None)
-        self.last_sent_payload_loaded.pop(prim_path, None)
-        self.last_sent_variant_selections.pop(prim_path, None)
-        self.last_sent_gprim_attrs.pop(prim_path, None)
+        self._prim_cache.pop(prim_path, None)
         self._dirty_attrs.pop(prim_path, None)
         self.dirty.discard(prim_path)
 
@@ -424,6 +423,7 @@ class NoticeEmitter:
     ) -> list[dict]:
         """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
         events: list[dict] = []
+        pc = self._prim_cache.setdefault(prim_path, {})
 
         # Structural events on first encounter
         if prim_path not in self._known_prims:
@@ -439,18 +439,18 @@ class NoticeEmitter:
 
         # Variant selection diff (V before R in LIVERPS)
         current_vsel = _read_variant_selections(self.stage, prim_path)
-        last_vsel = self.last_sent_variant_selections.get(prim_path, {})
+        last_vsel = pc.get(_C_VARIANT_SELECTIONS, {})
         if current_vsel != last_vsel:
             events.append({
                 "k": K_SET_VARIANT_SELECTIONS,
                 "prim": prim_path,
                 "selections": dict(current_vsel),
             })
-            self.last_sent_variant_selections[prim_path] = current_vsel
+            pc[_C_VARIANT_SELECTIONS] = current_vsel
 
         # Reference diff
         current_refs = _read_references(self.stage, prim_path)
-        last_refs = self.last_sent_references.get(prim_path, [])
+        last_refs = pc.get(_C_REFERENCES, [])
         if current_refs != last_refs:
             ref_ev = {"k": K_SET_REFERENCE, "prim": prim_path, "refs": []}
             for asset_path, ref_prim_path in current_refs:
@@ -459,11 +459,11 @@ class NoticeEmitter:
                     entry["prim_path"] = ref_prim_path
                 ref_ev["refs"].append(entry)
             events.append(ref_ev)
-            self.last_sent_references[prim_path] = current_refs
+            pc[_C_REFERENCES] = current_refs
 
         # Payload diff
         current_payloads = _read_payloads(self.stage, prim_path)
-        last_payloads = self.last_sent_payloads.get(prim_path, [])
+        last_payloads = pc.get(_C_PAYLOADS, [])
         if current_payloads != last_payloads:
             pay_ev: dict = {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": []}
             for asset_path, pay_prim_path in current_payloads:
@@ -472,40 +472,38 @@ class NoticeEmitter:
                     entry["prim_path"] = pay_prim_path
                 pay_ev["payloads"].append(entry)
             events.append(pay_ev)
-            self.last_sent_payloads[prim_path] = current_payloads
+            pc[_C_PAYLOADS] = current_payloads
 
         # Payload load-state diff
         prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid() and prim.HasAuthoredPayloads():
             is_loaded = prim.IsLoaded()
-            was_loaded = self.last_sent_payload_loaded.get(prim_path)
+            was_loaded = pc.get(_C_PAYLOAD_LOADED)
             if is_loaded != was_loaded:
                 if is_loaded:
                     events.append({"k": K_LOAD_PAYLOAD, "prim": prim_path})
                 else:
                     events.append({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
-                self.last_sent_payload_loaded[prim_path] = is_loaded
+                pc[_C_PAYLOAD_LOADED] = is_loaded
 
         # TRS partial diff
-        last = self.last_sent_trs.get(prim_path, {})
+        last_trs = pc.get(_C_TRS, {})
         fields = []
         payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
 
-        if not near_list(snap["t"], last.get("t"), eps_trs):
+        if not near_list(snap["t"], last_trs.get("t"), eps_trs):
             fields.append("t")
             payload["t"] = snap["t"]
-        if not near_list(snap["r"], last.get("r"), eps_trs):
+        if not near_list(snap["r"], last_trs.get("r"), eps_trs):
             fields.append("r")
             payload["r"] = snap["r"]
-        if not near_list(snap["s"], last.get("s"), eps_trs):
+        if not near_list(snap["s"], last_trs.get("s"), eps_trs):
             fields.append("s")
             payload["s"] = snap["s"]
 
         if fields:
             events.append(payload)
-            self.last_sent_trs[prim_path] = {
-                "t": snap["t"], "r": snap["r"], "s": snap["s"],
-            }
+            pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
         # Visibility diff — only emit if the attr is explicitly authored
         prim = self.stage.GetPrimAtPath(prim_path)
@@ -514,20 +512,20 @@ class NoticeEmitter:
             vis_attr = imageable.GetVisibilityAttr()
             if vis_attr and vis_attr.IsValid() and vis_attr.IsAuthored():
                 vis_val = vis_attr.Get() or "inherited"
-                last_vis = self.last_sent_visibility.get(prim_path)
+                last_vis = pc.get(_C_VISIBILITY)
                 if vis_val != last_vis:
                     events.append({
                         "k": K_SET_VISIBILITY,
                         "prim": prim_path,
                         "visible": vis_val != "invisible",
                     })
-                    self.last_sent_visibility[prim_path] = vis_val
+                    pc[_C_VISIBILITY] = vis_val
 
         # Gprim attribute diff
         prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
-            last_attrs = self.last_sent_gprim_attrs.get(prim_path, {})
+            last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
             # When no specific attrs were flagged by the notice (first encounter,
             # variant switch, or any resync), scan all authored trackable attrs
@@ -555,15 +553,13 @@ class NoticeEmitter:
                     "prim": prim_path,
                     "attrs": changed_attrs,
                 })
-                if prim_path not in self.last_sent_gprim_attrs:
-                    self.last_sent_gprim_attrs[prim_path] = {}
-                self.last_sent_gprim_attrs[prim_path].update(changed_attrs)
+                pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
         # Optional matrices event (diagnostic)
         if include_matrices:
-            lastm = self.last_sent_mats.get(prim_path, {})
-            if not near_list(snap["local_m16"], lastm.get("local"), eps_mat) or not near_list(
-                snap["world_m16"], lastm.get("world"), eps_mat
+            last_mats = pc.get(_C_MATS, {})
+            if not near_list(snap["local_m16"], last_mats.get("local"), eps_mat) or not near_list(
+                snap["world_m16"], last_mats.get("world"), eps_mat
             ):
                 events.append({
                     "k": K_SET_XFORM_MATRICES,
@@ -571,7 +567,7 @@ class NoticeEmitter:
                     "local_m": snap["local_m16"],
                     "world_m": snap["world_m16"],
                 })
-                self.last_sent_mats[prim_path] = {
+                pc[_C_MATS] = {
                     "local": snap["local_m16"],
                     "world": snap["world_m16"],
                 }

@@ -4,6 +4,11 @@ ReceiverThread is DCC-agnostic. It connects to the server as a receiver,
 reads JSON lines in a background thread, and provides a thread-safe queue
 for the main thread to drain. DCC-specific timer/callback registration
 is the plugin's responsibility.
+
+Features:
+- Automatic reconnection with exponential backoff on connection loss
+- Socket timeout to detect hung connections
+- Bounded queue — on overflow, disconnects, waits for drain, then reconnects for replay
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from collections import deque
 
 from .protocol import make_hello
@@ -19,9 +25,19 @@ from .transport import send_line
 
 LOG = logging.getLogger(__name__)
 
+# Reconnection defaults
+_RECONNECT_BASE_DELAY = 1.0   # seconds
+_RECONNECT_MAX_DELAY = 30.0   # seconds
+_SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
+_MAX_QUEUE_DEPTH = 50_000     # max queued lines before dropping oldest
+
 
 class ReceiverThread(threading.Thread):
     """Background TCP client that connects to server and queues incoming events.
+
+    Automatically reconnects on connection loss with exponential backoff.
+    Uses socket timeouts to detect hung servers. Queue depth is bounded
+    to prevent unbounded memory growth.
 
     Usage:
         rt = ReceiverThread(host="127.0.0.1", port=7200)
@@ -35,38 +51,113 @@ class ReceiverThread(threading.Thread):
         rt.stop()
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 7200, sync_from: int = 1):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 7200,
+        sync_from: int = 1,
+        reconnect: bool = True,
+        max_queue: int = _MAX_QUEUE_DEPTH,
+        socket_timeout: float = _SOCKET_TIMEOUT,
+    ):
         super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.sync_from = sync_from
+        self.reconnect = reconnect
+        self.max_queue = max_queue
+        self.socket_timeout = socket_timeout
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
         self.connected = False
         self.last_seq: int = 0
+        self._queue_overflow = False
 
     def run(self):
-        try:
-            LOG.info("ReceiverThread connecting to %s:%s", self.host, self.port)
-            self.sock = socket.create_connection((self.host, self.port))
-            self.connected = True
+        delay = _RECONNECT_BASE_DELAY
+        while not self._stop_event.is_set():
+            try:
+                self._connect_and_recv()
+            except Exception:
+                if not self._stop_event.is_set():
+                    LOG.exception("ReceiverThread: connection error")
+            finally:
+                self.connected = False
+                self._close_socket()
 
-            # Send hello as receiver
-            send_line(self.sock, make_hello("receiver", sync_from=self.sync_from))
+            if not self.reconnect or self._stop_event.is_set():
+                break
 
-            f = self.sock.makefile("r")
-            while not self._stop_event.is_set():
-                line = f.readline()
-                if line == "":
-                    LOG.info("ReceiverThread: EOF, server closed connection")
-                    break
-                line = line.strip()
+            if self._queue_overflow:
+                # Intentional disconnect — wait for main thread to drain
+                # before reconnecting, otherwise we'll overflow again.
+                self._queue_overflow = False
+                delay = _RECONNECT_BASE_DELAY
+                LOG.info("ReceiverThread: waiting for queue to drain before reconnect")
+                drain_start = time.monotonic()
+                while not self._stop_event.is_set():
+                    with self._incoming_lock:
+                        if len(self._incoming) == 0:
+                            break
+                    if time.monotonic() - drain_start > _RECONNECT_MAX_DELAY:
+                        LOG.warning("ReceiverThread: drain wait timed out, reconnecting anyway")
+                        break
+                    if self._stop_event.wait(timeout=0.1):
+                        break
+                continue
+
+            LOG.info("ReceiverThread: reconnecting in %.1fs", delay)
+            if self._stop_event.wait(timeout=delay):
+                break  # stop requested during backoff
+            delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+
+        LOG.info("ReceiverThread stopped")
+
+    def _connect_and_recv(self):
+        """Single connection attempt: connect, handshake, read until EOF/error."""
+        LOG.info("ReceiverThread connecting to %s:%s", self.host, self.port)
+        self.sock = socket.create_connection(
+            (self.host, self.port), timeout=self.socket_timeout,
+        )
+        self.sock.settimeout(self.socket_timeout)
+
+        # Send hello as receiver — use last_seq + 1 for replay on reconnect
+        sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
+        send_line(self.sock, make_hello("receiver", sync_from=sync_from))
+        self.connected = True
+        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+
+        buf = b""
+        while not self._stop_event.is_set():
+            try:
+                data = self.sock.recv(4096)
+            except TimeoutError:
+                continue
+            except OSError:
+                if not self._stop_event.is_set():
+                    LOG.warning("ReceiverThread: socket error during read")
+                break
+
+            if not data:
+                LOG.info("ReceiverThread: EOF, server closed connection")
+                break
+
+            buf += data
+            overflow = False
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
+
                 with self._incoming_lock:
+                    if len(self._incoming) >= self.max_queue:
+                        overflow = True
+                        break
                     self._incoming.append(line)
+
                 # Track last_seq for reconnect replay
                 try:
                     parsed = json.loads(line)
@@ -75,17 +166,23 @@ class ReceiverThread(threading.Thread):
                         self.last_seq = max(self.last_seq, int(seq))
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
-        except Exception:
-            if not self._stop_event.is_set():
-                LOG.exception("ReceiverThread: connection error")
-        finally:
-            self.connected = False
-            try:
-                if self.sock:
-                    self.sock.close()
-            except OSError:
-                pass
-            LOG.info("ReceiverThread stopped")
+
+            if overflow:
+                LOG.warning(
+                    "ReceiverThread: queue full (%d), disconnecting to replay from server",
+                    self.max_queue,
+                )
+                self._queue_overflow = True
+                break
+
+    def _close_socket(self):
+        """Close the socket, ignoring errors."""
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
+        self.sock = None
 
     def drain_queue(self) -> list[str]:
         """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
