@@ -232,6 +232,24 @@ class TestCompaction:
         assert len(vsel) == 1
         assert vsel[0]["selections"]["size"] == "large"
 
+    def test_gprim_attrs_latest_wins(self, srv):
+        """Only the latest gprim attrs event per prim survives compaction."""
+        self._insert_events(srv, [
+            {"k": "ensure_prim", "prim": "/A", "typeName": "Sphere"},
+            {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 1.0}},
+        ])
+        self._insert_events(srv, [
+            {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 5.0}},
+        ])
+
+        srv.compact_log()
+
+        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        events = [json.loads(r[0])["event"] for r in rows]
+        attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
+        assert len(attr_evs) == 1
+        assert attr_evs[0]["attrs"]["radius"] == 5.0
+
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""
         srv.compact_log()

@@ -17,6 +17,7 @@ from .protocol import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
@@ -25,6 +26,63 @@ from .protocol import (
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
+
+# Attribute prefixes that have dedicated event channels or are not geometry.
+_SKIP_ATTR_PREFIXES = ("xformOp:", "primvars:")
+
+# Individual attributes to skip:
+#   visibility, xformOpOrder — have dedicated event channels
+#   extent     — bounding box, computed from geometry by USD
+#   purpose    — rendering classification (default/render/guide/proxy)
+#   proxyPrim  — relationship target, not a value attribute
+_SKIP_ATTR_NAMES = frozenset({
+    "visibility", "xformOpOrder", "extent", "purpose", "proxyPrim",
+})
+
+
+def _should_track_attr(attr_name: str) -> bool:
+    """Return True if this attribute should be tracked as a gprim attr.
+
+    Excludes attributes handled by dedicated channels (xformOps, visibility),
+    computed attributes (extent), rendering hints (purpose, proxyPrim),
+    and per-vertex data (primvars).
+    """
+    if attr_name in _SKIP_ATTR_NAMES:
+        return False
+    for prefix in _SKIP_ATTR_PREFIXES:
+        if attr_name.startswith(prefix):
+            return False
+    return True
+
+
+def _usd_value_to_python(val):
+    """Convert a USD attribute value to a JSON-serializable Python type.
+
+    Returns None for unsupported types (arrays, matrices, etc.) so the
+    caller can skip them rather than sending unrecoverable data.
+    """
+    if val is None:
+        return None
+    # Simple scalars
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    # GfVec types → list of floats
+    for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
+        if isinstance(val, vec_type):
+            return [float(v) for v in val]
+    # Pxr value types that have a Python numeric equivalent
+    type_name = type(val).__name__
+    if type_name in ("Half",):
+        return float(val)
+    # Numeric coercion only — never fall through to str() which would produce
+    # unrecoverable representations like "Vt.Vec3fArray(...)"
+    for coerce in (float, int):
+        try:
+            return coerce(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
 
 # PrimResyncType enum for classifying resync notices.
 # Not available in all USD builds (e.g. Blender's bundled pxr).
@@ -178,7 +236,17 @@ class NoticeEmitter:
         # events is a list of event dicts ready to wrap in a txn
     """
 
-    def __init__(self, stage: Usd.Stage):
+    def __init__(self, stage: Usd.Stage, attr_filter=None):
+        """
+        Args:
+            stage: The Usd.Stage to watch.
+            attr_filter: Optional callable(attr_name: str) -> bool.
+                Controls which attributes are tracked for gprim attr diffing.
+                Return True to track, False to skip. If None, uses the
+                default _should_track_attr which skips xformOps, visibility,
+                primvars, extent, etc.
+        """
+        self._attr_filter = attr_filter or _should_track_attr
         self.stage = stage
         self.dirty: set[str] = set()
         self._known_prims: set[str] = set()
@@ -195,6 +263,8 @@ class NoticeEmitter:
         self.last_sent_payloads: dict[str, list[tuple[str, str]]] = {}
         self.last_sent_payload_loaded: dict[str, bool] = {}
         self.last_sent_variant_selections: dict[str, dict[str, str]] = {}
+        self.last_sent_gprim_attrs: dict[str, dict[str, object]] = {}
+        self._dirty_attrs: dict[str, set[str]] = {}
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -210,6 +280,7 @@ class NoticeEmitter:
         self._deleted_prims.clear()
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
+        self._dirty_attrs.clear()
 
     def _classify_resync(self, notice, prim_path: str) -> str | None:
         """Classify a resync path into an action.
@@ -259,9 +330,15 @@ class NoticeEmitter:
                 self.dirty.add(prim_path)
 
         for p in notice.GetChangedInfoOnlyPaths():
-            prim_path = _prim_path_from_notice_path(str(p))
+            path_str = str(p)
+            prim_path = _prim_path_from_notice_path(path_str)
             if prim_path:
                 self.dirty.add(prim_path)
+                # Track specific attribute names for gprim attr diffing
+                if "." in path_str:
+                    attr_name = path_str.split(".", 1)[1]
+                    if self._attr_filter(attr_name):
+                        self._dirty_attrs.setdefault(prim_path, set()).add(attr_name)
 
     def mark_dirty(self, prim_path: str):
         """Manually mark a prim as dirty (useful for DCC integrations)."""
@@ -298,7 +375,7 @@ class NoticeEmitter:
         for cache in (self.last_sent_trs, self.last_sent_mats,
                       self.last_sent_visibility, self.last_sent_references,
                       self.last_sent_payloads, self.last_sent_payload_loaded,
-                      self.last_sent_variant_selections):
+                      self.last_sent_variant_selections, self.last_sent_gprim_attrs):
             if old_path in cache:
                 cache[new_path] = cache.pop(old_path)
 
@@ -312,6 +389,8 @@ class NoticeEmitter:
         self.last_sent_payloads.pop(prim_path, None)
         self.last_sent_payload_loaded.pop(prim_path, None)
         self.last_sent_variant_selections.pop(prim_path, None)
+        self.last_sent_gprim_attrs.pop(prim_path, None)
+        self._dirty_attrs.pop(prim_path, None)
         self.dirty.discard(prim_path)
 
     def _build_rename_events(self) -> list[dict]:
@@ -428,12 +507,12 @@ class NoticeEmitter:
                 "t": snap["t"], "r": snap["r"], "s": snap["s"],
             }
 
-        # Visibility diff
+        # Visibility diff — only emit if the attr is explicitly authored
         prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             imageable = UsdGeom.Imageable(prim)
             vis_attr = imageable.GetVisibilityAttr()
-            if vis_attr and vis_attr.IsValid():
+            if vis_attr and vis_attr.IsValid() and vis_attr.IsAuthored():
                 vis_val = vis_attr.Get() or "inherited"
                 last_vis = self.last_sent_visibility.get(prim_path)
                 if vis_val != last_vis:
@@ -443,6 +522,42 @@ class NoticeEmitter:
                         "visible": vis_val != "invisible",
                     })
                     self.last_sent_visibility[prim_path] = vis_val
+
+        # Gprim attribute diff
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid():
+            dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
+            last_attrs = self.last_sent_gprim_attrs.get(prim_path, {})
+
+            # When no specific attrs were flagged by the notice (first encounter,
+            # variant switch, or any resync), scan all authored trackable attrs
+            # and diff against the cache.
+            if not dirty_attr_names:
+                for attr in prim.GetAttributes():
+                    name = attr.GetName()
+                    if attr.IsAuthored() and self._attr_filter(name):
+                        dirty_attr_names.add(name)
+
+            changed_attrs = {}
+            for attr_name in dirty_attr_names:
+                attr = prim.GetAttribute(attr_name)
+                if not attr or not attr.IsValid():
+                    continue
+                val = _usd_value_to_python(attr.Get())
+                if val is None:
+                    continue
+                if val != last_attrs.get(attr_name):
+                    changed_attrs[attr_name] = val
+
+            if changed_attrs:
+                events.append({
+                    "k": K_SET_GPRIM_ATTRS,
+                    "prim": prim_path,
+                    "attrs": changed_attrs,
+                })
+                if prim_path not in self.last_sent_gprim_attrs:
+                    self.last_sent_gprim_attrs[prim_path] = {}
+                self.last_sent_gprim_attrs[prim_path].update(changed_attrs)
 
         # Optional matrices event (diagnostic)
         if include_matrices:

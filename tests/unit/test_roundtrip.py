@@ -234,6 +234,25 @@ class TestNoticeEmitterRoundtrip:
         assert len(vis_events2) == 1
         assert vis_events2[0]["visible"] is True
 
+    def test_no_visibility_event_when_not_authored(self):
+        """Prims with default (unauthored) visibility should not emit set_visibility."""
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World", "Xform")
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        emitter = NoticeEmitter(stage)
+
+        # First encounter — visibility is not authored on either prim
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
+        assert len(vis_events) == 0, (
+            f"Got spurious visibility events: {vis_events}"
+        )
+
+        # Verify both prims are still visible via schema default
+        for path in ("/World", "/World/Sphere"):
+            vis = UsdGeom.Imageable(stage.GetPrimAtPath(path)).ComputeVisibility()
+            assert vis == "inherited"
+
 
 class TestUsdStageAdapterNewFeatures:
     """Test new features through UsdStageAdapter against real USD stages."""
@@ -562,16 +581,21 @@ class TestStageToStageRoundtrip:
         assert UsdGeom.Imageable(prim_b).GetVisibilityAttr().Get() == "invisible"
 
     def test_gprim_attrs_stage_to_stage(self):
-        """Gprim attr changes replicate between stages."""
+        """Gprim attr changes replicate between stages via emitter."""
         stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
         stage_a.DefinePrim("/World", "Xform")
-        stage_a.DefinePrim("/World/Sphere", "Sphere")
+        prim_a = stage_a.DefinePrim("/World/Sphere", "Sphere")
+        prim_a.GetAttribute("radius").Set(4.0)
 
-        # Manually build events (emitter doesn't emit gprim attrs yet)
-        events = [
-            {"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Sphere"},
-            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Sphere", "attrs": {"radius": 4.0}},
-        ]
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/Sphere")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        assert len(gprim_evs) == 1
+        assert abs(gprim_evs[0]["attrs"]["radius"] - 4.0) < 1e-6
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -581,6 +605,37 @@ class TestStageToStageRoundtrip:
         assert prim_b.IsValid()
         assert prim_b.GetTypeName() == "Sphere"
         assert abs(prim_b.GetAttribute("radius").Get() - 4.0) < 1e-6
+
+    def test_gprim_attrs_emitter_roundtrip(self):
+        """Emitter detects radius change -> apply_events on second stage -> verify."""
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        prim_a = stage_a.DefinePrim("/World/Cone", "Cone")
+        prim_a.GetAttribute("radius").Set(1.0)
+        prim_a.GetAttribute("height").Set(2.0)
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/Cone")
+        emitter.build_events_for_dirty(include_matrices=False)  # first flush
+
+        # Change radius
+        prim_a.GetAttribute("radius").Set(3.5)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        assert len(gprim_evs) == 1
+        assert abs(gprim_evs[0]["attrs"]["radius"] - 3.5) < 1e-6
+        assert "height" not in gprim_evs[0]["attrs"]  # unchanged, not sent
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        stage_b.DefinePrim("/World/Cone", "Cone")
+        apply_events(stage_b, events)
+
+        prim_b = stage_b.GetPrimAtPath("/World/Cone")
+        assert abs(prim_b.GetAttribute("radius").Get() - 3.5) < 1e-6
 
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
@@ -826,6 +881,45 @@ class TestLIVERPS:
         # V=99 should beat R=50
         assert abs(prim.GetAttribute("radius").Get() - 99.0) < 1e-6
 
+    def test_emitter_sends_composed_value_not_variant(self):
+        """Emitter sends the composed radius (local=1), not the variant opinion (10)."""
+        stage = Usd.Stage.Open(self._fixture("liverps_sphere.usda"))
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage)
+
+        emitter.mark_dirty("/World/Sphere")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        assert len(gprim_evs) == 1
+        # Local opinion (1.0) wins over variant "big" (10.0)
+        assert abs(gprim_evs[0]["attrs"]["radius"] - 1.0) < 1e-6
+
+    def test_emitter_no_gprim_event_when_composed_unchanged(self):
+        """Variant switch that doesn't change composed value emits no gprim attr event."""
+        stage = Usd.Stage.Open(self._fixture("liverps_sphere.usda"))
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage)
+
+        # First flush — local radius=1 wins over variant "big" radius=10
+        emitter.mark_dirty("/World/Sphere")
+        emitter.build_events_for_dirty(include_matrices=False)
+
+        # Switch to "small" (radius=0.5) — but local=1 still wins
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("small")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        # Variant selection event fires
+        vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 1
+
+        # But no gprim attr event — composed radius is still 1.0
+        gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        assert len(gprim_evs) == 0
+
     def test_local_beats_payload(self):
         """Local opinion wins over payload opinion."""
         pay_stage = Usd.Stage.CreateInMemory()
@@ -843,3 +937,89 @@ class TestLIVERPS:
         # Add local — should override
         prim.GetAttribute("radius").Set(2.0)
         assert abs(prim.GetAttribute("radius").Get() - 2.0) < 1e-6
+
+
+class TestSublayerOwnership:
+    """Emitter only emits references/payloads authored on own layers (root + session).
+
+    Composed-in content from sublayers is shared scene structure and should
+    not be re-emitted. User opinions on root/session layers should be emitted.
+    """
+
+    def test_emitter_ignores_references_from_composed_sublayers(self):
+        """References authored on composed-in sublayers are not re-emitted."""
+        ref_asset = Usd.Stage.CreateInMemory()
+        ref_asset.DefinePrim("/Model", "Xform")
+        ref_asset_id = ref_asset.GetRootLayer().identifier
+
+        sub = Sdf.Layer.CreateAnonymous("sub.usda")
+        sub_stage = Usd.Stage.Open(sub)
+        sub_prim = sub_stage.DefinePrim("/World/FromSub", "Xform")
+        sub_prim.GetReferences().AddReference(ref_asset_id, "/Model")
+        sub_stage = None
+
+        root = Sdf.Layer.CreateAnonymous("root.usda")
+        root_stage = Usd.Stage.Open(root)
+        root_stage.DefinePrim("/World", "Xform")
+        root_stage = None
+
+        root.subLayerPaths = [sub.identifier]
+        stage = Usd.Stage.Open(root)
+
+        prim = stage.GetPrimAtPath("/World/FromSub")
+        assert prim.IsValid()
+        assert prim.HasAuthoredReferences()
+
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage)
+        emitter.mark_dirty("/World/FromSub")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/FromSub"]
+        assert len(ref_evs) == 0, (
+            f"Emitter should not re-emit references from composed sublayers, got: {ref_evs}"
+        )
+
+    def test_emitter_sends_session_reference_on_sublayer_prim(self):
+        """Reference authored on session layer for a sublayer-defined prim IS emitted."""
+        sub = Sdf.Layer.CreateAnonymous("sub.usda")
+        sub_stage = Usd.Stage.Open(sub)
+        sub_stage.DefinePrim("/World", "Xform")
+        sub_stage.DefinePrim("/World/Chair", "Xform")
+        sub_stage = None
+
+        root = Sdf.Layer.CreateAnonymous("root.usda")
+        root.subLayerPaths = [sub.identifier]
+        stage = Usd.Stage.Open(root)
+
+        assert stage.GetPrimAtPath("/World/Chair").IsValid()
+
+        ref_asset = Usd.Stage.CreateInMemory()
+        ref_asset.DefinePrim("/Model", "Xform")
+        ref_asset.DefinePrim("/Model/Geom", "Cube")
+        ref_id = ref_asset.GetRootLayer().identifier
+
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        stage.GetPrimAtPath("/World/Chair").GetReferences().AddReference(ref_id, "/Model")
+
+        emitter = NoticeEmitter(stage)
+        emitter.mark_dirty("/World/Chair")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Chair"]
+        assert len(ref_evs) == 1
+        assert ref_evs[0]["refs"][0]["asset_path"] == ref_id
+
+        recv_stage = Usd.Stage.CreateInMemory()
+        recv_stage.DefinePrim("/World", "Xform")
+        apply_events(recv_stage, events)
+
+        recv_chair = recv_stage.GetPrimAtPath("/World/Chair")
+        assert recv_chair.IsValid()
+        assert recv_chair.HasAuthoredReferences()
+        child = recv_stage.GetPrimAtPath("/World/Chair/Geom")
+        assert child.IsValid()
+        assert child.GetTypeName() == "Cube"
+

@@ -12,6 +12,7 @@ from openusdconnect.protocol import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
@@ -926,3 +927,137 @@ class TestVariantSelectionEmission:
         events = emitter.build_events_for_dirty()
         vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
         assert len(vsel) == 0
+
+
+class TestGprimAttrEmission:
+    """NoticeEmitter detects and emits set_gprim_attrs events."""
+
+    def test_gprim_attr_emitted_on_first_encounter(self):
+        """Sphere with authored radius emits set_gprim_attrs on first encounter."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Sphere", "Sphere")
+        prim.GetAttribute("radius").Set(2.0)
+
+        events = emitter.build_events_for_dirty()
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        assert len(attr_evs) == 1
+        assert abs(attr_evs[0]["attrs"]["radius"] - 2.0) < 1e-6
+
+    def test_gprim_attr_change_detected(self):
+        """Changing radius after first flush emits a diff event."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Sphere", "Sphere")
+        prim.GetAttribute("radius").Set(1.0)
+        emitter.build_events_for_dirty()  # first flush
+
+        # Change radius
+        prim.GetAttribute("radius").Set(5.0)
+        events = emitter.build_events_for_dirty()
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        assert len(attr_evs) == 1
+        assert abs(attr_evs[0]["attrs"]["radius"] - 5.0) < 1e-6
+
+    def test_gprim_attr_unchanged_no_event(self):
+        """TRS-only change on a prim with attrs does not emit gprim attr event."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Sphere", "Sphere")
+        prim.GetAttribute("radius").Set(1.0)
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+        emitter.build_events_for_dirty()  # first flush
+
+        # Only change translation
+        xf.GetOrderedXformOps()[0].Set(Gf.Vec3d(5, 0, 0))
+        events = emitter.build_events_for_dirty()
+
+        # TRS event fires, but gprim attrs do not
+        trs_evs = [e for e in events if e["k"] == K_SET_XFORM_TRS]
+        assert len(trs_evs) == 1
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        assert len(attr_evs) == 0
+
+    def test_gprim_attr_cache_cleaned_on_deletion(self):
+        """Deleting a prim cleans the gprim attr cache."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Sphere", "Sphere")
+        prim.GetAttribute("radius").Set(3.0)
+        emitter.build_events_for_dirty()
+        assert "/World/Sphere" in emitter.last_sent_gprim_attrs
+
+        stage.RemovePrim("/World/Sphere")
+        emitter.build_events_for_dirty()
+        assert "/World/Sphere" not in emitter.last_sent_gprim_attrs
+
+    def test_gprim_attr_multiple_attrs(self):
+        """Multiple attrs (height + radius) on Cylinder emitted together."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Cyl", "Cylinder")
+        prim.GetAttribute("radius").Set(0.5)
+        prim.GetAttribute("height").Set(2.0)
+
+        events = emitter.build_events_for_dirty()
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Cyl"]
+        assert len(attr_evs) == 1
+        assert abs(attr_evs[0]["attrs"]["radius"] - 0.5) < 1e-6
+        assert abs(attr_evs[0]["attrs"]["height"] - 2.0) < 1e-6
+
+    def test_xform_ops_excluded(self):
+        """xformOp attribute changes do not produce gprim attr events."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Obj", "Xform")
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
+        xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
+        xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
+        emitter.build_events_for_dirty()
+
+        # Change translate
+        xf.GetOrderedXformOps()[0].Set(Gf.Vec3d(10, 0, 0))
+        events = emitter.build_events_for_dirty()
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        assert len(attr_evs) == 0
+
+    def test_gprim_attr_after_variant_switch(self):
+        """Variant switch that changes composed radius emits set_gprim_attrs."""
+        import os
+
+        fixture = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "fixtures", "variant_sphere.usda"
+        )
+        stage = Usd.Stage.Open(fixture)
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage)
+
+        # First flush — "small" variant, radius=1
+        emitter.mark_dirty("/World/Sphere")
+        events1 = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs1 = [e for e in events1 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        assert len(attr_evs1) == 1
+        initial_radius = attr_evs1[0]["attrs"]["radius"]
+
+        # Switch to "large" — radius changes via composition
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("large")
+        events2 = emitter.build_events_for_dirty(include_matrices=False)
+
+        attr_evs2 = [e for e in events2 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        assert len(attr_evs2) == 1
+        new_radius = attr_evs2[0]["attrs"]["radius"]
+        assert new_radius != initial_radius
+        assert abs(new_radius - 10.0) < 1e-6
+
+    def test_visibility_excluded(self):
+        """Visibility changes do not produce gprim attr events."""
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Sphere", "Sphere")
+        emitter.build_events_for_dirty()
+
+        UsdGeom.Imageable(prim).GetVisibilityAttr().Set("invisible")
+        events = emitter.build_events_for_dirty()
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
+        # Should not include visibility in gprim attrs
+        for ev in attr_evs:
+            assert "visibility" not in ev["attrs"]
