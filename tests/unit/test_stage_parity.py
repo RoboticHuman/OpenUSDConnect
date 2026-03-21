@@ -11,7 +11,7 @@ import os
 import pytest
 
 try:
-    from pxr import Gf, Sdf, Usd, UsdGeom
+    from pxr import Gf, Usd, UsdGeom
 
     PXR_AVAILABLE = True
 except ImportError:
@@ -389,7 +389,8 @@ class TestStageParity:
             for label, stage in [("emitter", emitter_stage),
                                  ("server", variant_srv.stage),
                                  ("receiver", receiver_stage)]:
-                sel = stage.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSelection("size")
+                prim = stage.GetPrimAtPath("/World/Sphere")
+                sel = prim.GetVariantSets().GetVariantSelection("size")
                 assert sel == "large", f"{label} variant selection: {sel}"
         finally:
             variant_srv.db_conn.close()

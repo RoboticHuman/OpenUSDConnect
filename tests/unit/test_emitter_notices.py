@@ -970,7 +970,10 @@ class TestGprimAttrEmission:
         prim.GetAttribute("radius").Set(2.0)
 
         events = emitter.build_events_for_dirty()
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        attr_evs = [
+            e for e in events
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+        ]
         assert len(attr_evs) == 1
         assert abs(attr_evs[0]["attrs"]["radius"] - 2.0) < 1e-6
 
@@ -984,7 +987,10 @@ class TestGprimAttrEmission:
         # Change radius
         prim.GetAttribute("radius").Set(5.0)
         events = emitter.build_events_for_dirty()
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        attr_evs = [
+            e for e in events
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+        ]
         assert len(attr_evs) == 1
         assert abs(attr_evs[0]["attrs"]["radius"] - 5.0) < 1e-6
 
@@ -1065,7 +1071,10 @@ class TestGprimAttrEmission:
         # First flush — "small" variant, radius=1
         emitter.mark_dirty("/World/Sphere")
         events1 = emitter.build_events_for_dirty(include_matrices=False)
-        attr_evs1 = [e for e in events1 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        attr_evs1 = [
+            e for e in events1
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+        ]
         assert len(attr_evs1) == 1
         initial_radius = attr_evs1[0]["attrs"]["radius"]
 
@@ -1074,7 +1083,10 @@ class TestGprimAttrEmission:
         prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("large")
         events2 = emitter.build_events_for_dirty(include_matrices=False)
 
-        attr_evs2 = [e for e in events2 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        attr_evs2 = [
+            e for e in events2
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+        ]
         assert len(attr_evs2) == 1
         new_radius = attr_evs2[0]["attrs"]["radius"]
         assert new_radius != initial_radius

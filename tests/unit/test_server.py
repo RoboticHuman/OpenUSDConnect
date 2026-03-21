@@ -257,7 +257,12 @@ class TestCompaction:
             {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
             {"k": "set_gprim_attrs", "prim": "/A",
              "attrs": {"primvars:st": [[0, 0], [1, 0]]},
-             "primvar_meta": {"primvars:st": {"typeName": "texCoord2f[]", "interpolation": "faceVarying"}}},
+             "primvar_meta": {
+                 "primvars:st": {
+                     "typeName": "texCoord2f[]",
+                     "interpolation": "faceVarying",
+                 },
+             }},
         ])
         self._insert_events(srv, [
             {"k": "set_gprim_attrs", "prim": "/A",
@@ -276,6 +281,29 @@ class TestCompaction:
         # Interpolation metadata survives
         assert attr_evs[0]["primvar_meta"]["primvars:st"]["typeName"] == "texCoord2f[]"
         assert attr_evs[0]["primvar_meta"]["primvars:st"]["interpolation"] == "faceVarying"
+
+    def test_attr_interp_merged_across_events(self, srv):
+        """Compaction merges attr_interp from separate events on the same prim."""
+        self._insert_events(srv, [
+            {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
+            {"k": "set_gprim_attrs", "prim": "/A",
+             "attrs": {"normals": [[0, 0, 1]]},
+             "attr_interp": {"normals": "faceVarying"}},
+        ])
+        self._insert_events(srv, [
+            {"k": "set_gprim_attrs", "prim": "/A",
+             "attrs": {"radius": 2.0}},
+        ])
+
+        srv.compact_log()
+
+        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        events = [json.loads(r[0])["event"] for r in rows]
+        attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
+        assert len(attr_evs) == 1
+        assert attr_evs[0]["attrs"]["normals"] == [[0, 0, 1]]
+        assert attr_evs[0]["attrs"]["radius"] == 2.0
+        assert attr_evs[0]["attr_interp"]["normals"] == "faceVarying"
 
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""

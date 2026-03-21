@@ -1014,7 +1014,10 @@ class TestLIVERPS:
         emitter.mark_dirty("/World/Sphere")
         events = emitter.build_events_for_dirty(include_matrices=False)
 
-        gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"]
+        gprim_evs = [
+            e for e in events
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+        ]
         assert len(gprim_evs) == 1
         # Local opinion (1.0) wins over variant "big" (10.0)
         assert abs(gprim_evs[0]["attrs"]["radius"] - 1.0) < 1e-6
