@@ -68,8 +68,8 @@ def _should_track_attr(attr_name: str) -> bool:
 def _usd_value_to_python(val):
     """Convert a USD attribute value to a JSON-serializable Python type.
 
-    Returns None for unsupported types (arrays, matrices, etc.) so the
-    caller can skip them rather than sending unrecoverable data.
+    Handles scalars, GfVec types, and VtArrays (including arrays of vectors).
+    Returns None for unsupported types so the caller can skip them.
     """
     if val is None:
         return None
@@ -80,8 +80,18 @@ def _usd_value_to_python(val):
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
         if isinstance(val, vec_type):
             return [float(v) for v in val]
-    # Pxr value types that have a Python numeric equivalent
+    # VtArray types (Vec3fArray, IntArray, FloatArray, etc.)
+    # Detected by type name ending in "Array" — no shared base class in pxr.
     type_name = type(val).__name__
+    if type_name.endswith("Array"):
+        result = []
+        for elem in val:
+            converted = _usd_value_to_python(elem)
+            if converted is None:
+                return None  # unsupported element type, skip entire array
+            result.append(converted)
+        return result
+    # Pxr value types that have a Python numeric equivalent
     if type_name in ("Half",):
         return float(val)
     # Numeric coercion only — never fall through to str() which would produce

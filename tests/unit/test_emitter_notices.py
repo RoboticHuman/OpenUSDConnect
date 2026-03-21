@@ -1092,3 +1092,26 @@ class TestGprimAttrEmission:
         # Should not include visibility in gprim attrs
         for ev in attr_evs:
             assert "visibility" not in ev["attrs"]
+
+    def test_mesh_attrs_emitted(self):
+        """Mesh points, faceVertexCounts, faceVertexIndices are emitted."""
+        from pxr import Vt
+
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Tri")
+        mesh.GetPointsAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(0, 0, 0), Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0),
+        ]))
+        mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3]))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2]))
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Tri"]
+        assert len(attr_evs) == 1
+        attrs = attr_evs[0]["attrs"]
+        assert "points" in attrs
+        assert "faceVertexCounts" in attrs
+        assert "faceVertexIndices" in attrs
+        assert attrs["points"] == [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        assert attrs["faceVertexCounts"] == [3]
+        assert attrs["faceVertexIndices"] == [0, 1, 2]

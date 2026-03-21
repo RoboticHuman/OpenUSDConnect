@@ -316,6 +316,16 @@ class BlenderAdapter(DCCAdapter):
         if not obj:
             LOG.warning("BlenderAdapter.set_gprim_attrs: object not found for %s", prim_path)
             return False
+
+        # Raw mesh topology: points + faceVertexCounts + faceVertexIndices
+        if (
+            "points" in attrs
+            and "faceVertexCounts" in attrs
+            and "faceVertexIndices" in attrs
+        ):
+            self._apply_mesh_topology(obj, attrs)
+            return True
+
         # Map USD parametric attrs to Blender object scale
         usd_type = obj.get("usd_type_name", "")
         if usd_type == "Sphere" and "radius" in attrs:
@@ -333,6 +343,37 @@ class BlenderAdapter(DCCAdapter):
                 obj.scale = (obj.scale[0], obj.scale[1], h)
         LOG.info("BlenderAdapter: set gprim attrs %s on %s", attrs, prim_path)
         return True
+
+    def _apply_mesh_topology(self, obj, attrs: dict) -> None:
+        """Build Blender mesh geometry from USD mesh topology attributes."""
+        points = attrs["points"]
+        face_counts = attrs["faceVertexCounts"]
+        face_indices = attrs["faceVertexIndices"]
+
+        # Convert faceVertexCounts + faceVertexIndices → face tuples
+        faces = []
+        idx = 0
+        for count in face_counts:
+            faces.append(tuple(face_indices[idx : idx + count]))
+            idx += count
+
+        verts = [tuple(p) for p in points]
+
+        if obj.type == "MESH" and obj.data:
+            mesh = obj.data
+            mesh.clear_geometry()
+        else:
+            mesh = bpy.data.meshes.new(obj.name + "_mesh")
+            obj.data = mesh
+
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        LOG.info(
+            "BlenderAdapter: built mesh topology for %s (%d verts, %d faces)",
+            obj.get("usd_prim_path", obj.name),
+            len(verts),
+            len(faces),
+        )
 
     def _resolve_asset_path(self, asset_path: str) -> str | None:
         """Resolve a possibly-relative asset path to an absolute file path.

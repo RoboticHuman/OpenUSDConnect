@@ -637,6 +637,37 @@ class TestStageToStageRoundtrip:
         prim_b = stage_b.GetPrimAtPath("/World/Cone")
         assert abs(prim_b.GetAttribute("radius").Get() - 3.5) < 1e-6
 
+    def test_mesh_roundtrip(self):
+        """Mesh points/faces emitted by emitter and applied to receiver stage."""
+        from pxr import Vt
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        mesh = UsdGeom.Mesh.Define(stage_a, "/World/Tri")
+        mesh.GetPointsAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(0, 0, 0), Gf.Vec3f(2, 0, 0), Gf.Vec3f(0, 3, 0),
+        ]))
+        mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3]))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2]))
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/Tri")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        mesh_b = UsdGeom.Mesh(stage_b.GetPrimAtPath("/World/Tri"))
+        pts = mesh_b.GetPointsAttr().Get()
+        assert len(pts) == 3
+        assert abs(pts[1][0] - 2.0) < 1e-6
+        assert abs(pts[2][1] - 3.0) < 1e-6
+        assert list(mesh_b.GetFaceVertexCountsAttr().Get()) == [3]
+        assert list(mesh_b.GetFaceVertexIndicesAttr().Get()) == [0, 1, 2]
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")
