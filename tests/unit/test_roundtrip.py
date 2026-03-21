@@ -730,6 +730,36 @@ class TestStageToStageRoundtrip:
         assert abs(vals[0][0] - 1.0) < 1e-6
         assert dc_b.GetInterpolation() == UsdGeom.Tokens.vertex
 
+    def test_normals_roundtrip(self):
+        """Normals emitted with interpolation and applied correctly on receiver."""
+        from pxr import Vt
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        mesh = UsdGeom.Mesh.Define(stage_a, "/World/NMesh")
+        mesh.GetNormalsAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 1, 0), Gf.Vec3f(1, 0, 0),
+        ]))
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/NMesh")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        mesh_b = UsdGeom.Mesh(stage_b.GetPrimAtPath("/World/NMesh"))
+        normals = mesh_b.GetNormalsAttr().Get()
+        assert len(normals) == 3
+        assert abs(normals[0][2] - 1.0) < 1e-6
+        assert abs(normals[1][1] - 1.0) < 1e-6
+        assert abs(normals[2][0] - 1.0) < 1e-6
+        assert mesh_b.GetNormalsInterpolation() == UsdGeom.Tokens.faceVarying
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

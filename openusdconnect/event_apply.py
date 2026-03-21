@@ -179,8 +179,7 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
 
     # Set interpolation on primvars — needed for schema-defined primvars
     # (e.g. displayColor) where the default interpolation differs from
-    # the authored value, and for newly created primvars where CreatePrimvar
-    # already set it (harmless no-op in that case).
+    # the authored value.
     if pvapi:
         for attr_name, meta in primvar_meta.items():
             interp = meta.get("interpolation")
@@ -189,6 +188,13 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
                 pv = pvapi.GetPrimvar(pv_name)
                 if pv:
                     pv.SetInterpolation(interp)
+
+    # Set interpolation metadata on non-primvar attributes (e.g. normals).
+    attr_interp = ev.get("attr_interp", {})
+    for attr_name, interp in attr_interp.items():
+        attr = prim.GetAttribute(attr_name)
+        if attr and attr.IsValid():
+            attr.SetMetadata("interpolation", interp)
 
 
 def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:

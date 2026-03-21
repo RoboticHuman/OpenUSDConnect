@@ -549,6 +549,7 @@ class NoticeEmitter:
 
             changed_attrs = {}
             primvar_meta = {}
+            attr_interp = {}
             pvapi = None  # lazy — only created if a primvar actually changed
             for attr_name in dirty_attr_names:
                 attr = prim.GetAttribute(attr_name)
@@ -559,10 +560,10 @@ class NoticeEmitter:
                     continue
                 if val != last_attrs.get(attr_name):
                     changed_attrs[attr_name] = val
-                    # For primvar attributes, include the USD type name and
-                    # interpolation so the receiver can create the attribute
-                    # with the exact same schema type.
                     if attr_name.startswith(PRIMVAR_PREFIX):
+                        # Primvar: include USD type name and interpolation so
+                        # the receiver can create non-schema primvars with the
+                        # exact type.
                         if pvapi is None:
                             pvapi = UsdGeom.PrimvarsAPI(prim)
                         pv = pvapi.GetPrimvar(attr_name[len(PRIMVAR_PREFIX):])
@@ -571,6 +572,12 @@ class NoticeEmitter:
                             if pv.HasAuthoredInterpolation():
                                 meta["interpolation"] = str(pv.GetInterpolation())
                             primvar_meta[attr_name] = meta
+                    else:
+                        # Non-primvar: capture authored interpolation metadata
+                        # (e.g. normals has per-attr interpolation).
+                        interp = attr.GetMetadata("interpolation")
+                        if interp:
+                            attr_interp[attr_name] = str(interp)
 
             if changed_attrs:
                 ev = {
@@ -580,6 +587,8 @@ class NoticeEmitter:
                 }
                 if primvar_meta:
                     ev["primvar_meta"] = primvar_meta
+                if attr_interp:
+                    ev["attr_interp"] = attr_interp
                 events.append(ev)
                 pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 

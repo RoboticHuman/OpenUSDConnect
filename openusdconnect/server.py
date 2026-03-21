@@ -197,6 +197,9 @@ class UsdSyncServer:
                     new_meta = ev.get("primvar_meta", {})
                     if new_meta:
                         prev.setdefault("primvar_meta", {}).update(new_meta)
+                    new_interp = ev.get("attr_interp", {})
+                    if new_interp:
+                        prev.setdefault("attr_interp", {}).update(new_interp)
                 else:
                     latest[(prim, k)] = ev
             elif k in LATEST_WINS_KINDS:

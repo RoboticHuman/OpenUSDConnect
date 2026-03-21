@@ -1189,3 +1189,25 @@ class TestGprimAttrEmission:
         # Only the changed primvar is in the event
         assert "primvars:st" in attrs
         assert "primvars:displayColor" not in attrs
+
+    def test_normals_emitted_with_interpolation(self):
+        """Normals are emitted with attr_interp metadata."""
+        from pxr import Vt
+
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/NMesh")
+        mesh.GetNormalsAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 0, 1),
+        ]))
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
+                     and e["prim"] == "/World/NMesh"]
+        assert len(attr_evs) == 1
+        attrs = attr_evs[0]["attrs"]
+        assert "normals" in attrs
+        assert attrs["normals"] == [[0.0, 0.0, 1.0]] * 3
+        # Interpolation in attr_interp (not primvar_meta — normals isn't a primvar)
+        interp = attr_evs[0].get("attr_interp", {})
+        assert interp.get("normals") == "faceVarying"
