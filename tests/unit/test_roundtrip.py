@@ -668,6 +668,68 @@ class TestStageToStageRoundtrip:
         assert list(mesh_b.GetFaceVertexCountsAttr().Get()) == [3]
         assert list(mesh_b.GetFaceVertexIndicesAttr().Get()) == [0, 1, 2]
 
+    def test_primvar_uv_roundtrip(self):
+        """Primvar UVs emitted by emitter and applied to receiver stage with interpolation."""
+        from pxr import Vt
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        mesh = UsdGeom.Mesh.Define(stage_a, "/World/UVMesh")
+        pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
+                                 UsdGeom.Tokens.faceVarying)
+        st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(0, 1)]))
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/UVMesh")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        prim_b = stage_b.GetPrimAtPath("/World/UVMesh")
+        pvapi_b = UsdGeom.PrimvarsAPI(prim_b)
+        st_b = pvapi_b.GetPrimvar("st")
+        assert st_b.GetAttr().IsValid()
+        vals = st_b.Get()
+        assert len(vals) == 3
+        assert abs(vals[1][0] - 1.0) < 1e-6
+        assert st_b.GetInterpolation() == UsdGeom.Tokens.faceVarying
+
+    def test_primvar_display_color_roundtrip(self):
+        """Primvar displayColor roundtrips with correct interpolation."""
+        from pxr import Vt
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        mesh = UsdGeom.Mesh.Define(stage_a, "/World/ColorMesh")
+        pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
+                                 UsdGeom.Tokens.vertex)
+        dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0)]))
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/ColorMesh")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        prim_b = stage_b.GetPrimAtPath("/World/ColorMesh")
+        pvapi_b = UsdGeom.PrimvarsAPI(prim_b)
+        dc_b = pvapi_b.GetPrimvar("displayColor")
+        assert dc_b.GetAttr().IsValid()
+        vals = dc_b.Get()
+        assert len(vals) == 2
+        assert abs(vals[0][0] - 1.0) < 1e-6
+        assert dc_b.GetInterpolation() == UsdGeom.Tokens.vertex
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

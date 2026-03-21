@@ -55,7 +55,6 @@ LATEST_WINS_KINDS = frozenset({
     K_SET_REFERENCE,
     K_SET_PAYLOAD,
     K_SET_VARIANT_SELECTIONS,
-    K_SET_GPRIM_ATTRS,
     K_DEACTIVATE_PRIM,
 })
 
@@ -189,6 +188,15 @@ class UsdSyncServer:
                             prev[field] = ev[field]
                             if field not in prev["fields"]:
                                 prev["fields"].append(field)
+                else:
+                    latest[(prim, k)] = ev
+            elif k == K_SET_GPRIM_ATTRS:
+                prev = latest.get((prim, k))
+                if prev:
+                    prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
+                    new_meta = ev.get("primvar_meta", {})
+                    if new_meta:
+                        prev.setdefault("primvar_meta", {}).update(new_meta)
                 else:
                     latest[(prim, k)] = ev
             elif k in LATEST_WINS_KINDS:

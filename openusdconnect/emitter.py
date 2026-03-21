@@ -25,6 +25,7 @@ from .protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    PRIMVAR_PREFIX,
 )
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
@@ -38,7 +39,7 @@ _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
-_SKIP_ATTR_PREFIXES = ("xformOp:", "primvars:")
+_SKIP_ATTR_PREFIXES = ("xformOp:",)
 
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
@@ -54,8 +55,8 @@ def _should_track_attr(attr_name: str) -> bool:
     """Return True if this attribute should be tracked as a gprim attr.
 
     Excludes attributes handled by dedicated channels (xformOps, visibility),
-    computed attributes (extent), rendering hints (purpose, proxyPrim),
-    and per-vertex data (primvars).
+    computed attributes (extent), and rendering hints (purpose, proxyPrim).
+    Primvars (primvars:st, primvars:displayColor, etc.) ARE tracked.
     """
     if attr_name in _SKIP_ATTR_NAMES:
         return False
@@ -252,7 +253,7 @@ class NoticeEmitter:
                 Controls which attributes are tracked for gprim attr diffing.
                 Return True to track, False to skip. If None, uses the
                 default _should_track_attr which skips xformOps, visibility,
-                primvars, extent, etc.
+                extent, etc. Primvars ARE tracked by default.
         """
         self._attr_filter = attr_filter or _should_track_attr
         self.stage = stage
@@ -547,6 +548,8 @@ class NoticeEmitter:
                         dirty_attr_names.add(name)
 
             changed_attrs = {}
+            primvar_meta = {}
+            pvapi = None  # lazy — only created if a primvar actually changed
             for attr_name in dirty_attr_names:
                 attr = prim.GetAttribute(attr_name)
                 if not attr or not attr.IsValid():
@@ -556,13 +559,28 @@ class NoticeEmitter:
                     continue
                 if val != last_attrs.get(attr_name):
                     changed_attrs[attr_name] = val
+                    # For primvar attributes, include the USD type name and
+                    # interpolation so the receiver can create the attribute
+                    # with the exact same schema type.
+                    if attr_name.startswith(PRIMVAR_PREFIX):
+                        if pvapi is None:
+                            pvapi = UsdGeom.PrimvarsAPI(prim)
+                        pv = pvapi.GetPrimvar(attr_name[len(PRIMVAR_PREFIX):])
+                        if pv:
+                            meta = {"typeName": str(attr.GetTypeName())}
+                            if pv.HasAuthoredInterpolation():
+                                meta["interpolation"] = str(pv.GetInterpolation())
+                            primvar_meta[attr_name] = meta
 
             if changed_attrs:
-                events.append({
+                ev = {
                     "k": K_SET_GPRIM_ATTRS,
                     "prim": prim_path,
                     "attrs": changed_attrs,
-                })
+                }
+                if primvar_meta:
+                    ev["primvar_meta"] = primvar_meta
+                events.append(ev)
                 pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
         # Optional matrices event (diagnostic)

@@ -1115,3 +1115,77 @@ class TestGprimAttrEmission:
         assert attrs["points"] == [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         assert attrs["faceVertexCounts"] == [3]
         assert attrs["faceVertexIndices"] == [0, 1, 2]
+
+    def test_primvar_uv_emitted(self):
+        """Primvar UVs (primvars:st) are detected and emitted with interpolation."""
+        from pxr import Sdf, Vt
+
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/UVMesh")
+        pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
+                                 UsdGeom.Tokens.faceVarying)
+        st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(0, 1)]))
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
+                     and e["prim"] == "/World/UVMesh"]
+        assert len(attr_evs) == 1
+        attrs = attr_evs[0]["attrs"]
+        assert "primvars:st" in attrs
+        assert attrs["primvars:st"] == [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+        # Interpolation metadata
+        meta = attr_evs[0].get("primvar_meta", {})
+        assert meta["primvars:st"]["typeName"] == "texCoord2f[]"
+        assert meta["primvars:st"]["interpolation"] == "faceVarying"
+
+    def test_primvar_display_color_emitted(self):
+        """Primvar displayColor is detected and emitted."""
+        from pxr import Sdf, Vt
+
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/ColorMesh")
+        pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
+                                 UsdGeom.Tokens.vertex)
+        dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0), Gf.Vec3f(0, 0, 1)]))
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
+                     and e["prim"] == "/World/ColorMesh"]
+        assert len(attr_evs) == 1
+        attrs = attr_evs[0]["attrs"]
+        assert "primvars:displayColor" in attrs
+        assert attrs["primvars:displayColor"] == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        meta = attr_evs[0].get("primvar_meta", {})
+        assert meta["primvars:displayColor"]["typeName"] == "color3f[]"
+        assert meta["primvars:displayColor"]["interpolation"] == "vertex"
+
+    def test_primvar_change_only_sends_changed(self):
+        """Changing one primvar does not re-send unchanged ones."""
+        from pxr import Sdf, Vt
+
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Multi")
+        pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
+                                 UsdGeom.Tokens.faceVarying)
+        st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0)]))
+        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
+                                 UsdGeom.Tokens.vertex)
+        dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 1, 1)]))
+
+        # Flush initial events
+        emitter.build_events_for_dirty(include_matrices=False)
+
+        # Now change only UVs
+        st.Set(Vt.Vec2fArray([Gf.Vec2f(0.5, 0.5), Gf.Vec2f(1, 1)]))
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
+                     and e["prim"] == "/World/Multi"]
+        assert len(attr_evs) == 1
+        attrs = attr_evs[0]["attrs"]
+        # Only the changed primvar is in the event
+        assert "primvars:st" in attrs
+        assert "primvars:displayColor" not in attrs

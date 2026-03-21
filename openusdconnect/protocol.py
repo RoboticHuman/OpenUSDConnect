@@ -60,6 +60,8 @@ K_LOAD_PAYLOAD = "load_payload"
 K_UNLOAD_PAYLOAD = "unload_payload"
 K_SET_VARIANT_SELECTIONS = "set_variant_selections"
 
+PRIMVAR_PREFIX = "primvars:"
+
 # Valid event keys
 EVENT_KEYS = frozenset(
     {

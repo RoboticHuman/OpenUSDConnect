@@ -93,6 +93,21 @@ def quatf_from_wxyz(q) -> Gf.Quatf:
     return Gf.Quatf(w, Gf.Vec3f(x, y, z))
 
 
+def _ensure_primvar_attr(prim: Usd.Prim, name: str, meta: dict,
+                         pvapi: UsdGeom.PrimvarsAPI) -> Usd.Attribute | None:
+    """Create a primvar attribute from metadata if it doesn't exist yet.
+
+    Returns the attribute (newly created or existing), or None on failure.
+    """
+    sdf_type = Sdf.ValueTypeNames.Find(meta["typeName"])
+    if not sdf_type:
+        return None
+    pv_name = name[len("primvars:"):]
+    interp = meta.get("interpolation", "")
+    pv = pvapi.CreatePrimvar(pv_name, sdf_type, interp)
+    return pv.GetAttr()
+
+
 def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
     """Set a single attribute on a typed gprim, coercing to the schema-defined type."""
     attr = prim.GetAttribute(name)
@@ -101,8 +116,11 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
     type_name = str(attr.GetTypeName())
 
     if isinstance(value, list):
-        if type_name in ("float3[]", "vector3f[]"):
+        if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
             arr = Vt.Vec3fArray([Gf.Vec3f(*v) for v in value])
+            attr.Set(arr)
+        elif type_name in ("float2[]", "texCoord2f[]"):
+            arr = Vt.Vec2fArray([Gf.Vec2f(*v) for v in value])
             attr.Set(arr)
         elif type_name == "int[]":
             attr.Set(Vt.IntArray(value))
@@ -147,9 +165,30 @@ def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
 
 def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
-    if prim and prim.IsValid():
-        for attr_name, attr_value in ev.get("attrs", {}).items():
-            _set_gprim_attr(prim, attr_name, attr_value)
+    if not prim or not prim.IsValid():
+        return
+    primvar_meta = ev.get("primvar_meta", {})
+    pvapi = UsdGeom.PrimvarsAPI(prim) if primvar_meta else None
+
+    for attr_name, attr_value in ev.get("attrs", {}).items():
+        meta = primvar_meta.get(attr_name)
+        # Create non-schema primvar attributes that don't exist yet
+        if meta and not prim.GetAttribute(attr_name).IsValid():
+            _ensure_primvar_attr(prim, attr_name, meta, pvapi)
+        _set_gprim_attr(prim, attr_name, attr_value)
+
+    # Set interpolation on primvars — needed for schema-defined primvars
+    # (e.g. displayColor) where the default interpolation differs from
+    # the authored value, and for newly created primvars where CreatePrimvar
+    # already set it (harmless no-op in that case).
+    if pvapi:
+        for attr_name, meta in primvar_meta.items():
+            interp = meta.get("interpolation")
+            if interp:
+                pv_name = attr_name[len("primvars:"):]
+                pv = pvapi.GetPrimvar(pv_name)
+                if pv:
+                    pv.SetInterpolation(interp)
 
 
 def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
