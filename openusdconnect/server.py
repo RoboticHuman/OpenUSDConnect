@@ -19,7 +19,7 @@ import socketserver
 import sqlite3
 import threading
 
-from pxr import Usd
+from pxr import Sdf, Usd
 
 from .protocol import (
     EVENT_KIND_ORDER,
@@ -73,6 +73,11 @@ class UsdSyncServer:
             # Define a minimal root prim — name is arbitrary for an empty stage
             self.stage.DefinePrim("/Root", "Xform")
 
+        # Non-destructive editing: all server-applied events go to an override
+        # sublayer, keeping the base layer(s) untouched.  The override is
+        # inserted as the strongest sublayer so its opinions compose on top.
+        self.edit_layer = self._create_edit_layer()
+
         self.log_path = log_path
         self.stage_lock = threading.Lock()
         self.clients_lock = threading.Lock()
@@ -85,6 +90,24 @@ class UsdSyncServer:
 
         # Resume sequence counter from existing DB
         self._next_seq = self._load_max_seq() + 1
+
+    def _create_edit_layer(self, label: str = "server-edits") -> Sdf.Layer:
+        """Create an override sublayer on the session layer and set it as the edit target.
+
+        The session layer is stronger than the entire root layer stack, so
+        opinions authored here always compose on top of the base file and
+        its sublayers.  The override is inserted as a sublayer of the session
+        layer (rather than using the session layer directly) so that
+        multi-user mode can add per-client sublayers alongside it.
+
+        Accepts an optional *label* for the layer identifier — this is the
+        extension point for per-client layers.
+        """
+        layer = Sdf.Layer.CreateAnonymous(label)
+        session = self.stage.GetSessionLayer()
+        session.subLayerPaths.insert(0, layer.identifier)
+        self.stage.SetEditTarget(Usd.EditTarget(layer))
+        return layer
 
     def _init_db(self, db_path: str) -> sqlite3.Connection:
         """Initialize SQLite database with events table."""
@@ -288,11 +311,43 @@ class UsdSyncServer:
             for h in dead:
                 self.receivers.discard(h)
 
-    def apply_txn(self, events: list[dict]):
+    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None):
+        """Apply a transaction to the stage.
+
+        Events are authored into *layer* (defaults to ``self.edit_layer``).
+        The optional parameter is the multi-user extension point — pass a
+        per-client layer to route edits to a specific sublayer.
+        """
         from .event_apply import apply_events
 
+        target = layer or self.edit_layer
         with self.stage_lock:
+            self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events)
+
+    def export_edit_layer(self, file_path: str | None = None) -> str:
+        """Export the server's edit layer as a USDA string.
+
+        If *file_path* is given, also writes the layer to disk.  The exported
+        layer contains only the opinions authored by the server — the base
+        layer and its sublayers are not included.
+        """
+        usda = self.edit_layer.ExportToString()
+        if file_path:
+            self.edit_layer.Export(file_path)
+            LOG.info("Exported edit layer to %s", file_path)
+        return usda
+
+    def export_flattened(self, file_path: str) -> None:
+        """Export the fully composed stage as a single flattened USD file.
+
+        All layers, composition arcs, and opinions are resolved into final
+        values.  The result is a standalone file with no external dependencies
+        — useful for archiving, delivery, or rendering.
+        """
+        with self.stage_lock:
+            self.stage.Export(file_path)
+        LOG.info("Exported flattened stage to %s", file_path)
 
     def replay_from(self, handler, seq_start: int):
         """Replay events from SQLite database starting at seq_start."""
@@ -414,6 +469,7 @@ def run_server(
     base_usd_path: str | None = None,
     log_path: str = "usd_events.db",
     compact: bool = False,
+    export_diff: str | None = None,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
@@ -425,6 +481,8 @@ def run_server(
 
     # Ensure the DB is closed even on hard kills (Stop-Process, SIGTERM).
     def _cleanup():
+        if export_diff:
+            sync_server.export_edit_layer(export_diff)
         try:
             sync_server.db_conn.close()
             LOG.info("Event log closed: %s", log_path)
@@ -438,6 +496,8 @@ def run_server(
     LOG.info("Event log: %s", log_path)
     if base_usd_path:
         LOG.info("Base USD: %s", base_usd_path)
+    if export_diff:
+        LOG.info("Will export diff to %s on shutdown", export_diff)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -454,6 +514,10 @@ def main():
     ap.add_argument("--base", default=None, help="Base USD file to load")
     ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
     ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
+    ap.add_argument(
+        "--export-diff", default=None, metavar="PATH",
+        help="Export the override layer as USDA on shutdown",
+    )
     args = ap.parse_args()
     run_server(
         host=args.host,
@@ -461,6 +525,7 @@ def main():
         base_usd_path=args.base,
         log_path=args.log,
         compact=args.compact,
+        export_diff=args.export_diff,
     )
 
 
