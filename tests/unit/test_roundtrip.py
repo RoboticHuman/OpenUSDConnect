@@ -760,6 +760,29 @@ class TestStageToStageRoundtrip:
         assert abs(normals[2][0] - 1.0) < 1e-6
         assert mesh_b.GetNormalsInterpolation() == UsdGeom.Tokens.faceVarying
 
+    def test_purpose_roundtrip(self):
+        """Purpose attribute roundtrips between stages."""
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        xf = UsdGeom.Xform.Define(stage_a, "/World/Guide")
+        UsdGeom.Imageable(xf.GetPrim()).GetPurposeAttr().Set(
+            UsdGeom.Tokens.guide
+        )
+
+        emitter = NoticeEmitter(stage_a)
+        emitter.mark_dirty("/World/Guide")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        prim_b = stage_b.GetPrimAtPath("/World/Guide")
+        purpose = UsdGeom.Imageable(prim_b).GetPurposeAttr().Get()
+        assert purpose == "guide"
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

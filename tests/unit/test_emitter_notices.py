@@ -1105,6 +1105,20 @@ class TestGprimAttrEmission:
         for ev in attr_evs:
             assert "visibility" not in ev["attrs"]
 
+    def test_purpose_emitted(self):
+        """Purpose attribute is tracked and emitted via gprim attrs."""
+        stage, emitter = _make_stage_and_emitter()
+        xf = UsdGeom.Xform.Define(stage, "/World/Guide")
+        UsdGeom.Imageable(xf.GetPrim()).GetPurposeAttr().Set(UsdGeom.Tokens.guide)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        attr_evs = [
+            e for e in events
+            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Guide"
+        ]
+        assert len(attr_evs) == 1
+        assert attr_evs[0]["attrs"]["purpose"] == "guide"
+
     def test_mesh_attrs_emitted(self):
         """Mesh points, faceVertexCounts, faceVertexIndices are emitted."""
         from pxr import Vt

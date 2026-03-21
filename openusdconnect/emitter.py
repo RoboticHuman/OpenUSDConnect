@@ -44,10 +44,9 @@ _SKIP_ATTR_PREFIXES = ("xformOp:",)
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
 #   extent     — bounding box, computed from geometry by USD
-#   purpose    — rendering classification (default/render/guide/proxy)
 #   proxyPrim  — relationship target, not a value attribute
 _SKIP_ATTR_NAMES = frozenset({
-    "visibility", "xformOpOrder", "extent", "purpose", "proxyPrim",
+    "visibility", "xformOpOrder", "extent", "proxyPrim",
 })
 
 
