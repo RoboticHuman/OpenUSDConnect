@@ -34,6 +34,16 @@ FALLBACK_VERSION = "5.0.1"
 _KNOWN_LTS_MINORS = {"2.83", "2.93", "3.3", "3.6", "4.2", "4.5"}
 
 
+def _safe_zip_extractall(zf: zipfile.ZipFile, target_dir: pathlib.Path) -> None:
+    """Extract zip members, rejecting path traversal attempts."""
+    target = pathlib.Path(target_dir).resolve()
+    for name in zf.namelist():
+        dest = (target / name).resolve()
+        if not dest.is_relative_to(target):
+            raise RuntimeError(f"Path traversal in zip archive: {name}")
+    zf.extractall(target_dir)
+
+
 def _fetch_index(url: str) -> str:
     """Fetch an HTML directory listing."""
     req = urllib.request.Request(url, headers={"User-Agent": "OpenUSDConnect-Test/1.0"})
@@ -181,10 +191,10 @@ def download_and_extract(version: str) -> pathlib.Path:
         print("Extracting...")
         if filename.endswith(".zip"):
             with zipfile.ZipFile(download_path, "r") as zf:
-                zf.extractall(BLENDER_DIR)
+                _safe_zip_extractall(zf, BLENDER_DIR)
         elif filename.endswith(".tar.xz"):
             with tarfile.open(download_path, "r:xz") as tf:
-                tf.extractall(BLENDER_DIR)
+                tf.extractall(BLENDER_DIR, filter="data")
         else:
             raise RuntimeError(f"Unsupported archive format: {filename}")
         extract_dir = _find_extracted_dir(version)

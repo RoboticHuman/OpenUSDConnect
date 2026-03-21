@@ -10,6 +10,8 @@ except Exception:
     BPY_AVAILABLE = False
 
 try:
+    from pxr import Usd  # noqa: F401
+
     PXR_AVAILABLE = True
 except Exception:
     PXR_AVAILABLE = False

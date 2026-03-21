@@ -29,7 +29,7 @@ LOG = logging.getLogger(__name__)
 _RECONNECT_BASE_DELAY = 1.0   # seconds
 _RECONNECT_MAX_DELAY = 30.0   # seconds
 _SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
-_MAX_QUEUE_DEPTH = 50_000     # max queued lines before dropping oldest
+_MAX_QUEUE_DEPTH = 50_000     # max queued lines before overflow (disconnect + replay)
 
 
 class ReceiverThread(threading.Thread):
