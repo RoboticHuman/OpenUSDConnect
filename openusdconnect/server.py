@@ -16,11 +16,13 @@ import json
 import logging
 import signal
 import socketserver
-import sqlite3
 import threading
+import time
+from dataclasses import dataclass, field
 
 from pxr import Sdf, Usd
 
+from .event_store import EventStore, SqliteEventStore
 from .protocol import (
     EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
@@ -59,36 +61,54 @@ LATEST_WINS_KINDS = frozenset({
 })
 
 
-class UsdSyncServer:
-    """Holds all shared server state: stage, sequence counter, client list, SQLite event log."""
+@dataclass
+class ClientInfo:
+    """Metadata for a connected client (emitter or receiver)."""
 
-    def __init__(self, base_usd_path: str | None = None, log_path: str = "usd_events.db"):
+    role: str
+    address: tuple
+    client_id: str | None = None
+    connected_at: float = field(default_factory=time.time)
+    last_activity: float = field(default_factory=time.time)
+    event_count: int = 0
+
+
+class UsdSyncServer:
+    """Holds all shared server state: stage, sequence counter, client list, event store."""
+
+    def __init__(
+        self,
+        base_usd_path: str | None = None,
+        log_path: str = "usd_events.db",
+        event_store: EventStore | None = None,
+    ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
             if self.stage is None:
                 raise RuntimeError(f"Failed to open base USD: {base_usd_path}")
         else:
             self.stage = Usd.Stage.CreateInMemory()
-            # Define a minimal root prim — name is arbitrary for an empty stage
             self.stage.DefinePrim("/Root", "Xform")
 
         # Non-destructive editing: all server-applied events go to an override
-        # sublayer, keeping the base layer(s) untouched.  The override is
-        # inserted as the strongest sublayer so its opinions compose on top.
+        # sublayer, keeping the base layer(s) untouched.
         self.edit_layer = self._create_edit_layer()
 
-        self.log_path = log_path
         self.stage_lock = threading.Lock()
         self.clients_lock = threading.Lock()
         self.receivers: set = set()
+        self.clients: dict[str, ClientInfo] = {}
+        self._event_listeners: list = []
+        self._start_time = time.time()
         self._seq_lock = threading.Lock()
 
-        # SQLite event log with WAL mode for concurrent reads
-        self.db_conn = self._init_db(log_path)
-        self.db_lock = threading.Lock()
+        # Pluggable event store — defaults to SQLite
+        self.store: EventStore = event_store or SqliteEventStore(log_path)
+        self._next_seq = self.store.get_max_seq() + 1
 
-        # Resume sequence counter from existing DB
-        self._next_seq = self._load_max_seq() + 1
+        # Rebuild stage from the event log so the composed stage matches
+        # what receivers would get on replay.
+        self._replay_log_into_stage()
 
     def _create_edit_layer(self, label: str = "server-edits") -> Sdf.Layer:
         """Create an override sublayer on the session layer and set it as the edit target.
@@ -108,27 +128,19 @@ class UsdSyncServer:
         self.stage.SetEditTarget(Usd.EditTarget(layer))
         return layer
 
-    def _init_db(self, db_path: str) -> sqlite3.Connection:
-        """Initialize SQLite database with events table."""
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                seq INTEGER PRIMARY KEY,
-                event TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        return conn
+    def _replay_log_into_stage(self):
+        """Apply all events from the event store to restore stage on startup."""
+        from .event_apply import apply_events
 
-    def _load_max_seq(self) -> int:
-        """Read the highest seq from the DB, or 0 if empty."""
-        try:
-            row = self.db_conn.execute("SELECT MAX(seq) FROM events").fetchone()
-            return row[0] or 0
-        except sqlite3.Error as e:
-            LOG.warning("Failed to load max seq: %s", e)
-            return 0
+        rows = self.store.get_all_asc()
+        if not rows:
+            return
+        events = []
+        for _seq, record_json in rows:
+            rec = json.loads(record_json)
+            events.append(rec.get("event", rec))
+        apply_events(self.stage, events)
+        LOG.info("Restored stage from event log: %d events", len(events))
 
     def compact_log(self):
         """Compact the event log, keeping only the latest state per prim.
@@ -138,11 +150,7 @@ class UsdSyncServer:
         prior events for that prim.  deactivate_prim is latest-wins (TRS
         preserved for payload reload).
         """
-        with self.db_lock:
-            rows = self.db_conn.execute(
-                "SELECT seq, event FROM events ORDER BY seq"
-            ).fetchall()
-
+        rows = self.store.get_all_asc()
         if not rows:
             return
 
@@ -212,18 +220,14 @@ class UsdSyncServer:
             key=lambda e: (e["prim"].count("/"), e["prim"], EVENT_KIND_ORDER[e["k"]]),
         )
 
-        with self.db_lock:
-            self.db_conn.execute("DELETE FROM events")
-            with self._seq_lock:
-                self._next_seq = 1
-            for ev in sorted_events:
-                seq = self.assign_seq()
-                rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
-                self.db_conn.execute(
-                    "INSERT INTO events(seq, event) VALUES (?, ?)",
-                    (seq, json.dumps(rec)),
-                )
-            self.db_conn.commit()
+        with self._seq_lock:
+            self._next_seq = 1
+        records = []
+        for ev in sorted_events:
+            seq = self.assign_seq()
+            rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
+            records.append((seq, json.dumps(rec)))
+        self.store.clear_and_rewrite(records)
 
         LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_events))
 
@@ -240,13 +244,9 @@ class UsdSyncServer:
             return s
 
     def append_log(self, rec: dict):
-        """Append event to SQLite database."""
+        """Append event record to the event store."""
         try:
-            with self.db_lock:
-                self.db_conn.execute(
-                    "INSERT INTO events(seq, event) VALUES (?, ?)", (rec["seq"], json.dumps(rec))
-                )
-                self.db_conn.commit()
+            self.store.append(rec["seq"], json.dumps(rec))
         except Exception:
             LOG.exception("Failed to write event log")
 
@@ -271,17 +271,11 @@ class UsdSyncServer:
         prefix = prim_path + "/"
         replay_kinds = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY}
 
-        # Pre-filter with LIKE to avoid deserializing the entire event log.
-        like_pattern = f'%"prim": "{prefix}%'
-        with self.db_lock:
-            rows = self.db_conn.execute(
-                "SELECT event FROM events WHERE event LIKE ? ORDER BY seq",
-                (like_pattern,),
-            ).fetchall()
+        record_jsons = self.store.search_like(f'%"prim": "{prefix}%')
 
         # Collect the latest event of each relevant kind per child prim
         latest: dict[tuple[str, str], dict] = {}
-        for (event_json,) in rows:
+        for event_json in record_jsons:
             rec = json.loads(event_json)
             ev = rec.get("event", rec)
             ep = ev.get("prim", "")
@@ -309,6 +303,29 @@ class UsdSyncServer:
             prim_path,
         )
 
+    def add_event_listener(self, callback) -> None:
+        """Subscribe to broadcast events. Callback receives the event record dict."""
+        self._event_listeners.append(callback)
+
+    def remove_event_listener(self, callback) -> None:
+        """Unsubscribe from broadcast events."""
+        if callback in self._event_listeners:
+            self._event_listeners.remove(callback)
+
+    def register_client(self, address: tuple, role: str, client_id: str | None = None):
+        """Register a connected client for tracking."""
+        key = f"{address[0]}:{address[1]}"
+        with self.clients_lock:
+            self.clients[key] = ClientInfo(
+                role=role, address=address, client_id=client_id,
+            )
+
+    def unregister_client(self, address: tuple):
+        """Remove a client from tracking."""
+        key = f"{address[0]}:{address[1]}"
+        with self.clients_lock:
+            self.clients.pop(key, None)
+
     def broadcast(self, rec: dict):
         line = (json.dumps(rec) + "\n").encode("utf-8")
         dead = []
@@ -321,6 +338,14 @@ class UsdSyncServer:
                     dead.append(h)
             for h in dead:
                 self.receivers.discard(h)
+        # Notify event listeners (e.g. dashboard, monitoring).
+        # Copy the list since listeners may remove themselves on error.
+        for listener in list(self._event_listeners):
+            try:
+                listener(rec)
+            except Exception:
+                LOG.debug("Event listener failed, removing")
+                self._event_listeners.remove(listener)
 
     def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None):
         """Apply a transaction to the stage.
@@ -336,16 +361,107 @@ class UsdSyncServer:
             self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events)
 
+    def get_prim_count(self) -> int:
+        """Return the number of prims on the composed stage (thread-safe)."""
+        with self.stage_lock:
+            return sum(1 for _ in self.stage.Traverse())
+
+    def get_event_count(self) -> int:
+        """Return the number of events in the log (thread-safe)."""
+        return self.store.get_count()
+
+    def query_events(
+        self,
+        offset: int = 0,
+        limit: int = 50,
+        kind: str = "",
+        prim_contains: str = "",
+    ) -> tuple[list[dict], int]:
+        """Return a page of events and total matching count (thread-safe)."""
+        record_jsons, count = self.store.query(
+            offset=offset, limit=limit,
+            kind=kind, prim_contains=prim_contains,
+        )
+        return [json.loads(r) for r in record_jsons], count
+
+    def get_client_list(self) -> list[dict]:
+        """Return a snapshot of connected clients (thread-safe)."""
+        now = time.time()
+        with self.clients_lock:
+            return [
+                {
+                    "key": k,
+                    "role": i.role,
+                    "address": f"{i.address[0]}:{i.address[1]}",
+                    "client_id": i.client_id,
+                    "connected_at": i.connected_at,
+                    "last_activity_ago": round(now - i.last_activity, 1),
+                    "event_count": i.event_count,
+                }
+                for k, i in self.clients.items()
+            ]
+
+    def get_uptime(self) -> float:
+        """Return server uptime in seconds."""
+        return time.time() - self._start_time
+
+    def get_server_info(self) -> dict:
+        """Return server configuration."""
+        root = self.stage.GetRootLayer()
+        return {
+            "base_usd_path": root.realPath or None,
+            "root_layer": root.identifier,
+            "edit_layer": self.edit_layer.identifier,
+        }
+
+    def get_prim_tree(self) -> list[dict]:
+        """Reconstruct the prim tree from the event log.
+
+        Reads ensure_prim and delete_prim events from the store — no
+        stage access or stage_lock needed.
+        """
+        rows = self.store.get_all_asc()
+        prims: dict[str, str] = {}  # path → typeName
+        for _seq, record_json in rows:
+            rec = json.loads(record_json)
+            ev = rec.get("event", {})
+            k = ev.get("k")
+            path = ev.get("prim", "")
+            if k == K_ENSURE_PRIM:
+                prims[path] = ev.get("typeName", "Xform")
+            elif k == K_DELETE_PRIM:
+                prims.pop(path, None)
+
+        # Build tree structure from flat paths
+        result = []
+        for path in sorted(prims):
+            parent = path.rsplit("/", 1)[0] or "/"
+            depth = path.count("/")
+            has_children = any(
+                p.startswith(path + "/") and p.count("/") == depth + 1
+                for p in prims
+            )
+            result.append({
+                "path": path,
+                "typeName": prims[path],
+                "parent": parent,
+                "depth": depth,
+                "has_children": has_children,
+            })
+        return result
+
     def export_edit_layer(self, file_path: str | None = None) -> str:
-        """Export the server's edit layer as a USDA string.
+        """Export the server's edit layer as a USDA string (thread-safe).
 
         If *file_path* is given, also writes the layer to disk.  The exported
         layer contains only the opinions authored by the server — the base
         layer and its sublayers are not included.
         """
-        usda = self.edit_layer.ExportToString()
+        with self.stage_lock:
+            usda = self.edit_layer.ExportToString()
+            if file_path:
+                self.edit_layer.Export(file_path)
         if file_path:
-            self.edit_layer.Export(file_path)
             LOG.info("Exported edit layer to %s", file_path)
         return usda
 
@@ -360,15 +476,17 @@ class UsdSyncServer:
             self.stage.Export(file_path)
         LOG.info("Exported flattened stage to %s", file_path)
 
+    def export_flattened_string(self) -> str:
+        """Return the fully composed stage as a USDA string (thread-safe)."""
+        with self.stage_lock:
+            return self.stage.Flatten().ExportToString()
+
     def replay_from(self, handler, seq_start: int):
-        """Replay events from SQLite database starting at seq_start."""
+        """Replay events from the event store starting at seq_start."""
         try:
-            cursor = self.db_conn.cursor()
-            cursor.execute(
-                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq", (seq_start,)
-            )
-            for row in cursor:
-                handler.request.sendall((row[1] + "\n").encode("utf-8"))
+            record_jsons = self.store.get_from_seq(seq_start)
+            for record_json in record_jsons:
+                handler.request.sendall((record_json + "\n").encode("utf-8"))
         except Exception:
             LOG.exception("Failed to replay events")
 
@@ -395,7 +513,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             return
 
         role = hello.get("role")
+        client_id = hello.get("client_id")
         LOG.info("Client connected: role=%s from %s", role, self.client_address)
+        sync_server.register_client(self.client_address, role, client_id)
 
         if role == "receiver":
             sync_from = int(hello.get("sync_from", 1))
@@ -403,7 +523,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # If sync_from is beyond the current log (e.g., after compaction
             # reset seq numbers), send resync so the receiver resets its
             # sequence counter, then replay the full log.
-            max_seq = sync_server._load_max_seq()
+            max_seq = sync_server.store.get_max_seq()
             if sync_from > max_seq > 0:
                 from .transport import send_line
 
@@ -422,6 +542,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         finally:
             with sync_server.clients_lock:
                 sync_server.receivers.discard(self)
+            sync_server.unregister_client(self.client_address)
             LOG.info("Client disconnected: %s", self.client_address)
 
     def _read_loop(self, sync_server: UsdSyncServer):
@@ -454,10 +575,25 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             sync_server.apply_txn(events)
 
             # Sequence and broadcast each event
+            addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
+            with sync_server.clients_lock:
+                info = sync_server.clients.get(addr_key)
+            client_id = info.client_id if info else None
             for ev in events:
-                rec = {"type": MSG_EVENT, "seq": sync_server.assign_seq(), "event": ev}
+                rec = {
+                    "type": MSG_EVENT,
+                    "seq": sync_server.assign_seq(),
+                    "event": ev,
+                    "client": addr_key,
+                    "client_id": client_id,
+                }
                 sync_server.append_log(rec)
                 sync_server.broadcast(rec)
+            # Update client activity tracking — no lock needed since
+            # each connection has its own _read_loop thread.
+            if info:
+                info.last_activity = time.time()
+                info.event_count += len(events)
 
             # After load_payload, re-broadcast latest child state so
             # receivers re-apply authoritative TRS after re-import.
@@ -481,12 +617,19 @@ def run_server(
     log_path: str = "usd_events.db",
     compact: bool = False,
     export_diff: str | None = None,
+    dashboard_port: int | None = None,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
 
     if compact:
         sync_server.compact_log()
+
+    if dashboard_port:
+        from integrations.dashboard import run_dashboard
+
+        run_dashboard(sync_server, dashboard_port)
+        LOG.info("Dashboard running on http://localhost:%d", dashboard_port)
 
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
 
@@ -495,13 +638,14 @@ def run_server(
         if export_diff:
             sync_server.export_edit_layer(export_diff)
         try:
-            sync_server.db_conn.close()
-            LOG.info("Event log closed: %s", log_path)
+            sync_server.store.close()
+            LOG.info("Event store closed")
         except Exception:
-            LOG.exception("Failed to close event log")
+            LOG.exception("Failed to close event store")
 
     atexit.register(_cleanup)
-    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
 
     LOG.info("Server listening on %s:%s", host, port)
     LOG.info("Event log: %s", log_path)
@@ -529,6 +673,10 @@ def main():
         "--export-diff", default=None, metavar="PATH",
         help="Export the override layer as USDA on shutdown",
     )
+    ap.add_argument(
+        "--dashboard", type=int, default=None, metavar="PORT",
+        help="Start admin dashboard on this port (e.g. --dashboard 8080)",
+    )
     args = ap.parse_args()
     run_server(
         host=args.host,
@@ -537,6 +685,7 @@ def main():
         log_path=args.log,
         compact=args.compact,
         export_diff=args.export_diff,
+        dashboard_port=args.dashboard,
     )
 
 

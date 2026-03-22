@@ -132,11 +132,15 @@ def clamp_fields(fields: list[str]) -> list[str]:
     return [f for f in fields if f in TRS_FIELDS]
 
 
-def make_hello(role: str, sync_from: int = None) -> dict:
+def make_hello(
+    role: str, sync_from: int | None = None, client_id: str | None = None,
+) -> dict:
     """Build a hello message."""
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
         msg["sync_from"] = sync_from
+    if client_id is not None:
+        msg["client_id"] = client_id
     return msg
 
 

@@ -15,6 +15,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 import socket
 
 import bpy
@@ -531,10 +532,10 @@ class BlenderStageAuthor:
 class NetworkSender:
     """Thin TCP connection for sending protocol events to the server."""
 
-    def __init__(self, host: str, port: int, client_id: str = "blender-emitter"):
+    def __init__(self, host: str, port: int, client_id: str | None = None):
         self.host = host
         self.port = port
-        self.client_id = client_id
+        self.client_id = client_id or f"blender-emitter-{os.getpid()}"
         self.sock: socket.socket | None = None
 
         # Lazy import to support vendored openusdconnect
@@ -548,7 +549,7 @@ class NetworkSender:
 
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
-        self._send_line(self.sock, self._make_hello("emitter"))
+        self._send_line(self.sock, self._make_hello("emitter", client_id=self.client_id))
         LOG.info("Network sender connected to %s:%d", self.host, self.port)
 
     def disconnect(self):

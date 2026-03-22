@@ -18,7 +18,7 @@ def srv(tmp_path):
     db = str(tmp_path / "test.db")
     s = UsdSyncServer(log_path=db)
     yield s
-    s.db_conn.close()
+    s.store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ class TestAppendLog:
         rec = {"type": "event", "seq": 1, "event": {"k": "ensure_prim", "prim": "/A"}}
         srv.append_log(rec)
 
-        rows = srv.db_conn.execute("SELECT seq, event FROM events ORDER BY seq").fetchall()
+        rows = srv.store.get_all_asc()
         assert len(rows) == 1
         assert rows[0][0] == 1
         assert json.loads(rows[0][1])["event"]["prim"] == "/A"
@@ -58,7 +58,7 @@ class TestAppendLog:
                 "type": "event", "seq": i + 1,
                 "event": {"k": "ensure_prim", "prim": f"/P{i}"},
             })
-        rows = srv.db_conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        rows = (srv.store.get_count(),)
         assert rows[0] == 5
 
 
@@ -125,12 +125,12 @@ class TestCompaction:
             {"k": "set_xform_trs", "prim": "/A", "fields": ["t", "r"],
              "t": [5, 0, 0], "r": [1, 0, 0, 0]},
         ])
-        count_before = srv.db_conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        count_before = (srv.store.get_count(),)[0]
         assert count_before == 4
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         trs = [e for e in events if e["k"] == "set_xform_trs"]
         assert len(trs) == 1
@@ -151,7 +151,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         assert len(events) == 1
         assert events[0]["k"] == "delete_prim"
@@ -168,7 +168,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         prims = [e["prim"] for e in events]
         # Only the rename should remain for /A
@@ -189,7 +189,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         vis = [e for e in events if e["k"] == "set_visibility"]
         assert len(vis) == 1
@@ -207,7 +207,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         load_events = [e for e in events if e["k"] in ("load_payload", "unload_payload")]
         assert len(load_events) == 1
@@ -227,7 +227,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         vsel = [e for e in events if e["k"] == "set_variant_selections"]
         assert len(vsel) == 1
@@ -245,7 +245,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
@@ -271,7 +271,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
@@ -297,7 +297,7 @@ class TestCompaction:
 
         srv.compact_log()
 
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [json.loads(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
@@ -308,7 +308,7 @@ class TestCompaction:
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""
         srv.compact_log()
-        rows = srv.db_conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        rows = (srv.store.get_count(),)
         assert rows[0] == 0
 
     def test_seq_resets_after_compact(self, srv):
@@ -322,7 +322,7 @@ class TestCompaction:
         srv.compact_log()
 
         # After compact, seqs were reassigned starting from 1
-        rows = srv.db_conn.execute("SELECT seq FROM events ORDER BY seq").fetchall()
+        rows = srv.store.get_all_asc()
         seqs = [r[0] for r in rows]
         assert seqs[0] == 1
 
@@ -452,12 +452,45 @@ class TestDBResume:
                 "type": "event", "seq": seq,
                 "event": {"k": "ensure_prim", "prim": f"/P{i}"},
             })
-        s1.db_conn.close()
+        s1.store.close()
 
         # Second server should resume from seq 6
         s2 = UsdSyncServer(log_path=db)
         assert s2.assign_seq() == 6
-        s2.db_conn.close()
+        s2.store.close()
+
+    def test_restores_stage_from_log(self, tmp_path):
+        """Server restores stage state from the event log on startup."""
+        db = str(tmp_path / "restore.db")
+
+        # First server: create prims and apply events
+        s1 = UsdSyncServer(log_path=db)
+        events = [
+            {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+            {"k": "ensure_prim", "prim": "/World/Box", "typeName": "Cube"},
+            {"k": "ensure_xform_ops", "prim": "/World/Box"},
+            {"k": "set_xform_trs", "prim": "/World/Box",
+             "fields": ["t"], "t": [5.0, 0.0, 0.0]},
+        ]
+        s1.apply_txn(events)
+        for ev in events:
+            seq = s1.assign_seq()
+            s1.append_log({"type": "event", "seq": seq, "event": ev})
+        s1.store.close()
+
+        # Second server: stage should be restored from log
+        s2 = UsdSyncServer(log_path=db)
+        prim = s2.stage.GetPrimAtPath("/World/Box")
+        assert prim.IsValid()
+        assert prim.GetTypeName() == "Cube"
+        # Verify transform was restored
+        xf = UsdGeom.Xformable(prim)
+        local = xf.GetLocalTransformation(Usd.TimeCode.Default())
+        if isinstance(local, tuple):
+            local = local[0]
+        t = local.ExtractTranslation()
+        assert abs(t[0] - 5.0) < 1e-6
+        s2.store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +579,7 @@ class TestEditLayerWithBaseFile:
         db = str(tmp_path / "test.db")
         srv = UsdSyncServer(base_usd_path=base_path, log_path=db)
         yield srv, base_path
-        srv.db_conn.close()
+        srv.store.close()
 
     def test_base_file_untouched_after_edits(self, base_srv):
         """Server edits must not modify the base file's layer."""
@@ -633,7 +666,7 @@ class TestEditLayerWithBaseFile:
         # Table is only in the edit layer
         assert srv.edit_layer.GetPrimAtPath("/World/Table") is not None
 
-        srv.db_conn.close()
+        srv.store.close()
 
 
 class TestExportEditLayer:
@@ -727,7 +760,7 @@ class TestExportEditLayer:
         # No sublayers in the flattened file
         assert len(flat_stage.GetRootLayer().subLayerPaths) == 0
 
-        srv.db_conn.close()
+        srv.store.close()
 
 
 class TestNestedLayerEditing:
@@ -779,7 +812,7 @@ class TestNestedLayerEditing:
         db = str(tmp_path / "test.db")
         srv = UsdSyncServer(base_usd_path=shot_path, log_path=db)
         yield srv, tmp_path
-        srv.db_conn.close()
+        srv.store.close()
 
     def _get_composed_translate(self, stage, prim_path):
         prim = stage.GetPrimAtPath(prim_path)

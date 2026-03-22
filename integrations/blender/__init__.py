@@ -37,9 +37,13 @@ except Exception:
 if "capture" in locals():
     import importlib
 
-    # Reload vendored core library first (dependency)
+    # Reload vendored core library first (dependency).
+    # The package itself must be reloaded so submodule references are fresh,
+    # then each submodule is reloaded so `from .protocol import X` picks up
+    # new symbols added since the last load.
     from . import openusdconnect as _ouc_pkg
 
+    importlib.reload(_ouc_pkg)
     _subs = ("protocol", "transport", "event_apply", "emitter", "receiver", "adapters", "server")
     for _sub in _subs:
         _mod = getattr(_ouc_pkg, _sub, None)

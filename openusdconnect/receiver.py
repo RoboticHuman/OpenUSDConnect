@@ -59,6 +59,9 @@ class ReceiverThread(threading.Thread):
         reconnect: bool = True,
         max_queue: int = _MAX_QUEUE_DEPTH,
         socket_timeout: float = _SOCKET_TIMEOUT,
+        client_id: str | None = None,
+        reconnect_base_delay: float = _RECONNECT_BASE_DELAY,
+        reconnect_max_delay: float = _RECONNECT_MAX_DELAY,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -67,6 +70,9 @@ class ReceiverThread(threading.Thread):
         self.reconnect = reconnect
         self.max_queue = max_queue
         self.socket_timeout = socket_timeout
+        self.client_id = client_id
+        self._reconnect_base_delay = reconnect_base_delay
+        self._reconnect_max_delay = reconnect_max_delay
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
         self._incoming: deque = deque()
@@ -76,7 +82,7 @@ class ReceiverThread(threading.Thread):
         self._queue_overflow = False
 
     def run(self):
-        delay = _RECONNECT_BASE_DELAY
+        delay = self._reconnect_base_delay
         while not self._stop_event.is_set():
             try:
                 self._connect_and_recv()
@@ -94,14 +100,14 @@ class ReceiverThread(threading.Thread):
                 # Intentional disconnect — wait for main thread to drain
                 # before reconnecting, otherwise we'll overflow again.
                 self._queue_overflow = False
-                delay = _RECONNECT_BASE_DELAY
+                delay = self._reconnect_base_delay
                 LOG.info("ReceiverThread: waiting for queue to drain before reconnect")
                 drain_start = time.monotonic()
                 while not self._stop_event.is_set():
                     with self._incoming_lock:
                         if len(self._incoming) == 0:
                             break
-                    if time.monotonic() - drain_start > _RECONNECT_MAX_DELAY:
+                    if time.monotonic() - drain_start > self._reconnect_max_delay:
                         LOG.warning("ReceiverThread: drain wait timed out, reconnecting anyway")
                         break
                     if self._stop_event.wait(timeout=0.1):
@@ -111,7 +117,7 @@ class ReceiverThread(threading.Thread):
             LOG.info("ReceiverThread: reconnecting in %.1fs", delay)
             if self._stop_event.wait(timeout=delay):
                 break  # stop requested during backoff
-            delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+            delay = min(delay * 2, self._reconnect_max_delay)
 
         LOG.info("ReceiverThread stopped")
 
@@ -125,7 +131,7 @@ class ReceiverThread(threading.Thread):
 
         # Send hello as receiver — use last_seq + 1 for replay on reconnect
         sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
-        send_line(self.sock, make_hello("receiver", sync_from=sync_from))
+        send_line(self.sock, make_hello("receiver", sync_from=sync_from, client_id=self.client_id))
         self.connected = True
         LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
 

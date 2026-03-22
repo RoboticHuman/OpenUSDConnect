@@ -19,7 +19,6 @@ import sys
 
 import bpy
 
-
 ADDON_MODULE = "usd_connect"
 
 
@@ -137,6 +136,18 @@ def _reload_addon(addon_zip: str, role: str) -> None:
     except Exception as exc:
         print(f"[USD Connect Bootstrap:{role}] addon_disable warning: {exc}")
 
+    # Purge cached modules so re-enable picks up new code from disk.
+    # Without this, Python's import cache returns stale module objects
+    # and new symbols (e.g. PRIMVAR_PREFIX) are not visible.
+    # Must clear both the addon modules AND the vendored core library.
+    prefixes = (ADDON_MODULE + ".", "openusdconnect.")
+    stale = [
+        k for k in sys.modules
+        if k in (ADDON_MODULE, "openusdconnect") or k.startswith(prefixes)
+    ]
+    for k in stale:
+        del sys.modules[k]
+
     bpy.ops.preferences.addon_install(filepath=addon_zip, overwrite=True)
     bpy.ops.preferences.addon_enable(module=ADDON_MODULE)
     print(f"[USD Connect Bootstrap:{role}] addon reloaded successfully")
@@ -187,8 +198,11 @@ def main() -> None:
     _start_reload_watcher(args.addon_zip, args.role)
 
     print(
-        f"[USD Connect Bootstrap:{args.role}] ready (server={args.host}:{args.port}, "
-        f"emitter={args.start_emitter}, receiver={args.start_receiver}, debug_port={args.debug_port})"
+        f"[USD Connect Bootstrap:{args.role}] ready"
+        f" (server={args.host}:{args.port},"
+        f" emitter={args.start_emitter},"
+        f" receiver={args.start_receiver},"
+        f" debug_port={args.debug_port})"
     )
 
 

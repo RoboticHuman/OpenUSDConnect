@@ -443,7 +443,11 @@ def test_set_reference_imports_usd(r):
     """set_reference imports a USD file and creates mesh objects under container."""
     import tempfile
 
-    from unit.test_asset_builder import EXPECTED_MESH_COUNT, EXPECTED_VERTEX_COUNT, create_chair_asset
+    from unit.test_asset_builder import (
+        EXPECTED_MESH_COUNT,
+        EXPECTED_VERTEX_COUNT,
+        create_chair_asset,
+    )
 
     name = "test_set_reference_imports_usd"
     _clear_scene()

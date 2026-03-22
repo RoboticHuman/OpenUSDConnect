@@ -39,7 +39,7 @@ if (-not $BlenderExe) {
 # --- Reload mode: build addon and signal running Blender instances, then exit ---
 if ($Reload) {
     Write-Host '[launcher] Building addon...'
-    & uv run python scripts/build_blender_addon.py
+    & uv run --no-group dashboard python scripts/build_blender_addon.py
     if (-not (Test-Path $AddonZip)) {
         throw "Addon build failed: $AddonZip not found"
     }

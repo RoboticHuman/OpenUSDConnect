@@ -38,7 +38,7 @@ def _teardown(rt, conn, srv):
     """Clean shutdown: close server-side socket first so readline() unblocks."""
     conn.close()
     rt.stop()
-    rt.join(timeout=2)
+    rt.join(timeout=1)
     srv.close()
 
 
@@ -86,19 +86,22 @@ class TestReceiverThread:
     def test_stop_on_server_close(self):
         """ReceiverThread stops cleanly when server closes connection."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.1,
+        )
         rt.start()
         conn = _accept(srv)
         try:
             _poll_until(lambda: rt.connected)
             assert rt.connected
             conn.close()
-            rt.join(timeout=2)
+            rt.join(timeout=1)
             assert not rt.connected
         finally:
             if rt.is_alive():
                 rt.stop()
-                rt.join(timeout=2)
+                rt.join(timeout=1)
             srv.close()
 
     def test_drain_empty_before_connect(self):
@@ -120,7 +123,10 @@ class TestReconnection:
     def test_reconnects_after_server_close(self):
         """After server closes, receiver reconnects to a new server."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=True)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=True,
+            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+        )
         rt.start()
 
         # First connection
@@ -133,8 +139,8 @@ class TestReconnection:
         _poll_until(lambda: not rt.connected)
 
         # Receiver should reconnect
-        conn2 = _accept(srv, timeout=5)
-        _poll_until(lambda: rt.connected, timeout=5)
+        conn2 = _accept(srv, timeout=2)
+        _poll_until(lambda: rt.connected, timeout=2)
         assert rt.connected
 
         # Verify hello sent on reconnect
@@ -147,7 +153,10 @@ class TestReconnection:
     def test_reconnect_uses_last_seq(self):
         """Reconnection sends sync_from based on last received seq."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=True)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=True,
+            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+        )
         rt.start()
 
         # First connection — send some events
@@ -161,7 +170,7 @@ class TestReconnection:
         _poll_until(lambda: not rt.connected)
 
         # Reconnect — should request sync_from=11
-        conn2 = _accept(srv, timeout=5)
+        conn2 = _accept(srv, timeout=2)
         hello = json.loads(conn2.makefile("r").readline())
         assert hello["sync_from"] == 11
 
@@ -170,14 +179,17 @@ class TestReconnection:
     def test_no_reconnect_when_disabled(self):
         """With reconnect=False, thread exits after connection loss."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.1,
+        )
         rt.start()
 
         conn = _accept(srv)
         _poll_until(lambda: rt.connected)
         conn.close()
 
-        rt.join(timeout=3)
+        rt.join(timeout=1)
         assert not rt.is_alive()
         srv.close()
 
@@ -189,7 +201,7 @@ class TestSocketTimeout:
         """Socket timeout triggers but connection stays alive if server responds later."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False, socket_timeout=0.5,
+            host="127.0.0.1", port=port, reconnect=False, socket_timeout=0.05,
         )
         rt.start()
         conn = _accept(srv)
@@ -198,7 +210,7 @@ class TestSocketTimeout:
             _poll_until(lambda: rt.connected)
 
             # Wait longer than socket timeout
-            time.sleep(0.8)
+            time.sleep(0.1)
 
             # Connection should still be alive — timeout just means no data
             assert rt.connected
@@ -218,7 +230,10 @@ class TestBoundedQueue:
     def test_queue_overflow_triggers_reconnect(self):
         """When queue is full, receiver disconnects and reconnects for replay."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=True, max_queue=3)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=True, max_queue=3,
+            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+        )
         rt.start()
 
         # First connection
@@ -233,14 +248,14 @@ class TestBoundedQueue:
             )
 
         # Wait for overflow to trigger disconnect
-        _poll_until(lambda: not rt.connected, timeout=3)
+        _poll_until(lambda: not rt.connected, timeout=2)
 
         # Queue should have the events it managed to buffer (up to 3)
         lines = rt.drain_queue()
         assert len(lines) <= 3
 
         # Receiver should reconnect automatically
-        conn2 = _accept(srv, timeout=5)
+        conn2 = _accept(srv, timeout=2)
         hello = json.loads(conn2.makefile("r").readline())
         assert hello["type"] == "hello"
         # Should request replay from where it left off
@@ -252,7 +267,10 @@ class TestBoundedQueue:
     def test_queue_overflow_no_reconnect_when_disabled(self):
         """With reconnect=False, overflow stops the thread."""
         srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False, max_queue=3)
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False, max_queue=3,
+            socket_timeout=0.1,
+        )
         rt.start()
         conn = _accept(srv)
         try:
@@ -264,7 +282,7 @@ class TestBoundedQueue:
                     .encode()
                 )
 
-            rt.join(timeout=3)
+            rt.join(timeout=1)
             assert not rt.is_alive()
         finally:
             conn.close()

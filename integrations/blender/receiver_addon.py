@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 try:
     import bpy
@@ -297,7 +298,10 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             _ADAPTER = None
 
         try:
-            _RECEIVER = ReceiverThread(host=host, port=port, sync_from=sync_from)
+            _RECEIVER = ReceiverThread(
+                host=host, port=port, sync_from=sync_from,
+                client_id=f"blender-receiver-{os.getpid()}",
+            )
             _RECEIVER.start()
             if not _QUEUE_TIMER_REGISTERED:
                 bpy.app.timers.register(_process_queue_timer, first_interval=0.01)

@@ -37,7 +37,10 @@ def build():
     # Copy core library (vendored inside addon)
     core_src = REPO_ROOT / "openusdconnect"
     core_dst = build_dir / "openusdconnect"
-    shutil.copytree(core_src, core_dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(
+        core_src, core_dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "dashboard"),
+    )
 
     # Create zip
     DIST_DIR.mkdir(exist_ok=True)

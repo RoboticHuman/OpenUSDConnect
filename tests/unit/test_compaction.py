@@ -31,9 +31,9 @@ def _inject_events(server, events):
 
 def _read_log(server):
     """Read all events from the DB, return list of event dicts."""
-    rows = server.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
+    rows = server.store.get_all_asc()
     result = []
-    for (event_json,) in rows:
+    for (_seq, event_json) in rows:
         rec = json.loads(event_json)
         result.append(rec.get("event", rec))
     return result

@@ -188,10 +188,8 @@ def _server_process_and_replay(srv, events):
         srv.append_log(rec)
 
     # Replay full log (what a new receiver would get)
-    rows = srv.db_conn.execute(
-        "SELECT event FROM events ORDER BY seq"
-    ).fetchall()
-    return [json.loads(r[0])["event"] for r in rows]
+    rows = srv.store.get_all_asc()
+    return [json.loads(r[1])["event"] for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +202,7 @@ def srv(tmp_path):
     db = str(tmp_path / "parity.db")
     s = UsdSyncServer(log_path=db)
     yield s
-    s.db_conn.close()
+    s.store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +391,7 @@ class TestStageParity:
                 sel = prim.GetVariantSets().GetVariantSelection("size")
                 assert sel == "large", f"{label} variant selection: {sel}"
         finally:
-            variant_srv.db_conn.close()
+            variant_srv.store.close()
 
     def test_compacted_log_maintains_parity(self, srv):
         """After log compaction, a new receiver still gets correct state."""
@@ -422,8 +420,8 @@ class TestStageParity:
         srv.compact_log()
 
         # New receiver replays compacted log
-        rows = srv.db_conn.execute("SELECT event FROM events ORDER BY seq").fetchall()
-        compacted_events = [json.loads(r[0])["event"] for r in rows]
+        rows = srv.store.get_all_asc()
+        compacted_events = [json.loads(r[1])["event"] for r in rows]
 
         receiver_stage = Usd.Stage.CreateInMemory()
         apply_events(receiver_stage, compacted_events)
