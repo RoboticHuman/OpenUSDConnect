@@ -1347,3 +1347,4 @@ class TestMaterialEmission:
             if e["k"] == K_SET_SHADER_INPUT
         ]
         assert len(shader_evs) == 0
+

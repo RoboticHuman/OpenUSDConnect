@@ -240,9 +240,11 @@ def _read_variant_selections(stage, prim_path):
 
 
 def _read_material_binding(stage, prim_path):
-    """Read the material:binding relationship target from own layers.
+    """Read the material:binding relationship target from the composed stage.
 
     Returns the target material prim path string, or empty string if unbound.
+    Reads from the full composed view so bindings from referenced files are
+    visible — the emitter's per-prim cache handles deduplication.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
@@ -250,16 +252,8 @@ def _read_material_binding(stage, prim_path):
     binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
     if not binding_rel or not binding_rel.IsValid():
         return ""
-    # Only report if authored on own layers (ignore composed-in bindings)
-    own_layers = {stage.GetRootLayer().identifier,
-                  stage.GetSessionLayer().identifier}
-    for spec in prim.GetPrimStack():
-        if spec.layer.identifier not in own_layers:
-            continue
-        if spec.relationships.get(REL_MATERIAL_BINDING):
-            targets = binding_rel.GetTargets()
-            return str(targets[0]) if targets else ""
-    return ""
+    targets = binding_rel.GetTargets()
+    return str(targets[0]) if targets else ""
 
 
 def _read_shader_inputs(stage, prim_path):
@@ -559,6 +553,7 @@ class NoticeEmitter:
                 pay_ev["payloads"].append(entry)
             events.append(pay_ev)
             pc[_C_PAYLOADS] = current_payloads
+
 
         # Payload load-state diff
         prim = self.stage.GetPrimAtPath(prim_path)

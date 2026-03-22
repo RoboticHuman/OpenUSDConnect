@@ -642,6 +642,68 @@ def test_adapter_brass_material(r):
 
 
 # ------------------------------------------------------------------
+# Post-import MaterialX enrichment from USD reference
+# ------------------------------------------------------------------
+
+def test_enrichment_from_reference(r):
+    """set_reference imports teapot, enrichment applies MaterialX material."""
+    name = "enrichment_from_reference"
+    _clear_materials()
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+
+    from integrations.blender.blender_adapter import BlenderAdapter
+
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Teapot", "Xform")
+    adapter.set_reference("/World/Teapot", [{
+        "asset_path": os.path.join(
+            project_root, "assets", "intent-vfx", "assets", "teapot", "teapot.usd",
+        ),
+        "prim_path": "/teapot",
+    }])
+
+    # Verify: material should exist and have MaterialX Standard Surface network
+    mat = bpy.data.materials.get("default_material")
+    if mat is None:
+        r.fail(name, "default_material not found")
+        return
+    if not mat.use_nodes:
+        r.fail(name, "material has no node tree")
+        return
+
+    # Should have more than just the default Principled BSDF + Material Output
+    # (enrichment adds HueSat + Mix preprocessing nodes)
+    tree = mat.node_tree
+    bsdf = None
+    for node in tree.nodes:
+        if node.type == "BSDF_PRINCIPLED":
+            bsdf = node
+
+    if bsdf is None:
+        r.fail(name, "no Principled BSDF found")
+        return
+
+    # Check the cached input_map exists (proves multi-node mapper ran)
+    mtlx_path = "/World/Teapot/mtl/default_material/default_shader_mtlx"
+    cached = adapter._prim_cache.get(mtlx_path + ":input_map")
+    if cached is None:
+        r.fail(name, "no cached input_map — enrichment didn't run")
+        return
+
+    # Verify a MaterialX-specific value was applied (base=1.0 from the teapot)
+    base_socket = cached.get("base")
+    if base_socket is None:
+        r.fail(name, "no 'base' in input_map")
+        return
+    if abs(base_socket.default_value - 1.0) > 0.01:
+        r.fail(name, f"base={base_socket.default_value}, expected 1.0")
+        return
+
+    r.ok(name)
+
+
+# ------------------------------------------------------------------
 # Runner
 # ------------------------------------------------------------------
 
@@ -666,6 +728,8 @@ def main():
         test_vendored_open_pbr,
         # End-to-end adapter with real material values
         test_adapter_brass_material,
+        # Post-import MaterialX enrichment
+        test_enrichment_from_reference,
     ]
 
     for t in tests:

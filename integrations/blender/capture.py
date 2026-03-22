@@ -416,6 +416,14 @@ class BlenderStageAuthor:
         if s_op:
             s_op.Set(Gf.Vec3d(scl.x, scl.y, scl.z))
 
+    def purge_prim_refs(self, prefix: str):
+        """Remove tracked references for prims matching a path prefix."""
+        to_purge = [pp for pp in self._prim_refs if pp.startswith(prefix)]
+        for pp in to_purge:
+            self._prim_refs.pop(pp, None)
+            self._last_matrix.pop(pp, None)
+            self._used_prim_paths.discard(pp)
+
     def _detect_deletions(self):
         """Check stored object references for deleted objects (ReferenceError).
 
@@ -700,6 +708,11 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
         try:
             bpy.ops.wm.usd_import(filepath=self.filepath)
             context.scene.usd_connect_base_usd_path = self.filepath
+            # Apply MaterialX materials that Blender's importer doesn't handle
+            from .blender_adapter import BlenderAdapter
+
+            adapter = BlenderAdapter()
+            adapter._enrich_materialx_from_import(self.filepath, "", "")
             self.report({"INFO"}, "USD imported with prim tagging")
         except Exception as e:
             self.report({"ERROR"}, f"USD import failed: {e}")

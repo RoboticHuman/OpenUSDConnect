@@ -536,9 +536,13 @@ class BlenderAdapter(DCCAdapter):
             socket = input_map.get(usd_name)
             if socket is None:
                 continue
-            if isinstance(value, list) and len(value) == 3:
-                socket.default_value = (*value, 1.0)
-            elif isinstance(value, list) and len(value) == 4:
+            if isinstance(value, (list, tuple)) and len(value) == 3:
+                # RGBA sockets need alpha appended; Vector sockets take 3 values
+                if socket.type == "RGBA":
+                    socket.default_value = (*value, 1.0)
+                else:
+                    socket.default_value = tuple(value)
+            elif isinstance(value, (list, tuple)) and len(value) == 4:
                 socket.default_value = tuple(value)
             else:
                 socket.default_value = value
@@ -801,6 +805,140 @@ class BlenderAdapter(DCCAdapter):
 
         return new_objs
 
+    def _enrich_materialx_from_import(self, resolved, prim_path, prim_path_ref):
+        """Read MaterialX materials from an imported USD file and apply them.
+
+        Opens the file via pxr, walks Material/Shader prims, and applies
+        them through the adapter's shader pipeline so ActivisionMtlxMapper
+        creates proper node networks for shaders that Blender's built-in
+        USD importer doesn't handle (e.g., ND_standard_surface_surfaceshader).
+        """
+        try:
+            from pxr import Usd, UsdShade
+
+            from openusdconnect.emitter import (
+                _read_material_binding,
+                _read_shader_inputs,
+            )
+        except ImportError:
+            return
+
+        try:
+            stage = Usd.Stage.Open(resolved)
+        except Exception:
+            LOG.debug("Could not open %s for MaterialX enrichment", resolved)
+            return
+
+        root_path = prim_path_ref or str(stage.GetDefaultPrim().GetPath())
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim or not root_prim.IsValid():
+            return
+
+        def _remap(file_path):
+            """Remap a USD file path to the composed scene path."""
+            if prim_path_ref and file_path.startswith(prim_path_ref):
+                return prim_path + file_path[len(prim_path_ref):]
+            return prim_path + "/" + file_path.lstrip("/")
+
+        # Collect material bindings, shader inputs, and connections
+        # in event-kind order: bindings after shader inputs (matching protocol)
+        shader_events = []
+        connection_events = []
+        binding_events = []
+
+        for prim in Usd.PrimRange(root_prim):
+            file_path = str(prim.GetPath())
+            scene_path = _remap(file_path)
+
+            binding_target = _read_material_binding(stage, file_path)
+            if binding_target:
+                binding_events.append((scene_path, _remap(binding_target)))
+
+            if prim.IsA(UsdShade.Shader):
+                sid, inputs, itypes, conns = _read_shader_inputs(stage, file_path)
+                if sid:
+                    shader_events.append((scene_path, sid, inputs, itypes))
+                    if conns:
+                        remapped_conns = {}
+                        for inp_name, conn in conns.items():
+                            remapped_conns[inp_name] = {
+                                "source_prim": _remap(conn["source_prim"]),
+                                "source_output": conn["source_output"],
+                            }
+                        connection_events.append((scene_path, remapped_conns))
+
+        # Apply in protocol order: shader inputs, connections, then bindings
+        for scene_path, sid, inputs, itypes in shader_events:
+            self.set_shader_input(scene_path, sid, inputs, itypes)
+        for scene_path, conns in connection_events:
+            self.set_shader_connection(scene_path, conns)
+        for scene_path, target in binding_events:
+            self.set_material_binding(scene_path, target)
+
+        # Fix missing textures — Blender's USD importer creates Image Texture
+        # nodes but often fails to resolve relative texture paths. Walk the
+        # stage for texture shaders and load the images using pxr's resolved paths.
+        self._fix_missing_textures(stage, root_prim, prim_path, _remap)
+
+        if shader_events:
+            LOG.info(
+                "Post-import enrichment: applied %d shaders from %s",
+                len(shader_events), resolved,
+            )
+
+    def _fix_missing_textures(self, stage, root_prim, prim_path, remap_fn):
+        """Load images for texture nodes that Blender's importer left empty.
+
+        Builds a lookup of resolved texture paths from the USD stage, then
+        walks Blender materials for Image Texture nodes with no image and
+        matches them by node name.
+        """
+        from pxr import Usd, UsdShade
+
+        # Build map: node_name → resolved file path from USD stage
+        resolved_textures = {}
+        for prim in Usd.PrimRange(root_prim):
+            if not prim.IsA(UsdShade.Shader):
+                continue
+            shader = UsdShade.Shader(prim)
+            sid = shader.GetIdAttr().Get() or ""
+            if "Texture" not in sid and "image" not in sid:
+                continue
+            file_inp = shader.GetInput("file")
+            if not file_inp:
+                continue
+            asset_val = file_inp.Get()
+            if not asset_val:
+                continue
+            resolved_path = getattr(asset_val, "resolvedPath", "")
+            if resolved_path and os.path.isfile(resolved_path):
+                resolved_textures[prim.GetName()] = resolved_path
+
+        if not resolved_textures:
+            return
+
+        # Walk all Blender materials for empty Image Texture nodes
+        loaded = 0
+        for mat in bpy.data.materials:
+            if not mat.use_nodes or not mat.node_tree:
+                continue
+            for node in mat.node_tree.nodes:
+                if node.bl_idname != "ShaderNodeTexImage":
+                    continue
+                if node.image is not None:
+                    continue
+                tex_path = resolved_textures.get(node.name)
+                if not tex_path:
+                    continue
+                img = bpy.data.images.get(os.path.basename(tex_path))
+                if not img:
+                    img = bpy.data.images.load(tex_path)
+                node.image = img
+                loaded += 1
+
+        if loaded:
+            LOG.info("Loaded %d missing textures from %s", loaded, stage.GetRootLayer().identifier)
+
     def set_reference(self, prim_path: str, refs: list) -> bool:
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.set_reference dry: %s", prim_path)
@@ -873,6 +1011,7 @@ class BlenderAdapter(DCCAdapter):
                 container, prim_path, resolved, prim_path_ref
             )
             total_imported += len(new_objs)
+            self._enrich_materialx_from_import(resolved, prim_path, prim_path_ref)
 
         # Tag container with resolved asset (for dedup on single-ref)
         if len(resolved_refs) == 1:
@@ -900,17 +1039,30 @@ class BlenderAdapter(DCCAdapter):
             return
         prefix = prim_path + "/"
         to_remove = [
-            (pp, obj) for pp, obj in self._prim_cache.items()
+            pp for pp in self._prim_cache
             if pp.startswith(prefix)
         ]
-        for pp, obj in to_remove:
-            del self._prim_cache[pp]
+        for pp in to_remove:
+            obj = self._prim_cache.pop(pp)
+            if not hasattr(obj, "users_collection"):
+                continue
             try:
                 for col in obj.users_collection:
                     col.objects.unlink(obj)
                 bpy.data.objects.remove(obj)
             except ReferenceError:
                 pass  # already deleted
+
+        # Clean up emitter state so _detect_deletions doesn't find stale
+        # references and trigger a storm of deactivation events.
+        from . import capture
+
+        if capture._state.author is not None:
+            capture._state.author.purge_prim_refs(prefix)
+        if capture._state.notice_emitter is not None:
+            for pp in to_remove:
+                capture._state.notice_emitter._purge_caches(pp)
+
         self._imported_refs.pop(prim_path, None)
 
     def set_payload(self, prim_path: str, payloads: list) -> bool:
@@ -945,6 +1097,7 @@ class BlenderAdapter(DCCAdapter):
             resolved = self._resolve_asset_path(asset_path)
             if resolved is not None:
                 self._import_ref_asset(container, prim_path, resolved, prim_path_ref)
+                self._enrich_materialx_from_import(resolved, prim_path, prim_path_ref)
         LOG.info("BlenderAdapter.load_payload: loaded %s", prim_path)
         return True
 

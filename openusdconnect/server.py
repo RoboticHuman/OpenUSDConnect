@@ -285,7 +285,10 @@ class UsdSyncServer:
                         child.SetActive(True)
 
         prefix = prim_path + "/"
-        replay_kinds = {K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY}
+        replay_kinds = {
+            K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY,
+            K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
+        }
 
         record_jsons = self.store.search_like(f'%"prim": "{prefix}%')
 

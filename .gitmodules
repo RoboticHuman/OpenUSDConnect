@@ -1,3 +1,6 @@
 [submodule "vendor/io_blender_mtlx"]
 	path = vendor/io_blender_mtlx
 	url = https://github.com/Activision/io_blender_mtlx.git
+[submodule "assets"]
+	path = assets
+	url = https://github.com/usd-wg/assets.git
