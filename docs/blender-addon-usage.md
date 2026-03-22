@@ -102,15 +102,21 @@ In the emitter Blender:
 | `ensure_xform_ops` | First encounter of an object | Establishes translate/orient/scale ops |
 | `set_xform_trs` | Object moved/rotated/scaled | Applies the transform delta |
 | `set_visibility` | Visibility toggled | Shows/hides the object |
-| `set_gprim_attrs` | Parametric attribute change | Updates radius, size, height, etc. |
+| `set_gprim_attrs` | Attribute change | Updates parametric attrs, mesh topology, primvars (UVs, vertex colors), normals, purpose |
 | `set_reference` | USD reference set on a prim | Imports the referenced asset |
 | `set_payload` | USD payload arc set on a prim | Stores payload info (unloaded by default) |
 | `load_payload` | Payload load requested | Imports the payload asset |
 | `unload_payload` | Payload unload requested | Removes imported payload children |
+| `set_variant_selections` | Variant selection changed | Updates the active variant |
 | `deactivate_prim` | Object deleted | Deactivates the prim |
+| `delete_prim` | Prim removed from stage | Removes the prim |
 | `rename_prim` | Object renamed | Renames the prim path |
 
 Rotation is transmitted as quaternion `[w, x, y, z]` (USD convention). Only changed fields are sent (partial diffs).
+
+`set_gprim_attrs` events include `primvar_meta` (USD type name and interpolation) for
+primvar attributes and `attr_interp` for non-primvar attributes with interpolation metadata
+(e.g., normals).
 
 ## Auto-track Mode
 

@@ -107,6 +107,12 @@ uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log 
 
 # Compact the event log on startup (deduplicates, keeps latest state per prim)
 uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log my_events.db --compact
+
+# With the admin dashboard (requires: uv sync --group dashboard)
+uv run python -m openusdconnect.server --port 7200 --dashboard 8080
+
+# Export the override diff layer on shutdown
+uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --export-diff diff.usda
 ```
 
 ### Inspecting the event log
