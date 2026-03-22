@@ -375,6 +375,92 @@ class BlenderAdapter(DCCAdapter):
             len(faces),
         )
 
+    # UsdPreviewSurface input → Blender 5.0+ Principled BSDF input name
+    _USD_TO_BSDF = {
+        "diffuseColor": "Base Color",
+        "metallic": "Metallic",
+        "roughness": "Roughness",
+        "emissiveColor": "Emission Color",
+        "clearcoat": "Coat Weight",
+        "clearcoatRoughness": "Coat Roughness",
+        "opacity": "Alpha",
+        "ior": "IOR",
+        "specularColor": "Specular Tint",
+    }
+
+    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+        if not BPY_AVAILABLE:
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if not obj:
+            LOG.warning("set_material_binding: no object for %s", prim_path)
+            return False
+        if not material_path:
+            if obj.data and obj.data.materials:
+                obj.data.materials.clear()
+            return True
+        # Derive Blender material name from prim path
+        mat_name = material_path.rsplit("/", 1)[-1]
+        mat = bpy.data.materials.get(mat_name)
+        if not mat:
+            mat = bpy.data.materials.new(name=mat_name)
+            mat.use_nodes = True
+        if not obj.data:
+            return False
+        if not obj.data.materials:
+            obj.data.materials.append(mat)
+        else:
+            obj.data.materials[0] = mat
+        LOG.info("set_material_binding: %s -> %s", prim_path, mat_name)
+        return True
+
+    def set_shader_input(self, prim_path: str, shader_id: str,
+                         inputs: dict, input_types: dict) -> bool:
+        if not BPY_AVAILABLE:
+            return True
+        if shader_id != "UsdPreviewSurface":
+            LOG.info("set_shader_input: unsupported shader %s", shader_id)
+            return True
+        # Find the material this shader belongs to (parent prim path)
+        mat_path = prim_path.rsplit("/", 1)[0]
+        mat_name = mat_path.rsplit("/", 1)[-1]
+        mat = bpy.data.materials.get(mat_name)
+        if not mat:
+            mat = bpy.data.materials.new(name=mat_name)
+            mat.use_nodes = True
+        if not mat.use_nodes:
+            mat.use_nodes = True
+        # Find or verify Principled BSDF node
+        principled = None
+        for node in mat.node_tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                principled = node
+                break
+        if not principled:
+            LOG.warning("set_shader_input: no Principled BSDF in %s", mat_name)
+            return False
+        # Map UsdPreviewSurface inputs to Principled BSDF
+        for usd_name, value in inputs.items():
+            bsdf_name = self._USD_TO_BSDF.get(usd_name)
+            if not bsdf_name or bsdf_name not in principled.inputs:
+                continue
+            inp = principled.inputs[bsdf_name]
+            if isinstance(value, list) and len(value) == 3:
+                inp.default_value = (*value, 1.0)  # RGB → RGBA
+            else:
+                inp.default_value = value
+        # Handle emissive — set emission strength to 1 if emissiveColor is set
+        # USD's emissiveColor is the final emission value (no separate
+        # strength). Blender defaults Emission Strength to 0, so set it
+        # to 1.0 (neutral passthrough) when emission color is non-zero.
+        if "emissiveColor" in inputs:
+            ec = inputs["emissiveColor"]
+            if isinstance(ec, list) and any(v > 0 for v in ec):
+                if "Emission Strength" in principled.inputs:
+                    principled.inputs["Emission Strength"].default_value = 1.0
+        LOG.info("set_shader_input: %s on %s", list(inputs.keys()), mat_name)
+        return True
+
     def _resolve_asset_path(self, asset_path: str) -> str | None:
         """Resolve a possibly-relative asset path to an absolute file path.
 

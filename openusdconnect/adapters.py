@@ -15,8 +15,10 @@ from .protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_UNLOAD_PAYLOAD,
@@ -103,6 +105,17 @@ class DCCAdapter(ABC):
     @abstractmethod
     def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
         """Set variant selections on a prim."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+        """Bind or unbind a material to a prim."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_shader_input(self, prim_path: str, shader_id: str,
+                         inputs: dict, input_types: dict) -> bool:
+        """Set shader input values on a shader prim."""
         raise NotImplementedError
 
 
@@ -202,6 +215,28 @@ class UsdStageAdapter(DCCAdapter):
         apply_event(
             self.stage,
             {"k": K_SET_VARIANT_SELECTIONS, "prim": prim_path, "selections": selections},
+        )
+        return True
+
+    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(
+            self.stage,
+            {"k": K_SET_MATERIAL_BINDING, "prim": prim_path,
+             "material_path": material_path},
+        )
+        return True
+
+    def set_shader_input(self, prim_path: str, shader_id: str,
+                         inputs: dict, input_types: dict) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(
+            self.stage,
+            {"k": K_SET_SHADER_INPUT, "prim": prim_path,
+             "shader_id": shader_id, "inputs": inputs,
+             "input_types": input_types},
         )
         return True
 
@@ -324,6 +359,27 @@ class MockAdapter(DCCAdapter):
             p = self._prims[prim_path]
         p["variant_selections"] = dict(selections)
         LOG.info("MockAdapter: set variant selections on prim %s", prim_path)
+        return True
+
+    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        p["material_binding"] = material_path
+        LOG.info("MockAdapter: set material binding %s -> %s", prim_path, material_path)
+        return True
+
+    def set_shader_input(self, prim_path: str, shader_id: str,
+                         inputs: dict, input_types: dict) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        p["shader_id"] = shader_id
+        p.setdefault("shader_inputs", {}).update(inputs)
+        p.setdefault("shader_input_types", {}).update(input_types)
+        LOG.info("MockAdapter: set shader input on %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

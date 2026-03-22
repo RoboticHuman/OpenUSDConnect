@@ -20,6 +20,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
+for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
+    del sys.modules[_k]
 
 from integrations.blender.blender_adapter import BlenderAdapter
 

@@ -26,8 +26,10 @@ from openusdconnect.protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -96,6 +98,8 @@ _DISPATCH_TABLE: dict[str, str] = {
     K_SET_PAYLOAD: "set_payload",
     K_LOAD_PAYLOAD: "load_payload",
     K_UNLOAD_PAYLOAD: "unload_payload",
+    K_SET_MATERIAL_BINDING: "set_material_binding",
+    K_SET_SHADER_INPUT: "set_shader_input",
 }
 
 # Per-event-type argument builders (returns kwargs for the adapter method).
@@ -117,6 +121,15 @@ def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
         return (prim_path, ev.get("selections", {})), {}
     if k == K_SET_PAYLOAD:
         return (prim_path, ev.get("payloads", [])), {}
+    if k == K_SET_MATERIAL_BINDING:
+        return (prim_path, ev.get("material_path", "")), {}
+    if k == K_SET_SHADER_INPUT:
+        return (
+            prim_path,
+            ev.get("shader_id", ""),
+            ev.get("inputs", {}),
+            ev.get("input_types", {}),
+        ), {}
     # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
     if k in (K_SET_XFORM_TRS, K_SET_XFORM_MATRICES):
         return (prim_path, ev), {}
