@@ -16,7 +16,7 @@ The USD Connect addon enables real-time transform sync between Blender instances
 
 The zip bundles the `openusdconnect` core library, so no separate Python package installation is needed.
 
-For development, see [Testing Setup](testing-setup.md) for the debug launcher (`start_usdconnect_debug.ps1`) which supports hot-reloading the addon into running Blender instances without restarting.
+For development, see [Testing Setup](testing-setup.md) for the debug launcher (`start_usdconnect_debug.py`) which supports hot-reloading the addon into running Blender instances without restarting.
 
 ## UI Overview
 

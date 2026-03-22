@@ -312,13 +312,13 @@ For hands-on debugging with breakpoints, the repo includes a launcher script tha
 
 2. Generate the VS Code configs and launch Blender once so it writes the addon install path:
 
-```powershell
-.\scripts\start_usdconnect_debug.ps1
+```bash
+uv run python scripts/start_usdconnect_debug.py
 ```
 
 3. Once Blender opens and you see `addon installed at: ...` in the terminal, close Blender, then regenerate VS Code configs with the correct debugpy path mappings:
 
-```powershell
+```bash
 uv run python scripts/setup_vscode.py
 ```
 
@@ -326,12 +326,12 @@ This reads `.blender_addon_path` (written by the bootstrap) and generates `.vsco
 
 ### Launching a debug session
 
-```powershell
+```bash
 # One Blender instance, waits for VS Code debugger attach
-.\scripts\start_usdconnect_debug.ps1 -WaitForDebugger
+uv run python scripts/start_usdconnect_debug.py --wait-for-debugger
 
 # Two Blender instances (A on :5678, B on :5679)
-.\scripts\start_usdconnect_debug.ps1 -WaitForDebugger -TwoBlenders
+uv run python scripts/start_usdconnect_debug.py --wait-for-debugger --two-blenders
 ```
 
 The launcher starts the sync server and Blender, prints a summary table with PIDs and debug ports, then waits. When you close all Blender windows, the server is stopped automatically and the terminal is released.
@@ -350,8 +350,8 @@ Breakpoints work in both `integrations/blender/` and `openusdconnect/` source fi
 
 After making code changes, you can rebuild the addon and push it to all running Blender instances without restarting them. From a separate terminal:
 
-```powershell
-.\scripts\start_usdconnect_debug.ps1 -Reload
+```bash
+uv run python scripts/start_usdconnect_debug.py --reload
 ```
 
 This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each running Blender instance has a background timer that watches for this file every 2 seconds, then disables, reinstalls, and re-enables the addon automatically.
@@ -360,15 +360,15 @@ This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each run
 
 | Flag | Description |
 |------|-------------|
-| `-WaitForDebugger` | Blender blocks at startup until VS Code attaches |
-| `-TwoBlenders` | Launch a second Blender instance (B on port 5679) |
-| `-Reload` | Build addon + signal running instances to reload, then exit |
-| `-StartEmitter` | Auto-start the network emitter on launch |
-| `-StartReceiver` | Auto-start the network receiver on launch |
-| `-DebugPort N` | debugpy port for instance A (default 5678) |
-| `-DebugPortB N` | debugpy port for instance B (default 5679) |
-| `-ServerPort N` | Sync server port (default 7200) |
-| `-BlenderExe path` | Override Blender executable (default: from `blender.test.cfg`) |
+| `--wait-for-debugger` | Blender blocks at startup until VS Code attaches |
+| `--two-blenders` | Launch a second Blender instance (B on port 5679) |
+| `--reload` | Build addon + signal running instances to reload, then exit |
+| `--start-emitter` | Auto-start the network emitter on launch |
+| `--start-receiver` | Auto-start the network receiver on launch |
+| `--debug-port N` | debugpy port for instance A (default 5678) |
+| `--debug-port-b N` | debugpy port for instance B (default 5679) |
+| `--server-port N` | Sync server port (default 7200) |
+| `--blender-exe path` | Override Blender executable (default: from `blender.test.cfg`) |
 
 ## Files
 
@@ -380,6 +380,6 @@ This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each run
 | `.blender_addon_path` | Installed addon directory (gitignored, written by bootstrap) |
 | `tests/conftest.py` | Pytest conftest with `blender_exe` fixture |
 | `scripts/setup_blender_test.py` | Portable Blender download/setup script |
-| `scripts/start_usdconnect_debug.ps1` | Debug session launcher (server + Blender + debugpy) |
+| `scripts/start_usdconnect_debug.py` | Debug session launcher (server + Blender + debugpy) |
 | `scripts/blender_bootstrap_instance.py` | Blender startup script (addon install, debugpy, reload watcher) |
 | `scripts/setup_vscode.py` | Generates `.vscode/launch.json` and `tasks.json` with correct path mappings |
