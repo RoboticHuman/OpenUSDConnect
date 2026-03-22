@@ -150,8 +150,47 @@ class ShaderMapper(ABC):
         """Apply a USD input value to the DCC node."""
         raise NotImplementedError
 
+    @property
+    def is_multi_node(self) -> bool:
+        """Whether this mapper creates multiple DCC nodes for one USD shader."""
+        return False
+
     def post_apply(self, node, inputs: dict) -> None:  # noqa: B027
         """Hook called after all inputs are applied. Override as needed."""
+
+
+class MultiNodeShaderMapper(ShaderMapper):
+    """Mapper that creates multiple DCC nodes for one USD shader.
+
+    Used for complex shaders like MaterialX Standard Surface that need
+    preprocessing nodes (Hue/Sat, Mix, Math) before the main BSDF.
+    The ``create_network`` method replaces the per-input ``apply_value``
+    pattern — it receives all inputs at once and builds the full graph.
+    """
+
+    @property
+    def is_multi_node(self) -> bool:
+        return True
+
+    def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
+        pass  # Not used — create_network handles everything
+
+    @abstractmethod
+    def create_network(self, tree, inputs: dict, **kwargs) -> tuple:
+        """Create the full node network for this shader.
+
+        Args:
+            tree: DCC-specific node tree (e.g., bpy.types.NodeTree)
+            inputs: dict of USD input name → Python value
+            **kwargs: DCC-specific extras (e.g., resolve_asset callback)
+
+        Returns:
+            (nodes, input_map, output_map) where:
+            - nodes: tuple of created DCC nodes
+            - input_map: dict of usd_input_name → DCC input socket
+            - output_map: dict of usd_output_name → DCC output socket
+        """
+        raise NotImplementedError
 
 
 class ShaderMapperRegistry:

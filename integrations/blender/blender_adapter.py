@@ -453,7 +453,12 @@ class BlenderAdapter(DCCAdapter):
         # Cache the shader_id for later use by set_shader_connection
         self._prim_cache[prim_path + ":shader_id"] = shader_id
 
-        # Find or create the material and node
+        if mapper.is_multi_node:
+            return self._apply_multi_node_shader(prim_path, mapper, inputs)
+        return self._apply_single_node_shader(prim_path, mapper, inputs)
+
+    def _apply_single_node_shader(self, prim_path, mapper, inputs):
+        """Apply shader inputs to a single Blender node."""
         mat, node = self._get_or_create_shader_node_for_input(
             prim_path, mapper.node_type,
         )
@@ -468,6 +473,80 @@ class BlenderAdapter(DCCAdapter):
         mapper.post_apply(node, inputs)
 
         LOG.info("set_shader_input: %s on %s", list(inputs.keys()), node.name)
+        return True
+
+    def _prepare_tree_for_network(self, tree):
+        """Remove the default Principled BSDF so the mapper starts clean."""
+        for node in list(tree.nodes):
+            if node.type == "BSDF_PRINCIPLED":
+                tree.nodes.remove(node)
+
+    def _wire_surface_to_material_output(self, tree, output_map):
+        """Connect the 'out' socket from output_map to Material Output."""
+        surface_socket = output_map.get("out")
+        if not surface_socket:
+            return
+        for node in tree.nodes:
+            if node.type == "OUTPUT_MATERIAL" and "Surface" in node.inputs:
+                tree.links.new(surface_socket, node.inputs["Surface"])
+                return
+
+    def _apply_multi_node_shader(self, prim_path, mapper, inputs):
+        """Apply shader inputs via a multi-node network."""
+        mat_path = prim_path.rsplit("/", 1)[0]
+        mat_name = mat_path.rsplit("/", 1)[-1]
+        mat = bpy.data.materials.get(mat_name)
+        if not mat:
+            mat = bpy.data.materials.new(name=mat_name)
+            mat.use_nodes = True
+        if not mat.use_nodes:
+            mat.use_nodes = True
+
+        # Reuse cached socket maps if the network was already created and
+        # the sockets are still valid (not from a deleted material).
+        input_map = self._prim_cache.get(prim_path + ":input_map")
+        if input_map is not None:
+            try:
+                _ = next(iter(input_map.values())).node
+            except (ReferenceError, StopIteration):
+                input_map = None
+
+        if input_map is None:
+            tree = mat.node_tree
+            self._prepare_tree_for_network(tree)
+
+            nodes, input_map, output_map = mapper.create_network(
+                tree, inputs,
+                resolve_asset=self._resolve_asset_path,
+            )
+            if not nodes:
+                LOG.warning("create_network returned no nodes for %s", prim_path)
+                return True
+
+            node_name = prim_path.rsplit("/", 1)[-1]
+            nodes[0].name = node_name
+            nodes[0].label = node_name
+            self._wire_surface_to_material_output(tree, output_map)
+
+            self._prim_cache[prim_path + ":output_map"] = output_map
+            self._prim_cache[prim_path + ":input_map"] = input_map
+
+        # Apply input values to the mapped sockets
+        for usd_name, value in inputs.items():
+            socket = input_map.get(usd_name)
+            if socket is None:
+                continue
+            if isinstance(value, list) and len(value) == 3:
+                socket.default_value = (*value, 1.0)
+            elif isinstance(value, list) and len(value) == 4:
+                socket.default_value = tuple(value)
+            else:
+                socket.default_value = value
+
+        LOG.info(
+            "set_shader_input (multi-node): %s on %s",
+            list(inputs.keys()), prim_path,
+        )
         return True
 
     def _get_or_create_shader_node_for_input(self, prim_path, node_type):
@@ -525,32 +604,52 @@ class BlenderAdapter(DCCAdapter):
             return False
 
         tree = mat.node_tree
-        # Find the target node (the shader prim this event is for)
         target_node = self._find_shader_node(tree, prim_path)
+
+        # Multi-node mappers cache per-socket maps so connections route
+        # to preprocessing nodes (e.g., base_color → Mix.B, not BSDF)
+        cached_inputs = self._prim_cache.get(prim_path + ":input_map")
 
         for input_name, conn in connections.items():
             source_prim = conn["source_prim"]
             source_output = conn["source_output"]
 
-            # Find or create the source node
             source_node = self._find_or_create_shader_node(
                 tree, source_prim,
             )
-            if not source_node or not target_node:
+
+            # Resolve source socket — check multi-node output map first
+            cached_outputs = self._prim_cache.get(
+                source_prim + ":output_map",
+            )
+            if cached_outputs and source_output in cached_outputs:
+                src_socket = cached_outputs[source_output]
+            elif source_node:
+                src_socket = self._get_output_socket(
+                    source_node, source_output,
+                )
+            else:
                 continue
 
-            # Find the correct sockets
-            src_socket = self._get_output_socket(
-                source_node, source_output,
-            )
-            tgt_socket = self._get_input_socket(
-                target_node, input_name,
-            )
+            # Resolve target socket — check multi-node input map first
+            if cached_inputs and input_name in cached_inputs:
+                tgt_socket = cached_inputs[input_name]
+            elif target_node:
+                tgt_socket = self._get_input_socket(
+                    target_node, input_name,
+                )
+            else:
+                continue
+
             if src_socket and tgt_socket:
                 tree.links.new(src_socket, tgt_socket)
 
         for input_name in disconnections or []:
-            if target_node and input_name in target_node.inputs:
+            if cached_inputs and input_name in cached_inputs:
+                socket = cached_inputs[input_name]
+                for link in list(socket.links):
+                    tree.links.remove(link)
+            elif target_node and input_name in target_node.inputs:
                 for link in list(target_node.inputs[input_name].links):
                     tree.links.remove(link)
 

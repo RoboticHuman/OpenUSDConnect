@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from openusdconnect.adapters import ShaderMapper, ShaderMapperRegistry
+from openusdconnect.adapters import MultiNodeShaderMapper, ShaderMapper, ShaderMapperRegistry
 
 LOG = logging.getLogger(__name__)
 
@@ -90,9 +90,214 @@ class UVReaderMapper(ShaderMapper):
         node.inputs[blender_name].default_value = value
 
 
+class ActivisionMtlxMapper(MultiNodeShaderMapper):
+    """Delegates to io_blender_mtlx's registered handler at runtime.
+
+    Requires MaterialX Python — available in Blender 5.0+.
+    The handler is looked up by shader_id from the vendored
+    node_registry.materialx_nodes dict.
+    """
+
+    # Cached MaterialX document with standard library loaded.
+    # Loading libraries is expensive, so we do it once across all instances.
+    _mx_doc = None
+
+    def create_network(self, tree, inputs, **kwargs):
+        import MaterialX as mx
+        from io_data_mtlx.lib.node_registry import materialx_nodes
+
+        handler = materialx_nodes.get(self.shader_id)
+        if handler is None:
+            raise ValueError(
+                f"No io_blender_mtlx handler for {self.shader_id}",
+            )
+
+        mx_node = self._create_mx_node(mx)
+        return handler(tree, mx_node)
+
+    def _create_mx_node(self, mx):
+        """Create a minimal mx.Node for the vendored handler."""
+        doc = self._get_mx_doc(mx)
+        node_def = doc.getNodeDef(self.shader_id)
+        if node_def is None:
+            raise ValueError(
+                f"NodeDef {self.shader_id} not found in MaterialX library",
+            )
+        category = node_def.getNodeString()
+        output_type = node_def.getType()
+        # Reuse a single scratch NodeGraph to avoid leaking
+        ng = doc.getNodeGraph("_vendored_scratch")
+        if ng is None:
+            ng = doc.addNodeGraph("_vendored_scratch")
+        for child in ng.getNodes():
+            ng.removeNode(child.getName())
+        return ng.addNode(category, self.shader_id, output_type)
+
+    @classmethod
+    def _get_mx_doc(cls, mx):
+        """Load and cache the MaterialX standard library document."""
+        if cls._mx_doc is None:
+            doc = mx.createDocument()
+            mx.loadLibraries(
+                mx.getDefaultDataLibraryFolders(),
+                mx.getDefaultDataSearchPath(),
+                doc,
+            )
+            cls._mx_doc = doc
+        return cls._mx_doc
+
+
+class MaterialXStandardSurfaceMapper(MultiNodeShaderMapper):
+    """Standard Surface → 5-node Blender network (fallback).
+
+    Replicates io_blender_mtlx's standard_surface handler topology
+    without requiring MaterialX Python. Used as a fallback when the
+    vendored io_blender_mtlx import is unavailable.
+    """
+
+    _NODE_PREFIX = "MtlxStdSurf"
+
+    def create_network(self, tree, inputs, **kwargs):
+        bsdf = self._get_or_create_bsdf(tree)
+        mix_base = self._ensure_node(
+            tree, "ShaderNodeMix", f"{self._NODE_PREFIX}_MixBase",
+        )
+        huesat_base = self._ensure_node(
+            tree, "ShaderNodeHueSaturation", f"{self._NODE_PREFIX}_HueSatBase",
+        )
+        mix_spec = self._ensure_node(
+            tree, "ShaderNodeMix", f"{self._NODE_PREFIX}_MixSpec",
+        )
+        huesat_spec = self._ensure_node(
+            tree, "ShaderNodeHueSaturation", f"{self._NODE_PREFIX}_HueSatSpec",
+        )
+
+        # Configure Mix nodes: RGBA multiply mode with factor=1
+        for mix in (mix_base, mix_spec):
+            mix.data_type = "RGBA"
+            mix.blend_type = "MULTIPLY"
+            mix.inputs[0].default_value = 1.0
+            # Preprocessing gray from io_blender_mtlx Standard Surface handler
+            mix.inputs[6].default_value = (0.604, 0.604, 0.604, 1.0)
+            mix.inputs[7].default_value = (0.5, 0.5, 0.5, 1.0)
+
+        # Configure HueSat nodes
+        for hs in (huesat_base, huesat_spec):
+            hs.inputs[0].default_value = 0.0   # Hue
+            hs.inputs[1].default_value = 1.0   # Saturation
+            hs.inputs[2].default_value = 1.0   # Value
+            hs.inputs[3].default_value = 1.0   # Fac
+            hs.inputs[4].default_value = (0.997, 1.0, 1.0, 1.0)
+
+        # Base color path: HueSat → Mix.A, Mix.Result → BSDF.Base Color
+        tree.links.new(huesat_base.outputs[0], mix_base.inputs[6])
+        tree.links.new(mix_base.outputs[2], bsdf.inputs["Base Color"])
+
+        # Specular path: HueSat → Mix.A, Mix.Result → BSDF.Specular Tint
+        tree.links.new(huesat_spec.outputs[0], mix_spec.inputs[6])
+        tree.links.new(mix_spec.outputs[2], bsdf.inputs["Specular Tint"])
+
+        nodes = (bsdf, mix_base, huesat_base, mix_spec, huesat_spec)
+
+        input_map = {
+            # Preprocessed through HueSat → Mix chains
+            "base": huesat_base.inputs[2],
+            "base_color": mix_base.inputs[7],
+            "specular": huesat_spec.inputs[2],
+            "specular_color": mix_spec.inputs[7],
+            # Direct to Principled BSDF (Blender 4.0+ socket names)
+            "metalness": bsdf.inputs["Metallic"],
+            "diffuse_roughness": bsdf.inputs["Diffuse Roughness"],
+            "specular_IOR": bsdf.inputs["Specular IOR Level"],
+            "specular_anisotropy": bsdf.inputs["Anisotropic"],
+            "specular_rotation": bsdf.inputs["Anisotropic Rotation"],
+            "specular_roughness": bsdf.inputs["Roughness"],
+            "transmission": bsdf.inputs["Transmission Weight"],
+            "subsurface": bsdf.inputs["Subsurface Weight"],
+            "subsurface_radius": bsdf.inputs["Subsurface Radius"],
+            "subsurface_scale": bsdf.inputs["Subsurface Scale"],
+            "subsurface_anisotropy": bsdf.inputs["Subsurface Anisotropy"],
+            "sheen": bsdf.inputs["Sheen Weight"],
+            "sheen_color": bsdf.inputs["Sheen Tint"],
+            "sheen_roughness": bsdf.inputs["Sheen Roughness"],
+            "coat": bsdf.inputs["Coat Weight"],
+            "coat_color": bsdf.inputs["Coat Tint"],
+            "coat_roughness": bsdf.inputs["Coat Roughness"],
+            "coat_ior": bsdf.inputs["Coat IOR"],
+            "coat_normal": bsdf.inputs["Coat Normal"],
+            "thin_film_thickness": bsdf.inputs["Thin Film Thickness"],
+            "thin_film_IOR": bsdf.inputs["Thin Film IOR"],
+            "emission": bsdf.inputs["Emission Strength"],
+            "emission_color": bsdf.inputs["Emission Color"],
+            "normal": bsdf.inputs["Normal"],
+            "tangent": bsdf.inputs["Tangent"],
+        }
+
+        output_map = {"out": bsdf.outputs[0]}
+
+        return nodes, input_map, output_map
+
+    def _get_or_create_bsdf(self, tree):
+        """Find existing Principled BSDF or create one."""
+        for node in tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                return node
+        return tree.nodes.new("ShaderNodeBsdfPrincipled")
+
+    def _ensure_node(self, tree, node_type, name):
+        """Get existing node by name, or create a new one."""
+        existing = tree.nodes.get(name)
+        if existing:
+            return existing
+        node = tree.nodes.new(node_type)
+        node.name = name
+        return node
+
+
 # ---------------------------------------------------------------------------
 # Default registry
 # ---------------------------------------------------------------------------
+
+
+def _register_vendored_materialx(reg: ShaderMapperRegistry) -> None:
+    """Register vendored io_blender_mtlx handlers as multi-node mappers.
+
+    Runs inside Blender where MaterialX Python is available.
+    Skips shader IDs that already have a registered mapper (e.g.,
+    texture nodes that need our _load_image handling).
+    Falls back to MaterialXStandardSurfaceMapper if import fails.
+    """
+    try:
+        import os
+        import sys
+
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        _project_root = os.path.dirname(os.path.dirname(_this_dir))
+        vendor_path = os.path.join(
+            _project_root, "vendor", "io_blender_mtlx", "bl_env", "addons",
+        )
+        if vendor_path not in sys.path:
+            sys.path.insert(0, vendor_path)
+
+        from io_data_mtlx.lib.node_registry import materialx_nodes
+
+        for shader_id in materialx_nodes:
+            if reg.get(shader_id) is not None:
+                continue
+            reg.register(ActivisionMtlxMapper(shader_id, "", {}))
+        LOG.info(
+            "Registered %d vendored MaterialX handlers",
+            sum(1 for s in materialx_nodes if reg.get(s)
+                and isinstance(reg.get(s), ActivisionMtlxMapper)),
+        )
+    except Exception:
+        LOG.debug(
+            "io_blender_mtlx not available, using fallback Standard Surface mapper",
+            exc_info=True,
+        )
+        reg.register(MaterialXStandardSurfaceMapper(
+            "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        ))
 
 
 def create_default_registry() -> ShaderMapperRegistry:
@@ -119,20 +324,6 @@ def create_default_registry() -> ShaderMapperRegistry:
         _preview_surface_map,
     ))
 
-    reg.register(PBRShaderMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled",
-        {
-            "base_color": "Base Color",
-            "metalness": "Metallic",
-            "specular_roughness": "Roughness",
-            "emission_color": "Emission Color",
-            "coat": "Coat Weight",
-            "coat_roughness": "Coat Roughness",
-            "opacity": "Alpha",
-            "specular_IOR": "IOR",
-        },
-    ))
-
     _tex_map = {"file": "_image", "st": "Vector"}
     reg.register(TextureShaderMapper(
         "UsdUVTexture", "ShaderNodeTexImage", _tex_map,
@@ -147,5 +338,10 @@ def create_default_registry() -> ShaderMapperRegistry:
         "UsdPrimvarReader_float2", "ShaderNodeUVMap",
         {"varname": "_uv_map"},
     ))
+
+    # Vendored MaterialX handlers — adds Standard Surface, OpenPBR,
+    # and 23 utility node handlers from io_blender_mtlx.
+    # Skips IDs already registered above (textures, UV reader).
+    _register_vendored_materialx(reg)
 
     return reg

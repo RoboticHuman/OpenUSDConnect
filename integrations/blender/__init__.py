@@ -22,6 +22,11 @@ _addon_dir = os.path.dirname(os.path.abspath(__file__))
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
 
+# io_blender_mtlx (Activision MaterialX node handlers) lives under vendor/
+_vendor_mtlx = os.path.join(_addon_dir, "vendor")
+if _vendor_mtlx not in sys.path:
+    sys.path.insert(0, _vendor_mtlx)
+
 # Make bundled pxr module available if Blender provides it
 try:
     import bpy
@@ -49,14 +54,16 @@ if "capture" in locals():
         _mod = getattr(_ouc_pkg, _sub, None)
         if _mod is not None:
             importlib.reload(_mod)
-    # Then reload addon modules
+    # Then reload addon modules (shader_mapper before blender_adapter which imports it)
     importlib.reload(capture)  # noqa: F821
     importlib.reload(receiver_addon)  # noqa: F821
+    importlib.reload(shader_mapper)  # noqa: F821
     importlib.reload(blender_adapter)  # noqa: F821
     importlib.reload(ui)  # noqa: F821
 
 from . import capture
 from . import receiver_addon
+from . import shader_mapper
 from . import blender_adapter as blender_adapter
 from . import ui
 

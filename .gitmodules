@@ -1,0 +1,3 @@
+[submodule "vendor/io_blender_mtlx"]
+	path = vendor/io_blender_mtlx
+	url = https://github.com/Activision/io_blender_mtlx.git

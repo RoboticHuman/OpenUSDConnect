@@ -17,6 +17,9 @@ dashboard = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "materialx: MaterialX shader mapper integration tests (require Blender)",
+]
 # Blender integration tests: configure via one of:
 #   uv run pytest --blender /path/to/blender.exe
 #   BLENDER_EXE=/path/to/blender.exe uv run pytest
@@ -48,6 +51,7 @@ openusdconnect-server = "openusdconnect.server:main"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["vendor/", "assets/"]
 
 [tool.ruff.lint]
 select = [
