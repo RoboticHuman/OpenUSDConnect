@@ -59,6 +59,8 @@ K_SET_PAYLOAD = "set_payload"
 K_LOAD_PAYLOAD = "load_payload"
 K_UNLOAD_PAYLOAD = "unload_payload"
 K_SET_VARIANT_SELECTIONS = "set_variant_selections"
+K_SET_MATERIAL_BINDING = "set_material_binding"
+K_SET_SHADER_INPUT = "set_shader_input"
 
 PRIMVAR_PREFIX = "primvars:"
 
@@ -79,6 +81,8 @@ EVENT_KEYS = frozenset(
         K_LOAD_PAYLOAD,
         K_UNLOAD_PAYLOAD,
         K_SET_VARIANT_SELECTIONS,
+        K_SET_MATERIAL_BINDING,
+        K_SET_SHADER_INPUT,
     }
 )
 
@@ -95,17 +99,20 @@ EVENT_KIND_ORDER: dict[str, int] = {
     K_SET_XFORM_TRS: 6,
     K_SET_VISIBILITY: 7,
     K_SET_GPRIM_ATTRS: 8,
-    K_SET_XFORM_MATRICES: 9,
-    K_DEACTIVATE_PRIM: 10,
-    K_DELETE_PRIM: 11,
-    K_RENAME_PRIM: 12,
-    K_UNLOAD_PAYLOAD: 13,
+    K_SET_SHADER_INPUT: 9,
+    K_SET_XFORM_MATRICES: 10,
+    K_SET_MATERIAL_BINDING: 11,
+    K_DEACTIVATE_PRIM: 12,
+    K_DELETE_PRIM: 13,
+    K_RENAME_PRIM: 14,
+    K_UNLOAD_PAYLOAD: 15,
 }
 
 # Events that must be applied outside a ChangeBlock (structural ops).
 STRUCTURAL_EVENT_KINDS = frozenset({
     K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_VARIANT_SELECTIONS,
     K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
+    K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT,
 })
 
 # Valid TRS field names
@@ -239,5 +246,23 @@ def validate_event(ev: dict) -> bool:
         if not all(isinstance(k, str) for k in selections):
             return False
         if not all(isinstance(v, str) for v in selections.values()):
+            return False
+    if k == K_SET_MATERIAL_BINDING:
+        material_path = ev.get("material_path")
+        if not isinstance(material_path, str):
+            return False
+        if material_path and not material_path.startswith("/"):
+            return False
+    if k == K_SET_SHADER_INPUT:
+        shader_id = ev.get("shader_id")
+        if not isinstance(shader_id, str) or not shader_id:
+            return False
+        inputs = ev.get("inputs")
+        if not isinstance(inputs, dict):
+            return False
+        if not all(isinstance(key, str) for key in inputs):
+            return False
+        input_types = ev.get("input_types")
+        if not isinstance(input_types, dict):
             return False
     return True

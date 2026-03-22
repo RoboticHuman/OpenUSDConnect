@@ -10,7 +10,7 @@ All functions require pxr (OpenUSD Python bindings).
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Usd, UsdGeom, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 from .protocol import (
     K_DEACTIVATE_PRIM,
@@ -20,8 +20,10 @@ from .protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -250,6 +252,78 @@ def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
     stage.Unload(Sdf.Path(ev["prim"]))
 
 
+def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
+    """Bind or unbind a material to a geometry prim."""
+    prim = get_or_define_prim(stage, ev["prim"])
+    material_path = ev.get("material_path", "")
+
+    binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+    if material_path:
+        mat_prim = stage.GetPrimAtPath(material_path)
+        if mat_prim and mat_prim.IsValid():
+            material = UsdShade.Material(mat_prim)
+            binding_api.Bind(material)
+    else:
+        binding_api.UnbindAllBindings()
+
+
+def _set_shader_input_value(shader: UsdShade.Shader, name: str,
+                            value, type_name: str) -> None:
+    """Set a single shader input, creating it with the correct type if needed."""
+    sdf_type = Sdf.ValueTypeNames.Find(type_name)
+    if not sdf_type:
+        return
+    inp = shader.GetInput(name)
+    if not inp:
+        inp = shader.CreateInput(name, sdf_type)
+
+    if isinstance(value, list):
+        if type_name in ("color3f", "float3", "normal3f"):
+            inp.Set(Gf.Vec3f(*value))
+        elif type_name in ("float2", "texCoord2f"):
+            inp.Set(Gf.Vec2f(*value))
+        else:
+            inp.Set(value)
+    else:
+        if type_name == "float":
+            inp.Set(float(value))
+        elif type_name == "int":
+            inp.Set(int(value))
+        else:
+            inp.Set(value)
+
+
+def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
+    """Set shader ID and input values on a Shader prim."""
+    prim = get_or_define_prim(stage, ev["prim"], "Shader")
+    shader = UsdShade.Shader(prim)
+
+    # Set the shader type (e.g., "UsdPreviewSurface")
+    shader_id = ev.get("shader_id", "")
+    if shader_id:
+        shader.CreateIdAttr(shader_id)
+
+    # Create the surface output if it doesn't exist
+    if not shader.GetOutput("surface"):
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+    # Connect material's outputs:surface to this shader if the parent is a Material
+    parent = prim.GetParent()
+    if parent and parent.IsA(UsdShade.Material):
+        material = UsdShade.Material(parent)
+        mat_output = material.GetSurfaceOutput()
+        if not mat_output:
+            mat_output = material.CreateSurfaceOutput()
+        mat_output.ConnectToSource(shader.GetOutput("surface"))
+
+    # Set input values
+    inputs = ev.get("inputs", {})
+    input_types = ev.get("input_types", {})
+    for name, value in inputs.items():
+        type_name = input_types.get(name, "float")
+        _set_shader_input_value(shader, name, value, type_name)
+
+
 _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_VARIANT_SELECTIONS: _apply_set_variant_selections,
     K_SET_XFORM_TRS: _apply_set_xform_trs,
@@ -260,6 +334,8 @@ _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_PAYLOAD: _apply_set_payload,
     K_LOAD_PAYLOAD: _apply_load_payload,
     K_UNLOAD_PAYLOAD: _apply_unload_payload,
+    K_SET_MATERIAL_BINDING: _apply_set_material_binding,
+    K_SET_SHADER_INPUT: _apply_set_shader_input,
 }
 
 
