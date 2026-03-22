@@ -29,6 +29,7 @@ from .protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    REL_MATERIAL_BINDING,
     STRUCTURAL_EVENT_KINDS,
 )
 
@@ -253,18 +254,22 @@ def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
 
 
 def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
-    """Bind or unbind a material to a geometry prim."""
+    """Bind or unbind a material to a geometry prim.
+
+    Uses direct relationship authoring so the binding works even if
+    the target material prim hasn't been created yet (USD relationships
+    can target non-existent prims).
+    """
     prim = get_or_define_prim(stage, ev["prim"])
     material_path = ev.get("material_path", "")
 
-    binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+    UsdShade.MaterialBindingAPI.Apply(prim)
+    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
+    if not binding_rel or not binding_rel.IsValid():
+        binding_rel = prim.CreateRelationship(REL_MATERIAL_BINDING)
+    binding_rel.ClearTargets(removeSpec=False)
     if material_path:
-        mat_prim = stage.GetPrimAtPath(material_path)
-        if mat_prim and mat_prim.IsValid():
-            material = UsdShade.Material(mat_prim)
-            binding_api.Bind(material)
-    else:
-        binding_api.UnbindAllBindings()
+        binding_rel.AddTarget(Sdf.Path(material_path))
 
 
 def _set_shader_input_value(shader: UsdShade.Shader, name: str,
@@ -307,14 +312,18 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     if not shader.GetOutput("surface"):
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
-    # Connect material's outputs:surface to this shader if the parent is a Material
+    # Wire to parent Material's outputs:surface — only if not already connected
     parent = prim.GetParent()
     if parent and parent.IsA(UsdShade.Material):
         material = UsdShade.Material(parent)
         mat_output = material.GetSurfaceOutput()
         if not mat_output:
             mat_output = material.CreateSurfaceOutput()
-        mat_output.ConnectToSource(shader.GetOutput("surface"))
+            mat_output.ConnectToSource(shader.GetOutput("surface"))
+        else:
+            sources, _ = mat_output.GetConnectedSources()
+            if not sources or sources[0].source.GetPath() != prim.GetPath():
+                mat_output.ConnectToSource(shader.GetOutput("surface"))
 
     # Set input values
     inputs = ev.get("inputs", {})

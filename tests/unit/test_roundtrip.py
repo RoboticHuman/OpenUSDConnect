@@ -783,6 +783,58 @@ class TestStageToStageRoundtrip:
         purpose = UsdGeom.Imageable(prim_b).GetPurposeAttr().Get()
         assert purpose == "guide"
 
+    def test_material_roundtrip(self):
+        """Material binding + shader inputs roundtrip between stages."""
+        from pxr import UsdShade
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        stage_a.DefinePrim("/World/Sphere", "Sphere")
+        mat = UsdShade.Material.Define(stage_a, "/Materials/Red")
+        shader = UsdShade.Shader.Define(stage_a, "/Materials/Red/PBR")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+        ).Set(Gf.Vec3f(1, 0, 0))
+        shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float,
+        ).Set(0.4)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat.CreateSurfaceOutput().ConnectToSource(
+            shader.GetOutput("surface"),
+        )
+        binding = UsdShade.MaterialBindingAPI.Apply(
+            stage_a.GetPrimAtPath("/World/Sphere"),
+        )
+        binding.Bind(mat)
+
+        emitter = NoticeEmitter(stage_a)
+        for p in ["/World", "/World/Sphere", "/Materials/Red",
+                  "/Materials/Red/PBR"]:
+            emitter.mark_dirty(p)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        # Verify binding
+        sphere_b = stage_b.GetPrimAtPath("/World/Sphere")
+        binding_b = UsdShade.MaterialBindingAPI(sphere_b)
+        mat_b, _ = binding_b.ComputeBoundMaterial()
+        assert str(mat_b.GetPath()) == "/Materials/Red"
+
+        # Verify shader values
+        shader_b = UsdShade.Shader(
+            stage_b.GetPrimAtPath("/Materials/Red/PBR"),
+        )
+        assert shader_b.GetIdAttr().Get() == "UsdPreviewSurface"
+        dc = shader_b.GetInput("diffuseColor").Get()
+        assert abs(dc[0] - 1.0) < 1e-6
+        assert abs(shader_b.GetInput("roughness").Get() - 0.4) < 1e-6
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

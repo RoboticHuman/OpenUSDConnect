@@ -9,7 +9,7 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .protocol import (
     K_DEACTIVATE_PRIM,
@@ -18,14 +18,17 @@ from .protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
+    REL_MATERIAL_BINDING,
 )
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
@@ -37,16 +40,20 @@ _C_PAYLOADS = "payloads"
 _C_PAYLOAD_LOADED = "payload_loaded"
 _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
+_C_MATERIAL_BINDING = "material_binding"
+_C_SHADER_INPUTS = "shader_inputs"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
-_SKIP_ATTR_PREFIXES = ("xformOp:",)
+# inputs:/outputs: are UsdShade namespace — handled by set_shader_input.
+_SKIP_ATTR_PREFIXES = ("xformOp:", "inputs:", "outputs:")
 
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
 #   extent     — bounding box, computed from geometry by USD
 #   proxyPrim  — relationship target, not a value attribute
+#   info:id    — shader type identifier, handled by set_shader_input
 _SKIP_ATTR_NAMES = frozenset({
-    "visibility", "xformOpOrder", "extent", "proxyPrim",
+    "visibility", "xformOpOrder", "extent", "proxyPrim", "info:id",
 })
 
 
@@ -228,6 +235,59 @@ def _read_variant_selections(stage, prim_path):
         if sel:
             result[name] = sel
     return result
+
+
+def _read_material_binding(stage, prim_path):
+    """Read the material:binding relationship target from own layers.
+
+    Returns the target material prim path string, or empty string if unbound.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return ""
+    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
+    if not binding_rel or not binding_rel.IsValid():
+        return ""
+    # Only report if authored on own layers (ignore composed-in bindings)
+    own_layers = {stage.GetRootLayer().identifier,
+                  stage.GetSessionLayer().identifier}
+    for spec in prim.GetPrimStack():
+        if spec.layer.identifier not in own_layers:
+            continue
+        if spec.relationships.get(REL_MATERIAL_BINDING):
+            targets = binding_rel.GetTargets()
+            return str(targets[0]) if targets else ""
+    return ""
+
+
+def _read_shader_inputs(stage, prim_path):
+    """Read shader inputs and metadata from a Shader prim.
+
+    Returns (shader_id, inputs_dict, input_types_dict) or ("", {}, {})
+    if the prim is not a shader.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return "", {}, {}
+    if not prim.IsA(UsdShade.Shader):
+        return "", {}, {}
+
+    shader = UsdShade.Shader(prim)
+    shader_id = shader.GetIdAttr().Get() or ""
+    if not shader_id:
+        return "", {}, {}
+
+    inputs = {}
+    input_types = {}
+    for inp in shader.GetInputs():
+        if not inp.GetAttr().IsAuthored():
+            continue
+        name = inp.GetBaseName()
+        val = _usd_value_to_python(inp.Get())
+        if val is not None:
+            inputs[name] = val
+            input_types[name] = str(inp.GetAttr().GetTypeName())
+    return shader_id, inputs, input_types
 
 
 class NoticeEmitter:
@@ -495,6 +555,43 @@ class NoticeEmitter:
                 else:
                     events.append({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
                 pc[_C_PAYLOAD_LOADED] = is_loaded
+
+        # Material binding diff
+        current_binding = _read_material_binding(self.stage, prim_path)
+        last_binding = pc.get(_C_MATERIAL_BINDING, "")
+        if current_binding != last_binding:
+            events.append({
+                "k": K_SET_MATERIAL_BINDING,
+                "prim": prim_path,
+                "material_path": current_binding,
+            })
+            pc[_C_MATERIAL_BINDING] = current_binding
+
+        # Shader input diff
+        shader_id, current_inputs, current_types = _read_shader_inputs(
+            self.stage, prim_path,
+        )
+        if shader_id:
+            last_shader = pc.get(_C_SHADER_INPUTS, {})
+            last_inputs = last_shader.get("inputs", {})
+            changed_inputs = {}
+            changed_types = {}
+            for name, val in current_inputs.items():
+                if val != last_inputs.get(name):
+                    changed_inputs[name] = val
+                    changed_types[name] = current_types[name]
+            if changed_inputs:
+                events.append({
+                    "k": K_SET_SHADER_INPUT,
+                    "prim": prim_path,
+                    "shader_id": shader_id,
+                    "inputs": changed_inputs,
+                    "input_types": changed_types,
+                })
+            pc[_C_SHADER_INPUTS] = {
+                "shader_id": shader_id,
+                "inputs": current_inputs,
+            }
 
         # TRS partial diff
         last_trs = pc.get(_C_TRS, {})

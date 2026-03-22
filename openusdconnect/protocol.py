@@ -63,6 +63,7 @@ K_SET_MATERIAL_BINDING = "set_material_binding"
 K_SET_SHADER_INPUT = "set_shader_input"
 
 PRIMVAR_PREFIX = "primvars:"
+REL_MATERIAL_BINDING = "material:binding"
 
 # Valid event keys
 EVENT_KEYS = frozenset(

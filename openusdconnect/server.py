@@ -34,6 +34,7 @@ from .protocol import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -208,6 +209,17 @@ class UsdSyncServer:
                     new_interp = ev.get("attr_interp", {})
                     if new_interp:
                         prev.setdefault("attr_interp", {}).update(new_interp)
+                else:
+                    latest[(prim, k)] = ev
+            elif k == K_SET_SHADER_INPUT:
+                prev = latest.get((prim, k))
+                if prev:
+                    prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
+                    prev.setdefault("input_types", {}).update(
+                        ev.get("input_types", {}),
+                    )
+                    if ev.get("shader_id"):
+                        prev["shader_id"] = ev["shader_id"]
                 else:
                     latest[(prim, k)] = ev
             elif k in LATEST_WINS_KINDS:
