@@ -61,6 +61,7 @@ K_UNLOAD_PAYLOAD = "unload_payload"
 K_SET_VARIANT_SELECTIONS = "set_variant_selections"
 K_SET_MATERIAL_BINDING = "set_material_binding"
 K_SET_SHADER_INPUT = "set_shader_input"
+K_SET_SHADER_CONNECTION = "set_shader_connection"
 
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
@@ -84,6 +85,7 @@ EVENT_KEYS = frozenset(
         K_SET_VARIANT_SELECTIONS,
         K_SET_MATERIAL_BINDING,
         K_SET_SHADER_INPUT,
+        K_SET_SHADER_CONNECTION,
     }
 )
 
@@ -101,19 +103,20 @@ EVENT_KIND_ORDER: dict[str, int] = {
     K_SET_VISIBILITY: 7,
     K_SET_GPRIM_ATTRS: 8,
     K_SET_SHADER_INPUT: 9,
-    K_SET_XFORM_MATRICES: 10,
-    K_SET_MATERIAL_BINDING: 11,
-    K_DEACTIVATE_PRIM: 12,
-    K_DELETE_PRIM: 13,
-    K_RENAME_PRIM: 14,
-    K_UNLOAD_PAYLOAD: 15,
+    K_SET_SHADER_CONNECTION: 10,
+    K_SET_XFORM_MATRICES: 11,
+    K_SET_MATERIAL_BINDING: 12,
+    K_DEACTIVATE_PRIM: 13,
+    K_DELETE_PRIM: 14,
+    K_RENAME_PRIM: 15,
+    K_UNLOAD_PAYLOAD: 16,
 }
 
 # Events that must be applied outside a ChangeBlock (structural ops).
 STRUCTURAL_EVENT_KINDS = frozenset({
     K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_VARIANT_SELECTIONS,
     K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
-    K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT,
+    K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
 })
 
 # Valid TRS field names
@@ -265,5 +268,19 @@ def validate_event(ev: dict) -> bool:
             return False
         input_types = ev.get("input_types")
         if not isinstance(input_types, dict):
+            return False
+    if k == K_SET_SHADER_CONNECTION:
+        connections = ev.get("connections", {})
+        if not isinstance(connections, dict):
+            return False
+        for conn in connections.values():
+            if not isinstance(conn, dict):
+                return False
+            if not isinstance(conn.get("source_prim"), str):
+                return False
+            if not isinstance(conn.get("source_output"), str):
+                return False
+        disconnections = ev.get("disconnections", [])
+        if not isinstance(disconnections, list):
             return False
     return True

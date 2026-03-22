@@ -23,6 +23,7 @@ from .protocol import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -308,22 +309,27 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     if shader_id:
         shader.CreateIdAttr(shader_id)
 
-    # Create the surface output if it doesn't exist
-    if not shader.GetOutput("surface"):
-        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
-
-    # Wire to parent Material's outputs:surface — only if not already connected
-    parent = prim.GetParent()
-    if parent and parent.IsA(UsdShade.Material):
-        material = UsdShade.Material(parent)
-        mat_output = material.GetSurfaceOutput()
-        if not mat_output:
-            mat_output = material.CreateSurfaceOutput()
-            mat_output.ConnectToSource(shader.GetOutput("surface"))
-        else:
-            sources, _ = mat_output.GetConnectedSources()
-            if not sources or sources[0].source.GetPath() != prim.GetPath():
+    # Surface shaders (UsdPreviewSurface, ND_standard_surface_surfaceshader, etc.)
+    # need outputs:surface and auto-wire to parent Material.
+    _SURFACE_SHADER_IDS = {
+        "UsdPreviewSurface",
+        "ND_UsdPreviewSurface_surfaceshader",
+        "ND_standard_surface_surfaceshader",
+    }
+    if shader_id in _SURFACE_SHADER_IDS:
+        if not shader.GetOutput("surface"):
+            shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        parent = prim.GetParent()
+        if parent and parent.IsA(UsdShade.Material):
+            material = UsdShade.Material(parent)
+            mat_output = material.GetSurfaceOutput()
+            if not mat_output:
+                mat_output = material.CreateSurfaceOutput()
                 mat_output.ConnectToSource(shader.GetOutput("surface"))
+            else:
+                sources, _ = mat_output.GetConnectedSources()
+                if not sources or sources[0].source.GetPath() != prim.GetPath():
+                    mat_output.ConnectToSource(shader.GetOutput("surface"))
 
     # Set input values
     inputs = ev.get("inputs", {})
@@ -331,6 +337,43 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     for name, value in inputs.items():
         type_name = input_types.get(name, "float")
         _set_shader_input_value(shader, name, value, type_name)
+
+
+def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
+    """Connect or disconnect shader inputs to/from other shader outputs."""
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if not prim or not prim.IsValid():
+        return
+    shader = UsdShade.Shader(prim)
+
+    for input_name, conn in ev.get("connections", {}).items():
+        source_prim = stage.GetPrimAtPath(conn["source_prim"])
+        if not source_prim or not source_prim.IsValid():
+            # Source shader may not exist yet — create it so the
+            # connection can be established. Its set_shader_input
+            # event will set the ID and other properties later.
+            source_prim = get_or_define_prim(
+                stage, conn["source_prim"], "Shader",
+            )
+        source_shader = UsdShade.Shader(source_prim)
+        source_output = source_shader.GetOutput(conn["source_output"])
+        if not source_output:
+            # Create the output with a generic token type — USD will
+            # resolve the actual type from the connection context.
+            source_output = source_shader.CreateOutput(
+                conn["source_output"], Sdf.ValueTypeNames.Token,
+            )
+        target_input = shader.GetInput(input_name)
+        if not target_input:
+            target_input = shader.CreateInput(
+                input_name, source_output.GetTypeName(),
+            )
+        target_input.ConnectToSource(source_output)
+
+    for input_name in ev.get("disconnections", []):
+        inp = shader.GetInput(input_name)
+        if inp:
+            inp.DisconnectSource()
 
 
 _EVENT_DISPATCH: dict[str, callable] = {
@@ -345,6 +388,7 @@ _EVENT_DISPATCH: dict[str, callable] = {
     K_UNLOAD_PAYLOAD: _apply_unload_payload,
     K_SET_MATERIAL_BINDING: _apply_set_material_binding,
     K_SET_SHADER_INPUT: _apply_set_shader_input,
+    K_SET_SHADER_CONNECTION: _apply_set_shader_connection,
 }
 
 

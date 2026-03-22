@@ -18,6 +18,7 @@ from .protocol import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -117,6 +118,60 @@ class DCCAdapter(ABC):
                          inputs: dict, input_types: dict) -> bool:
         """Set shader input values on a shader prim."""
         raise NotImplementedError
+
+    @abstractmethod
+    def set_shader_connection(self, prim_path: str,
+                              connections: dict,
+                              disconnections: list | None = None) -> bool:
+        """Connect/disconnect shader inputs to/from other shader outputs."""
+        raise NotImplementedError
+
+
+class ShaderMapper(ABC):
+    """Maps a USD shader type to a DCC-native node.
+
+    Subclass per DCC integration (Blender, Maya, etc.) and per shader
+    behavior (PBR surface, texture, UV reader).  The ``node`` parameter
+    in apply_value/post_apply is DCC-specific (untyped) — each
+    implementation knows its own node object type.
+    """
+
+    def __init__(self, shader_id: str, node_type: str, input_map: dict):
+        self.shader_id = shader_id
+        self.node_type = node_type
+        self._input_map = input_map
+
+    def get_native_input(self, usd_name: str) -> str | None:
+        """Return the DCC-native input name for a USD input, or None."""
+        return self._input_map.get(usd_name)
+
+    @abstractmethod
+    def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
+        """Apply a USD input value to the DCC node."""
+        raise NotImplementedError
+
+    def post_apply(self, node, inputs: dict) -> None:  # noqa: B027
+        """Hook called after all inputs are applied. Override as needed."""
+
+
+class ShaderMapperRegistry:
+    """Extensible registry of USD shader ID → ShaderMapper."""
+
+    def __init__(self):
+        self._mappers: dict[str, ShaderMapper] = {}
+
+    def register(self, mapper: ShaderMapper):
+        """Register a mapper for a shader ID."""
+        self._mappers[mapper.shader_id] = mapper
+
+    def get(self, shader_id: str) -> ShaderMapper | None:
+        """Look up a mapper by USD shader ID."""
+        return self._mappers.get(shader_id)
+
+    def get_node_type(self, shader_id: str) -> str | None:
+        """Return the DCC node type for a shader ID, or None."""
+        mapper = self._mappers.get(shader_id)
+        return mapper.node_type if mapper else None
 
 
 class UsdStageAdapter(DCCAdapter):
@@ -237,6 +292,19 @@ class UsdStageAdapter(DCCAdapter):
             {"k": K_SET_SHADER_INPUT, "prim": prim_path,
              "shader_id": shader_id, "inputs": inputs,
              "input_types": input_types},
+        )
+        return True
+
+    def set_shader_connection(self, prim_path: str,
+                              connections: dict,
+                              disconnections: list | None = None) -> bool:
+        from .event_apply import apply_event
+
+        apply_event(
+            self.stage,
+            {"k": K_SET_SHADER_CONNECTION, "prim": prim_path,
+             "connections": connections,
+             "disconnections": disconnections or []},
         )
         return True
 
@@ -380,6 +448,20 @@ class MockAdapter(DCCAdapter):
         p.setdefault("shader_inputs", {}).update(inputs)
         p.setdefault("shader_input_types", {}).update(input_types)
         LOG.info("MockAdapter: set shader input on %s", prim_path)
+        return True
+
+    def set_shader_connection(self, prim_path: str,
+                              connections: dict,
+                              disconnections: list | None = None) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
+            p = self._prims[prim_path]
+        conns = p.setdefault("shader_connections", {})
+        conns.update(connections)
+        for name in disconnections or []:
+            conns.pop(name, None)
+        LOG.info("MockAdapter: set shader connection on %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

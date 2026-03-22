@@ -21,6 +21,8 @@ except Exception:
 
 from openusdconnect.adapters import DCCAdapter
 
+from .shader_mapper import create_default_registry
+
 LOG = logging.getLogger(__name__)
 
 
@@ -35,6 +37,7 @@ class BlenderAdapter(DCCAdapter):
         self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
         self._imported_refs: dict[str, str] = {}  # prim_path -> asset_path
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
+        self._shader_registry = create_default_registry()
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -97,6 +100,8 @@ class BlenderAdapter(DCCAdapter):
 
         Returns a new bpy.types.Object with the mesh, or None on failure.
         """
+        import math
+
         import bmesh
 
         mesh = bpy.data.meshes.new(name + "_mesh")
@@ -117,6 +122,15 @@ class BlenderAdapter(DCCAdapter):
             else:
                 bm.free()
                 return None
+            # Generate UV coordinates for texture mapping
+            uv_layer = bm.loops.layers.uv.new("st")
+            for face in bm.faces:
+                for loop in face.loops:
+                    co = loop.vert.co
+                    # Spherical projection — works for all primitive shapes
+                    u = 0.5 + math.atan2(co.x, co.y) / (2 * math.pi)
+                    v = 0.5 + math.asin(max(-1, min(1, co.z))) / math.pi
+                    loop[uv_layer].uv = (u, v)
             bm.to_mesh(mesh)
         finally:
             bm.free()
@@ -174,9 +188,16 @@ class BlenderAdapter(DCCAdapter):
                 LOG.warning("Failed to move %s to collection %s", obj.name, target_col.name)
         LOG.info("ensure_prim: parented '%s' under '%s'", obj.name, parent_obj.name)
 
+    # Prim types that don't need scene objects — handled by their
+    # dedicated event handlers (set_shader_input, set_material_binding).
+    _NON_SCENE_TYPES = {"Material", "Shader", "NodeGraph", "Scope"}
+
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.ensure_prim dry: %s", prim_path)
+            return True
+        if type_name in self._NON_SCENE_TYPES:
+            LOG.info("ensure_prim: skipping non-scene type %s for %s", type_name, prim_path)
             return True
         obj = self._find_object_by_prim(prim_path)
         if obj:
@@ -324,7 +345,15 @@ class BlenderAdapter(DCCAdapter):
             and "faceVertexIndices" in attrs
         ):
             self._apply_mesh_topology(obj, attrs)
-            return True
+
+        # Standalone primvar:st update (without full topology rebuild)
+        elif "primvars:st" in attrs and obj.type == "MESH" and obj.data:
+            st = attrs["primvars:st"]
+            mesh = obj.data
+            uv_layer = mesh.uv_layers.get("st") or mesh.uv_layers.new(name="st")
+            for i, uv in enumerate(st):
+                if i < len(uv_layer.data):
+                    uv_layer.data[i].uv = tuple(uv)
 
         # Map USD parametric attrs to Blender object scale
         usd_type = obj.get("usd_type_name", "")
@@ -368,6 +397,16 @@ class BlenderAdapter(DCCAdapter):
 
         mesh.from_pydata(verts, [], faces)
         mesh.update()
+
+        # Apply primvars:st as UV layer if present
+        st = attrs.get("primvars:st")
+        if st and mesh.polygons:
+            uv_layer = mesh.uv_layers.new(name="st")
+            # faceVarying: one UV per loop (face-vertex)
+            for i, uv in enumerate(st):
+                if i < len(uv_layer.data):
+                    uv_layer.data[i].uv = tuple(uv)
+
         LOG.info(
             "BlenderAdapter: built mesh topology for %s (%d verts, %d faces)",
             obj.get("usd_prim_path", obj.name),
@@ -375,18 +414,6 @@ class BlenderAdapter(DCCAdapter):
             len(faces),
         )
 
-    # UsdPreviewSurface input → Blender 5.0+ Principled BSDF input name
-    _USD_TO_BSDF = {
-        "diffuseColor": "Base Color",
-        "metallic": "Metallic",
-        "roughness": "Roughness",
-        "emissiveColor": "Emission Color",
-        "clearcoat": "Coat Weight",
-        "clearcoatRoughness": "Coat Roughness",
-        "opacity": "Alpha",
-        "ior": "IOR",
-        "specularColor": "Specular Tint",
-    }
 
     def set_material_binding(self, prim_path: str, material_path: str) -> bool:
         if not BPY_AVAILABLE:
@@ -418,10 +445,33 @@ class BlenderAdapter(DCCAdapter):
                          inputs: dict, input_types: dict) -> bool:
         if not BPY_AVAILABLE:
             return True
-        if shader_id != "UsdPreviewSurface":
+        mapper = self._shader_registry.get(shader_id)
+        if not mapper:
             LOG.info("set_shader_input: unsupported shader %s", shader_id)
             return True
-        # Find the material this shader belongs to (parent prim path)
+
+        # Cache the shader_id for later use by set_shader_connection
+        self._prim_cache[prim_path + ":shader_id"] = shader_id
+
+        # Find or create the material and node
+        mat, node = self._get_or_create_shader_node_for_input(
+            prim_path, mapper.node_type,
+        )
+        if not mat or not node:
+            return False
+
+        for usd_name, value in inputs.items():
+            mapper.apply_value(
+                node, usd_name, value,
+                resolve_asset=self._resolve_asset_path,
+            )
+        mapper.post_apply(node, inputs)
+
+        LOG.info("set_shader_input: %s on %s", list(inputs.keys()), node.name)
+        return True
+
+    def _get_or_create_shader_node_for_input(self, prim_path, node_type):
+        """Find/create the material and target node for a shader input event."""
         mat_path = prim_path.rsplit("/", 1)[0]
         mat_name = mat_path.rsplit("/", 1)[-1]
         mat = bpy.data.materials.get(mat_name)
@@ -430,36 +480,140 @@ class BlenderAdapter(DCCAdapter):
             mat.use_nodes = True
         if not mat.use_nodes:
             mat.use_nodes = True
-        # Find or verify Principled BSDF node
-        principled = None
-        for node in mat.node_tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                principled = node
-                break
-        if not principled:
-            LOG.warning("set_shader_input: no Principled BSDF in %s", mat_name)
+
+        node_name = prim_path.rsplit("/", 1)[-1]
+        tree = mat.node_tree
+
+        # For Principled BSDF, reuse the existing default node
+        if node_type == "ShaderNodeBsdfPrincipled":
+            for n in tree.nodes:
+                if n.type == "BSDF_PRINCIPLED":
+                    n.name = node_name
+                    return mat, n
+            LOG.warning("No Principled BSDF in %s", mat_name)
+            return mat, None
+
+        # For other nodes, find by name or create
+        node = tree.nodes.get(node_name)
+        if not node:
+            node = tree.nodes.new(type=node_type)
+            node.name = node_name
+            node.label = node_name
+        return mat, node
+
+    # USD output name → Blender socket name
+    _OUTPUT_SOCKET_MAP = {
+        ("ShaderNodeTexImage", "rgb"): "Color",
+        ("ShaderNodeTexImage", "r"): "Color",
+        ("ShaderNodeTexImage", "a"): "Alpha",
+        ("ShaderNodeUVMap", "result"): "UV",
+    }
+
+    def set_shader_connection(self, prim_path: str,
+                              connections: dict,
+                              disconnections: list | None = None) -> bool:
+        if not BPY_AVAILABLE:
+            return True
+        # Find the material this shader belongs to
+        mat_path = prim_path.rsplit("/", 1)[0]
+        mat_name = mat_path.rsplit("/", 1)[-1]
+        mat = bpy.data.materials.get(mat_name)
+        if not mat or not mat.use_nodes:
+            LOG.warning(
+                "set_shader_connection: material %s not found", mat_name,
+            )
             return False
-        # Map UsdPreviewSurface inputs to Principled BSDF
-        for usd_name, value in inputs.items():
-            bsdf_name = self._USD_TO_BSDF.get(usd_name)
-            if not bsdf_name or bsdf_name not in principled.inputs:
+
+        tree = mat.node_tree
+        # Find the target node (the shader prim this event is for)
+        target_node = self._find_shader_node(tree, prim_path)
+
+        for input_name, conn in connections.items():
+            source_prim = conn["source_prim"]
+            source_output = conn["source_output"]
+
+            # Find or create the source node
+            source_node = self._find_or_create_shader_node(
+                tree, source_prim,
+            )
+            if not source_node or not target_node:
                 continue
-            inp = principled.inputs[bsdf_name]
-            if isinstance(value, list) and len(value) == 3:
-                inp.default_value = (*value, 1.0)  # RGB → RGBA
-            else:
-                inp.default_value = value
-        # Handle emissive — set emission strength to 1 if emissiveColor is set
-        # USD's emissiveColor is the final emission value (no separate
-        # strength). Blender defaults Emission Strength to 0, so set it
-        # to 1.0 (neutral passthrough) when emission color is non-zero.
-        if "emissiveColor" in inputs:
-            ec = inputs["emissiveColor"]
-            if isinstance(ec, list) and any(v > 0 for v in ec):
-                if "Emission Strength" in principled.inputs:
-                    principled.inputs["Emission Strength"].default_value = 1.0
-        LOG.info("set_shader_input: %s on %s", list(inputs.keys()), mat_name)
+
+            # Find the correct sockets
+            src_socket = self._get_output_socket(
+                source_node, source_output,
+            )
+            tgt_socket = self._get_input_socket(
+                target_node, input_name,
+            )
+            if src_socket and tgt_socket:
+                tree.links.new(src_socket, tgt_socket)
+
+        for input_name in disconnections or []:
+            if target_node and input_name in target_node.inputs:
+                for link in list(target_node.inputs[input_name].links):
+                    tree.links.remove(link)
+
+        LOG.info(
+            "set_shader_connection: %s on %s",
+            list(connections.keys()), mat_name,
+        )
         return True
+
+    def _find_shader_node(self, tree, prim_path: str):
+        """Find a Blender node by its USD prim path tag."""
+        node_name = prim_path.rsplit("/", 1)[-1]
+        return tree.nodes.get(node_name)
+
+    def _find_or_create_shader_node(self, tree, prim_path: str):
+        """Find or create a Blender shader node for a USD shader prim."""
+        node_name = prim_path.rsplit("/", 1)[-1]
+        existing = tree.nodes.get(node_name)
+        if existing:
+            return existing
+        shader_id = self._prim_cache.get(
+            prim_path + ":shader_id", "",
+        )
+        node_type = self._shader_registry.get_node_type(shader_id)
+        if not node_type:
+            LOG.info("Unknown shader %s for node creation", shader_id)
+            return None
+        node = tree.nodes.new(type=node_type)
+        node.name = node_name
+        node.label = node_name
+        return node
+
+    def _get_output_socket(self, node, usd_output_name: str):
+        """Map USD output name to Blender output socket."""
+        key = (node.bl_idname, usd_output_name)
+        socket_name = self._OUTPUT_SOCKET_MAP.get(key)
+        if socket_name and socket_name in node.outputs:
+            return node.outputs[socket_name]
+        # Fallback: try the first output
+        if node.outputs:
+            return node.outputs[0]
+        return None
+
+    def _get_input_socket(self, node, usd_input_name: str):
+        """Map USD input name to Blender input socket."""
+        # Check the shader_id cache to find the right mapper
+        for key, val in self._prim_cache.items():
+            if not key.endswith(":shader_id"):
+                continue
+            mapper = self._shader_registry.get(val)
+            if mapper and mapper.node_type == node.bl_idname:
+                blender_name = mapper.get_native_input(usd_input_name)
+                if blender_name and not blender_name.startswith("_"):
+                    if blender_name in node.inputs:
+                        return node.inputs[blender_name]
+                break
+        # Direct name match fallback
+        if usd_input_name in node.inputs:
+            return node.inputs[usd_input_name]
+        # UV input on texture nodes
+        if usd_input_name == "st" and "Vector" in node.inputs:
+            return node.inputs["Vector"]
+        return None
 
     def _resolve_asset_path(self, asset_path: str) -> str | None:
         """Resolve a possibly-relative asset path to an absolute file path.

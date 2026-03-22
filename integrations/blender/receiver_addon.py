@@ -29,6 +29,7 @@ from openusdconnect.protocol import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -100,6 +101,7 @@ _DISPATCH_TABLE: dict[str, str] = {
     K_UNLOAD_PAYLOAD: "unload_payload",
     K_SET_MATERIAL_BINDING: "set_material_binding",
     K_SET_SHADER_INPUT: "set_shader_input",
+    K_SET_SHADER_CONNECTION: "set_shader_connection",
 }
 
 # Per-event-type argument builders (returns kwargs for the adapter method).
@@ -129,6 +131,12 @@ def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
             ev.get("shader_id", ""),
             ev.get("inputs", {}),
             ev.get("input_types", {}),
+        ), {}
+    if k == K_SET_SHADER_CONNECTION:
+        return (
+            prim_path,
+            ev.get("connections", {}),
+            ev.get("disconnections", []),
         ), {}
     # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
     if k in (K_SET_XFORM_TRS, K_SET_XFORM_MATRICES):

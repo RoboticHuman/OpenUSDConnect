@@ -21,6 +21,7 @@ from .protocol import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -42,6 +43,7 @@ _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
 _C_MATERIAL_BINDING = "material_binding"
 _C_SHADER_INPUTS = "shader_inputs"
+_C_SHADER_CONNECTIONS = "shader_connections"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
 # inputs:/outputs: are UsdShade namespace — handled by set_shader_input.
@@ -263,31 +265,45 @@ def _read_material_binding(stage, prim_path):
 def _read_shader_inputs(stage, prim_path):
     """Read shader inputs and metadata from a Shader prim.
 
-    Returns (shader_id, inputs_dict, input_types_dict) or ("", {}, {})
-    if the prim is not a shader.
+    Returns (shader_id, inputs_dict, input_types_dict, connections_dict)
+    or ("", {}, {}, {}) if the prim is not a shader.
+
+    connections_dict maps input_name → {"source_prim": str, "source_output": str}
+    for connected inputs. Connected inputs are excluded from inputs_dict
+    since their values come from the connection, not direct authoring.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        return "", {}, {}
+        return "", {}, {}, {}
     if not prim.IsA(UsdShade.Shader):
-        return "", {}, {}
+        return "", {}, {}, {}
 
     shader = UsdShade.Shader(prim)
     shader_id = shader.GetIdAttr().Get() or ""
     if not shader_id:
-        return "", {}, {}
+        return "", {}, {}, {}
 
     inputs = {}
     input_types = {}
+    connections = {}
     for inp in shader.GetInputs():
         if not inp.GetAttr().IsAuthored():
             continue
         name = inp.GetBaseName()
+        # Check for connection first — connected inputs get their
+        # value from the source, not from direct authoring
+        sources, _ = inp.GetConnectedSources()
+        if sources:
+            connections[name] = {
+                "source_prim": str(sources[0].source.GetPath()),
+                "source_output": sources[0].sourceName,
+            }
+            continue
         val = _usd_value_to_python(inp.Get())
         if val is not None:
             inputs[name] = val
             input_types[name] = str(inp.GetAttr().GetTypeName())
-    return shader_id, inputs, input_types
+    return shader_id, inputs, input_types, connections
 
 
 class NoticeEmitter:
@@ -567,11 +583,12 @@ class NoticeEmitter:
             })
             pc[_C_MATERIAL_BINDING] = current_binding
 
-        # Shader input diff
-        shader_id, current_inputs, current_types = _read_shader_inputs(
-            self.stage, prim_path,
+        # Shader input + connection diff
+        shader_id, current_inputs, current_types, current_conns = (
+            _read_shader_inputs(self.stage, prim_path)
         )
         if shader_id:
+            # Value diff
             last_shader = pc.get(_C_SHADER_INPUTS, {})
             last_inputs = last_shader.get("inputs", {})
             changed_inputs = {}
@@ -592,6 +609,27 @@ class NoticeEmitter:
                 "shader_id": shader_id,
                 "inputs": current_inputs,
             }
+
+            # Connection diff
+            last_conns = pc.get(_C_SHADER_CONNECTIONS, {})
+            if current_conns != last_conns:
+                new_conns = {
+                    k: v for k, v in current_conns.items()
+                    if v != last_conns.get(k)
+                }
+                removed = [
+                    k for k in last_conns if k not in current_conns
+                ]
+                if new_conns or removed:
+                    ev = {
+                        "k": K_SET_SHADER_CONNECTION,
+                        "prim": prim_path,
+                        "connections": new_conns,
+                    }
+                    if removed:
+                        ev["disconnections"] = removed
+                    events.append(ev)
+                pc[_C_SHADER_CONNECTIONS] = current_conns
 
         # TRS partial diff
         last_trs = pc.get(_C_TRS, {})
