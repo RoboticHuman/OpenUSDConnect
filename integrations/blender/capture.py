@@ -27,6 +27,13 @@ try:
 except ImportError:
     _IDENTITY_4X4 = None
 
+from openusdconnect.axis_conversion import (
+    strip_axis_rotation,
+    zup_to_yup_quat,
+    zup_to_yup_scale,
+    zup_to_yup_vec,
+)
+
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom
 
@@ -427,42 +434,28 @@ class BlenderStageAuthor:
 
         loc, rot_quat, scl = _compute_local_trs(obj)
 
-        # Convert Blender transforms → stage coordinates.
-        # Check if parent already handles axis conversion (non-identity basis).
+        from .blender_adapter import _PROP_USD_IMPORTED, _has_axis_rotation
+
         orig = getattr(obj, "original", obj)
-        is_imported = orig.get("_usd_imported", False)
-        parent_handles_axis = False
-        parent = getattr(obj, "parent", None)
-        if parent is not None:
-            parent_orig = getattr(parent, "original", parent)
-            if _IDENTITY_4X4 is not None:
-                parent_handles_axis = parent_orig.matrix_world.to_quaternion() != mathutils.Quaternion()
+        is_imported = orig.get(_PROP_USD_IMPORTED, False)
+        parent_orig = getattr(obj, "parent", None)
+        if parent_orig is not None:
+            parent_orig = getattr(parent_orig, "original", parent_orig)
+        parent_handles = _has_axis_rotation(parent_orig)
 
-        if is_imported and self._needs_axis_conv and not parent_handles_axis:
-            # Object has its OWN Rx(90°) axis rotation — strip it.
-            from openusdconnect.axis_conversion import strip_axis_rotation
+        tx, ty, tz = loc.x, loc.y, loc.z
+        rw, rx, ry, rz = rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z
+        sx, sy, sz = scl.x, scl.y, scl.z
 
-            tx, ty, tz = loc.x, loc.y, loc.z
-            rw, rx, ry, rz = strip_axis_rotation(
-                rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z,
-            )
-            sx, sy, sz = scl.x, scl.y, scl.z
-        elif self._needs_axis_conv and not parent_handles_axis:
-            from openusdconnect.axis_conversion import (
-                zup_to_yup_quat,
-                zup_to_yup_scale,
-                zup_to_yup_vec,
-            )
-
-            tx, ty, tz = zup_to_yup_vec(loc.x, loc.y, loc.z)
-            rw, rx, ry, rz = zup_to_yup_quat(
-                rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z,
-            )
-            sx, sy, sz = zup_to_yup_scale(scl.x, scl.y, scl.z)
-        else:
-            tx, ty, tz = loc.x, loc.y, loc.z
-            rw, rx, ry, rz = rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z
-            sx, sy, sz = scl.x, scl.y, scl.z
+        if self._needs_axis_conv and not parent_handles:
+            if is_imported:
+                # Imported root: strip Rx(90°) display rotation, keep T/S
+                rw, rx, ry, rz = strip_axis_rotation(rw, rx, ry, rz)
+            else:
+                # Normal object: full Z-up → Y-up basis change
+                tx, ty, tz = zup_to_yup_vec(tx, ty, tz)
+                rw, rx, ry, rz = zup_to_yup_quat(rw, rx, ry, rz)
+                sx, sy, sz = zup_to_yup_scale(sx, sy, sz)
 
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
@@ -500,14 +493,18 @@ class BlenderStageAuthor:
             except ReferenceError:
                 stale_prims.append(pp)
 
-        for prim_path in stale_prims:
-            # Check if the object still exists in the scene (undo case)
-            found = None
-            for obj in bpy.data.objects:
-                if obj.get("usd_prim_path") == prim_path:
-                    found = obj
-                    break
+        if not stale_prims:
+            return
 
+        # Single O(N) scan instead of O(N) per stale prim
+        path_to_obj = {
+            obj.get("usd_prim_path"): obj
+            for obj in bpy.data.objects
+            if obj.get("usd_prim_path")
+        }
+
+        for prim_path in stale_prims:
+            found = path_to_obj.get(prim_path)
             if found is not None:
                 # Re-acquire reference — object survived undo
                 self._prim_refs[prim_path] = found
@@ -693,7 +690,7 @@ def _try_send_dirty_events(include_matrices: bool = False):
     if events:
         from collections import Counter
         kinds = Counter(e["k"] for e in events)
-        print(f"[capture] sending {len(events)} events: {dict(kinds)}")
+        LOG.debug("sending %d events: %s", len(events), dict(kinds))
         _state.sender.send_events(events)
 
 
@@ -746,7 +743,7 @@ def _depsgraph_handler(scene, depsgraph):
             _state.author.on_depsgraph_update(updates)
             dirty_count = len(_state.notice_emitter.dirty) if _state.notice_emitter else 0
             if dirty_count > 0:
-                print(f"[capture] depsgraph: {obj_count} obj updates, {dirty_count} dirty prims")
+                LOG.debug("depsgraph: %d obj updates, %d dirty prims", obj_count, dirty_count)
             _try_send_dirty_events(include_matrices=False)
 
     except Exception:

@@ -1,9 +1,15 @@
 """Axis conversion utilities for Y-up ↔ Z-up coordinate systems.
 
-Uses a uniform basis change (Rx(90°) conjugation) applied to every prim's
-local TRS.  This is mathematically equivalent to a single global coordinate
-change when applied uniformly across a hierarchy — no root-vs-child
-special-casing needed.
+Two kinds of rotation operation, each for a different situation:
+
+**Basis-change** (yup_to_zup_quat / zup_to_yup_quat):
+  Q' = Conv · Q · Conv⁻¹  — used for normal objects whose local TRS
+  is being converted between coordinate systems uniformly.
+
+**Compose / strip** (compose_axis_rotation / strip_axis_rotation):
+  Q' = Conv · Q  (or Conv⁻¹ · Q) — used for DCC-imported asset roots
+  that carry an explicit Rx(90°) for geometry display.  The emitter
+  strips it to recover the USD rotation; the receiver composes it back.
 
 Conversion formulas (derived from Conv = Rx(90°)):
   Translation:  (x, y, z)_Yup → (x, -z, y)_Zup

@@ -21,18 +21,28 @@ except Exception:
     _IDENTITY_4X4 = None
     _IDENTITY_QUAT = None
 
+from openusdconnect.adapters import DCCAdapter
+from openusdconnect.axis_conversion import (
+    compose_axis_rotation,
+    needs_conversion,
+    yup_to_zup_quat,
+    yup_to_zup_scale,
+    yup_to_zup_vec,
+)
+
+# Custom property marking objects imported via bpy.ops.wm.usd_import.
+_PROP_USD_IMPORTED = "_usd_imported"
+
 
 def _has_axis_rotation(obj) -> bool:
-    """Check if an object's world transform includes axis-conversion rotation.
+    """Return True if obj's world transform includes non-identity rotation.
 
-    Uses matrix_world (not matrix_basis) so it catches Rx(90°) from any
-    ancestor in the chain, not just the direct parent.
+    Uses matrix_world so it catches axis-conversion rotation from any
+    ancestor, not just the direct parent.
     """
     if not BPY_AVAILABLE or obj is None:
         return False
     return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
-
-from openusdconnect.adapters import DCCAdapter
 
 from .shader_mapper import create_default_registry
 
@@ -50,7 +60,7 @@ class BlenderAdapter(DCCAdapter):
         self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
         self._imported_refs: dict[str, tuple] = {}  # prim_path -> (asset, prim_ref)
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
-        self._scene_up_axis: str = scene_up_axis
+        self._needs_axis_conv: bool = needs_conversion(scene_up_axis)
         self._shader_registry = create_default_registry()
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
@@ -253,38 +263,25 @@ class BlenderAdapter(DCCAdapter):
             return False
 
         fields = payload.get("fields", [])
-        is_imported = obj.get("_usd_imported", False)
-
-        # Determine conversion mode:
-        # 1. _usd_imported: compose Rx(90°) onto rotation, pass T/S through
-        # 2. Parent has axis rotation: pass everything through (Y-up local)
-        # 3. Normal: full Y-up → Z-up basis-change conversion
-        parent_handles_axis = _has_axis_rotation(obj.parent)
-        convert = (
-            self._scene_up_axis == "Y"
-            and not is_imported
-            and not parent_handles_axis
-        )
+        is_imported = obj.get(_PROP_USD_IMPORTED, False)
+        parent_handles = _has_axis_rotation(obj.parent)
+        convert = self._needs_axis_conv and not is_imported and not parent_handles
 
         if "t" in fields and "t" in payload:
             t = payload["t"]
             tx, ty, tz = float(t[0]), float(t[1]), float(t[2])
             if convert:
-                from openusdconnect.axis_conversion import yup_to_zup_vec
-
                 tx, ty, tz = yup_to_zup_vec(tx, ty, tz)
             obj.location = (tx, ty, tz)
 
         if "r" in fields and "r" in payload:
-            r = payload["r"]  # [w,x,y,z]
+            r = payload["r"]
             rw, rx, ry, rz = float(r[0]), float(r[1]), float(r[2]), float(r[3])
-            if is_imported and self._scene_up_axis == "Y" and not parent_handles_axis:
-                from openusdconnect.axis_conversion import compose_axis_rotation
-
+            # Imported roots carry Rx(90°) for geometry display; compose it
+            # onto the incoming USD rotation when the parent doesn't already.
+            if is_imported and self._needs_axis_conv and not parent_handles:
                 rw, rx, ry, rz = compose_axis_rotation(rw, rx, ry, rz)
-            if convert:
-                from openusdconnect.axis_conversion import yup_to_zup_quat
-
+            elif convert:
                 rw, rx, ry, rz = yup_to_zup_quat(rw, rx, ry, rz)
             if BPY_AVAILABLE:
                 q = mathutils.Quaternion((rw, rx, ry, rz))
@@ -298,8 +295,6 @@ class BlenderAdapter(DCCAdapter):
             s = payload["s"]
             sx, sy, sz = float(s[0]), float(s[1]), float(s[2])
             if convert:
-                from openusdconnect.axis_conversion import yup_to_zup_scale
-
                 sx, sy, sz = yup_to_zup_scale(sx, sy, sz)
             obj.scale = (sx, sy, sz)
 
@@ -868,7 +863,7 @@ class BlenderAdapter(DCCAdapter):
 
             # Transfer container's properties to the imported root
             root["usd_prim_path"] = prim_path
-            root["_usd_imported"] = True
+            root[_PROP_USD_IMPORTED] = True
             for key in ("usd_type_name", "usd_ref_asset", "usd_ref_prim"):
                 val = container.get(key)
                 if val is not None:
@@ -882,13 +877,12 @@ class BlenderAdapter(DCCAdapter):
             root.parent = container_parent
             root.matrix_parent_inverse = container.matrix_parent_inverse.copy()
 
-            # If the parent already has axis-conversion rotation (Rx(90°)
-            # from the scene import), the root's own Rx(90°) from the
-            # asset import is redundant — the parent handles it.  Reset
-            # the root's rotation to identity to avoid double conversion.
+            # Avoid double Rx(90°): if the parent chain already has axis
+            # rotation, reset the root's own import-time rotation.
             if _has_axis_rotation(container_parent):
-                root.rotation_euler = (0, 0, 0)
                 root.rotation_quaternion = (1, 0, 0, 0)
+                root.rotation_euler = (0, 0, 0)
+                root.rotation_axis_angle = (0, 0, 1, 0)
 
             # Move any additional imported roots under the same parent
             for extra_root in imported_roots[1:]:

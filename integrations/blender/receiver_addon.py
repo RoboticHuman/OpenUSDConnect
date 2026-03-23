@@ -176,7 +176,7 @@ def _arc_changed(stage, ev, k):
             for e in ev.get("refs", [])
         ])
         changed = current != incoming
-        print(f"[recv] arc ref {prim_path} changed={changed}")
+        LOG.debug("arc ref %s changed=%s", prim_path, changed)
         return changed
     if k == K_SET_PAYLOAD:
         current = _normalize_arcs(_read_payloads(stage, prim_path))
@@ -185,13 +185,13 @@ def _arc_changed(stage, ev, k):
             for e in ev.get("payloads", [])
         ])
         changed = current != incoming
-        print(f"[recv] arc payload {prim_path} changed={changed}")
+        LOG.debug("arc payload %s changed=%s", prim_path, changed)
         return changed
     if k == K_SET_VARIANT_SELECTIONS:
         current = dict(_read_variant_selections(stage, prim_path))
         incoming = ev.get("selections", {})
         changed = current != incoming
-        print(f"[recv] arc variant {prim_path} changed={changed}")
+        LOG.debug("arc variant %s changed=%s", prim_path, changed)
         return changed
     return True
 
@@ -231,7 +231,7 @@ def _process_event(ev: dict):
         if cap is not None and cap._state.author is not None:
             stage = cap._state.author.stage
             if not _arc_changed(stage, ev, k):
-                print(f"[recv] skip adapter dispatch {k} {prim_path} (unchanged)")
+                LOG.debug("skip adapter dispatch %s %s (unchanged)", k, prim_path)
                 return
 
     _dispatch_event(_ADAPTER, k, prim_path, ev)
@@ -256,14 +256,14 @@ def _process_event(ev: dict):
                 # notices that trigger the emitter to re-emit everything.
                 if k in (K_SET_REFERENCE, K_SET_PAYLOAD, K_SET_VARIANT_SELECTIONS):
                     if not _arc_changed(stage, ev, k):
-                        print(f"[recv] skip sync {k} {prim_path}")
+                        LOG.debug("skip sync %s %s", k, prim_path)
                         return
                 if k == K_LOAD_PAYLOAD:
                     prim = stage.GetPrimAtPath(prim_path)
                     if prim and prim.IsValid() and prim.IsLoaded():
-                        print(f"[recv] skip sync {k} {prim_path} (loaded)")
+                        LOG.debug("skip sync %s %s (loaded)", k, prim_path)
                         return
-                print(f"[recv] apply to emitter: {k} {prim_path}")
+                LOG.debug("apply to emitter: %s %s", k, prim_path)
                 _apply_ev(stage, ev)
 
                 ne = cap._state.notice_emitter
