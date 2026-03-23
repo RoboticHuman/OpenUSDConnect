@@ -156,6 +156,46 @@ def _dispatch_event(adapter, k, prim_path, ev):
     method(*args, **kwargs)
 
 
+def _arc_changed(stage, ev, k):
+    """Check if a composition arc event differs from the emitter's stage."""
+    from openusdconnect.emitter import (
+        _read_payloads,
+        _read_references,
+        _read_variant_selections,
+    )
+
+    prim_path = ev.get("prim", "")
+
+    def _normalize_arcs(arcs):
+        return [(p.replace("\\", "/"), r) for p, r in arcs]
+
+    if k == K_SET_REFERENCE:
+        current = _normalize_arcs(_read_references(stage, prim_path))
+        incoming = _normalize_arcs([
+            (e.get("asset_path", ""), e.get("prim_path", ""))
+            for e in ev.get("refs", [])
+        ])
+        changed = current != incoming
+        print(f"[recv] arc ref {prim_path} changed={changed}")
+        return changed
+    if k == K_SET_PAYLOAD:
+        current = _normalize_arcs(_read_payloads(stage, prim_path))
+        incoming = _normalize_arcs([
+            (e.get("asset_path", ""), e.get("prim_path", ""))
+            for e in ev.get("payloads", [])
+        ])
+        changed = current != incoming
+        print(f"[recv] arc payload {prim_path} changed={changed}")
+        return changed
+    if k == K_SET_VARIANT_SELECTIONS:
+        current = dict(_read_variant_selections(stage, prim_path))
+        incoming = ev.get("selections", {})
+        changed = current != incoming
+        print(f"[recv] arc variant {prim_path} changed={changed}")
+        return changed
+    return True
+
+
 def _process_event(ev: dict):
     """Dispatch a single event to the BlenderAdapter.
 
@@ -165,7 +205,15 @@ def _process_event(ev: dict):
     """
     global _ADAPTER
     if _ADAPTER is None:
-        _ADAPTER = BlenderAdapter()
+        up_axis = "Y"  # default — most USD scenes are Y-up
+        cap = _get_capture_mod()
+        if cap is not None and getattr(cap, "_state", None) is not None:
+            author = getattr(cap._state, "author", None)
+            if author is not None:
+                from pxr import UsdGeom
+
+                up_axis = UsdGeom.GetStageUpAxis(author.stage)
+        _ADAPTER = BlenderAdapter(scene_up_axis=up_axis)
 
     k = ev.get("k")
     prim_path = ev.get("prim", "")
@@ -175,6 +223,16 @@ def _process_event(ev: dict):
     elif k == K_DEACTIVATE_PRIM:
         extra = f" active={ev.get('active')}"
     LOG.debug("event: k=%s prim=%s%s", k, prim_path, extra)
+
+    # Skip adapter dispatch for variant/reference events that haven't
+    # changed — prevents unnecessary remove + re-import on resync.
+    if k in (K_SET_VARIANT_SELECTIONS, K_SET_REFERENCE):
+        cap = _get_capture_mod()
+        if cap is not None and cap._state.author is not None:
+            stage = cap._state.author.stage
+            if not _arc_changed(stage, ev, k):
+                print(f"[recv] skip adapter dispatch {k} {prim_path} (unchanged)")
+                return
 
     _dispatch_event(_ADAPTER, k, prim_path, ev)
 
@@ -192,6 +250,20 @@ def _process_event(ev: dict):
 
             try:
                 stage = cap._state.author.stage
+
+                # Skip re-applying composition arcs that already match
+                # the emitter's stage — avoids unnecessary recomposition
+                # notices that trigger the emitter to re-emit everything.
+                if k in (K_SET_REFERENCE, K_SET_PAYLOAD, K_SET_VARIANT_SELECTIONS):
+                    if not _arc_changed(stage, ev, k):
+                        print(f"[recv] skip sync {k} {prim_path}")
+                        return
+                if k == K_LOAD_PAYLOAD:
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if prim and prim.IsValid() and prim.IsLoaded():
+                        print(f"[recv] skip sync {k} {prim_path} (loaded)")
+                        return
+                print(f"[recv] apply to emitter: {k} {prim_path}")
                 _apply_ev(stage, ev)
 
                 ne = cap._state.notice_emitter
@@ -218,6 +290,59 @@ def _process_event(ev: dict):
                         for child in Usd.PrimRange(prim, Usd.PrimAllPrimsPredicate):
                             if not child.IsActive():
                                 child.SetActive(True)
+
+                elif k == K_SET_REFERENCE:
+                    # Update emitter's caches so it doesn't re-emit
+                    # the reference or composed variant selections.
+                    if ne is not None:
+                        from pxr import Usd  # noqa: E402
+
+                        from openusdconnect.emitter import (
+                            _C_REFERENCES,
+                            _C_VARIANT_SELECTIONS,
+                            _read_references,
+                            _read_variant_selections,
+                        )
+                        pc = ne._prim_cache.setdefault(prim_path, {})
+                        pc[_C_REFERENCES] = _read_references(stage, prim_path)
+                        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                            stage, prim_path,
+                        )
+                        # Also cache variants for composed children
+                        prim = stage.GetPrimAtPath(prim_path)
+                        if prim and prim.IsValid():
+                            for child in Usd.PrimRange(prim):
+                                cp = str(child.GetPath())
+                                if cp == prim_path:
+                                    continue
+                                cvs = _read_variant_selections(stage, cp)
+                                if cvs:
+                                    cpc = ne._prim_cache.setdefault(cp, {})
+                                    cpc[_C_VARIANT_SELECTIONS] = cvs
+
+                elif k == K_SET_VARIANT_SELECTIONS:
+                    # Update the emitter's variant cache so it doesn't
+                    # re-emit the variant change on the next dirty cycle.
+                    if ne is not None:
+                        pc = ne._prim_cache.setdefault(prim_path, {})
+                        from openusdconnect.emitter import (
+                            _C_VARIANT_SELECTIONS,
+                            _read_variant_selections,
+                        )
+                        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                            stage, prim_path,
+                        )
+                        # Purge known prims for children so re-imported
+                        # objects are treated as fresh first-encounters.
+                        to_purge = [
+                            p for p in list(ne._known_prims)
+                            if p.startswith(prefix)
+                        ]
+                        for p in to_purge:
+                            ne._purge_caches(p)
+                    # Purge BlenderStageAuthor refs for old children
+                    cap._state.author.purge_prim_refs(prefix)
+
             except RuntimeError:
                 LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
 

@@ -21,6 +21,13 @@ import socket
 import bpy
 
 try:
+    import mathutils
+
+    _IDENTITY_4X4 = mathutils.Matrix.Identity(4)
+except ImportError:
+    _IDENTITY_4X4 = None
+
+try:
     from pxr import Gf, Sdf, Usd, UsdGeom
 
     PXR_AVAILABLE = True
@@ -161,8 +168,15 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
     bl_idname = "usd_connect.hook"
     bl_label = "USD Connect Hook"
 
+    # Set True by _import_ref_asset to suppress hook tagging during
+    # reference/payload imports — the adapter handles tagging with
+    # correct composed scene paths after import completes.
+    _skip_tagging: bool = False
+
     @staticmethod
     def on_import(import_context):
+        if USD_CONNECT_Hook._skip_tagging:
+            return True
         try:
             prim_map = import_context.get_prim_map()
         except Exception:
@@ -263,6 +277,13 @@ class BlenderStageAuthor:
         self.delta_layer = self.stage.GetSessionLayer()
         self.stage.SetEditTarget(Usd.EditTarget(self.delta_layer))
 
+        # Axis conversion: detect whether the stage is Y-up (needs Z↔Y swap)
+        from openusdconnect.axis_conversion import needs_conversion
+
+        self._needs_axis_conv: bool = needs_conversion(
+            UsdGeom.GetStageUpAxis(self.stage)
+        )
+
         self._last_matrix: dict = {}
         self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
         self._used_prim_paths: set = set()
@@ -276,7 +297,8 @@ class BlenderStageAuthor:
         for obj in bpy.context.scene.objects:
             if "usd_prim_path" not in obj:
                 continue
-            m = tuple(v for row in obj.matrix_world for v in row)
+            src = getattr(obj, "matrix_basis", obj.matrix_world)
+            m = tuple(v for row in src for v in row)
             self._last_matrix[obj.name] = m
 
     def seed_used_paths(self):
@@ -362,10 +384,13 @@ class BlenderStageAuthor:
             ancestors.append((ancestor, pp))
             ancestor = ancestor.parent
 
-        # Define/ensure top-down
+        # Define/ensure top-down — skip prims that already exist via
+        # composition (payload/reference children can't be redefined).
         for anc_obj, anc_path in reversed(ancestors):
             prim = self.stage.GetPrimAtPath(anc_path)
-            if not prim or not prim.IsValid():
+            if prim and prim.IsValid():
+                pass  # already exists (composed or defined)
+            else:
                 tn = anc_obj.get("usd_type_name", "Xform")
                 self.stage.DefinePrim(anc_path, tn)
             self._ensure_xform_ops(anc_path)
@@ -402,6 +427,43 @@ class BlenderStageAuthor:
 
         loc, rot_quat, scl = _compute_local_trs(obj)
 
+        # Convert Blender transforms → stage coordinates.
+        # Check if parent already handles axis conversion (non-identity basis).
+        orig = getattr(obj, "original", obj)
+        is_imported = orig.get("_usd_imported", False)
+        parent_handles_axis = False
+        parent = getattr(obj, "parent", None)
+        if parent is not None:
+            parent_orig = getattr(parent, "original", parent)
+            if _IDENTITY_4X4 is not None:
+                parent_handles_axis = parent_orig.matrix_world.to_quaternion() != mathutils.Quaternion()
+
+        if is_imported and self._needs_axis_conv and not parent_handles_axis:
+            # Object has its OWN Rx(90°) axis rotation — strip it.
+            from openusdconnect.axis_conversion import strip_axis_rotation
+
+            tx, ty, tz = loc.x, loc.y, loc.z
+            rw, rx, ry, rz = strip_axis_rotation(
+                rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z,
+            )
+            sx, sy, sz = scl.x, scl.y, scl.z
+        elif self._needs_axis_conv and not parent_handles_axis:
+            from openusdconnect.axis_conversion import (
+                zup_to_yup_quat,
+                zup_to_yup_scale,
+                zup_to_yup_vec,
+            )
+
+            tx, ty, tz = zup_to_yup_vec(loc.x, loc.y, loc.z)
+            rw, rx, ry, rz = zup_to_yup_quat(
+                rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z,
+            )
+            sx, sy, sz = zup_to_yup_scale(scl.x, scl.y, scl.z)
+        else:
+            tx, ty, tz = loc.x, loc.y, loc.z
+            rw, rx, ry, rz = rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z
+            sx, sy, sz = scl.x, scl.y, scl.z
+
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
 
@@ -410,11 +472,11 @@ class BlenderStageAuthor:
         s_op = find_op(xf, "scale")
 
         if t_op:
-            t_op.Set(Gf.Vec3d(loc.x, loc.y, loc.z))
+            t_op.Set(Gf.Vec3d(tx, ty, tz))
         if o_op:
-            o_op.Set(Gf.Quatf(rot_quat.w, Gf.Vec3f(rot_quat.x, rot_quat.y, rot_quat.z)))
+            o_op.Set(Gf.Quatf(rw, Gf.Vec3f(rx, ry, rz)))
         if s_op:
-            s_op.Set(Gf.Vec3d(scl.x, scl.y, scl.z))
+            s_op.Set(Gf.Vec3d(sx, sy, sz))
 
     def purge_prim_refs(self, prefix: str):
         """Remove tracked references for prims matching a path prefix."""
@@ -427,25 +489,38 @@ class BlenderStageAuthor:
     def _detect_deletions(self):
         """Check stored object references for deleted objects (ReferenceError).
 
-        For deleted objects, removes the prim from the local stage which
-        triggers NoticeEmitter deletion detection.
+        After undo, Blender invalidates Python references but the object
+        still exists in bpy.data.objects with a new pointer.  Re-acquire
+        the reference in that case instead of deactivating the prim.
         """
-        deleted_prims = []
+        stale_prims = []
         for pp, obj_ref in list(self._prim_refs.items()):
             try:
                 _ = obj_ref.name
             except ReferenceError:
-                deleted_prims.append(pp)
+                stale_prims.append(pp)
 
-        for prim_path in deleted_prims:
-            self._used_prim_paths.discard(prim_path)
-            self._prim_refs.pop(prim_path, None)
-            self._last_matrix.pop(prim_path, None)
-            # Remove prim from stage — triggers ObjectsChanged notice
-            prim = self.stage.GetPrimAtPath(prim_path)
-            if prim and prim.IsValid():
-                prim.SetActive(False)
-            LOG.info("Object deleted: deactivating prim %s", prim_path)
+        for prim_path in stale_prims:
+            # Check if the object still exists in the scene (undo case)
+            found = None
+            for obj in bpy.data.objects:
+                if obj.get("usd_prim_path") == prim_path:
+                    found = obj
+                    break
+
+            if found is not None:
+                # Re-acquire reference — object survived undo
+                self._prim_refs[prim_path] = found
+                LOG.info("Re-acquired reference for %s after undo", prim_path)
+            else:
+                # Truly deleted
+                self._used_prim_paths.discard(prim_path)
+                self._prim_refs.pop(prim_path, None)
+                self._last_matrix.pop(prim_path, None)
+                prim = self.stage.GetPrimAtPath(prim_path)
+                if prim and prim.IsValid():
+                    prim.SetActive(False)
+                LOG.info("Object deleted: deactivating prim %s", prim_path)
 
     def on_depsgraph_update(self, updates: list):
         """Main entry: author depsgraph changes to the local USD stage.
@@ -474,8 +549,10 @@ class BlenderStageAuthor:
             # deletion detection and identity lookups in _resolve_prim_path.
             self._prim_refs[prim_path] = getattr(obj, "original", obj)
 
-            # Check if matrix actually changed
-            m = tuple(v for row in obj.matrix_world for v in row)
+            # Check if transform changed. Prefer matrix_basis (local)
+            # to avoid re-emitting children when only the parent moved.
+            src = getattr(obj, "matrix_basis", obj.matrix_world)
+            m = tuple(v for row in src for v in row)
             last = self._last_matrix.get(obj.name)
             if last == m and self.stage.GetPrimAtPath(prim_path):
                 continue
@@ -614,6 +691,9 @@ def _try_send_dirty_events(include_matrices: bool = False):
         return
     events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
     if events:
+        from collections import Counter
+        kinds = Counter(e["k"] for e in events)
+        print(f"[capture] sending {len(events)} events: {dict(kinds)}")
         _state.sender.send_events(events)
 
 
@@ -662,7 +742,11 @@ def _depsgraph_handler(scene, depsgraph):
 
         if _state.author is not None and _state.author.enabled:
             _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
+            obj_count = sum(1 for u in updates if isinstance(u.id, bpy.types.Object))
             _state.author.on_depsgraph_update(updates)
+            dirty_count = len(_state.notice_emitter.dirty) if _state.notice_emitter else 0
+            if dirty_count > 0:
+                print(f"[capture] depsgraph: {obj_count} obj updates, {dirty_count} dirty prims")
             _try_send_dirty_events(include_matrices=False)
 
     except Exception:
@@ -729,7 +813,6 @@ class USD_CONNECT_OT_start_capture(bpy.types.Operator):
         if not PXR_AVAILABLE:
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
-        _reset_stage_author()
         try:
             author = _get_stage_author(context)
         except Exception as e:

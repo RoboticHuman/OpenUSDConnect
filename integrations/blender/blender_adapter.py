@@ -15,9 +15,22 @@ try:
 
     BPY_AVAILABLE = True
     _IDENTITY_4X4 = mathutils.Matrix.Identity(4)
+    _IDENTITY_QUAT = mathutils.Quaternion()
 except Exception:
     BPY_AVAILABLE = False
     _IDENTITY_4X4 = None
+    _IDENTITY_QUAT = None
+
+
+def _has_axis_rotation(obj) -> bool:
+    """Check if an object's world transform includes axis-conversion rotation.
+
+    Uses matrix_world (not matrix_basis) so it catches Rx(90°) from any
+    ancestor in the chain, not just the direct parent.
+    """
+    if not BPY_AVAILABLE or obj is None:
+        return False
+    return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
 
 from openusdconnect.adapters import DCCAdapter
 
@@ -33,10 +46,11 @@ class BlenderAdapter(DCCAdapter):
     Rotation payload is quaternion [w,x,y,z]; converts to object's rotation_mode.
     """
 
-    def __init__(self):
+    def __init__(self, scene_up_axis: str = "Y"):
         self._prim_cache: dict[str, object] = {}  # prim_path -> bpy.types.Object
-        self._imported_refs: dict[str, str] = {}  # prim_path -> asset_path
+        self._imported_refs: dict[str, tuple] = {}  # prim_path -> (asset, prim_ref)
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
+        self._scene_up_axis: str = scene_up_axis
         self._shader_registry = create_default_registry()
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
@@ -48,7 +62,7 @@ class BlenderAdapter(DCCAdapter):
                     if obj.get("usd_type_name") == "Reference":
                         ref_asset = obj.get("usd_ref_asset", "")
                         if ref_asset:
-                            self._imported_refs[pp] = ref_asset
+                            self._imported_refs[pp] = (ref_asset, obj.get("usd_ref_prim", ""))
 
     def _find_object_by_prim(self, prim_path: str) -> object | None:
         if not BPY_AVAILABLE:
@@ -239,15 +253,41 @@ class BlenderAdapter(DCCAdapter):
             return False
 
         fields = payload.get("fields", [])
+        is_imported = obj.get("_usd_imported", False)
+
+        # Determine conversion mode:
+        # 1. _usd_imported: compose Rx(90°) onto rotation, pass T/S through
+        # 2. Parent has axis rotation: pass everything through (Y-up local)
+        # 3. Normal: full Y-up → Z-up basis-change conversion
+        parent_handles_axis = _has_axis_rotation(obj.parent)
+        convert = (
+            self._scene_up_axis == "Y"
+            and not is_imported
+            and not parent_handles_axis
+        )
 
         if "t" in fields and "t" in payload:
             t = payload["t"]
-            obj.location = (float(t[0]), float(t[1]), float(t[2]))
+            tx, ty, tz = float(t[0]), float(t[1]), float(t[2])
+            if convert:
+                from openusdconnect.axis_conversion import yup_to_zup_vec
+
+                tx, ty, tz = yup_to_zup_vec(tx, ty, tz)
+            obj.location = (tx, ty, tz)
 
         if "r" in fields and "r" in payload:
             r = payload["r"]  # [w,x,y,z]
+            rw, rx, ry, rz = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+            if is_imported and self._scene_up_axis == "Y" and not parent_handles_axis:
+                from openusdconnect.axis_conversion import compose_axis_rotation
+
+                rw, rx, ry, rz = compose_axis_rotation(rw, rx, ry, rz)
+            if convert:
+                from openusdconnect.axis_conversion import yup_to_zup_quat
+
+                rw, rx, ry, rz = yup_to_zup_quat(rw, rx, ry, rz)
             if BPY_AVAILABLE:
-                q = mathutils.Quaternion((float(r[0]), float(r[1]), float(r[2]), float(r[3])))
+                q = mathutils.Quaternion((rw, rx, ry, rz))
                 if obj.rotation_mode == "QUATERNION":
                     obj.rotation_quaternion = q
                 else:
@@ -256,7 +296,12 @@ class BlenderAdapter(DCCAdapter):
 
         if "s" in fields and "s" in payload:
             s = payload["s"]
-            obj.scale = (float(s[0]), float(s[1]), float(s[2]))
+            sx, sy, sz = float(s[0]), float(s[1]), float(s[2])
+            if convert:
+                from openusdconnect.axis_conversion import yup_to_zup_scale
+
+                sx, sy, sz = yup_to_zup_scale(sx, sy, sz)
+            obj.scale = (sx, sy, sz)
 
         return True
 
@@ -744,37 +789,44 @@ class BlenderAdapter(DCCAdapter):
         return resolved
 
     def _import_ref_asset(self, container, prim_path, resolved, prim_path_ref):
-        """Import a single USD asset and parent results under *container*.
+        """Import a USD asset and merge the imported root into *container*.
 
-        Returns the set of newly created Blender objects (may be empty).
+        The container (created by ensure_prim) is consumed: the imported
+        root takes over its prim_path, position, and parent — becoming
+        the single object that represents the prim.
+
+        Returns (new_objs, merged) where merged is the new prim
+        representation, or None if no objects were imported.
         """
         LOG.info("set_reference: importing %s for %s", resolved, prim_path)
         before = set(bpy.data.objects)
 
-        try:
-            import_kwargs = {
-                "filepath": resolved,
-                "import_guide": False,
-                "import_visible_only": True,
-            }
-            if prim_path_ref:
-                import_kwargs["prim_path_mask"] = prim_path_ref
+        # Suppress USDHook tagging during this import — the adapter
+        # handles tagging with correct composed scene paths below.
+        from .capture import USD_CONNECT_Hook
 
-            window = bpy.context.window
-            if window is None:
-                windows = list(bpy.context.window_manager.windows)
-                window = windows[0] if windows else None
+        USD_CONNECT_Hook._skip_tagging = True
 
-            if window is not None:
-                with bpy.context.temp_override(window=window):
-                    bpy.ops.wm.usd_import(**import_kwargs)
-            else:
+        import_kwargs = {
+            "filepath": resolved,
+            "import_guide": False,
+            "import_visible_only": True,
+        }
+        if prim_path_ref:
+            import_kwargs["prim_path_mask"] = prim_path_ref
+
+        window = bpy.context.window
+        if window is None:
+            windows = list(bpy.context.window_manager.windows)
+            window = windows[0] if windows else None
+
+        if window is not None:
+            with bpy.context.temp_override(window=window):
                 bpy.ops.wm.usd_import(**import_kwargs)
-        except Exception:
-            LOG.exception(
-                "BlenderAdapter: USD import failed for %s", resolved
-            )
-            return set()
+        else:
+            bpy.ops.wm.usd_import(**import_kwargs)
+
+        USD_CONNECT_Hook._skip_tagging = False
 
         new_objs = set(bpy.data.objects) - before
         if not new_objs:
@@ -791,19 +843,69 @@ class BlenderAdapter(DCCAdapter):
             if obj.parent is None or obj.parent not in new_objs
         ]
 
+        # Tag imported children with composed scene paths.
+        imported_root_set = set(imported_roots)
         for obj in new_objs:
-            obj_name = obj.name.replace(".", "_")
-            child_path = f"{prim_path}/{obj_name}"
-            obj["usd_prim_path"] = child_path
-            self._prim_cache[child_path] = obj
+            if obj in imported_root_set:
+                continue
+            # Remap file-internal paths to composed scene paths.
+            # e.g. "/teapot/geo" → "/World/Teapot/geo".
+            hook_path = obj.get("usd_prim_path", "")
+            if hook_path and prim_path_ref and hook_path.startswith(prim_path_ref):
+                composed_path = prim_path + hook_path[len(prim_path_ref):]
+            else:
+                obj_name = obj.name.replace(".", "_")
+                composed_path = f"{prim_path}/{obj_name}"
+            obj["usd_prim_path"] = composed_path
+            self._prim_cache[composed_path] = obj
 
-        for root in imported_roots:
-            world = root.matrix_world.copy()
-            root.parent = container
-            root.matrix_parent_inverse = _IDENTITY_4X4.copy()
-            root.matrix_basis = container.matrix_world.inverted_safe() @ world
+        # Merge: replace the container with the first imported root.
+        # The root becomes the prim representation — it holds both the
+        # container's position and the import-time Rx(90°) axis rotation.
+        merged = None
+        if imported_roots:
+            root = imported_roots[0]
 
-        return new_objs
+            # Transfer container's properties to the imported root
+            root["usd_prim_path"] = prim_path
+            root["_usd_imported"] = True
+            for key in ("usd_type_name", "usd_ref_asset", "usd_ref_prim"):
+                val = container.get(key)
+                if val is not None:
+                    root[key] = val
+
+            # Copy container's location (the prim's position from set_xform_trs)
+            root.location = container.location.copy()
+
+            # Reparent root under container's parent
+            container_parent = container.parent
+            root.parent = container_parent
+            root.matrix_parent_inverse = container.matrix_parent_inverse.copy()
+
+            # If the parent already has axis-conversion rotation (Rx(90°)
+            # from the scene import), the root's own Rx(90°) from the
+            # asset import is redundant — the parent handles it.  Reset
+            # the root's rotation to identity to avoid double conversion.
+            if _has_axis_rotation(container_parent):
+                root.rotation_euler = (0, 0, 0)
+                root.rotation_quaternion = (1, 0, 0, 0)
+
+            # Move any additional imported roots under the same parent
+            for extra_root in imported_roots[1:]:
+                extra_root.parent = root
+                extra_root.matrix_parent_inverse = _IDENTITY_4X4.copy()
+
+            # Remove the container
+            self._prim_cache.pop(prim_path, None)
+            for col in container.users_collection:
+                col.objects.unlink(container)
+            bpy.data.objects.remove(container)
+
+            # Register the merged root as the prim representation
+            self._prim_cache[prim_path] = root
+            merged = root
+
+        return new_objs, merged
 
     def _enrich_materialx_from_import(self, resolved, prim_path, prim_path_ref):
         """Read MaterialX materials from an imported USD file and apply them.
@@ -967,15 +1069,16 @@ class BlenderAdapter(DCCAdapter):
         #      (e.g. single-instance emitter+receiver loopback) — children
         #      exist but _imported_refs is empty.
         if self._ref_children_exist(prim_path):
-            prev = self._imported_refs.get(prim_path)
-            if prev is None or prev == resolved_refs[0][0]:
+            prev_entry = self._imported_refs.get(prim_path)
+            prev_asset = prev_entry[0] if prev_entry else None
+            if prev_asset is None or prev_asset == resolved_refs[0][0]:
                 # Same asset (or unknown) and children present — skip import.
                 # Tag the container for future dedup.
                 container = self._find_object_by_prim(prim_path)
                 if container is not None and len(resolved_refs) == 1:
                     container["usd_type_name"] = "Reference"
                     container["usd_ref_asset"] = resolved_refs[0][0]
-                    self._imported_refs[prim_path] = resolved_refs[0][0]
+                    self._imported_refs[prim_path] = (resolved_refs[0][0], resolved_refs[0][1])
                 LOG.info(
                     "set_reference: children already exist for %s, skipping re-import",
                     prim_path,
@@ -1006,17 +1109,21 @@ class BlenderAdapter(DCCAdapter):
             container["usd_type_name"] = "Reference"
 
         total_imported = 0
+        prim_obj = container  # may be replaced by merge
         for resolved, prim_path_ref in resolved_refs:
-            new_objs = self._import_ref_asset(
-                container, prim_path, resolved, prim_path_ref
+            new_objs, merged = self._import_ref_asset(
+                prim_obj, prim_path, resolved, prim_path_ref
             )
             total_imported += len(new_objs)
+            if merged is not None:
+                prim_obj = merged  # container was consumed by merge
             self._enrich_materialx_from_import(resolved, prim_path, prim_path_ref)
 
-        # Tag container with resolved asset (for dedup on single-ref)
+        # Tag prim object with resolved asset (for dedup on single-ref)
         if len(resolved_refs) == 1:
-            container["usd_ref_asset"] = resolved_refs[0][0]
-            self._imported_refs[prim_path] = resolved_refs[0][0]
+            prim_obj["usd_ref_asset"] = resolved_refs[0][0]
+            prim_obj["usd_ref_prim"] = resolved_refs[0][1]
+            self._imported_refs[prim_path] = (resolved_refs[0][0], resolved_refs[0][1])
 
         LOG.info(
             "BlenderAdapter.set_reference: imported %d objects for %s",
@@ -1087,16 +1194,20 @@ class BlenderAdapter(DCCAdapter):
             LOG.info("load_payload: children already exist for %s, skipping", prim_path)
             return True
         # Resolve and import
-        container = self._find_object_by_prim(prim_path)
-        if container is None:
+        prim_obj = self._find_object_by_prim(prim_path)
+        if prim_obj is None:
             self.ensure_prim(prim_path)
-            container = self._find_object_by_prim(prim_path)
+            prim_obj = self._find_object_by_prim(prim_path)
         for entry in payloads:
             asset_path = entry.get("asset_path", "")
             prim_path_ref = entry.get("prim_path", "")
             resolved = self._resolve_asset_path(asset_path)
             if resolved is not None:
-                self._import_ref_asset(container, prim_path, resolved, prim_path_ref)
+                new_objs, merged = self._import_ref_asset(
+                    prim_obj, prim_path, resolved, prim_path_ref,
+                )
+                if merged is not None:
+                    prim_obj = merged
                 self._enrich_materialx_from_import(resolved, prim_path, prim_path_ref)
         LOG.info("BlenderAdapter.load_payload: loaded %s", prim_path)
         return True
@@ -1109,33 +1220,77 @@ class BlenderAdapter(DCCAdapter):
         LOG.info("BlenderAdapter.unload_payload: unloaded %s", prim_path)
         return True
 
+    def _create_variant_stage(self, asset_path, prim_path_ref, selections):
+        """Create a temporary USD file with variant selections pre-applied."""
+        import tempfile
+
+        try:
+            from pxr import Usd
+        except ImportError:
+            return None
+
+        try:
+            stage = Usd.Stage.Open(asset_path)
+        except Exception:
+            LOG.debug("Could not open %s for variant stage", asset_path)
+            return None
+
+        root_path = prim_path_ref or str(stage.GetDefaultPrim().GetPath())
+        prim = stage.GetPrimAtPath(root_path)
+        if not prim or not prim.IsValid():
+            return None
+
+        vsets = prim.GetVariantSets()
+        for name, value in selections.items():
+            if vsets.HasVariantSet(name):
+                vsets.GetVariantSet(name).SetVariantSelection(value)
+
+        tmp_dir = os.path.dirname(asset_path)
+        tmp = tempfile.NamedTemporaryFile(suffix=".usda", delete=False, dir=tmp_dir)
+        tmp_path = tmp.name
+        tmp.close()
+        stage.Export(tmp_path)
+        return tmp_path
+
     def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
         """Apply variant selection changes.
 
         If the prim has previously imported children (from a reference or
-        payload), remove them and re-import so Blender reflects the new
-        variant's geometry.  Otherwise just log — attribute-level changes
-        (radius, transforms, etc.) arrive as separate events.
+        payload), remove them and re-import with the new variant applied.
         """
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.set_variant_selections dry: %s -> %s", prim_path, selections)
             return True
 
-        # If this prim has imported children from a ref/payload, re-import
-        # to pick up the variant's composed geometry.
-        prev_asset = self._imported_refs.get(prim_path)
-        if prev_asset and self._ref_children_exist(prim_path):
+        prev_entry = self._imported_refs.get(prim_path)
+        if prev_entry and self._ref_children_exist(prim_path):
+            prev_asset, prev_prim_ref = prev_entry
             self._remove_imported_ref_children(prim_path)
             container = self._find_object_by_prim(prim_path)
             if container is not None:
-                self._import_ref_asset(container, prim_path, prev_asset, "")
-                self._imported_refs[prim_path] = prev_asset
+                temp_path = self._create_variant_stage(
+                    prev_asset, prev_prim_ref, selections,
+                )
+                import_path = temp_path or prev_asset
+                _objs, _merged = self._import_ref_asset(
+                    container, prim_path, import_path, prev_prim_ref,
+                )
+                self._enrich_materialx_from_import(
+                    import_path, prim_path, prev_prim_ref,
+                )
+                self._imported_refs[prim_path] = (prev_asset, prev_prim_ref)
+                if temp_path:
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
             LOG.info(
                 "set_variant_selections: re-imported %s after variant change %s",
                 prim_path, selections,
             )
         else:
             LOG.info(
-                "BlenderAdapter.set_variant_selections: %s -> %s", prim_path, selections,
+                "BlenderAdapter.set_variant_selections: %s -> %s",
+                prim_path, selections,
             )
         return True

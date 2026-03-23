@@ -130,6 +130,13 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
             attr.Set(Vt.IntArray(value))
         elif type_name == "float[]":
             attr.Set(Vt.FloatArray(value))
+        elif type_name in ("float3", "vector3f", "normal3f", "point3f",
+                          "color3f") and len(value) == 3:
+            attr.Set(Gf.Vec3f(*value))
+        elif type_name in ("float2", "texCoord2f") and len(value) == 2:
+            attr.Set(Gf.Vec2f(*value))
+        elif type_name == "double3" and len(value) == 3:
+            attr.Set(Gf.Vec3d(*value))
         else:
             attr.Set(value)
     else:
