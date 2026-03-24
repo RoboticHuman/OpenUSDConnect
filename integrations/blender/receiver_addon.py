@@ -359,8 +359,6 @@ def _process_event(ev: dict):
             except RuntimeError:
                 LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
 
-    # Track import events for post-batch cache seeding (see _process_queue_timer).
-
 
 def _set_applying_remote(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
@@ -430,10 +428,7 @@ def _process_queue_timer():
             cap = _get_capture_mod()
             if cap is not None:
                 for pp in _pending_seed_paths:
-                    try:
-                        cap.seed_emitter_caches_for_import(pp)
-                    except Exception:
-                        LOG.debug("Failed to seed emitter caches for %s", pp)
+                    cap.seed_emitter_caches_for_import(pp)
             _pending_seed_paths.clear()
     finally:
         _set_applying_remote(False)

@@ -1150,10 +1150,10 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             return
         prefix = prim_path + "/"
-        to_remove = [
+        to_remove = {
             pp for pp in self._prim_cache
             if pp.startswith(prefix)
-        ]
+        }
         # Single O(N) scan — cached refs may be stale if objects were
         # deleted by undo, user action, or merge.
         path_to_obj = {
@@ -1284,8 +1284,8 @@ class BlenderAdapter(DCCAdapter):
                 tmp.close()
                 stage.Export(tmp_path)
                 return tmp_path
-            except Exception:
-                # Clean up the failed temp file and try the next dir
+            except OSError as e:
+                LOG.warning("_create_variant_stage: export to %s failed: %s", tmp_dir, e)
                 try:
                     os.remove(tmp_path)
                 except OSError:

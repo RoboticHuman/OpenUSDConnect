@@ -161,9 +161,8 @@ class UsdSyncServer:
             return
 
         tombstoned: set[str] = set()
-        latest: dict[tuple[str, str], dict] = {}
-        # Track origin per (prim, kind) so compacted records preserve it.
-        origins: dict[tuple[str, str], str | None] = {}
+        # (ev, origin) tuples — same pattern as replay_children_after_load.
+        latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
 
         for _seq, event_json in rows:
             rec = json.loads(event_json)
@@ -172,20 +171,10 @@ class UsdSyncServer:
             k = ev.get("k", "")
             origin = rec.get("origin")
 
-            if k == K_DELETE_PRIM:
+            if k in (K_DELETE_PRIM, K_RENAME_PRIM):
                 tombstoned.add(prim)
                 latest = {key: val for key, val in latest.items() if key[0] != prim}
-                origins = {key: val for key, val in origins.items() if key[0] != prim}
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
-                continue
-
-            if k == K_RENAME_PRIM:
-                tombstoned.add(prim)
-                latest = {key: val for key, val in latest.items() if key[0] != prim}
-                origins = {key: val for key, val in origins.items() if key[0] != prim}
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
+                latest[(prim, k)] = (ev, origin)
                 continue
 
             if prim in tombstoned:
@@ -194,32 +183,29 @@ class UsdSyncServer:
             # load/unload are mutually exclusive — only the last one wins.
             if k == K_LOAD_PAYLOAD:
                 latest.pop((prim, K_UNLOAD_PAYLOAD), None)
-                origins.pop((prim, K_UNLOAD_PAYLOAD), None)
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
+                latest[(prim, k)] = (ev, origin)
                 continue
             if k == K_UNLOAD_PAYLOAD:
                 latest.pop((prim, K_LOAD_PAYLOAD), None)
-                origins.pop((prim, K_LOAD_PAYLOAD), None)
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
+                latest[(prim, k)] = (ev, origin)
                 continue
 
             if k == K_SET_XFORM_TRS:
-                prev = latest.get((prim, k))
-                if prev:
+                existing = latest.get((prim, k))
+                if existing:
+                    prev = existing[0]
                     for field in ("t", "r", "s"):
                         if field in ev.get("fields", []):
                             prev[field] = ev[field]
                             if field not in prev["fields"]:
                                 prev["fields"].append(field)
-                    origins[(prim, k)] = origin
+                    latest[(prim, k)] = (prev, origin)
                 else:
-                    latest[(prim, k)] = ev
-                    origins[(prim, k)] = origin
+                    latest[(prim, k)] = (ev, origin)
             elif k == K_SET_GPRIM_ATTRS:
-                prev = latest.get((prim, k))
-                if prev:
+                existing = latest.get((prim, k))
+                if existing:
+                    prev = existing[0]
                     prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
                     new_meta = ev.get("primvar_meta", {})
                     if new_meta:
@@ -227,45 +213,38 @@ class UsdSyncServer:
                     new_interp = ev.get("attr_interp", {})
                     if new_interp:
                         prev.setdefault("attr_interp", {}).update(new_interp)
-                    origins[(prim, k)] = origin
+                    latest[(prim, k)] = (prev, origin)
                 else:
-                    latest[(prim, k)] = ev
-                    origins[(prim, k)] = origin
+                    latest[(prim, k)] = (ev, origin)
             elif k == K_SET_SHADER_INPUT:
-                prev = latest.get((prim, k))
-                if prev:
+                existing = latest.get((prim, k))
+                if existing:
+                    prev = existing[0]
                     prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
                     prev.setdefault("input_types", {}).update(
                         ev.get("input_types", {}),
                     )
                     if ev.get("shader_id"):
                         prev["shader_id"] = ev["shader_id"]
-                    origins[(prim, k)] = origin
+                    latest[(prim, k)] = (prev, origin)
                 else:
-                    latest[(prim, k)] = ev
-                    origins[(prim, k)] = origin
-            elif k in LATEST_WINS_KINDS:
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
+                    latest[(prim, k)] = (ev, origin)
             else:
-                latest[(prim, k)] = ev
-                origins[(prim, k)] = origin
+                latest[(prim, k)] = (ev, origin)
 
-        sorted_keys = sorted(
-            latest.keys(),
-            key=lambda key: (
-                latest[key]["prim"].count("/"),
-                latest[key]["prim"],
-                EVENT_KIND_ORDER[latest[key]["k"]],
+        sorted_entries = sorted(
+            latest.values(),
+            key=lambda entry: (
+                entry[0]["prim"].count("/"),
+                entry[0]["prim"],
+                EVENT_KIND_ORDER[entry[0]["k"]],
             ),
         )
 
         with self._seq_lock:
             self._next_seq = 1
         records = []
-        for key in sorted_keys:
-            ev = latest[key]
-            origin = origins.get(key)
+        for ev, origin in sorted_entries:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             if origin:
@@ -273,7 +252,7 @@ class UsdSyncServer:
             records.append((seq, json.dumps(rec)))
         self.store.clear_and_rewrite(records)
 
-        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_keys))
+        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
 
         # Tell connected receivers to reset and replay from the compacted log.
         self.broadcast({"type": MSG_RESYNC})
