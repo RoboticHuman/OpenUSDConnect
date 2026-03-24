@@ -48,10 +48,16 @@ LOG = logging.getLogger(__name__)
 _RECEIVER: ReceiverThread | None = None
 _ADAPTER: BlenderAdapter | None = None
 _QUEUE_TIMER_REGISTERED = False
+# Prim paths that need emitter cache seeding after view_layer.update().
+_pending_seed_paths: set[str] = set()
 # Feedback loop guard: set True while applying remote events
 _APPLYING_REMOTE = False
 # Track last sequence number across reconnects
 _LAST_SEQ: int = 0
+# Shared origin for echo suppression — same value used by the emitter
+# (NetworkSender) so the server knows both connections belong to
+# this Blender instance and won't echo events back.
+from . import SESSION_ORIGIN as _ORIGIN
 
 # Lazy-cached reference to the capture module (avoids per-call import overhead)
 _capture_mod = None
@@ -236,6 +242,13 @@ def _process_event(ev: dict):
 
     _dispatch_event(_ADAPTER, k, prim_path, ev)
 
+    # Track import events for post-batch cache seeding.  Must happen here
+    # (before the emitter stage sync block) because the sync block can
+    # return early when the payload is already loaded on the emitter's
+    # stage (USD auto-loads payloads with the default LoadAll policy).
+    if k in (K_LOAD_PAYLOAD, K_SET_REFERENCE):
+        _pending_seed_paths.add(prim_path)
+
     # Keep the emitter's stage in sync with payload and reference arcs so
     # its composed view matches what the receiver imported/removed.  This
     # mirrors how the base-file case works: the emitter's stage has the
@@ -346,6 +359,8 @@ def _process_event(ev: dict):
             except RuntimeError:
                 LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
 
+    # Track import events for post-batch cache seeding (see _process_queue_timer).
+
 
 def _set_applying_remote(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
@@ -405,6 +420,21 @@ def _process_queue_timer():
                 bpy.context.view_layer.update()
         except RuntimeError:
             pass
+
+        # Seed emitter caches AFTER view_layer.update() so matrices reflect
+        # final evaluated state (parenting, constraints, etc.).  Seeding
+        # before the update captures stale matrices that won't match the
+        # next depsgraph evaluation, causing the emitter to re-process
+        # every imported object.
+        if _pending_seed_paths:
+            cap = _get_capture_mod()
+            if cap is not None:
+                for pp in _pending_seed_paths:
+                    try:
+                        cap.seed_emitter_caches_for_import(pp)
+                    except Exception:
+                        LOG.debug("Failed to seed emitter caches for %s", pp)
+            _pending_seed_paths.clear()
     finally:
         _set_applying_remote(False)
 
@@ -447,6 +477,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             _RECEIVER = ReceiverThread(
                 host=host, port=port, sync_from=sync_from,
                 client_id=f"blender-receiver-{os.getpid()}",
+                origin=_ORIGIN,
             )
             _RECEIVER.start()
             if not _QUEUE_TIMER_REGISTERED:

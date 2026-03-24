@@ -144,14 +144,28 @@ def clamp_fields(fields: list[str]) -> list[str]:
 
 
 def make_hello(
-    role: str, sync_from: int | None = None, client_id: str | None = None,
+    role: str,
+    sync_from: int | None = None,
+    client_id: str | None = None,
+    origin: str | None = None,
 ) -> dict:
-    """Build a hello message."""
+    """Build a hello message.
+
+    Args:
+        role: "emitter" or "receiver".
+        sync_from: Sequence number to replay from (receivers only).
+        client_id: Per-connection identifier.
+        origin: Session-level identifier shared by all connections from the
+            same DCC instance.  The server uses this to suppress echo —
+            events are not broadcast back to receivers with matching origin.
+    """
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
         msg["sync_from"] = sync_from
     if client_id is not None:
         msg["client_id"] = client_id
+    if origin is not None:
+        msg["origin"] = origin
     return msg
 
 

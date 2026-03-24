@@ -96,6 +96,7 @@ class TestApplyEvent:
 
     def test_set_xform_trs_full(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"})
         ev = {
             "k": K_SET_XFORM_TRS,
             "prim": "/World/Sphere",
@@ -120,6 +121,7 @@ class TestApplyEvent:
 
     def test_set_xform_trs_partial(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"})
         # First set full TRS
         apply_event(
             stage,
@@ -191,6 +193,7 @@ class TestApplyEvent:
 
     def test_rename_preserves_transform(self, stage):
         stage.DefinePrim("/World/OldName", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/OldName"})
         apply_event(
             stage,
             {

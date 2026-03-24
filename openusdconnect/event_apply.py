@@ -145,15 +145,21 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
 
 def _apply_set_xform_trs(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
     fields = ev.get("fields", [])
-    _, _, t_op, o_op, s_op = ensure_canonical_ops(stage, prim_path)
+    xf = UsdGeom.Xformable(prim)
+    t_op = find_op(xf, "translate")
+    o_op = find_op(xf, "orient")
+    s_op = find_op(xf, "scale")
 
-    if "t" in fields:
+    if "t" in fields and t_op:
         x, y, z = ev["t"]
         t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
-    if "r" in fields:
+    if "r" in fields and o_op:
         o_op.Set(quatf_from_wxyz(ev["r"]))
-    if "s" in fields:
+    if "s" in fields and s_op:
         x, y, z = ev["s"]
         s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
 

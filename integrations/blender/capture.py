@@ -448,14 +448,15 @@ class BlenderStageAuthor:
         sx, sy, sz = scl.x, scl.y, scl.z
 
         if self._needs_axis_conv and not parent_handles:
+            # T and S always need Z-up → Y-up conversion.
+            tx, ty, tz = zup_to_yup_vec(tx, ty, tz)
+            sx, sy, sz = zup_to_yup_scale(sx, sy, sz)
             if is_imported:
-                # Imported root: strip Rx(90°) display rotation, keep T/S
+                # Imported root: strip Rx(90°) display rotation
                 rw, rx, ry, rz = strip_axis_rotation(rw, rx, ry, rz)
             else:
-                # Normal object: full Z-up → Y-up basis change
-                tx, ty, tz = zup_to_yup_vec(tx, ty, tz)
+                # Normal object: full Z-up → Y-up rotation
                 rw, rx, ry, rz = zup_to_yup_quat(rw, rx, ry, rz)
-                sx, sy, sz = zup_to_yup_scale(sx, sy, sz)
 
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
@@ -614,10 +615,12 @@ class BlenderStageAuthor:
 class NetworkSender:
     """Thin TCP connection for sending protocol events to the server."""
 
-    def __init__(self, host: str, port: int, client_id: str | None = None):
+    def __init__(self, host: str, port: int, client_id: str | None = None, origin: str | None = None):
         self.host = host
         self.port = port
         self.client_id = client_id or f"blender-emitter-{os.getpid()}"
+        from . import SESSION_ORIGIN
+        self.origin = origin or SESSION_ORIGIN
         self.sock: socket.socket | None = None
 
         # Lazy import to support vendored openusdconnect
@@ -631,7 +634,7 @@ class NetworkSender:
 
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
-        self._send_line(self.sock, self._make_hello("emitter", client_id=self.client_id))
+        self._send_line(self.sock, self._make_hello("emitter", client_id=self.client_id, origin=self.origin))
         LOG.info("Network sender connected to %s:%d", self.host, self.port)
 
     def disconnect(self):
@@ -703,6 +706,91 @@ def set_emitter_feedback_guard(value: bool):
             _state.notice_emitter.unsuppress()
     if _state.author is not None:
         _state.author._applying_remote = value
+
+
+def seed_emitter_caches_for_import(prim_path: str):
+    """Seed emitter caches for a prim hierarchy after receiver import.
+
+    When the receiver imports objects (via load_payload or set_reference),
+    the emitter has never seen those objects.  Without seeding, the first
+    user interaction triggers the depsgraph handler to process every object,
+    author to the stage, and send a storm of events to the server.
+
+    Seeds both BlenderStageAuthor caches (matrix, prim refs) and
+    NoticeEmitter caches (known prims, prim cache) so the emitter treats
+    the hierarchy as already-tracked.
+    """
+    author = _state.author
+    ne = _state.notice_emitter
+    if author is None:
+        return
+
+    prefix = prim_path + "/"
+
+    # --- Seed BlenderStageAuthor caches from Blender objects ---
+    for obj in bpy.data.objects:
+        pp = obj.get("usd_prim_path")
+        if not pp:
+            continue
+        if pp != prim_path and not pp.startswith(prefix):
+            continue
+        src = getattr(obj, "matrix_basis", obj.matrix_world)
+        m = tuple(v for row in src for v in row)
+        author._last_matrix[obj.name] = m
+        author._prim_refs[pp] = obj
+        author._used_prim_paths.add(pp)
+
+    # --- Seed NoticeEmitter caches from emitter's stage ---
+    if ne is None:
+        return
+    stage = author.stage
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
+
+    from pxr import Usd
+
+    from openusdconnect.emitter import (
+        _C_GPRIM_ATTRS,
+        _C_MATERIAL_BINDING,
+        _C_PAYLOAD_LOADED,
+        _C_PAYLOADS,
+        _C_REFERENCES,
+        _C_VARIANT_SELECTIONS,
+        _read_material_binding,
+        _read_payloads,
+        _read_references,
+        _read_variant_selections,
+        _should_track_attr,
+        _usd_value_to_python,
+    )
+
+    for child in Usd.PrimRange(prim):
+        cp = str(child.GetPath())
+        # Don't seed _known_prims — let the emitter send ensure_prim +
+        # ensure_xform_ops on first encounter.  These structural events
+        # are small, idempotent, and needed by the server to create
+        # xform ops on payload prims (which can't be done inside a
+        # ChangeBlock).  The _prim_cache seeding below prevents the
+        # expensive state dump (material bindings, variants, gprim attrs).
+        pc = ne._prim_cache.setdefault(cp, {})
+        pc[_C_REFERENCES] = _read_references(stage, cp)
+        pc[_C_PAYLOADS] = _read_payloads(stage, cp)
+        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(stage, cp)
+        pc[_C_MATERIAL_BINDING] = _read_material_binding(stage, cp)
+        if child.HasAuthoredPayloads():
+            pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
+        # Seed gprim attr cache so the first move doesn't trigger a
+        # full mesh data scan (points, UVs, displayColor, etc.).
+        gprim_snapshot = {}
+        for attr in child.GetAttributes():
+            name = attr.GetName()
+            if attr.IsAuthored() and _should_track_attr(name):
+                val = _usd_value_to_python(attr.Get())
+                if val is not None:
+                    gprim_snapshot[name] = val
+        if gprim_snapshot:
+            pc[_C_GPRIM_ATTRS] = gprim_snapshot
 
 
 def _reset_stage_author():

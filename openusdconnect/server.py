@@ -73,6 +73,7 @@ class ClientInfo:
     role: str
     address: tuple
     client_id: str | None = None
+    origin: str | None = None
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     event_count: int = 0
@@ -161,23 +162,30 @@ class UsdSyncServer:
 
         tombstoned: set[str] = set()
         latest: dict[tuple[str, str], dict] = {}
+        # Track origin per (prim, kind) so compacted records preserve it.
+        origins: dict[tuple[str, str], str | None] = {}
 
         for _seq, event_json in rows:
             rec = json.loads(event_json)
             ev = rec.get("event", rec)
             prim = ev.get("prim", "")
             k = ev.get("k", "")
+            origin = rec.get("origin")
 
             if k == K_DELETE_PRIM:
                 tombstoned.add(prim)
                 latest = {key: val for key, val in latest.items() if key[0] != prim}
+                origins = {key: val for key, val in origins.items() if key[0] != prim}
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
                 continue
 
             if k == K_RENAME_PRIM:
                 tombstoned.add(prim)
                 latest = {key: val for key, val in latest.items() if key[0] != prim}
+                origins = {key: val for key, val in origins.items() if key[0] != prim}
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
                 continue
 
             if prim in tombstoned:
@@ -186,11 +194,15 @@ class UsdSyncServer:
             # load/unload are mutually exclusive — only the last one wins.
             if k == K_LOAD_PAYLOAD:
                 latest.pop((prim, K_UNLOAD_PAYLOAD), None)
+                origins.pop((prim, K_UNLOAD_PAYLOAD), None)
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
                 continue
             if k == K_UNLOAD_PAYLOAD:
                 latest.pop((prim, K_LOAD_PAYLOAD), None)
+                origins.pop((prim, K_LOAD_PAYLOAD), None)
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
                 continue
 
             if k == K_SET_XFORM_TRS:
@@ -201,8 +213,10 @@ class UsdSyncServer:
                             prev[field] = ev[field]
                             if field not in prev["fields"]:
                                 prev["fields"].append(field)
+                    origins[(prim, k)] = origin
                 else:
                     latest[(prim, k)] = ev
+                    origins[(prim, k)] = origin
             elif k == K_SET_GPRIM_ATTRS:
                 prev = latest.get((prim, k))
                 if prev:
@@ -213,8 +227,10 @@ class UsdSyncServer:
                     new_interp = ev.get("attr_interp", {})
                     if new_interp:
                         prev.setdefault("attr_interp", {}).update(new_interp)
+                    origins[(prim, k)] = origin
                 else:
                     latest[(prim, k)] = ev
+                    origins[(prim, k)] = origin
             elif k == K_SET_SHADER_INPUT:
                 prev = latest.get((prim, k))
                 if prev:
@@ -224,28 +240,40 @@ class UsdSyncServer:
                     )
                     if ev.get("shader_id"):
                         prev["shader_id"] = ev["shader_id"]
+                    origins[(prim, k)] = origin
                 else:
                     latest[(prim, k)] = ev
+                    origins[(prim, k)] = origin
             elif k in LATEST_WINS_KINDS:
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
             else:
                 latest[(prim, k)] = ev
+                origins[(prim, k)] = origin
 
-        sorted_events = sorted(
-            latest.values(),
-            key=lambda e: (e["prim"].count("/"), e["prim"], EVENT_KIND_ORDER[e["k"]]),
+        sorted_keys = sorted(
+            latest.keys(),
+            key=lambda key: (
+                latest[key]["prim"].count("/"),
+                latest[key]["prim"],
+                EVENT_KIND_ORDER[latest[key]["k"]],
+            ),
         )
 
         with self._seq_lock:
             self._next_seq = 1
         records = []
-        for ev in sorted_events:
+        for key in sorted_keys:
+            ev = latest[key]
+            origin = origins.get(key)
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
+            if origin:
+                rec["origin"] = origin
             records.append((seq, json.dumps(rec)))
         self.store.clear_and_rewrite(records)
 
-        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_events))
+        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_keys))
 
         # Tell connected receivers to reset and replay from the compacted log.
         self.broadcast({"type": MSG_RESYNC})
@@ -292,15 +320,17 @@ class UsdSyncServer:
 
         record_jsons = self.store.search_like(f'%"prim": "{prefix}%')
 
-        # Collect the latest event of each relevant kind per child prim
-        latest: dict[tuple[str, str], dict] = {}
+        # Collect the latest event of each relevant kind per child prim.
+        # Store (ev, origin) tuples so replayed broadcasts can suppress
+        # echo back to the original sender.
+        latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
         for event_json in record_jsons:
             rec = json.loads(event_json)
             ev = rec.get("event", rec)
             ep = ev.get("prim", "")
             ek = ev.get("k", "")
             if ep.startswith(prefix) and ek in replay_kinds:
-                latest[(ep, ek)] = ev
+                latest[(ep, ek)] = (ev, rec.get("origin"))
 
         if not latest:
             return
@@ -308,13 +338,15 @@ class UsdSyncServer:
         # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
         sorted_events = sorted(
             latest.values(),
-            key=lambda e: (e["prim"], EVENT_KIND_ORDER[e["k"]]),
+            key=lambda e: (e[0]["prim"], EVENT_KIND_ORDER[e[0]["k"]]),
         )
 
-        for ev in sorted_events:
+        for ev, origin in sorted_events:
             rec = {"type": MSG_EVENT, "seq": self.assign_seq(), "event": ev}
+            if origin:
+                rec["origin"] = origin
             self.append_log(rec)
-            self.broadcast(rec)
+            self.broadcast(rec, exclude_origin=origin)
 
         LOG.info(
             "Replayed %d child events after load_payload %s",
@@ -331,12 +363,15 @@ class UsdSyncServer:
         if callback in self._event_listeners:
             self._event_listeners.remove(callback)
 
-    def register_client(self, address: tuple, role: str, client_id: str | None = None):
+    def register_client(
+        self, address: tuple, role: str,
+        client_id: str | None = None, origin: str | None = None,
+    ):
         """Register a connected client for tracking."""
         key = f"{address[0]}:{address[1]}"
         with self.clients_lock:
             self.clients[key] = ClientInfo(
-                role=role, address=address, client_id=client_id,
+                role=role, address=address, client_id=client_id, origin=origin,
             )
 
     def unregister_client(self, address: tuple):
@@ -345,11 +380,19 @@ class UsdSyncServer:
         with self.clients_lock:
             self.clients.pop(key, None)
 
-    def broadcast(self, rec: dict):
+    def broadcast(self, rec: dict, exclude_origin: str | None = None):
+        """Broadcast a record to all connected receivers.
+
+        If *exclude_origin* is given, receivers whose ``_origin`` matches
+        are skipped — this suppresses echo back to the DCC instance that
+        sent the event.
+        """
         line = (json.dumps(rec) + "\n").encode("utf-8")
         dead = []
         with self.clients_lock:
             for h in self.receivers:
+                if exclude_origin and getattr(h, "_origin", None) == exclude_origin:
+                    continue
                 try:
                     h.request.sendall(line)
                 except OSError:
@@ -413,6 +456,7 @@ class UsdSyncServer:
                     "role": i.role,
                     "address": f"{i.address[0]}:{i.address[1]}",
                     "client_id": i.client_id,
+                    "origin": i.origin,
                     "connected_at": i.connected_at,
                     "last_activity_ago": round(now - i.last_activity, 1),
                     "event_count": i.event_count,
@@ -501,7 +545,12 @@ class UsdSyncServer:
             return self.stage.Flatten().ExportToString()
 
     def replay_from(self, handler, seq_start: int):
-        """Replay events from the event store starting at seq_start."""
+        """Replay events from the event store starting at seq_start.
+
+        All events are replayed regardless of origin — the receiver needs
+        its own prior edits (which share its origin) to restore state.
+        Origin filtering only applies to live broadcast to prevent echo.
+        """
         try:
             record_jsons = self.store.get_from_seq(seq_start)
             for record_json in record_jsons:
@@ -533,8 +582,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         role = hello.get("role")
         client_id = hello.get("client_id")
-        LOG.info("Client connected: role=%s from %s", role, self.client_address)
-        sync_server.register_client(self.client_address, role, client_id)
+        self._origin = hello.get("origin")
+        LOG.info("Client connected: role=%s origin=%s from %s", role, self._origin, self.client_address)
+        sync_server.register_client(self.client_address, role, client_id, origin=self._origin)
 
         if role == "receiver":
             sync_from = int(hello.get("sync_from", 1))
@@ -606,8 +656,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     "client": addr_key,
                     "client_id": client_id,
                 }
+                if self._origin:
+                    rec["origin"] = self._origin
                 sync_server.append_log(rec)
-                sync_server.broadcast(rec)
+                sync_server.broadcast(rec, exclude_origin=self._origin)
             # Update client activity tracking — no lock needed since
             # each connection has its own _read_loop thread.
             if info:

@@ -341,6 +341,7 @@ class NoticeEmitter:
         # _migrate_caches and _purge_caches handle all keys automatically.
         self._prim_cache: dict[str, dict] = {}
         self._dirty_attrs: dict[str, set[str]] = {}
+        self._resynced_prims: set[str] = set()
 
     def cleanup(self):
         """Deregister notice listener and clear all caches.
@@ -354,6 +355,7 @@ class NoticeEmitter:
         self._prim_cache.clear()
         self._known_prims.clear()
         self._dirty_attrs.clear()
+        self._resynced_prims.clear()
         self.dirty.clear()
 
     def suppress(self):
@@ -371,6 +373,7 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
         self._dirty_attrs.clear()
+        self._resynced_prims.clear()
 
     def _classify_resync(self, notice, prim_path: str) -> str | None:
         """Classify a resync path into an action.
@@ -418,6 +421,7 @@ class NoticeEmitter:
                 self._deactivated_prims.add(prim_path)
             elif action == "dirty":
                 self.dirty.add(prim_path)
+                self._resynced_prims.add(prim_path)
 
         for p in notice.GetChangedInfoOnlyPaths():
             path_str = str(p)
@@ -667,10 +671,14 @@ class NoticeEmitter:
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
             last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
-            # When no specific attrs were flagged by the notice (first encounter,
-            # variant switch, or any resync), scan all authored trackable attrs
-            # and diff against the cache.
-            if not dirty_attr_names:
+            # Full attr scan: needed on first encounter (cache empty) or
+            # after a resync notice (variant switch, structural change).
+            # Skipped for plain info-only changes (e.g., only xformOp values
+            # changed) where the cache is already populated — avoids reading
+            # thousands of mesh vertices every frame.
+            is_resync = prim_path in self._resynced_prims
+            self._resynced_prims.discard(prim_path)
+            if not dirty_attr_names and (not last_attrs or is_resync):
                 for attr in prim.GetAttributes():
                     name = attr.GetName()
                     if attr.IsAuthored() and self._attr_filter(name):

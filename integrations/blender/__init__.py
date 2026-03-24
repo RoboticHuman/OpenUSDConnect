@@ -16,6 +16,12 @@ bl_info = {
 
 import os
 import sys
+import uuid
+
+# Session-level origin identifier shared by emitter and receiver connections
+# from this Blender instance.  The server uses it to suppress echo — events
+# are not broadcast back to connections with the same origin.
+SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 
 # Ensure the addon directory is on sys.path so vendored openusdconnect is importable
 _addon_dir = os.path.dirname(os.path.abspath(__file__))

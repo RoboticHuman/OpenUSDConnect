@@ -265,7 +265,11 @@ class BlenderAdapter(DCCAdapter):
         fields = payload.get("fields", [])
         is_imported = obj.get(_PROP_USD_IMPORTED, False)
         parent_handles = _has_axis_rotation(obj.parent)
-        convert = self._needs_axis_conv and not is_imported and not parent_handles
+        # Axis conversion for T and S applies to ALL objects (imported or not)
+        # when the scene is Y-up and no ancestor handles the rotation.
+        # The is_imported flag only affects rotation handling (compose_axis_rotation
+        # vs yup_to_zup_quat) — it should not skip T/S conversion.
+        convert = self._needs_axis_conv and not parent_handles
 
         if "t" in fields and "t" in payload:
             t = payload["t"]
@@ -889,11 +893,18 @@ class BlenderAdapter(DCCAdapter):
                 extra_root.parent = root
                 extra_root.matrix_parent_inverse = _IDENTITY_4X4.copy()
 
-            # Remove the container
+            # Remove the container — frees its name for the merged root.
+            container_name = container.name
             self._prim_cache.pop(prim_path, None)
             for col in container.users_collection:
                 col.objects.unlink(container)
             bpy.data.objects.remove(container)
+
+            # The imported root may have a suffixed name (e.g. "Teapot.001")
+            # because the container existed during import.  Now that the
+            # container is gone, reclaim the original name.
+            if root.name != container_name:
+                root.name = container_name
 
             # Register the merged root as the prim representation
             self._prim_cache[prim_path] = root
@@ -1143,16 +1154,21 @@ class BlenderAdapter(DCCAdapter):
             pp for pp in self._prim_cache
             if pp.startswith(prefix)
         ]
+        # Single O(N) scan — cached refs may be stale if objects were
+        # deleted by undo, user action, or merge.
+        path_to_obj = {
+            o.get("usd_prim_path"): o
+            for o in bpy.data.objects
+            if o.get("usd_prim_path") in to_remove
+        }
         for pp in to_remove:
-            obj = self._prim_cache.pop(pp)
-            if not hasattr(obj, "users_collection"):
+            self._prim_cache.pop(pp)
+            obj = path_to_obj.get(pp)
+            if obj is None:
                 continue
-            try:
-                for col in obj.users_collection:
-                    col.objects.unlink(obj)
-                bpy.data.objects.remove(obj)
-            except ReferenceError:
-                pass  # already deleted
+            for col in obj.users_collection:
+                col.objects.unlink(obj)
+            bpy.data.objects.remove(obj)
 
         # Clean up emitter state so _detect_deletions doesn't find stale
         # references and trigger a storm of deactivation events.
@@ -1185,6 +1201,16 @@ class BlenderAdapter(DCCAdapter):
             return False
         # Dedup: skip if children already exist (same pattern as set_reference)
         if self._ref_children_exist(prim_path):
+            # Still populate _imported_refs so set_variant_selections can
+            # find the asset on resync (adapter was reset but objects persist).
+            if prim_path not in self._imported_refs:
+                for entry in payloads:
+                    asset_path = entry.get("asset_path", "")
+                    prim_path_ref = entry.get("prim_path", "")
+                    resolved = self._resolve_asset_path(asset_path)
+                    if resolved is not None:
+                        self._imported_refs[prim_path] = (resolved, prim_path_ref)
+                        break
             LOG.info("load_payload: children already exist for %s, skipping", prim_path)
             return True
         # Resolve and import
@@ -1203,6 +1229,11 @@ class BlenderAdapter(DCCAdapter):
                 if merged is not None:
                     prim_obj = merged
                 self._enrich_materialx_from_import(resolved, prim_path, prim_path_ref)
+                # Track the imported asset so set_variant_selections can
+                # find it later for re-import with the new variant applied.
+                prim_obj["usd_ref_asset"] = resolved
+                prim_obj["usd_ref_prim"] = prim_path_ref
+                self._imported_refs[prim_path] = (resolved, prim_path_ref)
         LOG.info("BlenderAdapter.load_payload: loaded %s", prim_path)
         return True
 
@@ -1239,12 +1270,28 @@ class BlenderAdapter(DCCAdapter):
             if vsets.HasVariantSet(name):
                 vsets.GetVariantSet(name).SetVariantSelection(value)
 
-        tmp_dir = os.path.dirname(asset_path)
-        tmp = tempfile.NamedTemporaryFile(suffix=".usda", delete=False, dir=tmp_dir)
-        tmp_path = tmp.name
-        tmp.close()
-        stage.Export(tmp_path)
-        return tmp_path
+        # Write the temp file next to the asset so relative texture paths
+        # resolve correctly.  Fall back to the system temp dir if the asset
+        # directory isn't writable (common on Windows where USD's safe-write
+        # rename can fail with "Access is denied").
+        asset_dir = os.path.dirname(asset_path)
+        for tmp_dir in (asset_dir, None):
+            try:
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".usda", delete=False, dir=tmp_dir,
+                )
+                tmp_path = tmp.name
+                tmp.close()
+                stage.Export(tmp_path)
+                return tmp_path
+            except Exception:
+                # Clean up the failed temp file and try the next dir
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        LOG.warning("_create_variant_stage: could not export variant stage for %s", asset_path)
+        return None
 
     def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
         """Apply variant selection changes.
