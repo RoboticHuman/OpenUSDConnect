@@ -184,7 +184,7 @@ def _build_status_cards(srv: UsdSyncServer):
             ui.label("CLIENTS").classes("text-xs dash-muted uppercase")
             client_val = ui.label("--").classes("text-2xl font-bold dash-accent")
         with ui.card().classes("flex-1"):
-            ui.label("PRIMS").classes("text-xs dash-muted uppercase")
+            ui.label("PRIMS (STAGE / TRACKED)").classes("text-xs dash-muted uppercase")
             prim_val = ui.label("--").classes("text-2xl font-bold dash-accent")
 
     def _fmt(s):
@@ -196,7 +196,7 @@ def _build_status_cards(srv: UsdSyncServer):
         uptime_val.text = _fmt(srv.get_uptime())
         event_val.text = f"{srv.get_event_count():,}"
         client_val.text = str(len(srv.get_client_list()))
-        prim_val.text = str(srv.get_prim_count())
+        prim_val.text = f"{srv.get_prim_count()} / {srv.get_tracked_prim_count()}"
 
     ui.timer(2.0, refresh)
     refresh()
@@ -217,6 +217,28 @@ def _build_operations(srv: UsdSyncServer):
     async def export_flatten():
         ui.download(srv.export_flattened_string().encode(), "flattened.usda")
 
+    async def purge():
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Purge all data?").classes("text-lg font-bold")
+            ui.label(
+                "This will delete all events from the log, clear the edit layer, "
+                "and reset all connected receivers. The base scene will be restored. "
+                "This cannot be undone."
+            ).classes("text-sm dash-muted")
+            with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                ui.button("Cancel", on_click=dialog.close).props("flat dense no-caps")
+
+                def confirm():
+                    count = srv.get_event_count()
+                    srv.purge()
+                    dialog.close()
+                    ui.notify(f"Purged {count} events", type="warning")
+
+                ui.button("Purge", icon="delete_forever", on_click=confirm).props(
+                    "dense no-caps color=negative"
+                )
+        dialog.open()
+
     with ui.row().classes("gap-2 mb-4"):
         ui.button("Compact Log", icon="compress", on_click=compact).props(
             "outline dense no-caps"
@@ -227,6 +249,9 @@ def _build_operations(srv: UsdSyncServer):
         ui.button("Export Flat", icon="download", on_click=export_flatten).props(
             "outline dense no-caps"
         )
+        ui.button("Purge", icon="delete_forever", on_click=purge).props(
+            "outline dense no-caps color=negative"
+        )
 
 
 def _build_clients_table(srv: UsdSyncServer):
@@ -236,6 +261,8 @@ def _build_clients_table(srv: UsdSyncServer):
     columns = [
         {"name": "role", "label": "Role", "field": "role", "align": "left"},
         {"name": "id", "label": "Client ID", "field": "client_id",
+         "align": "left"},
+        {"name": "origin", "label": "Origin", "field": "origin",
          "align": "left"},
         {"name": "events", "label": "Events", "field": "event_count",
          "align": "right"},
@@ -253,6 +280,7 @@ def _build_clients_table(srv: UsdSyncServer):
                 "key": c["key"],
                 "role": c["role"],
                 "client_id": c["client_id"] or "—",
+                "origin": c.get("origin") or "—",
                 "event_count": f"{c['event_count']:,}",
                 "last_activity": f"{c['last_activity_ago']:.0f}s ago",
             }
@@ -319,6 +347,7 @@ def _build_event_feed(srv: UsdSyncServer):
         prim = ev.get("prim", "")
         seq = rec.get("seq", "?")
         client = rec.get("client_id") or rec.get("client", "")
+        origin = rec.get("origin", "")
 
         exp = ui.expansion(icon="chevron_right").classes("w-full")
         with exp.add_slot("header"):
@@ -328,6 +357,10 @@ def _build_event_feed(srv: UsdSyncServer):
                 ui.label(str(seq)).classes("dash-muted w-10 text-right")
                 ui.label(k).classes("dash-kind w-44")
                 ui.label(prim).classes("dash-prim flex-1 truncate")
+                if origin:
+                    ui.label(origin).classes(
+                        "dash-muted w-36 text-right truncate"
+                    )
                 ui.label(client).classes(
                     "dash-muted w-36 text-right truncate"
                 )
@@ -403,6 +436,7 @@ def _register_api_routes(srv: UsdSyncServer):
             "event_count": srv.get_event_count(),
             "client_count": len(srv.get_client_list()),
             "prim_count": srv.get_prim_count(),
+            "tracked_prim_count": srv.get_tracked_prim_count(),
         }
 
     @app.get("/api/clients")

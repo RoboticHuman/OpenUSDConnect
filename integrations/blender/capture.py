@@ -741,56 +741,8 @@ def seed_emitter_caches_for_import(prim_path: str):
         author._used_prim_paths.add(pp)
 
     # --- Seed NoticeEmitter caches from emitter's stage ---
-    if ne is None:
-        return
-    stage = author.stage
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
-
-    from pxr import Usd
-
-    from openusdconnect.emitter import (
-        _C_GPRIM_ATTRS,
-        _C_MATERIAL_BINDING,
-        _C_PAYLOAD_LOADED,
-        _C_PAYLOADS,
-        _C_REFERENCES,
-        _C_VARIANT_SELECTIONS,
-        _read_material_binding,
-        _read_payloads,
-        _read_references,
-        _read_variant_selections,
-        _should_track_attr,
-        _usd_value_to_python,
-    )
-
-    for child in Usd.PrimRange(prim):
-        cp = str(child.GetPath())
-        # Don't seed _known_prims — let the emitter send ensure_prim +
-        # ensure_xform_ops on first encounter.  These structural events
-        # are small, idempotent, and needed by the server to create
-        # xform ops on payload prims (which can't be done inside a
-        # ChangeBlock).  The _prim_cache seeding below prevents the
-        # expensive state dump (material bindings, variants, gprim attrs).
-        pc = ne._prim_cache.setdefault(cp, {})
-        pc[_C_REFERENCES] = _read_references(stage, cp)
-        pc[_C_PAYLOADS] = _read_payloads(stage, cp)
-        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(stage, cp)
-        pc[_C_MATERIAL_BINDING] = _read_material_binding(stage, cp)
-        if child.HasAuthoredPayloads():
-            pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
-        # Seed gprim attr cache so the first move doesn't trigger a
-        # full mesh data scan (points, UVs, displayColor, etc.).
-        gprim_snapshot = {}
-        for attr in child.GetAttributes():
-            name = attr.GetName()
-            if attr.IsAuthored() and _should_track_attr(name):
-                val = _usd_value_to_python(attr.Get())
-                if val is not None:
-                    gprim_snapshot[name] = val
-        if gprim_snapshot:
-            pc[_C_GPRIM_ATTRS] = gprim_snapshot
+    if ne is not None:
+        ne.seed_prim_cache(author.stage, prim_path)
 
 
 def _reset_stage_author():

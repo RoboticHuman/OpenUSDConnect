@@ -358,6 +358,40 @@ class NoticeEmitter:
         self._resynced_prims.clear()
         self.dirty.clear()
 
+    def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
+        """Seed the per-prim diff cache for a prim and its composed children.
+
+        Populates ``_prim_cache`` with the current composed state (material
+        bindings, variant selections, payloads, references, gprim attrs) so
+        the emitter treats the hierarchy as already-tracked.  Prevents a
+        full state dump on first encounter.
+
+        Does NOT add to ``_known_prims`` — the emitter should still send
+        structural events (ensure_prim, ensure_xform_ops) on first
+        encounter so the server can create xform ops on payload prims.
+        """
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        for child in Usd.PrimRange(prim):
+            cp = str(child.GetPath())
+            pc = self._prim_cache.setdefault(cp, {})
+            pc[_C_REFERENCES] = _read_references(stage, cp)
+            pc[_C_PAYLOADS] = _read_payloads(stage, cp)
+            pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(stage, cp)
+            pc[_C_MATERIAL_BINDING] = _read_material_binding(stage, cp)
+            if child.HasAuthoredPayloads():
+                pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
+            gprim_snapshot = {}
+            for attr in child.GetAttributes():
+                name = attr.GetName()
+                if attr.IsAuthored() and self._attr_filter(name):
+                    val = _usd_value_to_python(attr.Get())
+                    if val is not None:
+                        gprim_snapshot[name] = val
+            if gprim_snapshot:
+                pc[_C_GPRIM_ATTRS] = gprim_snapshot
+
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
         self._suppressed = True

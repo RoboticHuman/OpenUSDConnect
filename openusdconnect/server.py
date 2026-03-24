@@ -161,20 +161,24 @@ class UsdSyncServer:
             return
 
         tombstoned: set[str] = set()
-        # (ev, origin) tuples — same pattern as replay_children_after_load.
-        latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
+        # (ev, metadata) tuples where metadata holds origin/client/client_id.
+        latest: dict[tuple[str, str], tuple[dict, dict]] = {}
 
         for _seq, event_json in rows:
             rec = json.loads(event_json)
             ev = rec.get("event", rec)
             prim = ev.get("prim", "")
             k = ev.get("k", "")
-            origin = rec.get("origin")
+            meta = {}
+            for field in ("origin", "client", "client_id"):
+                val = rec.get(field)
+                if val:
+                    meta[field] = val
 
             if k in (K_DELETE_PRIM, K_RENAME_PRIM):
                 tombstoned.add(prim)
                 latest = {key: val for key, val in latest.items() if key[0] != prim}
-                latest[(prim, k)] = (ev, origin)
+                latest[(prim, k)] = (ev, meta)
                 continue
 
             if prim in tombstoned:
@@ -183,11 +187,11 @@ class UsdSyncServer:
             # load/unload are mutually exclusive — only the last one wins.
             if k == K_LOAD_PAYLOAD:
                 latest.pop((prim, K_UNLOAD_PAYLOAD), None)
-                latest[(prim, k)] = (ev, origin)
+                latest[(prim, k)] = (ev, meta)
                 continue
             if k == K_UNLOAD_PAYLOAD:
                 latest.pop((prim, K_LOAD_PAYLOAD), None)
-                latest[(prim, k)] = (ev, origin)
+                latest[(prim, k)] = (ev, meta)
                 continue
 
             if k == K_SET_XFORM_TRS:
@@ -199,9 +203,9 @@ class UsdSyncServer:
                             prev[field] = ev[field]
                             if field not in prev["fields"]:
                                 prev["fields"].append(field)
-                    latest[(prim, k)] = (prev, origin)
+                    latest[(prim, k)] = (prev, meta)
                 else:
-                    latest[(prim, k)] = (ev, origin)
+                    latest[(prim, k)] = (ev, meta)
             elif k == K_SET_GPRIM_ATTRS:
                 existing = latest.get((prim, k))
                 if existing:
@@ -213,9 +217,9 @@ class UsdSyncServer:
                     new_interp = ev.get("attr_interp", {})
                     if new_interp:
                         prev.setdefault("attr_interp", {}).update(new_interp)
-                    latest[(prim, k)] = (prev, origin)
+                    latest[(prim, k)] = (prev, meta)
                 else:
-                    latest[(prim, k)] = (ev, origin)
+                    latest[(prim, k)] = (ev, meta)
             elif k == K_SET_SHADER_INPUT:
                 existing = latest.get((prim, k))
                 if existing:
@@ -226,11 +230,11 @@ class UsdSyncServer:
                     )
                     if ev.get("shader_id"):
                         prev["shader_id"] = ev["shader_id"]
-                    latest[(prim, k)] = (prev, origin)
+                    latest[(prim, k)] = (prev, meta)
                 else:
-                    latest[(prim, k)] = (ev, origin)
+                    latest[(prim, k)] = (ev, meta)
             else:
-                latest[(prim, k)] = (ev, origin)
+                latest[(prim, k)] = (ev, meta)
 
         sorted_entries = sorted(
             latest.values(),
@@ -244,21 +248,35 @@ class UsdSyncServer:
         with self._seq_lock:
             self._next_seq = 1
         records = []
-        for ev, origin in sorted_entries:
+        for ev, meta in sorted_entries:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
-            if origin:
-                rec["origin"] = origin
+            rec.update(meta)
             records.append((seq, json.dumps(rec)))
         self.store.clear_and_rewrite(records)
 
         LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
 
         # Tell connected receivers to reset and replay from the compacted log.
-        self.broadcast({"type": MSG_RESYNC})
+        self.broadcast({"type": MSG_RESYNC, "reason": "compact"})
         with self.clients_lock:
             for handler in self.receivers:
                 self.replay_from(handler, 1)
+
+    def purge(self):
+        """Clear all events, reset the edit layer, and resync receivers.
+
+        Wipes the event store, clears all opinions from the server's edit
+        layer (restoring the base scene), resets the sequence counter, and
+        sends a resync to all connected receivers so they start fresh.
+        """
+        self.store.clear_and_rewrite([])
+        with self._seq_lock:
+            self._next_seq = 1
+        with self.stage_lock:
+            self.edit_layer.Clear()
+        LOG.info("Purged event log and reset edit layer")
+        self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -406,6 +424,25 @@ class UsdSyncServer:
         """Return the number of prims on the composed stage (thread-safe)."""
         with self.stage_lock:
             return sum(1 for _ in self.stage.Traverse())
+
+    def get_tracked_prim_count(self) -> int:
+        """Return the number of prims tracked in the event log.
+
+        Counts distinct prim paths from ensure_prim events minus
+        delete_prim tombstones.
+        """
+        rows = self.store.get_all_asc()
+        prims: set[str] = set()
+        for _seq, record_json in rows:
+            rec = json.loads(record_json)
+            ev = rec.get("event", {})
+            k = ev.get("k")
+            path = ev.get("prim", "")
+            if k == K_ENSURE_PRIM:
+                prims.add(path)
+            elif k == K_DELETE_PRIM:
+                prims.discard(path)
+        return len(prims)
 
     def get_event_count(self) -> int:
         """Return the number of events in the log (thread-safe)."""
@@ -575,7 +612,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if sync_from > max_seq > 0:
                 from .transport import send_line
 
-                send_line(self.request, {"type": MSG_RESYNC})
+                send_line(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 
             # Hold clients_lock during replay AND add to prevent race condition.
