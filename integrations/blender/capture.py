@@ -299,6 +299,10 @@ class BlenderStageAuthor:
         self._applying_remote: bool = False
         self._unloaded_payload_roots: set[str] = set()  # prim paths with unloaded payloads
 
+        from .shader_mapper import create_default_registry
+        self._shader_registry = create_default_registry()
+        self._last_shader_values: dict[str, dict] = {}  # shader_path -> {usd_name: value}
+
     def initialize_baseline(self):
         """Snapshot current scene transforms for change detection."""
         for obj in bpy.context.scene.objects:
@@ -471,6 +475,96 @@ class BlenderStageAuthor:
             o_op.Set(Gf.Quatf(rw, Gf.Vec3f(rx, ry, rz)))
         if s_op:
             s_op.Set(Gf.Vec3d(sx, sy, sz))
+
+    # Blender node type → USD shader ID for reverse lookup
+    _NODE_TYPE_TO_SHADER_ID = {
+        "BSDF_PRINCIPLED": "UsdPreviewSurface",
+    }
+
+    def on_material_update(self, materials):
+        """Author Blender material node changes to the emitter's USD stage.
+
+        Called by _depsgraph_handler when bpy.types.Material updates are
+        detected.  Reads current node socket values via the shader mapper
+        and writes them to the corresponding UsdShade.Shader inputs on the
+        emitter's stage.  The NoticeEmitter then picks up the USD change
+        and emits set_shader_input events through the normal pipeline.
+        """
+        if not self.enabled or self._applying_remote:
+            return
+        for mat in materials:
+            orig = getattr(mat, "original", mat)
+            if not orig.node_tree:
+                continue
+            mat_path = orig.get("usd_material_path")
+            for node in orig.node_tree.nodes:
+                shader_path = node.get("usd_shader_path")
+                shader_id = node.get("usd_shader_id")
+                # Fallback: derive from material path + node type
+                if not shader_path and mat_path:
+                    shader_id = self._NODE_TYPE_TO_SHADER_ID.get(node.type)
+                    if shader_id:
+                        shader_path = self._find_shader_on_stage(
+                            mat_path, shader_id,
+                        )
+                if not shader_path or not shader_id:
+                    continue
+                mapper = self._shader_registry.get(shader_id)
+                if not mapper or not hasattr(mapper, "read_all_inputs"):
+                    continue
+                values = mapper.read_all_inputs(node)
+                if values:
+                    self._author_shader_inputs(shader_path, values)
+
+    def _find_shader_on_stage(self, mat_path: str, shader_id: str) -> str | None:
+        """Find a shader prim under a material on the emitter's stage."""
+        from pxr import Usd, UsdShade
+
+        mat_prim = self.stage.GetPrimAtPath(mat_path)
+        if not mat_prim or not mat_prim.IsValid():
+            return None
+        for child in Usd.PrimRange(mat_prim):
+            if child.IsA(UsdShade.Shader):
+                shader = UsdShade.Shader(child)
+                sid = shader.GetIdAttr().Get() or ""
+                if sid == shader_id:
+                    return str(child.GetPath())
+        return None
+
+    def _author_shader_inputs(self, shader_path, values):
+        """Write only changed shader input values to the emitter's USD stage.
+
+        Compares against ``_last_shader_values`` (the baseline from the
+        previous read) to detect actual user edits — same pattern as
+        ``_last_matrix`` for transforms.  On first encounter, seeds the
+        baseline and skips authoring (all values are "initial state").
+        """
+        from pxr import UsdShade
+
+        last = self._last_shader_values.get(shader_path)
+        if last is None:
+            self._last_shader_values[shader_path] = dict(values)
+            return
+
+        prim = self.stage.GetPrimAtPath(shader_path)
+        if not prim or not prim.IsValid():
+            return
+
+        changed = {k: v for k, v in values.items() if last.get(k) != v}
+        if not changed:
+            return
+
+        self.stage.OverridePrim(shader_path)
+        shader = UsdShade.Shader(prim)
+        for usd_name, value in changed.items():
+            if isinstance(value, list) and len(value) == 3:
+                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Color3f)
+                inp.Set(Gf.Vec3f(*value))
+            else:
+                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Float)
+                inp.Set(float(value))
+
+        self._last_shader_values[shader_path] = dict(values)
 
     def purge_prim_refs(self, prefix: str):
         """Remove tracked references for prims matching a path prefix."""
@@ -774,16 +868,23 @@ def _depsgraph_handler(scene, depsgraph):
         updates = list(depsgraph.updates)
 
         has_object_updates = any(isinstance(update.id, bpy.types.Object) for update in updates)
-        if not has_object_updates:
+        has_material_updates = any(isinstance(update.id, bpy.types.Material) for update in updates)
+        if not has_object_updates and not has_material_updates:
             return
 
         if _state.author is not None and _state.author.enabled:
-            _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
-            obj_count = sum(1 for u in updates if isinstance(u.id, bpy.types.Object))
-            _state.author.on_depsgraph_update(updates)
-            dirty_count = len(_state.notice_emitter.dirty) if _state.notice_emitter else 0
-            if dirty_count > 0:
-                LOG.debug("depsgraph: %d obj updates, %d dirty prims", obj_count, dirty_count)
+            if has_object_updates:
+                _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
+                obj_count = sum(1 for u in updates if isinstance(u.id, bpy.types.Object))
+                _state.author.on_depsgraph_update(updates)
+                dirty_count = len(_state.notice_emitter.dirty) if _state.notice_emitter else 0
+                if dirty_count > 0:
+                    LOG.debug("depsgraph: %d obj updates, %d dirty prims", obj_count, dirty_count)
+
+            if has_material_updates:
+                mat_updates = [u.id for u in updates if isinstance(u.id, bpy.types.Material)]
+                _state.author.on_material_update(mat_updates)
+
             _try_send_dirty_events(include_matrices=False)
 
     except Exception:

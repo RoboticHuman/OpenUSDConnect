@@ -476,6 +476,7 @@ class BlenderAdapter(DCCAdapter):
         if not mat:
             mat = bpy.data.materials.new(name=mat_name)
             mat.use_nodes = True
+        mat["usd_material_path"] = material_path
         if not obj.data:
             return False
         if not obj.data.materials:
@@ -508,6 +509,9 @@ class BlenderAdapter(DCCAdapter):
         )
         if not mat or not node:
             return False
+
+        node["usd_shader_path"] = prim_path
+        node["usd_shader_id"] = mapper.shader_id
 
         for usd_name, value in inputs.items():
             mapper.apply_value(
@@ -570,6 +574,8 @@ class BlenderAdapter(DCCAdapter):
             node_name = prim_path.rsplit("/", 1)[-1]
             nodes[0].name = node_name
             nodes[0].label = node_name
+            nodes[0]["usd_shader_path"] = prim_path
+            nodes[0]["usd_shader_id"] = mapper.shader_id
             self._wire_surface_to_material_output(tree, output_map)
 
             self._prim_cache[prim_path + ":output_map"] = output_map
@@ -599,10 +605,25 @@ class BlenderAdapter(DCCAdapter):
 
     def _get_or_create_shader_node_for_input(self, prim_path, node_type):
         """Find/create the material and target node for a shader input event."""
-        mat_path = prim_path.rsplit("/", 1)[0]
-        mat_name = mat_path.rsplit("/", 1)[-1]
-        mat = bpy.data.materials.get(mat_name)
+        # Prefer materials tagged with usd_material_path that matches
+        # the shader's ancestry — most reliable lookup.
+        mat = None
+        for m in bpy.data.materials:
+            mp = m.get("usd_material_path", "")
+            if mp and prim_path.startswith(mp + "/"):
+                mat = m
+                break
+        # Fallback: walk up path segments to find a material by name.
         if not mat:
+            path = prim_path
+            while "/" in path:
+                path = path.rsplit("/", 1)[0]
+                candidate = path.rsplit("/", 1)[-1]
+                mat = bpy.data.materials.get(candidate)
+                if mat:
+                    break
+        if not mat:
+            mat_name = prim_path.rsplit("/", 1)[0].rsplit("/", 1)[-1]
             mat = bpy.data.materials.new(name=mat_name)
             mat.use_nodes = True
         if not mat.use_nodes:
@@ -832,7 +853,7 @@ class BlenderAdapter(DCCAdapter):
             LOG.warning(
                 "BlenderAdapter: no objects imported from %s", resolved
             )
-            return set()
+            return set(), None
 
         LOG.info("set_reference: imported %d objects from %s", len(new_objs), resolved)
 
@@ -974,13 +995,14 @@ class BlenderAdapter(DCCAdapter):
                             }
                         connection_events.append((scene_path, remapped_conns))
 
-        # Apply in protocol order: shader inputs, connections, then bindings
+        # Bindings first so materials are tagged with usd_material_path
+        # before set_shader_input looks them up.
+        for scene_path, target in binding_events:
+            self.set_material_binding(scene_path, target)
         for scene_path, sid, inputs, itypes in shader_events:
             self.set_shader_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:
             self.set_shader_connection(scene_path, conns)
-        for scene_path, target in binding_events:
-            self.set_material_binding(scene_path, target)
 
         # Fix missing textures — Blender's USD importer creates Image Texture
         # nodes but often fails to resolve relative texture paths. Walk the

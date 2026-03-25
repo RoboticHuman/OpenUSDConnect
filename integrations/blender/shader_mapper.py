@@ -34,6 +34,30 @@ class BlenderShaderMapper(ShaderMapper):
         else:
             inp.default_value = value
 
+    def read_value(self, node, usd_name: str):
+        """Read a single input value from a Blender node back to USD form."""
+        blender_name = self.get_native_input(usd_name)
+        if not blender_name or blender_name.startswith("_"):
+            return None
+        if blender_name not in node.inputs:
+            return None
+        inp = node.inputs[blender_name]
+        if inp.is_linked:
+            return None
+        val = inp.default_value
+        if hasattr(val, "__len__") and len(val) == 4:
+            return [float(val[0]), float(val[1]), float(val[2])]
+        return float(val)
+
+    def read_all_inputs(self, node) -> dict:
+        """Read all mapped input values from a Blender node."""
+        result = {}
+        for usd_name in self._input_map:
+            val = self.read_value(node, usd_name)
+            if val is not None:
+                result[usd_name] = val
+        return result
+
 
 class PBRShaderMapper(BlenderShaderMapper):
     """UsdPreviewSurface and compatible surface shaders → Principled BSDF."""

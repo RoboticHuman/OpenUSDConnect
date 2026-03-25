@@ -359,6 +359,24 @@ def _process_event(ev: dict):
             except RuntimeError:
                 LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
 
+    # Sync incoming shader/material events to the emitter's stage so
+    # the emitter's diff baseline matches the latest network state.
+    if k in (K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION, K_SET_MATERIAL_BINDING):
+        cap = _get_capture_mod()
+        if cap is not None and cap._state.author is not None:
+            from openusdconnect.event_apply import apply_event as _apply_ev
+
+            stage = cap._state.author.stage
+            ne = cap._state.notice_emitter
+            _apply_ev(stage, ev)
+            if ne is not None and k == K_SET_SHADER_INPUT:
+                from openusdconnect.emitter import _C_SHADER_INPUTS, _read_shader_inputs
+
+                pc = ne._prim_cache.setdefault(prim_path, {})
+                sid, inps, _, _ = _read_shader_inputs(stage, prim_path)
+                if sid:
+                    pc[_C_SHADER_INPUTS] = {"shader_id": sid, "inputs": inps}
+
 
 def _set_applying_remote(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""

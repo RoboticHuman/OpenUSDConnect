@@ -145,6 +145,15 @@ class ShaderMapper(ABC):
         """Return the DCC-native input name for a USD input, or None."""
         return self._input_map.get(usd_name)
 
+    def get_usd_input(self, native_name: str) -> str | None:
+        """Return the USD input name for a DCC-native input (reverse lookup)."""
+        if not hasattr(self, "_reverse_map"):
+            self._reverse_map = {
+                v: k for k, v in self._input_map.items()
+                if not v.startswith("_")
+            }
+        return self._reverse_map.get(native_name)
+
     @abstractmethod
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
         """Apply a USD input value to the DCC node."""

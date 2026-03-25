@@ -391,6 +391,12 @@ class NoticeEmitter:
                         gprim_snapshot[name] = val
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
+            # Seed shader inputs/connections
+            shader_id, inputs, _types, connections = _read_shader_inputs(stage, cp)
+            if shader_id:
+                pc[_C_SHADER_INPUTS] = {"shader_id": shader_id, "inputs": inputs}
+                if connections:
+                    pc[_C_SHADER_CONNECTIONS] = connections
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
