@@ -305,6 +305,35 @@ class TestCompaction:
         assert attr_evs[0]["attrs"]["radius"] == 2.0
         assert attr_evs[0]["attr_interp"]["normals"] == "faceVarying"
 
+    def test_shader_inputs_merged_across_events(self, srv):
+        """Compaction merges shader inputs from separate events on the same prim."""
+        self._insert_events(srv, [
+            {"k": "ensure_prim", "prim": "/Mat", "typeName": "Material"},
+            {"k": "set_shader_input", "prim": "/Mat/PBR",
+             "shader_id": "UsdPreviewSurface",
+             "inputs": {"diffuseColor": [1, 0, 0]},
+             "input_types": {"diffuseColor": "color3f"}},
+        ])
+        self._insert_events(srv, [
+            {"k": "set_shader_input", "prim": "/Mat/PBR",
+             "shader_id": "UsdPreviewSurface",
+             "inputs": {"roughness": 0.5},
+             "input_types": {"roughness": "float"}},
+        ])
+
+        srv.compact_log()
+
+        rows = [(r,) for _, r in srv.store.get_all_asc()]
+        events = [json.loads(r[0])["event"] for r in rows]
+        shader_evs = [e for e in events if e["k"] == "set_shader_input"]
+        assert len(shader_evs) == 1
+        # Both inputs survive — merged, not replaced
+        assert shader_evs[0]["inputs"]["diffuseColor"] == [1, 0, 0]
+        assert shader_evs[0]["inputs"]["roughness"] == 0.5
+        assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
+        assert shader_evs[0]["input_types"]["roughness"] == "float"
+        assert shader_evs[0]["shader_id"] == "UsdPreviewSurface"
+
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""
         srv.compact_log()

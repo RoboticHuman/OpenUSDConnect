@@ -96,6 +96,7 @@ class TestApplyEvent:
 
     def test_set_xform_trs_full(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"})
         ev = {
             "k": K_SET_XFORM_TRS,
             "prim": "/World/Sphere",
@@ -120,6 +121,7 @@ class TestApplyEvent:
 
     def test_set_xform_trs_partial(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"})
         # First set full TRS
         apply_event(
             stage,
@@ -191,6 +193,7 @@ class TestApplyEvent:
 
     def test_rename_preserves_transform(self, stage):
         stage.DefinePrim("/World/OldName", "Xform")
+        apply_event(stage, {"k": K_ENSURE_XFORM_OPS, "prim": "/World/OldName"})
         apply_event(
             stage,
             {
@@ -527,3 +530,192 @@ class TestApplyEvents:
         apply_events(stage, events)
         assert stage.GetPrimAtPath("/World/A").IsValid()
         assert stage.GetPrimAtPath("/World/B").IsValid()
+
+
+# ---------------------------------------------------------------------------
+# Material binding
+# ---------------------------------------------------------------------------
+
+
+class TestSetMaterialBinding:
+    def test_bind_material(self, stage):
+        """Binding creates a material:binding relationship."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        stage.DefinePrim("/Materials/Plastic", "Material")
+        apply_event(stage, {
+            "k": "set_material_binding",
+            "prim": "/World/Sphere",
+            "material_path": "/Materials/Plastic",
+        })
+
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        binding = UsdShade.MaterialBindingAPI(prim)
+        mat, _ = binding.ComputeBoundMaterial()
+        assert str(mat.GetPath()) == "/Materials/Plastic"
+
+    def test_unbind_material(self, stage):
+        """Empty material_path unbinds."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        stage.DefinePrim("/Materials/Plastic", "Material")
+        apply_event(stage, {
+            "k": "set_material_binding",
+            "prim": "/World/Sphere",
+            "material_path": "/Materials/Plastic",
+        })
+        apply_event(stage, {
+            "k": "set_material_binding",
+            "prim": "/World/Sphere",
+            "material_path": "",
+        })
+
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        binding = UsdShade.MaterialBindingAPI(prim)
+        mat, _ = binding.ComputeBoundMaterial()
+        assert not mat
+
+    def test_rebind_material(self, stage):
+        """Rebinding changes the target."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        stage.DefinePrim("/Materials/A", "Material")
+        stage.DefinePrim("/Materials/B", "Material")
+        apply_event(stage, {
+            "k": "set_material_binding",
+            "prim": "/World/Sphere",
+            "material_path": "/Materials/A",
+        })
+        apply_event(stage, {
+            "k": "set_material_binding",
+            "prim": "/World/Sphere",
+            "material_path": "/Materials/B",
+        })
+
+        prim = stage.GetPrimAtPath("/World/Sphere")
+        binding = UsdShade.MaterialBindingAPI(prim)
+        mat, _ = binding.ComputeBoundMaterial()
+        assert str(mat.GetPath()) == "/Materials/B"
+
+
+# ---------------------------------------------------------------------------
+# Shader inputs
+# ---------------------------------------------------------------------------
+
+
+class TestSetShaderInput:
+    def test_set_preview_surface_inputs(self, stage):
+        """Shader inputs are created with correct types and values."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {
+                "diffuseColor": [0.8, 0.2, 0.2],
+                "metallic": 0.0,
+                "roughness": 0.5,
+            },
+            "input_types": {
+                "diffuseColor": "color3f",
+                "metallic": "float",
+                "roughness": "float",
+            },
+        })
+
+        shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/PBR"))
+        assert shader.GetIdAttr().Get() == "UsdPreviewSurface"
+        dc = shader.GetInput("diffuseColor").Get()
+        assert abs(dc[0] - 0.8) < 1e-6
+        assert abs(dc[1] - 0.2) < 1e-6
+        assert abs(shader.GetInput("metallic").Get()) < 1e-6
+        assert abs(shader.GetInput("roughness").Get() - 0.5) < 1e-6
+
+    def test_shader_connects_to_material_output(self, stage):
+        """Shader auto-connects outputs:surface to parent Material."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {"roughness": 0.3},
+            "input_types": {"roughness": "float"},
+        })
+
+        material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Mat"))
+        output = material.GetSurfaceOutput()
+        sources, _ = output.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
+
+    def test_update_existing_input(self, stage):
+        """Updating a shader input changes the value."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {"roughness": 0.3},
+            "input_types": {"roughness": "float"},
+        })
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {"roughness": 0.9},
+            "input_types": {"roughness": "float"},
+        })
+
+        shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/PBR"))
+        assert abs(shader.GetInput("roughness").Get() - 0.9) < 1e-6
+
+    def test_full_material_pipeline(self, stage):
+        """Full pipeline: create material + shader + bind to geometry."""
+        from pxr import UsdShade
+
+        events = [
+            {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+            {"k": "ensure_prim", "prim": "/World/Sphere",
+             "typeName": "Sphere"},
+            {"k": "ensure_prim", "prim": "/Materials",
+             "typeName": "Scope"},
+            {"k": "ensure_prim", "prim": "/Materials/Red",
+             "typeName": "Material"},
+            {"k": "set_shader_input",
+             "prim": "/Materials/Red/PBR",
+             "shader_id": "UsdPreviewSurface",
+             "inputs": {
+                 "diffuseColor": [1.0, 0.0, 0.0],
+                 "roughness": 0.4,
+             },
+             "input_types": {
+                 "diffuseColor": "color3f",
+                 "roughness": "float",
+             }},
+            {"k": "set_material_binding",
+             "prim": "/World/Sphere",
+             "material_path": "/Materials/Red"},
+        ]
+        apply_events(stage, events)
+
+        # Verify bound material resolves to correct shader values
+        sphere = stage.GetPrimAtPath("/World/Sphere")
+        binding = UsdShade.MaterialBindingAPI(sphere)
+        mat, _ = binding.ComputeBoundMaterial()
+        assert str(mat.GetPath()) == "/Materials/Red"
+
+        surface = mat.GetSurfaceOutput()
+        sources, _ = surface.GetConnectedSources()
+        shader = UsdShade.Shader(sources[0].source)
+        dc = shader.GetInput("diffuseColor").Get()
+        assert abs(dc[0] - 1.0) < 1e-6
+        assert abs(dc[1]) < 1e-6

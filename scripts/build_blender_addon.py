@@ -42,6 +42,20 @@ def build():
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "dashboard"),
     )
 
+    # Bundle io_blender_mtlx MaterialX node handlers
+    mtlx_lib_src = (
+        REPO_ROOT / "vendor" / "io_blender_mtlx"
+        / "bl_env" / "addons" / "io_data_mtlx"
+    )
+    if mtlx_lib_src.exists():
+        mtlx_lib_dst = build_dir / "vendor" / "io_data_mtlx"
+        shutil.copytree(
+            mtlx_lib_src, mtlx_lib_dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    else:
+        print("Warning: io_blender_mtlx submodule not found, skipping MaterialX handlers")
+
     # Create zip
     DIST_DIR.mkdir(exist_ok=True)
     zip_path = DIST_DIR / ZIP_NAME

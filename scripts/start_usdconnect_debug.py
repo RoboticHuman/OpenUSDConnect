@@ -136,6 +136,8 @@ def main():
     ap.add_argument("--wait-for-debugger", action="store_true")
     ap.add_argument("--reload", action="store_true",
                     help="Build addon and signal running Blenders to reload")
+    ap.add_argument("--no-server", action="store_true",
+                    help="Skip starting the server (connect to an existing one)")
     ap.add_argument("--blender-exe", default="")
     ap.add_argument("--base-usd", default="")
     ap.add_argument("--log-path", default="")
@@ -154,17 +156,19 @@ def main():
         raise SystemExit(f"Blender executable not found: {blender_exe}")
     if not BOOTSTRAP_SCRIPT.exists():
         raise SystemExit(f"Bootstrap script not found: {BOOTSTRAP_SCRIPT}")
-    if not pathlib.Path(base_usd).exists():
+    if not args.no_server and not pathlib.Path(base_usd).exists():
         raise SystemExit(f"Base USD file not found: {base_usd}")
 
     _build_addon()
-    python = _find_uv_python()
 
-    # Start server
-    server_proc = _start_server(
-        python, args.server_host, args.server_port, base_usd, log_path,
-    )
-    time.sleep(1)
+    # Start server (unless --no-server)
+    server_proc = None
+    if not args.no_server:
+        python = _find_uv_python()
+        server_proc = _start_server(
+            python, args.server_host, args.server_port, base_usd, log_path,
+        )
+        time.sleep(1)
 
     # Start Blender A
     blender_a = _start_blender(
@@ -188,7 +192,10 @@ def main():
     print(" USD Connect Debug Session")
     print("=========================================")
     print()
-    print(f"  Server           PID {server_proc.pid}")
+    if server_proc:
+        print(f"  Server           PID {server_proc.pid}")
+    else:
+        print(f"  Server           (external on {args.server_host}:{args.server_port})")
     print(f"  Blender A        PID {blender_a.pid}"
           f"    debug :{args.debug_port}")
     if blender_b:
@@ -202,7 +209,9 @@ def main():
                   f" on :{args.debug_port_b}")
         print()
 
-    pids = [server_proc.pid, blender_a.pid]
+    pids = [blender_a.pid]
+    if server_proc:
+        pids.insert(0, server_proc.pid)
     if blender_b:
         pids.append(blender_b.pid)
     print(f"[launcher] PIDs: {', '.join(str(p) for p in pids)}")
@@ -220,12 +229,13 @@ def main():
     except KeyboardInterrupt:
         print("\n[launcher] Interrupted.")
 
-    print(f"[launcher] Stopping server (PID {server_proc.pid})...")
-    server_proc.terminate()
-    try:
-        server_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        server_proc.kill()
+    if server_proc:
+        print(f"[launcher] Stopping server (PID {server_proc.pid})...")
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
     print("[launcher] Session ended.")
 
 

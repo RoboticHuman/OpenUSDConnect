@@ -174,11 +174,10 @@ class SqliteEventStore(EventStore):
     def clear_and_rewrite(self, records: list[tuple[int, str]]) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM events")
-            for seq, record_json in records:
-                self._conn.execute(
-                    "INSERT INTO events(seq, event) VALUES (?, ?)",
-                    (seq, record_json),
-                )
+            self._conn.executemany(
+                "INSERT INTO events(seq, event) VALUES (?, ?)",
+                records,
+            )
             self._conn.commit()
 
     def close(self) -> None:

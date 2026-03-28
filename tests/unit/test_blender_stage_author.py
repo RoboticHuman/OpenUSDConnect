@@ -413,6 +413,8 @@ class TestDeletionDetection:
         _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
         obj._deleted = True
+        # Remove from scene so _detect_deletions sees it as truly gone
+        sys.modules["bpy"].data.objects = _BlenderObjectList([])
         events = _get_events(author, emitter, [])
 
         deact = [e for e in events if e["k"] == K_DEACTIVATE_PRIM]

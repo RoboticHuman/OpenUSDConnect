@@ -21,6 +21,20 @@ import socket
 import bpy
 
 try:
+    import mathutils
+
+    _IDENTITY_4X4 = mathutils.Matrix.Identity(4)
+except ImportError:
+    _IDENTITY_4X4 = None
+
+from openusdconnect.axis_conversion import (
+    strip_axis_rotation,
+    zup_to_yup_quat,
+    zup_to_yup_scale,
+    zup_to_yup_vec,
+)
+
+try:
     from pxr import Gf, Sdf, Usd, UsdGeom
 
     PXR_AVAILABLE = True
@@ -101,10 +115,6 @@ _SCENE_PROPS = [
         "min": 0.0,
         "max": 5.0,
     }),
-    ("usd_connect_import_skip_leaf_geom", bpy.props.BoolProperty, {
-        "name": "Skip Leaf /Geom Prim Paths",
-        "default": True,
-    }),
     ("usd_connect_emit_host", bpy.props.StringProperty, {
         "name": "Server Host",
         "default": "127.0.0.1",
@@ -161,6 +171,11 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
     bl_idname = "usd_connect.hook"
     bl_label = "USD Connect Hook"
 
+    # Set True by _import_ref_asset during reference/payload imports so
+    # the hook still tags usd_prim_path but doesn't override auto_track_root
+    # with the referenced file's default prim.
+    _skip_root_inference: bool = False
+
     @staticmethod
     def on_import(import_context):
         try:
@@ -186,8 +201,10 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             LOG.info("USDHook: No prim map available; nothing tagged.")
             return True
 
-        # Infer root prim from the stage's default prim and update auto_track_root
-        if stage:
+        # Infer root prim from the stage's default prim and update auto_track_root.
+        # Skip during reference imports (_skip_root_inference) — the referenced file's
+        # default prim shouldn't override the main scene's auto_track_root.
+        if stage and not USD_CONNECT_Hook._skip_root_inference:
             try:
                 default_prim = stage.GetDefaultPrim()
                 if default_prim and default_prim.IsValid():
@@ -202,13 +219,9 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             except Exception as e:
                 LOG.warning("USDHook: Could not infer root prim: %s", e)
 
-        skip_leaf_geom = bool(getattr(bpy.context.scene, "usd_connect_import_skip_leaf_geom", True))
-
         tagged = 0
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
-            if skip_leaf_geom and prim_path_str.endswith("/Geom"):
-                continue
             # Look up prim type from the stage
             prim_type_name = ""
             if stage:
@@ -263,6 +276,13 @@ class BlenderStageAuthor:
         self.delta_layer = self.stage.GetSessionLayer()
         self.stage.SetEditTarget(Usd.EditTarget(self.delta_layer))
 
+        # Axis conversion: detect whether the stage is Y-up (needs Z↔Y swap)
+        from openusdconnect.axis_conversion import needs_conversion
+
+        self._needs_axis_conv: bool = needs_conversion(
+            UsdGeom.GetStageUpAxis(self.stage)
+        )
+
         self._last_matrix: dict = {}
         self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
         self._used_prim_paths: set = set()
@@ -271,12 +291,18 @@ class BlenderStageAuthor:
         self._applying_remote: bool = False
         self._unloaded_payload_roots: set[str] = set()  # prim paths with unloaded payloads
 
+        from .shader_mapper import create_default_registry
+        self._shader_registry = create_default_registry()
+        self._last_shader_values: dict[str, dict] = {}  # shader_path -> {usd_name: value}
+        self._shader_input_maps: dict[str, dict] = {}  # shader_path -> {usd_name: socket}
+
     def initialize_baseline(self):
         """Snapshot current scene transforms for change detection."""
         for obj in bpy.context.scene.objects:
             if "usd_prim_path" not in obj:
                 continue
-            m = tuple(v for row in obj.matrix_world for v in row)
+            src = getattr(obj, "matrix_basis", obj.matrix_world)
+            m = tuple(v for row in src for v in row)
             self._last_matrix[obj.name] = m
 
     def seed_used_paths(self):
@@ -362,10 +388,13 @@ class BlenderStageAuthor:
             ancestors.append((ancestor, pp))
             ancestor = ancestor.parent
 
-        # Define/ensure top-down
+        # Define/ensure top-down — skip prims that already exist via
+        # composition (payload/reference children can't be redefined).
         for anc_obj, anc_path in reversed(ancestors):
             prim = self.stage.GetPrimAtPath(anc_path)
-            if not prim or not prim.IsValid():
+            if prim and prim.IsValid():
+                pass  # already exists (composed or defined)
+            else:
                 tn = anc_obj.get("usd_type_name", "Xform")
                 self.stage.DefinePrim(anc_path, tn)
             self._ensure_xform_ops(anc_path)
@@ -402,6 +431,30 @@ class BlenderStageAuthor:
 
         loc, rot_quat, scl = _compute_local_trs(obj)
 
+        from .blender_adapter import _PROP_USD_IMPORTED, _has_axis_rotation
+
+        orig = getattr(obj, "original", obj)
+        is_imported = orig.get(_PROP_USD_IMPORTED, False)
+        parent_orig = getattr(obj, "parent", None)
+        if parent_orig is not None:
+            parent_orig = getattr(parent_orig, "original", parent_orig)
+        parent_handles = _has_axis_rotation(parent_orig)
+
+        tx, ty, tz = loc.x, loc.y, loc.z
+        rw, rx, ry, rz = rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z
+        sx, sy, sz = scl.x, scl.y, scl.z
+
+        if self._needs_axis_conv and not parent_handles:
+            # T and S always need Z-up → Y-up conversion.
+            tx, ty, tz = zup_to_yup_vec(tx, ty, tz)
+            sx, sy, sz = zup_to_yup_scale(sx, sy, sz)
+            if is_imported:
+                # Imported root: strip Rx(90°) display rotation
+                rw, rx, ry, rz = strip_axis_rotation(rw, rx, ry, rz)
+            else:
+                # Normal object: full Z-up → Y-up rotation
+                rw, rx, ry, rz = zup_to_yup_quat(rw, rx, ry, rz)
+
         xf = UsdGeom.Xformable(prim)
         from openusdconnect.event_apply import find_op
 
@@ -410,34 +463,174 @@ class BlenderStageAuthor:
         s_op = find_op(xf, "scale")
 
         if t_op:
-            t_op.Set(Gf.Vec3d(loc.x, loc.y, loc.z))
+            t_op.Set(Gf.Vec3d(tx, ty, tz))
         if o_op:
-            o_op.Set(Gf.Quatf(rot_quat.w, Gf.Vec3f(rot_quat.x, rot_quat.y, rot_quat.z)))
+            o_op.Set(Gf.Quatf(rw, Gf.Vec3f(rx, ry, rz)))
         if s_op:
-            s_op.Set(Gf.Vec3d(scl.x, scl.y, scl.z))
+            s_op.Set(Gf.Vec3d(sx, sy, sz))
+
+    # Blender node type → USD shader ID for reverse lookup
+    _NODE_TYPE_TO_SHADER_ID = {
+        "BSDF_PRINCIPLED": "UsdPreviewSurface",
+    }
+
+    def on_material_update(self, materials):
+        """Author Blender material node changes to the emitter's USD stage.
+
+        Called by _depsgraph_handler when bpy.types.Material updates are
+        detected.  Reads current node socket values via the shader mapper
+        and writes them to the corresponding UsdShade.Shader inputs on the
+        emitter's stage.  The NoticeEmitter then picks up the USD change
+        and emits set_shader_input events through the normal pipeline.
+        """
+        if not self.enabled or self._applying_remote:
+            return
+        for mat in materials:
+            orig = getattr(mat, "original", mat)
+            if not orig.node_tree:
+                continue
+            mat_path = orig.get("usd_material_path")
+            for node in orig.node_tree.nodes:
+                shader_path = node.get("usd_shader_path")
+                shader_id = node.get("usd_shader_id")
+                # Fallback: derive from material path + node type
+                if not shader_path and mat_path:
+                    shader_id = self._NODE_TYPE_TO_SHADER_ID.get(node.type)
+                    if shader_id:
+                        shader_path = self._find_shader_on_stage(
+                            mat_path, shader_id,
+                        )
+                if not shader_path or not shader_id:
+                    continue
+                mapper = self._shader_registry.get(shader_id)
+                if not mapper:
+                    continue
+
+                if mapper.is_multi_node:
+                    input_map = self._shader_input_maps.get(shader_path)
+                    if not input_map:
+                        continue
+                    try:
+                        next(iter(input_map.values())).node  # noqa: B018
+                    except ReferenceError:
+                        self._shader_input_maps.pop(shader_path, None)
+                        continue
+                    values = mapper.read_all_inputs(input_map=input_map)
+                elif hasattr(mapper, "read_all_inputs"):
+                    values = mapper.read_all_inputs(node)
+                else:
+                    continue
+
+                if values:
+                    self._author_shader_inputs(shader_path, values, shader_id=shader_id)
+
+    def _find_shader_on_stage(self, mat_path: str, shader_id: str) -> str | None:
+        """Find a shader prim under a material on the emitter's stage."""
+        from pxr import Usd, UsdShade
+
+        mat_prim = self.stage.GetPrimAtPath(mat_path)
+        if not mat_prim or not mat_prim.IsValid():
+            return None
+        for child in Usd.PrimRange(mat_prim):
+            if child.IsA(UsdShade.Shader):
+                shader = UsdShade.Shader(child)
+                sid = shader.GetIdAttr().Get() or ""
+                if sid == shader_id:
+                    return str(child.GetPath())
+        return None
+
+    def _author_shader_inputs(self, shader_path, values, shader_id=""):
+        """Write only changed shader input values to the emitter's USD stage.
+
+        Compares against ``_last_shader_values`` (the baseline from the
+        previous read) to detect actual user edits — same pattern as
+        ``_last_matrix`` for transforms.  On first encounter, seeds the
+        baseline and skips authoring (all values are "initial state").
+        """
+        from pxr import UsdShade
+
+        last = self._last_shader_values.get(shader_path)
+        if last is None:
+            self._last_shader_values[shader_path] = dict(values)
+            return
+
+        changed = {k: v for k, v in values.items() if last.get(k) != v}
+        if not changed:
+            return
+
+        prim = self.stage.GetPrimAtPath(shader_path)
+        if not prim or not prim.IsValid():
+            prim = self.stage.DefinePrim(shader_path, "Shader")
+            if not prim or not prim.IsValid():
+                return
+
+        self.stage.OverridePrim(shader_path)
+        shader = UsdShade.Shader(prim)
+        # Ensure info:id is authored so the emitter's _read_shader_inputs
+        # can identify the shader type when building events.
+        if shader_id and not shader.GetIdAttr().Get():
+            shader.CreateIdAttr(shader_id)
+        for usd_name, value in changed.items():
+            if isinstance(value, list) and len(value) == 3:
+                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Color3f)
+                inp.Set(Gf.Vec3f(*value))
+            else:
+                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Float)
+                inp.Set(float(value))
+
+        self._last_shader_values[shader_path] = dict(values)
+
+    def purge_prim_refs(self, prefix: str):
+        """Remove tracked references for prims matching a path prefix."""
+        to_purge = [pp for pp in self._prim_refs if pp.startswith(prefix)]
+        for pp in to_purge:
+            self._prim_refs.pop(pp, None)
+            self._last_matrix.pop(pp, None)
+            self._used_prim_paths.discard(pp)
+        shader_purge = [sp for sp in self._shader_input_maps if sp.startswith(prefix)]
+        for sp in shader_purge:
+            self._shader_input_maps.pop(sp, None)
+            self._last_shader_values.pop(sp, None)
 
     def _detect_deletions(self):
         """Check stored object references for deleted objects (ReferenceError).
 
-        For deleted objects, removes the prim from the local stage which
-        triggers NoticeEmitter deletion detection.
+        After undo, Blender invalidates Python references but the object
+        still exists in bpy.data.objects with a new pointer.  Re-acquire
+        the reference in that case instead of deactivating the prim.
         """
-        deleted_prims = []
+        stale_prims = []
         for pp, obj_ref in list(self._prim_refs.items()):
             try:
                 _ = obj_ref.name
             except ReferenceError:
-                deleted_prims.append(pp)
+                stale_prims.append(pp)
 
-        for prim_path in deleted_prims:
-            self._used_prim_paths.discard(prim_path)
-            self._prim_refs.pop(prim_path, None)
-            self._last_matrix.pop(prim_path, None)
-            # Remove prim from stage — triggers ObjectsChanged notice
-            prim = self.stage.GetPrimAtPath(prim_path)
-            if prim and prim.IsValid():
-                prim.SetActive(False)
-            LOG.info("Object deleted: deactivating prim %s", prim_path)
+        if not stale_prims:
+            return
+
+        # Single O(N) scan instead of O(N) per stale prim
+        path_to_obj = {
+            obj.get("usd_prim_path"): obj
+            for obj in bpy.data.objects
+            if obj.get("usd_prim_path")
+        }
+
+        for prim_path in stale_prims:
+            found = path_to_obj.get(prim_path)
+            if found is not None:
+                # Re-acquire reference — object survived undo
+                self._prim_refs[prim_path] = found
+                LOG.info("Re-acquired reference for %s after undo", prim_path)
+            else:
+                # Truly deleted
+                self._used_prim_paths.discard(prim_path)
+                self._prim_refs.pop(prim_path, None)
+                self._last_matrix.pop(prim_path, None)
+                prim = self.stage.GetPrimAtPath(prim_path)
+                if prim and prim.IsValid():
+                    prim.SetActive(False)
+                LOG.info("Object deleted: deactivating prim %s", prim_path)
 
     def on_depsgraph_update(self, updates: list):
         """Main entry: author depsgraph changes to the local USD stage.
@@ -466,8 +659,10 @@ class BlenderStageAuthor:
             # deletion detection and identity lookups in _resolve_prim_path.
             self._prim_refs[prim_path] = getattr(obj, "original", obj)
 
-            # Check if matrix actually changed
-            m = tuple(v for row in obj.matrix_world for v in row)
+            # Check if transform changed. Prefer matrix_basis (local)
+            # to avoid re-emitting children when only the parent moved.
+            src = getattr(obj, "matrix_basis", obj.matrix_world)
+            m = tuple(v for row in src for v in row)
             last = self._last_matrix.get(obj.name)
             if last == m and self.stage.GetPrimAtPath(prim_path):
                 continue
@@ -532,10 +727,15 @@ class BlenderStageAuthor:
 class NetworkSender:
     """Thin TCP connection for sending protocol events to the server."""
 
-    def __init__(self, host: str, port: int, client_id: str | None = None):
+    def __init__(
+        self, host: str, port: int,
+        client_id: str | None = None, origin: str | None = None,
+    ):
         self.host = host
         self.port = port
         self.client_id = client_id or f"blender-emitter-{os.getpid()}"
+        from . import SESSION_ORIGIN
+        self.origin = origin or SESSION_ORIGIN
         self.sock: socket.socket | None = None
 
         # Lazy import to support vendored openusdconnect
@@ -549,7 +749,10 @@ class NetworkSender:
 
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
-        self._send_line(self.sock, self._make_hello("emitter", client_id=self.client_id))
+        hello = self._make_hello(
+            "emitter", client_id=self.client_id, origin=self.origin,
+        )
+        self._send_line(self.sock, hello)
         LOG.info("Network sender connected to %s:%d", self.host, self.port)
 
     def disconnect(self):
@@ -606,6 +809,9 @@ def _try_send_dirty_events(include_matrices: bool = False):
         return
     events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
     if events:
+        from collections import Counter
+        kinds = Counter(e["k"] for e in events)
+        LOG.debug("sending %d events: %s", len(events), dict(kinds))
         _state.sender.send_events(events)
 
 
@@ -618,6 +824,43 @@ def set_emitter_feedback_guard(value: bool):
             _state.notice_emitter.unsuppress()
     if _state.author is not None:
         _state.author._applying_remote = value
+
+
+def seed_emitter_caches_for_import(prim_path: str):
+    """Seed emitter caches for a prim hierarchy after receiver import.
+
+    When the receiver imports objects (via load_payload or set_reference),
+    the emitter has never seen those objects.  Without seeding, the first
+    user interaction triggers the depsgraph handler to process every object,
+    author to the stage, and send a storm of events to the server.
+
+    Seeds both BlenderStageAuthor caches (matrix, prim refs) and
+    NoticeEmitter caches (known prims, prim cache) so the emitter treats
+    the hierarchy as already-tracked.
+    """
+    author = _state.author
+    ne = _state.notice_emitter
+    if author is None:
+        return
+
+    prefix = prim_path + "/"
+
+    # --- Seed BlenderStageAuthor caches from Blender objects ---
+    for obj in bpy.data.objects:
+        pp = obj.get("usd_prim_path")
+        if not pp:
+            continue
+        if pp != prim_path and not pp.startswith(prefix):
+            continue
+        src = getattr(obj, "matrix_basis", obj.matrix_world)
+        m = tuple(v for row in src for v in row)
+        author._last_matrix[obj.name] = m
+        author._prim_refs[pp] = obj
+        author._used_prim_paths.add(pp)
+
+    # --- Seed NoticeEmitter caches from emitter's stage ---
+    if ne is not None:
+        ne.seed_prim_cache(author.stage, prim_path)
 
 
 def _reset_stage_author():
@@ -649,12 +892,23 @@ def _depsgraph_handler(scene, depsgraph):
         updates = list(depsgraph.updates)
 
         has_object_updates = any(isinstance(update.id, bpy.types.Object) for update in updates)
-        if not has_object_updates:
+        has_material_updates = any(isinstance(update.id, bpy.types.Material) for update in updates)
+        if not has_object_updates and not has_material_updates:
             return
 
         if _state.author is not None and _state.author.enabled:
-            _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
-            _state.author.on_depsgraph_update(updates)
+            if has_object_updates:
+                _state.author.auto_track = getattr(scene, "usd_connect_auto_track", False)
+                obj_count = sum(1 for u in updates if isinstance(u.id, bpy.types.Object))
+                _state.author.on_depsgraph_update(updates)
+                dirty_count = len(_state.notice_emitter.dirty) if _state.notice_emitter else 0
+                if dirty_count > 0:
+                    LOG.debug("depsgraph: %d obj updates, %d dirty prims", obj_count, dirty_count)
+
+            if has_material_updates:
+                mat_updates = [u.id for u in updates if isinstance(u.id, bpy.types.Material)]
+                _state.author.on_material_update(mat_updates)
+
             _try_send_dirty_events(include_matrices=False)
 
     except Exception:
@@ -700,6 +954,11 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
         try:
             bpy.ops.wm.usd_import(filepath=self.filepath)
             context.scene.usd_connect_base_usd_path = self.filepath
+            # Apply MaterialX materials that Blender's importer doesn't handle
+            from .blender_adapter import BlenderAdapter
+
+            adapter = BlenderAdapter()
+            adapter._enrich_materialx_from_import(self.filepath, "", "")
             self.report({"INFO"}, "USD imported with prim tagging")
         except Exception as e:
             self.report({"ERROR"}, f"USD import failed: {e}")
@@ -716,7 +975,6 @@ class USD_CONNECT_OT_start_capture(bpy.types.Operator):
         if not PXR_AVAILABLE:
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
-        _reset_stage_author()
         try:
             author = _get_stage_author(context)
         except Exception as e:

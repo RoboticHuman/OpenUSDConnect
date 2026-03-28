@@ -15,10 +15,13 @@ import time
 import bpy
 
 # Add project root to sys.path (tests/integration/scripts/ → repo root)
+# and purge any stale openusdconnect modules from the installed addon.
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
+    del sys.modules[_k]
 
 from integrations.blender.blender_adapter import BlenderAdapter
 from openusdconnect.protocol import (
@@ -107,7 +110,8 @@ def main():
 
     if sphere:
         loc = sphere.location
-        if abs(loc.x - 3.0) < 0.1 and abs(loc.y - 4.0) < 0.1 and abs(loc.z - 5.0) < 0.1:
+        # Y-up (USD) → Z-up (Blender): (3, 4, 5) → (3, -5, 4)
+        if abs(loc.x - 3.0) < 0.1 and abs(loc.y + 5.0) < 0.1 and abs(loc.z - 4.0) < 0.1:
             results["sphere_location"] = "PASS"
         else:
             results["sphere_location"] = f"FAIL: loc={tuple(loc)}"

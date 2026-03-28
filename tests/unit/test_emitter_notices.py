@@ -13,8 +13,10 @@ from openusdconnect.protocol import (
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
 )
@@ -1237,3 +1239,112 @@ class TestGprimAttrEmission:
         # Interpolation in attr_interp (not primvar_meta — normals isn't a primvar)
         interp = attr_evs[0].get("attr_interp", {})
         assert interp.get("normals") == "faceVarying"
+
+
+class TestMaterialEmission:
+    """Material binding and shader input detection."""
+
+    def test_material_binding_emitted(self):
+        """Material binding is detected and emitted."""
+        from pxr import UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Sphere", "Sphere")
+        mat = UsdShade.Material.Define(stage, "/Materials/Red")
+        binding = UsdShade.MaterialBindingAPI.Apply(
+            stage.GetPrimAtPath("/World/Sphere"),
+        )
+        binding.Bind(mat)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        bind_evs = [
+            e for e in events
+            if e["k"] == K_SET_MATERIAL_BINDING
+            and e["prim"] == "/World/Sphere"
+        ]
+        assert len(bind_evs) == 1
+        assert bind_evs[0]["material_path"] == "/Materials/Red"
+
+    def test_shader_input_emitted(self):
+        """Shader inputs are detected with correct types."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+        ).Set(Gf.Vec3f(0.8, 0.2, 0.2))
+        shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float,
+        ).Set(0.5)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        shader_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"
+        ]
+        assert len(shader_evs) == 1
+        assert shader_evs[0]["shader_id"] == "UsdPreviewSurface"
+        assert "diffuseColor" in shader_evs[0]["inputs"]
+        assert "roughness" in shader_evs[0]["inputs"]
+        assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
+        assert shader_evs[0]["input_types"]["roughness"] == "float"
+
+    def test_shader_input_change_selective(self):
+        """Changing one input does not re-emit unchanged inputs."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+        ).Set(Gf.Vec3f(1, 0, 0))
+        shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float,
+        ).Set(0.4)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+        # Flush initial events
+        emitter.build_events_for_dirty(include_matrices=False)
+
+        # Change only roughness
+        shader.GetInput("roughness").Set(0.9)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        shader_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"
+        ]
+        assert len(shader_evs) == 1
+        assert "roughness" in shader_evs[0]["inputs"]
+        assert "diffuseColor" not in shader_evs[0]["inputs"]
+
+    def test_unchanged_shader_no_event(self):
+        """No event if shader inputs haven't changed."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float,
+        ).Set(0.5)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+        # Flush initial events
+        emitter.build_events_for_dirty(include_matrices=False)
+
+        # Mark dirty but don't change anything
+        emitter.mark_dirty("/Mat/PBR")
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        shader_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_INPUT
+        ]
+        assert len(shader_evs) == 0
+

@@ -783,6 +783,121 @@ class TestStageToStageRoundtrip:
         purpose = UsdGeom.Imageable(prim_b).GetPurposeAttr().Get()
         assert purpose == "guide"
 
+    def test_material_roundtrip(self):
+        """Material binding + shader inputs roundtrip between stages."""
+        from pxr import UsdShade
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        stage_a.DefinePrim("/World", "Xform")
+        stage_a.DefinePrim("/World/Sphere", "Sphere")
+        mat = UsdShade.Material.Define(stage_a, "/Materials/Red")
+        shader = UsdShade.Shader.Define(stage_a, "/Materials/Red/PBR")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+        ).Set(Gf.Vec3f(1, 0, 0))
+        shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float,
+        ).Set(0.4)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat.CreateSurfaceOutput().ConnectToSource(
+            shader.GetOutput("surface"),
+        )
+        binding = UsdShade.MaterialBindingAPI.Apply(
+            stage_a.GetPrimAtPath("/World/Sphere"),
+        )
+        binding.Bind(mat)
+
+        emitter = NoticeEmitter(stage_a)
+        for p in ["/World", "/World/Sphere", "/Materials/Red",
+                  "/Materials/Red/PBR"]:
+            emitter.mark_dirty(p)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        stage_b.DefinePrim("/World", "Xform")
+        apply_events(stage_b, events)
+
+        # Verify binding
+        sphere_b = stage_b.GetPrimAtPath("/World/Sphere")
+        binding_b = UsdShade.MaterialBindingAPI(sphere_b)
+        mat_b, _ = binding_b.ComputeBoundMaterial()
+        assert str(mat_b.GetPath()) == "/Materials/Red"
+
+        # Verify shader values
+        shader_b = UsdShade.Shader(
+            stage_b.GetPrimAtPath("/Materials/Red/PBR"),
+        )
+        assert shader_b.GetIdAttr().Get() == "UsdPreviewSurface"
+        dc = shader_b.GetInput("diffuseColor").Get()
+        assert abs(dc[0] - 1.0) < 1e-6
+        assert abs(shader_b.GetInput("roughness").Get() - 0.4) < 1e-6
+
+    def test_textured_material_roundtrip(self):
+        """Textured material with shader connections roundtrips."""
+        from pxr import UsdShade
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+
+        # Build a textured material: UVReader → DiffuseTex → PBR
+        stage_a.DefinePrim("/World", "Xform")
+        mat = UsdShade.Material.Define(stage_a, "/Mat")
+        pbr = UsdShade.Shader.Define(stage_a, "/Mat/PBR")
+        pbr.CreateIdAttr("UsdPreviewSurface")
+        pbr.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.3)
+        pbr.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat.CreateSurfaceOutput().ConnectToSource(pbr.GetOutput("surface"))
+
+        tex = UsdShade.Shader.Define(stage_a, "/Mat/DiffuseTex")
+        tex.CreateIdAttr("UsdUVTexture")
+        tex.CreateInput(
+            "file", Sdf.ValueTypeNames.Asset,
+        ).Set(Sdf.AssetPath("tex/diffuse.png"))
+        tex.CreateInput("st", Sdf.ValueTypeNames.Float2)
+        tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+        uv = UsdShade.Shader.Define(stage_a, "/Mat/UVReader")
+        uv.CreateIdAttr("UsdPrimvarReader_float2")
+        uv.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+        uv.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+        tex.GetInput("st").ConnectToSource(uv.GetOutput("result"))
+        pbr.GetInput("roughness")  # value only, no connection
+        pbr.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+        ).ConnectToSource(tex.GetOutput("rgb"))
+
+        emitter = NoticeEmitter(stage_a)
+        for p in ["/World", "/Mat", "/Mat/PBR", "/Mat/DiffuseTex",
+                  "/Mat/UVReader"]:
+            emitter.mark_dirty(p)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        apply_events(stage_b, events)
+
+        # Verify PBR has diffuseColor connected to DiffuseTex
+        pbr_b = UsdShade.Shader(stage_b.GetPrimAtPath("/Mat/PBR"))
+        dc_inp = pbr_b.GetInput("diffuseColor")
+        sources, _ = dc_inp.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Mat/DiffuseTex"
+        assert sources[0].sourceName == "rgb"
+
+        # Verify DiffuseTex has st connected to UVReader
+        tex_b = UsdShade.Shader(stage_b.GetPrimAtPath("/Mat/DiffuseTex"))
+        st_inp = tex_b.GetInput("st")
+        sources, _ = st_inp.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Mat/UVReader"
+
+        # Verify roughness value (not connected)
+        assert abs(pbr_b.GetInput("roughness").Get() - 0.3) < 1e-6
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

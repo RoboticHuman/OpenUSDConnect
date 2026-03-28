@@ -1,9 +1,10 @@
 # Testing Setup
 
-OpenUSDConnect has two categories of tests:
+OpenUSDConnect has three tiers of tests:
 
-- **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices (no Blender needed)
+- **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices, stage parity including shader inputs (no Blender needed)
 - **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
+- **Asset E2E tests** (`tests/integration/asset_tests/`) — full pipeline with real USD assets, material enrichment, texture connections, variant switching (requires Blender GUI, skipped by default)
 
 ## Running Tests
 
@@ -280,6 +281,35 @@ except KeyboardInterrupt:
 s.close()
 "
 ```
+
+## Asset Integration Tests (E2E)
+
+Heavy end-to-end tests that launch Blender (GUI mode) per test, send events through a real server, and verify material enrichment, texture connections, variant switching, and material identity on real USD assets.
+
+**Skipped by default.** Enable with `--asset-tests`:
+
+```bash
+# Run all asset tests (~90 seconds)
+uv run pytest tests/integration/asset_tests/ --asset-tests -v
+
+# Run a single asset test
+uv run pytest tests/integration/asset_tests/test_assets.py::test_bishop_materialx --asset-tests -v
+```
+
+The addon is automatically rebuilt before running. Each test starts its own server and cleans up after.
+
+### Asset test inventory
+
+| Test | Asset | What it verifies |
+|------|-------|-----------------|
+| `test_bishop_materialx` | OpenChessSet Bishop | MaterialX multi-node network, texture loading via NodeGraph resolution, diffuse connection chain (Mix←HueSat←Texture), dual materials (Black/White), material binding, shader map seeding |
+| `test_teapot_variants` | Teapot | Payload loading, default variant material (Ceramic with primvar Base Color), variant switch Utah↔Fancy with material rebinding, interleaved live editing with value retention across variant round-trips |
+| `test_two_teapots_identity` | Teapot ×2 | Path-based material identity — two references get separate Ceramic materials with different `usd_material_path` tags, node tree integrity, parent-context object naming |
+| `test_vehicles_multi_binding` | Vehicles 4WD | 6 material bindings across mesh parts from external material file references |
+
+### Adding new asset tests
+
+See `tests/integration/asset_tests/README.md` for the `TestHarness` API and step-by-step guide.
 
 ## What the Blender Tests Cover
 

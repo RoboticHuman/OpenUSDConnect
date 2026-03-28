@@ -9,7 +9,7 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .protocol import (
     K_DEACTIVATE_PRIM,
@@ -18,14 +18,18 @@ from .protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
+    REL_MATERIAL_BINDING,
 )
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
@@ -37,16 +41,21 @@ _C_PAYLOADS = "payloads"
 _C_PAYLOAD_LOADED = "payload_loaded"
 _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
+_C_MATERIAL_BINDING = "material_binding"
+_C_SHADER_INPUTS = "shader_inputs"
+_C_SHADER_CONNECTIONS = "shader_connections"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
-_SKIP_ATTR_PREFIXES = ("xformOp:",)
+# inputs:/outputs: are UsdShade namespace — handled by set_shader_input.
+_SKIP_ATTR_PREFIXES = ("xformOp:", "inputs:", "outputs:")
 
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
 #   extent     — bounding box, computed from geometry by USD
 #   proxyPrim  — relationship target, not a value attribute
+#   info:id    — shader type identifier, handled by set_shader_input
 _SKIP_ATTR_NAMES = frozenset({
-    "visibility", "xformOpOrder", "extent", "proxyPrim",
+    "visibility", "xformOpOrder", "extent", "proxyPrim", "info:id",
 })
 
 
@@ -230,6 +239,86 @@ def _read_variant_selections(stage, prim_path):
     return result
 
 
+def _read_material_binding(stage, prim_path):
+    """Read the material:binding relationship target from the composed stage.
+
+    Returns the target material prim path string, or empty string if unbound.
+    Reads from the full composed view so bindings from referenced files are
+    visible — the emitter's per-prim cache handles deduplication.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return ""
+    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
+    if not binding_rel or not binding_rel.IsValid():
+        return ""
+    targets = binding_rel.GetTargets()
+    return str(targets[0]) if targets else ""
+
+
+def resolve_nodegraph_connection(stage, source_prim_path, source_output):
+    """Resolve a NodeGraph interface output to the internal shader.
+
+    If the source is a NodeGraph, follows its output connection to the
+    actual shader that produces the value.  Returns the resolved
+    (prim_path, output_name) tuple.  If the source is already a Shader
+    or resolution fails, returns the original values unchanged.
+    """
+    prim = stage.GetPrimAtPath(source_prim_path)
+    if prim and prim.IsA(UsdShade.NodeGraph):
+        ng = UsdShade.NodeGraph(prim)
+        ng_out = ng.GetOutput(source_output)
+        if ng_out:
+            srcs, _ = ng_out.GetConnectedSources()
+            if srcs:
+                return str(srcs[0].source.GetPath()), srcs[0].sourceName
+    return source_prim_path, source_output
+
+
+def _read_shader_inputs(stage, prim_path):
+    """Read shader inputs and metadata from a Shader prim.
+
+    Returns (shader_id, inputs_dict, input_types_dict, connections_dict)
+    or ("", {}, {}, {}) if the prim is not a shader.
+
+    connections_dict maps input_name → {"source_prim": str, "source_output": str}
+    for connected inputs. Connected inputs are excluded from inputs_dict
+    since their values come from the connection, not direct authoring.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return "", {}, {}, {}
+    if not prim.IsA(UsdShade.Shader):
+        return "", {}, {}, {}
+
+    shader = UsdShade.Shader(prim)
+    shader_id = shader.GetIdAttr().Get() or ""
+    if not shader_id:
+        return "", {}, {}, {}
+
+    inputs = {}
+    input_types = {}
+    connections = {}
+    for inp in shader.GetInputs():
+        if not inp.GetAttr().IsAuthored():
+            continue
+        name = inp.GetBaseName()
+        # Check for connection first — connected inputs get their
+        # value from the source, not from direct authoring
+        sources, _ = inp.GetConnectedSources()
+        if sources:
+            connections[name] = {
+                "source_prim": str(sources[0].source.GetPath()),
+                "source_output": sources[0].sourceName,
+            }
+            continue
+        val = _usd_value_to_python(inp.Get())
+        if val is not None:
+            inputs[name] = val
+            input_types[name] = str(inp.GetAttr().GetTypeName())
+    return shader_id, inputs, input_types, connections
+
+
 class NoticeEmitter:
     """Watches a Usd.Stage for changes and builds idempotent transform events.
 
@@ -271,6 +360,7 @@ class NoticeEmitter:
         # _migrate_caches and _purge_caches handle all keys automatically.
         self._prim_cache: dict[str, dict] = {}
         self._dirty_attrs: dict[str, set[str]] = {}
+        self._resynced_prims: set[str] = set()
 
     def cleanup(self):
         """Deregister notice listener and clear all caches.
@@ -284,7 +374,48 @@ class NoticeEmitter:
         self._prim_cache.clear()
         self._known_prims.clear()
         self._dirty_attrs.clear()
+        self._resynced_prims.clear()
         self.dirty.clear()
+
+    def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
+        """Seed the per-prim diff cache for a prim and its composed children.
+
+        Populates ``_prim_cache`` with the current composed state (material
+        bindings, variant selections, payloads, references, gprim attrs) so
+        the emitter treats the hierarchy as already-tracked.  Prevents a
+        full state dump on first encounter.
+
+        Does NOT add to ``_known_prims`` — the emitter should still send
+        structural events (ensure_prim, ensure_xform_ops) on first
+        encounter so the server can create xform ops on payload prims.
+        """
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        for child in Usd.PrimRange(prim):
+            cp = str(child.GetPath())
+            pc = self._prim_cache.setdefault(cp, {})
+            pc[_C_REFERENCES] = _read_references(stage, cp)
+            pc[_C_PAYLOADS] = _read_payloads(stage, cp)
+            pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(stage, cp)
+            pc[_C_MATERIAL_BINDING] = _read_material_binding(stage, cp)
+            if child.HasAuthoredPayloads():
+                pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
+            gprim_snapshot = {}
+            for attr in child.GetAttributes():
+                name = attr.GetName()
+                if attr.IsAuthored() and self._attr_filter(name):
+                    val = _usd_value_to_python(attr.Get())
+                    if val is not None:
+                        gprim_snapshot[name] = val
+            if gprim_snapshot:
+                pc[_C_GPRIM_ATTRS] = gprim_snapshot
+            # Seed shader inputs/connections
+            shader_id, inputs, _types, connections = _read_shader_inputs(stage, cp)
+            if shader_id:
+                pc[_C_SHADER_INPUTS] = {"shader_id": shader_id, "inputs": inputs}
+                if connections:
+                    pc[_C_SHADER_CONNECTIONS] = connections
 
     def suppress(self):
         """Suppress notice collection (feedback guard)."""
@@ -301,6 +432,7 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
         self._dirty_attrs.clear()
+        self._resynced_prims.clear()
 
     def _classify_resync(self, notice, prim_path: str) -> str | None:
         """Classify a resync path into an action.
@@ -348,6 +480,7 @@ class NoticeEmitter:
                 self._deactivated_prims.add(prim_path)
             elif action == "dirty":
                 self.dirty.add(prim_path)
+                self._resynced_prims.add(prim_path)
 
         for p in notice.GetChangedInfoOnlyPaths():
             path_str = str(p)
@@ -434,17 +567,21 @@ class NoticeEmitter:
         """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
         events: list[dict] = []
         pc = self._prim_cache.setdefault(prim_path, {})
+        prim = self.stage.GetPrimAtPath(prim_path)
 
         # Structural events on first encounter
         if prim_path not in self._known_prims:
-            prim = self.stage.GetPrimAtPath(prim_path)
             type_name = "Xform"
             if prim and prim.IsValid():
                 tn = prim.GetTypeName()
                 if tn:
                     type_name = tn
             events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
-            events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
+            # Only emit xform ops for prims that have transforms —
+            # Materials, Shaders, NodeGraphs, Scopes don't.
+            xf = UsdGeom.Xformable(prim) if prim else None
+            if xf and xf.GetXformOpOrderAttr().IsAuthored():
+                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._known_prims.add(prim_path)
 
         # Variant selection diff (V before R in LIVERPS)
@@ -484,8 +621,8 @@ class NoticeEmitter:
             events.append(pay_ev)
             pc[_C_PAYLOADS] = current_payloads
 
+
         # Payload load-state diff
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid() and prim.HasAuthoredPayloads():
             is_loaded = prim.IsLoaded()
             was_loaded = pc.get(_C_PAYLOAD_LOADED)
@@ -496,27 +633,89 @@ class NoticeEmitter:
                     events.append({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
                 pc[_C_PAYLOAD_LOADED] = is_loaded
 
-        # TRS partial diff
-        last_trs = pc.get(_C_TRS, {})
-        fields = []
-        payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
+        # Material binding diff
+        current_binding = _read_material_binding(self.stage, prim_path)
+        last_binding = pc.get(_C_MATERIAL_BINDING, "")
+        if current_binding != last_binding:
+            events.append({
+                "k": K_SET_MATERIAL_BINDING,
+                "prim": prim_path,
+                "material_path": current_binding,
+            })
+            pc[_C_MATERIAL_BINDING] = current_binding
 
-        if not near_list(snap["t"], last_trs.get("t"), eps_trs):
-            fields.append("t")
-            payload["t"] = snap["t"]
-        if not near_list(snap["r"], last_trs.get("r"), eps_trs):
-            fields.append("r")
-            payload["r"] = snap["r"]
-        if not near_list(snap["s"], last_trs.get("s"), eps_trs):
-            fields.append("s")
-            payload["s"] = snap["s"]
+        # Shader input + connection diff
+        shader_id, current_inputs, current_types, current_conns = (
+            _read_shader_inputs(self.stage, prim_path)
+        )
+        if shader_id:
+            # Value diff
+            last_shader = pc.get(_C_SHADER_INPUTS, {})
+            last_inputs = last_shader.get("inputs", {})
+            changed_inputs = {}
+            changed_types = {}
+            for name, val in current_inputs.items():
+                if val != last_inputs.get(name):
+                    changed_inputs[name] = val
+                    changed_types[name] = current_types[name]
+            if changed_inputs:
+                events.append({
+                    "k": K_SET_SHADER_INPUT,
+                    "prim": prim_path,
+                    "shader_id": shader_id,
+                    "inputs": changed_inputs,
+                    "input_types": changed_types,
+                })
+            pc[_C_SHADER_INPUTS] = {
+                "shader_id": shader_id,
+                "inputs": current_inputs,
+            }
 
-        if fields:
-            events.append(payload)
-            pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
+            # Connection diff
+            last_conns = pc.get(_C_SHADER_CONNECTIONS, {})
+            if current_conns != last_conns:
+                new_conns = {
+                    k: v for k, v in current_conns.items()
+                    if v != last_conns.get(k)
+                }
+                removed = [
+                    k for k in last_conns if k not in current_conns
+                ]
+                if new_conns or removed:
+                    ev = {
+                        "k": K_SET_SHADER_CONNECTION,
+                        "prim": prim_path,
+                        "connections": new_conns,
+                    }
+                    if removed:
+                        ev["disconnections"] = removed
+                    events.append(ev)
+                pc[_C_SHADER_CONNECTIONS] = current_conns
+
+        # TRS partial diff — skip for prims without authored xform ops
+        xf = UsdGeom.Xformable(prim) if prim else None
+        has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
+
+        if has_xform:
+            last_trs = pc.get(_C_TRS, {})
+            fields = []
+            payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
+
+            if not near_list(snap["t"], last_trs.get("t"), eps_trs):
+                fields.append("t")
+                payload["t"] = snap["t"]
+            if not near_list(snap["r"], last_trs.get("r"), eps_trs):
+                fields.append("r")
+                payload["r"] = snap["r"]
+            if not near_list(snap["s"], last_trs.get("s"), eps_trs):
+                fields.append("s")
+                payload["s"] = snap["s"]
+
+            if fields:
+                events.append(payload)
+                pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
         # Visibility diff — only emit if the attr is explicitly authored
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             imageable = UsdGeom.Imageable(prim)
             vis_attr = imageable.GetVisibilityAttr()
@@ -532,15 +731,18 @@ class NoticeEmitter:
                     pc[_C_VISIBILITY] = vis_val
 
         # Gprim attribute diff
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
             last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
-            # When no specific attrs were flagged by the notice (first encounter,
-            # variant switch, or any resync), scan all authored trackable attrs
-            # and diff against the cache.
-            if not dirty_attr_names:
+            # Full attr scan: needed on first encounter (cache empty) or
+            # after a resync notice (variant switch, structural change).
+            # Skipped for plain info-only changes (e.g., only xformOp values
+            # changed) where the cache is already populated — avoids reading
+            # thousands of mesh vertices every frame.
+            is_resync = prim_path in self._resynced_prims
+            self._resynced_prims.discard(prim_path)
+            if not dirty_attr_names and (not last_attrs or is_resync):
                 for attr in prim.GetAttributes():
                     name = attr.GetName()
                     if attr.IsAuthored() and self._attr_filter(name):

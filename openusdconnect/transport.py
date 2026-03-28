@@ -22,14 +22,16 @@ def recv_lines(sock: socket.socket, bufsize: int = 4096) -> Generator[dict, None
     Reads from socket in chunks, splits on newlines, yields parsed dicts.
     Stops when the connection is closed (recv returns empty bytes).
     """
-    buf = b""
+    buf = bytearray()
     while True:
         data = sock.recv(bufsize)
         if not data:
             break
-        buf += data
+        buf.extend(data)
         while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
+            idx = buf.index(b"\n")
+            line = bytes(buf[:idx])
+            del buf[:idx + 1]
             if line:
                 yield json.loads(line.decode("utf-8"))
 

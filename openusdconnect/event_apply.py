@@ -10,7 +10,7 @@ All functions require pxr (OpenUSD Python bindings).
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Usd, UsdGeom, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 from .protocol import (
     K_DEACTIVATE_PRIM,
@@ -20,15 +20,26 @@ from .protocol import (
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
+    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    REL_MATERIAL_BINDING,
     STRUCTURAL_EVENT_KINDS,
 )
+
+# Surface shader IDs that need outputs:surface and auto-wire to Material.
+_SURFACE_SHADER_IDS = frozenset({
+    "UsdPreviewSurface",
+    "ND_UsdPreviewSurface_surfaceshader",
+    "ND_standard_surface_surfaceshader",
+})
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -126,6 +137,13 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
             attr.Set(Vt.IntArray(value))
         elif type_name == "float[]":
             attr.Set(Vt.FloatArray(value))
+        elif type_name in ("float3", "vector3f", "normal3f", "point3f",
+                          "color3f") and len(value) == 3:
+            attr.Set(Gf.Vec3f(*value))
+        elif type_name in ("float2", "texCoord2f") and len(value) == 2:
+            attr.Set(Gf.Vec2f(*value))
+        elif type_name == "double3" and len(value) == 3:
+            attr.Set(Gf.Vec3d(*value))
         else:
             attr.Set(value)
     else:
@@ -134,15 +152,21 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
 
 def _apply_set_xform_trs(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
     fields = ev.get("fields", [])
-    _, _, t_op, o_op, s_op = ensure_canonical_ops(stage, prim_path)
+    xf = UsdGeom.Xformable(prim)
+    t_op = find_op(xf, "translate")
+    o_op = find_op(xf, "orient")
+    s_op = find_op(xf, "scale")
 
-    if "t" in fields:
+    if "t" in fields and t_op:
         x, y, z = ev["t"]
         t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
-    if "r" in fields:
+    if "r" in fields and o_op:
         o_op.Set(quatf_from_wxyz(ev["r"]))
-    if "s" in fields:
+    if "s" in fields and s_op:
         x, y, z = ev["s"]
         s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
 
@@ -250,6 +274,121 @@ def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
     stage.Unload(Sdf.Path(ev["prim"]))
 
 
+def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
+    """Bind or unbind a material to a geometry prim.
+
+    Uses direct relationship authoring so the binding works even if
+    the target material prim hasn't been created yet (USD relationships
+    can target non-existent prims).
+    """
+    prim = get_or_define_prim(stage, ev["prim"])
+    material_path = ev.get("material_path", "")
+
+    UsdShade.MaterialBindingAPI.Apply(prim)
+    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
+    if not binding_rel or not binding_rel.IsValid():
+        binding_rel = prim.CreateRelationship(REL_MATERIAL_BINDING)
+    binding_rel.ClearTargets(removeSpec=False)
+    if material_path:
+        binding_rel.AddTarget(Sdf.Path(material_path))
+
+
+def _set_shader_input_value(shader: UsdShade.Shader, name: str,
+                            value, type_name: str) -> None:
+    """Set a single shader input, creating it with the correct type if needed."""
+    sdf_type = Sdf.ValueTypeNames.Find(type_name)
+    if not sdf_type:
+        return
+    inp = shader.GetInput(name)
+    if not inp:
+        inp = shader.CreateInput(name, sdf_type)
+
+    if isinstance(value, list):
+        if type_name in ("color3f", "float3", "normal3f"):
+            inp.Set(Gf.Vec3f(*value))
+        elif type_name in ("float2", "texCoord2f"):
+            inp.Set(Gf.Vec2f(*value))
+        else:
+            inp.Set(value)
+    else:
+        if type_name == "float":
+            inp.Set(float(value))
+        elif type_name == "int":
+            inp.Set(int(value))
+        else:
+            inp.Set(value)
+
+
+def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
+    """Set shader ID and input values on a Shader prim."""
+    prim = get_or_define_prim(stage, ev["prim"], "Shader")
+    shader = UsdShade.Shader(prim)
+
+    # Set the shader type (e.g., "UsdPreviewSurface")
+    shader_id = ev.get("shader_id", "")
+    if shader_id:
+        shader.CreateIdAttr(shader_id)
+
+    if shader_id in _SURFACE_SHADER_IDS:
+        if not shader.GetOutput("surface"):
+            shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        parent = prim.GetParent()
+        if parent and parent.IsA(UsdShade.Material):
+            material = UsdShade.Material(parent)
+            mat_output = material.GetSurfaceOutput()
+            if not mat_output:
+                mat_output = material.CreateSurfaceOutput()
+                mat_output.ConnectToSource(shader.GetOutput("surface"))
+            else:
+                sources, _ = mat_output.GetConnectedSources()
+                if not sources or sources[0].source.GetPath() != prim.GetPath():
+                    mat_output.ConnectToSource(shader.GetOutput("surface"))
+
+    # Set input values
+    inputs = ev.get("inputs", {})
+    input_types = ev.get("input_types", {})
+    for name, value in inputs.items():
+        type_name = input_types.get(name, "float")
+        _set_shader_input_value(shader, name, value, type_name)
+
+
+def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
+    """Connect or disconnect shader inputs to/from other shader outputs."""
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if not prim or not prim.IsValid():
+        return
+    shader = UsdShade.Shader(prim)
+
+    for input_name, conn in ev.get("connections", {}).items():
+        source_prim = stage.GetPrimAtPath(conn["source_prim"])
+        if not source_prim or not source_prim.IsValid():
+            # Source shader may not exist yet — create it so the
+            # connection can be established. Its set_shader_input
+            # event will set the ID and other properties later.
+            source_prim = get_or_define_prim(
+                stage, conn["source_prim"], "Shader",
+            )
+        source_shader = UsdShade.Shader(source_prim)
+        source_output = source_shader.GetOutput(conn["source_output"])
+        if not source_output:
+            # Create the output with a generic token type — USD will
+            # resolve the actual type from the connection context.
+            source_output = source_shader.CreateOutput(
+                conn["source_output"], Sdf.ValueTypeNames.Token,
+            )
+        target_input = shader.GetInput(input_name)
+        if not target_input:
+            target_input = shader.CreateInput(
+                input_name, source_output.GetTypeName(),
+            )
+        target_input.ConnectToSource(source_output)
+
+    for input_name in ev.get("disconnections", []):
+        inp = shader.GetInput(input_name)
+        if inp:
+            inp.DisconnectSource()
+
+
 _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_VARIANT_SELECTIONS: _apply_set_variant_selections,
     K_SET_XFORM_TRS: _apply_set_xform_trs,
@@ -260,6 +399,9 @@ _EVENT_DISPATCH: dict[str, callable] = {
     K_SET_PAYLOAD: _apply_set_payload,
     K_LOAD_PAYLOAD: _apply_load_payload,
     K_UNLOAD_PAYLOAD: _apply_unload_payload,
+    K_SET_MATERIAL_BINDING: _apply_set_material_binding,
+    K_SET_SHADER_INPUT: _apply_set_shader_input,
+    K_SET_SHADER_CONNECTION: _apply_set_shader_connection,
 }
 
 
