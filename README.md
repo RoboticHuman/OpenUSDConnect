@@ -91,3 +91,8 @@ See [Testing Setup](docs/testing-setup.md) for Blender configuration and detaile
 - `test_blender_adapter.py` — headless tests: prim types, TRS, visibility, gprim attrs, delete, rename, MPI world-preservation
 - `test_blender_integration.py` — end-to-end emitter → server → receiver pipeline
 - `test_ref_reimport.py` — reference/payload deduplication across import, reset, loopback, and manual workflows
+
+## Acknowledgments
+
+- [**io_blender_mtlx**](https://github.com/Activision/io_blender_mtlx) by Activision — MaterialX node handlers for building Blender shader networks from MaterialX node definitions
+- [**USD Working Group Assets**](https://github.com/usd-wg/assets) by the USD Working Group — standardized test assets used by the asset integration test suite
