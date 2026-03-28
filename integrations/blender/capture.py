@@ -115,10 +115,6 @@ _SCENE_PROPS = [
         "min": 0.0,
         "max": 5.0,
     }),
-    ("usd_connect_import_skip_leaf_geom", bpy.props.BoolProperty, {
-        "name": "Skip Leaf /Geom Prim Paths",
-        "default": True,
-    }),
     ("usd_connect_emit_host", bpy.props.StringProperty, {
         "name": "Server Host",
         "default": "127.0.0.1",
@@ -223,13 +219,9 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             except Exception as e:
                 LOG.warning("USDHook: Could not infer root prim: %s", e)
 
-        skip_leaf_geom = bool(getattr(bpy.context.scene, "usd_connect_import_skip_leaf_geom", True))
-
         tagged = 0
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
-            if skip_leaf_geom and prim_path_str.endswith("/Geom"):
-                continue
             # Look up prim type from the stage
             prim_type_name = ""
             if stage:

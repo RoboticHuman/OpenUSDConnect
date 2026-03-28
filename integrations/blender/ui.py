@@ -21,7 +21,6 @@ def _draw_import_section(layout, scene):
     box = layout.box()
     box.label(text="Import", icon="IMPORT")
     box.operator("usd_connect.import_with_hook")
-    box.prop(scene, "usd_connect_import_skip_leaf_geom")
     box.operator("usd_connect.print_import_props", icon="CONSOLE")
 
 
