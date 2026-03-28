@@ -30,6 +30,14 @@ Event types (inside txn.events):
   unload_payload:     {"k":"unload_payload","prim":"/World/Asset"}
   set_variant_selections: {"k":"set_variant_selections","prim":"/World/Car",
                         "selections":{"wheels":"wheelWide","color":"red"}}
+  set_material_binding: {"k":"set_material_binding","prim":"/World/Mesh",
+                        "material_path":"/World/Materials/Wood"}
+  set_shader_input:   {"k":"set_shader_input","prim":"/World/Mat/Shader",
+                        "shader_id":"UsdPreviewSurface",
+                        "inputs":{"metallic":0.8}, "input_types":{"metallic":"float"}}
+  set_shader_connection: {"k":"set_shader_connection","prim":"/World/Mat/Shader",
+                        "connections":{"diffuseColor":{"source_prim":"/World/Mat/Tex",
+                        "source_output":"rgb"}}, "disconnections":["opacity"]}
 """
 
 from __future__ import annotations
@@ -89,27 +97,32 @@ EVENT_KEYS = frozenset(
     }
 )
 
-# Event application order — structural/compositional first, values second,
-# destructive last.  Follows the LIVERPS composition strength model from
-# the OpenUSD spec (section 10.4).
+# Event application order — structural first, then composition arcs
+# (V before R before P per LIVERPS), then local value opinions (L),
+# destructive last.  This is dependency order (prim must exist before
+# values can be set), not strength order.  LIVERPS strength (L strongest,
+# S weakest) is handled by USD's composition engine, not by event ordering.
+_EVENT_KIND_SEQUENCE = [
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_VARIANT_SELECTIONS,   # V in LIVERPS — before R
+    K_SET_REFERENCE,
+    K_SET_PAYLOAD,
+    K_LOAD_PAYLOAD,
+    K_SET_XFORM_TRS,
+    K_SET_VISIBILITY,
+    K_SET_GPRIM_ATTRS,
+    K_SET_SHADER_INPUT,
+    K_SET_SHADER_CONNECTION,
+    K_SET_XFORM_MATRICES,
+    K_SET_MATERIAL_BINDING,
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_RENAME_PRIM,
+    K_UNLOAD_PAYLOAD,
+]
 EVENT_KIND_ORDER: dict[str, int] = {
-    K_ENSURE_PRIM: 0,
-    K_ENSURE_XFORM_OPS: 1,
-    K_SET_VARIANT_SELECTIONS: 2,  # V in LIVERPS — before R
-    K_SET_REFERENCE: 3,
-    K_SET_PAYLOAD: 4,
-    K_LOAD_PAYLOAD: 5,
-    K_SET_XFORM_TRS: 6,
-    K_SET_VISIBILITY: 7,
-    K_SET_GPRIM_ATTRS: 8,
-    K_SET_SHADER_INPUT: 9,
-    K_SET_SHADER_CONNECTION: 10,
-    K_SET_XFORM_MATRICES: 11,
-    K_SET_MATERIAL_BINDING: 12,
-    K_DEACTIVATE_PRIM: 13,
-    K_DELETE_PRIM: 14,
-    K_RENAME_PRIM: 15,
-    K_UNLOAD_PAYLOAD: 16,
+    k: i for i, k in enumerate(_EVENT_KIND_SEQUENCE)
 }
 
 # Events that must be applied outside a ChangeBlock (structural ops).
@@ -121,6 +134,24 @@ STRUCTURAL_EVENT_KINDS = frozenset({
 
 # Valid TRS field names
 TRS_FIELDS = frozenset({"t", "r", "s"})
+
+
+def _is_arc_list_valid(arcs: list) -> bool:
+    """Validate a list of composition arc entries (refs or payloads)."""
+    if not isinstance(arcs, list):
+        return False
+    for entry in arcs:
+        if not isinstance(entry, dict):
+            return False
+        ap = entry.get("asset_path")
+        pp = entry.get("prim_path")
+        if ap is None and pp is None:
+            return False
+        if ap is not None and (not isinstance(ap, str) or not ap):
+            return False
+        if pp is not None and (not isinstance(pp, str) or not pp.startswith("/")):
+            return False
+    return True
 
 
 def is_quat_valid(q: list[float]) -> bool:
@@ -221,42 +252,12 @@ def validate_event(ev: dict) -> bool:
         if not all(isinstance(key, str) for key in attrs):
             return False
     if k == K_SET_REFERENCE:
-        refs = ev.get("refs")
-        if not isinstance(refs, list):
+        if not _is_arc_list_valid(ev.get("refs", None)):
             return False
-        for entry in refs:
-            if not isinstance(entry, dict):
-                return False
-            ap = entry.get("asset_path")
-            pp = entry.get("prim_path")
-            # At least one of asset_path or prim_path must be present
-            if ap is None and pp is None:
-                return False
-            if ap is not None:
-                if not isinstance(ap, str) or not ap:
-                    return False
-            if pp is not None:
-                if not isinstance(pp, str) or not pp.startswith("/"):
-                    return False
     # load_payload and unload_payload require only "prim" (already validated above)
-
     if k == K_SET_PAYLOAD:
-        payloads = ev.get("payloads")
-        if not isinstance(payloads, list):
+        if not _is_arc_list_valid(ev.get("payloads", None)):
             return False
-        for entry in payloads:
-            if not isinstance(entry, dict):
-                return False
-            ap = entry.get("asset_path")
-            pp = entry.get("prim_path")
-            if ap is None and pp is None:
-                return False
-            if ap is not None:
-                if not isinstance(ap, str) or not ap:
-                    return False
-            if pp is not None:
-                if not isinstance(pp, str) or not pp.startswith("/"):
-                    return False
     if k == K_SET_VARIANT_SELECTIONS:
         selections = ev.get("selections")
         if not isinstance(selections, dict):
