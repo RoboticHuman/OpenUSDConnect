@@ -133,7 +133,11 @@ class ReceiverThread(threading.Thread):
 
         # Send hello as receiver — use last_seq + 1 for replay on reconnect
         sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
-        send_line(self.sock, make_hello("receiver", sync_from=sync_from, client_id=self.client_id, origin=self.origin))
+        hello = make_hello(
+            "receiver", sync_from=sync_from,
+            client_id=self.client_id, origin=self.origin,
+        )
+        send_line(self.sock, hello)
         self.connected = True
         LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
 

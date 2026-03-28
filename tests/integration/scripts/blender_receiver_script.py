@@ -110,7 +110,8 @@ def main():
 
     if sphere:
         loc = sphere.location
-        if abs(loc.x - 3.0) < 0.1 and abs(loc.y - 4.0) < 0.1 and abs(loc.z - 5.0) < 0.1:
+        # Y-up (USD) → Z-up (Blender): (3, 4, 5) → (3, -5, 4)
+        if abs(loc.x - 3.0) < 0.1 and abs(loc.y + 5.0) < 0.1 and abs(loc.z - 4.0) < 0.1:
             results["sphere_location"] = "PASS"
         else:
             results["sphere_location"] = f"FAIL: loc={tuple(loc)}"

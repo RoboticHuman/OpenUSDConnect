@@ -6,9 +6,7 @@ set_reference for the teapot asset, then disconnects.
 
 import argparse
 import json
-import os
 import socket
-import sys
 
 
 def main():

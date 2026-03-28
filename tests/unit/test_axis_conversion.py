@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
 from openusdconnect.axis_conversion import (
     compose_axis_rotation,
     needs_conversion,
@@ -179,9 +177,9 @@ def _mat4_from_trs(t, q, s):
     """
     w, x, y, z = q
     x2, y2, z2 = x * 2, y * 2, z * 2
-    xx = x * x2; xy = x * y2; xz = x * z2
-    yy = y * y2; yz = y * z2; zz = z * z2
-    wx = w * x2; wy = w * y2; wz = w * z2
+    xx, xy, xz = x * x2, x * y2, x * z2
+    yy, yz, zz = y * y2, y * z2, z * z2
+    wx, wy, wz = w * x2, w * y2, w * z2
 
     # Rotation matrix columns (pre-scale)
     r = [

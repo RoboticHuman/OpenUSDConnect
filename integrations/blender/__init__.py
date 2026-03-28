@@ -69,7 +69,7 @@ if "capture" in locals():
 
 from . import capture
 from . import receiver_addon
-from . import shader_mapper
+from . import shader_mapper as shader_mapper
 from . import blender_adapter as blender_adapter
 from . import ui
 

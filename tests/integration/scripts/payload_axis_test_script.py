@@ -109,14 +109,14 @@ def main():
     # ==================================================================
     # Step 1: Import test_scene.usda via addon import (with USDHook)
     # ==================================================================
+    from integrations.blender import capture as cap_mod
+    from integrations.blender import receiver_addon
     from integrations.blender.capture import (
-        USD_CONNECT_Hook,
         NetworkSender,
+        USD_CONNECT_Hook,
         _ensure_scene_props,
         _get_stage_author,
     )
-    from integrations.blender import capture as cap_mod
-    from integrations.blender import receiver_addon
     from openusdconnect.emitter import NoticeEmitter
 
     _ensure_scene_props()
@@ -196,7 +196,7 @@ def main():
             break
 
     if teapot_obj:
-        print(f"\n[Test] Step 5: Moving World_Teapot")
+        print("\n[Test] Step 5: Moving World_Teapot")
         teapot_obj.location = (2.0, 0.0, 0.0)
         bpy.context.view_layer.update()
         # Pump aggressively to catch the feedback loop
@@ -234,7 +234,7 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n[Test] === RESULTS ===")
+    print("\n[Test] === RESULTS ===")
     print(f"  Total: {len(inv_final)}")
     print(f"  Suffixed (.001): {suffixed or 'none'}")
     print(f"  Duplicate paths: {duplicates or 'none'}")

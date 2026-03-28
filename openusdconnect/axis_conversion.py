@@ -85,7 +85,9 @@ def zup_to_yup_scale(sx: float, sy: float, sz: float) -> tuple[float, float, flo
     return (sx, sz, sy)
 
 
-def compose_axis_rotation(w: float, x: float, y: float, z: float) -> tuple[float, float, float, float]:
+def compose_axis_rotation(
+    w: float, x: float, y: float, z: float,
+) -> tuple[float, float, float, float]:
     """Prepend Rx(90°) to a quaternion: Rx(90°) · Q.
 
     Adds the Y-up → Z-up axis-conversion rotation to a USD rotation
@@ -94,7 +96,9 @@ def compose_axis_rotation(w: float, x: float, y: float, z: float) -> tuple[float
     return _quat_mul(_Q_YUP_TO_ZUP, (w, x, y, z))
 
 
-def strip_axis_rotation(w: float, x: float, y: float, z: float) -> tuple[float, float, float, float]:
+def strip_axis_rotation(
+    w: float, x: float, y: float, z: float,
+) -> tuple[float, float, float, float]:
     """Prepend Rx(-90°) to a quaternion: Rx(-90°) · Q.
 
     Removes the Y-up → Z-up axis-conversion rotation from a Z-up DCC

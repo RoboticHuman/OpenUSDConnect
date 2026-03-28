@@ -170,10 +170,10 @@ class UsdSyncServer:
             prim = ev.get("prim", "")
             k = ev.get("k", "")
             meta = {}
-            for field in ("origin", "client", "client_id"):
-                val = rec.get(field)
+            for meta_key in ("origin", "client", "client_id"):
+                val = rec.get(meta_key)
                 if val:
-                    meta[field] = val
+                    meta[meta_key] = val
 
             if k in (K_DELETE_PRIM, K_RENAME_PRIM):
                 tombstoned.add(prim)
@@ -599,7 +599,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         role = hello.get("role")
         client_id = hello.get("client_id")
         self._origin = hello.get("origin")
-        LOG.info("Client connected: role=%s origin=%s from %s", role, self._origin, self.client_address)
+        LOG.info(
+            "Client connected: role=%s origin=%s from %s",
+            role, self._origin, self.client_address,
+        )
         sync_server.register_client(self.client_address, role, client_id, origin=self._origin)
 
         if role == "receiver":

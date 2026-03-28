@@ -256,6 +256,25 @@ def _read_material_binding(stage, prim_path):
     return str(targets[0]) if targets else ""
 
 
+def resolve_nodegraph_connection(stage, source_prim_path, source_output):
+    """Resolve a NodeGraph interface output to the internal shader.
+
+    If the source is a NodeGraph, follows its output connection to the
+    actual shader that produces the value.  Returns the resolved
+    (prim_path, output_name) tuple.  If the source is already a Shader
+    or resolution fails, returns the original values unchanged.
+    """
+    prim = stage.GetPrimAtPath(source_prim_path)
+    if prim and prim.IsA(UsdShade.NodeGraph):
+        ng = UsdShade.NodeGraph(prim)
+        ng_out = ng.GetOutput(source_output)
+        if ng_out:
+            srcs, _ = ng_out.GetConnectedSources()
+            if srcs:
+                return str(srcs[0].source.GetPath()), srcs[0].sourceName
+    return source_prim_path, source_output
+
+
 def _read_shader_inputs(stage, prim_path):
     """Read shader inputs and metadata from a Shader prim.
 
@@ -558,7 +577,11 @@ class NoticeEmitter:
                 if tn:
                     type_name = tn
             events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
-            events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
+            # Only emit xform ops for prims that have transforms —
+            # Materials, Shaders, NodeGraphs, Scopes don't.
+            xf = UsdGeom.Xformable(prim) if prim else None
+            if xf and xf.GetXformOpOrderAttr().IsAuthored():
+                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._known_prims.add(prim_path)
 
         # Variant selection diff (V before R in LIVERPS)
@@ -670,24 +693,29 @@ class NoticeEmitter:
                     events.append(ev)
                 pc[_C_SHADER_CONNECTIONS] = current_conns
 
-        # TRS partial diff
-        last_trs = pc.get(_C_TRS, {})
-        fields = []
-        payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
+        # TRS partial diff — skip for prims without authored xform ops
+        prim = self.stage.GetPrimAtPath(prim_path)
+        xf = UsdGeom.Xformable(prim) if prim else None
+        has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
-        if not near_list(snap["t"], last_trs.get("t"), eps_trs):
-            fields.append("t")
-            payload["t"] = snap["t"]
-        if not near_list(snap["r"], last_trs.get("r"), eps_trs):
-            fields.append("r")
-            payload["r"] = snap["r"]
-        if not near_list(snap["s"], last_trs.get("s"), eps_trs):
-            fields.append("s")
-            payload["s"] = snap["s"]
+        if has_xform:
+            last_trs = pc.get(_C_TRS, {})
+            fields = []
+            payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
 
-        if fields:
-            events.append(payload)
-            pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
+            if not near_list(snap["t"], last_trs.get("t"), eps_trs):
+                fields.append("t")
+                payload["t"] = snap["t"]
+            if not near_list(snap["r"], last_trs.get("r"), eps_trs):
+                fields.append("r")
+                payload["r"] = snap["r"]
+            if not near_list(snap["s"], last_trs.get("s"), eps_trs):
+                fields.append("s")
+                payload["s"] = snap["s"]
+
+            if fields:
+                events.append(payload)
+                pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
         # Visibility diff — only emit if the attr is explicitly authored
         prim = self.stage.GetPrimAtPath(prim_path)

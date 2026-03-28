@@ -428,3 +428,104 @@ class TestStageParity:
 
         _compare_stages(emitter_stage, srv.stage, "emitter", "server")
         _compare_stages(emitter_stage, receiver_stage, "emitter", "receiver")
+
+    def test_shader_input_parity(self, srv):
+        """Shader inputs on emitter, server, and receiver stages match."""
+        from pxr import Sdf, UsdShade
+
+        stage = Usd.Stage.CreateInMemory()
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+
+        stage.DefinePrim("/World", "Xform")
+        mat_prim = stage.DefinePrim("/World/Mat", "Material")
+        shader_prim = stage.DefinePrim("/World/Mat/Surface", "Shader")
+        shader = UsdShade.Shader(shader_prim)
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(0.2, 0.8, 0.3),
+        )
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.75)
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.4)
+
+        mesh = stage.DefinePrim("/World/Mesh", "Sphere")
+        UsdShade.MaterialBindingAPI.Apply(mesh)
+        UsdShade.MaterialBindingAPI(mesh).Bind(UsdShade.Material(mat_prim))
+
+        _, _, t, o, s = ensure_canonical_ops(stage, "/World/Mesh")
+        t.Set(Gf.Vec3d(0, 0, 0))
+        o.Set(Gf.Quatf(1, 0, 0, 0))
+        s.Set(Gf.Vec3d(1, 1, 1))
+
+        emitter = NoticeEmitter(stage)
+        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
+            p = str(prim.GetPath())
+            if p != "/":
+                emitter.mark_dirty(p)
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        shader_evts = [e for e in events if e.get("k") == "set_shader_input"]
+        binding_evts = [e for e in events if e.get("k") == "set_material_binding"]
+        assert shader_evts, "No shader events generated"
+        assert binding_evts, "No binding events generated"
+        surface_ev = next(e for e in shader_evts if e["prim"] == "/World/Mat/Surface")
+        assert surface_ev["shader_id"] == "UsdPreviewSurface"
+        assert "metallic" in surface_ev["inputs"]
+
+        replayed = _server_process_and_replay(srv, events)
+        receiver_stage = Usd.Stage.CreateInMemory()
+        apply_events(receiver_stage, replayed)
+
+        for label, target in [("server", srv.stage), ("receiver", receiver_stage)]:
+            sh = UsdShade.Shader(target.GetPrimAtPath("/World/Mat/Surface"))
+            assert sh.GetIdAttr().Get() == "UsdPreviewSurface"
+            assert abs(sh.GetInput("metallic").Get() - 0.75) < 1e-6, f"metallic on {label}"
+            assert abs(sh.GetInput("roughness").Get() - 0.4) < 1e-6, f"roughness on {label}"
+            binding = UsdShade.MaterialBindingAPI(
+                target.GetPrimAtPath("/World/Mesh"),
+            ).GetDirectBinding()
+            assert str(binding.GetMaterialPath()) == "/World/Mat", f"binding on {label}"
+
+    def test_shader_input_update_parity(self, srv):
+        """Incremental shader input changes maintain parity."""
+        from pxr import Sdf, UsdShade
+
+        stage = Usd.Stage.CreateInMemory()
+        session = stage.GetSessionLayer()
+        stage.SetEditTarget(Usd.EditTarget(session))
+
+        stage.DefinePrim("/World", "Xform")
+        stage.DefinePrim("/World/Mat", "Material")
+        shader_prim = stage.DefinePrim("/World/Mat/Surface", "Shader")
+        shader = UsdShade.Shader(shader_prim)
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+        emitter = NoticeEmitter(stage)
+        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
+            p = str(prim.GetPath())
+            if p != "/":
+                emitter.mark_dirty(p)
+        _server_process_and_replay(srv, emitter.build_events_for_dirty(include_matrices=False))
+
+        # Incremental: change metallic only
+        shader.GetInput("metallic").Set(0.9)
+        emitter.mark_dirty("/World/Mat/Surface")
+        update = emitter.build_events_for_dirty(include_matrices=False)
+
+        shader_updates = [e for e in update if e.get("k") == "set_shader_input"]
+        assert len(shader_updates) == 1
+        assert "metallic" in shader_updates[0]["inputs"]
+        assert "roughness" not in shader_updates[0]["inputs"]
+
+        replayed = _server_process_and_replay(srv, update)
+        receiver_stage = Usd.Stage.CreateInMemory()
+        apply_events(receiver_stage, replayed)
+
+        for label, target in [
+            ("emitter", stage), ("server", srv.stage), ("receiver", receiver_stage),
+        ]:
+            sh = UsdShade.Shader(target.GetPrimAtPath("/World/Mat/Surface"))
+            assert abs(sh.GetInput("metallic").Get() - 0.9) < 1e-6, f"metallic on {label}"
+            assert abs(sh.GetInput("roughness").Get() - 0.5) < 1e-6, f"roughness on {label}"

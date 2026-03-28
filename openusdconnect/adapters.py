@@ -199,9 +199,8 @@ class MultiNodeShaderMapper(ShaderMapper):
             if socket.is_linked:
                 continue
             val = socket.default_value
-            if hasattr(val, "__len__") and len(val) == 4:
-                result[usd_name] = [float(val[0]), float(val[1]), float(val[2])]
-            elif hasattr(val, "__len__") and len(val) == 3:
+            if hasattr(val, "__len__") and len(val) >= 3:
+                # Truncate RGBA/RGB to [r, g, b]
                 result[usd_name] = [float(val[0]), float(val[1]), float(val[2])]
             else:
                 result[usd_name] = float(val)

@@ -588,9 +588,9 @@ def test_adapter_brass_material(r):
         return
 
     # Check brass values were applied (via multi-node input_map)
-    cached_inputs = adapter._prim_cache.get(
-        "/MaterialX/Materials/Tiled_Brass/ND_standard_surface_surfaceshader:input_map",
-    )
+    cached_inputs = adapter._registry.get_shader(
+        "/MaterialX/Materials/Tiled_Brass/ND_standard_surface_surfaceshader",
+    ).get("input_map")
     if cached_inputs is None:
         r.fail(name, "no cached input_map for Standard Surface")
         return
@@ -686,7 +686,7 @@ def test_enrichment_from_reference(r):
 
     # Check the cached input_map exists (proves multi-node mapper ran)
     mtlx_path = "/World/Teapot/mtl/default_material/default_shader_mtlx"
-    cached = adapter._prim_cache.get(mtlx_path + ":input_map")
+    cached = adapter._registry.get_shader(mtlx_path).get("input_map")
     if cached is None:
         r.fail(name, "no cached input_map — enrichment didn't run")
         return

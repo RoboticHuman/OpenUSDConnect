@@ -58,17 +58,19 @@ def stop_server(proc):
         proc.kill()
 
 
-def run_blender(blender_exe, script, port, extra_args=None, timeout=60):
+def run_blender(blender_exe, script, port, extra_args=None, timeout=60,
+                background=True):
     """Run a Blender script and return the subprocess result."""
-    cmd = [
-        blender_exe,
-        "--background",
+    cmd = [blender_exe]
+    if background:
+        cmd.append("--background")
+    cmd.extend([
         "--python",
         script,
         "--",
         "--port",
         str(port),
-    ]
+    ])
     if extra_args:
         cmd.extend(extra_args)
     # Isolate Blender user data to repo-local directory (not system AppData)

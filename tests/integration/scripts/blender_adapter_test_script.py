@@ -199,8 +199,10 @@ def test_set_xform_trs(r):
         r.fail(name, "object not found")
         return
     loc = obj.location
-    if abs(loc.x - 3.0) > 1e-4 or abs(loc.y - 4.0) > 1e-4 or abs(loc.z - 5.0) > 1e-4:
-        r.fail(name, f"location wrong: {tuple(loc)}")
+    # Adapter converts Y-up (USD) to Z-up (Blender): (x, y, z) → (x, -z, y)
+    if abs(loc.x - 3.0) > 1e-4 or abs(loc.y + 5.0) > 1e-4 or abs(loc.z - 4.0) > 1e-4:
+        r.fail(name, f"location wrong: {tuple(loc)} (expected ~(3, -5, 4) after Y→Z)")
+
         return
     scl = obj.scale
     if abs(scl.x - 2.0) > 1e-4:
@@ -548,12 +550,9 @@ def test_set_reference_reimport_after_delete(r):
         r.fail(name, "no children after first import")
         return
 
-    # Delete all child objects (simulating user deleting meshes in Blender)
-    for obj in children_before:
-        adapter._prim_cache.pop(obj.get("usd_prim_path", ""), None)
-        for col in obj.users_collection:
-            col.objects.unlink(obj)
-        bpy.data.objects.remove(obj)
+    # Delete all child objects using the adapter's own cleanup method,
+    # which clears registry entries, aliases, and reference children.
+    adapter._remove_imported_ref_children("/World/Asset")
 
     # Verify children are gone
     children_mid = [
@@ -563,11 +562,27 @@ def test_set_reference_reimport_after_delete(r):
         r.fail(name, f"children still exist after delete: {len(children_mid)}")
         return
 
+    # Diagnostic: check adapter state before second import
+    has_children = adapter._registry.children_exist("/World/Asset")
+    has_ref = adapter._registry.get_imported_ref("/World/Asset")
+    container = adapter._registry.find("/World/Asset")
+    remaining = [p for p in adapter._registry._objects
+                 if p.startswith("/World/Asset/")]
+    print(f"  info: before reimport: children_exist={has_children} "
+          f"imported_ref={has_ref} container={container} "
+          f"remaining_children={remaining}")
+
     # Second import — same asset path, but stale cache should be detected
+    all_before = set(bpy.data.objects)
     result2 = adapter.set_reference("/World/Asset", refs)
     if not result2:
         r.fail(name, "second set_reference returned False")
         return
+    all_after = set(bpy.data.objects)
+    new_from_reimport = all_after - all_before
+    print(f"  info: reimport created {len(new_from_reimport)} new objects: "
+          f"{[o.name for o in new_from_reimport]}")
+    print(f"  info: all objects after: {[o.name for o in bpy.data.objects]}")
 
     # Verify children were re-imported
     children_after = [
@@ -579,8 +594,8 @@ def test_set_reference_reimport_after_delete(r):
             name, f"expected {EXPECTED_MESH_COUNT} meshes after re-import, got {len(mesh_children)}"
         )
         return
-
-    print(f"  info: re-imported {len(mesh_children)} meshes after stale cache detection")
+    else:
+        print(f"  info: re-imported {len(mesh_children)} meshes after stale cache detection")
     r.ok(name)
 
 

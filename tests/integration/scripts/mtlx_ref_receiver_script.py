@@ -153,7 +153,7 @@ def main():
 
     # Check for MaterialX shader (cached input_map proves ActivisionMtlxMapper ran)
     mtlx_path = "/World/Teapot/mtl/default_material/default_shader_mtlx"
-    cached = adapter._prim_cache.get(mtlx_path + ":input_map")
+    cached = adapter._registry.get_shader(mtlx_path).get("input_map")
     if cached is not None:
         results["materialx_enrichment"] = "PASS"
         # Verify a value was applied

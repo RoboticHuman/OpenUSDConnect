@@ -59,7 +59,10 @@ class BlenderAdapter(DCCAdapter):
     def __init__(self, scene_up_axis: str = "Y"):
         from openusdconnect.prim_registry import PrimRegistry
 
-        self._registry = PrimRegistry(scan_fn=self._scan_scene_object)
+        self._registry = PrimRegistry(
+            scan_fn=self._scan_scene_object,
+            alive_fn=self._is_bpy_alive,
+        )
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
         self._needs_axis_conv: bool = needs_conversion(scene_up_axis)
         self._shader_registry = create_default_registry()
@@ -76,6 +79,15 @@ class BlenderAdapter(DCCAdapter):
                             self._registry.set_imported_ref(
                                 pp, ref_asset, obj.get("usd_ref_prim", ""),
                             )
+
+    @staticmethod
+    def _is_bpy_alive(obj) -> bool:
+        """Check if a bpy object reference is still valid."""
+        try:
+            obj.name  # noqa: B018
+            return True
+        except ReferenceError:
+            return False
 
     @staticmethod
     def _scan_scene_object(prim_path: str):
@@ -225,8 +237,6 @@ class BlenderAdapter(DCCAdapter):
         obj = self._find_object_by_prim(prim_path)
         if obj:
             return True
-        # Skip creation for prims that are composed children of a reference
-        # import — the import already created them.
         if self._registry.is_reference_child(prim_path):
             return True
 
@@ -469,14 +479,30 @@ class BlenderAdapter(DCCAdapter):
             if obj and obj.data and obj.data.materials:
                 obj.data.materials.clear()
             return True
-        # Always create and tag the material — shader enrichment needs
-        # the usd_material_path tag even when the mesh isn't found yet.
-        mat_name = material_path.rsplit("/", 1)[-1]
-        mat = bpy.data.materials.get(mat_name)
+        # Find or create the material.  Path-based lookup first so two
+        # references to the same asset get separate materials per composed path.
+        mat = self._registry.find_material(material_path)
         if not mat:
-            mat = bpy.data.materials.new(name=mat_name)
+            mat_name = material_path.rsplit("/", 1)[-1]
+            # Scan all materials with this leaf name.  Prefer:
+            # 1. Exact path match (same composed path)
+            # 2. Untagged material (created by Blender's importer, not yet claimed)
+            # 3. Create new (all existing copies are claimed by other paths)
+            untagged = None
+            for m in bpy.data.materials:
+                if not m.name.startswith(mat_name):
+                    continue
+                mp = m.get("usd_material_path", "")
+                if mp == material_path:
+                    mat = m
+                    break
+                if not mp and untagged is None:
+                    untagged = m
+            if not mat:
+                mat = untagged or bpy.data.materials.new(name=mat_name)
             mat.use_nodes = True
         mat["usd_material_path"] = material_path
+        self._registry.register_material(material_path, mat)
         # Assign to the target object if it exists
         obj = self._find_object_by_prim(prim_path)
         if not obj or not obj.data:
@@ -485,7 +511,7 @@ class BlenderAdapter(DCCAdapter):
             obj.data.materials.append(mat)
         else:
             obj.data.materials[0] = mat
-        LOG.info("set_material_binding: %s -> %s", prim_path, mat_name)
+        LOG.info("set_material_binding: %s -> %s", prim_path, mat.name)
         return True
 
     def set_shader_input(self, prim_path: str, shader_id: str,
@@ -494,7 +520,7 @@ class BlenderAdapter(DCCAdapter):
             return True
         mapper = self._shader_registry.get(shader_id)
         if not mapper:
-            LOG.info("set_shader_input: unsupported shader %s", shader_id)
+            LOG.warning("set_shader_input: unsupported shader %s", shader_id)
             return True
 
         # Cache the shader_id for later use by set_shader_connection
@@ -510,6 +536,7 @@ class BlenderAdapter(DCCAdapter):
             prim_path, mapper.node_type,
         )
         if not mat or not node:
+            LOG.warning("set_shader_input: no mat/node for %s", prim_path)
             return False
 
         node["usd_shader_path"] = prim_path
@@ -607,13 +634,24 @@ class BlenderAdapter(DCCAdapter):
     def _find_material_for_shader(self, prim_path: str, create: bool = False):
         """Find the Blender material that owns a shader prim path.
 
-        Checks usd_material_path tags first, then walks up path segments
-        by name.  Handles nested Material/NodeGraph/Shader structures.
+        Walks up the prim path checking the registry cache first (O(1)),
+        then falls back to usd_material_path tag scan, then name match.
         """
+        # Walk up the shader path to find the material ancestor
+        path = prim_path
+        while "/" in path:
+            path = path.rsplit("/", 1)[0]
+            # O(1) registry lookup
+            mat = self._registry.find_material(path)
+            if mat:
+                return mat
+        # Fallback: scan all materials by usd_material_path tag
         for m in bpy.data.materials:
             mp = m.get("usd_material_path", "")
             if mp and prim_path.startswith(mp + "/"):
+                self._registry.register_material(mp, m)
                 return m
+        # Fallback: walk up path and match by name
         path = prim_path
         while "/" in path:
             path = path.rsplit("/", 1)[0]
@@ -884,6 +922,15 @@ class BlenderAdapter(DCCAdapter):
                     self._registry.register(composed_path, obj)
             else:
                 obj["usd_prim_path"] = composed_path
+                # Rename object and data block to include parent context.
+                # e.g. "Geometry" → "Teapot_Geometry"
+                parts = composed_path.rsplit("/", 2)
+                if len(parts) >= 3:
+                    ctx_name = f"{parts[-2]}_{parts[-1]}"
+                    if obj.name != ctx_name:
+                        obj.name = ctx_name
+                    if obj.data and obj.data.name != ctx_name:
+                        obj.data.name = ctx_name
                 self._registry.register(composed_path, obj)
 
         # Merge: replace the container with the first imported root.
@@ -1006,11 +1053,19 @@ class BlenderAdapter(DCCAdapter):
                 if sid:
                     shader_events.append((scene_path, sid, inputs, itypes))
                     if conns:
+                        from openusdconnect.emitter import (
+                            resolve_nodegraph_connection,
+                        )
                         remapped_conns = {}
                         for inp_name, conn in conns.items():
+                            # Resolve NodeGraph outputs to internal shaders
+                            # so Blender can wire directly between nodes.
+                            src, out = resolve_nodegraph_connection(
+                                stage, conn["source_prim"], conn["source_output"],
+                            )
                             remapped_conns[inp_name] = {
-                                "source_prim": _remap(conn["source_prim"]),
-                                "source_output": conn["source_output"],
+                                "source_prim": _remap(src),
+                                "source_output": out,
                             }
                         connection_events.append((scene_path, remapped_conns))
 
@@ -1190,10 +1245,12 @@ class BlenderAdapter(DCCAdapter):
             stage = capture._state.author.stage
             ref_prim = stage.GetPrimAtPath(prim_path)
             if ref_prim and ref_prim.IsValid():
-                for child in Usd.PrimRange(ref_prim):
-                    cp = str(child.GetPath())
-                    if cp != prim_path:
-                        self._registry._ref_children.add(cp)
+                child_paths = {
+                    str(child.GetPath())
+                    for child in Usd.PrimRange(ref_prim)
+                    if str(child.GetPath()) != prim_path
+                }
+                self._registry.mark_reference_children(child_paths)
 
         # Tag prim object with resolved asset (for dedup on single-ref)
         if len(resolved_refs) == 1:
