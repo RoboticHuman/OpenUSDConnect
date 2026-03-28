@@ -41,6 +41,7 @@ from openusdconnect.protocol import (
 )
 from openusdconnect.receiver import ReceiverThread
 
+from . import SESSION_ORIGIN as _ORIGIN
 from .blender_adapter import BlenderAdapter
 
 LOG = logging.getLogger(__name__)
@@ -54,11 +55,6 @@ _pending_seed_paths: set[str] = set()
 _APPLYING_REMOTE = False
 # Track last sequence number across reconnects
 _LAST_SEQ: int = 0
-# Shared origin for echo suppression — same value used by the emitter
-# (NetworkSender) so the server knows both connections belong to
-# this Blender instance and won't echo events back.
-from . import SESSION_ORIGIN as _ORIGIN
-
 # Lazy-cached reference to the capture module (avoids per-call import overhead)
 _capture_mod = None
 

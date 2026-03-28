@@ -30,6 +30,8 @@ from openusdconnect.axis_conversion import (
     yup_to_zup_vec,
 )
 
+from .shader_mapper import create_default_registry
+
 # Custom property marking objects imported via bpy.ops.wm.usd_import.
 _PROP_USD_IMPORTED = "_usd_imported"
 
@@ -43,8 +45,6 @@ def _has_axis_rotation(obj) -> bool:
     if not BPY_AVAILABLE or obj is None:
         return False
     return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
-
-from .shader_mapper import create_default_registry
 
 LOG = logging.getLogger(__name__)
 
@@ -643,7 +643,7 @@ class BlenderAdapter(DCCAdapter):
                 if n.type == "BSDF_PRINCIPLED":
                     n.name = node_name
                     return mat, n
-            LOG.warning("No Principled BSDF in %s", mat_name)
+            LOG.warning("No Principled BSDF in %s", mat.name)
             return mat, None
 
         # For other nodes, find by name or create
@@ -1023,7 +1023,7 @@ class BlenderAdapter(DCCAdapter):
         # the MaterialX version — it's more expressive and isn't handled
         # by the importer.  Applying both would overwrite the node tree.
         multi_node_mats = set()
-        for scene_path, sid, inputs, itypes in shader_events:
+        for scene_path, sid, _inputs, _itypes in shader_events:
             mapper = self._shader_registry.get(sid)
             if mapper and mapper.is_multi_node:
                 mat_path = scene_path.rsplit("/", 1)[0]
@@ -1139,7 +1139,9 @@ class BlenderAdapter(DCCAdapter):
                 if container is not None and len(resolved_refs) == 1:
                     container["usd_type_name"] = "Reference"
                     container["usd_ref_asset"] = resolved_refs[0][0]
-                    self._registry.set_imported_ref(prim_path, resolved_refs[0][0], resolved_refs[0][1])
+                    self._registry.set_imported_ref(
+                        prim_path, resolved_refs[0][0], resolved_refs[0][1],
+                    )
                 LOG.info(
                     "set_reference: children already exist for %s, skipping re-import",
                     prim_path,
@@ -1238,7 +1240,7 @@ class BlenderAdapter(DCCAdapter):
         from . import capture
 
         if capture._state.author is not None:
-            capture._state.author.purge_prim_refs(prefix)
+            capture._state.author.purge_prim_refs(prim_path + "/")
         if capture._state.notice_emitter is not None:
             for pp in to_remove:
                 capture._state.notice_emitter._purge_caches(pp)

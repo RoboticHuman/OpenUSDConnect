@@ -30,7 +30,7 @@ class PrimRegistry:
 
     def __init__(self, *, scan_fn=None):
         self._objects: dict[str, Any] = {}          # prim_path -> DCC object
-        self._shaders: dict[str, dict] = {}          # prim_path -> {shader_id, input_map, output_map}
+        self._shaders: dict[str, dict] = {}          # prim_path -> shader metadata
         self._ref_children: set[str] = set()         # paths owned by reference imports
         self._imported_refs: dict[str, tuple] = {}   # prim_path -> (asset_path, prim_path_ref)
         self._scan_fn = scan_fn

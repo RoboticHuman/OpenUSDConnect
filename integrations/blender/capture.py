@@ -735,7 +735,10 @@ class BlenderStageAuthor:
 class NetworkSender:
     """Thin TCP connection for sending protocol events to the server."""
 
-    def __init__(self, host: str, port: int, client_id: str | None = None, origin: str | None = None):
+    def __init__(
+        self, host: str, port: int,
+        client_id: str | None = None, origin: str | None = None,
+    ):
         self.host = host
         self.port = port
         self.client_id = client_id or f"blender-emitter-{os.getpid()}"
@@ -754,7 +757,10 @@ class NetworkSender:
 
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
-        self._send_line(self.sock, self._make_hello("emitter", client_id=self.client_id, origin=self.origin))
+        hello = self._make_hello(
+            "emitter", client_id=self.client_id, origin=self.origin,
+        )
+        self._send_line(self.sock, hello)
         LOG.info("Network sender connected to %s:%d", self.host, self.port)
 
     def disconnect(self):
