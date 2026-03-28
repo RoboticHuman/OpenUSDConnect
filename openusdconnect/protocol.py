@@ -136,7 +136,7 @@ STRUCTURAL_EVENT_KINDS = frozenset({
 TRS_FIELDS = frozenset({"t", "r", "s"})
 
 
-def _is_arc_list_valid(arcs: list) -> bool:
+def _is_arc_list_valid(arcs: list | None) -> bool:
     """Validate a list of composition arc entries (refs or payloads)."""
     if not isinstance(arcs, list):
         return False
@@ -262,7 +262,7 @@ def validate_event(ev: dict) -> bool:
         selections = ev.get("selections")
         if not isinstance(selections, dict):
             return False
-        if not all(isinstance(k, str) for k in selections):
+        if not all(isinstance(key, str) for key in selections):
             return False
         if not all(isinstance(v, str) for v in selections.values()):
             return False

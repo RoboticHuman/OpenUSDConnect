@@ -567,10 +567,10 @@ class NoticeEmitter:
         """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
         events: list[dict] = []
         pc = self._prim_cache.setdefault(prim_path, {})
+        prim = self.stage.GetPrimAtPath(prim_path)
 
         # Structural events on first encounter
         if prim_path not in self._known_prims:
-            prim = self.stage.GetPrimAtPath(prim_path)
             type_name = "Xform"
             if prim and prim.IsValid():
                 tn = prim.GetTypeName()
@@ -623,7 +623,6 @@ class NoticeEmitter:
 
 
         # Payload load-state diff
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid() and prim.HasAuthoredPayloads():
             is_loaded = prim.IsLoaded()
             was_loaded = pc.get(_C_PAYLOAD_LOADED)
@@ -694,7 +693,6 @@ class NoticeEmitter:
                 pc[_C_SHADER_CONNECTIONS] = current_conns
 
         # TRS partial diff — skip for prims without authored xform ops
-        prim = self.stage.GetPrimAtPath(prim_path)
         xf = UsdGeom.Xformable(prim) if prim else None
         has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
@@ -718,7 +716,6 @@ class NoticeEmitter:
                 pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
         # Visibility diff — only emit if the attr is explicitly authored
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             imageable = UsdGeom.Imageable(prim)
             vis_attr = imageable.GetVisibilityAttr()
@@ -734,7 +731,6 @@ class NoticeEmitter:
                     pc[_C_VISIBILITY] = vis_val
 
         # Gprim attribute diff
-        prim = self.stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
             last_attrs = pc.get(_C_GPRIM_ATTRS, {})

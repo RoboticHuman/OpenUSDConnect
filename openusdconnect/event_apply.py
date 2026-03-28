@@ -34,6 +34,13 @@ from .protocol import (
     STRUCTURAL_EVENT_KINDS,
 )
 
+# Surface shader IDs that need outputs:surface and auto-wire to Material.
+_SURFACE_SHADER_IDS = frozenset({
+    "UsdPreviewSurface",
+    "ND_UsdPreviewSurface_surfaceshader",
+    "ND_standard_surface_surfaceshader",
+})
+
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
     """Get existing prim or define a new one. Idempotent."""
@@ -322,13 +329,6 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     if shader_id:
         shader.CreateIdAttr(shader_id)
 
-    # Surface shaders (UsdPreviewSurface, ND_standard_surface_surfaceshader, etc.)
-    # need outputs:surface and auto-wire to parent Material.
-    _SURFACE_SHADER_IDS = {
-        "UsdPreviewSurface",
-        "ND_UsdPreviewSurface_surfaceshader",
-        "ND_standard_surface_surfaceshader",
-    }
     if shader_id in _SURFACE_SHADER_IDS:
         if not shader.GetOutput("surface"):
             shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)

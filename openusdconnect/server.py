@@ -285,11 +285,12 @@ class UsdSyncServer:
             return s
 
     def append_log(self, rec: dict):
-        """Append event record to the event store."""
-        try:
-            self.store.append(rec["seq"], json.dumps(rec))
-        except Exception:
-            LOG.exception("Failed to write event log")
+        """Append event record to the event store.
+
+        Raises on persistence failure — callers should not broadcast
+        events that were not successfully persisted.
+        """
+        self.store.append(rec["seq"], json.dumps(rec))
 
     def replay_children_after_load(self, prim_path: str):
         """After load_payload, re-broadcast the latest events for children.
