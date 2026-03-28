@@ -302,6 +302,7 @@ class BlenderStageAuthor:
         from .shader_mapper import create_default_registry
         self._shader_registry = create_default_registry()
         self._last_shader_values: dict[str, dict] = {}  # shader_path -> {usd_name: value}
+        self._shader_input_maps: dict[str, dict] = {}  # shader_path -> {usd_name: socket}
 
     def initialize_baseline(self):
         """Snapshot current scene transforms for change detection."""
@@ -510,11 +511,26 @@ class BlenderStageAuthor:
                 if not shader_path or not shader_id:
                     continue
                 mapper = self._shader_registry.get(shader_id)
-                if not mapper or not hasattr(mapper, "read_all_inputs"):
+                if not mapper:
                     continue
-                values = mapper.read_all_inputs(node)
+
+                if mapper.is_multi_node:
+                    input_map = self._shader_input_maps.get(shader_path)
+                    if not input_map:
+                        continue
+                    try:
+                        next(iter(input_map.values())).node  # noqa: B018
+                    except ReferenceError:
+                        self._shader_input_maps.pop(shader_path, None)
+                        continue
+                    values = mapper.read_all_inputs(input_map=input_map)
+                elif hasattr(mapper, "read_all_inputs"):
+                    values = mapper.read_all_inputs(node)
+                else:
+                    continue
+
                 if values:
-                    self._author_shader_inputs(shader_path, values)
+                    self._author_shader_inputs(shader_path, values, shader_id=shader_id)
 
     def _find_shader_on_stage(self, mat_path: str, shader_id: str) -> str | None:
         """Find a shader prim under a material on the emitter's stage."""
@@ -531,7 +547,7 @@ class BlenderStageAuthor:
                     return str(child.GetPath())
         return None
 
-    def _author_shader_inputs(self, shader_path, values):
+    def _author_shader_inputs(self, shader_path, values, shader_id=""):
         """Write only changed shader input values to the emitter's USD stage.
 
         Compares against ``_last_shader_values`` (the baseline from the
@@ -546,16 +562,22 @@ class BlenderStageAuthor:
             self._last_shader_values[shader_path] = dict(values)
             return
 
-        prim = self.stage.GetPrimAtPath(shader_path)
-        if not prim or not prim.IsValid():
-            return
-
         changed = {k: v for k, v in values.items() if last.get(k) != v}
         if not changed:
             return
 
+        prim = self.stage.GetPrimAtPath(shader_path)
+        if not prim or not prim.IsValid():
+            prim = self.stage.DefinePrim(shader_path, "Shader")
+            if not prim or not prim.IsValid():
+                return
+
         self.stage.OverridePrim(shader_path)
         shader = UsdShade.Shader(prim)
+        # Ensure info:id is authored so the emitter's _read_shader_inputs
+        # can identify the shader type when building events.
+        if shader_id and not shader.GetIdAttr().Get():
+            shader.CreateIdAttr(shader_id)
         for usd_name, value in changed.items():
             if isinstance(value, list) and len(value) == 3:
                 inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Color3f)
@@ -573,6 +595,10 @@ class BlenderStageAuthor:
             self._prim_refs.pop(pp, None)
             self._last_matrix.pop(pp, None)
             self._used_prim_paths.discard(pp)
+        shader_purge = [sp for sp in self._shader_input_maps if sp.startswith(prefix)]
+        for sp in shader_purge:
+            self._shader_input_maps.pop(sp, None)
+            self._last_shader_values.pop(sp, None)
 
     def _detect_deletions(self):
         """Check stored object references for deleted objects (ReferenceError).

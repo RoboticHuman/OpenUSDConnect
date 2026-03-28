@@ -415,6 +415,37 @@ def _drain_and_process(lines):
             LOG.exception("Error processing received line")
 
 
+def _seed_multi_node_shader_maps(cap, prim_path: str):
+    """Copy multi-node shader input maps from adapter to author.
+
+    The adapter caches ``input_map`` dicts (usd_name -> socket) during
+    forward application.  The author needs them for reverse reading
+    (Blender -> USD).  Also seeds ``_last_shader_values`` baseline so
+    the first depsgraph tick doesn't emit all inputs as changes.
+    """
+    author = cap._state.author
+    prefix = prim_path + "/"
+    for cache_key, socket_map in _ADAPTER._prim_cache.items():
+        if not cache_key.endswith(":input_map"):
+            continue
+        shader_path = cache_key[: -len(":input_map")]
+        if shader_path != prim_path and not shader_path.startswith(prefix):
+            continue
+        author._shader_input_maps[shader_path] = socket_map
+        shader_id = _ADAPTER._prim_cache.get(shader_path + ":shader_id")
+        if not shader_id:
+            continue
+        mapper = author._shader_registry.get(shader_id)
+        if mapper and mapper.is_multi_node:
+            values = mapper.read_all_inputs(input_map=socket_map)
+            if values:
+                author._last_shader_values[shader_path] = values
+                LOG.debug(
+                    "seeded shader map %s with %d inputs",
+                    shader_path, len(values),
+                )
+
+
 def _process_queue_timer():
     """Drain receiver queue on Blender main thread."""
     if _RECEIVER is None:
@@ -447,6 +478,11 @@ def _process_queue_timer():
             if cap is not None:
                 for pp in _pending_seed_paths:
                     cap.seed_emitter_caches_for_import(pp)
+                # Seed multi-node shader input maps and baselines so the
+                # emitter can read values back from multi-node networks.
+                if cap._state.author is not None and _ADAPTER is not None:
+                    for pp in _pending_seed_paths:
+                        _seed_multi_node_shader_maps(cap, pp)
             _pending_seed_paths.clear()
     finally:
         _set_applying_remote(False)

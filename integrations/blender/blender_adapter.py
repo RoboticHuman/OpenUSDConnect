@@ -77,17 +77,17 @@ class BlenderAdapter(DCCAdapter):
     def _find_object_by_prim(self, prim_path: str) -> object | None:
         if not BPY_AVAILABLE:
             return None
-        # Check cache first
+        # Check cache first — the cache is authoritative.  An object may
+        # be cached under a child path after a reference merge (the merged
+        # root represents both its own path and its consumed children).
         obj = self._prim_cache.get(prim_path)
         if obj is not None:
             try:
-                # Verify the object is still valid and has the right prim path
-                if obj.get("usd_prim_path") == prim_path:
-                    return obj
+                obj.name  # probe — raises ReferenceError if freed
+                return obj
             except ReferenceError:
-                pass
-            del self._prim_cache[prim_path]
-        # Fall back to scan and cache the result
+                del self._prim_cache[prim_path]
+        # Fall back to property scan and cache the result
         for obj in bpy.data.objects:
             if obj.get("usd_prim_path") == prim_path:
                 self._prim_cache[prim_path] = obj
@@ -462,23 +462,23 @@ class BlenderAdapter(DCCAdapter):
     def set_material_binding(self, prim_path: str, material_path: str) -> bool:
         if not BPY_AVAILABLE:
             return True
-        obj = self._find_object_by_prim(prim_path)
-        if not obj:
-            LOG.warning("set_material_binding: no object for %s", prim_path)
-            return False
         if not material_path:
-            if obj.data and obj.data.materials:
+            obj = self._find_object_by_prim(prim_path)
+            if obj and obj.data and obj.data.materials:
                 obj.data.materials.clear()
             return True
-        # Derive Blender material name from prim path
+        # Always create and tag the material — shader enrichment needs
+        # the usd_material_path tag even when the mesh isn't found yet.
         mat_name = material_path.rsplit("/", 1)[-1]
         mat = bpy.data.materials.get(mat_name)
         if not mat:
             mat = bpy.data.materials.new(name=mat_name)
             mat.use_nodes = True
         mat["usd_material_path"] = material_path
-        if not obj.data:
-            return False
+        # Assign to the target object if it exists
+        obj = self._find_object_by_prim(prim_path)
+        if not obj or not obj.data:
+            return True
         if not obj.data.materials:
             obj.data.materials.append(mat)
         else:
@@ -534,19 +534,19 @@ class BlenderAdapter(DCCAdapter):
         surface_socket = output_map.get("out")
         if not surface_socket:
             return
+        out_node = None
         for node in tree.nodes:
-            if node.type == "OUTPUT_MATERIAL" and "Surface" in node.inputs:
-                tree.links.new(surface_socket, node.inputs["Surface"])
-                return
+            if node.type == "OUTPUT_MATERIAL":
+                out_node = node
+                break
+        if not out_node:
+            out_node = tree.nodes.new(type="ShaderNodeOutputMaterial")
+        if "Surface" in out_node.inputs:
+            tree.links.new(surface_socket, out_node.inputs["Surface"])
 
     def _apply_multi_node_shader(self, prim_path, mapper, inputs):
         """Apply shader inputs via a multi-node network."""
-        mat_path = prim_path.rsplit("/", 1)[0]
-        mat_name = mat_path.rsplit("/", 1)[-1]
-        mat = bpy.data.materials.get(mat_name)
-        if not mat:
-            mat = bpy.data.materials.new(name=mat_name)
-            mat.use_nodes = True
+        mat = self._find_material_for_shader(prim_path, create=True)
         if not mat.use_nodes:
             mat.use_nodes = True
 
@@ -603,29 +603,33 @@ class BlenderAdapter(DCCAdapter):
         )
         return True
 
-    def _get_or_create_shader_node_for_input(self, prim_path, node_type):
-        """Find/create the material and target node for a shader input event."""
-        # Prefer materials tagged with usd_material_path that matches
-        # the shader's ancestry — most reliable lookup.
-        mat = None
+    def _find_material_for_shader(self, prim_path: str, create: bool = False):
+        """Find the Blender material that owns a shader prim path.
+
+        Checks usd_material_path tags first, then walks up path segments
+        by name.  Handles nested Material/NodeGraph/Shader structures.
+        """
         for m in bpy.data.materials:
             mp = m.get("usd_material_path", "")
             if mp and prim_path.startswith(mp + "/"):
-                mat = m
-                break
-        # Fallback: walk up path segments to find a material by name.
-        if not mat:
-            path = prim_path
-            while "/" in path:
-                path = path.rsplit("/", 1)[0]
-                candidate = path.rsplit("/", 1)[-1]
-                mat = bpy.data.materials.get(candidate)
-                if mat:
-                    break
-        if not mat:
+                return m
+        path = prim_path
+        while "/" in path:
+            path = path.rsplit("/", 1)[0]
+            candidate = path.rsplit("/", 1)[-1]
+            mat = bpy.data.materials.get(candidate)
+            if mat:
+                return mat
+        if create:
             mat_name = prim_path.rsplit("/", 1)[0].rsplit("/", 1)[-1]
             mat = bpy.data.materials.new(name=mat_name)
             mat.use_nodes = True
+            return mat
+        return None
+
+    def _get_or_create_shader_node_for_input(self, prim_path, node_type):
+        """Find/create the material and target node for a shader input event."""
+        mat = self._find_material_for_shader(prim_path, create=True)
         if not mat.use_nodes:
             mat.use_nodes = True
 
@@ -662,13 +666,10 @@ class BlenderAdapter(DCCAdapter):
                               disconnections: list | None = None) -> bool:
         if not BPY_AVAILABLE:
             return True
-        # Find the material this shader belongs to
-        mat_path = prim_path.rsplit("/", 1)[0]
-        mat_name = mat_path.rsplit("/", 1)[-1]
-        mat = bpy.data.materials.get(mat_name)
+        mat = self._find_material_for_shader(prim_path)
         if not mat or not mat.use_nodes:
             LOG.warning(
-                "set_shader_connection: material %s not found", mat_name,
+                "set_shader_connection: no material for %s", prim_path,
             )
             return False
 
@@ -724,7 +725,7 @@ class BlenderAdapter(DCCAdapter):
 
         LOG.info(
             "set_shader_connection: %s on %s",
-            list(connections.keys()), mat_name,
+            list(connections.keys()), mat.name,
         )
         return True
 
@@ -840,11 +841,14 @@ class BlenderAdapter(DCCAdapter):
             windows = list(bpy.context.window_manager.windows)
             window = windows[0] if windows else None
 
+        # EXEC_DEFAULT bypasses the invoke callback which defers execution
+        # via the event loop.  Without it, the import may not complete before
+        # we check for newly created objects below.
         if window is not None:
             with bpy.context.temp_override(window=window):
-                bpy.ops.wm.usd_import(**import_kwargs)
+                bpy.ops.wm.usd_import('EXEC_DEFAULT', **import_kwargs)
         else:
-            bpy.ops.wm.usd_import(**import_kwargs)
+            bpy.ops.wm.usd_import('EXEC_DEFAULT', **import_kwargs)
 
         USD_CONNECT_Hook._skip_tagging = False
 
@@ -863,21 +867,26 @@ class BlenderAdapter(DCCAdapter):
             if obj.parent is None or obj.parent not in new_objs
         ]
 
-        # Tag imported children with composed scene paths.
+        # Remap file-internal paths to composed scene paths.
+        # e.g. "/Teapot/teapot_MeshShape" → "/World/Teapot/teapot_MeshShape".
+        # Imported roots are registered in the cache but their usd_prim_path
+        # is NOT overwritten — the merge below handles that.
         imported_root_set = set(imported_roots)
         for obj in new_objs:
-            if obj in imported_root_set:
-                continue
-            # Remap file-internal paths to composed scene paths.
-            # e.g. "/teapot/geo" → "/World/Teapot/geo".
             hook_path = obj.get("usd_prim_path", "")
             if hook_path and prim_path_ref and hook_path.startswith(prim_path_ref):
                 composed_path = prim_path + hook_path[len(prim_path_ref):]
             else:
                 obj_name = obj.name.replace(".", "_")
                 composed_path = f"{prim_path}/{obj_name}"
-            obj["usd_prim_path"] = composed_path
-            self._prim_cache[composed_path] = obj
+            if obj in imported_root_set:
+                # Register the child path so lookups (e.g. set_material_binding)
+                # can find the merged root by its original mesh path.
+                if composed_path != prim_path:
+                    self._prim_cache[composed_path] = obj
+            else:
+                obj["usd_prim_path"] = composed_path
+                self._prim_cache[composed_path] = obj
 
         # Merge: replace the container with the first imported root.
         # The root becomes the prim representation — it holds both the
@@ -927,11 +936,23 @@ class BlenderAdapter(DCCAdapter):
             if root.name != container_name:
                 root.name = container_name
 
-            # Register the merged root as the prim representation
+            # Register the merged root as the prim representation.
             self._prim_cache[prim_path] = root
             merged = root
 
         return new_objs, merged
+
+    @staticmethod
+    def _is_under_material(prim) -> bool:
+        """Return True if prim is a descendant of a UsdShade.Material."""
+        from pxr import UsdShade
+
+        ancestor = prim.GetParent()
+        while ancestor and ancestor.IsValid():
+            if ancestor.IsA(UsdShade.Material):
+                return True
+            ancestor = ancestor.GetParent()
+        return False
 
     def _enrich_materialx_from_import(self, resolved, prim_path, prim_path_ref):
         """Read MaterialX materials from an imported USD file and apply them.
@@ -957,8 +978,8 @@ class BlenderAdapter(DCCAdapter):
             LOG.debug("Could not open %s for MaterialX enrichment", resolved)
             return
 
-        root_path = prim_path_ref or str(stage.GetDefaultPrim().GetPath())
-        root_prim = stage.GetPrimAtPath(root_path)
+        # Walk the full stage — materials may live in sibling scopes.
+        root_prim = stage.GetPseudoRoot()
         if not root_prim or not root_prim.IsValid():
             return
 
@@ -982,7 +1003,7 @@ class BlenderAdapter(DCCAdapter):
             if binding_target:
                 binding_events.append((scene_path, _remap(binding_target)))
 
-            if prim.IsA(UsdShade.Shader):
+            if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
                 sid, inputs, itypes, conns = _read_shader_inputs(stage, file_path)
                 if sid:
                     shader_events.append((scene_path, sid, inputs, itypes))
@@ -999,7 +1020,22 @@ class BlenderAdapter(DCCAdapter):
         # before set_shader_input looks them up.
         for scene_path, target in binding_events:
             self.set_material_binding(scene_path, target)
+        # Blender's USD importer already handles UsdPreviewSurface shaders.
+        # When a material also has a MaterialX shader (multi-node), prefer
+        # the MaterialX version — it's more expressive and isn't handled
+        # by the importer.  Applying both would overwrite the node tree.
+        multi_node_mats = set()
         for scene_path, sid, inputs, itypes in shader_events:
+            mapper = self._shader_registry.get(sid)
+            if mapper and mapper.is_multi_node:
+                mat_path = scene_path.rsplit("/", 1)[0]
+                multi_node_mats.add(mat_path)
+        for scene_path, sid, inputs, itypes in shader_events:
+            mapper = self._shader_registry.get(sid)
+            if mapper and not mapper.is_multi_node:
+                mat_path = scene_path.rsplit("/", 1)[0]
+                if mat_path in multi_node_mats:
+                    continue
             self.set_shader_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:
             self.set_shader_connection(scene_path, conns)

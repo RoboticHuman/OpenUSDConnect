@@ -184,6 +184,29 @@ class MultiNodeShaderMapper(ShaderMapper):
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
         pass  # Not used — create_network handles everything
 
+    def read_all_inputs(self, node=None, *, input_map=None) -> dict:
+        """Read all mapped input values from a multi-node network.
+
+        Unlike single-node mappers which read from one node, multi-node
+        mappers read from the socket map returned by ``create_network``.
+        Each socket is a generic object with ``.default_value`` and
+        ``.is_linked`` attributes — no DCC-specific imports needed.
+        """
+        if not input_map:
+            return {}
+        result = {}
+        for usd_name, socket in input_map.items():
+            if socket.is_linked:
+                continue
+            val = socket.default_value
+            if hasattr(val, "__len__") and len(val) == 4:
+                result[usd_name] = [float(val[0]), float(val[1]), float(val[2])]
+            elif hasattr(val, "__len__") and len(val) == 3:
+                result[usd_name] = [float(val[0]), float(val[1]), float(val[2])]
+            else:
+                result[usd_name] = float(val)
+        return result
+
     @abstractmethod
     def create_network(self, tree, inputs: dict, **kwargs) -> tuple:
         """Create the full node network for this shader.
