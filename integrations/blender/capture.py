@@ -175,15 +175,13 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
     bl_idname = "usd_connect.hook"
     bl_label = "USD Connect Hook"
 
-    # Set True by _import_ref_asset to suppress hook tagging during
-    # reference/payload imports — the adapter handles tagging with
-    # correct composed scene paths after import completes.
-    _skip_tagging: bool = False
+    # Set True by _import_ref_asset during reference/payload imports so
+    # the hook still tags usd_prim_path but doesn't override auto_track_root
+    # with the referenced file's default prim.
+    _skip_root_inference: bool = False
 
     @staticmethod
     def on_import(import_context):
-        if USD_CONNECT_Hook._skip_tagging:
-            return True
         try:
             prim_map = import_context.get_prim_map()
         except Exception:
@@ -207,8 +205,10 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             LOG.info("USDHook: No prim map available; nothing tagged.")
             return True
 
-        # Infer root prim from the stage's default prim and update auto_track_root
-        if stage:
+        # Infer root prim from the stage's default prim and update auto_track_root.
+        # Skip during reference imports (_skip_root_inference) — the referenced file's
+        # default prim shouldn't override the main scene's auto_track_root.
+        if stage and not USD_CONNECT_Hook._skip_root_inference:
             try:
                 default_prim = stage.GetDefaultPrim()
                 if default_prim and default_prim.IsValid():

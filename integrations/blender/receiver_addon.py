@@ -425,19 +425,18 @@ def _seed_multi_node_shader_maps(cap, prim_path: str):
     """
     author = cap._state.author
     prefix = prim_path + "/"
-    for cache_key, socket_map in _ADAPTER._prim_cache.items():
-        if not cache_key.endswith(":input_map"):
+    for shader_path, sc in _ADAPTER._registry.iter_shaders():
+        if "input_map" not in sc:
             continue
-        shader_path = cache_key[: -len(":input_map")]
         if shader_path != prim_path and not shader_path.startswith(prefix):
             continue
-        author._shader_input_maps[shader_path] = socket_map
-        shader_id = _ADAPTER._prim_cache.get(shader_path + ":shader_id")
+        author._shader_input_maps[shader_path] = sc["input_map"]
+        shader_id = sc.get("shader_id")
         if not shader_id:
             continue
         mapper = author._shader_registry.get(shader_id)
         if mapper and mapper.is_multi_node:
-            values = mapper.read_all_inputs(input_map=socket_map)
+            values = mapper.read_all_inputs(input_map=sc["input_map"])
             if values:
                 author._last_shader_values[shader_path] = values
                 LOG.debug(
