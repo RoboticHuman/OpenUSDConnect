@@ -23,8 +23,17 @@ import uuid
 # are not broadcast back to connections with the same origin.
 SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 
-# Ensure the addon directory is on sys.path so vendored openusdconnect is importable
+# Ensure the addon directory is on sys.path so vendored openusdconnect is importable.
+# Purge openusdconnect modules loaded from a different path (e.g. the uv dev
+# environment) so the bundled copy is used.  Keep modules already loaded from
+# this addon's directory (e.g. during hot-reload).
 _addon_dir = os.path.dirname(os.path.abspath(__file__))
+_bundled_prefix = os.path.join(_addon_dir, "openusdconnect")
+for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
+    _mod = sys.modules[_k]
+    _mod_file = getattr(_mod, "__file__", "") or ""
+    if not _mod_file.startswith(_bundled_prefix):
+        del sys.modules[_k]
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
 
