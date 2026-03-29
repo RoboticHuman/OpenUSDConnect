@@ -90,6 +90,11 @@ def register():
 
 
 def unregister():
+    # Grab the timer ref before module reload creates a new function object.
+    import bpy
+    timer = getattr(capture, "_timer_tick", None)
     ui.unregister()
     receiver_addon.unregister()
     capture.unregister()
+    if timer is not None and bpy.app.timers.is_registered(timer):
+        bpy.app.timers.unregister(timer)

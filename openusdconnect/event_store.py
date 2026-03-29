@@ -24,6 +24,11 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def append_batch(self, records: list[tuple[int, str]]) -> None:
+        """Persist multiple event records in a single transaction."""
+        raise NotImplementedError
+
+    @abstractmethod
     def get_max_seq(self) -> int:
         """Return the highest sequence number, or 0 if empty."""
         raise NotImplementedError
@@ -93,6 +98,16 @@ class SqliteEventStore(EventStore):
             self._conn.execute(
                 "INSERT INTO events(seq, event) VALUES (?, ?)",
                 (seq, record_json),
+            )
+            self._conn.commit()
+
+    def append_batch(self, records: list[tuple[int, str]]) -> None:
+        if not records:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO events(seq, event) VALUES (?, ?)",
+                records,
             )
             self._conn.commit()
 

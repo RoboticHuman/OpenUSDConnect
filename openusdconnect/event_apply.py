@@ -150,17 +150,23 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
         attr.Set(value)
 
 
-def _apply_set_xform_trs(stage: Usd.Stage, ev: dict) -> None:
+def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
     prim_path = ev["prim"]
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
-    fields = ev.get("fields", [])
-    xf = UsdGeom.Xformable(prim)
-    t_op = find_op(xf, "translate")
-    o_op = find_op(xf, "orient")
-    s_op = find_op(xf, "scale")
+    cached = op_cache.get(prim_path) if op_cache else None
+    if cached:
+        t_op, o_op, s_op = cached
+    else:
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        xf = UsdGeom.Xformable(prim)
+        t_op = find_op(xf, "translate")
+        o_op = find_op(xf, "orient")
+        s_op = find_op(xf, "scale")
+        if op_cache is not None:
+            op_cache[prim_path] = (t_op, o_op, s_op)
 
+    fields = ev.get("fields", [])
     if "t" in fields and t_op:
         x, y, z = ev["t"]
         t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
@@ -440,16 +446,41 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
         handler(stage, ev)
 
 
-def apply_events(stage: Usd.Stage, events: list) -> None:
-    """Apply a list of events. Structural events (ensure_prim, ensure_xform_ops)
-    are applied first outside a ChangeBlock, then value-setting events are
-    applied inside a ChangeBlock for atomicity."""
-    # Structural events first (DefinePrim can fail inside ChangeBlock in some USD builds)
+def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
+    """Apply a list of events to a USD stage.
+
+    Structural events are applied outside a ChangeBlock, then value-setting
+    events inside one for atomicity.
+
+    *op_cache* is an optional dict-like mapping prim_path to
+    (translate_op, orient_op, scale_op).  Pass a persistent cache
+    (e.g. ``cachetools.LRUCache``) to avoid repeated ``find_op`` lookups
+    across calls.
+    """
+    if op_cache is None:
+        op_cache = {}
+
+    # Structural ops outside ChangeBlock (DefinePrim fails inside on our USD build).
     for ev in events:
-        if ev.get("k") in STRUCTURAL_EVENT_KINDS:
+        k = ev.get("k")
+        if k not in STRUCTURAL_EVENT_KINDS:
+            continue
+        if k == K_ENSURE_XFORM_OPS:
+            _prim, _xf, t, o, s = ensure_canonical_ops(stage, ev["prim"])
+            op_cache[ev["prim"]] = (t, o, s)
+        else:
             apply_event(stage, ev)
-    # Value-setting events in a ChangeBlock
+
+    # Value-setting ops inside ChangeBlock.
     with Sdf.ChangeBlock():
         for ev in events:
-            if ev.get("k") not in STRUCTURAL_EVENT_KINDS:
+            k = ev.get("k")
+            if k in STRUCTURAL_EVENT_KINDS:
+                continue
+            if k == K_SET_XFORM_TRS:
+                _apply_set_xform_trs(stage, ev, op_cache)
+            elif k in (K_DELETE_PRIM, K_RENAME_PRIM):
+                op_cache.pop(ev.get("prim"), None)
+                apply_event(stage, ev)
+            else:
                 apply_event(stage, ev)

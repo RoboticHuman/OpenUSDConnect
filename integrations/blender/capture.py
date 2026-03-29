@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import time
 
 import bpy
 
@@ -788,12 +789,13 @@ class _State:
     author -> notice_emitter -> sender.
     """
 
-    __slots__ = ("author", "notice_emitter", "sender")
+    __slots__ = ("author", "notice_emitter", "sender", "_last_send_time")
 
     def __init__(self):
         self.author: BlenderStageAuthor | None = None
         self.notice_emitter = None  # Optional[NoticeEmitter]
         self.sender: NetworkSender | None = None
+        self._last_send_time: float = 0.0
 
 
 _state = _State()
@@ -909,19 +911,25 @@ def _depsgraph_handler(scene, depsgraph):
                 mat_updates = [u.id for u in updates if isinstance(u.id, bpy.types.Material)]
                 _state.author.on_material_update(mat_updates)
 
-            _try_send_dirty_events(include_matrices=False)
+            coalesce = getattr(scene, "usd_connect_coalesce_seconds", DEFAULT_COALESCE_SECONDS)
+            now = time.time()
+            if coalesce <= 0 or (now - _state._last_send_time) >= coalesce:
+                _try_send_dirty_events(include_matrices=False)
+                _state._last_send_time = now
 
     except Exception:
         LOG.exception("depsgraph handler error")
 
 
 def _timer_tick():
+    """Flush remaining dirty prims after the user stops interacting."""
     try:
-        if _state.author is None:
-            return None
-        if not _state.author.enabled:
-            return None
-        return 0.1
+        if _state.author is None or not _state.author.enabled:
+            return 0.25
+        if _state.notice_emitter and _state.notice_emitter.dirty:
+            _try_send_dirty_events(include_matrices=False)
+            _state._last_send_time = time.time()
+        return 0.25
     except Exception:
         LOG.exception("timer error")
         return 0.5
@@ -932,6 +940,8 @@ def _remove_handler():
         bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_handler)
     except ValueError:
         pass
+    if bpy.app.timers.is_registered(_timer_tick):
+        bpy.app.timers.unregister(_timer_tick)
 
 
 # ---------------------------------------------------------------------------
@@ -984,7 +994,7 @@ class USD_CONNECT_OT_start_capture(bpy.types.Operator):
         author.initialize_baseline()
         _remove_handler()
         bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
-        bpy.app.timers.register(_timer_tick, first_interval=0.1)
+        bpy.app.timers.register(_timer_tick, first_interval=0.25)
         self.report({"INFO"}, f"Capture started (base: {author.base_usd_path})")
         return {"FINISHED"}
 
@@ -1078,6 +1088,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
 
             _remove_handler()
             bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)
+            bpy.app.timers.register(_timer_tick, first_interval=0.25)
             scene.usd_connect_net_emitter_running = True
             host = scene.usd_connect_emit_host
             port = scene.usd_connect_emit_port
@@ -1093,6 +1104,7 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
     bl_label = "Disconnect Emitter"
 
     def execute(self, context):
+        _remove_handler()
         if _state.sender is not None:
             _state.sender.disconnect()
             _state.sender = None

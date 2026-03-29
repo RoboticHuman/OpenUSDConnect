@@ -14,6 +14,7 @@ import argparse
 import atexit
 import json
 import logging
+import os
 import signal
 import socketserver
 import threading
@@ -82,11 +83,14 @@ class ClientInfo:
 class UsdSyncServer:
     """Holds all shared server state: stage, sequence counter, client list, event store."""
 
+    DEFAULT_OP_CACHE_SIZE = 4096
+
     def __init__(
         self,
         base_usd_path: str | None = None,
         log_path: str = "usd_events.db",
         event_store: EventStore | None = None,
+        op_cache_size: int | None = None,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -111,6 +115,12 @@ class UsdSyncServer:
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         self._next_seq = self.store.get_max_seq() + 1
+
+        # LRU cache: prim_path → (translate_op, orient_op, scale_op).
+        from cachetools import LRUCache
+        self._op_cache: LRUCache = LRUCache(
+            maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
+        )
 
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
@@ -145,7 +155,7 @@ class UsdSyncServer:
         for _seq, record_json in rows:
             rec = json.loads(record_json)
             events.append(rec.get("event", rec))
-        apply_events(self.stage, events)
+        apply_events(self.stage, events, op_cache=self._op_cache)
         LOG.info("Restored stage from event log: %d events", len(events))
 
     def compact_log(self):
@@ -255,6 +265,7 @@ class UsdSyncServer:
             records.append((seq, json.dumps(rec)))
         self.store.clear_and_rewrite(records)
 
+        self._op_cache.clear()
         LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
 
         # Tell connected receivers to reset and replay from the compacted log.
@@ -275,6 +286,7 @@ class UsdSyncServer:
             self._next_seq = 1
         with self.stage_lock:
             self.edit_layer.Clear()
+        self._op_cache.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
@@ -291,6 +303,11 @@ class UsdSyncServer:
         events that were not successfully persisted.
         """
         self.store.append(rec["seq"], json.dumps(rec))
+
+    def append_log_batch(self, records: list[dict]):
+        """Persist multiple event records in one SQLite transaction."""
+        tuples = [(rec["seq"], json.dumps(rec)) for rec in records]
+        self.store.append_batch(tuples)
 
     def replay_children_after_load(self, prim_path: str):
         """After load_payload, re-broadcast the latest events for children.
@@ -419,7 +436,7 @@ class UsdSyncServer:
         target = layer or self.edit_layer
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
-            apply_events(self.stage, events)
+            apply_events(self.stage, events, op_cache=self._op_cache)
 
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe)."""
@@ -663,11 +680,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # Apply atomically
             sync_server.apply_txn(events)
 
-            # Sequence and broadcast each event
+            # Sequence, persist (batched), then broadcast
             addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
             with sync_server.clients_lock:
                 info = sync_server.clients.get(addr_key)
             client_id = info.client_id if info else None
+            records = []
             for ev in events:
                 rec = {
                     "type": MSG_EVENT,
@@ -678,7 +696,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 }
                 if self._origin:
                     rec["origin"] = self._origin
-                sync_server.append_log(rec)
+                records.append(rec)
+            sync_server.append_log_batch(records)
+            for rec in records:
                 sync_server.broadcast(rec, exclude_origin=self._origin)
             # Update client activity tracking — no lock needed since
             # each connection has its own _read_loop thread.
@@ -709,9 +729,14 @@ def run_server(
     compact: bool = False,
     export_diff: str | None = None,
     dashboard_port: int | None = None,
+    op_cache_size: int | None = None,
 ):
     """Start the server (blocking)."""
-    sync_server = UsdSyncServer(base_usd_path=base_usd_path, log_path=log_path)
+    sync_server = UsdSyncServer(
+        base_usd_path=base_usd_path,
+        log_path=log_path,
+        op_cache_size=op_cache_size,
+    )
 
     if compact:
         sync_server.compact_log()
@@ -724,8 +749,13 @@ def run_server(
 
     server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
 
-    # Ensure the DB is closed even on hard kills (Stop-Process, SIGTERM).
+    _cleaned_up = False
+
     def _cleanup():
+        nonlocal _cleaned_up
+        if _cleaned_up:
+            return
+        _cleaned_up = True
         if export_diff:
             sync_server.export_edit_layer(export_diff)
         try:
@@ -738,7 +768,7 @@ def run_server(
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
 
-    LOG.info("Server listening on %s:%s", host, port)
+    LOG.info("Server listening on %s:%s (PID %d)", host, port, os.getpid())
     LOG.info("Event log: %s", log_path)
     if base_usd_path:
         LOG.info("Base USD: %s", base_usd_path)
@@ -750,6 +780,7 @@ def run_server(
         LOG.info("Server shutting down")
     finally:
         server.shutdown()
+        _cleanup()
 
 
 def main():
@@ -768,6 +799,10 @@ def main():
         "--dashboard", type=int, default=None, metavar="PORT",
         help="Start admin dashboard on this port (e.g. --dashboard 8080)",
     )
+    ap.add_argument(
+        "--op-cache-size", type=int, default=None, metavar="N",
+        help=f"Max xform op cache entries (default: {UsdSyncServer.DEFAULT_OP_CACHE_SIZE})",
+    )
     args = ap.parse_args()
     run_server(
         host=args.host,
@@ -777,6 +812,7 @@ def main():
         compact=args.compact,
         export_diff=args.export_diff,
         dashboard_port=args.dashboard,
+        op_cache_size=args.op_cache_size,
     )
 
 
