@@ -198,174 +198,152 @@ def _arc_changed(stage, ev, k):
     return True
 
 
-def _process_event(ev: dict):
-    """Dispatch a single event to the BlenderAdapter.
-
-    NOTE: caller is responsible for setting _APPLYING_REMOTE around the
-    entire batch — this function only dispatches, it does not toggle the
-    feedback guard.
-    """
+def _ensure_adapter():
+    """Lazily create the BlenderAdapter on first use."""
     global _ADAPTER
-    if _ADAPTER is None:
-        up_axis = "Y"  # default — most USD scenes are Y-up
-        cap = _get_capture_mod()
-        if cap is not None and getattr(cap, "_state", None) is not None:
-            author = getattr(cap._state, "author", None)
-            if author is not None:
-                from pxr import UsdGeom
+    if _ADAPTER is not None:
+        return _ADAPTER
+    up_axis = "Y"  # default — most USD scenes are Y-up
+    cap = _get_capture_mod()
+    if cap is not None and getattr(cap, "_state", None) is not None:
+        author = getattr(cap._state, "author", None)
+        if author is not None:
+            from pxr import UsdGeom
 
-                up_axis = UsdGeom.GetStageUpAxis(author.stage)
-        _ADAPTER = BlenderAdapter(scene_up_axis=up_axis)
+            up_axis = UsdGeom.GetStageUpAxis(author.stage)
+    _ADAPTER = BlenderAdapter(scene_up_axis=up_axis)
+    return _ADAPTER
 
-    k = ev.get("k")
-    prim_path = ev.get("prim", "")
-    extra = ""
-    if k == K_SET_VISIBILITY:
-        extra = f" visible={ev.get('visible')}"
-    elif k == K_DEACTIVATE_PRIM:
-        extra = f" active={ev.get('active')}"
-    LOG.debug("event: k=%s prim=%s%s", k, prim_path, extra)
 
-    # Skip adapter dispatch for variant/reference events that haven't
-    # changed — prevents unnecessary remove + re-import on resync.
-    if k in (K_SET_VARIANT_SELECTIONS, K_SET_REFERENCE):
-        cap = _get_capture_mod()
-        if cap is not None and cap._state.author is not None:
-            stage = cap._state.author.stage
-            if not _arc_changed(stage, ev, k):
-                LOG.debug("skip adapter dispatch %s %s (unchanged)", k, prim_path)
-                return
+# Event types that are synced to the emitter's USD stage.
+# Transforms go directly to the BlenderAdapter — the emitter stage
+# only needs composition arcs and materials to keep its composed view
+# in sync with what the receiver imported.
+_STAGE_SYNC_KINDS = frozenset({
+    K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
+    K_SET_VARIANT_SELECTIONS,
+    K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
+})
 
-    _dispatch_event(_ADAPTER, k, prim_path, ev)
 
-    # Track import events for post-batch cache seeding.  Must happen here
-    # (before the emitter stage sync block) because the sync block can
-    # return early when the payload is already loaded on the emitter's
-    # stage (USD auto-loads payloads with the default LoadAll policy).
-    if k in (K_LOAD_PAYLOAD, K_SET_REFERENCE):
-        _pending_seed_paths.add(prim_path)
+def _commit_to_stage(events: list[dict], stage) -> None:
+    """Apply composition arc and material events to the emitter's stage.
 
-    # Keep the emitter's stage in sync with payload and reference arcs so
-    # its composed view matches what the receiver imported/removed.  This
-    # mirrors how the base-file case works: the emitter's stage has the
-    # composition arc, so children compose naturally when loaded.
-    if k in (
-        K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
-        K_SET_REFERENCE, K_SET_VARIANT_SELECTIONS,
-    ):
-        cap = _get_capture_mod()
-        if cap is not None and cap._state.author is not None:
-            from openusdconnect.event_apply import apply_event as _apply_ev
+    Rolls back on failure via atomic_apply.  Also reactivates payload
+    children that were deactivated during a previous unload cycle.
+    """
+    from pxr import Usd
 
-            try:
-                stage = cap._state.author.stage
+    from openusdconnect.event_apply import apply_events, atomic_apply
 
-                # Skip re-applying composition arcs that already match
-                # the emitter's stage — avoids unnecessary recomposition
-                # notices that trigger the emitter to re-emit everything.
-                if k in (K_SET_REFERENCE, K_SET_PAYLOAD, K_SET_VARIANT_SELECTIONS):
-                    if not _arc_changed(stage, ev, k):
-                        LOG.debug("skip sync %s %s", k, prim_path)
-                        return
-                if k == K_LOAD_PAYLOAD:
-                    prim = stage.GetPrimAtPath(prim_path)
-                    if prim and prim.IsValid() and prim.IsLoaded():
-                        LOG.debug("skip sync %s %s (loaded)", k, prim_path)
-                        return
-                LOG.debug("apply to emitter: %s %s", k, prim_path)
-                _apply_ev(stage, ev)
+    stage_events = [ev for ev in events if ev.get("k") in _STAGE_SYNC_KINDS]
+    if not stage_events:
+        return
+    with atomic_apply(stage):
+        apply_events(stage, stage_events)
+        for ev in stage_events:
+            if ev.get("k") != K_LOAD_PAYLOAD:
+                continue
+            prim = stage.GetPrimAtPath(ev["prim"])
+            if prim and prim.IsValid():
+                for child in Usd.PrimRange(prim, Usd.PrimAllPrimsPredicate):
+                    if not child.IsActive():
+                        child.SetActive(True)
 
-                ne = cap._state.notice_emitter
-                prefix = prim_path + "/"
 
-                if k == K_UNLOAD_PAYLOAD:
-                    # Track unloaded payload root so emitter skips children
-                    cap._state.author._unloaded_payload_roots.add(prim_path)
-                    # Purge emitter caches for unloaded children so they're
-                    # treated as fresh first-encounters after the next load.
-                    if ne is not None:
-                        to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
-                        for p in to_purge:
-                            ne._purge_caches(p)
+def _dispatch_to_adapter(events: list[dict], skip_indices: set[int]) -> None:
+    """Phase 4: Dispatch events to the BlenderAdapter.
 
-                elif k == K_LOAD_PAYLOAD:
-                    cap._state.author._unloaded_payload_roots.discard(prim_path)
-                    # Clear stale SetActive(False) opinions left by
-                    # _detect_deletions during the previous unload cycle.
-                    from pxr import Usd
+    Only called after the stage commit succeeds.  Events whose index is
+    in *skip_indices* (unchanged arcs) are skipped.
+    """
+    adapter = _ensure_adapter()
+    for i, ev in enumerate(events):
+        if i in skip_indices:
+            continue
+        k = ev.get("k")
+        prim_path = ev.get("prim", "")
+        LOG.debug("event: k=%s prim=%s", k, prim_path)
+        _dispatch_event(adapter, k, prim_path, ev)
+        # Track import events for post-batch cache seeding.
+        if k in (K_LOAD_PAYLOAD, K_SET_REFERENCE):
+            _pending_seed_paths.add(prim_path)
 
-                    prim = stage.GetPrimAtPath(prim_path)
-                    if prim and prim.IsValid():
-                        for child in Usd.PrimRange(prim, Usd.PrimAllPrimsPredicate):
-                            if not child.IsActive():
-                                child.SetActive(True)
 
-                elif k == K_SET_REFERENCE:
-                    # Update emitter's caches so it doesn't re-emit
-                    # the reference or composed variant selections.
-                    if ne is not None:
-                        from pxr import Usd  # noqa: E402
+def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) -> None:
+    """Phase 5: Update emitter caches from committed stage state.
 
-                        from openusdconnect.emitter import (
-                            _C_REFERENCES,
-                            _C_VARIANT_SELECTIONS,
-                            _read_references,
-                            _read_variant_selections,
-                        )
-                        pc = ne._prim_cache.setdefault(prim_path, {})
-                        pc[_C_REFERENCES] = _read_references(stage, prim_path)
-                        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
-                            stage, prim_path,
-                        )
-                        # Also cache variants for composed children
-                        prim = stage.GetPrimAtPath(prim_path)
-                        if prim and prim.IsValid():
-                            for child in Usd.PrimRange(prim):
-                                cp = str(child.GetPath())
-                                if cp == prim_path:
-                                    continue
-                                cvs = _read_variant_selections(stage, cp)
-                                if cvs:
-                                    cpc = ne._prim_cache.setdefault(cp, {})
-                                    cpc[_C_VARIANT_SELECTIONS] = cvs
+    Reads from the stage AFTER all events are committed, so the stage
+    is in a consistent state.
+    """
+    cap = _get_capture_mod()
+    if cap is None or cap._state.author is None:
+        return
+    ne = cap._state.notice_emitter
 
-                elif k == K_SET_VARIANT_SELECTIONS:
-                    # Update the emitter's variant cache so it doesn't
-                    # re-emit the variant change on the next dirty cycle.
-                    if ne is not None:
-                        pc = ne._prim_cache.setdefault(prim_path, {})
-                        from openusdconnect.emitter import (
-                            _C_VARIANT_SELECTIONS,
-                            _read_variant_selections,
-                        )
-                        pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
-                            stage, prim_path,
-                        )
-                        # Purge known prims for children so re-imported
-                        # objects are treated as fresh first-encounters.
-                        to_purge = [
-                            p for p in list(ne._known_prims)
-                            if p.startswith(prefix)
-                        ]
-                        for p in to_purge:
-                            ne._purge_caches(p)
-                    # Purge BlenderStageAuthor refs for old children
-                    cap._state.author.purge_prim_refs(prefix)
+    for i, ev in enumerate(events):
+        if i in skip_indices:
+            continue
+        k = ev.get("k")
+        prim_path = ev.get("prim", "")
+        prefix = prim_path + "/"
 
-            except RuntimeError:
-                LOG.warning("Could not apply %s to emitter stage for %s", k, prim_path)
+        if k == K_UNLOAD_PAYLOAD:
+            cap._state.author._unloaded_payload_roots.add(prim_path)
+            if ne is not None:
+                to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
+                for p in to_purge:
+                    ne._purge_caches(p)
 
-    # Sync incoming shader/material events to the emitter's stage so
-    # the emitter's diff baseline matches the latest network state.
-    if k in (K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION, K_SET_MATERIAL_BINDING):
-        cap = _get_capture_mod()
-        if cap is not None and cap._state.author is not None:
-            from openusdconnect.event_apply import apply_event as _apply_ev
+        elif k == K_LOAD_PAYLOAD:
+            cap._state.author._unloaded_payload_roots.discard(prim_path)
 
-            stage = cap._state.author.stage
-            ne = cap._state.notice_emitter
-            _apply_ev(stage, ev)
-            if ne is not None and k == K_SET_SHADER_INPUT:
+        elif k == K_SET_REFERENCE:
+            if ne is not None:
+                from pxr import Usd
+
+                from openusdconnect.emitter import (
+                    _C_REFERENCES,
+                    _C_VARIANT_SELECTIONS,
+                    _read_references,
+                    _read_variant_selections,
+                )
+                pc = ne._prim_cache.setdefault(prim_path, {})
+                pc[_C_REFERENCES] = _read_references(stage, prim_path)
+                pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                    stage, prim_path,
+                )
+                prim = stage.GetPrimAtPath(prim_path)
+                if prim and prim.IsValid():
+                    for child in Usd.PrimRange(prim):
+                        cp = str(child.GetPath())
+                        if cp == prim_path:
+                            continue
+                        cvs = _read_variant_selections(stage, cp)
+                        if cvs:
+                            cpc = ne._prim_cache.setdefault(cp, {})
+                            cpc[_C_VARIANT_SELECTIONS] = cvs
+
+        elif k == K_SET_VARIANT_SELECTIONS:
+            if ne is not None:
+                from openusdconnect.emitter import (
+                    _C_VARIANT_SELECTIONS,
+                    _read_variant_selections,
+                )
+                pc = ne._prim_cache.setdefault(prim_path, {})
+                pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                    stage, prim_path,
+                )
+                to_purge = [
+                    p for p in list(ne._known_prims)
+                    if p.startswith(prefix)
+                ]
+                for p in to_purge:
+                    ne._purge_caches(p)
+            cap._state.author.purge_prim_refs(prefix)
+
+        elif k == K_SET_SHADER_INPUT:
+            if ne is not None:
                 from openusdconnect.emitter import _C_SHADER_INPUTS, _read_shader_inputs
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
@@ -386,9 +364,14 @@ def _set_applying_remote(value: bool):
             pass
 
 
-def _drain_and_process(lines):
-    """Parse, deduplicate, and apply a batch of raw JSON lines."""
+def _parse_events(lines) -> list[dict]:
+    """Parse and deduplicate raw JSON lines into a list of event dicts.
+
+    Handles resync messages (resets sequence and adapter).  Returns the
+    collected events for the caller to process in phases.
+    """
     global _LAST_SEQ, _ADAPTER
+    events = []
     for raw_line in lines:
         try:
             msg = json.loads(raw_line)
@@ -397,6 +380,7 @@ def _drain_and_process(lines):
                 LOG.info("Server requested resync — resetting sequence and adapter")
                 _LAST_SEQ = 0
                 _ADAPTER = None
+                events.clear()
                 continue
 
             seq = msg.get("seq")
@@ -406,9 +390,12 @@ def _drain_and_process(lines):
                     continue
                 _LAST_SEQ = seq_int
             if msg.get("type") == MSG_EVENT:
-                _process_event(msg.get("event", {}))
+                ev = msg.get("event", {})
+                if ev:
+                    events.append(ev)
         except Exception:
-            LOG.exception("Error processing received line")
+            LOG.exception("Error parsing received line")
+    return events
 
 
 def _seed_multi_node_shader_maps(cap, prim_path: str):
@@ -442,7 +429,15 @@ def _seed_multi_node_shader_maps(cap, prim_path: str):
 
 
 def _process_queue_timer():
-    """Drain receiver queue on Blender main thread."""
+    """Drain receiver queue on Blender main thread.
+
+    Stage-first architecture:
+      Phase 1 — Parse JSON lines into event list
+      Phase 2 — Collect skip decisions (unchanged arcs) from pre-commit state
+      Phase 3 — Commit all events to the emitter's USD stage (atomic rollback)
+      Phase 4 — Dispatch to BlenderAdapter (only after stage commit succeeds)
+      Phase 5 — Update emitter caches from committed stage state
+    """
     if _RECEIVER is None:
         return None  # Unregister timer
 
@@ -454,7 +449,48 @@ def _process_queue_timer():
     # so the depsgraph handler doesn't echo received changes back to the server.
     _set_applying_remote(True)
     try:
-        _drain_and_process(lines)
+        # Phase 1: Parse and collect events
+        events = _parse_events(lines)
+        if not events:
+            return 0.01
+
+        cap = _get_capture_mod()
+        has_stage = (
+            cap is not None
+            and getattr(cap, "_state", None) is not None
+            and cap._state.author is not None
+        )
+        stage = cap._state.author.stage if has_stage else None
+
+        # Phase 2: Collect skip decisions BEFORE stage commit.
+        # arc_changed reads pre-commit state to avoid unnecessary re-imports.
+        # Unchanged arcs are excluded from stage commit too — ClearReferences()
+        # followed by re-adding identical references triggers recomposition
+        # even when the final state is identical.
+        skip_indices: set[int] = set()
+        if stage is not None:
+            for i, ev in enumerate(events):
+                k = ev.get("k")
+                if k in (K_SET_VARIANT_SELECTIONS, K_SET_REFERENCE, K_SET_PAYLOAD):
+                    if not _arc_changed(stage, ev, k):
+                        skip_indices.add(i)
+
+        # Phase 3: Commit stage-sync events to the emitter's USD stage
+        # (atomic).  Unchanged arcs (skip_indices) are excluded to avoid
+        # spurious recomposition from ClearReferences + re-add.
+        if stage is not None:
+            sync_events = [
+                ev for i, ev in enumerate(events)
+                if i not in skip_indices
+            ]
+            _commit_to_stage(sync_events, stage)
+
+        # Phase 4: Dispatch to BlenderAdapter (stage is committed)
+        _dispatch_to_adapter(events, skip_indices)
+
+        # Phase 5: Update emitter caches from committed stage state
+        if stage is not None:
+            _update_emitter_caches(events, stage, skip_indices)
 
         # Refresh viewport once after processing all events (not per-event)
         try:
@@ -469,7 +505,6 @@ def _process_queue_timer():
         # next depsgraph evaluation, causing the emitter to re-process
         # every imported object.
         if _pending_seed_paths:
-            cap = _get_capture_mod()
             if cap is not None:
                 for pp in _pending_seed_paths:
                     cap.seed_emitter_caches_for_import(pp)
@@ -554,7 +589,7 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
                 pass
 
             # NOW drain any remaining queued events (thread dead, timer stopped)
-            _drain_and_process(receiver.drain_queue())
+            _parse_events(receiver.drain_queue())
 
             # Persist to scene property
             try:

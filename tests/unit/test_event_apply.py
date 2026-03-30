@@ -786,3 +786,93 @@ class TestAtomicApply:
         assert not stage.GetPrimAtPath("/World/E2").IsValid()
         # Pre-existing prim should be untouched
         assert stage.GetPrimAtPath("/World/Pre").IsValid()
+
+
+class TestReceiverStageFirstFlow:
+    """Simulates the Blender receiver's stage-first flow:
+    commit to stage, then dispatch to adapter.  Verifies that on
+    failure the stage rolls back and the adapter is never called.
+    """
+
+    def test_adapter_only_called_after_stage_commit(self, stage):
+        """Adapter dispatch happens only when stage commit succeeds."""
+        from openusdconnect.adapters import MockAdapter
+
+        adapter = MockAdapter()
+        events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/X", "typeName": "Xform"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/X"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/X",
+             "fields": ["t"], "t": [5.0, 6.0, 7.0]},
+        ]
+
+        with atomic_apply(stage):
+            apply_events(stage, events)
+
+        for ev in events:
+            k = ev["k"]
+            prim = ev["prim"]
+            if k == K_ENSURE_PRIM:
+                adapter.ensure_prim(prim, ev.get("typeName", "Xform"))
+            elif k == K_ENSURE_XFORM_OPS:
+                adapter.ensure_xform_ops(prim)
+            elif k == K_SET_XFORM_TRS:
+                adapter.set_xform_trs(prim, ev)
+
+        assert stage.GetPrimAtPath("/World/X").IsValid()
+        assert "/World/X" in adapter._prims
+        assert adapter.get_trs("/World/X").get("t") == [5.0, 6.0, 7.0]
+
+    def test_adapter_not_called_on_stage_failure(self, stage):
+        """If stage commit fails, adapter is never touched."""
+        from openusdconnect.adapters import MockAdapter
+
+        adapter = MockAdapter()
+        events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Y", "typeName": "Xform"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Y",
+             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+        ]
+
+        adapter_called = False
+
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage):
+                apply_events(stage, events)
+                raise RuntimeError("simulated network corruption")
+
+            adapter_called = True
+
+        assert not stage.GetPrimAtPath("/World/Y").IsValid()
+        assert not adapter_called
+        assert "/World/Y" not in adapter._prims
+
+    def test_stage_rollback_preserves_prior_state(self, stage):
+        """Existing stage state survives a failed batch."""
+        from openusdconnect.adapters import MockAdapter
+
+        apply_events(stage, [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Existing", "typeName": "Xform"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Existing"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Existing",
+             "fields": ["t"], "t": [100.0, 200.0, 300.0]},
+        ])
+
+        adapter = MockAdapter()
+        adapter.ensure_prim("/World/Existing", "Xform")
+        adapter.ensure_xform_ops("/World/Existing")
+        adapter.set_xform_trs("/World/Existing",
+                              {"fields": ["t"], "t": [100.0, 200.0, 300.0]})
+
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage):
+                apply_events(stage, [
+                    {"k": K_ENSURE_PRIM, "prim": "/World/New1", "typeName": "Xform"},
+                    {"k": K_ENSURE_PRIM, "prim": "/World/New2", "typeName": "Xform"},
+                ])
+                raise RuntimeError("fail")
+
+        assert not stage.GetPrimAtPath("/World/New1").IsValid()
+        assert not stage.GetPrimAtPath("/World/New2").IsValid()
+        assert stage.GetPrimAtPath("/World/Existing").IsValid()
+        assert adapter.get_trs("/World/Existing").get("t") == [100.0, 200.0, 300.0]
