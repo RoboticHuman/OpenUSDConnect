@@ -233,6 +233,8 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                 except Exception:
                     LOG.debug("USDHook: could not look up prim type for %s", prim_path_str)
 
+            from .blender_adapter import _PROP_USD_IMPORTED
+
             for db in data_blocks:
                 if isinstance(db, bpy.types.Object):
                     db["usd_prim_path"] = prim_path_str
@@ -240,6 +242,7 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                         db["usd_type_name"] = prim_type_name
                     if stage_id:
                         db["usd_stage_id"] = stage_id
+                    db[_PROP_USD_IMPORTED] = True
                     tagged += 1
 
         LOG.info("USDHook: Tagged %d objects with usd_prim_path", tagged)
