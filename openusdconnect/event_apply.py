@@ -484,3 +484,45 @@ def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
                 apply_event(stage, ev)
             else:
                 apply_event(stage, ev)
+
+
+class _AtomicApply:
+    """Context manager for atomic event application with rollback.
+
+    Snapshots the edit target layer on enter. If the block raises,
+    restores the snapshot so the stage returns to its pre-apply state.
+    Exceptions propagate — __exit__ returns False.
+    """
+
+    __slots__ = ("_layer", "_backup")
+
+    def __init__(self, stage: Usd.Stage):
+        self._layer = stage.GetEditTarget().GetLayer()
+        self._backup = None
+
+    def __enter__(self):
+        self._backup = Sdf.Layer.CreateAnonymous("txn-backup")
+        self._backup.TransferContent(self._layer)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self._layer.TransferContent(self._backup)
+        self._backup = None
+        return False
+
+
+def atomic_apply(stage: Usd.Stage):
+    """Return a context manager for atomic event application.
+
+    Usage::
+
+        with atomic_apply(stage):
+            apply_events(stage, events)
+
+    On success, changes persist. On failure, the edit target layer
+    is restored to its state before the block — partial applies
+    are rolled back. Uses ``Sdf.Layer.TransferContent()`` for the
+    snapshot/restore.
+    """
+    return _AtomicApply(stage)

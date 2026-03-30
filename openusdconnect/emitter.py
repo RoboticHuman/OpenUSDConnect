@@ -319,12 +319,33 @@ def _read_shader_inputs(stage, prim_path):
     return shader_id, inputs, input_types, connections
 
 
+class _SuppressScope:
+    """Context manager for NoticeEmitter.suppressed().
+
+    Calls suppress() on enter and unsuppress() on exit.
+    __exit__ returns False -- exceptions propagate, never swallowed.
+    """
+
+    __slots__ = ("_emitter",)
+
+    def __init__(self, emitter: "NoticeEmitter"):
+        self._emitter = emitter
+
+    def __enter__(self):
+        self._emitter.suppress()
+        return self._emitter
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._emitter.unsuppress()
+        return False
+
+
 class NoticeEmitter:
     """Watches a Usd.Stage for changes and builds idempotent transform events.
 
     Detects creation, deletion, deactivation, and renames via
-    ``notice.GetPrimResyncType()`` on resync paths. Supports a suppress
-    flag for feedback-loop prevention.
+    ``notice.GetPrimResyncType()`` on resync paths. Supports a reentrant
+    suppress counter for feedback-loop prevention.
 
     Usage:
         emitter = NoticeEmitter(stage)
@@ -350,7 +371,7 @@ class NoticeEmitter:
         self._deleted_prims: set[str] = set()
         self._deactivated_prims: set[str] = set()
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
-        self._suppressed: bool = False
+        self._suppress_depth: int = 0
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         # Per-prim diff cache. Each prim_path maps to a dict with keys:
@@ -376,6 +397,7 @@ class NoticeEmitter:
         self._dirty_attrs.clear()
         self._resynced_prims.clear()
         self.dirty.clear()
+        self._suppress_depth = 0
 
     def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
         """Seed the per-prim diff cache for a prim and its composed children.
@@ -418,12 +440,37 @@ class NoticeEmitter:
                     pc[_C_SHADER_CONNECTIONS] = connections
 
     def suppress(self):
-        """Suppress notice collection (feedback guard)."""
-        self._suppressed = True
+        """Suppress notice collection (feedback guard).
+
+        Reentrant: each call increments the suppress depth.
+        Must be paired with a matching unsuppress() call.
+        """
+        self._suppress_depth += 1
 
     def unsuppress(self):
-        """Resume notice collection."""
-        self._suppressed = False
+        """Resume notice collection.
+
+        Decrements the suppress depth. Notices are only collected
+        again when depth reaches zero.
+        """
+        assert self._suppress_depth > 0, (
+            "unsuppress() called without matching suppress()"
+        )
+        self._suppress_depth -= 1
+
+    def suppressed(self):
+        """Return a context manager that suppresses notices for the block.
+
+        Usage::
+
+            with emitter.suppressed():
+                apply_events(stage, events)
+            # notices automatically resume here
+
+        Reentrant -- nests correctly with other suppress/unsuppress calls.
+        Exceptions are NOT swallowed: __exit__ returns False.
+        """
+        return _SuppressScope(self)
 
     def clear_all(self):
         """Flush all dirty/deleted/renamed sets without building events."""
@@ -466,7 +513,7 @@ class NoticeEmitter:
         return None
 
     def _on_changed(self, notice, stage):
-        if self._suppressed:
+        if self._suppress_depth > 0:
             return
 
         for p in notice.GetResyncedPaths():

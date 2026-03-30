@@ -17,6 +17,7 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 from openusdconnect.event_apply import (
     apply_event,
     apply_events,
+    atomic_apply,
     ensure_canonical_ops,
     get_or_define_prim,
 )
@@ -719,3 +720,69 @@ class TestSetShaderInput:
         dc = shader.GetInput("diffuseColor").Get()
         assert abs(dc[0] - 1.0) < 1e-6
         assert abs(dc[1]) < 1e-6
+
+
+class TestAtomicApply:
+    """atomic_apply context manager: commit on success, rollback on failure."""
+
+    def test_commits_on_success(self, stage):
+        events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/A",
+             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+        ]
+        with atomic_apply(stage):
+            apply_events(stage, events)
+
+        prim = stage.GetPrimAtPath("/World/A")
+        assert prim and prim.IsValid()
+
+    def test_rollback_on_exception(self, stage):
+        # Pre-state: /World exists, /World/B does not
+        assert not stage.GetPrimAtPath("/World/B").IsValid()
+
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage):
+                apply_events(stage, [
+                    {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
+                ])
+                # Verify B exists mid-transaction
+                assert stage.GetPrimAtPath("/World/B").IsValid()
+                raise RuntimeError("simulated failure")
+
+        # B should be rolled back
+        assert not stage.GetPrimAtPath("/World/B").IsValid()
+
+    def test_exception_propagates(self, stage):
+        with pytest.raises(ValueError, match="test error"):
+            with atomic_apply(stage):
+                raise ValueError("test error")
+
+    def test_partial_batch_rollback(self, stage):
+        # Set up a known starting point
+        apply_events(stage, [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Pre", "typeName": "Xform"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Pre"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Pre",
+             "fields": ["t"], "t": [10.0, 20.0, 30.0]},
+        ])
+
+        # Build a batch where event 3 will fail
+        events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/E1", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/E2", "typeName": "Xform"},
+        ]
+
+        def failing_apply():
+            with atomic_apply(stage):
+                apply_events(stage, events)
+                raise RuntimeError("fail after partial apply")
+
+        with pytest.raises(RuntimeError):
+            failing_apply()
+
+        # E1 and E2 should be rolled back
+        assert not stage.GetPrimAtPath("/World/E1").IsValid()
+        assert not stage.GetPrimAtPath("/World/E2").IsValid()
+        # Pre-existing prim should be untouched
+        assert stage.GetPrimAtPath("/World/Pre").IsValid()

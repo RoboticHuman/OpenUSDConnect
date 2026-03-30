@@ -224,6 +224,112 @@ class TestSuppressFlag:
         assert "/World/Hidden" not in prim_paths
 
 
+class TestReentrantSuppress:
+    """Counter-based suppress correctly handles nesting."""
+
+    def test_nested_suppress_stays_suppressed(self):
+        """Inner unsuppress does not re-enable when outer suppress is active."""
+        stage, emitter = _make_stage_and_emitter()
+
+        emitter.suppress()       # depth 1
+        emitter.suppress()       # depth 2
+        emitter.unsuppress()     # depth 1 — still suppressed
+
+        stage.DefinePrim("/World/ShouldBeHidden", "Xform")
+        events = emitter.build_events_for_dirty()
+        assert events == []
+
+        emitter.unsuppress()     # depth 0
+
+    def test_nested_suppress_resumes_at_zero(self):
+        """Full unnesting resumes collection."""
+        stage, emitter = _make_stage_and_emitter()
+
+        emitter.suppress()
+        emitter.suppress()
+        emitter.unsuppress()
+        emitter.unsuppress()     # depth 0
+
+        stage.DefinePrim("/World/Visible", "Xform")
+        events = emitter.build_events_for_dirty()
+        prim_paths = {e["prim"] for e in events if e["k"] == K_ENSURE_PRIM}
+        assert "/World/Visible" in prim_paths
+
+    def test_unbalanced_unsuppress_raises(self):
+        """unsuppress() without suppress() raises AssertionError."""
+        stage, emitter = _make_stage_and_emitter()
+        import pytest
+
+        with pytest.raises(AssertionError, match="without matching suppress"):
+            emitter.unsuppress()
+
+
+class TestSuppressedContextManager:
+    """Context manager for scoped suppress."""
+
+    def test_context_manager_suppresses_and_resumes(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        with emitter.suppressed():
+            stage.DefinePrim("/World/Inside", "Xform")
+
+        stage.DefinePrim("/World/Outside", "Xform")
+        events = emitter.build_events_for_dirty()
+        prim_paths = {e["prim"] for e in events if e["k"] == K_ENSURE_PRIM}
+        assert "/World/Inside" not in prim_paths
+        assert "/World/Outside" in prim_paths
+
+    def test_context_manager_unsuppresses_on_exception(self):
+        stage, emitter = _make_stage_and_emitter()
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            with emitter.suppressed():
+                raise RuntimeError("test error")
+
+        assert emitter._suppress_depth == 0
+        stage.DefinePrim("/World/AfterError", "Xform")
+        events = emitter.build_events_for_dirty()
+        prim_paths = {e["prim"] for e in events if e["k"] == K_ENSURE_PRIM}
+        assert "/World/AfterError" in prim_paths
+
+    def test_context_manager_does_not_swallow_exception(self):
+        stage, emitter = _make_stage_and_emitter()
+        import pytest
+
+        with pytest.raises(ValueError, match="boom"):
+            with emitter.suppressed():
+                raise ValueError("boom")
+
+    def test_nested_context_managers(self):
+        stage, emitter = _make_stage_and_emitter()
+
+        with emitter.suppressed():
+            assert emitter._suppress_depth == 1
+            with emitter.suppressed():
+                assert emitter._suppress_depth == 2
+                stage.DefinePrim("/World/Deep", "Xform")
+            assert emitter._suppress_depth == 1
+            stage.DefinePrim("/World/Shallow", "Xform")
+
+        assert emitter._suppress_depth == 0
+        stage.DefinePrim("/World/Free", "Xform")
+
+        events = emitter.build_events_for_dirty()
+        prim_paths = {e["prim"] for e in events if e["k"] == K_ENSURE_PRIM}
+        assert "/World/Deep" not in prim_paths
+        assert "/World/Shallow" not in prim_paths
+        assert "/World/Free" in prim_paths
+
+    def test_cleanup_resets_suppress_depth(self):
+        stage, emitter = _make_stage_and_emitter()
+        emitter.suppress()
+        emitter.suppress()
+        assert emitter._suppress_depth == 2
+        emitter.cleanup()
+        assert emitter._suppress_depth == 0
+
+
 class TestChangeBlockBatching:
     """Multiple changes in one ChangeBlock produce a single batch of events."""
 

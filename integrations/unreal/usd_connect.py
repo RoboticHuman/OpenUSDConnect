@@ -24,6 +24,7 @@ import socket
 import sys
 import time
 import uuid
+from contextlib import nullcontext
 
 # Self-bootstrap: ensure the project root is on sys.path so that
 # `openusdconnect` is importable without any external setup.
@@ -167,7 +168,7 @@ def _apply_received_lines(stage, lines: list[str]):
     """Parse, deduplicate, and apply received JSON lines to the stage."""
     global _last_seq
 
-    from openusdconnect.event_apply import apply_events
+    from openusdconnect.event_apply import apply_events, atomic_apply
     from openusdconnect.protocol import MSG_EVENT, MSG_RESYNC
 
     events_to_apply = []
@@ -202,16 +203,9 @@ def _apply_received_lines(stage, lines: list[str]):
     if not events_to_apply:
         return
 
-    # Suppress emitter to prevent echoing received events back
-    if _emitter is not None:
-        _emitter.suppress()
-    try:
+    suppress_ctx = _emitter.suppressed() if _emitter is not None else nullcontext()
+    with suppress_ctx, atomic_apply(stage):
         apply_events(stage, events_to_apply)
-    except Exception:
-        LOG.exception("Error applying %d events to stage", len(events_to_apply))
-    finally:
-        if _emitter is not None:
-            _emitter.unsuppress()
 
 
 def _flush_emitter():
