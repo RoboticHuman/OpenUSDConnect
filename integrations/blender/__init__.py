@@ -18,9 +18,17 @@ import os
 import sys
 import uuid
 
+from openusdconnect.client_id import make_stable_client_id
+
+# Stable client ID based on username + hostname. Persists across sessions
+# so the server can map reconnections to the same per-client layer.
+STABLE_CLIENT_ID = make_stable_client_id("blender")
+
 # Session-level origin identifier shared by emitter and receiver connections
 # from this Blender instance.  The server uses it to suppress echo — events
 # are not broadcast back to connections with the same origin.
+# Random per session — unlike STABLE_CLIENT_ID, this changes on restart so
+# the server can distinguish multiple sessions from the same machine.
 SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 
 # Ensure the addon directory is on sys.path so vendored openusdconnect is importable.

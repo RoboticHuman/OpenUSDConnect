@@ -46,11 +46,15 @@ PROTOCOL_VERSION = 1
 
 # Message type constants
 MSG_HELLO = "hello"
+MSG_HELLO_OK = "hello_ok"
+MSG_AUTH_REJECTED = "auth_rejected"
 MSG_TXN = "txn"
 MSG_EVENT = "event"
 MSG_RESYNC = "resync"
 MSG_COMPACT = "compact"
 MSG_QUIT = "quit"
+MSG_CREATE_PROPOSAL = "create_proposal"
+MSG_PROPOSAL_CREATED = "proposal_created"
 
 # Event kind constants — use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -179,6 +183,8 @@ def make_hello(
     sync_from: int | None = None,
     client_id: str | None = None,
     origin: str | None = None,
+    department: str | None = None,
+    token: str | None = None,
 ) -> dict:
     """Build a hello message.
 
@@ -189,6 +195,10 @@ def make_hello(
         origin: Session-level identifier shared by all connections from the
             same DCC instance.  The server uses this to suppress echo —
             events are not broadcast back to receivers with matching origin.
+        department: Optional department name (e.g. "animation", "lighting").
+            Used by the server for layer ordering when per-client layers
+            are enabled.
+        token: Authentication token from a previous session (TOFU).
     """
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
@@ -197,6 +207,10 @@ def make_hello(
         msg["client_id"] = client_id
     if origin is not None:
         msg["origin"] = origin
+    if department is not None:
+        msg["department"] = department
+    if token is not None:
+        msg["token"] = token
     return msg
 
 

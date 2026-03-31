@@ -19,8 +19,9 @@ import socket
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 
-from .protocol import make_hello
+from .protocol import MSG_AUTH_REJECTED, MSG_HELLO_OK, make_hello
 from .transport import send_line
 
 LOG = logging.getLogger(__name__)
@@ -63,6 +64,8 @@ class ReceiverThread(threading.Thread):
         reconnect_base_delay: float = _RECONNECT_BASE_DELAY,
         reconnect_max_delay: float = _RECONNECT_MAX_DELAY,
         origin: str | None = None,
+        token: str | None = None,
+        on_token_issued: Callable | None = None,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -73,6 +76,8 @@ class ReceiverThread(threading.Thread):
         self.socket_timeout = socket_timeout
         self.client_id = client_id
         self.origin = origin
+        self.token = token
+        self._on_token_issued = on_token_issued
         self._reconnect_base_delay = reconnect_base_delay
         self._reconnect_max_delay = reconnect_max_delay
         self._stop_event = threading.Event()
@@ -82,6 +87,7 @@ class ReceiverThread(threading.Thread):
         self.connected = False
         self.last_seq: int = 0
         self._queue_overflow = False
+        self.auth_rejected = False
 
     def run(self):
         delay = self._reconnect_base_delay
@@ -95,7 +101,7 @@ class ReceiverThread(threading.Thread):
                 self.connected = False
                 self._close_socket()
 
-            if not self.reconnect or self._stop_event.is_set():
+            if not self.reconnect or self._stop_event.is_set() or self.auth_rejected:
                 break
 
             if self._queue_overflow:
@@ -136,9 +142,12 @@ class ReceiverThread(threading.Thread):
         hello = make_hello(
             "receiver", sync_from=sync_from,
             client_id=self.client_id, origin=self.origin,
+            token=self.token,
         )
         send_line(self.sock, hello)
+
         self.connected = True
+        self.auth_rejected = False
         LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
 
         buf = b""
@@ -164,6 +173,27 @@ class ReceiverThread(threading.Thread):
                 if not line:
                     continue
 
+                # Handle auth messages inline (first message from server)
+                try:
+                    parsed = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = None
+
+                if parsed and parsed.get("type") == MSG_AUTH_REJECTED:
+                    LOG.error("ReceiverThread: auth rejected — %s",
+                              parsed.get("reason"))
+                    self.auth_rejected = True
+                    return
+
+                if parsed and parsed.get("type") == MSG_HELLO_OK:
+                    issued = parsed.get("token")
+                    if issued:
+                        self.token = issued
+                        if self._on_token_issued:
+                            self._on_token_issued(issued)
+                        LOG.info("ReceiverThread: token issued by server")
+                    continue  # Don't queue the hello_ok
+
                 with self._incoming_lock:
                     if len(self._incoming) >= self.max_queue:
                         overflow = True
@@ -172,8 +202,7 @@ class ReceiverThread(threading.Thread):
 
                 # Track last_seq for reconnect replay
                 try:
-                    parsed = json.loads(line)
-                    seq = parsed.get("seq")
+                    seq = parsed.get("seq") if parsed else None
                     if seq is not None:
                         self.last_seq = max(self.last_seq, int(seq))
                 except (json.JSONDecodeError, ValueError, TypeError):

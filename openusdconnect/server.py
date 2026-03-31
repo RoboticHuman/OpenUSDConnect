@@ -43,9 +43,13 @@ from .protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    MSG_AUTH_REJECTED,
     MSG_COMPACT,
+    MSG_CREATE_PROPOSAL,
     MSG_EVENT,
     MSG_HELLO,
+    MSG_HELLO_OK,
+    MSG_PROPOSAL_CREATED,
     MSG_QUIT,
     MSG_RESYNC,
     MSG_TXN,
@@ -75,9 +79,25 @@ class ClientInfo:
     address: tuple
     client_id: str | None = None
     origin: str | None = None
+    department: str | None = None
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     event_count: int = 0
+
+
+@dataclass
+class Proposal:
+    """Metadata for a cross-department edit proposal."""
+
+    proposal_id: str
+    from_client: str
+    from_department: str | None
+    target_department: str
+    description: str
+    layer: Sdf.Layer
+    status: str = "pending"  # pending, approved, rejected
+    created_at: float = field(default_factory=time.time)
+    events: list = field(default_factory=list)  # accumulated events for log persistence
 
 
 class UsdSyncServer:
@@ -91,6 +111,9 @@ class UsdSyncServer:
         log_path: str = "usd_events.db",
         event_store: EventStore | None = None,
         op_cache_size: int | None = None,
+        department_priority: list[str] | None = None,
+        require_token: bool = False,
+        token_db_path: str | None = None,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -100,11 +123,18 @@ class UsdSyncServer:
             self.stage = Usd.Stage.CreateInMemory()
             self.stage.DefinePrim("/Root", "Xform")
 
-        # Non-destructive editing: all server-applied events go to an override
-        # sublayer, keeping the base layer(s) untouched.
+        # Non-destructive editing: fallback layer for clients without an ID.
         self.edit_layer = self._create_edit_layer()
 
-        self.stage_lock = threading.Lock()
+        # Per-department layers: clients in the same department share a layer
+        # (last-write-wins within a department). Department ordering controls
+        # strength between departments.
+        self.client_layers: dict[str, Sdf.Layer] = {}  # client_id or dept → layer
+        self._dept_layers: dict[str, Sdf.Layer] = {}   # department → shared layer
+        self._client_departments: dict[str, str] = {}  # client_id → department
+        self.department_priority: list[str] = list(department_priority or [])
+
+        self.stage_lock = threading.RLock()
         self.clients_lock = threading.Lock()
         self.receivers: set = set()
         self.clients: dict[str, ClientInfo] = {}
@@ -115,6 +145,19 @@ class UsdSyncServer:
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         self._next_seq = self.store.get_max_seq() + 1
+        self._event_count = self.store.get_count()
+
+        # TOFU token authentication
+        self.require_token = require_token
+        self.token_store = None
+        if require_token:
+            from .token_store import TokenStore
+            _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
+            self.token_store = TokenStore(_token_path)
+
+        # Cross-department edit proposals
+        self.proposals_lock = threading.Lock()
+        self.proposals: dict[str, Proposal] = {}
 
         # LRU cache: prim_path → (translate_op, orient_op, scale_op).
         from cachetools import LRUCache
@@ -145,18 +188,443 @@ class UsdSyncServer:
         return layer
 
     def _replay_log_into_stage(self):
-        """Apply all events from the event store to restore stage on startup."""
+        """Apply all events from the event store to restore stage on startup.
+
+        Routes events to per-client layers based on stored client_id.
+        Events without a client_id go to the shared edit_layer.
+        """
         from .event_apply import apply_events
 
         rows = self.store.get_all_asc()
         if not rows:
             return
-        events = []
-        for _seq, record_json in rows:
-            rec = json.loads(record_json)
-            events.append(rec.get("event", rec))
-        apply_events(self.stage, events, op_cache=self._op_cache)
-        LOG.info("Restored stage from event log: %d events", len(events))
+
+        if self.department_priority:
+            # Per-client layers: route events to the correct client layer.
+            by_client: dict[str | None, list[dict]] = {}
+            for _seq, record_json in rows:
+                rec = json.loads(record_json)
+                ev = rec.get("event", rec)
+                cid = rec.get("client_id")
+                by_client.setdefault(cid, []).append(ev)
+
+            for cid, evts in by_client.items():
+                layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
+                self.stage.SetEditTarget(Usd.EditTarget(layer))
+                apply_events(self.stage, evts, op_cache=self._op_cache)
+
+            total = sum(len(v) for v in by_client.values())
+        else:
+            # Legacy mode: all events to the shared edit_layer.
+            events = []
+            for _seq, record_json in rows:
+                rec = json.loads(record_json)
+                events.append(rec.get("event", rec))
+            apply_events(self.stage, events, op_cache=self._op_cache)
+            total = len(events)
+
+        LOG.info("Restored stage from event log: %d events", total)
+
+    # -- TOFU authentication -------------------------------------------
+
+    def authenticate(self, client_id: str | None, token: str | None,
+                     department: str | None = None) -> tuple[bool, str | None]:
+        """Authenticate a client using TOFU.
+
+        Returns (accepted, issued_token).
+        - First connect (no token stored): issues a new token → (True, new_token)
+        - Reconnect with valid token: accepted → (True, None)
+        - Reconnect with wrong/missing token: rejected → (False, None)
+        - Token not required or no client_id: always accepted → (True, None)
+        """
+        if not self.require_token or not self.token_store or not client_id:
+            return True, None
+
+        if not self.token_store.has_token(client_id):
+            # First connect — issue token (TOFU)
+            new_token = self.token_store.issue(client_id, department)
+            return True, new_token
+
+        if token and self.token_store.verify(client_id, token):
+            return True, None
+
+        LOG.warning("Auth rejected for %s — invalid or missing token", client_id)
+        return False, None
+
+    def revoke_token(self, client_id: str) -> bool:
+        """Revoke a client's token via dashboard/API."""
+        if not self.token_store:
+            return False
+        return self.token_store.revoke(client_id)
+
+    def get_token_list(self) -> list[dict]:
+        """Return all token records for the dashboard."""
+        if not self.token_store:
+            return []
+        return self.token_store.get_all()
+
+    # -- Proposals (cross-department edit requests) ----------------------
+
+    def create_proposal(
+        self, from_client: str, target_department: str, description: str = "",
+    ) -> str:
+        """Create a proposal targeting another department.
+
+        Creates a muted layer for the proposal. The proposer sends txns
+        targeting this proposal_id. The target department reviews in the
+        dashboard.
+
+        Returns the proposal_id.
+        """
+        import uuid
+        proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
+        from_dept = self._client_departments.get(from_client)
+
+        with self.stage_lock:
+            layer = Sdf.Layer.CreateAnonymous(f"proposal-{proposal_id}")
+            session = self.stage.GetSessionLayer()
+            # Insert at the end (weakest) so preview doesn't accidentally
+            # override real layers.
+            session.subLayerPaths.append(layer.identifier)
+            self.stage.MuteLayer(layer.identifier)
+
+        proposal = Proposal(
+            proposal_id=proposal_id,
+            from_client=from_client,
+            from_department=from_dept,
+            target_department=target_department,
+            description=description,
+            layer=layer,
+        )
+        with self.proposals_lock:
+            self.proposals[proposal_id] = proposal
+        LOG.info(
+            "Proposal %s created: %s → %s (%s)",
+            proposal_id, from_client, target_department, description,
+        )
+        return proposal_id
+
+    def list_proposals(
+        self, department: str | None = None, include_usda: bool = True,
+    ) -> list[dict]:
+        """List proposals, optionally filtered by target department.
+
+        If department is None, returns all proposals (admin view).
+        Set include_usda=False to skip expensive ExportToString().
+        """
+        with self.proposals_lock:
+            snapshot = list(self.proposals.values())
+        result = []
+        for p in snapshot:
+            if department and p.target_department != department:
+                continue
+            entry = {
+                "proposal_id": p.proposal_id,
+                "from_client": p.from_client,
+                "from_department": p.from_department,
+                "target_department": p.target_department,
+                "description": p.description,
+                "status": p.status,
+                "created_at": p.created_at,
+            }
+            if include_usda:
+                entry["layer_usda"] = p.layer.ExportToString()
+            result.append(entry)
+        return result
+
+    def approve_proposal(self, proposal_id: str) -> bool:
+        """Approve a proposal — replay events into target department layer.
+
+        Replays the accumulated events through apply_txn targeting the
+        department layer. This handles stage mutation, broadcast, gating,
+        corrections, and log persistence — same path as normal txns.
+        Then removes the proposal layer.
+        """
+        with self.proposals_lock:
+            p = self.proposals.get(proposal_id)
+        if not p or p.status != "pending":
+            return False
+
+        target_layer = self._dept_layers.get(p.target_department)
+        if not target_layer:
+            LOG.warning(
+                "Cannot approve proposal %s — target department '%s' has no layer",
+                proposal_id, p.target_department,
+            )
+            return False
+
+        if p.events:
+            # Apply into the target department layer.
+            self.apply_txn(p.events, layer=target_layer)
+
+            # Persist and broadcast all events. Unlike normal txns we
+            # don't filter by changed_set — proposals merge into a
+            # department layer and all events should be visible to
+            # receivers for log consistency. No corrections needed
+            # since no active receiver has the proposal origin.
+            records = []
+            for ev in p.events:
+                rec = {
+                    "type": MSG_EVENT,
+                    "seq": self.assign_seq(),
+                    "event": ev,
+                    "client_id": p.from_client,
+                    "origin": f"proposal-{p.proposal_id}",
+                }
+                records.append(rec)
+            self.append_log_batch(records)
+            for rec in records:
+                self.broadcast(rec)
+
+        # Remove proposal layer from session
+        with self.stage_lock:
+            self.stage.UnmuteLayer(p.layer.identifier)
+            session = self.stage.GetSessionLayer()
+            idx = list(session.subLayerPaths).index(p.layer.identifier)
+            del session.subLayerPaths[idx]
+
+        p.status = "approved"
+        LOG.info("Proposal %s approved — merged into %s", proposal_id, p.target_department)
+        return True
+
+    def reject_proposal(self, proposal_id: str) -> bool:
+        """Reject a proposal — discard the layer."""
+        with self.proposals_lock:
+            p = self.proposals.get(proposal_id)
+        if not p or p.status != "pending":
+            return False
+
+        with self.stage_lock:
+            self.stage.MuteLayer(p.layer.identifier)
+            session = self.stage.GetSessionLayer()
+            idx = list(session.subLayerPaths).index(p.layer.identifier)
+            del session.subLayerPaths[idx]
+
+        p.status = "rejected"
+        LOG.info("Proposal %s rejected", proposal_id)
+        return True
+
+    def get_proposal_count(self) -> int:
+        """Thread-safe proposal count for dashboard polling."""
+        with self.proposals_lock:
+            return len(self.proposals)
+
+    def get_proposal_layer(self, proposal_id: str) -> Sdf.Layer | None:
+        """Get the layer for a proposal (for txn routing)."""
+        with self.proposals_lock:
+            p = self.proposals.get(proposal_id)
+        if p and p.status == "pending":
+            return p.layer
+        return None
+
+    # -- Per-client layer management ------------------------------------
+
+    def get_or_create_client_layer(
+        self, client_id: str, department: str | None = None,
+    ) -> Sdf.Layer:
+        """Get or create a layer for this client.
+
+        With department: clients share a department layer (last-write-wins
+        within the department, department priority controls strength).
+        Without department: uses the shared edit_layer (weakest, last-write-wins).
+        """
+        if not department:
+            self.client_layers[client_id] = self.edit_layer
+            return self.edit_layer
+
+        self._client_departments[client_id] = department
+
+        # Reuse existing department layer
+        existing = self._dept_layers.get(department)
+        if existing:
+            self.client_layers[client_id] = existing
+            return existing
+
+        # First client in this department — create a new layer
+        with self.stage_lock:
+            layer = self._create_edit_layer(label=f"dept-{department}")
+            self._dept_layers[department] = layer
+            self.client_layers[client_id] = layer
+            self._reorder_session_sublayers()
+        LOG.info("Created shared layer for department %s (client %s)", department, client_id)
+        return layer
+
+    def _reorder_session_sublayers(self):
+        """Reorder session sublayers: department layers by priority, then edit_layer.
+
+        Ordering (strongest → weakest):
+        1. Department layers in ``department_priority`` order
+        2. Shared ``edit_layer`` (fallback for non-department clients)
+        """
+        session = self.stage.GetSessionLayer()
+        ordered: list[str] = []
+
+        for dept in self.department_priority:
+            layer = self._dept_layers.get(dept)
+            if layer:
+                ordered.append(layer.identifier)
+
+        # edit_layer is always last (weakest)
+        ordered.append(self.edit_layer.identifier)
+
+        session.subLayerPaths.clear()
+        for p in ordered:
+            session.subLayerPaths.append(p)
+
+    def resolve_layer(self, key: str) -> Sdf.Layer | None:
+        """Resolve a layer by client_id or department name."""
+        return (
+            self._dept_layers.get(key)
+            or self.client_layers.get(key)
+        )
+
+    def mute_layer(self, key: str) -> bool:
+        """Mute a layer by client_id or department — opinions hidden but preserved."""
+        layer = self.resolve_layer(key)
+        if not layer:
+            return False
+        with self.stage_lock:
+            self.stage.MuteLayer(layer.identifier)
+        return True
+
+    def unmute_layer(self, key: str) -> bool:
+        """Unmute a layer by client_id or department."""
+        layer = self.resolve_layer(key)
+        if not layer:
+            return False
+        with self.stage_lock:
+            self.stage.UnmuteLayer(layer.identifier)
+        return True
+
+    def merge_layer(self, client_id: str) -> bool:
+        """Merge a client's layer opinions into the root layer, then remove it.
+
+        Copies each leaf prim spec individually via Sdf.CopySpec so
+        existing root opinions on sibling prims are preserved.
+        Returns False for clients on the shared edit_layer (no-op).
+        """
+        layer = self.client_layers.get(client_id)
+        if not layer or layer is self.edit_layer:
+            return False
+        with self.stage_lock:
+            root = self.stage.GetRootLayer()
+            # Collect leaf prim paths (no children in source layer).
+            # Copying leaves preserves existing sibling prims in root.
+            leaves = []
+
+            def _walk(spec):
+                if not spec.nameChildren:
+                    leaves.append(spec.path)
+                else:
+                    for child in spec.nameChildren:
+                        _walk(child)
+
+            for prim_spec in layer.rootPrims:
+                _walk(prim_spec)
+
+            for path in leaves:
+                parent = path.GetParentPath()
+                if parent != Sdf.Path.absoluteRootPath and not root.GetPrimAtPath(parent):
+                    Sdf.CreatePrimInLayer(root, parent)
+
+                dst_spec = root.GetPrimAtPath(path)
+                if dst_spec:
+                    # Prim exists in root — copy properties individually
+                    # to avoid replacing the entire spec (which would lose
+                    # properties authored by earlier merges).
+                    src_spec = layer.GetPrimAtPath(path)
+                    for prop in src_spec.properties:
+                        Sdf.CopySpec(layer, prop.path, root, prop.path)
+                else:
+                    # New prim — full CopySpec preserves the source specifier.
+                    # An 'over' stays 'over' — the 'def' lives in another layer.
+                    Sdf.CopySpec(layer, path, root, path)
+            session = self.stage.GetSessionLayer()
+            idx = list(session.subLayerPaths).index(layer.identifier)
+            del session.subLayerPaths[idx]
+        self._cleanup_client_refs(client_id)
+        LOG.info("Merged and removed layer for client %s", client_id)
+        return True
+
+    def delete_layer(self, client_id: str) -> bool:
+        """Delete a client's layer and discard all opinions.
+
+        Returns False for clients on the shared edit_layer (no-op).
+        """
+        layer = self.client_layers.get(client_id)
+        if not layer or layer is self.edit_layer:
+            return False
+        with self.stage_lock:
+            session = self.stage.GetSessionLayer()
+            idx = list(session.subLayerPaths).index(layer.identifier)
+            del session.subLayerPaths[idx]
+        self._cleanup_client_refs(client_id)
+        LOG.info("Deleted layer for client %s", client_id)
+        return True
+
+    def _cleanup_client_refs(self, client_id: str):
+        """Remove a client from all tracking dicts.
+
+        If this was the last client in a department, also removes the
+        orphaned department layer reference.
+        """
+        self.client_layers.pop(client_id, None)
+        dept = self._client_departments.pop(client_id, None)
+        if dept and not any(d == dept for d in self._client_departments.values()):
+            self._dept_layers.pop(dept, None)
+
+    def set_department_priority(self, ordered_departments: list[str]) -> None:
+        """Set department priority ordering (strongest first)."""
+        with self.stage_lock:
+            self.department_priority = list(ordered_departments)
+            self._reorder_session_sublayers()
+
+    def get_layer_stack_info(self) -> list[dict]:
+        """Return ordered layer stack info for the dashboard.
+
+        Department layers list all clients sharing them. Non-department
+        layers list the single owning client.
+        """
+        with self.stage_lock:
+            session = self.stage.GetSessionLayer()
+            muted = set(self.stage.GetMutedLayers())
+            sublayer_paths = list(session.subLayerPaths)
+            dept_items = list(self._dept_layers.items())
+            client_items = list(self.client_layers.items())
+            dept_map = dict(self._client_departments)
+
+        seen = set()
+        result = []
+
+        # Department layers
+        for dept, layer in dept_items:
+            if layer.identifier in seen:
+                continue
+            seen.add(layer.identifier)
+            clients = [cid for cid, d in dept_map.items() if d == dept]
+            result.append({
+                "department": dept,
+                "clients": clients,
+                "identifier": layer.identifier,
+                "muted": layer.identifier in muted,
+            })
+
+        # Non-department client layers
+        for cid, layer in client_items:
+            if layer.identifier in seen:
+                continue
+            seen.add(layer.identifier)
+            result.append({
+                "department": None,
+                "clients": [cid],
+                "identifier": layer.identifier,
+                "muted": layer.identifier in muted,
+            })
+
+        # Sort by session sublayer order (strongest first)
+        path_order = {p: i for i, p in enumerate(sublayer_paths)}
+        result.sort(key=lambda r: path_order.get(r["identifier"], 999))
+        return result
 
     def compact_log(self):
         """Compact the event log, keeping only the latest state per prim.
@@ -262,8 +730,9 @@ class UsdSyncServer:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
-            records.append((seq, json.dumps(rec)))
+            records.append((seq, json.dumps(rec), meta.get("client_id")))
         self.store.clear_and_rewrite(records)
+        self._event_count = len(records)
 
         self._op_cache.clear()
         LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
@@ -282,6 +751,7 @@ class UsdSyncServer:
         sends a resync to all connected receivers so they start fresh.
         """
         self.store.clear_and_rewrite([])
+        self._event_count = 0
         with self._seq_lock:
             self._next_seq = 1
         with self.stage_lock:
@@ -289,6 +759,65 @@ class UsdSyncServer:
         self._op_cache.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
+
+    def build_correction(self, ev: dict) -> dict | None:
+        """Build a correction event with the composed value for an overridden event.
+
+        Returns a new event dict with the server's authoritative composed
+        values, or None if no correction is needed.
+        """
+        k = ev.get("k")
+        pp = ev.get("prim", "")
+        if not pp:
+            return None
+
+        with self.stage_lock:
+            prim = self.stage.GetPrimAtPath(pp)
+            if not prim or not prim.IsValid():
+                return None
+
+            if k == K_SET_XFORM_TRS:
+                from pxr import UsdGeom
+
+                from .emitter import as_matrix, decompose_trs_from_matrix
+
+                xf = UsdGeom.Xformable(prim)
+                local = xf.GetLocalTransformation(Usd.TimeCode.Default())
+                t, r, s = decompose_trs_from_matrix(as_matrix(local))
+                return {
+                    "k": K_SET_XFORM_TRS, "prim": pp,
+                    "fields": ["t", "r", "s"], "t": t, "r": r, "s": s,
+                }
+
+            if k == K_SET_VISIBILITY:
+                from pxr import UsdGeom
+                img = UsdGeom.Imageable(prim)
+                vis = img.GetVisibilityAttr().Get()
+                return {
+                    "k": K_SET_VISIBILITY, "prim": pp,
+                    "visible": vis != "invisible",
+                }
+
+            if k == K_DEACTIVATE_PRIM:
+                return {
+                    "k": K_DEACTIVATE_PRIM, "prim": pp,
+                    "active": prim.IsActive(),
+                }
+
+        # For event types we can't build corrections for, return None.
+        # The sender stays divergent until the next full resync.
+        return None
+
+    def send_to_origin(self, rec: dict, origin: str):
+        """Send a record to all receivers matching an origin."""
+        line = (json.dumps(rec) + "\n").encode("utf-8")
+        with self.clients_lock:
+            for h in self.receivers:
+                if getattr(h, "_origin", None) == origin:
+                    try:
+                        h.request.sendall(line)
+                    except OSError:
+                        pass
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -303,11 +832,16 @@ class UsdSyncServer:
         events that were not successfully persisted.
         """
         self.store.append(rec["seq"], json.dumps(rec))
+        self._event_count += 1
 
     def append_log_batch(self, records: list[dict]):
         """Persist multiple event records in one SQLite transaction."""
-        tuples = [(rec["seq"], json.dumps(rec)) for rec in records]
+        tuples = [
+            (rec["seq"], json.dumps(rec), rec.get("client_id"))
+            for rec in records
+        ]
         self.store.append_batch(tuples)
+        self._event_count += len(records)
 
     def replay_children_after_load(self, prim_path: str):
         """After load_payload, re-broadcast the latest events for children.
@@ -381,12 +915,14 @@ class UsdSyncServer:
     def register_client(
         self, address: tuple, role: str,
         client_id: str | None = None, origin: str | None = None,
+        department: str | None = None,
     ):
         """Register a connected client for tracking."""
         key = f"{address[0]}:{address[1]}"
         with self.clients_lock:
             self.clients[key] = ClientInfo(
-                role=role, address=address, client_id=client_id, origin=origin,
+                role=role, address=address, client_id=client_id,
+                origin=origin, department=department,
             )
 
     def unregister_client(self, address: tuple):
@@ -424,19 +960,104 @@ class UsdSyncServer:
                 LOG.debug("Event listener failed, removing")
                 self._event_listeners.remove(listener)
 
-    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None):
+    # Maps event kind -> list of attribute names (or 'meta:active' for
+    # prim metadata) that the event writes.  Used by apply_txn to check
+    # per-attribute whether the target layer's opinion is the winner.
+    # Events not in this map are always broadcast (conservative default).
+    _EVENT_ATTR_MAP: dict[str, list[str]] = {
+        K_ENSURE_PRIM: [],  # structural — check prim definer
+        K_ENSURE_XFORM_OPS: [],
+        K_SET_XFORM_TRS: [
+            "xformOp:translate", "xformOp:orient", "xformOp:scale",
+        ],
+        K_SET_XFORM_MATRICES: [],
+        K_SET_VISIBILITY: ["visibility"],
+        K_DEACTIVATE_PRIM: ["meta:active"],
+        K_DELETE_PRIM: [],  # structural
+        K_RENAME_PRIM: [],  # structural
+        K_SET_MATERIAL_BINDING: ["rel:material:binding"],
+    }
+
+    def _is_layer_winning(self, prim, target, ev) -> bool:
+        """Check if the target layer's opinions from this event are visible.
+
+        For attribute-writing events, checks ``GetPropertyStack`` per
+        attribute.  For metadata (``active``), checks ``PrimSpec.HasInfo``.
+        For structural events or unknown event types, returns True
+        (conservative — always broadcast).
+        """
+        k = ev.get("k", "")
+        attr_names = self._EVENT_ATTR_MAP.get(k)
+
+        if attr_names is None:
+            return True  # unknown event type — always broadcast
+
+        if not attr_names:
+            # Structural event (ensure_prim, delete, rename) — check
+            # if target layer is the strongest definer.
+            stack = prim.GetPrimStack()
+            return not stack or stack[0].layer == target
+
+        for attr_name in attr_names:
+            if attr_name == "meta:active":
+                # active is prim metadata — check which layer authored it.
+                # Walk prim stack from strongest; first with HasInfo wins.
+                for spec in prim.GetPrimStack():
+                    if spec.HasInfo("active"):
+                        if spec.layer == target:
+                            return True
+                        break  # stronger layer has the opinion
+            elif attr_name.startswith("rel:"):
+                # Relationship — check via GetRelationship
+                rel = prim.GetRelationship(attr_name[4:])
+                if not rel or not rel.IsValid():
+                    continue
+                stack = rel.GetPropertyStack()
+                if stack and stack[0].layer == target:
+                    return True
+            else:
+                attr = prim.GetAttribute(attr_name)
+                if not attr or not attr.IsValid():
+                    continue
+                stack = attr.GetPropertyStack()
+                if stack and stack[0].layer == target:
+                    return True
+
+        return False
+
+    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None) -> list[int]:
         """Apply a transaction to the stage.
 
         Events are authored into *layer* (defaults to ``self.edit_layer``).
-        The optional parameter is the multi-user extension point — pass a
-        per-client layer to route edits to a specific sublayer.
+        Returns indices of events that changed the composed view — events
+        whose composed values are unchanged (overridden by a stronger layer)
+        are excluded.  All events are persisted to the log regardless.
+
+        Uses per-attribute strength checking via ``GetPropertyStack`` and
+        ``PrimSpec.HasInfo`` — works for all event types without snapshotting.
         """
         from .event_apply import apply_events
 
         target = layer or self.edit_layer
+
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events, op_cache=self._op_cache)
+
+            changed_indices = []
+            for i, ev in enumerate(events):
+                pp = ev.get("prim", "")
+                if not pp:
+                    changed_indices.append(i)
+                    continue
+                prim = self.stage.GetPrimAtPath(pp)
+                if not prim or not prim.IsValid():
+                    changed_indices.append(i)
+                    continue
+                if self._is_layer_winning(prim, target, ev):
+                    changed_indices.append(i)
+
+        return changed_indices
 
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe)."""
@@ -463,8 +1084,8 @@ class UsdSyncServer:
         return len(prims)
 
     def get_event_count(self) -> int:
-        """Return the number of events in the log (thread-safe)."""
-        return self.store.get_count()
+        """Return the number of events in the log (thread-safe, cached)."""
+        return self._event_count
 
     def query_events(
         self,
@@ -504,12 +1125,13 @@ class UsdSyncServer:
 
     def get_server_info(self) -> dict:
         """Return server configuration."""
-        root = self.stage.GetRootLayer()
-        return {
-            "base_usd_path": root.realPath or None,
-            "root_layer": root.identifier,
-            "edit_layer": self.edit_layer.identifier,
-        }
+        with self.stage_lock:
+            root = self.stage.GetRootLayer()
+            return {
+                "base_usd_path": root.realPath or None,
+                "root_layer": root.identifier,
+                "edit_layer": self.edit_layer.identifier,
+            }
 
     def get_prim_tree(self) -> list[dict]:
         """Reconstruct the prim tree from the event log.
@@ -617,11 +1239,45 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         role = hello.get("role")
         client_id = hello.get("client_id")
         self._origin = hello.get("origin")
-        LOG.info(
-            "Client connected: role=%s origin=%s from %s",
-            role, self._origin, self.client_address,
+        self._department = hello.get("department")
+        self._client_id = client_id
+
+        # TOFU authentication
+        from .transport import send_line
+
+        accepted, issued_token = sync_server.authenticate(
+            client_id, hello.get("token"), self._department,
         )
-        sync_server.register_client(self.client_address, role, client_id, origin=self._origin)
+        if not accepted:
+            send_line(self.request, {
+                "type": MSG_AUTH_REJECTED,
+                "reason": "invalid or missing token",
+            })
+            LOG.warning("Rejected %s from %s", client_id, self.client_address)
+            return
+
+        # Send hello_ok with token (issued on first connect, None on reconnect)
+        hello_ok = {"type": MSG_HELLO_OK}
+        if issued_token:
+            hello_ok["token"] = issued_token
+        send_line(self.request, hello_ok)
+
+        LOG.info(
+            "Client connected: role=%s origin=%s dept=%s from %s",
+            role, self._origin, self._department, self.client_address,
+        )
+        sync_server.register_client(
+            self.client_address, role, client_id,
+            origin=self._origin, department=self._department,
+        )
+
+        # Create per-client layer only when department ordering is enabled.
+        # Without departments, all clients share edit_layer (last-write-wins).
+        self._client_layer = None
+        if role == "emitter" and client_id and sync_server.department_priority:
+            self._client_layer = sync_server.get_or_create_client_layer(
+                client_id, department=self._department,
+            )
 
         if role == "receiver":
             sync_from = int(hello.get("sync_from", 1))
@@ -631,8 +1287,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # sequence counter, then replay the full log.
             max_seq = sync_server.store.get_max_seq()
             if sync_from > max_seq > 0:
-                from .transport import send_line
-
                 send_line(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 
@@ -670,6 +1324,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 sync_server.compact_log()
                 continue
 
+            if msg.get("type") == MSG_CREATE_PROPOSAL:
+                self._handle_create_proposal(sync_server, msg)
+                continue
+
             if msg.get("type") != MSG_TXN:
                 continue
 
@@ -677,10 +1335,19 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if not isinstance(events, list) or not events:
                 continue
 
-            # Apply atomically
-            sync_server.apply_txn(events)
+            # Check if txn targets a proposal (no broadcast, just apply to muted layer)
+            proposal_id = msg.get("proposal_id")
+            if proposal_id:
+                self._handle_proposal_txn(sync_server, proposal_id, events)
+                continue
 
-            # Sequence, persist (batched), then broadcast
+            # Apply to the client's layer. Returns indices of events
+            # that actually changed the composed view.
+            changed = sync_server.apply_txn(events, layer=self._client_layer)
+            changed_set = set(changed)
+
+            # Sequence and persist ALL events (even overridden ones —
+            # they're in the client's layer for mute/merge/review).
             addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
             with sync_server.clients_lock:
                 info = sync_server.clients.get(addr_key)
@@ -698,8 +1365,27 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     rec["origin"] = self._origin
                 records.append(rec)
             sync_server.append_log_batch(records)
-            for rec in records:
-                sync_server.broadcast(rec, exclude_origin=self._origin)
+
+            # Broadcast events that changed the composed view to everyone
+            # except the sender (origin suppression — sender already has
+            # the correct value locally).
+            # For overridden events, send a correction back to the sender
+            # with the composed value so their DCC snaps to the authoritative
+            # state.  This ensures flatten parity across all clients.
+            for i, rec in enumerate(records):
+                if i in changed_set:
+                    sync_server.broadcast(rec, exclude_origin=self._origin)
+                else:
+                    correction = sync_server.build_correction(events[i])
+                    if correction:
+                        correction_rec = {
+                            "type": MSG_EVENT,
+                            "seq": sync_server.assign_seq(),
+                            "event": correction,
+                        }
+                        sync_server.send_to_origin(
+                            correction_rec, self._origin,
+                        )
             # Update client activity tracking — no lock needed since
             # each connection has its own _read_loop thread.
             if info:
@@ -711,6 +1397,44 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             for ev in events:
                 if ev.get("k") == K_LOAD_PAYLOAD:
                     sync_server.replay_children_after_load(ev["prim"])
+
+    def _handle_create_proposal(self, sync_server: UsdSyncServer, msg: dict):
+        """Handle a create_proposal message from an emitter."""
+        from .transport import send_line
+
+        target = msg.get("target_department", "")
+        desc = msg.get("description", "")
+        if not target:
+            return
+        pid = sync_server.create_proposal(
+            self._client_id or "", target, desc,
+        )
+        send_line(self.request, {
+            "type": MSG_PROPOSAL_CREATED,
+            "proposal_id": pid,
+        })
+
+    def _handle_proposal_txn(
+        self, sync_server: UsdSyncServer, proposal_id: str, events: list[dict],
+    ):
+        """Apply a txn to a proposal's muted layer (no broadcast).
+
+        Muted layers can't be SetEditTarget — temporarily unmute during
+        the write, then re-mute so opinions stay invisible to composition.
+        Events are accumulated on the proposal for log persistence on approval.
+        """
+        p = sync_server.proposals.get(proposal_id)
+        if not p or p.status != "pending":
+            return
+        from .event_apply import apply_events
+
+        with sync_server.stage_lock:
+            sync_server.stage.UnmuteLayer(p.layer.identifier)
+            sync_server.stage.SetEditTarget(Usd.EditTarget(p.layer))
+            apply_events(sync_server.stage, events, op_cache=sync_server._op_cache)
+            sync_server.stage.MuteLayer(p.layer.identifier)
+        p.events.extend(events)
+        LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
 
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -730,12 +1454,16 @@ def run_server(
     export_diff: str | None = None,
     dashboard_port: int | None = None,
     op_cache_size: int | None = None,
+    department_priority: list[str] | None = None,
+    require_token: bool = False,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
         base_usd_path=base_usd_path,
         log_path=log_path,
         op_cache_size=op_cache_size,
+        department_priority=department_priority,
+        require_token=require_token,
     )
 
     if compact:
@@ -803,7 +1531,19 @@ def main():
         "--op-cache-size", type=int, default=None, metavar="N",
         help=f"Max xform op cache entries (default: {UsdSyncServer.DEFAULT_OP_CACHE_SIZE})",
     )
+    ap.add_argument(
+        "--departments", default=None, metavar="LIST",
+        help="Comma-separated department priority (strongest first). "
+             "Enables per-client layer ordering by department. "
+             "Example: --departments lighting,fx,animation,layout",
+    )
+    ap.add_argument(
+        "--require-token", action="store_true",
+        help="Enable TOFU token authentication. Clients are issued a token "
+             "on first connect and must present it on reconnect.",
+    )
     args = ap.parse_args()
+    dept_list = args.departments.split(",") if args.departments else None
     run_server(
         host=args.host,
         port=args.port,
@@ -813,6 +1553,8 @@ def main():
         export_diff=args.export_diff,
         dashboard_port=args.dashboard,
         op_cache_size=args.op_cache_size,
+        department_priority=dept_list,
+        require_token=args.require_token,
     )
 
 

@@ -328,7 +328,7 @@ class _SuppressScope:
 
     __slots__ = ("_emitter",)
 
-    def __init__(self, emitter: "NoticeEmitter"):
+    def __init__(self, emitter: NoticeEmitter):
         self._emitter = emitter
 
     def __enter__(self):

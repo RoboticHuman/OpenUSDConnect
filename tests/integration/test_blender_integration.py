@@ -13,9 +13,9 @@ EMITTER_SCRIPT = os.path.join(SCRIPTS_DIR, "blender_emitter_script.py")
 RECEIVER_SCRIPT = os.path.join(SCRIPTS_DIR, "blender_receiver_script.py")
 
 
-def test_emitter_server_receiver_integration(blender_exe, tmp_path):
+def test_emitter_server_receiver_integration(blender_exe, tmp_path, free_port):
     """Full pipeline: Blender emitter -> server -> Blender receiver."""
-    port = 7299
+    port = free_port
     results_path = str(tmp_path / "receiver_results.json")
     server = start_server(tmp_path, port)
 

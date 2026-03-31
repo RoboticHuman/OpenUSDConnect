@@ -5,7 +5,7 @@ Leverages Epic's full USD support — USDStageActor handles all actor spawning,
 transform conversion, and scene management. We only touch the USD stage.
 
 Usage (from UE Python console):
-    >>> import sys; sys.path.insert(0, r"D:\gamedev\OpenUSDConnect")
+    >>> import sys; sys.path.insert(0, r"D:\\gamedev\\OpenUSDConnect")
     >>> from integrations.unreal.usd_connect import start, stop
     >>> start("127.0.0.1", 7200, "test_scene.usda")
     >>> stop()
@@ -270,7 +270,8 @@ def start(
     _root_layer_name = root_layer_name
     _host = host
     _port = port
-    _client_id = client_id or f"ue-{uuid.uuid4().hex[:8]}"
+    from openusdconnect.client_id import make_stable_client_id
+    _client_id = client_id or make_stable_client_id("ue")
     _origin = origin or f"ue-{uuid.uuid4().hex[:8]}"
     _coalesce_seconds = coalesce
     _last_send_time = 0.0

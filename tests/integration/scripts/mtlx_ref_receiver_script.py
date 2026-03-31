@@ -83,10 +83,19 @@ def main():
     print(f"[MtlxRefReceiver] Connecting to 127.0.0.1:{port}")
     receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
-    time.sleep(2.0)
 
+    # Poll until we receive events (the emitter may still be sending
+    # under heavy CI load).  Stop early once we see a set_reference.
     adapter = BlenderAdapter()
-    lines = receiver.drain_queue()
+    lines = []
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        time.sleep(0.3)
+        batch = receiver.drain_queue()
+        if batch:
+            lines.extend(batch)
+            if any('"set_reference"' in line for line in batch):
+                break
     print(f"[MtlxRefReceiver] Got {len(lines)} messages from queue")
 
     for raw_line in lines:
