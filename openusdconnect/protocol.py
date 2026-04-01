@@ -249,29 +249,25 @@ def validate_event(ev: dict) -> bool:
             return False
         if not is_mat16_valid(ev.get("world_m", [])):
             return False
-    if k == K_DEACTIVATE_PRIM:
-        if not isinstance(ev.get("active"), bool):
-            return False
+    if k == K_DEACTIVATE_PRIM and not isinstance(ev.get("active"), bool):
+        return False
     if k == K_RENAME_PRIM:
         new_name = ev.get("new_name")
         if not isinstance(new_name, str) or not new_name:
             return False
-    if k == K_SET_VISIBILITY:
-        if not isinstance(ev.get("visible"), bool):
-            return False
+    if k == K_SET_VISIBILITY and not isinstance(ev.get("visible"), bool):
+        return False
     if k == K_SET_GPRIM_ATTRS:
         attrs = ev.get("attrs")
         if not isinstance(attrs, dict):
             return False
         if not all(isinstance(key, str) for key in attrs):
             return False
-    if k == K_SET_REFERENCE:
-        if not _is_arc_list_valid(ev.get("refs", None)):
-            return False
+    if k == K_SET_REFERENCE and not _is_arc_list_valid(ev.get("refs")):
+        return False
     # load_payload and unload_payload require only "prim" (already validated above)
-    if k == K_SET_PAYLOAD:
-        if not _is_arc_list_valid(ev.get("payloads", None)):
-            return False
+    if k == K_SET_PAYLOAD and not _is_arc_list_valid(ev.get("payloads")):
+        return False
     if k == K_SET_VARIANT_SELECTIONS:
         selections = ev.get("selections")
         if not isinstance(selections, dict):

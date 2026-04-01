@@ -439,6 +439,7 @@ class TestBroadcast:
         srv.receivers.add(h2)
 
         srv.broadcast({"type": "event", "seq": 1, "event": {"k": "ensure_prim", "prim": "/A"}})
+        srv._broadcast_queue.join()  # wait for async broadcast thread
 
         for h in (h1, h2):
             data = h.request.getvalue().decode("utf-8").strip()
@@ -460,6 +461,7 @@ class TestBroadcast:
         h = DeadHandler()
         srv.receivers.add(h)
         srv.broadcast({"type": "event", "seq": 1, "event": {}})
+        srv._broadcast_queue.join()  # wait for async broadcast thread
         assert h not in srv.receivers
 
 

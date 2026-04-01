@@ -253,6 +253,10 @@ class TestHarness:
         from openusdconnect.transport import send_line
         s = _socket.create_connection((self.host, self.port), timeout=5)
         send_line(s, make_hello("emitter", client_id="asset_test"))
+        # Read hello_ok before sending txn — server won't process
+        # further messages until hello_ok is sent.
+        s.settimeout(5)
+        s.recv(4096)
         send_line(s, {"type": "txn", "client_id": "asset_test", "events": events})
         s.close()
 

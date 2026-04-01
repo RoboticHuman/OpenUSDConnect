@@ -15,14 +15,16 @@ import atexit
 import json
 import logging
 import os
+import queue
 import signal
 import socketserver
 import threading
 import time
 from dataclasses import dataclass, field
 
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdGeom
 
+from .emitter import as_matrix, decompose_trs_from_matrix
 from .event_store import EventStore, SqliteEventStore
 from .protocol import (
     EVENT_KIND_ORDER,
@@ -114,6 +116,7 @@ class UsdSyncServer:
         department_priority: list[str] | None = None,
         require_token: bool = False,
         token_db_path: str | None = None,
+        durability: str = "strict",
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -133,6 +136,10 @@ class UsdSyncServer:
         self._dept_layers: dict[str, Sdf.Layer] = {}   # department → shared layer
         self._client_departments: dict[str, str] = {}  # client_id → department
         self.department_priority: list[str] = list(department_priority or [])
+
+        # Ordered session layer objects (strong → weak) for fast strength
+        # checks. Rebuilt by _reorder_session_sublayers().
+        self._ordered_session_layers: list = [self.edit_layer]
 
         self.stage_lock = threading.RLock()
         self.clients_lock = threading.Lock()
@@ -158,6 +165,36 @@ class UsdSyncServer:
         # Cross-department edit proposals
         self.proposals_lock = threading.Lock()
         self.proposals: dict[str, Proposal] = {}
+
+        # Cached prim count — invalidated on structural events to avoid
+        # full Traverse on every dashboard poll.
+        self._prim_count: int = 0
+        self._prim_count_dirty: bool = True
+
+        # Async broadcast — emitter threads push to the queue, a dedicated
+        # thread handles the actual network sends so emitters are never
+        # blocked by slow receivers.
+        # Item: (payload_bytes, exclude_origin, target_origin)
+        #   exclude_origin set → broadcast to all except that origin
+        #   target_origin set  → send only to that origin (corrections)
+        #   both None          → broadcast to everyone
+        self._broadcast_queue: queue.Queue = queue.Queue()
+        self._broadcast_thread = threading.Thread(
+            target=self._broadcast_loop, daemon=True,
+        )
+        self._broadcast_thread.start()
+
+        # Durability mode:
+        #   "strict"   — persist to DB before broadcast (no lost events on crash)
+        #   "realtime" — broadcast first, persist async (lower latency)
+        self.durability = durability
+        self._persist_queue: queue.Queue | None = None
+        if durability == "realtime":
+            self._persist_queue = queue.Queue()
+            self._persist_thread = threading.Thread(
+                target=self._persist_loop, daemon=True,
+            )
+            self._persist_thread.start()
 
         # LRU cache: prim_path → (translate_op, orient_op, scale_op).
         from cachetools import LRUCache
@@ -434,14 +471,14 @@ class UsdSyncServer:
 
         self._client_departments[client_id] = department
 
-        # Reuse existing department layer
-        existing = self._dept_layers.get(department)
-        if existing:
-            self.client_layers[client_id] = existing
-            return existing
-
-        # First client in this department — create a new layer
+        # Lock the whole lookup+create so two threads for the same
+        # department don't both miss the check and create duplicate layers.
         with self.stage_lock:
+            existing = self._dept_layers.get(department)
+            if existing:
+                self.client_layers[client_id] = existing
+                return existing
+
             layer = self._create_edit_layer(label=f"dept-{department}")
             self._dept_layers[department] = layer
             self.client_layers[client_id] = layer
@@ -457,19 +494,26 @@ class UsdSyncServer:
         2. Shared ``edit_layer`` (fallback for non-department clients)
         """
         session = self.stage.GetSessionLayer()
-        ordered: list[str] = []
+        ordered_ids: list[str] = []
+        ordered_layers: list = []
 
         for dept in self.department_priority:
             layer = self._dept_layers.get(dept)
             if layer:
-                ordered.append(layer.identifier)
+                ordered_ids.append(layer.identifier)
+                ordered_layers.append(layer)
 
         # edit_layer is always last (weakest)
-        ordered.append(self.edit_layer.identifier)
+        ordered_ids.append(self.edit_layer.identifier)
+        ordered_layers.append(self.edit_layer)
 
         session.subLayerPaths.clear()
-        for p in ordered:
+        for p in ordered_ids:
             session.subLayerPaths.append(p)
+
+        # Cache for _is_first_layer_with_spec — avoids Sdf.Layer.Find()
+        # on every strength check.
+        self._ordered_session_layers = ordered_layers
 
     def resolve_layer(self, key: str) -> Sdf.Layer | None:
         """Resolve a layer by client_id or department name."""
@@ -506,22 +550,24 @@ class UsdSyncServer:
         layer = self.client_layers.get(client_id)
         if not layer or layer is self.edit_layer:
             return False
+
+        # Collect leaf prim paths outside the lock — this is a read-only
+        # walk of the source layer, no stage mutation involved.
+        leaves = []
+
+        def _walk(spec):
+            if not spec.nameChildren:
+                leaves.append(spec.path)
+            else:
+                for child in spec.nameChildren:
+                    _walk(child)
+
+        for prim_spec in layer.rootPrims:
+            _walk(prim_spec)
+
+        # Only hold stage_lock for the actual Sdf copy operations.
         with self.stage_lock:
             root = self.stage.GetRootLayer()
-            # Collect leaf prim paths (no children in source layer).
-            # Copying leaves preserves existing sibling prims in root.
-            leaves = []
-
-            def _walk(spec):
-                if not spec.nameChildren:
-                    leaves.append(spec.path)
-                else:
-                    for child in spec.nameChildren:
-                        _walk(child)
-
-            for prim_spec in layer.rootPrims:
-                _walk(prim_spec)
-
             for path in leaves:
                 parent = path.GetParentPath()
                 if parent != Sdf.Path.absoluteRootPath and not root.GetPrimAtPath(parent):
@@ -529,15 +575,10 @@ class UsdSyncServer:
 
                 dst_spec = root.GetPrimAtPath(path)
                 if dst_spec:
-                    # Prim exists in root — copy properties individually
-                    # to avoid replacing the entire spec (which would lose
-                    # properties authored by earlier merges).
                     src_spec = layer.GetPrimAtPath(path)
                     for prop in src_spec.properties:
                         Sdf.CopySpec(layer, prop.path, root, prop.path)
                 else:
-                    # New prim — full CopySpec preserves the source specifier.
-                    # An 'over' stays 'over' — the 'def' lives in another layer.
                     Sdf.CopySpec(layer, path, root, path)
             session = self.stage.GetSessionLayer()
             idx = list(session.subLayerPaths).index(layer.identifier)
@@ -777,10 +818,6 @@ class UsdSyncServer:
                 return None
 
             if k == K_SET_XFORM_TRS:
-                from pxr import UsdGeom
-
-                from .emitter import as_matrix, decompose_trs_from_matrix
-
                 xf = UsdGeom.Xformable(prim)
                 local = xf.GetLocalTransformation(Usd.TimeCode.Default())
                 t, r, s = decompose_trs_from_matrix(as_matrix(local))
@@ -790,7 +827,6 @@ class UsdSyncServer:
                 }
 
             if k == K_SET_VISIBILITY:
-                from pxr import UsdGeom
                 img = UsdGeom.Imageable(prim)
                 vis = img.GetVisibilityAttr().Get()
                 return {
@@ -808,17 +844,6 @@ class UsdSyncServer:
         # The sender stays divergent until the next full resync.
         return None
 
-    def send_to_origin(self, rec: dict, origin: str):
-        """Send a record to all receivers matching an origin."""
-        line = (json.dumps(rec) + "\n").encode("utf-8")
-        with self.clients_lock:
-            for h in self.receivers:
-                if getattr(h, "_origin", None) == origin:
-                    try:
-                        h.request.sendall(line)
-                    except OSError:
-                        pass
-
     def assign_seq(self) -> int:
         with self._seq_lock:
             s = self._next_seq
@@ -835,13 +860,20 @@ class UsdSyncServer:
         self._event_count += 1
 
     def append_log_batch(self, records: list[dict]):
-        """Persist multiple event records in one SQLite transaction."""
-        tuples = [
-            (rec["seq"], json.dumps(rec), rec.get("client_id"))
-            for rec in records
-        ]
-        self.store.append_batch(tuples)
-        self._event_count += len(records)
+        """Persist multiple event records.
+
+        In strict mode, writes synchronously (caller blocks until DB commit).
+        In realtime mode, enqueues for async write (caller returns immediately).
+        """
+        if self._persist_queue is not None:
+            self._persist_queue.put(records)
+        else:
+            tuples = [
+                (rec["seq"], json.dumps(rec), rec.get("client_id"))
+                for rec in records
+            ]
+            self.store.append_batch(tuples)
+            self._event_count += len(records)
 
     def replay_children_after_load(self, prim_path: str):
         """After load_payload, re-broadcast the latest events for children.
@@ -932,33 +964,85 @@ class UsdSyncServer:
             self.clients.pop(key, None)
 
     def broadcast(self, rec: dict, exclude_origin: str | None = None):
-        """Broadcast a record to all connected receivers.
+        """Broadcast a single record to all connected receivers."""
+        self.broadcast_batch([rec], exclude_origin=exclude_origin)
 
-        If *exclude_origin* is given, receivers whose ``_origin`` matches
-        are skipped — this suppresses echo back to the DCC instance that
-        sent the event.
+    def broadcast_batch(
+        self, records: list[dict], exclude_origin: str | None = None,
+    ):
+        """Enqueue records for async broadcast to all receivers.
+
+        The actual network sends happen on the dedicated broadcast thread,
+        so the calling emitter thread is never blocked by slow receivers.
         """
-        line = (json.dumps(rec) + "\n").encode("utf-8")
-        dead = []
-        with self.clients_lock:
-            for h in self.receivers:
-                if exclude_origin and getattr(h, "_origin", None) == exclude_origin:
-                    continue
-                try:
-                    h.request.sendall(line)
-                except OSError:
-                    LOG.debug("Broadcast failed for %s, marking as dead", h.client_address)
-                    dead.append(h)
-            for h in dead:
-                self.receivers.discard(h)
-        # Notify event listeners (e.g. dashboard, monitoring).
-        # Copy the list since listeners may remove themselves on error.
+        if not records:
+            return
+        payload = "".join(
+            json.dumps(rec) + "\n" for rec in records
+        ).encode("utf-8")
+        self._broadcast_queue.put((payload, exclude_origin, None))
+        # Notify event listeners synchronously — these are in-process
+        # callbacks (e.g. dashboard) that are fast and must see events
+        # in order.
         for listener in list(self._event_listeners):
+            for rec in records:
+                try:
+                    listener(rec)
+                except Exception:
+                    LOG.debug("Event listener failed, removing")
+                    self._event_listeners.remove(listener)
+                    break
+
+    def send_to_origin(self, rec: dict, origin: str):
+        """Enqueue a record for async send to receivers matching an origin."""
+        line = (json.dumps(rec) + "\n").encode("utf-8")
+        self._broadcast_queue.put((line, None, origin))
+
+    def _broadcast_loop(self):
+        """Dedicated thread: drain the broadcast queue and send to receivers."""
+        while True:
+            payload, exclude_origin, target_origin = self._broadcast_queue.get()
             try:
-                listener(rec)
+                with self.clients_lock:
+                    targets = list(self.receivers)
+                dead = []
+                for h in targets:
+                    h_origin = getattr(h, "_origin", None)
+                    if target_origin and h_origin != target_origin:
+                        continue
+                    if exclude_origin and h_origin == exclude_origin:
+                        continue
+                    try:
+                        h.request.sendall(payload)
+                    except OSError:
+                        LOG.debug("Broadcast failed for %s, marking as dead",
+                                  h.client_address)
+                        dead.append(h)
+                if dead:
+                    with self.clients_lock:
+                        for h in dead:
+                            self.receivers.discard(h)
             except Exception:
-                LOG.debug("Event listener failed, removing")
-                self._event_listeners.remove(listener)
+                LOG.exception("Unexpected error in broadcast loop")
+            finally:
+                self._broadcast_queue.task_done()
+
+    def _persist_loop(self):
+        """Dedicated thread for realtime durability: drain persistence queue
+        and write to SQLite without blocking emitter threads."""
+        while True:
+            records = self._persist_queue.get()
+            try:
+                tuples = [
+                    (rec["seq"], json.dumps(rec), rec.get("client_id"))
+                    for rec in records
+                ]
+                self.store.append_batch(tuples)
+                self._event_count += len(records)
+            except Exception:
+                LOG.exception("Unexpected error in persist loop")
+            finally:
+                self._persist_queue.task_done()
 
     # Maps event kind -> list of attribute names (or 'meta:active' for
     # prim metadata) that the event writes.  Used by apply_txn to check
@@ -982,9 +1066,9 @@ class UsdSyncServer:
         """Check if the target layer's opinions from this event are visible.
 
         For attribute-writing events, checks ``GetPropertyStack`` per
-        attribute.  For metadata (``active``), checks ``PrimSpec.HasInfo``.
-        For structural events or unknown event types, returns True
-        (conservative — always broadcast).
+        attribute.  For metadata and structural events, walks session
+        sublayers with early exit (avoids building the full prim stack).
+        For unknown event types, returns True (conservative — always broadcast).
         """
         k = ev.get("k", "")
         attr_names = self._EVENT_ATTR_MAP.get(k)
@@ -992,23 +1076,22 @@ class UsdSyncServer:
         if attr_names is None:
             return True  # unknown event type — always broadcast
 
+        prim_path = str(prim.GetPath())
+
         if not attr_names:
-            # Structural event (ensure_prim, delete, rename) — check
-            # if target layer is the strongest definer.
-            stack = prim.GetPrimStack()
-            return not stack or stack[0].layer == target
+            # Structural event (ensure_prim, delete, rename) — walk
+            # session sublayers strong-to-weak, first with a spec wins.
+            # Uses HasSpec() (cheap lookup) instead of GetPrimStack()
+            # (builds full spec vector).
+            return self._is_first_layer_with_spec(prim_path, target)
 
         for attr_name in attr_names:
             if attr_name == "meta:active":
-                # active is prim metadata — check which layer authored it.
-                # Walk prim stack from strongest; first with HasInfo wins.
-                for spec in prim.GetPrimStack():
-                    if spec.HasInfo("active"):
-                        if spec.layer == target:
-                            return True
-                        break  # stronger layer has the opinion
+                # Walk session sublayers; first with HasInfo("active") wins.
+                return self._is_first_layer_with_info(
+                    prim_path, target, "active",
+                )
             elif attr_name.startswith("rel:"):
-                # Relationship — check via GetRelationship
                 rel = prim.GetRelationship(attr_name[4:])
                 if not rel or not rel.IsValid():
                     continue
@@ -1025,6 +1108,35 @@ class UsdSyncServer:
 
         return False
 
+    def _is_first_layer_with_spec(self, prim_path: str, target) -> bool:
+        """Check if target is the strongest layer with a spec for prim_path.
+
+        Iterates cached session layer objects (strong → weak). Returns
+        True at the first layer that has a spec — early exit, no
+        Sdf.Layer.Find() calls.
+        """
+        for layer in self._ordered_session_layers:
+            if layer.GetPrimAtPath(prim_path):
+                return layer == target
+        root = self.stage.GetRootLayer()
+        if root.GetPrimAtPath(prim_path):
+            return root == target
+        return True
+
+    def _is_first_layer_with_info(
+        self, prim_path: str, target, field: str,
+    ) -> bool:
+        """Check if target is the strongest layer with a given metadata field."""
+        for layer in self._ordered_session_layers:
+            spec = layer.GetPrimAtPath(prim_path)
+            if spec and spec.HasInfo(field):
+                return layer == target
+        root = self.stage.GetRootLayer()
+        spec = root.GetPrimAtPath(prim_path)
+        if spec and spec.HasInfo(field):
+            return root == target
+        return True
+
     def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None) -> list[int]:
         """Apply a transaction to the stage.
 
@@ -1040,12 +1152,19 @@ class UsdSyncServer:
 
         target = layer or self.edit_layer
 
+        # Phase 1: Mutate stage (must be locked — SetEditTarget is global).
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events, op_cache=self._op_cache)
 
-            changed_indices = []
+        # Phase 2: Strength checking (separate lock scope so reads can
+        # interleave between mutation and strength-check).
+        changed_indices = []
+        with self.stage_lock:
             for i, ev in enumerate(events):
+                k = ev.get("k")
+                if k in (K_ENSURE_PRIM, K_DELETE_PRIM):
+                    self._prim_count_dirty = True
                 pp = ev.get("prim", "")
                 if not pp:
                     changed_indices.append(i)
@@ -1060,9 +1179,12 @@ class UsdSyncServer:
         return changed_indices
 
     def get_prim_count(self) -> int:
-        """Return the number of prims on the composed stage (thread-safe)."""
-        with self.stage_lock:
-            return sum(1 for _ in self.stage.Traverse())
+        """Return the number of prims on the composed stage (thread-safe, cached)."""
+        if self._prim_count_dirty:
+            with self.stage_lock:
+                self._prim_count = sum(1 for _ in self.stage.Traverse())
+            self._prim_count_dirty = False
+        return self._prim_count
 
     def get_tracked_prim_count(self) -> int:
         """Return the number of prims tracked in the event log.
@@ -1176,11 +1298,13 @@ class UsdSyncServer:
         layer contains only the opinions authored by the server — the base
         layer and its sublayers are not included.
         """
+        # Snapshot layer ref under lock, serialize outside — avoids holding
+        # stage_lock during the (potentially slow) ExportToString call.
         with self.stage_lock:
-            usda = self.edit_layer.ExportToString()
-            if file_path:
-                self.edit_layer.Export(file_path)
+            layer = self.edit_layer
+        usda = layer.ExportToString()
         if file_path:
+            layer.Export(file_path)
             LOG.info("Exported edit layer to %s", file_path)
         return usda
 
@@ -1191,14 +1315,18 @@ class UsdSyncServer:
         values.  The result is a standalone file with no external dependencies
         — useful for archiving, delivery, or rendering.
         """
+        # Flatten under lock (fast — creates a composed snapshot), then
+        # export outside lock to avoid blocking mutations during disk I/O.
         with self.stage_lock:
-            self.stage.Export(file_path)
+            flat = self.stage.Flatten()
+        flat.Export(file_path)
         LOG.info("Exported flattened stage to %s", file_path)
 
     def export_flattened_string(self) -> str:
         """Return the fully composed stage as a USDA string (thread-safe)."""
         with self.stage_lock:
-            return self.stage.Flatten().ExportToString()
+            flat = self.stage.Flatten()
+        return flat.ExportToString()
 
     def replay_from(self, handler, seq_start: int):
         """Replay events from the event store starting at seq_start.
@@ -1241,6 +1369,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._origin = hello.get("origin")
         self._department = hello.get("department")
         self._client_id = client_id
+        self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
         # TOFU authentication
         from .transport import send_line
@@ -1348,18 +1477,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             # Sequence and persist ALL events (even overridden ones —
             # they're in the client's layer for mute/merge/review).
-            addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
-            with sync_server.clients_lock:
-                info = sync_server.clients.get(addr_key)
-            client_id = info.client_id if info else None
             records = []
             for ev in events:
                 rec = {
                     "type": MSG_EVENT,
                     "seq": sync_server.assign_seq(),
                     "event": ev,
-                    "client": addr_key,
-                    "client_id": client_id,
+                    "client": self._addr_key,
+                    "client_id": self._client_id,
                 }
                 if self._origin:
                     rec["origin"] = self._origin
@@ -1372,9 +1497,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # For overridden events, send a correction back to the sender
             # with the composed value so their DCC snaps to the authoritative
             # state.  This ensures flatten parity across all clients.
+            changed_records = []
             for i, rec in enumerate(records):
                 if i in changed_set:
-                    sync_server.broadcast(rec, exclude_origin=self._origin)
+                    changed_records.append(rec)
                 else:
                     correction = sync_server.build_correction(events[i])
                     if correction:
@@ -1386,8 +1512,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         sync_server.send_to_origin(
                             correction_rec, self._origin,
                         )
-            # Update client activity tracking — no lock needed since
-            # each connection has its own _read_loop thread.
+            if changed_records:
+                sync_server.broadcast_batch(
+                    changed_records, exclude_origin=self._origin,
+                )
+            # Update client activity tracking.
+            with sync_server.clients_lock:
+                info = sync_server.clients.get(self._addr_key)
             if info:
                 info.last_activity = time.time()
                 info.event_count += len(events)
@@ -1456,6 +1587,7 @@ def run_server(
     op_cache_size: int | None = None,
     department_priority: list[str] | None = None,
     require_token: bool = False,
+    durability: str = "strict",
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
@@ -1464,6 +1596,7 @@ def run_server(
         op_cache_size=op_cache_size,
         department_priority=department_priority,
         require_token=require_token,
+        durability=durability,
     )
 
     if compact:
@@ -1496,7 +1629,8 @@ def run_server(
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
 
-    LOG.info("Server listening on %s:%s (PID %d)", host, port, os.getpid())
+    LOG.info("Server listening on %s:%s (PID %d) durability=%s",
+             host, port, os.getpid(), sync_server.durability)
     LOG.info("Event log: %s", log_path)
     if base_usd_path:
         LOG.info("Base USD: %s", base_usd_path)
@@ -1542,6 +1676,11 @@ def main():
         help="Enable TOFU token authentication. Clients are issued a token "
              "on first connect and must present it on reconnect.",
     )
+    ap.add_argument(
+        "--durability", choices=["strict", "realtime"], default="strict",
+        help="strict: persist to DB before broadcast (no lost events). "
+             "realtime: broadcast first, persist async (lower latency).",
+    )
     args = ap.parse_args()
     dept_list = args.departments.split(",") if args.departments else None
     run_server(
@@ -1555,6 +1694,7 @@ def main():
         op_cache_size=args.op_cache_size,
         department_priority=dept_list,
         require_token=args.require_token,
+        durability=args.durability,
     )
 
 

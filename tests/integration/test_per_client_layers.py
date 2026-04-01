@@ -538,3 +538,368 @@ class TestReplayWithClientLayers:
         assert "alice" in srv2.client_layers
         assert "bob" in srv2.client_layers
         srv2.store.close()
+
+
+class TestConcurrentDepartmentWrites:
+    """Verify that concurrent threads writing to different department layers
+    produce correct composed results.
+
+    USD's SetEditTarget is a global stage mutation — writes must be
+    serialized through stage_lock.  These tests confirm the lock
+    correctly protects concurrent access and that reads can interleave
+    with the split lock phases.
+    """
+
+    def test_concurrent_writes_to_different_departments(self, tmp_path):
+        """3 threads × 20 writes each to separate prims — verify writes
+        land in the correct layer (not cross-written due to SetEditTarget
+        race) and that per-layer values are independently correct."""
+        import threading
+        from pxr import Sdf, UsdGeom
+
+        srv = _make_server(tmp_path, department_priority=["animation", "lighting", "fx"])
+        barrier = threading.Barrier(3)
+        errors = []
+
+        def _writer(client_id, dept, prim, base, count):
+            try:
+                barrier.wait(timeout=5)
+                for i in range(count):
+                    t = (base[0] + i, base[1] + i, base[2] + i)
+                    _emit_events(srv, client_id, _make_trs_events(prim, t),
+                                 department=dept)
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_writer, args=(
+            "alice", "animation", "/World/Anim", (1, 0, 0), 20))
+        t2 = threading.Thread(target=_writer, args=(
+            "bob", "lighting", "/World/Light", (0, 1, 0), 20))
+        t3 = threading.Thread(target=_writer, args=(
+            "carol", "fx", "/World/FX", (0, 0, 1), 20))
+
+        t1.start(); t2.start(); t3.start()
+        t1.join(timeout=10); t2.join(timeout=10); t3.join(timeout=10)
+
+        assert not errors, f"Writer threads raised: {errors}"
+
+        # Final composed values correct
+        assert _read_translate(srv.stage, "/World/Anim") == (20, 19, 19)
+        assert _read_translate(srv.stage, "/World/Light") == (19, 20, 19)
+        assert _read_translate(srv.stage, "/World/FX") == (19, 19, 20)
+
+        # Opinions landed in the correct layers — each layer must only
+        # contain specs for its own prim, not the other departments'.
+        anim_layer = srv.client_layers["alice"]
+        light_layer = srv.client_layers["bob"]
+        fx_layer = srv.client_layers["carol"]
+
+        assert anim_layer.GetPrimAtPath("/World/Anim") is not None
+        assert anim_layer.GetPrimAtPath("/World/Light") is None
+        assert anim_layer.GetPrimAtPath("/World/FX") is None
+
+        assert light_layer.GetPrimAtPath("/World/Light") is not None
+        assert light_layer.GetPrimAtPath("/World/Anim") is None
+        assert light_layer.GetPrimAtPath("/World/FX") is None
+
+        assert fx_layer.GetPrimAtPath("/World/FX") is not None
+        assert fx_layer.GetPrimAtPath("/World/Anim") is None
+        assert fx_layer.GetPrimAtPath("/World/Light") is None
+
+        # Verify the value inside each layer directly (not composed) —
+        # catches corruption where the composed value happens to be right
+        # but the layer opinion is wrong.
+        for layer, prim_path, expected in [
+            (anim_layer, "/World/Anim", (20, 19, 19)),
+            (light_layer, "/World/Light", (19, 20, 19)),
+            (fx_layer, "/World/FX", (19, 19, 20)),
+        ]:
+            attr_spec = layer.GetAttributeAtPath(
+                Sdf.Path(f"{prim_path}.xformOp:translate"),
+            )
+            assert attr_spec is not None, f"No translate spec in layer for {prim_path}"
+            val = attr_spec.default
+            assert (val[0], val[1], val[2]) == expected, (
+                f"Layer opinion for {prim_path}: {val} != {expected}"
+            )
+
+    def test_concurrent_writes_to_same_prim(self, tmp_path):
+        """Two departments writing to the same prim concurrently.
+        Regardless of thread scheduling, the composed value must always
+        reflect the stronger department's last write."""
+        import threading
+
+        srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def _writer(client_id, dept, base, count):
+            try:
+                barrier.wait(timeout=5)
+                for i in range(count):
+                    t = (base[0] + i, base[1] + i, base[2] + i)
+                    _emit_events(srv, client_id, _make_trs_events("/World/Shared", t),
+                                 department=dept)
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_writer, args=(
+            "alice", "animation", (100, 0, 0), 20))
+        t2 = threading.Thread(target=_writer, args=(
+            "bob", "lighting", (0, 200, 0), 20))
+
+        t1.start(); t2.start()
+        t1.join(timeout=10); t2.join(timeout=10)
+
+        assert not errors, f"Writer threads raised: {errors}"
+
+        from pxr import Sdf
+
+        # Animation is stronger — composed value must be animation's last write,
+        # regardless of which thread finished last.
+        result = _read_translate(srv.stage, "/World/Shared")
+        assert result == (119, 19, 19), f"Expected animation to win, got {result}"
+
+        # Both layers have opinions — verify each layer's opinion is
+        # independently correct (catches writes landing in the wrong layer).
+        anim_layer = srv.client_layers["alice"]
+        light_layer = srv.client_layers["bob"]
+
+        anim_spec = anim_layer.GetAttributeAtPath(
+            Sdf.Path("/World/Shared.xformOp:translate"),
+        )
+        light_spec = light_layer.GetAttributeAtPath(
+            Sdf.Path("/World/Shared.xformOp:translate"),
+        )
+        assert anim_spec is not None, "Animation layer missing translate opinion"
+        assert light_spec is not None, "Lighting layer missing translate opinion"
+
+        # Animation wrote (100+i, i, i), lighting wrote (i, 200+i, i)
+        anim_val = anim_spec.default
+        light_val = light_spec.default
+        assert anim_val[0] == 119, f"Animation layer X={anim_val[0]}, expected 119"
+        assert light_val[1] == 219, f"Lighting layer Y={light_val[1]}, expected 219"
+
+    def test_reads_interleave_with_writes(self, tmp_path):
+        """Dashboard reads (prim count, flatten, layer info) complete while
+        writers are active. Verifies the split lock phases allow reads to
+        interleave — reads should not be starved by continuous writes."""
+        import threading
+
+        srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
+
+        # Seed some data so reads have something to traverse
+        _emit_events(srv, "seed", _make_trs_events("/World/Seed", (0, 0, 0)),
+                     department="animation")
+
+        write_done = threading.Event()
+        barrier = threading.Barrier(3)
+        errors = []
+        read_count = 0
+        read_lock = threading.Lock()
+
+        def _writer(client_id, dept, prim, base, count):
+            try:
+                barrier.wait(timeout=5)
+                for i in range(count):
+                    t = (base[0] + i, base[1] + i, base[2] + i)
+                    _emit_events(srv, client_id, _make_trs_events(prim, t),
+                                 department=dept)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                write_done.set()
+
+        def _reader():
+            nonlocal read_count
+            try:
+                barrier.wait(timeout=5)
+                while not write_done.is_set():
+                    # These should not block for the full write duration
+                    count = srv.get_prim_count()
+                    assert count > 0, "Prim count should be > 0"
+                    usda = srv.export_flattened_string()
+                    assert len(usda) > 0, "Flattened string should not be empty"
+                    info = srv.get_layer_stack_info()
+                    assert isinstance(info, list)
+                    with read_lock:
+                        read_count += 1
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_writer, args=(
+            "alice", "animation", "/World/Cube", (1, 0, 0), 30))
+        t2 = threading.Thread(target=_writer, args=(
+            "bob", "lighting", "/World/Sphere", (0, 1, 0), 30))
+        t3 = threading.Thread(target=_reader)
+
+        t1.start(); t2.start(); t3.start()
+        t1.join(timeout=15); t2.join(timeout=15); t3.join(timeout=15)
+
+        assert not errors, f"Threads raised: {errors}"
+        assert read_count > 0, "Reader thread never completed a read cycle"
+
+        # Stage consistent after all writes
+        assert _read_translate(srv.stage, "/World/Cube") is not None
+        assert _read_translate(srv.stage, "/World/Sphere") is not None
+
+
+class TestMultiDepartmentContention:
+    """Stress test: multiple departments with a mix of private and shared prims.
+
+    Each department has prims only it touches (private) and prims that
+    multiple departments contest (shared). After all threads finish,
+    the composed stage must reflect:
+      - private prims: each department's last value in its own layer
+      - shared prims: strongest department's last value wins composed view,
+        but each layer retains its own opinion
+    """
+
+    # Department priority: animation > lighting > fx > layout (strongest first)
+    DEPTS = ["animation", "lighting", "fx", "layout"]
+
+    # Each department writes to its own private prims AND to shared prims.
+    # Format: (client_id, department, prims_spec)
+    # prims_spec: list of (prim_path, base_translate, is_shared)
+    CLIENTS = [
+        ("alice", "animation", [
+            ("/World/AnimRig", (100, 0, 0), False),
+            ("/World/Hero", (1, 0, 0), True),        # shared — animation wins
+            ("/World/Camera", (10, 0, 0), True),      # shared — animation wins
+        ]),
+        ("bob", "lighting", [
+            ("/World/KeyLight", (0, 100, 0), False),
+            ("/World/Hero", (0, 1, 0), True),         # shared — weaker
+            ("/World/EnvSphere", (0, 10, 0), True),   # shared — lighting wins vs fx/layout
+        ]),
+        ("carol", "fx", [
+            ("/World/Particles", (0, 0, 100), False),
+            ("/World/Hero", (0, 0, 1), True),         # shared — weakest with opinion
+            ("/World/EnvSphere", (0, 0, 10), True),   # shared — weaker than lighting
+        ]),
+        ("dave", "layout", [
+            ("/World/Ground", (50, 50, 0), False),
+            ("/World/Camera", (50, 0, 50), True),     # shared — weaker than animation
+        ]),
+    ]
+
+    ITERATIONS = 50
+
+    def test_concurrent_contention_on_shared_prims(self, tmp_path):
+        """Concurrent department writes with shared and private prims."""
+        import threading
+        from pxr import Sdf
+
+        srv = _make_server(tmp_path, department_priority=self.DEPTS)
+        barrier = threading.Barrier(len(self.CLIENTS))
+        errors = []
+
+        def _worker(client_id, dept, prims_spec, iterations):
+            try:
+                barrier.wait(timeout=10)
+                for i in range(iterations):
+                    for prim_path, base, _shared in prims_spec:
+                        t = (base[0] + i, base[1] + i, base[2] + i)
+                        _emit_events(
+                            srv, client_id,
+                            _make_trs_events(prim_path, t),
+                            department=dept,
+                        )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(
+                target=_worker,
+                args=(cid, dept, prims, self.ITERATIONS),
+            )
+            for cid, dept, prims in self.CLIENTS
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"Worker threads raised: {errors}"
+
+        n = self.ITERATIONS - 1  # last iteration index
+
+        # -- Private prims: each department's last value --
+        assert _read_translate(srv.stage, "/World/AnimRig") == (100 + n, n, n)
+        assert _read_translate(srv.stage, "/World/KeyLight") == (n, 100 + n, n)
+        assert _read_translate(srv.stage, "/World/Particles") == (n, n, 100 + n)
+        assert _read_translate(srv.stage, "/World/Ground") == (50 + n, 50 + n, n)
+
+        # -- Shared prims: strongest department's last value wins --
+        # /World/Hero: animation(strongest) > lighting > fx
+        # animation wrote (1+n, n, n)
+        assert _read_translate(srv.stage, "/World/Hero") == (1 + n, n, n)
+
+        # /World/Camera: animation > layout
+        # animation wrote (10+n, n, n)
+        assert _read_translate(srv.stage, "/World/Camera") == (10 + n, n, n)
+
+        # /World/EnvSphere: lighting > fx
+        # lighting wrote (n, 10+n, n)
+        assert _read_translate(srv.stage, "/World/EnvSphere") == (n, 10 + n, n)
+
+        # -- Layer isolation: private prims only in their own layer --
+        anim_layer = srv.client_layers["alice"]
+        light_layer = srv.client_layers["bob"]
+        fx_layer = srv.client_layers["carol"]
+        layout_layer = srv.client_layers["dave"]
+
+        assert anim_layer.GetPrimAtPath("/World/AnimRig") is not None
+        assert anim_layer.GetPrimAtPath("/World/KeyLight") is None
+        assert light_layer.GetPrimAtPath("/World/KeyLight") is not None
+        assert light_layer.GetPrimAtPath("/World/AnimRig") is None
+        assert fx_layer.GetPrimAtPath("/World/Particles") is not None
+        assert fx_layer.GetPrimAtPath("/World/Ground") is None
+        assert layout_layer.GetPrimAtPath("/World/Ground") is not None
+        assert layout_layer.GetPrimAtPath("/World/Particles") is None
+
+        # -- Shared prims: each contesting layer has its own opinion --
+        # /World/Hero has opinions from animation, lighting, and fx
+        for layer, dept_base in [
+            (anim_layer, (1, 0, 0)),
+            (light_layer, (0, 1, 0)),
+            (fx_layer, (0, 0, 1)),
+        ]:
+            spec = layer.GetAttributeAtPath(
+                Sdf.Path("/World/Hero.xformOp:translate"),
+            )
+            assert spec is not None, f"Missing Hero opinion in {layer.identifier}"
+            val = spec.default
+            expected = (dept_base[0] + n, dept_base[1] + n, dept_base[2] + n)
+            assert (val[0], val[1], val[2]) == expected, (
+                f"Hero layer opinion: {val} != {expected}"
+            )
+
+        # layout should NOT have /World/Hero (dave never wrote to it)
+        assert layout_layer.GetPrimAtPath("/World/Hero") is None
+
+        # /World/Camera has opinions from animation and layout
+        for layer, dept_base in [
+            (anim_layer, (10, 0, 0)),
+            (layout_layer, (50, 0, 50)),
+        ]:
+            spec = layer.GetAttributeAtPath(
+                Sdf.Path("/World/Camera.xformOp:translate"),
+            )
+            assert spec is not None
+            val = spec.default
+            expected = (dept_base[0] + n, dept_base[1] + n, dept_base[2] + n)
+            assert (val[0], val[1], val[2]) == expected
+
+        # /World/EnvSphere has opinions from lighting and fx
+        for layer, dept_base in [
+            (light_layer, (0, 10, 0)),
+            (fx_layer, (0, 0, 10)),
+        ]:
+            spec = layer.GetAttributeAtPath(
+                Sdf.Path("/World/EnvSphere.xformOp:translate"),
+            )
+            assert spec is not None
+            val = spec.default
+            expected = (dept_base[0] + n, dept_base[1] + n, dept_base[2] + n)
+            assert (val[0], val[1], val[2]) == expected
