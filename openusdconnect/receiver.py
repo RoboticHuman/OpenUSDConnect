@@ -84,10 +84,21 @@ class ReceiverThread(threading.Thread):
         self.sock: socket.socket | None = None
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
-        self.connected = False
+        self._connected_event = threading.Event()
         self.last_seq: int = 0
         self._queue_overflow = False
         self.auth_rejected = False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected_event.is_set()
+
+    @connected.setter
+    def connected(self, value: bool):
+        if value:
+            self._connected_event.set()
+        else:
+            self._connected_event.clear()
 
     def run(self):
         delay = self._reconnect_base_delay
@@ -145,16 +156,14 @@ class ReceiverThread(threading.Thread):
             token=self.token,
         )
         send_line(self.sock, hello)
-
-        self.connected = True
         self.auth_rejected = False
-        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
 
-        buf = b""
+        buf = bytearray()
         while not self._stop_event.is_set():
             try:
                 data = self.sock.recv(4096)
             except TimeoutError:
+                LOG.debug("ReceiverThread: recv timeout, retrying")
                 continue
             except OSError:
                 if not self._stop_event.is_set():
@@ -165,10 +174,12 @@ class ReceiverThread(threading.Thread):
                 LOG.info("ReceiverThread: EOF, server closed connection")
                 break
 
-            buf += data
+            buf.extend(data)
             overflow = False
             while b"\n" in buf:
-                line_bytes, buf = buf.split(b"\n", 1)
+                idx = buf.index(b"\n")
+                line_bytes = bytes(buf[:idx])
+                del buf[:idx + 1]
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
@@ -176,7 +187,7 @@ class ReceiverThread(threading.Thread):
                 # Handle auth messages inline (first message from server)
                 try:
                     parsed = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except json.JSONDecodeError:
                     parsed = None
 
                 if parsed and parsed.get("type") == MSG_AUTH_REJECTED:
@@ -192,6 +203,8 @@ class ReceiverThread(threading.Thread):
                         if self._on_token_issued:
                             self._on_token_issued(issued)
                         LOG.info("ReceiverThread: token issued by server")
+                    self.connected = True
+                    LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                     continue  # Don't queue the hello_ok
 
                 with self._incoming_lock:
@@ -199,14 +212,11 @@ class ReceiverThread(threading.Thread):
                         overflow = True
                         break
                     self._incoming.append(line)
-
-                # Track last_seq for reconnect replay
-                try:
-                    seq = parsed.get("seq") if parsed else None
-                    if seq is not None:
-                        self.last_seq = max(self.last_seq, int(seq))
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    pass
+                    # Track last_seq for reconnect replay (protected by lock)
+                    if parsed:
+                        seq = parsed.get("seq")
+                        if seq is not None:
+                            self.last_seq = max(self.last_seq, int(seq))
 
             if overflow:
                 LOG.warning(
@@ -236,8 +246,9 @@ class ReceiverThread(threading.Thread):
     def stop(self):
         """Request clean shutdown."""
         self._stop_event.set()
-        try:
-            if self.sock:
-                self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+        sock = self.sock  # Local ref avoids TOCTOU with _close_socket()
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass

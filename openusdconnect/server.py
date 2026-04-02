@@ -17,6 +17,7 @@ import logging
 import os
 import queue
 import signal
+import socket
 import socketserver
 import threading
 import time
@@ -58,6 +59,11 @@ from .protocol import (
 )
 
 LOG = logging.getLogger(__name__)
+
+# Bounded queue limits — provides natural backpressure when receivers or
+# persistence can't keep up, preventing unbounded memory growth.
+_BROADCAST_QUEUE_MAX = 10_000
+_PERSIST_QUEUE_MAX = 10_000
 
 # Event kinds where only the latest event per prim matters.
 LATEST_WINS_KINDS = frozenset({
@@ -178,7 +184,7 @@ class UsdSyncServer:
         #   exclude_origin set → broadcast to all except that origin
         #   target_origin set  → send only to that origin (corrections)
         #   both None          → broadcast to everyone
-        self._broadcast_queue: queue.Queue = queue.Queue()
+        self._broadcast_queue: queue.Queue = queue.Queue(maxsize=_BROADCAST_QUEUE_MAX)
         self._broadcast_thread = threading.Thread(
             target=self._broadcast_loop, daemon=True,
         )
@@ -190,7 +196,7 @@ class UsdSyncServer:
         self.durability = durability
         self._persist_queue: queue.Queue | None = None
         if durability == "realtime":
-            self._persist_queue = queue.Queue()
+            self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
             self._persist_thread = threading.Thread(
                 target=self._persist_loop, daemon=True,
             )
@@ -781,7 +787,13 @@ class UsdSyncServer:
         # Tell connected receivers to reset and replay from the compacted log.
         self.broadcast({"type": MSG_RESYNC, "reason": "compact"})
         with self.clients_lock:
-            for handler in self.receivers:
+            targets = list(self.receivers)
+        for handler in targets:
+            send_lock = getattr(handler, "_send_lock", None)
+            if send_lock:
+                with send_lock:
+                    self.replay_from(handler, 1)
+            else:
                 self.replay_from(handler, 1)
 
     def purge(self):
@@ -1013,8 +1025,13 @@ class UsdSyncServer:
                     if exclude_origin and h_origin == exclude_origin:
                         continue
                     try:
-                        h.request.sendall(payload)
-                    except OSError:
+                        send_lock = getattr(h, "_send_lock", None)
+                        if send_lock:
+                            with send_lock:
+                                h.request.sendall(payload)
+                        else:
+                            h.request.sendall(payload)
+                    except (OSError, TimeoutError):
                         LOG.debug("Broadcast failed for %s, marking as dead",
                                   h.client_address)
                         dead.append(h)
@@ -1351,8 +1368,24 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     def handle(self):
         sync_server = self.server.sync_server
 
+        # Socket hardening: disable Nagle (small JSON messages benefit from
+        # immediate sends), enable keepalive (detect dead peers), and set a
+        # handshake timeout so misbehaving clients don't block handler threads.
+        # The timeout is cleared before _read_loop since receivers legitimately
+        # sit idle (only consuming broadcasts); SO_KEEPALIVE detects dead peers.
+        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self.request.settimeout(60.0)
+
+        # Per-receiver send lock: serializes replay and broadcast sends on
+        # this socket without holding the global clients_lock during I/O.
+        self._send_lock = threading.Lock()
+
         # Read hello
-        line = self.rfile.readline()
+        try:
+            line = self.rfile.readline()
+        except TimeoutError:
+            return
         if not line:
             return
         try:
@@ -1419,13 +1452,18 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 send_line(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 
-            # Hold clients_lock during replay AND add to prevent race condition.
-            # This blocks broadcasts during replay, ensuring no events slip through
-            # the gap between replay finishing and being added to broadcast set.
-            with sync_server.clients_lock:
+            # Acquire _send_lock first, then add to broadcast set and replay.
+            # The _send_lock prevents broadcasts from reaching this receiver
+            # until replay is complete (preserving event ordering). The
+            # broadcast thread never holds both locks simultaneously (it
+            # snapshots under clients_lock, releases it, then acquires
+            # _send_lock per target), so no deadlock is possible.
+            with self._send_lock:
+                with sync_server.clients_lock:
+                    sync_server.receivers.add(self)
                 sync_server.replay_from(self, sync_from)
-                sync_server.receivers.add(self)
 
+        self.request.settimeout(None)  # Clear handshake timeout
         try:
             self._read_loop(sync_server)
         finally:
@@ -1436,7 +1474,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
     def _read_loop(self, sync_server: UsdSyncServer):
         while True:
-            line = self.rfile.readline()
+            try:
+                line = self.rfile.readline()
+            except ConnectionResetError:
+                break
             if not line:
                 break
             try:
@@ -1519,9 +1560,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # Update client activity tracking.
             with sync_server.clients_lock:
                 info = sync_server.clients.get(self._addr_key)
-            if info:
-                info.last_activity = time.time()
-                info.event_count += len(events)
+                if info:
+                    info.last_activity = time.time()
+                    info.event_count += len(events)
 
             # After load_payload, re-broadcast latest child state so
             # receivers re-apply authoritative TRS after re-import.
@@ -1570,6 +1611,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
+    request_queue_size = 128
 
     def __init__(self, server_address, handler_class, sync_server: UsdSyncServer):
         self.sync_server = sync_server

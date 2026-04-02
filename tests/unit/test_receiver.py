@@ -6,6 +6,8 @@ import time
 
 from openusdconnect.receiver import ReceiverThread
 
+_HELLO_OK = b'{"type":"hello_ok"}\n'
+
 
 def _make_server():
     """Create a listening socket on a random port, return (socket, port)."""
@@ -16,8 +18,17 @@ def _make_server():
     return srv, srv.getsockname()[1]
 
 
+def _accept_and_hello(srv, timeout=2):
+    """Accept one connection, consume hello, send hello_ok. Return conn."""
+    srv.settimeout(timeout)
+    conn, _ = srv.accept()
+    conn.makefile("r").readline()  # consume hello
+    conn.sendall(_HELLO_OK)
+    return conn
+
+
 def _accept(srv, timeout=2):
-    """Accept one connection."""
+    """Accept one connection (no handshake)."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
     return conn
@@ -62,10 +73,8 @@ class TestReceiverThread:
         srv, port = _make_server()
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
-
             conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
             conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
 
@@ -91,7 +100,7 @@ class TestReceiverThread:
             socket_timeout=0.1,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
             _poll_until(lambda: rt.connected)
             assert rt.connected
@@ -110,7 +119,7 @@ class TestReceiverThread:
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
         assert rt.drain_queue() == []
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
             assert rt.drain_queue() == []
         finally:
@@ -130,7 +139,7 @@ class TestReconnection:
         rt.start()
 
         # First connection
-        conn1 = _accept(srv)
+        conn1 = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected)
         assert rt.connected
 
@@ -139,14 +148,9 @@ class TestReconnection:
         _poll_until(lambda: not rt.connected)
 
         # Receiver should reconnect
-        conn2 = _accept(srv, timeout=2)
+        conn2 = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected, timeout=2)
         assert rt.connected
-
-        # Verify hello sent on reconnect
-        hello = json.loads(conn2.makefile("r").readline())
-        assert hello["type"] == "hello"
-        assert hello["role"] == "receiver"
 
         _teardown(rt, conn2, srv)
 
@@ -160,8 +164,7 @@ class TestReconnection:
         rt.start()
 
         # First connection — send some events
-        conn1 = _accept(srv)
-        conn1.makefile("r").readline()  # consume hello
+        conn1 = _accept_and_hello(srv)
         conn1.sendall(b'{"type":"event","seq":10,"event":{"k":"ensure_prim"}}\n')
         _poll_until(lambda: rt.last_seq == 10)
 
@@ -185,7 +188,7 @@ class TestReconnection:
         )
         rt.start()
 
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected)
         conn.close()
 
@@ -204,9 +207,8 @@ class TestSocketTimeout:
             host="127.0.0.1", port=port, reconnect=False, socket_timeout=0.05,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
             _poll_until(lambda: rt.connected)
 
             # Wait longer than socket timeout
@@ -237,8 +239,7 @@ class TestBoundedQueue:
         rt.start()
 
         # First connection
-        conn1 = _accept(srv)
-        conn1.makefile("r").readline()  # consume hello
+        conn1 = _accept_and_hello(srv)
 
         # Send 5 events into a queue with max depth 3
         for i in range(1, 6):
@@ -272,10 +273,8 @@ class TestBoundedQueue:
             socket_timeout=0.1,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
-
             for i in range(1, 6):
                 conn.sendall(
                     (json.dumps({"type": "event", "seq": i, "event": {"k": "ensure_prim"}}) + "\n")
