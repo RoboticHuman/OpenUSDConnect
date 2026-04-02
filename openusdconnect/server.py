@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import concurrent.futures
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import queue
 import signal
 import socket
 import socketserver
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -52,6 +54,7 @@ from .protocol import (
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
+    MSG_PING,
     MSG_PROPOSAL_CREATED,
     MSG_QUIT,
     MSG_RESYNC,
@@ -64,6 +67,9 @@ LOG = logging.getLogger(__name__)
 # persistence can't keep up, preventing unbounded memory growth.
 _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
+_MAX_LINE_SIZE = 16 * 1024 * 1024  # 16 MiB — generous for large geometry
+_PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
+_SEND_TIMEOUT_MS = 10_000  # SO_SNDTIMEO for receiver sockets (milliseconds)
 
 # Event kinds where only the latest event per prim matters.
 LATEST_WINS_KINDS = frozenset({
@@ -77,6 +83,41 @@ LATEST_WINS_KINDS = frozenset({
     K_SET_SHADER_CONNECTION,
     K_DEACTIVATE_PRIM,
 })
+
+
+class _TxnBarrier:
+    """Read-write barrier: multiple shared (txn) holders, exclusive for compaction.
+
+    Lock ordering: _TxnBarrier is acquired BEFORE stage_lock / _seq_lock.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition(threading.Lock())
+        self._readers = 0
+        self._exclusive = False
+
+    def acquire_shared(self):
+        with self._cond:
+            while self._exclusive:
+                self._cond.wait()
+            self._readers += 1
+
+    def release_shared(self):
+        with self._cond:
+            self._readers -= 1
+            if self._readers == 0:
+                self._cond.notify_all()
+
+    def acquire_exclusive(self):
+        with self._cond:
+            self._exclusive = True
+            while self._readers > 0:
+                self._cond.wait()
+
+    def release_exclusive(self):
+        with self._cond:
+            self._exclusive = False
+            self._cond.notify_all()
 
 
 @dataclass
@@ -154,6 +195,7 @@ class UsdSyncServer:
         self._event_listeners: list = []
         self._start_time = time.time()
         self._seq_lock = threading.Lock()
+        self._txn_barrier = _TxnBarrier()
 
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
@@ -680,7 +722,17 @@ class UsdSyncServer:
         is kept.  Partial TRS fields are merged.  delete_prim tombstones all
         prior events for that prim.  deactivate_prim is latest-wins (TRS
         preserved for payload reload).
+
+        Acquires _txn_barrier exclusively so no emitter txns are in-flight
+        during the seq reset + log rewrite.
         """
+        self._txn_barrier.acquire_exclusive()
+        try:
+            self._compact_log_inner()
+        finally:
+            self._txn_barrier.release_exclusive()
+
+    def _compact_log_inner(self):
         rows = self.store.get_all_asc()
         if not rows:
             return
@@ -779,7 +831,8 @@ class UsdSyncServer:
             rec.update(meta)
             records.append((seq, json.dumps(rec), meta.get("client_id")))
         self.store.clear_and_rewrite(records)
-        self._event_count = len(records)
+        with self._seq_lock:
+            self._event_count = len(records)
 
         self._op_cache.clear()
         LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
@@ -797,15 +850,17 @@ class UsdSyncServer:
                 self.replay_from(handler, 1)
 
     def purge(self):
-        """Clear all events, reset the edit layer, and resync receivers.
+        """Clear all events, reset the edit layer, and resync receivers."""
+        self._txn_barrier.acquire_exclusive()
+        try:
+            self._purge_inner()
+        finally:
+            self._txn_barrier.release_exclusive()
 
-        Wipes the event store, clears all opinions from the server's edit
-        layer (restoring the base scene), resets the sequence counter, and
-        sends a resync to all connected receivers so they start fresh.
-        """
+    def _purge_inner(self):
         self.store.clear_and_rewrite([])
-        self._event_count = 0
         with self._seq_lock:
+            self._event_count = 0
             self._next_seq = 1
         with self.stage_lock:
             self.edit_layer.Clear()
@@ -869,7 +924,8 @@ class UsdSyncServer:
         events that were not successfully persisted.
         """
         self.store.append(rec["seq"], json.dumps(rec))
-        self._event_count += 1
+        with self._seq_lock:
+            self._event_count += 1
 
     def append_log_batch(self, records: list[dict]):
         """Persist multiple event records.
@@ -877,15 +933,27 @@ class UsdSyncServer:
         In strict mode, writes synchronously (caller blocks until DB commit).
         In realtime mode, enqueues for async write (caller returns immediately).
         """
+        tuples = [
+            (rec["seq"], json.dumps(rec), rec.get("client_id"))
+            for rec in records
+        ]
         if self._persist_queue is not None:
-            self._persist_queue.put(records)
+            self._persist_queue.put(tuples)
         else:
-            tuples = [
-                (rec["seq"], json.dumps(rec), rec.get("client_id"))
-                for rec in records
-            ]
             self.store.append_batch(tuples)
-            self._event_count += len(records)
+            with self._seq_lock:
+                self._event_count += len(tuples)
+
+    def append_log_batch_preserialized(
+        self, tuples: list[tuple[int, str, str | None]],
+    ):
+        """Persist pre-serialized event records: (seq, json_str, client_id)."""
+        if self._persist_queue is not None:
+            self._persist_queue.put(tuples)
+        else:
+            self.store.append_batch(tuples)
+            with self._seq_lock:
+                self._event_count += len(tuples)
 
     def replay_children_after_load(self, prim_path: str):
         """After load_payload, re-broadcast the latest events for children.
@@ -1005,57 +1073,94 @@ class UsdSyncServer:
                     self._event_listeners.remove(listener)
                     break
 
+    def broadcast_bytes(
+        self, payload: bytes, records: list[dict],
+        exclude_origin: str | None = None,
+    ):
+        """Enqueue pre-encoded payload for broadcast and notify listeners."""
+        self._broadcast_queue.put((payload, exclude_origin, None))
+        for listener in list(self._event_listeners):
+            for rec in records:
+                try:
+                    listener(rec)
+                except Exception:
+                    LOG.debug("Event listener failed, removing")
+                    self._event_listeners.remove(listener)
+                    break
+
     def send_to_origin(self, rec: dict, origin: str):
         """Enqueue a record for async send to receivers matching an origin."""
         line = (json.dumps(rec) + "\n").encode("utf-8")
         self._broadcast_queue.put((line, None, origin))
 
     def _broadcast_loop(self):
-        """Dedicated thread: drain the broadcast queue and send to receivers."""
+        """Dedicated thread: drain the broadcast queue and send to receivers.
+
+        During idle periods, sends periodic pings to detect dead receivers.
+        """
+        _ping_payload = (json.dumps({"type": MSG_PING}) + "\n").encode("utf-8")
+
         while True:
-            payload, exclude_origin, target_origin = self._broadcast_queue.get()
             try:
-                with self.clients_lock:
-                    targets = list(self.receivers)
-                dead = []
-                for h in targets:
-                    h_origin = getattr(h, "_origin", None)
-                    if target_origin and h_origin != target_origin:
-                        continue
-                    if exclude_origin and h_origin == exclude_origin:
-                        continue
-                    try:
-                        send_lock = getattr(h, "_send_lock", None)
-                        if send_lock:
-                            with send_lock:
-                                h.request.sendall(payload)
-                        else:
-                            h.request.sendall(payload)
-                    except (OSError, TimeoutError):
-                        LOG.debug("Broadcast failed for %s, marking as dead",
-                                  h.client_address)
-                        dead.append(h)
-                if dead:
-                    with self.clients_lock:
-                        for h in dead:
-                            self.receivers.discard(h)
+                payload, exclude_origin, target_origin = (
+                    self._broadcast_queue.get(timeout=_PING_INTERVAL)
+                )
+            except queue.Empty:
+                # Idle — send pings to detect dead receivers
+                self._send_to_all(_ping_payload)
+                continue
+
+            try:
+                self._send_to_all(
+                    payload,
+                    exclude_origin=exclude_origin,
+                    target_origin=target_origin,
+                )
             except Exception:
                 LOG.exception("Unexpected error in broadcast loop")
             finally:
                 self._broadcast_queue.task_done()
 
+    def _send_to_all(
+        self, payload: bytes,
+        exclude_origin: str | None = None,
+        target_origin: str | None = None,
+    ):
+        """Send payload to matching receivers, removing dead ones."""
+        with self.clients_lock:
+            targets = list(self.receivers)
+        dead = []
+        for h in targets:
+            h_origin = getattr(h, "_origin", None)
+            if target_origin and h_origin != target_origin:
+                continue
+            if exclude_origin and h_origin == exclude_origin:
+                continue
+            try:
+                send_lock = getattr(h, "_send_lock", None)
+                if send_lock:
+                    with send_lock:
+                        h.request.sendall(payload)
+                else:
+                    h.request.sendall(payload)
+            except (OSError, TimeoutError):
+                LOG.debug("Send failed for %s, marking as dead",
+                          h.client_address)
+                dead.append(h)
+        if dead:
+            with self.clients_lock:
+                for h in dead:
+                    self.receivers.discard(h)
+
     def _persist_loop(self):
         """Dedicated thread for realtime durability: drain persistence queue
         and write to SQLite without blocking emitter threads."""
         while True:
-            records = self._persist_queue.get()
+            tuples = self._persist_queue.get()
             try:
-                tuples = [
-                    (rec["seq"], json.dumps(rec), rec.get("client_id"))
-                    for rec in records
-                ]
                 self.store.append_batch(tuples)
-                self._event_count += len(records)
+                with self._seq_lock:
+                    self._event_count += len(tuples)
             except Exception:
                 LOG.exception("Unexpected error in persist loop")
             finally:
@@ -1169,15 +1274,11 @@ class UsdSyncServer:
 
         target = layer or self.edit_layer
 
-        # Phase 1: Mutate stage (must be locked — SetEditTarget is global).
+        changed_indices = []
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events, op_cache=self._op_cache)
 
-        # Phase 2: Strength checking (separate lock scope so reads can
-        # interleave between mutation and strength-check).
-        changed_indices = []
-        with self.stage_lock:
             for i, ev in enumerate(events):
                 k = ev.get("k")
                 if k in (K_ENSURE_PRIM, K_DELETE_PRIM):
@@ -1352,10 +1453,21 @@ class UsdSyncServer:
         its own prior edits (which share its origin) to restore state.
         Origin filtering only applies to live broadcast to prevent echo.
         """
+        _REPLAY_CHUNK = 65536
         try:
             record_jsons = self.store.get_from_seq(seq_start)
+            buf: list[str] = []
+            buf_size = 0
             for record_json in record_jsons:
-                handler.request.sendall((record_json + "\n").encode("utf-8"))
+                line = record_json + "\n"
+                buf.append(line)
+                buf_size += len(line)
+                if buf_size >= _REPLAY_CHUNK:
+                    handler.request.sendall("".join(buf).encode("utf-8"))
+                    buf.clear()
+                    buf_size = 0
+            if buf:
+                handler.request.sendall("".join(buf).encode("utf-8"))
         except Exception:
             LOG.exception("Failed to replay events")
 
@@ -1383,10 +1495,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Read hello
         try:
-            line = self.rfile.readline()
+            line = self.rfile.readline(_MAX_LINE_SIZE)
         except TimeoutError:
             return
         if not line:
+            return
+        if not line.endswith(b"\n"):
+            LOG.warning("Hello line exceeded %d bytes from %s, disconnecting",
+                        _MAX_LINE_SIZE, self.client_address)
             return
         try:
             hello = json.loads(line.decode("utf-8"))
@@ -1463,7 +1579,17 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     sync_server.receivers.add(self)
                 sync_server.replay_from(self, sync_from)
 
-        self.request.settimeout(None)  # Clear handshake timeout
+        if role == "receiver":
+            # Send-only timeout so the broadcast thread isn't blocked
+            # indefinitely by one slow receiver. Uses SO_SNDTIMEO instead
+            # of settimeout() to avoid affecting recv (which must block
+            # in _read_loop without spurious TimeoutError).
+            timeout_ms = _SEND_TIMEOUT_MS
+            self.request.setsockopt(
+                socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+                struct.pack("II", timeout_ms, 0),
+            )
+        self.request.settimeout(None)
         try:
             self._read_loop(sync_server)
         finally:
@@ -1475,10 +1601,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     def _read_loop(self, sync_server: UsdSyncServer):
         while True:
             try:
-                line = self.rfile.readline()
+                line = self.rfile.readline(_MAX_LINE_SIZE)
             except ConnectionResetError:
                 break
+            except TimeoutError:
+                continue
             if not line:
+                break
+            if not line.endswith(b"\n"):
+                LOG.warning("Message line exceeded %d bytes from %s, disconnecting",
+                            _MAX_LINE_SIZE, self.client_address)
                 break
             try:
                 msg = json.loads(line.decode("utf-8"))
@@ -1511,52 +1643,60 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 self._handle_proposal_txn(sync_server, proposal_id, events)
                 continue
 
-            # Apply to the client's layer. Returns indices of events
-            # that actually changed the composed view.
-            changed = sync_server.apply_txn(events, layer=self._client_layer)
-            changed_set = set(changed)
+            sync_server._txn_barrier.acquire_shared()
+            try:
+                changed = sync_server.apply_txn(events, layer=self._client_layer)
+                changed_set = set(changed)
 
-            # Sequence and persist ALL events (even overridden ones —
-            # they're in the client's layer for mute/merge/review).
-            records = []
-            for ev in events:
-                rec = {
-                    "type": MSG_EVENT,
-                    "seq": sync_server.assign_seq(),
-                    "event": ev,
-                    "client": self._addr_key,
-                    "client_id": self._client_id,
-                }
-                if self._origin:
-                    rec["origin"] = self._origin
-                records.append(rec)
-            sync_server.append_log_batch(records)
+                # Serialize once, use for both persist and broadcast.
+                records = []
+                json_strs = []
+                persist_tuples = []
+                for ev in events:
+                    rec = {
+                        "type": MSG_EVENT,
+                        "seq": sync_server.assign_seq(),
+                        "event": ev,
+                        "client": self._addr_key,
+                        "client_id": self._client_id,
+                    }
+                    if self._origin:
+                        rec["origin"] = self._origin
+                    js = json.dumps(rec)
+                    records.append(rec)
+                    json_strs.append(js)
+                    persist_tuples.append((rec["seq"], js, self._client_id))
+                sync_server.append_log_batch_preserialized(persist_tuples)
 
-            # Broadcast events that changed the composed view to everyone
-            # except the sender (origin suppression — sender already has
-            # the correct value locally).
-            # For overridden events, send a correction back to the sender
-            # with the composed value so their DCC snaps to the authoritative
-            # state.  This ensures flatten parity across all clients.
-            changed_records = []
-            for i, rec in enumerate(records):
-                if i in changed_set:
-                    changed_records.append(rec)
-                else:
-                    correction = sync_server.build_correction(events[i])
-                    if correction:
-                        correction_rec = {
-                            "type": MSG_EVENT,
-                            "seq": sync_server.assign_seq(),
-                            "event": correction,
-                        }
-                        sync_server.send_to_origin(
-                            correction_rec, self._origin,
-                        )
-            if changed_records:
-                sync_server.broadcast_batch(
-                    changed_records, exclude_origin=self._origin,
-                )
+                # Broadcast changed events; send corrections for overridden ones.
+                changed_records = []
+                changed_strs = []
+                for i, (rec, js) in enumerate(zip(records, json_strs, strict=True)):
+                    if i in changed_set:
+                        changed_records.append(rec)
+                        changed_strs.append(js)
+                    else:
+                        correction = sync_server.build_correction(events[i])
+                        if correction:
+                            correction_rec = {
+                                "type": MSG_EVENT,
+                                "seq": sync_server.assign_seq(),
+                                "event": correction,
+                            }
+                            sync_server.send_to_origin(
+                                correction_rec, self._origin,
+                            )
+                if changed_records:
+                    payload = "".join(
+                        s + "\n" for s in changed_strs
+                    ).encode("utf-8")
+                    sync_server.broadcast_bytes(
+                        payload, changed_records,
+                        exclude_origin=self._origin,
+                    )
+            finally:
+                sync_server._txn_barrier.release_shared()
+
             # Update client activity tracking.
             with sync_server.clients_lock:
                 info = sync_server.clients.get(self._addr_key)
@@ -1609,13 +1749,34 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
 
 
-class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+class ThreadedTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
     request_queue_size = 128
+    _MAX_WORKERS = 256
 
-    def __init__(self, server_address, handler_class, sync_server: UsdSyncServer):
+    def __init__(self, server_address, handler_class, sync_server: UsdSyncServer,
+                 max_workers: int | None = None):
         self.sync_server = sync_server
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers or self._MAX_WORKERS,
+            thread_name_prefix="conn",
+        )
         super().__init__(server_address, handler_class)
+
+    def process_request(self, request, client_address):
+        self._pool.submit(self._handle_request, request, client_address)
+
+    def _handle_request(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self):
+        super().server_close()
+        self._pool.shutdown(wait=False)
 
 
 def run_server(
@@ -1630,6 +1791,7 @@ def run_server(
     department_priority: list[str] | None = None,
     require_token: bool = False,
     durability: str = "strict",
+    max_connections: int | None = None,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
@@ -1650,7 +1812,8 @@ def run_server(
         run_dashboard(sync_server, dashboard_port)
         LOG.info("Dashboard running on http://localhost:%d", dashboard_port)
 
-    server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server)
+    server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server,
+                               max_workers=max_connections)
 
     _cleaned_up = False
 
@@ -1723,6 +1886,10 @@ def main():
         help="strict: persist to DB before broadcast (no lost events). "
              "realtime: broadcast first, persist async (lower latency).",
     )
+    ap.add_argument(
+        "--max-connections", type=int, default=None, metavar="N",
+        help=f"Max concurrent client connections (default: {ThreadedTCPServer._MAX_WORKERS})",
+    )
     args = ap.parse_args()
     dept_list = args.departments.split(",") if args.departments else None
     run_server(
@@ -1737,6 +1904,7 @@ def main():
         department_priority=dept_list,
         require_token=args.require_token,
         durability=args.durability,
+        max_connections=args.max_connections,
     )
 
 

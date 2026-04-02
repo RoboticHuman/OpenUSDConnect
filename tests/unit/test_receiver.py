@@ -286,3 +286,76 @@ class TestBoundedQueue:
         finally:
             conn.close()
             srv.close()
+
+
+class TestPingHandling:
+    """Server pings are handled transparently by the receiver."""
+
+    def test_ping_not_queued(self):
+        """Ping messages from server are silently dropped, not queued."""
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
+            conn.sendall(b'{"type":"ping"}\n')
+            conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
+
+            collected = []
+            _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 2)
+            assert len(collected) == 2
+            for line in collected:
+                assert '"ping"' not in line
+            assert rt.last_seq == 2
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_ping_resets_timeout_counter(self):
+        """Receiving a ping prevents consecutive timeout disconnect."""
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.05,
+        )
+        import openusdconnect.receiver as recv_mod
+        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        try:
+            rt.start()
+            conn = _accept_and_hello(srv)
+            _poll_until(lambda: rt.connected)
+            # Wait ~2 timeouts, then send a ping to reset counter
+            time.sleep(0.12)
+            conn.sendall(b'{"type":"ping"}\n')
+            time.sleep(0.12)
+            # Should still be alive because ping reset the counter
+            assert rt.connected
+        finally:
+            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
+            _teardown(rt, conn, srv)
+
+
+class TestConsecutiveTimeouts:
+    """Receiver disconnects after too many consecutive recv timeouts."""
+
+    def test_max_consecutive_timeouts(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.02,
+        )
+        import openusdconnect.receiver as recv_mod
+        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        try:
+            rt.start()
+            conn = _accept_and_hello(srv)
+            _poll_until(lambda: rt.connected)
+            # Don't send anything — let timeouts accumulate
+            rt.join(timeout=2)
+            assert not rt.is_alive()
+        finally:
+            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
+            conn.close()
+            srv.close()

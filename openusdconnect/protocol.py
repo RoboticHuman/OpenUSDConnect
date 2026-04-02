@@ -8,6 +8,7 @@ Message types:
            receivers must reset their sequence counter and expect a full replay)
   compact: {"type":"compact"}  (client requests server to compact event log;
            triggers resync broadcast to all receivers)
+  ping:    {"type":"ping"}  (server sends during idle to detect dead receivers)
   quit:    {"type":"quit"}
 
 Event types (inside txn.events):
@@ -52,6 +53,7 @@ MSG_TXN = "txn"
 MSG_EVENT = "event"
 MSG_RESYNC = "resync"
 MSG_COMPACT = "compact"
+MSG_PING = "ping"
 MSG_QUIT = "quit"
 MSG_CREATE_PROPOSAL = "create_proposal"
 MSG_PROPOSAL_CREATED = "proposal_created"

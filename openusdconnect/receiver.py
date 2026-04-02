@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 
-from .protocol import MSG_AUTH_REJECTED, MSG_HELLO_OK, make_hello
+from .protocol import MSG_AUTH_REJECTED, MSG_HELLO_OK, MSG_PING, make_hello
 from .transport import send_line
 
 LOG = logging.getLogger(__name__)
@@ -31,6 +32,13 @@ _RECONNECT_BASE_DELAY = 1.0   # seconds
 _RECONNECT_MAX_DELAY = 30.0   # seconds
 _SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
 _MAX_QUEUE_DEPTH = 50_000     # max queued lines before overflow (disconnect + replay)
+_MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
+
+_SEQ_RE = re.compile(r'"seq"\s*:\s*(\d+)')
+
+
+def _is_ping(line: str) -> bool:
+    return f'"type":"{MSG_PING}"' in line or f'"type": "{MSG_PING}"' in line
 
 
 class ReceiverThread(threading.Thread):
@@ -159,11 +167,20 @@ class ReceiverThread(threading.Thread):
         self.auth_rejected = False
 
         buf = bytearray()
+        consecutive_timeouts = 0
         while not self._stop_event.is_set():
             try:
-                data = self.sock.recv(4096)
+                data = self.sock.recv(65536)
             except TimeoutError:
-                LOG.debug("ReceiverThread: recv timeout, retrying")
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
+                    LOG.warning(
+                        "ReceiverThread: %d consecutive timeouts, reconnecting",
+                        consecutive_timeouts,
+                    )
+                    break
+                LOG.debug("ReceiverThread: recv timeout (%d/%d)",
+                          consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS)
                 continue
             except OSError:
                 if not self._stop_event.is_set():
@@ -174,49 +191,55 @@ class ReceiverThread(threading.Thread):
                 LOG.info("ReceiverThread: EOF, server closed connection")
                 break
 
+            consecutive_timeouts = 0
             buf.extend(data)
+
+            parts = buf.split(b"\n")
+            buf = bytearray(parts[-1])
+
             overflow = False
-            while b"\n" in buf:
-                idx = buf.index(b"\n")
-                line_bytes = bytes(buf[:idx])
-                del buf[:idx + 1]
-                line = line_bytes.decode("utf-8", errors="replace").strip()
+            for part in parts[:-1]:
+                line = part.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
 
-                # Handle auth messages inline (first message from server)
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    parsed = None
+                # Pre-handshake: full parse for auth/hello messages
+                if not self.connected:
+                    try:
+                        parsed = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                if parsed and parsed.get("type") == MSG_AUTH_REJECTED:
-                    LOG.error("ReceiverThread: auth rejected — %s",
-                              parsed.get("reason"))
-                    self.auth_rejected = True
-                    return
+                    if parsed.get("type") == MSG_AUTH_REJECTED:
+                        LOG.error("ReceiverThread: auth rejected — %s",
+                                  parsed.get("reason"))
+                        self.auth_rejected = True
+                        return
 
-                if parsed and parsed.get("type") == MSG_HELLO_OK:
-                    issued = parsed.get("token")
-                    if issued:
-                        self.token = issued
-                        if self._on_token_issued:
-                            self._on_token_issued(issued)
-                        LOG.info("ReceiverThread: token issued by server")
-                    self.connected = True
-                    LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
-                    continue  # Don't queue the hello_ok
+                    if parsed.get("type") == MSG_HELLO_OK:
+                        issued = parsed.get("token")
+                        if issued:
+                            self.token = issued
+                            if self._on_token_issued:
+                                self._on_token_issued(issued)
+                            LOG.info("ReceiverThread: token issued by server")
+                        self.connected = True
+                        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+                    continue
+
+                # Post-handshake: skip pings, extract seq via regex
+                if _is_ping(line):
+                    continue
 
                 with self._incoming_lock:
                     if len(self._incoming) >= self.max_queue:
                         overflow = True
                         break
                     self._incoming.append(line)
-                    # Track last_seq for reconnect replay (protected by lock)
-                    if parsed:
-                        seq = parsed.get("seq")
-                        if seq is not None:
-                            self.last_seq = max(self.last_seq, int(seq))
+
+                seq_match = _SEQ_RE.search(line)
+                if seq_match:
+                    self.last_seq = max(self.last_seq, int(seq_match.group(1)))
 
             if overflow:
                 LOG.warning(
@@ -237,11 +260,10 @@ class ReceiverThread(threading.Thread):
 
     def drain_queue(self) -> list[str]:
         """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
-        result = []
         with self._incoming_lock:
-            while self._incoming:
-                result.append(self._incoming.popleft())
-        return result
+            old = self._incoming
+            self._incoming = deque()
+        return list(old)
 
     def stop(self):
         """Request clean shutdown."""
