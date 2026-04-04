@@ -9,6 +9,7 @@ Resolution order:
 
 import os
 import pathlib
+import socket
 
 import pytest
 
@@ -48,3 +49,11 @@ def blender_exe(request):
     if not path or not os.path.isfile(path):
         pytest.skip(f"Blender not found (set --blender, BLENDER_EXE, or {_CFG_FILE.name})")
     return path
+
+
+@pytest.fixture
+def free_port():
+    """Return a free TCP port. Binds briefly to let the OS assign one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]

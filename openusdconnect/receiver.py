@@ -19,8 +19,9 @@ import socket
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 
-from .protocol import make_hello
+from .protocol import MSG_AUTH_REJECTED, MSG_HELLO_OK, MSG_PING, make_hello
 from .transport import send_line
 
 LOG = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ _RECONNECT_BASE_DELAY = 1.0   # seconds
 _RECONNECT_MAX_DELAY = 30.0   # seconds
 _SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
 _MAX_QUEUE_DEPTH = 50_000     # max queued lines before overflow (disconnect + replay)
+_MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
+
+
+def _is_ping(line: str) -> bool:
+    return f'"type":"{MSG_PING}"' in line or f'"type": "{MSG_PING}"' in line
 
 
 class ReceiverThread(threading.Thread):
@@ -63,6 +69,8 @@ class ReceiverThread(threading.Thread):
         reconnect_base_delay: float = _RECONNECT_BASE_DELAY,
         reconnect_max_delay: float = _RECONNECT_MAX_DELAY,
         origin: str | None = None,
+        token: str | None = None,
+        on_token_issued: Callable | None = None,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -73,15 +81,29 @@ class ReceiverThread(threading.Thread):
         self.socket_timeout = socket_timeout
         self.client_id = client_id
         self.origin = origin
+        self.token = token
+        self._on_token_issued = on_token_issued
         self._reconnect_base_delay = reconnect_base_delay
         self._reconnect_max_delay = reconnect_max_delay
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
-        self.connected = False
+        self._connected_event = threading.Event()
         self.last_seq: int = 0
         self._queue_overflow = False
+        self.auth_rejected = False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected_event.is_set()
+
+    @connected.setter
+    def connected(self, value: bool):
+        if value:
+            self._connected_event.set()
+        else:
+            self._connected_event.clear()
 
     def run(self):
         delay = self._reconnect_base_delay
@@ -95,7 +117,7 @@ class ReceiverThread(threading.Thread):
                 self.connected = False
                 self._close_socket()
 
-            if not self.reconnect or self._stop_event.is_set():
+            if not self.reconnect or self._stop_event.is_set() or self.auth_rejected:
                 break
 
             if self._queue_overflow:
@@ -136,16 +158,26 @@ class ReceiverThread(threading.Thread):
         hello = make_hello(
             "receiver", sync_from=sync_from,
             client_id=self.client_id, origin=self.origin,
+            token=self.token,
         )
         send_line(self.sock, hello)
-        self.connected = True
-        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+        self.auth_rejected = False
 
-        buf = b""
+        buf = bytearray()
+        consecutive_timeouts = 0
         while not self._stop_event.is_set():
             try:
-                data = self.sock.recv(4096)
+                data = self.sock.recv(65536)
             except TimeoutError:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
+                    LOG.warning(
+                        "ReceiverThread: %d consecutive timeouts, reconnecting",
+                        consecutive_timeouts,
+                    )
+                    break
+                LOG.debug("ReceiverThread: recv timeout (%d/%d)",
+                          consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS)
                 continue
             except OSError:
                 if not self._stop_event.is_set():
@@ -156,12 +188,44 @@ class ReceiverThread(threading.Thread):
                 LOG.info("ReceiverThread: EOF, server closed connection")
                 break
 
-            buf += data
+            consecutive_timeouts = 0
+            buf.extend(data)
+
+            parts = buf.split(b"\n")
+            buf = bytearray(parts[-1])
+
             overflow = False
-            while b"\n" in buf:
-                line_bytes, buf = buf.split(b"\n", 1)
-                line = line_bytes.decode("utf-8", errors="replace").strip()
+            for part in parts[:-1]:
+                line = part.decode("utf-8", errors="replace").strip()
                 if not line:
+                    continue
+
+                # Pre-handshake: full parse for auth/hello messages
+                if not self.connected:
+                    try:
+                        parsed = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if parsed.get("type") == MSG_AUTH_REJECTED:
+                        LOG.error("ReceiverThread: auth rejected — %s",
+                                  parsed.get("reason"))
+                        self.auth_rejected = True
+                        return
+
+                    if parsed.get("type") == MSG_HELLO_OK:
+                        issued = parsed.get("token")
+                        if issued:
+                            self.token = issued
+                            if self._on_token_issued:
+                                self._on_token_issued(issued)
+                            LOG.info("ReceiverThread: token issued by server")
+                        self.connected = True
+                        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+                    continue
+
+                # Post-handshake: skip pings, extract seq via regex
+                if _is_ping(line):
                     continue
 
                 with self._incoming_lock:
@@ -170,13 +234,12 @@ class ReceiverThread(threading.Thread):
                         break
                     self._incoming.append(line)
 
-                # Track last_seq for reconnect replay
                 try:
                     parsed = json.loads(line)
                     seq = parsed.get("seq")
-                    if seq is not None:
-                        self.last_seq = max(self.last_seq, int(seq))
-                except (json.JSONDecodeError, ValueError, TypeError):
+                    if isinstance(seq, int):
+                        self.last_seq = max(self.last_seq, seq)
+                except json.JSONDecodeError:
                     pass
 
             if overflow:
@@ -196,19 +259,19 @@ class ReceiverThread(threading.Thread):
             pass
         self.sock = None
 
-    def drain_queue(self) -> list[str]:
+    def drain_queue(self) -> deque:
         """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
-        result = []
         with self._incoming_lock:
-            while self._incoming:
-                result.append(self._incoming.popleft())
-        return result
+            old = self._incoming
+            self._incoming = deque()
+        return old
 
     def stop(self):
         """Request clean shutdown."""
         self._stop_event.set()
-        try:
-            if self.sock:
-                self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+        sock = self.sock  # Local ref avoids TOCTOU with _close_socket()
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass

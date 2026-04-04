@@ -8,6 +8,7 @@ Message types:
            receivers must reset their sequence counter and expect a full replay)
   compact: {"type":"compact"}  (client requests server to compact event log;
            triggers resync broadcast to all receivers)
+  ping:    {"type":"ping"}  (server sends during idle to detect dead receivers)
   quit:    {"type":"quit"}
 
 Event types (inside txn.events):
@@ -46,11 +47,17 @@ PROTOCOL_VERSION = 1
 
 # Message type constants
 MSG_HELLO = "hello"
+MSG_HELLO_OK = "hello_ok"
+MSG_AUTH_REJECTED = "auth_rejected"
 MSG_TXN = "txn"
 MSG_EVENT = "event"
 MSG_RESYNC = "resync"
 MSG_COMPACT = "compact"
+MSG_PING = "ping"
 MSG_QUIT = "quit"
+MSG_CREATE_PROPOSAL = "create_proposal"
+MSG_PROPOSAL_CREATED = "proposal_created"
+MSG_RATE_LIMITED = "rate_limited"
 
 # Event kind constants — use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -179,6 +186,8 @@ def make_hello(
     sync_from: int | None = None,
     client_id: str | None = None,
     origin: str | None = None,
+    department: str | None = None,
+    token: str | None = None,
 ) -> dict:
     """Build a hello message.
 
@@ -189,6 +198,10 @@ def make_hello(
         origin: Session-level identifier shared by all connections from the
             same DCC instance.  The server uses this to suppress echo —
             events are not broadcast back to receivers with matching origin.
+        department: Optional department name (e.g. "animation", "lighting").
+            Used by the server for layer ordering when per-client layers
+            are enabled.
+        token: Authentication token from a previous session (TOFU).
     """
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
@@ -197,6 +210,10 @@ def make_hello(
         msg["client_id"] = client_id
     if origin is not None:
         msg["origin"] = origin
+    if department is not None:
+        msg["department"] = department
+    if token is not None:
+        msg["token"] = token
     return msg
 
 
@@ -235,29 +252,25 @@ def validate_event(ev: dict) -> bool:
             return False
         if not is_mat16_valid(ev.get("world_m", [])):
             return False
-    if k == K_DEACTIVATE_PRIM:
-        if not isinstance(ev.get("active"), bool):
-            return False
+    if k == K_DEACTIVATE_PRIM and not isinstance(ev.get("active"), bool):
+        return False
     if k == K_RENAME_PRIM:
         new_name = ev.get("new_name")
         if not isinstance(new_name, str) or not new_name:
             return False
-    if k == K_SET_VISIBILITY:
-        if not isinstance(ev.get("visible"), bool):
-            return False
+    if k == K_SET_VISIBILITY and not isinstance(ev.get("visible"), bool):
+        return False
     if k == K_SET_GPRIM_ATTRS:
         attrs = ev.get("attrs")
         if not isinstance(attrs, dict):
             return False
         if not all(isinstance(key, str) for key in attrs):
             return False
-    if k == K_SET_REFERENCE:
-        if not _is_arc_list_valid(ev.get("refs", None)):
-            return False
+    if k == K_SET_REFERENCE and not _is_arc_list_valid(ev.get("refs")):
+        return False
     # load_payload and unload_payload require only "prim" (already validated above)
-    if k == K_SET_PAYLOAD:
-        if not _is_arc_list_valid(ev.get("payloads", None)):
-            return False
+    if k == K_SET_PAYLOAD and not _is_arc_list_valid(ev.get("payloads")):
+        return False
     if k == K_SET_VARIANT_SELECTIONS:
         selections = ev.get("selections")
         if not isinstance(selections, dict):

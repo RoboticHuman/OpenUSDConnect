@@ -19,13 +19,16 @@ class EventStore(ABC):
     """Abstract interface for persisting and querying the event log."""
 
     @abstractmethod
-    def append(self, seq: int, record_json: str) -> None:
+    def append(self, seq: int, record_json: str, client_id: str | None = None) -> None:
         """Persist a single event record (already JSON-serialized)."""
         raise NotImplementedError
 
     @abstractmethod
-    def append_batch(self, records: list[tuple[int, str]]) -> None:
-        """Persist multiple event records in a single transaction."""
+    def append_batch(self, records: list[tuple[int, str, str | None]]) -> None:
+        """Persist multiple event records in a single transaction.
+
+        Each record is (seq, record_json, client_id).
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -46,6 +49,11 @@ class EventStore(ABC):
     @abstractmethod
     def get_from_seq(self, seq_start: int) -> list[str]:
         """Return record_json strings for all events with seq >= seq_start."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
+        """Return (seq, record_json) tuples for events with seq >= seq_start."""
         raise NotImplementedError
 
     @abstractmethod
@@ -87,26 +95,30 @@ class SqliteEventStore(EventStore):
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY,
-                event TEXT NOT NULL
+                event TEXT NOT NULL,
+                client_id TEXT
             )
         """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_client_id ON events(client_id)"
+        )
         self._conn.commit()
         self._lock = threading.Lock()
 
-    def append(self, seq: int, record_json: str) -> None:
+    def append(self, seq: int, record_json: str, client_id: str | None = None) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO events(seq, event) VALUES (?, ?)",
-                (seq, record_json),
+                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
+                (seq, record_json, client_id),
             )
             self._conn.commit()
 
-    def append_batch(self, records: list[tuple[int, str]]) -> None:
+    def append_batch(self, records: list[tuple[int, str, str | None]]) -> None:
         if not records:
             return
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO events(seq, event) VALUES (?, ?)",
+                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
                 records,
             )
             self._conn.commit()
@@ -137,6 +149,13 @@ class SqliteEventStore(EventStore):
                 (seq_start,),
             ).fetchall()
         return [row[1] for row in rows]
+
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
+                (seq_start,),
+            ).fetchall()
 
     def query(
         self,
@@ -186,11 +205,11 @@ class SqliteEventStore(EventStore):
             ).fetchall()
         return [r[0] for r in rows]
 
-    def clear_and_rewrite(self, records: list[tuple[int, str]]) -> None:
+    def clear_and_rewrite(self, records: list[tuple[int, str, str | None]]) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM events")
             self._conn.executemany(
-                "INSERT INTO events(seq, event) VALUES (?, ?)",
+                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
                 records,
             )
             self._conn.commit()

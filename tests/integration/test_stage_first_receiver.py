@@ -10,7 +10,7 @@ import socket
 import time
 
 import pytest
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Usd, UsdGeom
 
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.event_apply import apply_events, atomic_apply

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from nicegui import ui
@@ -10,12 +12,18 @@ if TYPE_CHECKING:
     from openusdconnect.server import UsdSyncServer
 
 DASHBOARD_STYLE = """
-    .q-page { height: 100vh; }
     .nicegui-content {
-        max-width: 1100px; margin: 0 auto;
-        height: 100%; display: flex; flex-direction: column;
+        max-width: 1400px; margin: 0 auto;
+        padding-bottom: 2rem;
     }
-    .event-feed-scroll { flex: 1; min-height: 0; }
+    .usda-viewer {
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        font-size: 12px;
+        line-height: 1.4;
+        white-space: pre;
+        tab-size: 4;
+        overflow: auto;
+    }
 
     /* JSON editor theme — desaturated to match dashboard */
     body.body--dark .jse-theme-dark {
@@ -90,6 +98,30 @@ def setup_pages(srv: UsdSyncServer):
         ui.add_css(DASHBOARD_STYLE)
         dark = ui.dark_mode(True)
 
+        # Shared refresh registry — sections register callbacks,
+        # single timer drives them all.
+        _refresh_callbacks: list[Callable] = []
+        _refresh_interval = {"value": 5.0}
+
+        def register_refresh(fn):
+            _refresh_callbacks.append(fn)
+
+        def _tick():
+            if _refresh_interval["value"] <= 0:
+                return
+            for fn in _refresh_callbacks:
+                fn()
+
+        timer = ui.timer(5.0, _tick)
+
+        def _set_rate(val):
+            _refresh_interval["value"] = val
+            if val <= 0:
+                timer.deactivate()
+            else:
+                timer.interval = val
+                timer.activate()
+
         # Header
         with ui.row().classes("items-center w-full mb-4"):
             ui.icon("hub", size="sm").classes("dash-accent")
@@ -97,17 +129,24 @@ def setup_pages(srv: UsdSyncServer):
                 "text-lg font-semibold dash-accent"
             )
             ui.space()
+            ui.select(
+                {0: "Off", 2: "2s", 5: "5s", 10: "10s", 30: "30s"},
+                value=5,
+                on_change=lambda e: _set_rate(e.value),
+            ).props('dense outlined label="Auto-refresh"').classes("w-28")
             ui.button(
                 icon="dark_mode",
                 on_click=lambda: dark.set_value(not dark.value),
             ).props("flat round dense size=sm")
 
         _build_server_info(srv)
-        _build_status_cards(srv)
+        _build_status_cards(srv, register_refresh)
         _build_operations(srv)
-        _build_clients_table(srv)
+        _build_layer_stack(srv, register_refresh)
+        _build_proposals_panel(srv, register_refresh)
+        _build_clients_table(srv, register_refresh)
         _build_prim_tree(srv)
-        _build_event_feed(srv)
+        _build_event_feed(srv, register_refresh)
 
     _register_api_routes(srv)
 
@@ -119,6 +158,8 @@ def _build_server_info(srv: UsdSyncServer):
     with ui.row().classes("gap-4 items-center mb-2 text-xs"):
         ui.icon("info", size="xs").classes("dash-muted")
         ui.label(f"Base: {base}").classes("dash-muted font-mono")
+        if srv.require_token:
+            ui.badge("TOFU AUTH", color="positive").props("dense")
 
 
 def _build_prim_tree(srv: UsdSyncServer):
@@ -171,7 +212,7 @@ def _build_prim_tree(srv: UsdSyncServer):
     refresh()
 
 
-def _build_status_cards(srv: UsdSyncServer):
+def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
     """Four stat cards."""
     with ui.row().classes("w-full gap-4 mb-4"):
         with ui.card().classes("flex-1"):
@@ -198,7 +239,8 @@ def _build_status_cards(srv: UsdSyncServer):
         client_val.text = str(len(srv.get_client_list()))
         prim_val.text = f"{srv.get_prim_count()} / {srv.get_tracked_prim_count()}"
 
-    ui.timer(2.0, refresh)
+    if register_refresh:
+        register_refresh(refresh)
     refresh()
 
 
@@ -254,7 +296,394 @@ def _build_operations(srv: UsdSyncServer):
         )
 
 
-def _build_clients_table(srv: UsdSyncServer):
+def _build_transforms_view(srv: UsdSyncServer):
+    """Show composed transforms for all Xform prims on the stage."""
+    from pxr import UsdGeom
+
+    # Snapshot all data under the lock — Traverse() returns a lazy iterator
+    # that can crash if the stage is mutated concurrently by the server thread.
+    rows = []
+    with srv.stage_lock:
+        prims = list(srv.stage.Traverse())
+        for prim in prims:
+            xf = UsdGeom.Xformable(prim)
+            ops = xf.GetOrderedXformOps() if xf else []
+            if not ops:
+                continue
+
+            path = str(prim.GetPath())
+            t_val = r_val = s_val = None
+            for op in ops:
+                name = op.GetAttr().GetName()
+                val = op.Get()
+                if val is None:
+                    continue
+                if name == "xformOp:translate":
+                    v = list(val)
+                    t_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
+                elif name == "xformOp:orient":
+                    q = val
+                    r_val = (
+                        f"({q.GetReal():.3f}, "
+                        f"{q.GetImaginary()[0]:.3f}, "
+                        f"{q.GetImaginary()[1]:.3f}, "
+                        f"{q.GetImaginary()[2]:.3f})"
+                    )
+                elif name == "xformOp:scale":
+                    v = list(val)
+                    s_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
+            rows.append((path, t_val, r_val, s_val))
+
+    # Build UI outside the lock
+    for path, t_val, r_val, s_val in rows:
+        with ui.row().classes(
+            "items-baseline gap-2 w-full font-mono text-xs py-1"
+        ).style("border-bottom: 1px solid rgba(128,128,128,0.15)"):
+            ui.label(path).classes("dash-prim w-48 truncate")
+            if t_val:
+                ui.label(f"T {t_val}").classes("dash-accent")
+            if r_val:
+                ui.label(f"R {r_val}").classes("dash-kind")
+            if s_val:
+                ui.label(f"S {s_val}").classes("dash-muted")
+
+
+def _build_per_layer_view(srv: UsdSyncServer):
+    """Show each department/client layer's USDA contribution."""
+    layers = srv.get_layer_stack_info()
+    if not layers:
+        ui.label("No layers").classes("dash-muted text-sm")
+        return
+
+    # Batch all layer exports in a single lock acquisition
+    layer_usda: list[tuple[str, str, bool, str]] = []
+    with srv.stage_lock:
+        for i, info in enumerate(layers):
+            dept = info.get("department")
+            clients = info.get("clients", [])
+            muted = info.get("muted", False)
+            name = dept or (clients[0] if clients else info.get("identifier", ""))
+            layer = srv.resolve_layer(name)
+            usda = layer.ExportToString() if layer else "# layer not found"
+            badge = "  [MUTED]" if muted else ""
+            header = f"#{i + 1}  {name}{badge}"
+            icon = "layers" if dept else "person"
+            layer_usda.append((header, usda, bool(dept), icon))
+
+    # Build UI outside the lock
+    for header, usda, _is_dept, icon in layer_usda:
+        lines = usda.strip().split("\n")
+        has_opinions = len(lines) > 1
+        with ui.expansion(
+            header, icon=icon,
+        ).classes("w-full").props(
+            "dense" + (" default-opened" if has_opinions else "")
+        ):
+            ui.label(usda).classes("usda-viewer")
+
+
+def _build_layer_stack(srv: UsdSyncServer, register_refresh=None):
+    """Layer stack panel with composed USDA viewer side-by-side."""
+
+    with ui.row().classes("w-full gap-4 mb-4 items-start"):
+        # -- Left column: layer controls -----------------------------------
+        with ui.column().classes("flex-1"):
+            ui.label("LAYER STACK").classes(
+                "text-xs font-semibold dash-muted uppercase mb-1"
+            )
+
+            layer_container = ui.column().classes("w-full")
+
+        # -- Right column: composed USDA viewer ----------------------------
+        with ui.column().classes("flex-1"):
+            with ui.row().classes("items-center gap-2 mb-1"):
+                ui.label("COMPOSED STAGE").classes(
+                    "text-xs font-semibold dash-muted uppercase"
+                )
+                view_toggle = ui.toggle(
+                    {"transforms": "Transforms", "layers": "Per Layer", "usda": "Full USDA"},
+                    value="transforms",
+                ).props("dense no-caps size=sm")
+                ui.button(
+                    icon="refresh",
+                    on_click=lambda: _refresh_composed(),
+                ).props("flat round dense size=sm").tooltip("Refresh")
+            usda_scroll = ui.scroll_area().classes("w-full").style("height: 400px")
+            with usda_scroll:
+                composed_container = ui.column().classes("w-full gap-0")
+
+    # -- Refresh logic (needs references from both columns) ----------------
+
+    def _refresh_composed():
+        composed_container.clear()
+        with composed_container:
+            if view_toggle.value == "usda":
+                try:
+                    text = srv.export_flattened_string()
+                except Exception:
+                    text = "# (unable to flatten stage)"
+                ui.label(text).classes("usda-viewer")
+            elif view_toggle.value == "layers":
+                _build_per_layer_view(srv)
+            else:
+                _build_transforms_view(srv)
+
+    view_toggle.on_value_change(lambda _: _refresh_composed())
+
+    def _refresh_layer_cards():
+        """Refresh only the layer card list (safe for timer — no expansion reset)."""
+        layers = srv.get_layer_stack_info()
+        connected_clients = {
+            c["client_id"] for c in srv.get_client_list() if c.get("client_id")
+        }
+        n = len(layers)
+        layer_container.clear()
+        with layer_container:
+            if not layers:
+                ui.label("No layers").classes("dash-muted text-sm")
+            else:
+                for i, info in enumerate(layers):
+                    _build_layer_card(
+                        i, info, connected_clients,
+                        _mute, _unmute, _merge, _move_layer,
+                        is_first=(i == 0), is_last=(i == n - 1),
+                    )
+
+    def _refresh_all():
+        """Full refresh — layer cards + composed view. For user actions only."""
+        _refresh_layer_cards()
+        _refresh_composed()
+
+    def _move_layer(index, direction):
+        """Move a department layer up (stronger) or down (weaker)."""
+        layers = srv.get_layer_stack_info()
+        new_index = index + direction
+        if new_index < 0 or new_index >= len(layers):
+            return
+        layers[index], layers[new_index] = layers[new_index], layers[index]
+        new_order = [
+            info["department"] for info in layers if info.get("department")
+        ]
+        srv.set_department_priority(new_order)
+        _refresh_all()
+
+    def _mute(key):
+        srv.mute_layer(key)
+        ui.notify(f"Muted: {key}", type="info")
+        _refresh_all()
+
+    def _unmute(key):
+        srv.unmute_layer(key)
+        ui.notify(f"Unmuted: {key}", type="positive")
+        _refresh_all()
+
+    def _merge(client_id):
+        ok = srv.merge_layer(client_id)
+        if ok:
+            ui.notify(f"Merged: {client_id}", type="positive")
+        else:
+            ui.notify(f"Merge failed: {client_id}", type="negative")
+        _refresh_all()
+
+    _refresh_all()
+
+    def _timer_tick():
+        _refresh_layer_cards()
+        if view_toggle.value == "transforms":
+            _refresh_composed()
+
+    if register_refresh:
+        register_refresh(_timer_tick)
+
+
+def _build_layer_card(
+    i, info, connected_clients,
+    on_mute, on_unmute, on_merge, on_move,
+    is_first=False, is_last=False,
+):
+    """Render a single layer card in the stack."""
+    dept = info.get("department")
+    clients = info.get("clients", [])
+    muted = info.get("muted", False)
+    identifier = info.get("identifier", "")
+
+    with ui.card().classes("w-full p-2"):
+        with ui.row().classes("items-center w-full gap-2"):
+            # Reorder buttons
+            with ui.column().classes("gap-0"):
+                ui.button(
+                    icon="keyboard_arrow_up",
+                    on_click=lambda idx=i: on_move(idx, -1),
+                ).props("flat round dense size=xs").set_enabled(not is_first)
+                ui.button(
+                    icon="keyboard_arrow_down",
+                    on_click=lambda idx=i: on_move(idx, 1),
+                ).props("flat round dense size=xs").set_enabled(not is_last)
+
+            # Strength indicator
+            ui.label(f"#{i + 1}").classes(
+                "text-xs dash-muted font-mono w-6 text-right"
+            )
+
+            # Layer icon + name
+            if dept:
+                ui.icon("layers", size="xs").classes("dash-accent")
+                ui.label(dept).classes("font-semibold text-sm dash-accent")
+            else:
+                ui.icon("person", size="xs").classes("dash-muted")
+                label = clients[0] if clients else identifier
+                ui.label(label).classes("font-semibold text-sm")
+
+            ui.space()
+
+            # Connected/disconnected indicators
+            for cid in clients:
+                online = cid in connected_clients
+                color = "positive" if online else "grey-6"
+                ui.icon(
+                    "circle", size="xs",
+                ).classes(f"text-{color}").tooltip(
+                    f"{cid} — {'connected' if online else 'disconnected'}"
+                )
+
+            # Muted badge
+            if muted:
+                ui.badge("MUTED", color="warning").props("dense")
+
+            # Mute/unmute toggle
+            key = dept or (clients[0] if clients else None)
+            if key:
+                if muted:
+                    ui.button(
+                        icon="volume_up",
+                        on_click=lambda k=key: on_unmute(k),
+                    ).props("flat round dense size=sm").tooltip("Unmute")
+                else:
+                    ui.button(
+                        icon="volume_off",
+                        on_click=lambda k=key: on_mute(k),
+                    ).props("flat round dense size=sm").tooltip("Mute")
+
+            # Merge button (only for non-department, single client)
+            if not dept and clients:
+                ui.button(
+                    icon="merge",
+                    on_click=lambda cid=clients[0]: on_merge(cid),
+                ).props("flat round dense size=sm").tooltip("Merge into root")
+
+        # Client list for department layers
+        if dept and clients:
+            with ui.row().classes("pl-8 gap-1 flex-wrap"):
+                for cid in clients:
+                    online = cid in connected_clients
+                    ui.label(cid).classes(
+                        "text-xs font-mono "
+                        + ("" if online else "dash-muted")
+                    )
+
+
+def _build_proposals_panel(srv: UsdSyncServer, register_refresh=None):
+    """Cross-department edit proposals panel."""
+    with ui.row().classes("items-center gap-2 mb-1"):
+        ui.label("PROPOSALS").classes(
+            "text-xs font-semibold dash-muted uppercase"
+        )
+        ui.button(
+            icon="refresh",
+            on_click=lambda: _refresh_proposals(),
+        ).props("flat round dense size=sm").tooltip("Refresh")
+
+    proposal_container = ui.column().classes("w-full mb-4")
+
+    def _refresh_proposals():
+        proposals = srv.list_proposals()
+        proposal_container.clear()
+        with proposal_container:
+            pending = [p for p in proposals if p["status"] == "pending"]
+            if not pending:
+                ui.label("No pending proposals").classes("dash-muted text-sm")
+                return
+
+            for p in pending:
+                _build_proposal_card(p)
+
+    def _build_proposal_card(p):
+        pid = p["proposal_id"]
+        with ui.card().classes("w-full p-3"):
+            with ui.row().classes("items-center w-full gap-2"):
+                ui.icon("rate_review", size="xs").classes("dash-accent")
+                # Title: first line of description or proposal ID
+                title = (p["description"] or pid).split("\n")[0]
+                ui.label(title).classes("font-semibold text-sm flex-1")
+                ui.badge(p["status"], color="warning").props("dense")
+
+            with ui.row().classes("items-center gap-3 text-xs dash-muted mt-1"):
+                ui.label(f"From: {p['from_client']}")
+                if p.get("from_department"):
+                    ui.badge(p["from_department"]).props("dense outline")
+                ui.icon("arrow_forward", size="xs")
+                ui.badge(
+                    p["target_department"], color="primary",
+                ).props("dense")
+
+            # Full description (multi-line body after the title)
+            desc = p.get("description", "")
+            body = "\n".join(desc.split("\n")[1:]).strip()
+            if body:
+                ui.label(body).classes("text-xs dash-muted mt-1").style(
+                    "white-space: pre-wrap"
+                )
+
+            # Proposal USDA content
+            usda = p.get("layer_usda", "")
+            lines = usda.strip().split("\n")
+            has_content = len(lines) > 1
+            if has_content:
+                with ui.expansion("View changes", icon="code").classes(
+                    "w-full mt-1"
+                ).props("dense"):
+                    ui.label(usda).classes("usda-viewer")
+
+            # Action buttons
+            with ui.row().classes("gap-2 mt-2"):
+                ui.button(
+                    "Approve", icon="check",
+                    on_click=lambda pid=pid: _approve(pid),
+                ).props("dense no-caps size=sm color=positive")
+                ui.button(
+                    "Reject", icon="close",
+                    on_click=lambda pid=pid: _reject(pid),
+                ).props("dense no-caps size=sm color=negative")
+
+    def _approve(pid):
+        if srv.approve_proposal(pid):
+            ui.notify(f"Approved: {pid}", type="positive")
+        else:
+            ui.notify("Approval failed", type="negative")
+        _refresh_proposals()
+
+    def _reject(pid):
+        if srv.reject_proposal(pid):
+            ui.notify(f"Rejected: {pid}", type="warning")
+        else:
+            ui.notify("Rejection failed", type="negative")
+        _refresh_proposals()
+
+    _refresh_proposals()
+
+    _last_proposal_count = {"value": srv.get_proposal_count()}
+
+    def _check_proposals():
+        count = srv.get_proposal_count()
+        if count != _last_proposal_count["value"]:
+            _last_proposal_count["value"] = count
+            _refresh_proposals()
+
+    if register_refresh:
+        register_refresh(_check_proposals)
+
+
+def _build_clients_table(srv: UsdSyncServer, register_refresh=None):
     """Client roster."""
     ui.label("CLIENTS").classes("text-xs font-semibold dash-muted uppercase mb-1")
 
@@ -287,11 +716,60 @@ def _build_clients_table(srv: UsdSyncServer):
             for c in clients
         ]
 
-    ui.timer(3.0, refresh)
+    if register_refresh:
+        register_refresh(refresh)
     refresh()
 
+    # Token management (only when TOFU is enabled)
+    if srv.require_token:
+        _build_token_panel(srv)
 
-def _build_event_feed(srv: UsdSyncServer):
+
+def _build_token_panel(srv: UsdSyncServer):
+    """Token management panel — list issued tokens with revoke buttons."""
+    ui.label("TOKENS").classes("text-xs font-semibold dash-muted uppercase mb-1")
+
+    token_container = ui.column().classes("w-full mb-4")
+
+    def _refresh_tokens():
+        tokens = srv.get_token_list()
+        token_container.clear()
+        with token_container:
+            if not tokens:
+                ui.label("No tokens issued").classes("dash-muted text-sm")
+                return
+            for t in tokens:
+                created = datetime.datetime.fromtimestamp(
+                    t["created_at"],
+                ).strftime("%Y-%m-%d %H:%M")
+                seen = datetime.datetime.fromtimestamp(
+                    t["last_seen"],
+                ).strftime("%Y-%m-%d %H:%M")
+                with ui.row().classes(
+                    "items-center w-full gap-3 font-mono text-xs py-1"
+                ).style("border-bottom: 1px solid rgba(128,128,128,0.15)"):
+                    ui.label(t["client_id"]).classes("dash-prim flex-1")
+                    if t.get("department"):
+                        ui.badge(t["department"]).props("dense outline")
+                    ui.label(f"created {created}").classes("dash-muted")
+                    ui.label(f"seen {seen}").classes("dash-muted")
+                    ui.button(
+                        icon="delete",
+                        on_click=lambda cid=t["client_id"]: _revoke(cid),
+                    ).props("flat round dense size=sm color=negative").tooltip(
+                        "Revoke token"
+                    )
+
+    def _revoke(client_id):
+        ok = srv.revoke_token(client_id)
+        if ok:
+            ui.notify(f"Revoked token: {client_id}", type="warning")
+        _refresh_tokens()
+
+    _refresh_tokens()
+
+
+def _build_event_feed(srv: UsdSyncServer, register_refresh=None):
     """Paginated event feed with inline JSON detail."""
     ui.label("EVENT LOG").classes(
         "text-xs font-semibold dash-muted uppercase mb-1"
@@ -329,7 +807,7 @@ def _build_event_feed(srv: UsdSyncServer):
             icon="chevron_right", on_click=lambda: _go(1),
         ).props("flat dense round size=sm")
 
-    feed_scroll = ui.scroll_area().classes("w-full event-feed-scroll")
+    feed_scroll = ui.scroll_area().classes("w-full").style("height: 600px")
     feed_container = ui.column().classes("w-full gap-0")
     feed_container.move(feed_scroll)
 
@@ -412,12 +890,18 @@ def _build_event_feed(srv: UsdSyncServer):
     def _on_live(_rec):
         _has_new_events["value"] = True
 
+    _last_count = {"value": srv.get_event_count()}
+
     def _check_live():
-        if _has_new_events["value"] and current_page["value"] == 0:
+        count = srv.get_event_count()
+        changed = _has_new_events["value"] or count != _last_count["value"]
+        _last_count["value"] = count
+        if changed:
             _has_new_events["value"] = False
             _rebuild()
 
-    ui.timer(1.0, _check_live)
+    if register_refresh:
+        register_refresh(_check_live)
     srv.add_event_listener(_on_live)
 
     # Clean up listener when browser tab disconnects
@@ -428,6 +912,7 @@ def _build_event_feed(srv: UsdSyncServer):
 def _register_api_routes(srv: UsdSyncServer):
     """REST API for scripting."""
     from nicegui import app
+    from starlette.requests import Request
 
     @app.get("/api/status")
     def api_status():
@@ -455,3 +940,82 @@ def _register_api_routes(srv: UsdSyncServer):
     @app.get("/api/prim-tree")
     def api_prim_tree():
         return srv.get_prim_tree()
+
+    # -- Layer management endpoints ----------------------------------------
+
+    @app.get("/api/layers")
+    def api_layers():
+        return srv.get_layer_stack_info()
+
+    @app.post("/api/layers/reorder")
+    async def api_layers_reorder(request: Request):
+        body = await request.json()
+        ordered = body.get("departments", body.get("order", []))
+        srv.set_department_priority(ordered)
+        return {"ok": True}
+
+    @app.post("/api/layers/{key}/mute")
+    def api_layer_mute(key: str):
+        ok = srv.mute_layer(key)
+        return {"ok": ok}
+
+    @app.post("/api/layers/{key}/unmute")
+    def api_layer_unmute(key: str):
+        ok = srv.unmute_layer(key)
+        return {"ok": ok}
+
+    @app.post("/api/layers/{client_id}/merge")
+    def api_layer_merge(client_id: str):
+        ok = srv.merge_layer(client_id)
+        return {"ok": ok}
+
+    @app.delete("/api/layers/{client_id}")
+    def api_layer_delete(client_id: str):
+        ok = srv.delete_layer(client_id)
+        return {"ok": ok}
+
+    @app.get("/api/departments")
+    def api_departments():
+        return {"departments": srv.department_priority}
+
+    @app.post("/api/departments")
+    async def api_departments_set(request: Request):
+        body = await request.json()
+        ordered = body.get("departments", [])
+        srv.set_department_priority(ordered)
+        return {"ok": True}
+
+    # -- Token management endpoints ----------------------------------------
+
+    @app.get("/api/tokens")
+    def api_tokens():
+        return srv.get_token_list()
+
+    @app.delete("/api/tokens/{client_id}")
+    def api_token_revoke(client_id: str):
+        ok = srv.revoke_token(client_id)
+        return {"ok": ok}
+
+    # -- Proposal endpoints ------------------------------------------------
+
+    @app.get("/api/proposals")
+    def api_proposals(department: str | None = None):
+        return srv.list_proposals(department=department)
+
+    @app.post("/api/proposals")
+    async def api_proposal_create(request: Request):
+        body = await request.json()
+        pid = srv.create_proposal(
+            body.get("from_client", ""),
+            body.get("target_department", ""),
+            body.get("description", ""),
+        )
+        return {"proposal_id": pid}
+
+    @app.post("/api/proposals/{proposal_id}/approve")
+    def api_proposal_approve(proposal_id: str):
+        return {"ok": srv.approve_proposal(proposal_id)}
+
+    @app.post("/api/proposals/{proposal_id}/reject")
+    def api_proposal_reject(proposal_id: str):
+        return {"ok": srv.reject_proposal(proposal_id)}

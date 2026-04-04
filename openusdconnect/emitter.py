@@ -68,10 +68,7 @@ def _should_track_attr(attr_name: str) -> bool:
     """
     if attr_name in _SKIP_ATTR_NAMES:
         return False
-    for prefix in _SKIP_ATTR_PREFIXES:
-        if attr_name.startswith(prefix):
-            return False
-    return True
+    return all(not attr_name.startswith(prefix) for prefix in _SKIP_ATTR_PREFIXES)
 
 
 def _usd_value_to_python(val):
@@ -328,7 +325,7 @@ class _SuppressScope:
 
     __slots__ = ("_emitter",)
 
-    def __init__(self, emitter: "NoticeEmitter"):
+    def __init__(self, emitter: NoticeEmitter):
         self._emitter = emitter
 
     def __enter__(self):

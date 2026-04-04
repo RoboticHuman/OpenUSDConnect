@@ -71,10 +71,10 @@ def _assert_ref_results(results, label, check_trs=True):
             )
 
 
-def test_ref_no_duplicates(blender_exe, tmp_path):
+def test_ref_no_duplicates(blender_exe, tmp_path, free_port):
     """Reference children: emitter sends ensure_prim for children of a
     referenced asset.  Receiver must not create duplicate Blender objects."""
-    port = 7297
+    port = free_port
     results_path = str(tmp_path / "ref_receiver_results.json")
     server = start_server(tmp_path, port)
 
@@ -97,14 +97,14 @@ def test_ref_no_duplicates(blender_exe, tmp_path):
         stop_server(server)
 
 
-def test_ref_reset_no_duplicates(blender_exe, tmp_path):
+def test_ref_reset_no_duplicates(blender_exe, tmp_path, free_port):
     """Same scenario but receiver runs twice (simulating seq=0 reset).
 
     Each Blender invocation starts with a fresh scene.  The second receiver
     gets all events replayed from the start, including set_reference.
     Both runs must produce no duplicates.
     """
-    port = 7296
+    port = free_port
     results1_path = str(tmp_path / "ref_reset_results1.json")
     results2_path = str(tmp_path / "ref_reset_results2.json")
     server = start_server(tmp_path, port)
@@ -167,9 +167,9 @@ def _create_test_scene(tmp_path):
     return scene_path
 
 
-def test_ref_loopback_no_duplicates(blender_exe, tmp_path):
+def test_ref_loopback_no_duplicates(blender_exe, tmp_path, free_port):
     """Loopback: Blender already has the scene imported when events arrive."""
-    port = 7295
+    port = free_port
     results_path = str(tmp_path / "ref_loopback_results.json")
     scene_path = _create_test_scene(tmp_path)
     server = start_server(tmp_path, port)
@@ -193,9 +193,9 @@ def test_ref_loopback_no_duplicates(blender_exe, tmp_path):
         stop_server(server)
 
 
-def test_ref_manual_then_move(blender_exe, tmp_path):
+def test_ref_manual_then_move(blender_exe, tmp_path, free_port):
     """User's exact workflow: manual set_reference via CLI, then move Chair."""
-    port = 7294
+    port = free_port
     results_path = str(tmp_path / "ref_manual_results.json")
     server = start_server(tmp_path, port)
 

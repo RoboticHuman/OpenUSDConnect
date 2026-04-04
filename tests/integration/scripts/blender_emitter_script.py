@@ -6,7 +6,6 @@ Run via: blender --background --python tests/blender_emitter_script.py -- --port
 
 import os
 import sys
-import time
 
 # Add project root to sys.path (tests/integration/scripts/ → repo root)
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -71,9 +70,6 @@ def main():
     txn = make_txn("integration-test-emitter", events)
     send_line(sock, txn)
     print(f"[Emitter] Sent {len(events)} events")
-
-    # Small delay to ensure server processes
-    time.sleep(0.5)
 
     send_line(sock, make_quit())
     sock.close()

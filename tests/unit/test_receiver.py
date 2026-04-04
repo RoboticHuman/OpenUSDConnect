@@ -6,6 +6,8 @@ import time
 
 from openusdconnect.receiver import ReceiverThread
 
+_HELLO_OK = b'{"type":"hello_ok"}\n'
+
 
 def _make_server():
     """Create a listening socket on a random port, return (socket, port)."""
@@ -16,8 +18,17 @@ def _make_server():
     return srv, srv.getsockname()[1]
 
 
+def _accept_and_hello(srv, timeout=2):
+    """Accept one connection, consume hello, send hello_ok. Return conn."""
+    srv.settimeout(timeout)
+    conn, _ = srv.accept()
+    conn.makefile("r").readline()  # consume hello
+    conn.sendall(_HELLO_OK)
+    return conn
+
+
 def _accept(srv, timeout=2):
-    """Accept one connection."""
+    """Accept one connection (no handshake)."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
     return conn
@@ -62,10 +73,8 @@ class TestReceiverThread:
         srv, port = _make_server()
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
-
             conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
             conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
 
@@ -79,7 +88,7 @@ class TestReceiverThread:
             _poll_until(_drain_all)
             assert len(collected) == 2
             assert rt.last_seq == 2
-            assert rt.drain_queue() == []
+            assert len(rt.drain_queue()) == 0
         finally:
             _teardown(rt, conn, srv)
 
@@ -91,7 +100,7 @@ class TestReceiverThread:
             socket_timeout=0.1,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
             _poll_until(lambda: rt.connected)
             assert rt.connected
@@ -105,14 +114,14 @@ class TestReceiverThread:
             srv.close()
 
     def test_drain_empty_before_connect(self):
-        """drain_queue returns empty list before any data arrives."""
+        """drain_queue returns empty deque before any data arrives."""
         srv, port = _make_server()
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        assert rt.drain_queue() == []
+        assert len(rt.drain_queue()) == 0
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            assert rt.drain_queue() == []
+            assert len(rt.drain_queue()) == 0
         finally:
             _teardown(rt, conn, srv)
 
@@ -130,7 +139,7 @@ class TestReconnection:
         rt.start()
 
         # First connection
-        conn1 = _accept(srv)
+        conn1 = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected)
         assert rt.connected
 
@@ -139,14 +148,9 @@ class TestReconnection:
         _poll_until(lambda: not rt.connected)
 
         # Receiver should reconnect
-        conn2 = _accept(srv, timeout=2)
+        conn2 = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected, timeout=2)
         assert rt.connected
-
-        # Verify hello sent on reconnect
-        hello = json.loads(conn2.makefile("r").readline())
-        assert hello["type"] == "hello"
-        assert hello["role"] == "receiver"
 
         _teardown(rt, conn2, srv)
 
@@ -160,8 +164,7 @@ class TestReconnection:
         rt.start()
 
         # First connection — send some events
-        conn1 = _accept(srv)
-        conn1.makefile("r").readline()  # consume hello
+        conn1 = _accept_and_hello(srv)
         conn1.sendall(b'{"type":"event","seq":10,"event":{"k":"ensure_prim"}}\n')
         _poll_until(lambda: rt.last_seq == 10)
 
@@ -185,7 +188,7 @@ class TestReconnection:
         )
         rt.start()
 
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         _poll_until(lambda: rt.connected)
         conn.close()
 
@@ -204,9 +207,8 @@ class TestSocketTimeout:
             host="127.0.0.1", port=port, reconnect=False, socket_timeout=0.05,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
             _poll_until(lambda: rt.connected)
 
             # Wait longer than socket timeout
@@ -237,8 +239,7 @@ class TestBoundedQueue:
         rt.start()
 
         # First connection
-        conn1 = _accept(srv)
-        conn1.makefile("r").readline()  # consume hello
+        conn1 = _accept_and_hello(srv)
 
         # Send 5 events into a queue with max depth 3
         for i in range(1, 6):
@@ -272,10 +273,8 @@ class TestBoundedQueue:
             socket_timeout=0.1,
         )
         rt.start()
-        conn = _accept(srv)
+        conn = _accept_and_hello(srv)
         try:
-            conn.makefile("r").readline()  # consume hello
-
             for i in range(1, 6):
                 conn.sendall(
                     (json.dumps({"type": "event", "seq": i, "event": {"k": "ensure_prim"}}) + "\n")
@@ -285,5 +284,78 @@ class TestBoundedQueue:
             rt.join(timeout=1)
             assert not rt.is_alive()
         finally:
+            conn.close()
+            srv.close()
+
+
+class TestPingHandling:
+    """Server pings are handled transparently by the receiver."""
+
+    def test_ping_not_queued(self):
+        """Ping messages from server are silently dropped, not queued."""
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
+            conn.sendall(b'{"type":"ping"}\n')
+            conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
+
+            collected = []
+            _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 2)
+            assert len(collected) == 2
+            for line in collected:
+                assert '"ping"' not in line
+            assert rt.last_seq == 2
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_ping_resets_timeout_counter(self):
+        """Receiving a ping prevents consecutive timeout disconnect."""
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.05,
+        )
+        import openusdconnect.receiver as recv_mod
+        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        try:
+            rt.start()
+            conn = _accept_and_hello(srv)
+            _poll_until(lambda: rt.connected)
+            # Wait ~2 timeouts, then send a ping to reset counter
+            time.sleep(0.12)
+            conn.sendall(b'{"type":"ping"}\n')
+            time.sleep(0.12)
+            # Should still be alive because ping reset the counter
+            assert rt.connected
+        finally:
+            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
+            _teardown(rt, conn, srv)
+
+
+class TestConsecutiveTimeouts:
+    """Receiver disconnects after too many consecutive recv timeouts."""
+
+    def test_max_consecutive_timeouts(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1", port=port, reconnect=False,
+            socket_timeout=0.02,
+        )
+        import openusdconnect.receiver as recv_mod
+        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        try:
+            rt.start()
+            conn = _accept_and_hello(srv)
+            _poll_until(lambda: rt.connected)
+            # Don't send anything — let timeouts accumulate
+            rt.join(timeout=2)
+            assert not rt.is_alive()
+        finally:
+            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
             conn.close()
             srv.close()

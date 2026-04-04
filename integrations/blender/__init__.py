@@ -18,11 +18,6 @@ import os
 import sys
 import uuid
 
-# Session-level origin identifier shared by emitter and receiver connections
-# from this Blender instance.  The server uses it to suppress echo — events
-# are not broadcast back to connections with the same origin.
-SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
-
 # Ensure the addon directory is on sys.path so vendored openusdconnect is importable.
 # Purge openusdconnect modules loaded from a different path (e.g. the uv dev
 # environment) so the bundled copy is used.  Keep modules already loaded from
@@ -36,6 +31,19 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
         del sys.modules[_k]
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
+
+from openusdconnect.client_id import make_stable_client_id
+
+# Stable client ID based on username + hostname. Persists across sessions
+# so the server can map reconnections to the same per-client layer.
+STABLE_CLIENT_ID = make_stable_client_id("blender")
+
+# Session-level origin identifier shared by emitter and receiver connections
+# from this Blender instance.  The server uses it to suppress echo — events
+# are not broadcast back to connections with the same origin.
+# Random per session — unlike STABLE_CLIENT_ID, this changes on restart so
+# the server can distinguish multiple sessions from the same machine.
+SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 
 # io_blender_mtlx (Activision MaterialX node handlers) lives under vendor/
 _vendor_mtlx = os.path.join(_addon_dir, "vendor")

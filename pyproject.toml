@@ -76,6 +76,7 @@ select = [
 "tests/unit/test_blender_stage_author.py" = ["E402"]
 "tests/unit/test_stage_parity.py" = ["E402", "I001"]
 "scripts/create_test_asset.py" = ["E402"]
+"integrations/unreal/connect.py" = ["E402"]
 
 [tool.coverage.run]
 source = ["openusdconnect"]

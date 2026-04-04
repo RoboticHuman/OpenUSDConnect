@@ -8,57 +8,56 @@ General-purpose real-time USD sync framework for DCC livelink. The core library 
 # Install dependencies
 uv sync
 
-# Run core tests (no Blender needed)
-uv run pytest tests/ -v -k "not blender"
+# Run tests (no Blender needed)
+uv run pytest tests/unit/ -v
 
 # Start sync server
-uv run python -m openusdconnect.server --port 7200 --base scene.usda --log events.db
+uv run python -m openusdconnect.server --port 7200 --base scene.usda
 
-# Start with event log compaction
-uv run python -m openusdconnect.server --port 7200 --log events.db --compact
-```
+# Start with admin dashboard
+uv run python -m openusdconnect.server --port 7200 --base scene.usda --dashboard 8080
 
-## Documentation
+# Start with per-department layers and TOFU auth
+uv run python -m openusdconnect.server --port 7200 --base scene.usda \
+  --department-priority animation,lighting,fx --require-token
 
-- **[Testing Setup](docs/testing-setup.md)** — How to configure Blender for tests: download portable Blender, point to a local build, or skip Blender tests entirely.
-- **[Blender Addon Usage](docs/blender-addon-usage.md)** — Installing the addon, UI overview, two-Blender live sync walkthrough, auto-tracking, and synced event types.
-
-## Building the Blender Addon
-
-```bash
+# Build Blender addon
 uv run python scripts/build_blender_addon.py
 # Output: dist/usd_connect_blender.zip
 ```
 
-Install in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
+Install the addon in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
+
+## Documentation
+
+- **[Blender Addon Usage](docs/blender-addon-usage.md)** — Installing, UI overview, live sync walkthrough
+- **[Testing Setup](docs/testing-setup.md)** — Blender configuration, test tiers
+- **[Profiling](docs/profiling.md)** — Performance profiling with py-spy
 
 ## Features
 
-### Core Framework (`openusdconnect/`)
-- JSON Lines over TCP protocol covering transforms, visibility, references, payloads, lifecycle events, and more
+### Core Framework
+- JSON Lines over TCP protocol: transforms, visibility, references, payloads, variants, materials, shaders
 - Authoritative sequencer server with SQLite event log, late-join replay, and compaction
-- Background receiver thread with sequence-based reconnect resume
-- Stage change detection via `Usd.Notice.ObjectsChanged` with partial TRS diffing
+- Per-department shared layers with configurable priority ordering (composition strength)
+- TOFU (Trust On First Use) token authentication
+- Cross-department edit proposals (propose/approve/reject workflow)
+- Stage change detection via `Usd.Notice.ObjectsChanged` with partial diffing
 - Quaternion rotation using USD-native `xformOp:orient`
-- Payload composition arcs with load/unload lifecycle and TRS persistence across cycles
-- Event log compaction with resync broadcast (follows LIVERPS ordering from OpenUSD spec)
-- `DCCAdapter` ABC — plug in any DCC (Blender, Maya, Houdini, Unreal)
-- `UsdStageAdapter` for headless/server-side USD consumers
-- `MockAdapter` for testing without pxr
+- `DCCAdapter` ABC for plugging in any DCC application
 
-### Blender Integration (`integrations/blender/`)
-- USDHook for automatic prim-path tagging on import
-- Live network emitter via depsgraph handler
-- Auto-track mode — assigns prim paths to new objects on first manipulation
-- Network receiver with `bpy.app.timers` queue drain
-- World-preserving `matrix_parent_inverse` normalization (Y-up <> Z-up safe)
-- Batch-scoped feedback loop guard (emitter + receiver on same instance)
-- Ancestor event emission for correct parent-child ordering
-- Sidebar UI: Import, Local Capture, Network Emitter, Network Receiver
-- Geometry types: Sphere, Cube, Cylinder, Cone, Mesh, Xform
-- Parametric attribute sync (radius, size, height)
-- Reference and payload import with deduplication across load/unload cycles
-- Visibility, delete, rename, deactivate sync
+### Blender Integration
+- Live network emitter with configurable coalescing
+- Network receiver with timer-based queue drain
+- Auto-track mode for new objects
+- Reference and payload import with load/unload lifecycle
+- Material sync: UsdPreviewSurface, MaterialX (Standard Surface, OpenPBR), texture connections
+- Geometry, visibility, delete, rename sync
+- Y-up / Z-up axis conversion
+
+### Unreal Integration
+- Stage-level bridge via USDStageActor (no DCCAdapter needed)
+- Bidirectional transform sync
 
 ## Architecture
 
@@ -68,31 +67,32 @@ Install in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 | `openusdconnect/transport.py` | TCP send/recv (JSON Lines) |
 | `openusdconnect/event_apply.py` | Apply events to a `Usd.Stage` |
 | `openusdconnect/emitter.py` | Stage change detection and partial diffing |
-| `openusdconnect/server.py` | Authoritative TCP sequencer with replay and compaction |
+| `openusdconnect/server.py` | Authoritative TCP sequencer with per-department layers, replay, and compaction |
 | `openusdconnect/receiver.py` | Background TCP client with event queue |
 | `openusdconnect/adapters.py` | `DCCAdapter` ABC + USD/Mock implementations |
-| `integrations/blender/` | Blender addon (capture, receiver, UI) |
+| `openusdconnect/token_store.py` | SQLite-backed TOFU token persistence |
+| `openusdconnect/token_client.py` | Client-side token storage |
+| `openusdconnect/client_id.py` | Deterministic client ID generation |
+| `integrations/blender/` | Blender addon (capture, receiver, shader mappers, UI) |
+| `integrations/unreal/` | Unreal Engine integration via USDStageActor |
+| `integrations/dashboard/` | NiceGUI web admin dashboard (layers, auth, proposals) |
 
 ## Tests
 
-Run all tests: `uv run pytest tests/ -v`
-Run core only (no Blender): `uv run pytest tests/ -v -k "not blender"`
+```bash
+# Unit tests (fast, no Blender)
+uv run pytest tests/unit/ -v
 
-See [Testing Setup](docs/testing-setup.md) for Blender configuration and detailed coverage.
+# All tests (unit + headless integration)
+uv run pytest tests/ -v
 
-### Core tests (no Blender needed)
-- `test_protocol.py` — event schema validation, message construction
-- `test_event_apply.py` — prim creation, canonical xform ops, TRS application
-- `test_roundtrip.py` — emitter → adapter full pipeline, partial diffs, visibility, payload load/unload
-- `test_compaction.py` — event log compaction: TRS merging, tombstones, load/unload exclusivity
-- `test_blender_stage_author.py` — BlenderStageAuthor + NoticeEmitter integration with mock bpy: auto-track, partial diff, deletion detection, feedback guard
+# Asset E2E tests (requires Blender)
+uv run pytest tests/integration/asset_tests/ --asset-tests -v
+```
 
-### Blender tests (headless, requires Blender 4.4+)
-- `test_blender_adapter.py` — headless tests: prim types, TRS, visibility, gprim attrs, delete, rename, MPI world-preservation
-- `test_blender_integration.py` — end-to-end emitter → server → receiver pipeline
-- `test_ref_reimport.py` — reference/payload deduplication across import, reset, loopback, and manual workflows
+See [Testing Setup](docs/testing-setup.md) for details.
 
 ## Acknowledgments
 
-- [**io_blender_mtlx**](https://github.com/Activision/io_blender_mtlx) by Activision — MaterialX node handlers for building Blender shader networks from MaterialX node definitions
-- [**USD Working Group Assets**](https://github.com/usd-wg/assets) by the USD Working Group — standardized test assets used by the asset integration test suite
+- [**io_blender_mtlx**](https://github.com/Activision/io_blender_mtlx) by Activision — MaterialX node handlers for Blender shader networks
+- [**USD Working Group Assets**](https://github.com/usd-wg/assets) — standardized test assets for the integration test suite

@@ -43,10 +43,30 @@ _SURFACE_SHADER_IDS = frozenset({
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
-    """Get existing prim or define a new one. Idempotent."""
+    """Get existing prim or define a new one. Idempotent.
+
+    When the prim already exists on the composed stage but the current
+    edit target layer has no spec for it, a 'def' spec is created in the
+    edit target so the prim survives if stronger layers are muted or
+    removed.  Without this, the edit target would only get an 'over'
+    on the first attribute write, which is invisible without a 'def'
+    elsewhere.
+    """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
         prim = stage.DefinePrim(prim_path, type_name)
+    else:
+        # Prim exists on composed stage — ensure a def spec exists
+        # in the current edit target layer (DefinePrim is a no-op if
+        # the prim already exists, so we go through Sdf directly).
+        layer = stage.GetEditTarget().GetLayer()
+        if not layer.GetPrimAtPath(prim_path):
+            Sdf.CreatePrimInLayer(layer, prim_path)
+            spec = layer.GetPrimAtPath(prim_path)
+            if spec:
+                spec.specifier = Sdf.SpecifierDef
+                if type_name:
+                    spec.typeName = type_name
     return prim
 
 
@@ -64,36 +84,75 @@ def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
     return None
 
 
-def ensure_canonical_ops(stage: Usd.Stage, prim_path: str):
+def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
     """Ensure canonical xform ops exist on prim: translate, orient (quatf), scale.
 
     Returns (prim, xformable, translate_op, orient_op, scale_op).
     Enforces xformOpOrder = [translate, orient, scale].
+
+    When per-client layers are in use, ops may already exist on the
+    composed stage (from another client's layer) but not in the current
+    edit target.  This function checks the edit target layer and
+    re-authors ops locally so each layer is self-contained — a layer
+    can be muted or removed without losing xform op definitions.
+
+    If *op_cache* has a hit and the edit target already has the ops,
+    returns cached op handles directly (avoids 3x find_op per txn).
+    Op handles are composed-stage references — valid for any edit target.
     """
     prim = get_or_define_prim(stage, prim_path, "Xform")
     xf = UsdGeom.Xformable(prim)
 
-    t = find_op(xf, "translate")
-    o = find_op(xf, "orient")
-    s = find_op(xf, "scale")
+    # Check whether the edit target layer already has the ops.
+    layer = stage.GetEditTarget().GetLayer()
+    layer_spec = layer.GetPrimAtPath(prim_path)
+    has_local_ops = (
+        layer_spec is not None
+        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:translate")) is not None
+        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:orient")) is not None
+        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:scale")) is not None
+    )
 
-    if t is None or o is None or s is None:
-        # Composed prims (e.g. children of a reference) may lack an authored
-        # spec on the edit target layer.  OverridePrim creates an 'over' spec
-        # so AddXformOp can author attributes.
+    if has_local_ops:
+        cached = op_cache.get(prim_path) if op_cache is not None else None
+        if cached and cached[0] is not None:
+            return prim, xf, cached[0], cached[1], cached[2]
+    else:
+        # Ops missing from edit target — author attribute specs and
+        # xformOpOrder directly via Sdf so each layer is self-contained.
         stage.OverridePrim(prim_path)
+        layer_spec = layer.GetPrimAtPath(prim_path)
+        _OP_SPECS = [
+            ("xformOp:translate", Sdf.ValueTypeNames.Double3),
+            ("xformOp:orient", Sdf.ValueTypeNames.Quatf),
+            ("xformOp:scale", Sdf.ValueTypeNames.Float3),
+        ]
+        for attr_name, type_name in _OP_SPECS:
+            if not layer_spec.GetAttributeAtPath(
+                Sdf.Path(f"{prim_path}.{attr_name}")
+            ):
+                Sdf.AttributeSpec(layer_spec, attr_name, type_name)
 
-    if t is None:
-        t = xf.AddTranslateOp()
-    if o is None:
-        o = xf.AddOrientOp()
-    if s is None:
-        s = xf.AddScaleOp()
+        order_path = Sdf.Path(f"{prim_path}.xformOpOrder")
+        if not layer_spec.GetAttributeAtPath(order_path):
+            order_attr = Sdf.AttributeSpec(
+                layer_spec, "xformOpOrder", Sdf.ValueTypeNames.TokenArray,
+            )
+            order_attr.SetInfo("variability", Sdf.VariabilityUniform)
+        else:
+            order_attr = layer_spec.GetAttributeAtPath(order_path)
+        order_attr.default = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
 
-    desired = [t, o, s]
-    cur = xf.GetOrderedXformOps()
-    if [op.GetAttr().GetPath() for op in cur] != [op.GetAttr().GetPath() for op in desired]:
-        xf.SetXformOpOrder(desired)
+    # Single iteration over ops instead of 3× find_op.
+    t = o = s = None
+    for op in xf.GetOrderedXformOps():
+        name = op.GetAttr().GetName()
+        if name == "xformOp:translate":
+            t = op
+        elif name == "xformOp:orient":
+            o = op
+        elif name == "xformOp:scale":
+            s = op
 
     return prim, xf, t, o, s
 
@@ -466,7 +525,9 @@ def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
         if k not in STRUCTURAL_EVENT_KINDS:
             continue
         if k == K_ENSURE_XFORM_OPS:
-            _prim, _xf, t, o, s = ensure_canonical_ops(stage, ev["prim"])
+            _prim, _xf, t, o, s = ensure_canonical_ops(
+                stage, ev["prim"], op_cache=op_cache,
+            )
             op_cache[ev["prim"]] = (t, o, s)
         else:
             apply_event(stage, ev)

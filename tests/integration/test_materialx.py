@@ -44,13 +44,13 @@ def test_materialx_standard_surface(blender_exe):
 
 
 @pytest.mark.materialx
-def test_materialx_reference_pipeline(blender_exe, tmp_path):
+def test_materialx_reference_pipeline(blender_exe, tmp_path, free_port):
     """Full pipeline: emitter sends teapot reference → server → receiver.
 
     Verifies hierarchy collapse (no redundant root) and MaterialX
     enrichment (ActivisionMtlxMapper creates Standard Surface network).
     """
-    port = 7248
+    port = free_port
     server_proc = start_server(tmp_path, port)
     try:
         # Send teapot reference

@@ -15,7 +15,6 @@ Architecture:
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import time
 
@@ -737,8 +736,8 @@ class NetworkSender:
     ):
         self.host = host
         self.port = port
-        self.client_id = client_id or f"blender-emitter-{os.getpid()}"
-        from . import SESSION_ORIGIN
+        from . import SESSION_ORIGIN, STABLE_CLIENT_ID
+        self.client_id = client_id or STABLE_CLIENT_ID
         self.origin = origin or SESSION_ORIGIN
         self.sock: socket.socket | None = None
 

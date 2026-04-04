@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 try:
     import bpy
@@ -553,9 +552,11 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             _ADAPTER = None
 
         try:
+            from . import STABLE_CLIENT_ID
+
             _RECEIVER = ReceiverThread(
                 host=host, port=port, sync_from=sync_from,
-                client_id=f"blender-receiver-{os.getpid()}",
+                client_id=STABLE_CLIENT_ID,
                 origin=_ORIGIN,
             )
             _RECEIVER.start()
