@@ -57,6 +57,7 @@ MSG_PING = "ping"
 MSG_QUIT = "quit"
 MSG_CREATE_PROPOSAL = "create_proposal"
 MSG_PROPOSAL_CREATED = "proposal_created"
+MSG_RATE_LIMITED = "rate_limited"
 
 # Event kind constants — use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"

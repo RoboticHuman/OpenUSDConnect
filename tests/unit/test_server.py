@@ -5,11 +5,12 @@ sequence assignment, event log, compaction, replay, apply_txn, edit layer, etc.
 """
 
 import json
+import threading
 
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom
 
-from openusdconnect.server import UsdSyncServer
+from openusdconnect.server import TokenBucket, UsdSyncServer
 
 
 @pytest.fixture
@@ -429,6 +430,7 @@ class TestBroadcast:
             def __init__(self):
                 self.request = io.BytesIO()
                 self.client_address = ("fake", 0)
+                self._send_lock = threading.Lock()
 
         h1 = FakeHandler()
         h1.request.sendall = h1.request.write
@@ -452,6 +454,7 @@ class TestBroadcast:
 
         class DeadHandler:
             client_address = ("dead", 0)
+            _send_lock = threading.Lock()
 
             class request:
                 @staticmethod
@@ -1127,3 +1130,58 @@ class TestCompactionWithEditLayer:
         assert srv.edit_layer.GetPrimAtPath("/A") is not None
         # Composed stage is correct
         assert srv.stage.GetPrimAtPath("/A").IsValid()
+
+
+class TestTokenBucket:
+    def test_burst_allows_immediate(self):
+        """Burst tokens are available immediately."""
+        tb = TokenBucket(rate=10.0, burst=5)
+        for _ in range(5):
+            assert tb.try_consume() == 0.0
+        # 6th should be denied
+        assert tb.try_consume() > 0.0
+
+    def test_refill_over_time(self):
+        """Tokens refill at the configured rate."""
+        tb = TokenBucket(rate=10.0, burst=5)
+        # Exhaust burst
+        for _ in range(5):
+            tb.try_consume()
+        assert tb.try_consume() > 0.0
+        # Simulate 0.5s passing (10/s * 0.5s = 5 tokens)
+        tb._last -= 0.5
+        assert tb.try_consume() == 0.0
+
+    def test_does_not_exceed_burst(self):
+        """Tokens cap at burst even after long idle."""
+        tb = TokenBucket(rate=1000.0, burst=3)
+        # Simulate 10s passing — would refill 10000, but capped at burst=3
+        tb._last -= 10.0
+        for _ in range(3):
+            assert tb.try_consume() == 0.0
+        assert tb.try_consume() > 0.0
+
+    def test_wait_time_is_positive(self):
+        """Denied consume returns a positive wait estimate."""
+        tb = TokenBucket(rate=10.0, burst=1)
+        tb.try_consume()
+        wait = tb.try_consume()
+        assert wait == pytest.approx(0.1, abs=0.01)  # 1 token / 10 per sec
+
+
+class TestRateLimitedServer:
+    def test_rate_limit_params_stored(self, tmp_path):
+        """txn_rate and txn_burst are stored on the server."""
+        db = str(tmp_path / "rl.db")
+        s = UsdSyncServer(log_path=db, txn_rate=50.0, txn_burst=100)
+        assert s.txn_rate == 50.0
+        assert s.txn_burst == 100
+        s.store.close()
+
+    def test_zero_rate_disables(self, tmp_path):
+        """txn_rate=0 means no rate limiting (default)."""
+        db = str(tmp_path / "rl2.db")
+        s = UsdSyncServer(log_path=db)
+        assert s.txn_rate == 0
+        assert s.txn_burst == 0
+        s.store.close()

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import socket
 import threading
 import time
@@ -33,8 +32,6 @@ _RECONNECT_MAX_DELAY = 30.0   # seconds
 _SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
 _MAX_QUEUE_DEPTH = 50_000     # max queued lines before overflow (disconnect + replay)
 _MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
-
-_SEQ_RE = re.compile(r'"seq"\s*:\s*(\d+)')
 
 
 def _is_ping(line: str) -> bool:
@@ -237,9 +234,13 @@ class ReceiverThread(threading.Thread):
                         break
                     self._incoming.append(line)
 
-                seq_match = _SEQ_RE.search(line)
-                if seq_match:
-                    self.last_seq = max(self.last_seq, int(seq_match.group(1)))
+                try:
+                    parsed = json.loads(line)
+                    seq = parsed.get("seq")
+                    if isinstance(seq, int):
+                        self.last_seq = max(self.last_seq, seq)
+                except json.JSONDecodeError:
+                    pass
 
             if overflow:
                 LOG.warning(
@@ -258,12 +259,12 @@ class ReceiverThread(threading.Thread):
             pass
         self.sock = None
 
-    def drain_queue(self) -> list[str]:
+    def drain_queue(self) -> deque:
         """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
         with self._incoming_lock:
             old = self._incoming
             self._incoming = deque()
-        return list(old)
+        return old
 
     def stop(self):
         """Request clean shutdown."""

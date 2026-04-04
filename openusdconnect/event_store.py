@@ -52,6 +52,11 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
+        """Return (seq, record_json) tuples for events with seq >= seq_start."""
+        raise NotImplementedError
+
+    @abstractmethod
     def query(
         self,
         offset: int = 0,
@@ -144,6 +149,13 @@ class SqliteEventStore(EventStore):
                 (seq_start,),
             ).fetchall()
         return [row[1] for row in rows]
+
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
+                (seq_start,),
+            ).fetchall()
 
     def query(
         self,

@@ -20,7 +20,6 @@ import queue
 import signal
 import socket
 import socketserver
-import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -57,6 +56,7 @@ from .protocol import (
     MSG_PING,
     MSG_PROPOSAL_CREATED,
     MSG_QUIT,
+    MSG_RATE_LIMITED,
     MSG_RESYNC,
     MSG_TXN,
 )
@@ -69,7 +69,33 @@ _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
 _MAX_LINE_SIZE = 16 * 1024 * 1024  # 16 MiB — generous for large geometry
 _PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
-_SEND_TIMEOUT_MS = 10_000  # SO_SNDTIMEO for receiver sockets (milliseconds)
+_SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
+
+
+def _set_send_timeout(sock: socket.socket, timeout_s: float):
+    """Set a send-only timeout on a socket (platform-aware).
+
+    Uses SO_SNDTIMEO so only sends are affected — recv stays blocking.
+    settimeout() cannot be used here because it sets both send and recv
+    timeouts, causing spurious TimeoutError in the read loop.
+    """
+    import struct
+    import sys
+    if sys.platform == "win32":
+        # Windows: SO_SNDTIMEO takes a DWORD (4 bytes) in milliseconds
+        ms = int(timeout_s * 1000)
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+            ms.to_bytes(4, "little"),
+        )
+    else:
+        # Unix/macOS: SO_SNDTIMEO takes struct timeval {long sec, long usec}
+        secs = int(timeout_s)
+        usecs = int((timeout_s - secs) * 1_000_000)
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+            struct.pack("ll", secs, usecs),
+        )
 
 # Event kinds where only the latest event per prim matters.
 LATEST_WINS_KINDS = frozenset({
@@ -120,6 +146,33 @@ class _TxnBarrier:
             self._cond.notify_all()
 
 
+class TokenBucket:
+    """Simple token bucket for per-client transaction rate limiting."""
+
+    def __init__(self, rate: float, burst: int):
+        self.rate = rate    # tokens per second
+        self.burst = burst
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+
+    def try_consume(self) -> float:
+        """Try to consume one token.
+
+        Returns 0.0 if a token was consumed, otherwise the number of
+        seconds to wait before a token becomes available.
+        """
+        now = time.monotonic()
+        self._tokens = min(
+            self.burst,
+            self._tokens + (now - self._last) * self.rate,
+        )
+        self._last = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return 0.0
+        return (1.0 - self._tokens) / self.rate
+
+
 @dataclass
 class ClientInfo:
     """Metadata for a connected client (emitter or receiver)."""
@@ -164,6 +217,8 @@ class UsdSyncServer:
         require_token: bool = False,
         token_db_path: str | None = None,
         durability: str = "strict",
+        txn_rate: float = 0,
+        txn_burst: int = 0,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -236,6 +291,9 @@ class UsdSyncServer:
         #   "strict"   — persist to DB before broadcast (no lost events on crash)
         #   "realtime" — broadcast first, persist async (lower latency)
         self.durability = durability
+        # Per-client rate limiting (0 = disabled)
+        self.txn_rate = txn_rate
+        self.txn_burst = txn_burst
         self._persist_queue: queue.Queue | None = None
         if durability == "realtime":
             self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
@@ -250,9 +308,23 @@ class UsdSyncServer:
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
 
+        # Incremental prim tracking — avoids full log scans on dashboard polls.
+        self._prim_paths: dict[str, str] = {}  # prim_path → typeName
+
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
         self._replay_log_into_stage()
+
+    def shutdown(self):
+        """Signal background threads to drain queued work and exit.
+
+        Persist queue drains first (durability), then broadcast.
+        """
+        if self._persist_queue is not None:
+            self._persist_queue.put(None)
+            self._persist_thread.join(timeout=10.0)
+        self._broadcast_queue.put(None)
+        self._broadcast_thread.join(timeout=10.0)
 
     def _create_edit_layer(self, label: str = "server-edits") -> Sdf.Layer:
         """Create an override sublayer on the session layer and set it as the edit target.
@@ -272,17 +344,37 @@ class UsdSyncServer:
         self.stage.SetEditTarget(Usd.EditTarget(layer))
         return layer
 
+    def _track_prim_event(self, ev: dict):
+        """Update _prim_paths from a single event (ensure/delete/rename)."""
+        k = ev.get("k")
+        prim = ev.get("prim", "")
+        if k == K_ENSURE_PRIM:
+            self._prim_paths[prim] = ev.get("typeName", "Xform")
+        elif k == K_DELETE_PRIM:
+            self._prim_paths.pop(prim, None)
+        elif k == K_RENAME_PRIM:
+            type_name = self._prim_paths.pop(prim, "Xform")
+            new_name = ev.get("new_name", "")
+            if new_name:
+                parent = prim.rsplit("/", 1)[0] or "/"
+                new_path = f"{parent}/{new_name}" if parent != "/" else f"/{new_name}"
+                self._prim_paths[new_path] = type_name
+
     def _replay_log_into_stage(self):
         """Apply all events from the event store to restore stage on startup.
 
         Routes events to per-client layers based on stored client_id.
         Events without a client_id go to the shared edit_layer.
+        Also populates _prim_paths for incremental prim tracking.
         """
         from .event_apply import apply_events
 
         rows = self.store.get_all_asc()
         if not rows:
             return
+
+        # Collect all events for prim tracking (both code paths need this).
+        all_events: list[dict] = []
 
         if self.department_priority:
             # Per-client layers: route events to the correct client layer.
@@ -292,6 +384,7 @@ class UsdSyncServer:
                 ev = rec.get("event", rec)
                 cid = rec.get("client_id")
                 by_client.setdefault(cid, []).append(ev)
+                all_events.append(ev)
 
             for cid, evts in by_client.items():
                 layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
@@ -304,9 +397,15 @@ class UsdSyncServer:
             events = []
             for _seq, record_json in rows:
                 rec = json.loads(record_json)
-                events.append(rec.get("event", rec))
+                ev = rec.get("event", rec)
+                events.append(ev)
+                all_events.append(ev)
             apply_events(self.stage, events, op_cache=self._op_cache)
             total = len(events)
+
+        # Populate incremental prim tracking from replayed events.
+        for ev in all_events:
+            self._track_prim_event(ev)
 
         LOG.info("Restored stage from event log: %d events", total)
 
@@ -723,96 +822,137 @@ class UsdSyncServer:
         prior events for that prim.  deactivate_prim is latest-wins (TRS
         preserved for payload reload).
 
-        Acquires _txn_barrier exclusively so no emitter txns are in-flight
-        during the seq reset + log rewrite.
+        Two-phase design minimizes emitter blocking:
+          Phase 1 (no lock): snapshot the log and build the compacted dict.
+          Phase 2 (exclusive): merge any delta, rewrite store, resync.
         """
-        self._txn_barrier.acquire_exclusive()
-        try:
-            self._compact_log_inner()
-        finally:
-            self._txn_barrier.release_exclusive()
-
-    def _compact_log_inner(self):
+        # Phase 1 — snapshot + compute (no txn_barrier, emitters keep running)
         rows = self.store.get_all_asc()
         if not rows:
             return
+        max_seq = rows[-1][0]
+        latest, tombstoned = self._build_compacted(rows)
+        original_count = len(rows)
 
-        tombstoned: set[str] = set()
-        # (ev, metadata) tuples where metadata holds origin/client/client_id.
-        latest: dict[tuple[str, str], tuple[dict, dict]] = {}
+        # Phase 2 — merge delta + commit (exclusive, emitters blocked)
+        self._txn_barrier.acquire_exclusive()
+        try:
+            # Catch any events that arrived during phase 1
+            delta = self.store.get_from_seq_asc(max_seq + 1)
+            if delta:
+                for _seq, event_json in delta:
+                    self._merge_event(latest, tombstoned, event_json)
+                original_count += len(delta)
 
-        for _seq, event_json in rows:
-            rec = json.loads(event_json)
-            ev = rec.get("event", rec)
-            prim = ev.get("prim", "")
-            k = ev.get("k", "")
-            meta = {}
-            for meta_key in ("origin", "client", "client_id"):
-                val = rec.get(meta_key)
-                if val:
-                    meta[meta_key] = val
+            self._commit_compaction(latest, original_count)
+        finally:
+            self._txn_barrier.release_exclusive()
 
-            if k in (K_DELETE_PRIM, K_RENAME_PRIM):
-                tombstoned.add(prim)
-                latest = {key: val for key, val in latest.items() if key[0] != prim}
-                latest[(prim, k)] = (ev, meta)
-                continue
+    @staticmethod
+    def _merge_event(
+        latest: dict[tuple[str, str], tuple[dict, dict]],
+        tombstoned: set[str],
+        event_json: str,
+    ):
+        """Merge a single event record into the compacted state."""
+        rec = json.loads(event_json)
+        ev = rec.get("event", rec)
+        prim = ev.get("prim", "")
+        k = ev.get("k", "")
+        meta = {}
+        for meta_key in ("origin", "client", "client_id"):
+            val = rec.get(meta_key)
+            if val:
+                meta[meta_key] = val
 
-            if prim in tombstoned:
-                continue
+        if k in (K_DELETE_PRIM, K_RENAME_PRIM):
+            tombstoned.add(prim)
+            to_remove = [key for key in latest if key[0] == prim]
+            for key in to_remove:
+                del latest[key]
+            latest[(prim, k)] = (ev, meta)
+            return
 
-            # load/unload are mutually exclusive — only the last one wins.
-            if k == K_LOAD_PAYLOAD:
-                latest.pop((prim, K_UNLOAD_PAYLOAD), None)
-                latest[(prim, k)] = (ev, meta)
-                continue
-            if k == K_UNLOAD_PAYLOAD:
-                latest.pop((prim, K_LOAD_PAYLOAD), None)
-                latest[(prim, k)] = (ev, meta)
-                continue
+        if prim in tombstoned:
+            return
 
-            if k == K_SET_XFORM_TRS:
-                existing = latest.get((prim, k))
-                if existing:
-                    prev = existing[0]
-                    for field in ("t", "r", "s"):
-                        if field in ev.get("fields", []):
-                            prev[field] = ev[field]
-                            if field not in prev["fields"]:
-                                prev["fields"].append(field)
-                    latest[(prim, k)] = (prev, meta)
-                else:
-                    latest[(prim, k)] = (ev, meta)
-            elif k == K_SET_GPRIM_ATTRS:
-                existing = latest.get((prim, k))
-                if existing:
-                    prev = existing[0]
-                    prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
-                    new_meta = ev.get("primvar_meta", {})
-                    if new_meta:
-                        prev.setdefault("primvar_meta", {}).update(new_meta)
-                    new_interp = ev.get("attr_interp", {})
-                    if new_interp:
-                        prev.setdefault("attr_interp", {}).update(new_interp)
-                    latest[(prim, k)] = (prev, meta)
-                else:
-                    latest[(prim, k)] = (ev, meta)
-            elif k == K_SET_SHADER_INPUT:
-                existing = latest.get((prim, k))
-                if existing:
-                    prev = existing[0]
-                    prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
-                    prev.setdefault("input_types", {}).update(
-                        ev.get("input_types", {}),
-                    )
-                    if ev.get("shader_id"):
-                        prev["shader_id"] = ev["shader_id"]
-                    latest[(prim, k)] = (prev, meta)
-                else:
-                    latest[(prim, k)] = (ev, meta)
+        # load/unload are mutually exclusive — only the last one wins.
+        if k == K_LOAD_PAYLOAD:
+            latest.pop((prim, K_UNLOAD_PAYLOAD), None)
+            latest[(prim, k)] = (ev, meta)
+            return
+        if k == K_UNLOAD_PAYLOAD:
+            latest.pop((prim, K_LOAD_PAYLOAD), None)
+            latest[(prim, k)] = (ev, meta)
+            return
+
+        if k == K_SET_XFORM_TRS:
+            existing = latest.get((prim, k))
+            if existing:
+                prev = existing[0]
+                for field in ("t", "r", "s"):
+                    if field in ev.get("fields", []):
+                        prev[field] = ev[field]
+                        if field not in prev["fields"]:
+                            prev["fields"].append(field)
+                latest[(prim, k)] = (prev, meta)
             else:
                 latest[(prim, k)] = (ev, meta)
+        elif k == K_SET_GPRIM_ATTRS:
+            existing = latest.get((prim, k))
+            if existing:
+                prev = existing[0]
+                prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
+                new_meta = ev.get("primvar_meta", {})
+                if new_meta:
+                    prev.setdefault("primvar_meta", {}).update(new_meta)
+                new_interp = ev.get("attr_interp", {})
+                if new_interp:
+                    prev.setdefault("attr_interp", {}).update(new_interp)
+                latest[(prim, k)] = (prev, meta)
+            else:
+                latest[(prim, k)] = (ev, meta)
+        elif k == K_SET_SHADER_INPUT:
+            existing = latest.get((prim, k))
+            if existing:
+                prev = existing[0]
+                prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
+                prev.setdefault("input_types", {}).update(
+                    ev.get("input_types", {}),
+                )
+                if ev.get("shader_id"):
+                    prev["shader_id"] = ev["shader_id"]
+                latest[(prim, k)] = (prev, meta)
+            else:
+                latest[(prim, k)] = (ev, meta)
+        else:
+            latest[(prim, k)] = (ev, meta)
 
+    @staticmethod
+    def _build_compacted(
+        rows: list[tuple[int, str]],
+    ) -> tuple[dict[tuple[str, str], tuple[dict, dict]], set[str]]:
+        """Build compacted event dict from raw log rows.
+
+        Returns (latest, tombstoned) where:
+          latest: {(prim, kind) → (event_dict, metadata_dict)}
+          tombstoned: set of prim paths deleted/renamed
+        """
+        tombstoned: set[str] = set()
+        latest: dict[tuple[str, str], tuple[dict, dict]] = {}
+        for _seq, event_json in rows:
+            UsdSyncServer._merge_event(latest, tombstoned, event_json)
+        return latest, tombstoned
+
+    def _commit_compaction(
+        self,
+        latest: dict[tuple[str, str], tuple[dict, dict]],
+        original_count: int,
+    ):
+        """Commit compacted state: rewrite store, reset seqs, resync receivers.
+
+        Must be called under exclusive _txn_barrier.
+        """
         sorted_entries = sorted(
             latest.values(),
             key=lambda entry: (
@@ -835,18 +975,20 @@ class UsdSyncServer:
             self._event_count = len(records)
 
         self._op_cache.clear()
-        LOG.info("Compacted event log: %d -> %d events", len(rows), len(sorted_entries))
+
+        # Rebuild incremental prim tracking from compacted state.
+        self._prim_paths.clear()
+        for ev, _meta in sorted_entries:
+            self._track_prim_event(ev)
+
+        LOG.info("Compacted event log: %d -> %d events", original_count, len(sorted_entries))
 
         # Tell connected receivers to reset and replay from the compacted log.
         self.broadcast({"type": MSG_RESYNC, "reason": "compact"})
         with self.clients_lock:
             targets = list(self.receivers)
         for handler in targets:
-            send_lock = getattr(handler, "_send_lock", None)
-            if send_lock:
-                with send_lock:
-                    self.replay_from(handler, 1)
-            else:
+            with handler._send_lock:
                 self.replay_from(handler, 1)
 
     def purge(self):
@@ -865,6 +1007,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.edit_layer.Clear()
         self._op_cache.clear()
+        self._prim_paths.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
@@ -1097,19 +1240,39 @@ class UsdSyncServer:
         """Dedicated thread: drain the broadcast queue and send to receivers.
 
         During idle periods, sends periodic pings to detect dead receivers.
+        Exits cleanly when a None sentinel is enqueued via shutdown().
         """
         _ping_payload = (json.dumps({"type": MSG_PING}) + "\n").encode("utf-8")
 
         while True:
             try:
-                payload, exclude_origin, target_origin = (
-                    self._broadcast_queue.get(timeout=_PING_INTERVAL)
-                )
+                item = self._broadcast_queue.get(timeout=_PING_INTERVAL)
             except queue.Empty:
                 # Idle — send pings to detect dead receivers
                 self._send_to_all(_ping_payload)
                 continue
 
+            if item is None:
+                # Drain remaining items before exiting
+                while True:
+                    try:
+                        remaining = self._broadcast_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if remaining is None:
+                        continue
+                    payload, exclude_origin, target_origin = remaining
+                    try:
+                        self._send_to_all(
+                            payload,
+                            exclude_origin=exclude_origin,
+                            target_origin=target_origin,
+                        )
+                    except Exception:
+                        LOG.exception("Error draining broadcast queue")
+                return
+
+            payload, exclude_origin, target_origin = item
             try:
                 self._send_to_all(
                     payload,
@@ -1137,11 +1300,7 @@ class UsdSyncServer:
             if exclude_origin and h_origin == exclude_origin:
                 continue
             try:
-                send_lock = getattr(h, "_send_lock", None)
-                if send_lock:
-                    with send_lock:
-                        h.request.sendall(payload)
-                else:
+                with h._send_lock:
                     h.request.sendall(payload)
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead",
@@ -1154,9 +1313,26 @@ class UsdSyncServer:
 
     def _persist_loop(self):
         """Dedicated thread for realtime durability: drain persistence queue
-        and write to SQLite without blocking emitter threads."""
+        and write to SQLite without blocking emitter threads.
+        Exits cleanly when a None sentinel is enqueued via shutdown()."""
         while True:
             tuples = self._persist_queue.get()
+            if tuples is None:
+                # Drain remaining items before exiting
+                while True:
+                    try:
+                        remaining = self._persist_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if remaining is None:
+                        continue
+                    try:
+                        self.store.append_batch(remaining)
+                        with self._seq_lock:
+                            self._event_count += len(remaining)
+                    except Exception:
+                        LOG.exception("Error draining persist queue")
+                return
             try:
                 self.store.append_batch(tuples)
                 with self._seq_lock:
@@ -1281,8 +1457,9 @@ class UsdSyncServer:
 
             for i, ev in enumerate(events):
                 k = ev.get("k")
-                if k in (K_ENSURE_PRIM, K_DELETE_PRIM):
+                if k in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                     self._prim_count_dirty = True
+                    self._track_prim_event(ev)
                 pp = ev.get("prim", "")
                 if not pp:
                     changed_indices.append(i)
@@ -1305,23 +1482,8 @@ class UsdSyncServer:
         return self._prim_count
 
     def get_tracked_prim_count(self) -> int:
-        """Return the number of prims tracked in the event log.
-
-        Counts distinct prim paths from ensure_prim events minus
-        delete_prim tombstones.
-        """
-        rows = self.store.get_all_asc()
-        prims: set[str] = set()
-        for _seq, record_json in rows:
-            rec = json.loads(record_json)
-            ev = rec.get("event", {})
-            k = ev.get("k")
-            path = ev.get("prim", "")
-            if k == K_ENSURE_PRIM:
-                prims.add(path)
-            elif k == K_DELETE_PRIM:
-                prims.discard(path)
-        return len(prims)
+        """Return the number of prims tracked (incremental, no log scan)."""
+        return len(self._prim_paths)
 
     def get_event_count(self) -> int:
         """Return the number of events in the log (thread-safe, cached)."""
@@ -1374,24 +1536,12 @@ class UsdSyncServer:
             }
 
     def get_prim_tree(self) -> list[dict]:
-        """Reconstruct the prim tree from the event log.
+        """Build the prim tree from the incremental _prim_paths dict.
 
-        Reads ensure_prim and delete_prim events from the store — no
-        stage access or stage_lock needed.
+        No event log scan needed — uses the in-memory prim tracking.
         """
-        rows = self.store.get_all_asc()
-        prims: dict[str, str] = {}  # path → typeName
-        for _seq, record_json in rows:
-            rec = json.loads(record_json)
-            ev = rec.get("event", {})
-            k = ev.get("k")
-            path = ev.get("prim", "")
-            if k == K_ENSURE_PRIM:
-                prims[path] = ev.get("typeName", "Xform")
-            elif k == K_DELETE_PRIM:
-                prims.pop(path, None)
+        prims = dict(self._prim_paths)  # snapshot
 
-        # Build tree structure from flat paths
         result = []
         for path in sorted(prims):
             parent = path.rsplit("/", 1)[0] or "/"
@@ -1492,6 +1642,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         # Per-receiver send lock: serializes replay and broadcast sends on
         # this socket without holding the global clients_lock during I/O.
         self._send_lock = threading.Lock()
+        self._rate_bucket = (
+            TokenBucket(sync_server.txn_rate, sync_server.txn_burst)
+            if sync_server.txn_rate > 0 else None
+        )
 
         # Read hello
         try:
@@ -1579,16 +1733,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     sync_server.receivers.add(self)
                 sync_server.replay_from(self, sync_from)
 
+        # Send-only timeout so the broadcast thread isn't blocked
+        # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
+        # aware) so recv stays blocking — settimeout() can't be used
+        # because it would cause spurious TimeoutError in _read_loop.
         if role == "receiver":
-            # Send-only timeout so the broadcast thread isn't blocked
-            # indefinitely by one slow receiver. Uses SO_SNDTIMEO instead
-            # of settimeout() to avoid affecting recv (which must block
-            # in _read_loop without spurious TimeoutError).
-            timeout_ms = _SEND_TIMEOUT_MS
-            self.request.setsockopt(
-                socket.SOL_SOCKET, socket.SO_SNDTIMEO,
-                struct.pack("II", timeout_ms, 0),
-            )
+            _set_send_timeout(self.request, _SEND_TIMEOUT_S)
         self.request.settimeout(None)
         try:
             self._read_loop(sync_server)
@@ -1642,6 +1792,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if proposal_id:
                 self._handle_proposal_txn(sync_server, proposal_id, events)
                 continue
+
+            if self._rate_bucket is not None:
+                wait = self._rate_bucket.try_consume()
+                if wait > 0:
+                    from .transport import send_line as _send_line
+                    _send_line(self.request, {
+                        "type": MSG_RATE_LIMITED,
+                        "retry_after": round(wait, 3),
+                    })
+                    continue
 
             sync_server._txn_barrier.acquire_shared()
             try:
@@ -1792,6 +1952,8 @@ def run_server(
     require_token: bool = False,
     durability: str = "strict",
     max_connections: int | None = None,
+    txn_rate: float = 0,
+    txn_burst: int = 0,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
@@ -1801,6 +1963,8 @@ def run_server(
         department_priority=department_priority,
         require_token=require_token,
         durability=durability,
+        txn_rate=txn_rate,
+        txn_burst=txn_burst,
     )
 
     if compact:
@@ -1824,6 +1988,10 @@ def run_server(
         _cleaned_up = True
         if export_diff:
             sync_server.export_edit_layer(export_diff)
+        try:
+            sync_server.shutdown()
+        except Exception:
+            LOG.exception("Failed to shut down background threads")
         try:
             sync_server.store.close()
             LOG.info("Event store closed")
@@ -1890,6 +2058,14 @@ def main():
         "--max-connections", type=int, default=None, metavar="N",
         help=f"Max concurrent client connections (default: {ThreadedTCPServer._MAX_WORKERS})",
     )
+    ap.add_argument(
+        "--txn-rate", type=float, default=0, metavar="N",
+        help="Max transactions per second per client (0 = unlimited, default: 0)",
+    )
+    ap.add_argument(
+        "--txn-burst", type=int, default=0, metavar="N",
+        help="Max burst size for transaction rate limiter (default: 0 = disabled)",
+    )
     args = ap.parse_args()
     dept_list = args.departments.split(",") if args.departments else None
     run_server(
@@ -1905,6 +2081,8 @@ def main():
         require_token=args.require_token,
         durability=args.durability,
         max_connections=args.max_connections,
+        txn_rate=args.txn_rate,
+        txn_burst=args.txn_burst,
     )
 
 

@@ -88,7 +88,7 @@ class TestReceiverThread:
             _poll_until(_drain_all)
             assert len(collected) == 2
             assert rt.last_seq == 2
-            assert rt.drain_queue() == []
+            assert len(rt.drain_queue()) == 0
         finally:
             _teardown(rt, conn, srv)
 
@@ -114,14 +114,14 @@ class TestReceiverThread:
             srv.close()
 
     def test_drain_empty_before_connect(self):
-        """drain_queue returns empty list before any data arrives."""
+        """drain_queue returns empty deque before any data arrives."""
         srv, port = _make_server()
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        assert rt.drain_queue() == []
+        assert len(rt.drain_queue()) == 0
         rt.start()
         conn = _accept_and_hello(srv)
         try:
-            assert rt.drain_queue() == []
+            assert len(rt.drain_queue()) == 0
         finally:
             _teardown(rt, conn, srv)
 
