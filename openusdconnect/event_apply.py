@@ -61,8 +61,7 @@ def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform
         # the prim already exists, so we go through Sdf directly).
         layer = stage.GetEditTarget().GetLayer()
         if not layer.GetPrimAtPath(prim_path):
-            Sdf.CreatePrimInLayer(layer, prim_path)
-            spec = layer.GetPrimAtPath(prim_path)
+            spec = Sdf.CreatePrimInLayer(layer, prim_path)
             if spec:
                 spec.specifier = Sdf.SpecifierDef
                 if type_name:
@@ -84,6 +83,36 @@ def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
     return None
 
 
+_xform_path_cache: dict[str, tuple] = {}
+
+
+def _get_xform_paths(prim_path: str):
+    """Return cached (translate, orient, scale, order) Sdf.Path objects.
+
+    Sdf.Path construction from strings is ~17 µs per call.  Caching the
+    parsed paths eliminates repeated string→path parsing on the hot path.
+    The cache is safe to share: Sdf.Path is immutable and stateless.
+    """
+    paths = _xform_path_cache.get(prim_path)
+    if paths is None:
+        pp = Sdf.Path(prim_path)
+        paths = (
+            pp.AppendProperty("xformOp:translate"),
+            pp.AppendProperty("xformOp:orient"),
+            pp.AppendProperty("xformOp:scale"),
+            pp.AppendProperty("xformOpOrder"),
+        )
+        _xform_path_cache[prim_path] = paths
+    return paths
+
+
+_XFORM_OP_SPECS = [
+    ("xformOp:translate", Sdf.ValueTypeNames.Double3),
+    ("xformOp:orient", Sdf.ValueTypeNames.Quatf),
+    ("xformOp:scale", Sdf.ValueTypeNames.Float3),
+]
+
+
 def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
     """Ensure canonical xform ops exist on prim: translate, orient (quatf), scale.
 
@@ -103,14 +132,15 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
     prim = get_or_define_prim(stage, prim_path, "Xform")
     xf = UsdGeom.Xformable(prim)
 
+    # Pre-built Sdf.Path objects — avoids ~70 µs of string→path parsing.
+    path_t, path_o, path_s, path_order = _get_xform_paths(prim_path)
+
     # Check whether the edit target layer already has the ops.
     layer = stage.GetEditTarget().GetLayer()
-    layer_spec = layer.GetPrimAtPath(prim_path)
     has_local_ops = (
-        layer_spec is not None
-        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:translate")) is not None
-        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:orient")) is not None
-        and layer_spec.GetAttributeAtPath(Sdf.Path(f"{prim_path}.xformOp:scale")) is not None
+        layer.GetAttributeAtPath(path_t) is not None
+        and layer.GetAttributeAtPath(path_o) is not None
+        and layer.GetAttributeAtPath(path_s) is not None
     )
 
     if has_local_ops:
@@ -122,25 +152,19 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
         # xformOpOrder directly via Sdf so each layer is self-contained.
         stage.OverridePrim(prim_path)
         layer_spec = layer.GetPrimAtPath(prim_path)
-        _OP_SPECS = [
-            ("xformOp:translate", Sdf.ValueTypeNames.Double3),
-            ("xformOp:orient", Sdf.ValueTypeNames.Quatf),
-            ("xformOp:scale", Sdf.ValueTypeNames.Float3),
-        ]
-        for attr_name, type_name in _OP_SPECS:
+        for attr_name, type_name in _XFORM_OP_SPECS:
             if not layer_spec.GetAttributeAtPath(
-                Sdf.Path(f"{prim_path}.{attr_name}")
+                Sdf.Path(prim_path).AppendProperty(attr_name)
             ):
                 Sdf.AttributeSpec(layer_spec, attr_name, type_name)
 
-        order_path = Sdf.Path(f"{prim_path}.xformOpOrder")
-        if not layer_spec.GetAttributeAtPath(order_path):
+        if not layer_spec.GetAttributeAtPath(path_order):
             order_attr = Sdf.AttributeSpec(
                 layer_spec, "xformOpOrder", Sdf.ValueTypeNames.TokenArray,
             )
             order_attr.SetInfo("variability", Sdf.VariabilityUniform)
         else:
-            order_attr = layer_spec.GetAttributeAtPath(order_path)
+            order_attr = layer_spec.GetAttributeAtPath(path_order)
         order_attr.default = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
 
     # Single iteration over ops instead of 3× find_op.
@@ -179,11 +203,41 @@ def _ensure_primvar_attr(prim: Usd.Prim, name: str, meta: dict,
 
 
 def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
-    """Set a single attribute on a typed gprim, coercing to the schema-defined type."""
+    """Set a single attribute on a typed gprim, coercing to the schema-defined type.
+
+    Accepts Python lists (legacy/dict path) and numpy arrays (zero-copy path).
+    When value is a numpy array, uses Vt.*Array.FromNumpy() for bulk conversion
+    without per-element Python iteration.
+    """
+    import numpy as np
+
     attr = prim.GetAttribute(name)
     if not attr or not attr.IsValid():
         return
     type_name = str(attr.GetTypeName())
+
+    # numpy array fast path — bulk conversion via FromNumpy
+    if isinstance(value, np.ndarray):
+        if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
+            arr = value.reshape(-1, 3).astype(np.float32, copy=False)
+            attr.Set(Vt.Vec3fArray.FromNumpy(arr))
+        elif type_name in ("float2[]", "texCoord2f[]"):
+            arr = value.reshape(-1, 2).astype(np.float32, copy=False)
+            attr.Set(Vt.Vec2fArray.FromNumpy(arr))
+        elif type_name == "int[]":
+            attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)))
+        elif type_name == "float[]":
+            attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)))
+        elif type_name in ("float3", "vector3f", "normal3f", "point3f",
+                          "color3f") and value.size == 3:
+            attr.Set(Gf.Vec3f(*value.flat))
+        elif type_name in ("float2", "texCoord2f") and value.size == 2:
+            attr.Set(Gf.Vec2f(*value.flat))
+        elif type_name == "double3" and value.size == 3:
+            attr.Set(Gf.Vec3d(*value.flat))
+        else:
+            attr.Set(value.tolist())
+        return
 
     if isinstance(value, list):
         if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):

@@ -5,10 +5,11 @@ event log) without TCP. Events flow: emitter → server.apply_txn → replay
 from server log → receiver.apply_events. All three stages are compared.
 """
 
-import json
 import os
 
 import pytest
+
+from openusdconnect.codec import message_to_dict
 
 try:
     from pxr import Gf, Usd, UsdGeom
@@ -189,7 +190,7 @@ def _server_process_and_replay(srv, events):
 
     # Replay full log (what a new receiver would get)
     rows = srv.store.get_all_asc()
-    return [json.loads(r[1])["event"] for r in rows]
+    return [message_to_dict(r[1])["event"] for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +422,7 @@ class TestStageParity:
 
         # New receiver replays compacted log
         rows = srv.store.get_all_asc()
-        compacted_events = [json.loads(r[1])["event"] for r in rows]
+        compacted_events = [message_to_dict(r[1])["event"] for r in rows]
 
         receiver_stage = Usd.Stage.CreateInMemory()
         apply_events(receiver_stage, compacted_events)

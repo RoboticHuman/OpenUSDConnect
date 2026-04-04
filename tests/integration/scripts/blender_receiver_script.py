@@ -20,6 +20,9 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
@@ -31,6 +34,7 @@ from openusdconnect.protocol import (
     K_SET_XFORM_TRS,
     MSG_EVENT,
 )
+from openusdconnect.codec import message_to_dict
 from openusdconnect.receiver import ReceiverThread
 
 
@@ -54,17 +58,22 @@ def main():
     receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
 
-    # Wait for events to arrive via replay
-    time.sleep(2.0)
+    # Wait for connection + replay to complete
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if receiver.connected:
+            time.sleep(0.5)  # brief extra wait for replay to finish
+            break
+        time.sleep(0.1)
 
     # Drain queue and process events
     adapter = BlenderAdapter()
     lines = receiver.drain_queue()
     print(f"[Receiver] Got {len(lines)} messages from queue")
 
-    for raw_line in lines:
+    for raw_buf in lines:
         try:
-            msg = json.loads(raw_line)
+            msg = message_to_dict(raw_buf)
             if msg.get("type") == MSG_EVENT:
                 ev = msg.get("event", {})
                 k = ev.get("k")

@@ -5,8 +5,17 @@ set_reference for the teapot asset, then disconnects.
 """
 
 import argparse
-import json
+import os
 import socket
+import sys
+import time
+
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from openusdconnect.transport import send_msg
 
 
 def main():
@@ -17,11 +26,8 @@ def main():
 
     s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
 
-    def send(msg):
-        s.sendall((json.dumps(msg) + "\n").encode())
-
-    send({"type": "hello", "role": "emitter", "protocol_version": 1})
-    send({
+    send_msg(s, {"type": "hello", "role": "emitter", "protocol_version": 1})
+    send_msg(s, {
         "type": "txn",
         "client_id": "mtlx_ref_emitter",
         "events": [
@@ -39,7 +45,8 @@ def main():
     })
 
     print(f"[MtlxRefEmitter] Sent teapot reference: {args.asset_path}")
-    send({"type": "quit"})
+    send_msg(s, {"type": "quit"})
+    time.sleep(0.5)
     s.close()
 
 

@@ -88,11 +88,12 @@ def dump_server_log(tmp_path, port):
         print("[ServerLog] No database found")
         return
     conn = sqlite3.connect(db_path)
-    rows = conn.execute("SELECT seq, event FROM events ORDER BY seq").fetchall()
+    rows = conn.execute("SELECT seq, event_bin FROM events ORDER BY seq").fetchall()
     conn.close()
+    from openusdconnect.codec import message_to_dict
     print(f"\n=== Server Event Log ({len(rows)} events) ===")
-    for seq, event_json in rows:
-        record = json.loads(event_json)
+    for seq, event_bin in rows:
+        record = message_to_dict(event_bin)
         ev = record.get("event", record)
         k = ev.get("k", "?")
         prim = ev.get("prim", "?")

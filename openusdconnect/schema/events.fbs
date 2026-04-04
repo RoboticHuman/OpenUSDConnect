@@ -1,0 +1,227 @@
+// OpenUSDConnect event schema — FlatBuffers IDL
+// Covers all 17 event kinds for USD scene synchronization.
+
+namespace OpenUSDConnect;
+
+// ---------------------------------------------------------------------------
+// Attribute value — supports scalars and bulk typed arrays (zero-copy)
+// ---------------------------------------------------------------------------
+
+// Which field of AttrValue is populated.
+enum AttrValueType : byte {
+    None = 0,
+    ScalarFloat,
+    ScalarInt,
+    ScalarBool,
+    ScalarString,
+    FloatArray,     // contiguous float32 — points, normals, UVs (flattened)
+    IntArray,       // contiguous int32 — face indices, vertex counts
+    StringVal,      // alias for string scalars (kept for clarity)
+    NestedList,     // JSON fallback for unusual/nested types
+}
+
+table AttrValue {
+    value_type:AttrValueType;
+    scalar_float:float;
+    scalar_int:int;
+    scalar_bool:bool;
+    scalar_string:string;
+    float_array:[float];    // zero-copy bulk path
+    int_array:[int];        // zero-copy bulk path
+    nested_json:string;     // JSON-encoded fallback for complex types
+    stride:ubyte = 1;       // element width: 3 for Vec3f, 2 for Vec2f, 4 for Vec4f
+}
+
+// Primvar metadata (USD type name + interpolation)
+table PrimvarMeta {
+    attr_name:string;
+    type_name:string;       // e.g. "float3[]", "texCoord2f[]"
+    interpolation:string;   // e.g. "faceVarying", "vertex"
+}
+
+// Non-primvar interpolation metadata
+table AttrInterp {
+    attr_name:string;
+    interpolation:string;
+}
+
+// Named attribute entry (name + value pair)
+table NamedAttr {
+    name:string;
+    value:AttrValue;
+}
+
+// ---------------------------------------------------------------------------
+// Composition arc entries
+// ---------------------------------------------------------------------------
+
+table ArcEntry {
+    asset_path:string;
+    prim_path:string;
+}
+
+// ---------------------------------------------------------------------------
+// Shader connection / disconnection
+// ---------------------------------------------------------------------------
+
+table ShaderConnection {
+    input_name:string;
+    source_prim:string;
+    source_output:string;
+}
+
+// ---------------------------------------------------------------------------
+// Key-value pair for variant selections and generic string maps
+// ---------------------------------------------------------------------------
+
+table StringPair {
+    key:string;
+    value:string;
+}
+
+// ---------------------------------------------------------------------------
+// Shader input value — typed to match USD shader input types
+// ---------------------------------------------------------------------------
+
+// Which field of ShaderInputValue is populated.
+enum ShaderInputValueType : byte {
+    None = 0,
+    ScalarFloat,
+    ScalarInt,
+    ScalarBool,
+    ScalarString,
+    FloatArray,
+}
+
+table ShaderInputValue {
+    name:string;
+    type_name:string;       // USD type: "float", "color3f", "asset", etc.
+    value_type:ShaderInputValueType;
+    scalar_float:float;
+    scalar_int:int;
+    scalar_bool:bool;
+    scalar_string:string;
+    float_array:[float];    // for vector types (color3f = 3 floats, etc.)
+}
+
+// ---------------------------------------------------------------------------
+// Event kinds — one table per kind
+// ---------------------------------------------------------------------------
+
+table EnsurePrim {
+    prim:string;
+    type_name:string;       // e.g. "Xform", "Mesh", "Scope"
+}
+
+table EnsureXformOps {
+    prim:string;
+}
+
+// TRS fields bitmask: bit 0 = translate, bit 1 = rotate, bit 2 = scale
+table SetXformTrs {
+    prim:string;
+    fields:ubyte;           // bitmask: 1=t, 2=r, 4=s
+    t:[float];              // 3 floats (translate)
+    r:[float];              // 4 floats (quaternion wxyz)
+    s:[float];              // 3 floats (scale)
+}
+
+table SetXformMatrices {
+    prim:string;
+    local_m:[float];        // 16 floats (row-major 4x4)
+    world_m:[float];        // 16 floats (row-major 4x4)
+}
+
+table DeletePrim {
+    prim:string;
+}
+
+table DeactivatePrim {
+    prim:string;
+    active:bool = true;
+}
+
+table RenamePrim {
+    prim:string;
+    new_name:string;
+}
+
+table SetVisibility {
+    prim:string;
+    visible:bool;
+}
+
+table SetGprimAttrs {
+    prim:string;
+    attrs:[NamedAttr];
+    primvar_meta:[PrimvarMeta];
+    attr_interp:[AttrInterp];
+}
+
+table SetReference {
+    prim:string;
+    refs:[ArcEntry];
+}
+
+table SetPayload {
+    prim:string;
+    payloads:[ArcEntry];
+}
+
+table LoadPayload {
+    prim:string;
+}
+
+table UnloadPayload {
+    prim:string;
+}
+
+table SetVariantSelections {
+    prim:string;
+    selections:[StringPair];
+}
+
+table SetMaterialBinding {
+    prim:string;
+    material_path:string;
+}
+
+table SetShaderInput {
+    prim:string;
+    shader_id:string;
+    inputs:[ShaderInputValue];
+}
+
+table SetShaderConnection {
+    prim:string;
+    connections:[ShaderConnection];
+    disconnections:[string];
+}
+
+// ---------------------------------------------------------------------------
+// Event union — wraps all event kinds
+// ---------------------------------------------------------------------------
+
+union EventPayload {
+    EnsurePrim,
+    EnsureXformOps,
+    SetXformTrs,
+    SetXformMatrices,
+    DeletePrim,
+    DeactivatePrim,
+    RenamePrim,
+    SetVisibility,
+    SetGprimAttrs,
+    SetReference,
+    SetPayload,
+    LoadPayload,
+    UnloadPayload,
+    SetVariantSelections,
+    SetMaterialBinding,
+    SetShaderInput,
+    SetShaderConnection,
+}
+
+table EventWrapper {
+    event:EventPayload;
+}

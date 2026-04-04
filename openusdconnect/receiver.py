@@ -1,9 +1,9 @@
 """Background receiver thread — connects to server, queues incoming events.
 
 ReceiverThread is DCC-agnostic. It connects to the server as a receiver,
-reads JSON lines in a background thread, and provides a thread-safe queue
-for the main thread to drain. DCC-specific timer/callback registration
-is the plugin's responsibility.
+reads length-prefixed FlatBuffers messages in a background thread, and
+provides a thread-safe queue for the main thread to drain. DCC-specific
+timer/callback registration is the plugin's responsibility.
 
 Features:
 - Automatic reconnection with exponential backoff on connection loss
@@ -13,7 +13,6 @@ Features:
 
 from __future__ import annotations
 
-import json
 import logging
 import socket
 import threading
@@ -21,8 +20,15 @@ import time
 from collections import deque
 from collections.abc import Callable
 
-from .protocol import MSG_AUTH_REJECTED, MSG_HELLO_OK, MSG_PING, make_hello
-from .transport import send_line
+from .codec import (
+    PayloadType,
+    decode_envelope,
+    is_ping,
+    resolve_payload,
+)
+from .framing import IncompleteRead, MessageTooLarge, recv_framed
+from .protocol import make_hello
+from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
 
@@ -30,12 +36,8 @@ LOG = logging.getLogger(__name__)
 _RECONNECT_BASE_DELAY = 1.0   # seconds
 _RECONNECT_MAX_DELAY = 30.0   # seconds
 _SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
-_MAX_QUEUE_DEPTH = 50_000     # max queued lines before overflow (disconnect + replay)
+_MAX_QUEUE_DEPTH = 50_000     # max queued messages before overflow (disconnect + replay)
 _MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
-
-
-def _is_ping(line: str) -> bool:
-    return f'"type":"{MSG_PING}"' in line or f'"type": "{MSG_PING}"' in line
 
 
 class ReceiverThread(threading.Thread):
@@ -45,14 +47,17 @@ class ReceiverThread(threading.Thread):
     Uses socket timeouts to detect hung servers. Queue depth is bounded
     to prevent unbounded memory growth.
 
+    The queue stores raw FlatBuffers bytes.  Consumers use the codec to
+    decode them (zero-copy via ``decode_envelope`` / ``resolve_payload``).
+
     Usage:
         rt = ReceiverThread(host="127.0.0.1", port=7200)
         rt.start()
         # ... periodically on main thread:
-        events = rt.drain_queue()
-        for raw_line in events:
-            msg = json.loads(raw_line)
-            # process msg
+        for raw_buf in rt.drain_queue():
+            env = decode_envelope(raw_buf)
+            msg_type, obj = resolve_payload(env)
+            # process typed FB object
         # ... when done:
         rt.stop()
     """
@@ -160,14 +165,13 @@ class ReceiverThread(threading.Thread):
             client_id=self.client_id, origin=self.origin,
             token=self.token,
         )
-        send_line(self.sock, hello)
+        send_msg(self.sock, hello)
         self.auth_rejected = False
 
-        buf = bytearray()
         consecutive_timeouts = 0
         while not self._stop_event.is_set():
             try:
-                data = self.sock.recv(65536)
+                buf = recv_framed(self.sock)
             except TimeoutError:
                 consecutive_timeouts += 1
                 if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
@@ -179,76 +183,67 @@ class ReceiverThread(threading.Thread):
                 LOG.debug("ReceiverThread: recv timeout (%d/%d)",
                           consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS)
                 continue
+            except (IncompleteRead, MessageTooLarge):
+                if not self._stop_event.is_set():
+                    LOG.warning("ReceiverThread: framing error during read")
+                break
             except OSError:
                 if not self._stop_event.is_set():
                     LOG.warning("ReceiverThread: socket error during read")
                 break
 
-            if not data:
-                LOG.info("ReceiverThread: EOF, server closed connection")
-                break
-
             consecutive_timeouts = 0
-            buf.extend(data)
 
-            parts = buf.split(b"\n")
-            buf = bytearray(parts[-1])
+            # Pre-handshake: check for auth/hello_ok messages
+            if not self.connected:
+                env = decode_envelope(buf)
+                pt = env.PayloadType()
 
-            overflow = False
-            for part in parts[:-1]:
-                line = part.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
+                if pt == PayloadType.AuthRejected:
+                    _, ar = resolve_payload(env)
+                    reason = ar.Reason()
+                    if isinstance(reason, bytes):
+                        reason = reason.decode("utf-8")
+                    LOG.error("ReceiverThread: auth rejected — %s", reason)
+                    self.auth_rejected = True
+                    return
 
-                # Pre-handshake: full parse for auth/hello messages
-                if not self.connected:
-                    try:
-                        parsed = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                if pt == PayloadType.HelloOk:
+                    _, ho = resolve_payload(env)
+                    issued = ho.Token()
+                    if issued:
+                        if isinstance(issued, bytes):
+                            issued = issued.decode("utf-8")
+                        self.token = issued
+                        if self._on_token_issued:
+                            self._on_token_issued(issued)
+                        LOG.info("ReceiverThread: token issued by server")
+                    self.connected = True
+                    LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+                continue
 
-                    if parsed.get("type") == MSG_AUTH_REJECTED:
-                        LOG.error("ReceiverThread: auth rejected — %s",
-                                  parsed.get("reason"))
-                        self.auth_rejected = True
-                        return
+            # Post-handshake: skip pings
+            if is_ping(buf):
+                continue
 
-                    if parsed.get("type") == MSG_HELLO_OK:
-                        issued = parsed.get("token")
-                        if issued:
-                            self.token = issued
-                            if self._on_token_issued:
-                                self._on_token_issued(issued)
-                            LOG.info("ReceiverThread: token issued by server")
-                        self.connected = True
-                        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
-                    continue
+            # Extract seq for tracking (read from BroadcastEvent without
+            # full dict conversion)
+            env = decode_envelope(buf)
+            if env.PayloadType() == PayloadType.BroadcastEvent:
+                _, be = resolve_payload(env)
+                seq = be.Seq()
+                if seq > self.last_seq:
+                    self.last_seq = seq
 
-                # Post-handshake: skip pings, extract seq via regex
-                if _is_ping(line):
-                    continue
-
-                with self._incoming_lock:
-                    if len(self._incoming) >= self.max_queue:
-                        overflow = True
-                        break
-                    self._incoming.append(line)
-
-                try:
-                    parsed = json.loads(line)
-                    seq = parsed.get("seq")
-                    if isinstance(seq, int):
-                        self.last_seq = max(self.last_seq, seq)
-                except json.JSONDecodeError:
-                    pass
-
-            if overflow:
-                LOG.warning(
-                    "ReceiverThread: queue full (%d), disconnecting to replay from server",
-                    self.max_queue,
-                )
-                self._queue_overflow = True
-                break
+            with self._incoming_lock:
+                if len(self._incoming) >= self.max_queue:
+                    LOG.warning(
+                        "ReceiverThread: queue full (%d), disconnecting to replay from server",
+                        self.max_queue,
+                    )
+                    self._queue_overflow = True
+                    break
+                self._incoming.append(buf)
 
     def _close_socket(self):
         """Close the socket, ignoring errors."""
@@ -260,7 +255,7 @@ class ReceiverThread(threading.Thread):
         self.sock = None
 
     def drain_queue(self) -> deque:
-        """Drain all queued raw JSON lines. Thread-safe, call from main thread."""
+        """Drain all queued raw FlatBuffers messages. Thread-safe, call from main thread."""
         with self._incoming_lock:
             old = self._incoming
             self._incoming = deque()

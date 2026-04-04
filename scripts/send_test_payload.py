@@ -5,9 +5,16 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import socket
+import sys
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from openusdconnect.transport import send_msg
 
 
 def main():
@@ -21,10 +28,8 @@ def main():
 
     def send_txn(events):
         s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
-        def send(m):
-            s.sendall((json.dumps(m) + "\n").encode())
-        send({"type": "hello", "role": "emitter", "protocol_version": 1})
-        send({"type": "txn", "client_id": "cli", "events": events})
+        send_msg(s, {"type": "hello", "role": "emitter", "protocol_version": 1})
+        send_msg(s, {"type": "txn", "client_id": "cli", "events": events})
         s.close()
 
     send_txn([

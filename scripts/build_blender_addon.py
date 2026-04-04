@@ -42,6 +42,15 @@ def build():
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "dashboard"),
     )
 
+    # Vendor flatbuffers (pure Python, required by codec)
+    import flatbuffers as _fb_mod
+    fb_src = Path(_fb_mod.__path__[0])
+    fb_dst = build_dir / "flatbuffers"
+    shutil.copytree(
+        fb_src, fb_dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
     # Bundle io_blender_mtlx MaterialX node handlers
     mtlx_lib_src = (
         REPO_ROOT / "vendor" / "io_blender_mtlx"

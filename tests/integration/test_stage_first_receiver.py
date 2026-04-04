@@ -5,7 +5,6 @@ Uses a real server (subprocess), real ReceiverThread, and MockAdapter.
 No Blender required — headless, runs in CI.
 """
 
-import json
 import socket
 import time
 
@@ -13,6 +12,7 @@ import pytest
 from pxr import Usd, UsdGeom
 
 from openusdconnect.adapters import MockAdapter
+from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events, atomic_apply
 from openusdconnect.protocol import (
     K_ENSURE_PRIM,
@@ -24,7 +24,7 @@ from openusdconnect.protocol import (
     make_txn,
 )
 from openusdconnect.receiver import ReceiverThread
-from openusdconnect.transport import send_line
+from openusdconnect.transport import send_msg
 from tests.helpers import start_server, stop_server
 
 PORT = 7291  # Unique port to avoid conflicts with other tests
@@ -42,9 +42,9 @@ def _send_events_to_server(events, port=PORT):
     """Connect as emitter and send a batch of events."""
     sock = socket.create_connection(("127.0.0.1", PORT), timeout=5)
     hello = make_hello("emitter", client_id="test-emitter", origin="test")
-    send_line(sock, hello)
+    send_msg(sock, hello)
     txn = make_txn("test-emitter", events)
-    send_line(sock, txn)
+    send_msg(sock, txn)
     time.sleep(0.2)  # Let server process
     sock.close()
 
@@ -60,11 +60,11 @@ def _receive_events(wait=0.5):
     return lines
 
 
-def _parse_events_from_lines(lines):
-    """Replicate the receiver's parse phase."""
+def _parse_events_from_bufs(bufs):
+    """Replicate the receiver's parse phase — decode FB buffers."""
     events = []
-    for raw_line in lines:
-        msg = json.loads(raw_line)
+    for raw_buf in bufs:
+        msg = message_to_dict(raw_buf)
         if msg.get("type") == MSG_RESYNC:
             events.clear()
             continue
@@ -98,7 +98,7 @@ class TestStageFirstIntegration:
         lines = _receive_events()
         assert len(lines) > 0
 
-        parsed = _parse_events_from_lines(lines)
+        parsed = _parse_events_from_bufs(lines)
         assert len(parsed) == 3
 
         # Stage-first: commit to stage atomically
@@ -140,7 +140,7 @@ class TestStageFirstIntegration:
 
         _send_events_to_server(events)
         lines = _receive_events()
-        parsed = _parse_events_from_lines(lines)
+        parsed = _parse_events_from_bufs(lines)
 
         adapter_called = False
         with pytest.raises(RuntimeError):
@@ -174,7 +174,7 @@ class TestStageFirstIntegration:
         ]
         _send_events_to_server(events)
         lines = _receive_events()
-        parsed = _parse_events_from_lines(lines)
+        parsed = _parse_events_from_bufs(lines)
 
         with pytest.raises(RuntimeError):
             with atomic_apply(stage):

@@ -1,0 +1,1249 @@
+"""FlatBuffers codec for the OpenUSDConnect wire protocol.
+
+FlatBuffers is the canonical wire and storage format.  Zero-copy access
+is used wherever possible:
+
+  * **Receiver queue** — stores raw bytes; decode on drain.
+  * **Broadcast relay** — pre-framed binary sent to all receivers.
+  * **Event store** — binary blobs written/read without re-serialization.
+
+The server's event-processing path (apply_txn) still operates on Python
+dicts — events are decoded once on ingestion and the dict is passed to
+event_apply.  This is the primary conversion boundary.
+
+Primary API (zero-copy path):
+    encode_message(msg_dict)     -> bytes          # dict  → FB binary
+    decode_envelope(buf)         -> Envelope        # FB binary → typed FB object
+    resolve_payload(envelope)    -> (msg_type, obj) # Envelope → (str, typed FB table)
+    resolve_event(event_wrapper) -> (kind, obj)     # EventWrapper → (str, typed FB table)
+
+Debug / compaction API (copies):
+    message_to_dict(buf)  -> dict    # FB binary → Python dict
+    event_to_dict(ew)     -> dict    # EventWrapper → Python dict
+
+Fast checks:
+    is_ping(buf)          -> bool    # single-byte read, no alloc
+    payload_type(buf)     -> int     # raw union tag
+"""
+
+from __future__ import annotations
+
+import json
+
+import flatbuffers
+import numpy as np
+
+from .generated import messages_generated as _fb
+from .protocol import (
+    K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_LOAD_PAYLOAD,
+    K_RENAME_PRIM,
+    K_SET_GPRIM_ATTRS,
+    K_SET_MATERIAL_BINDING,
+    K_SET_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
+    K_SET_SHADER_INPUT,
+    K_SET_VARIANT_SELECTIONS,
+    K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
+    MSG_AUTH_REJECTED,
+    MSG_COMPACT,
+    MSG_CREATE_PROPOSAL,
+    MSG_EVENT,
+    MSG_HELLO,
+    MSG_HELLO_OK,
+    MSG_PING,
+    MSG_PROPOSAL_CREATED,
+    MSG_QUIT,
+    MSG_RATE_LIMITED,
+    MSG_RESYNC,
+    MSG_TXN,
+)
+
+# Re-export generated classes so consumers import from codec, not generated path.
+# These are the typed FB table classes the rest of the codebase works with.
+Envelope = _fb.Envelope
+Hello = _fb.Hello
+HelloOk = _fb.HelloOk
+AuthRejected = _fb.AuthRejected
+Txn = _fb.Txn
+BroadcastEvent = _fb.BroadcastEvent
+Resync = _fb.Resync
+Compact = _fb.Compact
+Ping = _fb.Ping
+Quit = _fb.Quit
+CreateProposal = _fb.CreateProposal
+ProposalCreated = _fb.ProposalCreated
+RateLimited = _fb.RateLimited
+EventWrapper = _fb.EventWrapper
+EnsurePrim = _fb.EnsurePrim
+EnsureXformOps = _fb.EnsureXformOps
+SetXformTrs = _fb.SetXformTrs
+SetXformMatrices = _fb.SetXformMatrices
+DeletePrim = _fb.DeletePrim
+DeactivatePrim = _fb.DeactivatePrim
+RenamePrim = _fb.RenamePrim
+SetVisibility = _fb.SetVisibility
+SetGprimAttrs = _fb.SetGprimAttrs
+SetReference = _fb.SetReference
+SetPayload = _fb.SetPayload
+LoadPayload = _fb.LoadPayload
+UnloadPayload = _fb.UnloadPayload
+SetVariantSelections = _fb.SetVariantSelections
+SetMaterialBinding = _fb.SetMaterialBinding
+SetShaderInput = _fb.SetShaderInput
+SetShaderConnection = _fb.SetShaderConnection
+NamedAttr = _fb.NamedAttr
+AttrValue = _fb.AttrValue
+AttrValueType = _fb.AttrValueType
+PrimvarMeta = _fb.PrimvarMeta
+AttrInterp = _fb.AttrInterp
+ShaderInputValue = _fb.ShaderInputValue
+ShaderConnection = _fb.ShaderConnection
+ShaderInputValueType = _fb.ShaderInputValueType
+ArcEntry = _fb.ArcEntry
+StringPair = _fb.StringPair
+PayloadType = _fb.Payload
+EventPayloadType = _fb.EventPayload
+
+SCHEMA_VERSION = 1
+
+# ---------------------------------------------------------------------------
+# Mapping tables
+# ---------------------------------------------------------------------------
+
+_MSG_TYPE_TO_PAYLOAD = {
+    MSG_HELLO: PayloadType.Hello,
+    MSG_HELLO_OK: PayloadType.HelloOk,
+    MSG_AUTH_REJECTED: PayloadType.AuthRejected,
+    MSG_TXN: PayloadType.Txn,
+    MSG_EVENT: PayloadType.BroadcastEvent,
+    MSG_RESYNC: PayloadType.Resync,
+    MSG_COMPACT: PayloadType.Compact,
+    MSG_PING: PayloadType.Ping,
+    MSG_QUIT: PayloadType.Quit,
+    MSG_CREATE_PROPOSAL: PayloadType.CreateProposal,
+    MSG_PROPOSAL_CREATED: PayloadType.ProposalCreated,
+    MSG_RATE_LIMITED: PayloadType.RateLimited,
+}
+
+_PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
+
+_PAYLOAD_TO_CLASS = {
+    PayloadType.Hello: Hello,
+    PayloadType.HelloOk: HelloOk,
+    PayloadType.AuthRejected: AuthRejected,
+    PayloadType.Txn: Txn,
+    PayloadType.BroadcastEvent: BroadcastEvent,
+    PayloadType.Resync: Resync,
+    PayloadType.Compact: Compact,
+    PayloadType.Ping: Ping,
+    PayloadType.Quit: Quit,
+    PayloadType.CreateProposal: CreateProposal,
+    PayloadType.ProposalCreated: ProposalCreated,
+    PayloadType.RateLimited: RateLimited,
+}
+
+_EVENT_KIND_TO_TAG = {
+    K_ENSURE_PRIM: EventPayloadType.EnsurePrim,
+    K_ENSURE_XFORM_OPS: EventPayloadType.EnsureXformOps,
+    K_SET_XFORM_TRS: EventPayloadType.SetXformTrs,
+    K_SET_XFORM_MATRICES: EventPayloadType.SetXformMatrices,
+    K_DELETE_PRIM: EventPayloadType.DeletePrim,
+    K_DEACTIVATE_PRIM: EventPayloadType.DeactivatePrim,
+    K_RENAME_PRIM: EventPayloadType.RenamePrim,
+    K_SET_VISIBILITY: EventPayloadType.SetVisibility,
+    K_SET_GPRIM_ATTRS: EventPayloadType.SetGprimAttrs,
+    K_SET_REFERENCE: EventPayloadType.SetReference,
+    K_SET_PAYLOAD: EventPayloadType.SetPayload,
+    K_LOAD_PAYLOAD: EventPayloadType.LoadPayload,
+    K_UNLOAD_PAYLOAD: EventPayloadType.UnloadPayload,
+    K_SET_VARIANT_SELECTIONS: EventPayloadType.SetVariantSelections,
+    K_SET_MATERIAL_BINDING: EventPayloadType.SetMaterialBinding,
+    K_SET_SHADER_INPUT: EventPayloadType.SetShaderInput,
+    K_SET_SHADER_CONNECTION: EventPayloadType.SetShaderConnection,
+}
+
+_TAG_TO_EVENT_KIND = {v: k for k, v in _EVENT_KIND_TO_TAG.items()}
+
+_EVENT_TAG_TO_CLASS = {
+    EventPayloadType.EnsurePrim: EnsurePrim,
+    EventPayloadType.EnsureXformOps: EnsureXformOps,
+    EventPayloadType.SetXformTrs: SetXformTrs,
+    EventPayloadType.SetXformMatrices: SetXformMatrices,
+    EventPayloadType.DeletePrim: DeletePrim,
+    EventPayloadType.DeactivatePrim: DeactivatePrim,
+    EventPayloadType.RenamePrim: RenamePrim,
+    EventPayloadType.SetVisibility: SetVisibility,
+    EventPayloadType.SetGprimAttrs: SetGprimAttrs,
+    EventPayloadType.SetReference: SetReference,
+    EventPayloadType.SetPayload: SetPayload,
+    EventPayloadType.LoadPayload: LoadPayload,
+    EventPayloadType.UnloadPayload: UnloadPayload,
+    EventPayloadType.SetVariantSelections: SetVariantSelections,
+    EventPayloadType.SetMaterialBinding: SetMaterialBinding,
+    EventPayloadType.SetShaderInput: SetShaderInput,
+    EventPayloadType.SetShaderConnection: SetShaderConnection,
+}
+
+_TRS_BITS = {"t": 1, "r": 2, "s": 4}
+
+_BUILDER_SIZE_HINT: dict[str, int] = {
+    MSG_EVENT: 4096,
+    MSG_TXN: 4096,
+}
+_DEFAULT_BUILDER_SIZE = 512
+
+
+# ===================================================================
+# ZERO-COPY DECODE API  (primary path)
+# ===================================================================
+
+
+def decode_envelope(buf: bytes | bytearray) -> Envelope:
+    """Decode wire bytes to a FlatBuffers Envelope (zero-copy)."""
+    return Envelope.GetRootAs(buf, 0)
+
+
+def resolve_payload(envelope: Envelope):
+    """Resolve envelope union to (msg_type_str, typed_fb_object).
+
+    Returns e.g. ("hello", Hello) or ("event", BroadcastEvent).
+    The typed object shares the same underlying buffer — zero-copy.
+    """
+    tag = envelope.PayloadType()
+    msg_type = _PAYLOAD_TO_MSG_TYPE.get(tag)
+    if msg_type is None:
+        raise ValueError(f"unknown payload type {tag}")
+    cls = _PAYLOAD_TO_CLASS[tag]
+    raw_table = envelope.Payload()
+    obj = cls()
+    obj.Init(raw_table.Bytes, raw_table.Pos)
+    return msg_type, obj
+
+
+def resolve_event(event_wrapper: EventWrapper):
+    """Resolve EventWrapper union to (kind_str, typed_fb_object).
+
+    Returns e.g. ("set_xform_trs", SetXformTrs) or
+    ("set_gprim_attrs", SetGprimAttrs).
+    """
+    tag = event_wrapper.EventType()
+    kind = _TAG_TO_EVENT_KIND.get(tag)
+    if kind is None:
+        raise ValueError(f"unknown event payload type {tag}")
+    cls = _EVENT_TAG_TO_CLASS[tag]
+    raw_table = event_wrapper.Event()
+    obj = cls()
+    obj.Init(raw_table.Bytes, raw_table.Pos)
+    return kind, obj
+
+
+def is_ping(buf: bytes | bytearray) -> bool:
+    """Check if a buffer is a Ping message — single byte read, no alloc."""
+    return decode_envelope(buf).PayloadType() == PayloadType.Ping
+
+
+def payload_type(buf: bytes | bytearray) -> int:
+    """Read the raw Payload union tag from a buffer."""
+    return decode_envelope(buf).PayloadType()
+
+
+# ===================================================================
+# ENCODE API  (dict -> FlatBuffers bytes)
+# ===================================================================
+
+
+def encode_message(msg: dict) -> bytes:
+    """Encode a protocol dict to FlatBuffers wire bytes."""
+    msg_type = msg["type"]
+    builder = flatbuffers.Builder(
+        _BUILDER_SIZE_HINT.get(msg_type, _DEFAULT_BUILDER_SIZE)
+    )
+
+    payload_tag = _MSG_TYPE_TO_PAYLOAD[msg_type]
+    payload_offset = _ENCODE_DISPATCH[msg_type](builder, msg)
+
+    _fb.EnvelopeStart(builder)
+    _fb.EnvelopeAddPayloadType(builder, payload_tag)
+    _fb.EnvelopeAddPayload(builder, payload_offset)
+    _fb.EnvelopeAddSchemaVersion(builder, SCHEMA_VERSION)
+    envelope = _fb.EnvelopeEnd(builder)
+
+    builder.Finish(envelope)
+    return bytes(builder.Output())
+
+
+# --- Per-message-type encoders ---
+
+def _encode_hello(b, msg):
+    role = b.CreateString(msg["role"])
+    client_id = b.CreateString(msg["client_id"]) if msg.get("client_id") else None
+    origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
+    department = b.CreateString(msg["department"]) if msg.get("department") else None
+    token = b.CreateString(msg["token"]) if msg.get("token") else None
+
+    _fb.HelloStart(b)
+    _fb.HelloAddRole(b, role)
+    _fb.HelloAddProtocolVersion(b, msg.get("protocol_version", 0))
+    if msg.get("sync_from") is not None:
+        _fb.HelloAddSyncFrom(b, msg["sync_from"])
+    if client_id:
+        _fb.HelloAddClientId(b, client_id)
+    if origin:
+        _fb.HelloAddOrigin(b, origin)
+    if department:
+        _fb.HelloAddDepartment(b, department)
+    if token:
+        _fb.HelloAddToken(b, token)
+    return _fb.HelloEnd(b)
+
+
+def _encode_hello_ok(b, msg):
+    token = b.CreateString(msg["token"]) if msg.get("token") else None
+    _fb.HelloOkStart(b)
+    if token:
+        _fb.HelloOkAddToken(b, token)
+    return _fb.HelloOkEnd(b)
+
+
+def _encode_auth_rejected(b, msg):
+    reason = b.CreateString(msg.get("reason", ""))
+    _fb.AuthRejectedStart(b)
+    _fb.AuthRejectedAddReason(b, reason)
+    return _fb.AuthRejectedEnd(b)
+
+
+def _encode_txn(b, msg):
+    client_id = b.CreateString(msg["client_id"])
+    event_offsets = [_encode_event_wrapper(b, ev) for ev in msg["events"]]
+    _fb.TxnStartEventsVector(b, len(event_offsets))
+    for off in reversed(event_offsets):
+        b.PrependUOffsetTRelative(off)
+    events_vec = b.EndVector()
+    _fb.TxnStart(b)
+    _fb.TxnAddClientId(b, client_id)
+    _fb.TxnAddEvents(b, events_vec)
+    return _fb.TxnEnd(b)
+
+
+def _encode_broadcast_event(b, msg):
+    ev_offset = _encode_event_wrapper(b, msg["event"])
+    origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
+    client_id = b.CreateString(msg["client_id"]) if msg.get("client_id") else None
+    client = b.CreateString(msg["client"]) if msg.get("client") else None
+    _fb.BroadcastEventStart(b)
+    _fb.BroadcastEventAddSeq(b, msg["seq"])
+    _fb.BroadcastEventAddEvent(b, ev_offset)
+    if origin:
+        _fb.BroadcastEventAddOrigin(b, origin)
+    if client_id:
+        _fb.BroadcastEventAddClientId(b, client_id)
+    if client:
+        _fb.BroadcastEventAddClient(b, client)
+    return _fb.BroadcastEventEnd(b)
+
+
+def _encode_resync(b, _msg):
+    _fb.ResyncStart(b)
+    return _fb.ResyncEnd(b)
+
+
+def _encode_compact(b, _msg):
+    _fb.CompactStart(b)
+    return _fb.CompactEnd(b)
+
+
+def _encode_ping(b, _msg):
+    _fb.PingStart(b)
+    return _fb.PingEnd(b)
+
+
+def _encode_quit(b, _msg):
+    _fb.QuitStart(b)
+    return _fb.QuitEnd(b)
+
+
+def _encode_create_proposal(b, msg):
+    target = b.CreateString(msg["target_department"])
+    desc = b.CreateString(msg.get("description", ""))
+    events = msg.get("events", [])
+    events_vec = None
+    if events:
+        event_offsets = [_encode_event_wrapper(b, ev) for ev in events]
+        _fb.CreateProposalStartEventsVector(b, len(event_offsets))
+        for off in reversed(event_offsets):
+            b.PrependUOffsetTRelative(off)
+        events_vec = b.EndVector()
+    _fb.CreateProposalStart(b)
+    _fb.CreateProposalAddTargetDepartment(b, target)
+    if events_vec is not None:
+        _fb.CreateProposalAddEvents(b, events_vec)
+    _fb.CreateProposalAddDescription(b, desc)
+    return _fb.CreateProposalEnd(b)
+
+
+def _encode_proposal_created(b, msg):
+    pid = b.CreateString(msg["proposal_id"])
+    _fb.ProposalCreatedStart(b)
+    _fb.ProposalCreatedAddProposalId(b, pid)
+    return _fb.ProposalCreatedEnd(b)
+
+
+def _encode_rate_limited(b, msg):
+    _fb.RateLimitedStart(b)
+    _fb.RateLimitedAddRetryAfter(b, msg["retry_after"])
+    return _fb.RateLimitedEnd(b)
+
+
+_ENCODE_DISPATCH = {
+    MSG_HELLO: _encode_hello,
+    MSG_HELLO_OK: _encode_hello_ok,
+    MSG_AUTH_REJECTED: _encode_auth_rejected,
+    MSG_TXN: _encode_txn,
+    MSG_EVENT: _encode_broadcast_event,
+    MSG_RESYNC: _encode_resync,
+    MSG_COMPACT: _encode_compact,
+    MSG_PING: _encode_ping,
+    MSG_QUIT: _encode_quit,
+    MSG_CREATE_PROPOSAL: _encode_create_proposal,
+    MSG_PROPOSAL_CREATED: _encode_proposal_created,
+    MSG_RATE_LIMITED: _encode_rate_limited,
+}
+
+
+# --- Event wrapper encoder ---
+
+def _encode_event_wrapper(b, ev: dict) -> int:
+    kind = ev["k"]
+    tag = _EVENT_KIND_TO_TAG[kind]
+    event_offset = _EVENT_ENCODE_DISPATCH[kind](b, ev)
+    _fb.EventWrapperStart(b)
+    _fb.EventWrapperAddEventType(b, tag)
+    _fb.EventWrapperAddEvent(b, event_offset)
+    return _fb.EventWrapperEnd(b)
+
+
+# --- Per-event-kind encoders ---
+
+def _create_float_vector(b, values):
+    """Create a FlatBuffers float32 vector via numpy bulk copy."""
+    return b.CreateNumpyVector(np.asarray(values, dtype=np.float32))
+
+
+def _create_int_vector(b, values):
+    """Create a FlatBuffers int32 vector via numpy bulk copy."""
+    return b.CreateNumpyVector(np.asarray(values, dtype=np.int32))
+
+
+def _encode_ensure_prim(b, ev):
+    prim = b.CreateString(ev["prim"])
+    tn = b.CreateString(ev.get("typeName", ""))
+    _fb.EnsurePrimStart(b)
+    _fb.EnsurePrimAddPrim(b, prim)
+    _fb.EnsurePrimAddTypeName(b, tn)
+    return _fb.EnsurePrimEnd(b)
+
+
+def _encode_ensure_xform_ops(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.EnsureXformOpsStart(b)
+    _fb.EnsureXformOpsAddPrim(b, prim)
+    return _fb.EnsureXformOpsEnd(b)
+
+
+def _encode_set_xform_trs(b, ev):
+    prim = b.CreateString(ev["prim"])
+    fields = ev.get("fields", [])
+    bitmask = 0
+    for f in fields:
+        bitmask |= _TRS_BITS.get(f, 0)
+
+    t_vec = _create_float_vector(b, ev["t"]) if "t" in fields else None
+    r_vec = _create_float_vector(b, ev["r"]) if "r" in fields else None
+    s_vec = _create_float_vector(b, ev["s"]) if "s" in fields else None
+
+    _fb.SetXformTrsStart(b)
+    _fb.SetXformTrsAddPrim(b, prim)
+    _fb.SetXformTrsAddFields(b, bitmask)
+    if t_vec is not None:
+        _fb.SetXformTrsAddT(b, t_vec)
+    if r_vec is not None:
+        _fb.SetXformTrsAddR(b, r_vec)
+    if s_vec is not None:
+        _fb.SetXformTrsAddS(b, s_vec)
+    return _fb.SetXformTrsEnd(b)
+
+
+def _encode_set_xform_matrices(b, ev):
+    prim = b.CreateString(ev["prim"])
+    local_vec = _create_float_vector(b, ev["local_m"])
+    world_vec = _create_float_vector(b, ev["world_m"])
+    _fb.SetXformMatricesStart(b)
+    _fb.SetXformMatricesAddPrim(b, prim)
+    _fb.SetXformMatricesAddLocalM(b, local_vec)
+    _fb.SetXformMatricesAddWorldM(b, world_vec)
+    return _fb.SetXformMatricesEnd(b)
+
+
+def _encode_delete_prim(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.DeletePrimStart(b)
+    _fb.DeletePrimAddPrim(b, prim)
+    return _fb.DeletePrimEnd(b)
+
+
+def _encode_deactivate_prim(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.DeactivatePrimStart(b)
+    _fb.DeactivatePrimAddPrim(b, prim)
+    _fb.DeactivatePrimAddActive(b, ev["active"])
+    return _fb.DeactivatePrimEnd(b)
+
+
+def _encode_rename_prim(b, ev):
+    prim = b.CreateString(ev["prim"])
+    new_name = b.CreateString(ev["new_name"])
+    _fb.RenamePrimStart(b)
+    _fb.RenamePrimAddPrim(b, prim)
+    _fb.RenamePrimAddNewName(b, new_name)
+    return _fb.RenamePrimEnd(b)
+
+
+def _encode_set_visibility(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.SetVisibilityStart(b)
+    _fb.SetVisibilityAddPrim(b, prim)
+    _fb.SetVisibilityAddVisible(b, ev["visible"])
+    return _fb.SetVisibilityEnd(b)
+
+
+def _encode_attr_value(b, name: str, value) -> int:
+    """Encode a single named attribute value into a NamedAttr table."""
+    name_off = b.CreateString(name)
+    av_off = _encode_attr_value_inner(b, value)
+    _fb.NamedAttrStart(b)
+    _fb.NamedAttrAddName(b, name_off)
+    _fb.NamedAttrAddValue(b, av_off)
+    return _fb.NamedAttrEnd(b)
+
+
+def _encode_attr_value_inner(b, value) -> int:
+    """Encode a Python value into an AttrValue table offset."""
+    if isinstance(value, bool):
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.ScalarBool)
+        _fb.AttrValueAddScalarBool(b, value)
+        return _fb.AttrValueEnd(b)
+    if isinstance(value, int):
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.ScalarInt)
+        _fb.AttrValueAddScalarInt(b, value)
+        return _fb.AttrValueEnd(b)
+    if isinstance(value, float):
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.ScalarFloat)
+        _fb.AttrValueAddScalarFloat(b, value)
+        return _fb.AttrValueEnd(b)
+    if isinstance(value, str):
+        str_off = b.CreateString(value)
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.ScalarString)
+        _fb.AttrValueAddScalarString(b, str_off)
+        return _fb.AttrValueEnd(b)
+    # numpy arrays — bulk encode via CreateNumpyVector (zero-copy path)
+    if isinstance(value, np.ndarray):
+        return _encode_attr_value_numpy(b, value)
+    if isinstance(value, list):
+        return _encode_attr_value_list(b, value)
+    # Fallback: JSON
+    json_off = b.CreateString(json.dumps(value))
+    _fb.AttrValueStart(b)
+    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
+    _fb.AttrValueAddNestedJson(b, json_off)
+    return _fb.AttrValueEnd(b)
+
+
+def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
+    """Encode a numpy array into an AttrValue — direct bulk copy."""
+    if arr.size == 0:
+        json_off = b.CreateString("[]")
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
+        _fb.AttrValueAddNestedJson(b, json_off)
+        return _fb.AttrValueEnd(b)
+
+    # Determine stride from array shape (e.g. (N,3) → stride=3, (N,) → stride=1)
+    if arr.ndim == 1:
+        stride = 1
+    elif arr.ndim == 2:
+        stride = arr.shape[1]
+    else:
+        # 3D+ arrays — flatten and use stride from last dim
+        stride = arr.shape[-1]
+
+    # Flatten to 1D for FlatBuffers vector
+    flat = arr.ravel()
+
+    if np.issubdtype(arr.dtype, np.floating):
+        vec = b.CreateNumpyVector(flat.astype(np.float32, copy=False))
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
+        _fb.AttrValueAddFloatArray(b, vec)
+        _fb.AttrValueAddStride(b, stride)
+        return _fb.AttrValueEnd(b)
+
+    if np.issubdtype(arr.dtype, np.integer):
+        vec = b.CreateNumpyVector(flat.astype(np.int32, copy=False))
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.IntArray)
+        _fb.AttrValueAddIntArray(b, vec)
+        _fb.AttrValueAddStride(b, stride)
+        return _fb.AttrValueEnd(b)
+
+    # Fallback for unusual dtypes
+    json_off = b.CreateString(json.dumps(arr.tolist()))
+    _fb.AttrValueStart(b)
+    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
+    _fb.AttrValueAddNestedJson(b, json_off)
+    return _fb.AttrValueEnd(b)
+
+
+def _encode_attr_value_list(b, value: list) -> int:
+    """Encode a list value — detect element type, use typed vectors."""
+    if not value:
+        json_off = b.CreateString("[]")
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
+        _fb.AttrValueAddNestedJson(b, json_off)
+        return _fb.AttrValueEnd(b)
+
+    first = value[0]
+
+    # Flat float list
+    if isinstance(first, float):
+        vec = _create_float_vector(b, value)
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
+        _fb.AttrValueAddFloatArray(b, vec)
+        _fb.AttrValueAddStride(b, 1)
+        return _fb.AttrValueEnd(b)
+
+    # Flat int list
+    if isinstance(first, int) and not isinstance(first, bool):
+        vec = _create_int_vector(b, value)
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.IntArray)
+        _fb.AttrValueAddIntArray(b, vec)
+        _fb.AttrValueAddStride(b, 1)
+        return _fb.AttrValueEnd(b)
+
+    # Nested list of numbers (Vec3fArray → [[x,y,z], ...]) → flattened with stride
+    if isinstance(first, list) and first and isinstance(first[0], (int, float)):
+        stride = len(first)
+        flat = []
+        for sub in value:
+            flat.extend(float(v) for v in sub)
+        vec = _create_float_vector(b, flat)
+        _fb.AttrValueStart(b)
+        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
+        _fb.AttrValueAddFloatArray(b, vec)
+        _fb.AttrValueAddStride(b, stride)
+        return _fb.AttrValueEnd(b)
+
+    # Fallback
+    json_off = b.CreateString(json.dumps(value))
+    _fb.AttrValueStart(b)
+    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
+    _fb.AttrValueAddNestedJson(b, json_off)
+    return _fb.AttrValueEnd(b)
+
+
+def _encode_set_gprim_attrs(b, ev):
+    prim = b.CreateString(ev["prim"])
+    attrs = ev.get("attrs", {})
+    primvar_meta = ev.get("primvar_meta", {})
+    attr_interp_map = ev.get("attr_interp", {})
+
+    attr_offsets = [_encode_attr_value(b, name, val) for name, val in attrs.items()]
+    _fb.SetGprimAttrsStartAttrsVector(b, len(attr_offsets))
+    for off in reversed(attr_offsets):
+        b.PrependUOffsetTRelative(off)
+    attrs_vec = b.EndVector()
+
+    pvm_offsets = []
+    for aname, meta in primvar_meta.items():
+        an = b.CreateString(aname)
+        tn = b.CreateString(meta.get("typeName", ""))
+        interp = b.CreateString(meta["interpolation"]) if meta.get("interpolation") else None
+        _fb.PrimvarMetaStart(b)
+        _fb.PrimvarMetaAddAttrName(b, an)
+        _fb.PrimvarMetaAddTypeName(b, tn)
+        if interp:
+            _fb.PrimvarMetaAddInterpolation(b, interp)
+        pvm_offsets.append(_fb.PrimvarMetaEnd(b))
+
+    pvm_vec = None
+    if pvm_offsets:
+        _fb.SetGprimAttrsStartPrimvarMetaVector(b, len(pvm_offsets))
+        for off in reversed(pvm_offsets):
+            b.PrependUOffsetTRelative(off)
+        pvm_vec = b.EndVector()
+
+    ai_offsets = []
+    for aname, interp in attr_interp_map.items():
+        an = b.CreateString(aname)
+        iv = b.CreateString(interp)
+        _fb.AttrInterpStart(b)
+        _fb.AttrInterpAddAttrName(b, an)
+        _fb.AttrInterpAddInterpolation(b, iv)
+        ai_offsets.append(_fb.AttrInterpEnd(b))
+
+    ai_vec = None
+    if ai_offsets:
+        _fb.SetGprimAttrsStartAttrInterpVector(b, len(ai_offsets))
+        for off in reversed(ai_offsets):
+            b.PrependUOffsetTRelative(off)
+        ai_vec = b.EndVector()
+
+    _fb.SetGprimAttrsStart(b)
+    _fb.SetGprimAttrsAddPrim(b, prim)
+    _fb.SetGprimAttrsAddAttrs(b, attrs_vec)
+    if pvm_vec is not None:
+        _fb.SetGprimAttrsAddPrimvarMeta(b, pvm_vec)
+    if ai_vec is not None:
+        _fb.SetGprimAttrsAddAttrInterp(b, ai_vec)
+    return _fb.SetGprimAttrsEnd(b)
+
+
+def _encode_arc_entries(b, entries):
+    offsets = []
+    for entry in entries:
+        ap = b.CreateString(entry["asset_path"]) if entry.get("asset_path") else None
+        pp = b.CreateString(entry["prim_path"]) if entry.get("prim_path") else None
+        _fb.ArcEntryStart(b)
+        if ap:
+            _fb.ArcEntryAddAssetPath(b, ap)
+        if pp:
+            _fb.ArcEntryAddPrimPath(b, pp)
+        offsets.append(_fb.ArcEntryEnd(b))
+    return offsets
+
+
+def _encode_set_reference(b, ev):
+    prim = b.CreateString(ev["prim"])
+    arc_offsets = _encode_arc_entries(b, ev["refs"])
+    _fb.SetReferenceStartRefsVector(b, len(arc_offsets))
+    for off in reversed(arc_offsets):
+        b.PrependUOffsetTRelative(off)
+    refs_vec = b.EndVector()
+    _fb.SetReferenceStart(b)
+    _fb.SetReferenceAddPrim(b, prim)
+    _fb.SetReferenceAddRefs(b, refs_vec)
+    return _fb.SetReferenceEnd(b)
+
+
+def _encode_set_payload(b, ev):
+    prim = b.CreateString(ev["prim"])
+    arc_offsets = _encode_arc_entries(b, ev["payloads"])
+    _fb.SetPayloadStartPayloadsVector(b, len(arc_offsets))
+    for off in reversed(arc_offsets):
+        b.PrependUOffsetTRelative(off)
+    payloads_vec = b.EndVector()
+    _fb.SetPayloadStart(b)
+    _fb.SetPayloadAddPrim(b, prim)
+    _fb.SetPayloadAddPayloads(b, payloads_vec)
+    return _fb.SetPayloadEnd(b)
+
+
+def _encode_load_payload(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.LoadPayloadStart(b)
+    _fb.LoadPayloadAddPrim(b, prim)
+    return _fb.LoadPayloadEnd(b)
+
+
+def _encode_unload_payload(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.UnloadPayloadStart(b)
+    _fb.UnloadPayloadAddPrim(b, prim)
+    return _fb.UnloadPayloadEnd(b)
+
+
+def _encode_set_variant_selections(b, ev):
+    prim = b.CreateString(ev["prim"])
+    sp_offsets = []
+    for key, val in ev["selections"].items():
+        k = b.CreateString(key)
+        v = b.CreateString(val)
+        _fb.StringPairStart(b)
+        _fb.StringPairAddKey(b, k)
+        _fb.StringPairAddValue(b, v)
+        sp_offsets.append(_fb.StringPairEnd(b))
+    _fb.SetVariantSelectionsStartSelectionsVector(b, len(sp_offsets))
+    for off in reversed(sp_offsets):
+        b.PrependUOffsetTRelative(off)
+    sel_vec = b.EndVector()
+    _fb.SetVariantSelectionsStart(b)
+    _fb.SetVariantSelectionsAddPrim(b, prim)
+    _fb.SetVariantSelectionsAddSelections(b, sel_vec)
+    return _fb.SetVariantSelectionsEnd(b)
+
+
+def _encode_set_material_binding(b, ev):
+    prim = b.CreateString(ev["prim"])
+    mp = b.CreateString(ev["material_path"])
+    _fb.SetMaterialBindingStart(b)
+    _fb.SetMaterialBindingAddPrim(b, prim)
+    _fb.SetMaterialBindingAddMaterialPath(b, mp)
+    return _fb.SetMaterialBindingEnd(b)
+
+
+def _encode_set_shader_input(b, ev):
+    prim = b.CreateString(ev["prim"])
+    shader_id = b.CreateString(ev["shader_id"])
+    inputs = ev.get("inputs", {})
+    input_types = ev.get("input_types", {})
+
+    si_offsets = []
+    for name, value in inputs.items():
+        n = b.CreateString(name)
+        tn = b.CreateString(input_types.get(name, ""))
+        str_off = None
+        float_vec = None
+        if isinstance(value, str):
+            str_off = b.CreateString(value)
+        elif isinstance(value, list):
+            float_vec = _create_float_vector(b, [float(v) for v in value])
+
+        _fb.ShaderInputValueStart(b)
+        _fb.ShaderInputValueAddName(b, n)
+        _fb.ShaderInputValueAddTypeName(b, tn)
+        if isinstance(value, bool):
+            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarBool)
+            _fb.ShaderInputValueAddScalarBool(b, value)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarInt)
+            _fb.ShaderInputValueAddScalarInt(b, value)
+        elif isinstance(value, float):
+            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarFloat)
+            _fb.ShaderInputValueAddScalarFloat(b, value)
+        elif str_off is not None:
+            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarString)
+            _fb.ShaderInputValueAddScalarString(b, str_off)
+        elif float_vec is not None:
+            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.FloatArray)
+            _fb.ShaderInputValueAddFloatArray(b, float_vec)
+        si_offsets.append(_fb.ShaderInputValueEnd(b))
+
+    _fb.SetShaderInputStartInputsVector(b, len(si_offsets))
+    for off in reversed(si_offsets):
+        b.PrependUOffsetTRelative(off)
+    inputs_vec = b.EndVector()
+
+    _fb.SetShaderInputStart(b)
+    _fb.SetShaderInputAddPrim(b, prim)
+    _fb.SetShaderInputAddShaderId(b, shader_id)
+    _fb.SetShaderInputAddInputs(b, inputs_vec)
+    return _fb.SetShaderInputEnd(b)
+
+
+def _encode_set_shader_connection(b, ev):
+    prim = b.CreateString(ev["prim"])
+    connections = ev.get("connections", {})
+    disconnections = ev.get("disconnections", [])
+
+    conn_offsets = []
+    for input_name, conn in connections.items():
+        in_off = b.CreateString(input_name)
+        sp_off = b.CreateString(conn["source_prim"])
+        so_off = b.CreateString(conn["source_output"])
+        _fb.ShaderConnectionStart(b)
+        _fb.ShaderConnectionAddInputName(b, in_off)
+        _fb.ShaderConnectionAddSourcePrim(b, sp_off)
+        _fb.ShaderConnectionAddSourceOutput(b, so_off)
+        conn_offsets.append(_fb.ShaderConnectionEnd(b))
+
+    _fb.SetShaderConnectionStartConnectionsVector(b, len(conn_offsets))
+    for off in reversed(conn_offsets):
+        b.PrependUOffsetTRelative(off)
+    conn_vec = b.EndVector()
+
+    disc_str_offsets = [b.CreateString(d) for d in disconnections]
+    _fb.SetShaderConnectionStartDisconnectionsVector(b, len(disc_str_offsets))
+    for off in reversed(disc_str_offsets):
+        b.PrependUOffsetTRelative(off)
+    disc_vec = b.EndVector()
+
+    _fb.SetShaderConnectionStart(b)
+    _fb.SetShaderConnectionAddPrim(b, prim)
+    _fb.SetShaderConnectionAddConnections(b, conn_vec)
+    _fb.SetShaderConnectionAddDisconnections(b, disc_vec)
+    return _fb.SetShaderConnectionEnd(b)
+
+
+_EVENT_ENCODE_DISPATCH = {
+    K_ENSURE_PRIM: _encode_ensure_prim,
+    K_ENSURE_XFORM_OPS: _encode_ensure_xform_ops,
+    K_SET_XFORM_TRS: _encode_set_xform_trs,
+    K_SET_XFORM_MATRICES: _encode_set_xform_matrices,
+    K_DELETE_PRIM: _encode_delete_prim,
+    K_DEACTIVATE_PRIM: _encode_deactivate_prim,
+    K_RENAME_PRIM: _encode_rename_prim,
+    K_SET_VISIBILITY: _encode_set_visibility,
+    K_SET_GPRIM_ATTRS: _encode_set_gprim_attrs,
+    K_SET_REFERENCE: _encode_set_reference,
+    K_SET_PAYLOAD: _encode_set_payload,
+    K_LOAD_PAYLOAD: _encode_load_payload,
+    K_UNLOAD_PAYLOAD: _encode_unload_payload,
+    K_SET_VARIANT_SELECTIONS: _encode_set_variant_selections,
+    K_SET_MATERIAL_BINDING: _encode_set_material_binding,
+    K_SET_SHADER_INPUT: _encode_set_shader_input,
+    K_SET_SHADER_CONNECTION: _encode_set_shader_connection,
+}
+
+
+# ===================================================================
+# DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
+# ===================================================================
+
+
+def message_to_dict(buf: bytes | bytearray) -> dict:
+    """Decode FlatBuffers wire bytes to a Python dict.
+
+    This copies all data out of the buffer.  Use only for debug output,
+    dashboard display, and compaction merge logic.
+    """
+    envelope = decode_envelope(buf)
+    msg_type, obj = resolve_payload(envelope)
+    return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type)
+
+
+def event_to_dict(ew: EventWrapper) -> dict:
+    """Decode an EventWrapper FB object to a Python dict (copies)."""
+    kind, obj = resolve_event(ew)
+    return _EVENT_DICT_DECODE_DISPATCH[kind](obj, kind)
+
+
+# --- Helpers ---
+
+def _str(val) -> str | None:
+    if val is None:
+        return None
+    if isinstance(val, bytes):
+        return val.decode("utf-8")
+    return val
+
+
+# --- Per-message dict decoders ---
+
+def _dict_hello(h, msg_type):
+    msg = {"type": msg_type, "role": _str(h.Role()), "protocol_version": h.ProtocolVersion()}
+    sf = h.SyncFrom()
+    if sf:
+        msg["sync_from"] = sf
+    for key, getter in [("client_id", h.ClientId), ("origin", h.Origin),
+                        ("department", h.Department), ("token", h.Token)]:
+        v = _str(getter())
+        if v:
+            msg[key] = v
+    return msg
+
+
+def _dict_hello_ok(h, msg_type):
+    msg = {"type": msg_type}
+    token = _str(h.Token())
+    if token:
+        msg["token"] = token
+    return msg
+
+
+def _dict_auth_rejected(h, msg_type):
+    return {"type": msg_type, "reason": _str(h.Reason()) or ""}
+
+
+def _dict_txn(t, msg_type):
+    events = [event_to_dict(t.Events(i)) for i in range(t.EventsLength())]
+    return {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
+
+
+def _dict_broadcast_event(be, msg_type):
+    ew = be.Event()
+    event_dict = event_to_dict(ew) if ew else {}
+    msg = {"type": msg_type, "seq": be.Seq(), "event": event_dict}
+    for key, getter in [("origin", be.Origin), ("client_id", be.ClientId),
+                        ("client", be.Client)]:
+        v = _str(getter())
+        if v:
+            msg[key] = v
+    return msg
+
+
+def _dict_empty(_obj, msg_type):
+    return {"type": msg_type}
+
+
+def _dict_create_proposal(cp, msg_type):
+    events = [event_to_dict(cp.Events(i)) for i in range(cp.EventsLength())]
+    return {
+        "type": msg_type,
+        "target_department": _str(cp.TargetDepartment()),
+        "events": events,
+        "description": _str(cp.Description()) or "",
+    }
+
+
+def _dict_proposal_created(pc, msg_type):
+    return {"type": msg_type, "proposal_id": _str(pc.ProposalId())}
+
+
+def _dict_rate_limited(rl, msg_type):
+    return {"type": msg_type, "retry_after": rl.RetryAfter()}
+
+
+_DICT_DECODE_DISPATCH = {
+    MSG_HELLO: _dict_hello,
+    MSG_HELLO_OK: _dict_hello_ok,
+    MSG_AUTH_REJECTED: _dict_auth_rejected,
+    MSG_TXN: _dict_txn,
+    MSG_EVENT: _dict_broadcast_event,
+    MSG_RESYNC: _dict_empty,
+    MSG_COMPACT: _dict_empty,
+    MSG_PING: _dict_empty,
+    MSG_QUIT: _dict_empty,
+    MSG_CREATE_PROPOSAL: _dict_create_proposal,
+    MSG_PROPOSAL_CREATED: _dict_proposal_created,
+    MSG_RATE_LIMITED: _dict_rate_limited,
+}
+
+
+# --- Per-event dict decoders ---
+
+def _dict_ensure_prim(ep, kind):
+    ev = {"k": kind, "prim": _str(ep.Prim())}
+    tn = _str(ep.TypeName())
+    if tn:
+        ev["typeName"] = tn
+    return ev
+
+
+def _dict_ensure_xform_ops(exo, kind):
+    return {"k": kind, "prim": _str(exo.Prim())}
+
+
+def _dict_set_xform_trs(trs, kind):
+    bitmask = trs.Fields()
+    fields = []
+    ev = {"k": kind, "prim": _str(trs.Prim())}
+    if bitmask & 1:
+        fields.append("t")
+        ev["t"] = [trs.T(i) for i in range(trs.TLength())]
+    if bitmask & 2:
+        fields.append("r")
+        ev["r"] = [trs.R(i) for i in range(trs.RLength())]
+    if bitmask & 4:
+        fields.append("s")
+        ev["s"] = [trs.S(i) for i in range(trs.SLength())]
+    ev["fields"] = fields
+    return ev
+
+
+def _dict_set_xform_matrices(m, kind):
+    return {
+        "k": kind,
+        "prim": _str(m.Prim()),
+        "local_m": [m.LocalM(i) for i in range(m.LocalMLength())],
+        "world_m": [m.WorldM(i) for i in range(m.WorldMLength())],
+    }
+
+
+def _dict_delete_prim(dp, kind):
+    return {"k": kind, "prim": _str(dp.Prim())}
+
+
+def _dict_deactivate_prim(dp, kind):
+    return {"k": kind, "prim": _str(dp.Prim()), "active": dp.Active()}
+
+
+def _dict_rename_prim(rp, kind):
+    return {"k": kind, "prim": _str(rp.Prim()), "new_name": _str(rp.NewName())}
+
+
+def _dict_set_visibility(sv, kind):
+    return {"k": kind, "prim": _str(sv.Prim()), "visible": sv.Visible()}
+
+
+def _attr_value_to_python(av):
+    """Convert an AttrValue FB object to a Python value (copies data)."""
+    vt = av.ValueType()
+    if vt == AttrValueType.ScalarFloat:
+        return av.ScalarFloat()
+    if vt == AttrValueType.ScalarInt:
+        return av.ScalarInt()
+    if vt == AttrValueType.ScalarBool:
+        return av.ScalarBool()
+    if vt == AttrValueType.ScalarString:
+        return _str(av.ScalarString())
+    if vt == AttrValueType.FloatArray:
+        stride = av.Stride()
+        length = av.FloatArrayLength()
+        if stride <= 1:
+            return [av.FloatArray(i) for i in range(length)]
+        return [[av.FloatArray(i + j) for j in range(stride)] for i in range(0, length, stride)]
+    if vt == AttrValueType.IntArray:
+        stride = av.Stride()
+        length = av.IntArrayLength()
+        if stride <= 1:
+            return [av.IntArray(i) for i in range(length)]
+        return [[av.IntArray(i + j) for j in range(stride)] for i in range(0, length, stride)]
+    if vt == AttrValueType.NestedList:
+        return json.loads(_str(av.NestedJson()))
+    return None
+
+
+def _dict_set_gprim_attrs(sg, kind):
+    attrs = {}
+    for i in range(sg.AttrsLength()):
+        na = sg.Attrs(i)
+        attrs[_str(na.Name())] = _attr_value_to_python(na.Value())
+
+    ev = {"k": kind, "prim": _str(sg.Prim()), "attrs": attrs}
+
+    if sg.PrimvarMetaLength():
+        primvar_meta = {}
+        for i in range(sg.PrimvarMetaLength()):
+            pm = sg.PrimvarMeta(i)
+            meta = {"typeName": _str(pm.TypeName())}
+            interp = _str(pm.Interpolation())
+            if interp:
+                meta["interpolation"] = interp
+            primvar_meta[_str(pm.AttrName())] = meta
+        ev["primvar_meta"] = primvar_meta
+
+    if sg.AttrInterpLength():
+        attr_interp = {}
+        for i in range(sg.AttrInterpLength()):
+            ai = sg.AttrInterp(i)
+            attr_interp[_str(ai.AttrName())] = _str(ai.Interpolation())
+        ev["attr_interp"] = attr_interp
+
+    return ev
+
+
+def _dict_set_reference(sr, kind):
+    refs = []
+    for i in range(sr.RefsLength()):
+        arc = sr.Refs(i)
+        entry = {}
+        ap = _str(arc.AssetPath())
+        if ap:
+            entry["asset_path"] = ap
+        pp = _str(arc.PrimPath())
+        if pp:
+            entry["prim_path"] = pp
+        refs.append(entry)
+    return {"k": kind, "prim": _str(sr.Prim()), "refs": refs}
+
+
+def _dict_set_payload(sp, kind):
+    payloads = []
+    for i in range(sp.PayloadsLength()):
+        arc = sp.Payloads(i)
+        entry = {}
+        ap = _str(arc.AssetPath())
+        if ap:
+            entry["asset_path"] = ap
+        pp = _str(arc.PrimPath())
+        if pp:
+            entry["prim_path"] = pp
+        payloads.append(entry)
+    return {"k": kind, "prim": _str(sp.Prim()), "payloads": payloads}
+
+
+def _dict_load_payload(lp, kind):
+    return {"k": kind, "prim": _str(lp.Prim())}
+
+
+def _dict_unload_payload(up, kind):
+    return {"k": kind, "prim": _str(up.Prim())}
+
+
+def _dict_set_variant_selections(sv, kind):
+    selections = {}
+    for i in range(sv.SelectionsLength()):
+        sp = sv.Selections(i)
+        selections[_str(sp.Key())] = _str(sp.Value())
+    return {"k": kind, "prim": _str(sv.Prim()), "selections": selections}
+
+
+def _dict_set_material_binding(mb, kind):
+    return {"k": kind, "prim": _str(mb.Prim()), "material_path": _str(mb.MaterialPath())}
+
+
+def _dict_set_shader_input(si, kind):
+    inputs = {}
+    input_types = {}
+    for i in range(si.InputsLength()):
+        siv = si.Inputs(i)
+        name = _str(siv.Name())
+        input_types[name] = _str(siv.TypeName())
+        vt = siv.ValueType()
+        if vt == ShaderInputValueType.FloatArray:
+            inputs[name] = [siv.FloatArray(j) for j in range(siv.FloatArrayLength())]
+        elif vt == ShaderInputValueType.ScalarString:
+            inputs[name] = _str(siv.ScalarString())
+        elif vt == ShaderInputValueType.ScalarBool:
+            inputs[name] = siv.ScalarBool()
+        elif vt == ShaderInputValueType.ScalarInt:
+            inputs[name] = siv.ScalarInt()
+        else:
+            inputs[name] = siv.ScalarFloat()
+    return {
+        "k": kind,
+        "prim": _str(si.Prim()),
+        "shader_id": _str(si.ShaderId()),
+        "inputs": inputs,
+        "input_types": input_types,
+    }
+
+
+def _dict_set_shader_connection(sc, kind):
+    connections = {}
+    for i in range(sc.ConnectionsLength()):
+        c = sc.Connections(i)
+        connections[_str(c.InputName())] = {
+            "source_prim": _str(c.SourcePrim()),
+            "source_output": _str(c.SourceOutput()),
+        }
+    disconnections = [_str(sc.Disconnections(i)) for i in range(sc.DisconnectionsLength())]
+    ev = {"k": kind, "prim": _str(sc.Prim()), "connections": connections}
+    if disconnections:
+        ev["disconnections"] = disconnections
+    return ev
+
+
+_EVENT_DICT_DECODE_DISPATCH = {
+    K_ENSURE_PRIM: _dict_ensure_prim,
+    K_ENSURE_XFORM_OPS: _dict_ensure_xform_ops,
+    K_SET_XFORM_TRS: _dict_set_xform_trs,
+    K_SET_XFORM_MATRICES: _dict_set_xform_matrices,
+    K_DELETE_PRIM: _dict_delete_prim,
+    K_DEACTIVATE_PRIM: _dict_deactivate_prim,
+    K_RENAME_PRIM: _dict_rename_prim,
+    K_SET_VISIBILITY: _dict_set_visibility,
+    K_SET_GPRIM_ATTRS: _dict_set_gprim_attrs,
+    K_SET_REFERENCE: _dict_set_reference,
+    K_SET_PAYLOAD: _dict_set_payload,
+    K_LOAD_PAYLOAD: _dict_load_payload,
+    K_UNLOAD_PAYLOAD: _dict_unload_payload,
+    K_SET_VARIANT_SELECTIONS: _dict_set_variant_selections,
+    K_SET_MATERIAL_BINDING: _dict_set_material_binding,
+    K_SET_SHADER_INPUT: _dict_set_shader_input,
+    K_SET_SHADER_CONNECTION: _dict_set_shader_connection,
+}

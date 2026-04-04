@@ -5,6 +5,8 @@ description = "General-purpose real-time USD sync framework for DCC livelink"
 requires-python = ">=3.12"
 dependencies = [
     "cachetools>=6.0",
+    "flatbuffers>=24.3",
+    "numpy>=1.26",
 ]
 
 [dependency-groups]
@@ -53,7 +55,7 @@ openusdconnect-server = "openusdconnect.server:main"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["vendor/", "assets/"]
+exclude = ["vendor/", "assets/", "openusdconnect/generated/"]
 
 [tool.ruff.lint]
 select = [

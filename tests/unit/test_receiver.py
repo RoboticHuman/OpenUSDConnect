@@ -1,12 +1,11 @@
 """Tests for ReceiverThread."""
 
-import json
 import socket
 import time
 
+from openusdconnect.codec import decode_envelope, encode_message, message_to_dict, resolve_payload
+from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.receiver import ReceiverThread
-
-_HELLO_OK = b'{"type":"hello_ok"}\n'
 
 
 def _make_server():
@@ -22,8 +21,9 @@ def _accept_and_hello(srv, timeout=2):
     """Accept one connection, consume hello, send hello_ok. Return conn."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
-    conn.makefile("r").readline()  # consume hello
-    conn.sendall(_HELLO_OK)
+    conn.settimeout(timeout)
+    recv_framed(conn)  # consume hello
+    send_framed(conn, encode_message({"type": "hello_ok"}))
     return conn
 
 
@@ -31,7 +31,27 @@ def _accept(srv, timeout=2):
     """Accept one connection (no handshake)."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
+    conn.settimeout(timeout)
     return conn
+
+
+def _recv_hello(conn):
+    """Read and decode a hello message from connection."""
+    buf = recv_framed(conn)
+    return message_to_dict(buf)
+
+
+def _send_event(conn, seq, event=None):
+    """Send a broadcast event message."""
+    if event is None:
+        event = {"k": "ensure_prim", "prim": "/World/X"}
+    msg = {"type": "event", "seq": seq, "event": event}
+    send_framed(conn, encode_message(msg))
+
+
+def _send_ping(conn):
+    """Send a ping message."""
+    send_framed(conn, encode_message({"type": "ping"}))
 
 
 def _poll_until(predicate, timeout=2, interval=0.02):
@@ -46,7 +66,7 @@ def _poll_until(predicate, timeout=2, interval=0.02):
 
 
 def _teardown(rt, conn, srv):
-    """Clean shutdown: close server-side socket first so readline() unblocks."""
+    """Clean shutdown: close server-side socket first so recv unblocks."""
     conn.close()
     rt.stop()
     rt.join(timeout=1)
@@ -61,7 +81,7 @@ class TestReceiverThread:
         rt.start()
         conn = _accept(srv)
         try:
-            hello = json.loads(conn.makefile("r").readline())
+            hello = _recv_hello(conn)
             assert hello["type"] == "hello"
             assert hello["role"] == "receiver"
             assert hello["sync_from"] == 5
@@ -69,16 +89,15 @@ class TestReceiverThread:
             _teardown(rt, conn, srv)
 
     def test_receives_and_drains(self):
-        """ReceiverThread queues incoming lines for drain_queue."""
+        """ReceiverThread queues incoming FB messages for drain_queue."""
         srv, port = _make_server()
         rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
         rt.start()
         conn = _accept_and_hello(srv)
         try:
-            conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
-            conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
+            _send_event(conn, 1)
+            _send_event(conn, 2)
 
-            # Poll until both messages arrive
             collected = []
 
             def _drain_all():
@@ -165,7 +184,7 @@ class TestReconnection:
 
         # First connection — send some events
         conn1 = _accept_and_hello(srv)
-        conn1.sendall(b'{"type":"event","seq":10,"event":{"k":"ensure_prim"}}\n')
+        _send_event(conn1, 10)
         _poll_until(lambda: rt.last_seq == 10)
 
         # Drop connection
@@ -174,7 +193,7 @@ class TestReconnection:
 
         # Reconnect — should request sync_from=11
         conn2 = _accept(srv, timeout=2)
-        hello = json.loads(conn2.makefile("r").readline())
+        hello = _recv_hello(conn2)
         assert hello["sync_from"] == 11
 
         _teardown(rt, conn2, srv)
@@ -218,7 +237,7 @@ class TestSocketTimeout:
             assert rt.connected
 
             # Send data after timeout — should still be received
-            conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
+            _send_event(conn, 1)
             collected = []
             _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 1)
             assert len(collected) == 1
@@ -243,21 +262,18 @@ class TestBoundedQueue:
 
         # Send 5 events into a queue with max depth 3
         for i in range(1, 6):
-            conn1.sendall(
-                (json.dumps({"type": "event", "seq": i, "event": {"k": "ensure_prim"}}) + "\n")
-                .encode()
-            )
+            _send_event(conn1, i)
 
         # Wait for overflow to trigger disconnect
         _poll_until(lambda: not rt.connected, timeout=2)
 
         # Queue should have the events it managed to buffer (up to 3)
-        lines = rt.drain_queue()
-        assert len(lines) <= 3
+        msgs = rt.drain_queue()
+        assert len(msgs) <= 3
 
         # Receiver should reconnect automatically
         conn2 = _accept(srv, timeout=2)
-        hello = json.loads(conn2.makefile("r").readline())
+        hello = _recv_hello(conn2)
         assert hello["type"] == "hello"
         # Should request replay from where it left off
         assert hello["sync_from"] > 0
@@ -276,10 +292,7 @@ class TestBoundedQueue:
         conn = _accept_and_hello(srv)
         try:
             for i in range(1, 6):
-                conn.sendall(
-                    (json.dumps({"type": "event", "seq": i, "event": {"k": "ensure_prim"}}) + "\n")
-                    .encode()
-                )
+                _send_event(conn, i)
 
             rt.join(timeout=1)
             assert not rt.is_alive()
@@ -298,15 +311,13 @@ class TestPingHandling:
         rt.start()
         conn = _accept_and_hello(srv)
         try:
-            conn.sendall(b'{"type":"event","seq":1,"event":{"k":"ensure_prim"}}\n')
-            conn.sendall(b'{"type":"ping"}\n')
-            conn.sendall(b'{"type":"event","seq":2,"event":{"k":"ensure_prim"}}\n')
+            _send_event(conn, 1)
+            _send_ping(conn)
+            _send_event(conn, 2)
 
             collected = []
             _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 2)
             assert len(collected) == 2
-            for line in collected:
-                assert '"ping"' not in line
             assert rt.last_seq == 2
         finally:
             _teardown(rt, conn, srv)
@@ -327,7 +338,7 @@ class TestPingHandling:
             _poll_until(lambda: rt.connected)
             # Wait ~2 timeouts, then send a ping to reset counter
             time.sleep(0.12)
-            conn.sendall(b'{"type":"ping"}\n')
+            _send_ping(conn)
             time.sleep(0.12)
             # Should still be alive because ping reset the counter
             assert rt.connected

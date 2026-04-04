@@ -21,6 +21,9 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
@@ -57,6 +60,7 @@ def main():
         make_quit,
         make_txn,
     )
+    from openusdconnect.codec import message_to_dict
     from openusdconnect.receiver import ReceiverThread
     from openusdconnect.transport import send_line
 
@@ -84,6 +88,7 @@ def main():
     )
     time.sleep(0.3)
     send_line(emitter_sock, make_quit())
+    time.sleep(0.5)
     emitter_sock.close()
 
     # ==================================================================
@@ -98,8 +103,8 @@ def main():
     lines = receiver.drain_queue()
     print(f"[ManualThenMove] Phase 1: receiver got {len(lines)} messages")
 
-    for raw_line in lines:
-        msg = json.loads(raw_line)
+    for raw_buf in lines:
+        msg = message_to_dict(raw_buf)
         if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})
@@ -164,6 +169,7 @@ def main():
     )
     time.sleep(0.3)
     send_line(emitter_sock2, make_quit())
+    time.sleep(0.5)
     emitter_sock2.close()
 
     # Process phase 3 events
@@ -171,8 +177,8 @@ def main():
     lines2 = receiver.drain_queue()
     print(f"[ManualThenMove] Phase 3: receiver got {len(lines2)} messages")
 
-    for raw_line in lines2:
-        msg = json.loads(raw_line)
+    for raw_buf in lines2:
+        msg = message_to_dict(raw_buf)
         if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})

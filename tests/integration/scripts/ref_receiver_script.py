@@ -21,6 +21,9 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
@@ -39,6 +42,7 @@ from openusdconnect.protocol import (
     K_SET_XFORM_TRS,
     MSG_EVENT,
 )
+from openusdconnect.codec import message_to_dict
 from openusdconnect.receiver import ReceiverThread
 
 
@@ -113,8 +117,8 @@ def main():
     lines = receiver.drain_queue()
     print(f"[RefReceiver] Got {len(lines)} messages from queue")
 
-    for raw_line in lines:
-        msg = json.loads(raw_line)
+    for raw_buf in lines:
+        msg = message_to_dict(raw_buf)
         if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})

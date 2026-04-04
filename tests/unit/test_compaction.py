@@ -1,7 +1,6 @@
 """Tests for server event log compaction."""
 
-import json
-
+from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -33,8 +32,8 @@ def _read_log(server):
     """Read all events from the DB, return list of event dicts."""
     rows = server.store.get_all_asc()
     result = []
-    for (_seq, event_json) in rows:
-        rec = json.loads(event_json)
+    for (_seq, record_bin) in rows:
+        rec = message_to_dict(record_bin)
         result.append(rec.get("event", rec))
     return result
 

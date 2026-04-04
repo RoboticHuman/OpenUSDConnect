@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import socket
 import subprocess
@@ -36,7 +35,10 @@ if _PROJECT_ROOT not in sys.path:
 
 from pxr import Usd, UsdGeom
 
+from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events
+from openusdconnect.framing import recv_framed
+from openusdconnect.transport import send_msg
 
 SERVER_PORT = 7201
 DB_PATH = "stress_test.db"
@@ -53,19 +55,14 @@ SHARED_PRIMS = ["/World/Hero", "/World/Camera", "/World/EnvSphere", "/World/Stag
 # ---------------------------------------------------------------------------
 
 def _send(sock, msg):
-    sock.sendall((json.dumps(msg) + "\n").encode())
+    send_msg(sock, msg)
 
 
-def _recv_line(sock):
-    buf = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return None
-        buf += chunk
-        if b"\n" in buf:
-            line, _ = buf.split(b"\n", 1)
-            return json.loads(line.decode())
+def _recv_one(sock):
+    buf = recv_framed(sock)
+    if not buf:
+        return None
+    return message_to_dict(buf)
 
 
 def _connect_emitter(port, client_id, department):
@@ -75,7 +72,7 @@ def _connect_emitter(port, client_id, department):
         "client_id": client_id, "origin": f"{client_id}-origin",
         "department": department,
     })
-    _recv_line(s)  # hello_ok
+    _recv_one(s)  # hello_ok
     return s
 
 
@@ -192,19 +189,14 @@ def _receiver_worker(port, spec, done_event, connect_delay, errors, stats):
         time.sleep(connect_delay)
         sock = _connect_receiver(port, cid)
         count = 0
-        buf = b""
         while not done_event.is_set():
             try:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if line.strip():
-                        count += 1
+                recv_framed(sock)
+                count += 1
             except TimeoutError:
                 continue
+            except (ConnectionError, OSError):
+                break
         stats[cid] = count
         sock.close()
     except Exception as exc:
@@ -222,21 +214,16 @@ def _bidi_worker(port, spec, iterations, barrier, done_event,
         rx_count = [0]
 
         def _rx():
-            buf = b""
             while not done_event.is_set():
                 try:
-                    chunk = recv_sock.recv(65536)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        if line.strip():
-                            rx_count[0] += 1
-                except (TimeoutError, OSError):
+                    recv_framed(recv_sock)
+                    rx_count[0] += 1
+                except TimeoutError:
                     if done_event.is_set():
                         break
                     continue
+                except (ConnectionError, OSError):
+                    break
 
         rx_thread = threading.Thread(target=_rx, daemon=True)
         rx_thread.start()
@@ -417,24 +404,19 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
 
         verify_sock = _connect_receiver(SERVER_PORT, "verifier-final")
         verify_events = []
-        buf = b""
         verify_sock.settimeout(1)
         quiet_seconds = 0
         while quiet_seconds < 3:
             try:
-                chunk = verify_sock.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
+                raw = recv_framed(verify_sock)
                 quiet_seconds = 0
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if line.strip():
-                        msg = json.loads(line.decode())
-                        if msg.get("type") == "event":
-                            verify_events.append(msg.get("event", msg))
+                msg = message_to_dict(raw)
+                if msg.get("type") == "event":
+                    verify_events.append(msg.get("event", msg))
             except TimeoutError:
                 quiet_seconds += 1
+            except (ConnectionError, OSError):
+                break
         verify_sock.close()
         print(f"  Replayed {len(verify_events)} events")
 

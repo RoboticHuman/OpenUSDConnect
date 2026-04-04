@@ -71,32 +71,52 @@ def _should_track_attr(attr_name: str) -> bool:
     return all(not attr_name.startswith(prefix) for prefix in _SKIP_ATTR_PREFIXES)
 
 
+def _values_equal(a, b) -> bool:
+    """Compare two attribute values, handling numpy arrays."""
+    import numpy as np
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        try:
+            return np.array_equal(a, b)
+        except (TypeError, ValueError):
+            return False
+    return a == b
+
+
 def _usd_value_to_python(val):
-    """Convert a USD attribute value to a JSON-serializable Python type.
+    """Convert a USD attribute value to a codec-friendly Python type.
 
     Handles scalars, GfVec types, and VtArrays (including arrays of vectors).
+    VtArrays are converted to numpy arrays (zero-copy when possible) so the
+    codec can use CreateNumpyVector for bulk encoding.
     Returns None for unsupported types so the caller can skip them.
     """
+    import numpy as np
+
     if val is None:
         return None
     # Simple scalars
     if isinstance(val, (int, float, bool, str)):
         return val
-    # GfVec types → list of floats
+    # GfVec types → list of floats (small, not worth numpy overhead)
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
         if isinstance(val, vec_type):
             return [float(v) for v in val]
     # VtArray types (Vec3fArray, IntArray, FloatArray, etc.)
     # Detected by type name ending in "Array" — no shared base class in pxr.
+    # Convert to numpy directly — pxr VtArrays support the buffer protocol.
     type_name = type(val).__name__
     if type_name.endswith("Array"):
-        result = []
-        for elem in val:
-            converted = _usd_value_to_python(elem)
-            if converted is None:
-                return None  # unsupported element type, skip entire array
-            result.append(converted)
-        return result
+        try:
+            return np.array(val)
+        except (TypeError, ValueError):
+            # Fallback for exotic array types — iterate element-by-element
+            result = []
+            for elem in val:
+                converted = _usd_value_to_python(elem)
+                if converted is None:
+                    return None
+                result.append(converted)
+            return result
     # Pxr value types that have a Python numeric equivalent
     if type_name in ("Half",):
         return float(val)
@@ -803,7 +823,7 @@ class NoticeEmitter:
                 val = _usd_value_to_python(attr.Get())
                 if val is None:
                     continue
-                if val != last_attrs.get(attr_name):
+                if not _values_equal(val, last_attrs.get(attr_name)):
                     changed_attrs[attr_name] = val
                     if attr_name.startswith(PRIMVAR_PREFIX):
                         # Primvar: include USD type name and interpolation so
