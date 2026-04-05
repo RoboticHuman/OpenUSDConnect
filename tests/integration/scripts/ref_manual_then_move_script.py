@@ -49,6 +49,7 @@ def main():
         sys.exit(1)
 
     from integrations.blender.blender_adapter import BlenderAdapter
+    from openusdconnect.codec import message_to_dict
     from openusdconnect.protocol import (
         K_ENSURE_PRIM,
         K_ENSURE_XFORM_OPS,
@@ -60,7 +61,6 @@ def main():
         make_quit,
         make_txn,
     )
-    from openusdconnect.codec import message_to_dict
     from openusdconnect.receiver import ReceiverThread
     from openusdconnect.transport import send_line
 

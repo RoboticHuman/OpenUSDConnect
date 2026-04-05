@@ -40,8 +40,6 @@ from openusdconnect.protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
-    MSG_EVENT,
-    MSG_RESYNC,
 )
 from openusdconnect.receiver import ReceiverThread
 

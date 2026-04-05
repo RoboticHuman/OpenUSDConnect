@@ -1,98 +1,121 @@
 # OpenUSDConnect
 
-General-purpose real-time USD sync framework for DCC livelink. The core library (`openusdconnect/`) is DCC-agnostic — Blender, Maya, Houdini, Unreal, etc. are plugins that sit on top.
+Real-time USD scene synchronization across DCC applications. OpenUSDConnect provides an authoritative sync server and client libraries that keep OpenUSD stages in sync across Blender, Unreal Engine, and other tools over a local network.
 
-## Quick Start
+## Features
+
+**Sync Server**
+- Authoritative sequencer with atomic transaction ordering
+- SQLite event log with late-join replay and log compaction
+- Per-department shared layers with configurable priority
+- TOFU (Trust On First Use) client authentication
+- Cross-department edit proposals (propose/approve/reject workflow)
+- Rate limiting and connection management for production use
+- Web admin dashboard with live event inspector
+
+**Scene Support**
+- Transforms (translate, rotate, scale) with quaternion rotation
+- Geometry, visibility, materials, and shaders
+- References, payloads, and variant selections
+- Prim lifecycle: create, rename, delete, deactivate
+
+**DCC Integrations**
+- **Blender** — Live emitter/receiver addon with material sync (UsdPreviewSurface, MaterialX), axis conversion, and auto-tracking
+- **Unreal Engine** — Bidirectional transform sync via USDStageActor
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) for local development
+- OpenUSD Python bindings (`pxr`) — provided automatically in Docker or by DCC applications
+
+### Local Development
 
 ```bash
 # Install dependencies
 uv sync
 
-# Run tests (no Blender needed)
-uv run pytest tests/unit/ -v
-
-# Start sync server
-uv run python -m openusdconnect.server --port 7200 --base scene.usda
+# Start the sync server
+uv run openusdconnect-server --port 7200 --base scene.usda
 
 # Start with admin dashboard
-uv run python -m openusdconnect.server --port 7200 --base scene.usda --dashboard 8080
+uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
 
-# Start with per-department layers and TOFU auth
-uv run python -m openusdconnect.server --port 7200 --base scene.usda \
+# Start with per-department layers and authentication
+uv run openusdconnect-server --port 7200 --base scene.usda \
   --department-priority animation,lighting,fx --require-token
-
-# Build Blender addon
-uv run python scripts/build_blender_addon.py
-# Output: dist/usd_connect_blender.zip
 ```
 
-Install the addon in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
+### Docker
+
+The server image uses [`usd-core`](https://pypi.org/project/usd-core/) from PyPI for headless OpenUSD support.
+
+```bash
+# Build the server image
+docker build -t openusdconnect-server .
+
+# Run the server
+docker run -p 7200:7200 -v ./scenes:/scenes \
+  openusdconnect-server --port 7200 --base /scenes/scene.usda
+
+# Build with dashboard support
+docker build --build-arg DASHBOARD=1 -t openusdconnect-server:dashboard .
+
+# Run with dashboard
+docker run -p 7200:7200 -p 8080:8080 -v ./scenes:/scenes \
+  openusdconnect-server:dashboard \
+  --port 7200 --base /scenes/scene.usda --dashboard 8080
+```
+
+Or using Docker Compose:
+
+```bash
+# Server only
+docker compose --profile default up
+
+# Server with dashboard
+docker compose --profile dashboard up
+```
+
+### Blender Addon
+
+```bash
+uv run python scripts/build_blender_addon.py
+```
+
+Install the output zip (`dist/usd_connect_blender.zip`) in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
+
+### Unreal Engine
+
+Run the integration script from the Unreal Python console:
+
+```python
+py "path/to/OpenUSDConnect/integrations/unreal/connect.py"
+```
 
 ## Documentation
 
-- **[Blender Addon Usage](docs/blender-addon-usage.md)** — Installing, UI overview, live sync walkthrough
-- **[Testing Setup](docs/testing-setup.md)** — Blender configuration, test tiers
-- **[Profiling](docs/profiling.md)** — Performance profiling with py-spy
+- [Blender Addon Usage](docs/blender-addon-usage.md) — Installation, UI overview, live sync walkthrough
+- [Live Material Editing](docs/live-material-editing.md) — Material and shader synchronization
+- [Testing Setup](docs/testing-setup.md) — Test tiers, Blender configuration, adding new tests
+- [Profiling](docs/profiling.md) — Performance profiling with py-spy
 
-## Features
-
-### Core Framework
-- JSON Lines over TCP protocol: transforms, visibility, references, payloads, variants, materials, shaders
-- Authoritative sequencer server with SQLite event log, late-join replay, and compaction
-- Per-department shared layers with configurable priority ordering (composition strength)
-- TOFU (Trust On First Use) token authentication
-- Cross-department edit proposals (propose/approve/reject workflow)
-- Stage change detection via `Usd.Notice.ObjectsChanged` with partial diffing
-- Quaternion rotation using USD-native `xformOp:orient`
-- `DCCAdapter` ABC for plugging in any DCC application
-
-### Blender Integration
-- Live network emitter with configurable coalescing
-- Network receiver with timer-based queue drain
-- Auto-track mode for new objects
-- Reference and payload import with load/unload lifecycle
-- Material sync: UsdPreviewSurface, MaterialX (Standard Surface, OpenPBR), texture connections
-- Geometry, visibility, delete, rename sync
-- Y-up / Z-up axis conversion
-
-### Unreal Integration
-- Stage-level bridge via USDStageActor (no DCCAdapter needed)
-- Bidirectional transform sync
-
-## Architecture
-
-| Module | Purpose |
-|--------|---------|
-| `openusdconnect/protocol.py` | Event schema and validation |
-| `openusdconnect/transport.py` | TCP send/recv (JSON Lines) |
-| `openusdconnect/event_apply.py` | Apply events to a `Usd.Stage` |
-| `openusdconnect/emitter.py` | Stage change detection and partial diffing |
-| `openusdconnect/server.py` | Authoritative TCP sequencer with per-department layers, replay, and compaction |
-| `openusdconnect/receiver.py` | Background TCP client with event queue |
-| `openusdconnect/adapters.py` | `DCCAdapter` ABC + USD/Mock implementations |
-| `openusdconnect/token_store.py` | SQLite-backed TOFU token persistence |
-| `openusdconnect/token_client.py` | Client-side token storage |
-| `openusdconnect/client_id.py` | Deterministic client ID generation |
-| `integrations/blender/` | Blender addon (capture, receiver, shader mappers, UI) |
-| `integrations/unreal/` | Unreal Engine integration via USDStageActor |
-| `integrations/dashboard/` | NiceGUI web admin dashboard (layers, auth, proposals) |
-
-## Tests
+## Testing
 
 ```bash
-# Unit tests (fast, no Blender)
+# Unit tests (fast, no DCC required)
 uv run pytest tests/unit/ -v
 
-# All tests (unit + headless integration)
+# All headless tests
 uv run pytest tests/ -v
 
-# Asset E2E tests (requires Blender)
+# Asset end-to-end tests (requires Blender)
 uv run pytest tests/integration/asset_tests/ --asset-tests -v
 ```
 
-See [Testing Setup](docs/testing-setup.md) for details.
-
 ## Acknowledgments
 
-- [**io_blender_mtlx**](https://github.com/Activision/io_blender_mtlx) by Activision — MaterialX node handlers for Blender shader networks
-- [**USD Working Group Assets**](https://github.com/usd-wg/assets) — standardized test assets for the integration test suite
+- [io_blender_mtlx](https://github.com/Activision/io_blender_mtlx) by Activision — MaterialX node handlers for Blender shader networks
+- [USD Working Group Assets](https://github.com/usd-wg/assets) — Standardized test assets for the integration test suite

@@ -4,9 +4,8 @@ Tests creation, deletion, deactivation, rename detection,
 suppress flag, and ChangeBlock batching — all DCC-agnostic.
 """
 
-from pxr import Gf, Sdf, Usd, UsdGeom
-
 import numpy as np
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.protocol import (
@@ -1292,7 +1291,8 @@ class TestGprimAttrEmission:
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "primvars:displayColor" in attrs
-        assert np.array_equal(attrs["primvars:displayColor"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        expected = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        assert np.array_equal(attrs["primvars:displayColor"], expected)
         meta = attr_evs[0].get("primvar_meta", {})
         assert meta["primvars:displayColor"]["typeName"] == "color3f[]"
         assert meta["primvars:displayColor"]["interpolation"] == "vertex"

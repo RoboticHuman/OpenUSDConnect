@@ -914,20 +914,29 @@ _EVENT_ENCODE_DISPATCH = {
 # ===================================================================
 
 
-def message_to_dict(buf: bytes | bytearray) -> dict:
+def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> dict:
     """Decode FlatBuffers wire bytes to a Python dict.
 
-    This copies all data out of the buffer.  Use only for debug output,
-    dashboard display, and compaction merge logic.
+    When *numpy_arrays* is True, geometry array attributes are returned as
+    numpy arrays (zero-copy views into the FlatBuffer) for efficient
+    Vt.*Array.FromNumpy() conversion in event_apply.  Default (False) returns
+    plain Python lists for JSON-safe compatibility.
     """
     envelope = decode_envelope(buf)
     msg_type, obj = resolve_payload(envelope)
+    if msg_type in (MSG_TXN, MSG_EVENT, MSG_CREATE_PROPOSAL):
+        return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type, numpy_arrays=numpy_arrays)
     return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type)
 
 
-def event_to_dict(ew: EventWrapper) -> dict:
-    """Decode an EventWrapper FB object to a Python dict (copies)."""
+def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
+    """Decode an EventWrapper FB object to a Python dict.
+
+    See *message_to_dict* for the meaning of *numpy_arrays*.
+    """
     kind, obj = resolve_event(ew)
+    if kind == K_SET_GPRIM_ATTRS:
+        return _dict_set_gprim_attrs(obj, kind, numpy_arrays=numpy_arrays)
     return _EVENT_DICT_DECODE_DISPATCH[kind](obj, kind)
 
 
@@ -968,14 +977,15 @@ def _dict_auth_rejected(h, msg_type):
     return {"type": msg_type, "reason": _str(h.Reason()) or ""}
 
 
-def _dict_txn(t, msg_type):
-    events = [event_to_dict(t.Events(i)) for i in range(t.EventsLength())]
+def _dict_txn(t, msg_type, numpy_arrays=False):
+    events = [event_to_dict(t.Events(i), numpy_arrays=numpy_arrays)
+              for i in range(t.EventsLength())]
     return {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
 
 
-def _dict_broadcast_event(be, msg_type):
+def _dict_broadcast_event(be, msg_type, numpy_arrays=False):
     ew = be.Event()
-    event_dict = event_to_dict(ew) if ew else {}
+    event_dict = event_to_dict(ew, numpy_arrays=numpy_arrays) if ew else {}
     msg = {"type": msg_type, "seq": be.Seq(), "event": event_dict}
     for key, getter in [("origin", be.Origin), ("client_id", be.ClientId),
                         ("client", be.Client)]:
@@ -989,8 +999,9 @@ def _dict_empty(_obj, msg_type):
     return {"type": msg_type}
 
 
-def _dict_create_proposal(cp, msg_type):
-    events = [event_to_dict(cp.Events(i)) for i in range(cp.EventsLength())]
+def _dict_create_proposal(cp, msg_type, numpy_arrays=False):
+    events = [event_to_dict(cp.Events(i), numpy_arrays=numpy_arrays)
+              for i in range(cp.EventsLength())]
     return {
         "type": msg_type,
         "target_department": _str(cp.TargetDepartment()),
@@ -1079,8 +1090,15 @@ def _dict_set_visibility(sv, kind):
     return {"k": kind, "prim": _str(sv.Prim()), "visible": sv.Visible()}
 
 
-def _attr_value_to_python(av):
-    """Convert an AttrValue FB object to a Python value (copies data)."""
+def _attr_value_to_python(av, numpy_arrays: bool = False):
+    """Convert an AttrValue FB object to a Python value.
+
+    When *numpy_arrays* is True, array types return numpy arrays (zero-copy
+    view into the FlatBuffer) so downstream consumers like event_apply can
+    pass them directly to Vt.*Array.FromNumpy() without intermediate lists.
+    When False (default), arrays are returned as plain Python lists for
+    JSON-safe compatibility (dashboard, tests, compaction).
+    """
     vt = av.ValueType()
     if vt == AttrValueType.ScalarFloat:
         return av.ScalarFloat()
@@ -1091,12 +1109,24 @@ def _attr_value_to_python(av):
     if vt == AttrValueType.ScalarString:
         return _str(av.ScalarString())
     if vt == AttrValueType.FloatArray:
+        if numpy_arrays:
+            arr = av.FloatArrayAsNumpy()
+            stride = av.Stride()
+            if stride > 1:
+                arr = arr.reshape(-1, stride)
+            return arr
         stride = av.Stride()
         length = av.FloatArrayLength()
         if stride <= 1:
             return [av.FloatArray(i) for i in range(length)]
         return [[av.FloatArray(i + j) for j in range(stride)] for i in range(0, length, stride)]
     if vt == AttrValueType.IntArray:
+        if numpy_arrays:
+            arr = av.IntArrayAsNumpy()
+            stride = av.Stride()
+            if stride > 1:
+                arr = arr.reshape(-1, stride)
+            return arr
         stride = av.Stride()
         length = av.IntArrayLength()
         if stride <= 1:
@@ -1107,11 +1137,11 @@ def _attr_value_to_python(av):
     return None
 
 
-def _dict_set_gprim_attrs(sg, kind):
+def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
     attrs = {}
     for i in range(sg.AttrsLength()):
         na = sg.Attrs(i)
-        attrs[_str(na.Name())] = _attr_value_to_python(na.Value())
+        attrs[_str(na.Name())] = _attr_value_to_python(na.Value(), numpy_arrays)
 
     ev = {"k": kind, "prim": _str(sg.Prim()), "attrs": attrs}
 

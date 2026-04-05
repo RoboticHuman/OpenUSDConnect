@@ -2,21 +2,24 @@
 name = "openusdconnect"
 version = "0.1.0"
 description = "General-purpose real-time USD sync framework for DCC livelink"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
-    "cachetools>=6.0",
-    "flatbuffers>=24.3",
-    "numpy>=1.26",
+    "cachetools==7.0.5",
+    "flatbuffers==25.12.19",
+    "numpy==2.4.4",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
-    "pytest-cov>=7.0.0",
-    "ruff>=0.15.6",
+    "pytest==9.0.2",
+    "pytest-cov==7.0.0",
+    "ruff==0.15.6",
 ]
 dashboard = [
-    "nicegui>=2.0",
+    "nicegui==3.9.0",
+]
+server = [
+    "usd-core==26.3",
 ]
 
 [tool.pytest.ini_options]
@@ -54,7 +57,7 @@ openusdconnect-server = "openusdconnect.server:main"
 #
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 exclude = ["vendor/", "assets/", "openusdconnect/generated/"]
 
 [tool.ruff.lint]
@@ -77,7 +80,7 @@ select = [
 "tests/unit/test_event_apply.py" = ["E402"]
 "tests/unit/test_blender_stage_author.py" = ["E402"]
 "tests/unit/test_stage_parity.py" = ["E402", "I001"]
-"scripts/create_test_asset.py" = ["E402"]
+"scripts/*.py" = ["E402", "E501"]
 "integrations/unreal/connect.py" = ["E402"]
 
 [tool.coverage.run]

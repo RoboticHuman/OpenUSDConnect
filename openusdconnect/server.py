@@ -257,7 +257,7 @@ class UsdSyncServer:
         self._event_listeners: list = []
         self._start_time = time.time()
         self._seq_lock = threading.Lock()
-        self._txn_barrier = _TxnBarrier()
+        self.txn_barrier = _TxnBarrier()
 
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
@@ -311,7 +311,7 @@ class UsdSyncServer:
 
         # LRU cache: prim_path → (translate_op, orient_op, scale_op).
         from cachetools import LRUCache
-        self._op_cache: LRUCache = LRUCache(
+        self.op_cache: LRUCache = LRUCache(
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
 
@@ -387,7 +387,7 @@ class UsdSyncServer:
             # Per-client layers: route events to the correct client layer.
             by_client: dict[str | None, list[dict]] = {}
             for _seq, record_bin in rows:
-                rec = message_to_dict(record_bin)
+                rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
                 cid = rec.get("client_id")
                 by_client.setdefault(cid, []).append(ev)
@@ -396,18 +396,18 @@ class UsdSyncServer:
             for cid, evts in by_client.items():
                 layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
                 self.stage.SetEditTarget(Usd.EditTarget(layer))
-                apply_events(self.stage, evts, op_cache=self._op_cache)
+                apply_events(self.stage, evts, op_cache=self.op_cache)
 
             total = sum(len(v) for v in by_client.values())
         else:
             # Legacy mode: all events to the shared edit_layer.
             events = []
             for _seq, record_bin in rows:
-                rec = message_to_dict(record_bin)
+                rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
                 events.append(ev)
                 all_events.append(ev)
-            apply_events(self.stage, events, op_cache=self._op_cache)
+            apply_events(self.stage, events, op_cache=self.op_cache)
             total = len(events)
 
         # Populate incremental prim tracking from replayed events.
@@ -848,7 +848,7 @@ class UsdSyncServer:
         original_count = len(rows)
 
         # Phase 2 — merge delta + commit (exclusive, emitters blocked)
-        self._txn_barrier.acquire_exclusive()
+        self.txn_barrier.acquire_exclusive()
         try:
             # Catch any events that arrived during phase 1
             delta = self.store.get_from_seq_asc(max_seq + 1)
@@ -859,7 +859,7 @@ class UsdSyncServer:
 
             self._commit_compaction(latest, original_count)
         finally:
-            self._txn_barrier.release_exclusive()
+            self.txn_barrier.release_exclusive()
 
     @staticmethod
     def _merge_event(
@@ -903,11 +903,11 @@ class UsdSyncServer:
             existing = latest.get((prim, k))
             if existing:
                 prev = existing[0]
-                for field in ("t", "r", "s"):
-                    if field in ev.get("fields", []):
-                        prev[field] = ev[field]
-                        if field not in prev["fields"]:
-                            prev["fields"].append(field)
+                for comp in ("t", "r", "s"):
+                    if comp in ev.get("fields", []):
+                        prev[comp] = ev[comp]
+                        if comp not in prev["fields"]:
+                            prev["fields"].append(comp)
                 latest[(prim, k)] = (prev, meta)
             else:
                 latest[(prim, k)] = (ev, meta)
@@ -964,7 +964,7 @@ class UsdSyncServer:
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
-        Must be called under exclusive _txn_barrier.
+        Must be called under exclusive txn_barrier.
         """
         sorted_entries = sorted(
             latest.values(),
@@ -988,7 +988,7 @@ class UsdSyncServer:
         with self._seq_lock:
             self._event_count = len(records)
 
-        self._op_cache.clear()
+        self.op_cache.clear()
 
         # Rebuild incremental prim tracking from compacted state.
         self._prim_paths.clear()
@@ -1002,16 +1002,16 @@ class UsdSyncServer:
         with self.clients_lock:
             targets = list(self.receivers)
         for handler in targets:
-            with handler._send_lock:
+            with handler.send_lock:
                 self.replay_from(handler, 1)
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
-        self._txn_barrier.acquire_exclusive()
+        self.txn_barrier.acquire_exclusive()
         try:
             self._purge_inner()
         finally:
-            self._txn_barrier.release_exclusive()
+            self.txn_barrier.release_exclusive()
 
     def _purge_inner(self):
         self.store.clear_and_rewrite([])
@@ -1020,7 +1020,7 @@ class UsdSyncServer:
             self._next_seq = 1
         with self.stage_lock:
             self.edit_layer.Clear()
-        self._op_cache.clear()
+        self.op_cache.clear()
         self._prim_paths.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
@@ -1306,7 +1306,7 @@ class UsdSyncServer:
             if exclude_origin and h_origin == exclude_origin:
                 continue
             try:
-                with h._send_lock:
+                with h.send_lock:
                     h.request.sendall(payload)
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead",
@@ -1464,7 +1464,7 @@ class UsdSyncServer:
         changed_indices = []
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
-            apply_events(self.stage, events, op_cache=self._op_cache)
+            apply_events(self.stage, events, op_cache=self.op_cache)
 
             # Cache winning results per (prim_path, event_kind) — the
             # layer stack is frozen for the duration of this txn so the
@@ -1670,7 +1670,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Per-receiver send lock: serializes replay and broadcast sends on
         # this socket without holding the global clients_lock during I/O.
-        self._send_lock = threading.Lock()
+        self.send_lock = threading.Lock()
         self._rate_bucket = (
             TokenBucket(sync_server.txn_rate, sync_server.txn_burst)
             if sync_server.txn_rate > 0 else None
@@ -1753,13 +1753,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 
-            # Acquire _send_lock first, then add to broadcast set and replay.
-            # The _send_lock prevents broadcasts from reaching this receiver
+            # Acquire send_lock first, then add to broadcast set and replay.
+            # The send_lock prevents broadcasts from reaching this receiver
             # until replay is complete (preserving event ordering). The
             # broadcast thread never holds both locks simultaneously (it
             # snapshots under clients_lock, releases it, then acquires
-            # _send_lock per target), so no deadlock is possible.
-            with self._send_lock:
+            # send_lock per target), so no deadlock is possible.
+            with self.send_lock:
                 with sync_server.clients_lock:
                     sync_server.receivers.add(self)
                 sync_server.replay_from(self, sync_from)
@@ -1811,9 +1811,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if pt != PayloadType.Txn:
                 continue
 
-            # Decode txn events to dicts for apply_txn (still dict-based)
+            # Decode txn events to dicts for apply_txn — numpy arrays
+            # for geometry attrs to avoid per-element Python iteration.
             _, txn_fb = resolve_payload(env)
-            events = [event_to_dict(txn_fb.Events(i))
+            events = [event_to_dict(txn_fb.Events(i), numpy_arrays=True)
                       for i in range(txn_fb.EventsLength())]
             if not events:
                 continue
@@ -1828,7 +1829,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     })
                     continue
 
-            sync_server._txn_barrier.acquire_shared()
+            sync_server.txn_barrier.acquire_shared()
             try:
                 changed = sync_server.apply_txn(events, layer=self._client_layer)
                 changed_set = set(changed)
@@ -1879,7 +1880,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         exclude_origin=self._origin,
                     )
             finally:
-                sync_server._txn_barrier.release_shared()
+                sync_server.txn_barrier.release_shared()
 
             # Update client activity tracking.
             with sync_server.clients_lock:
@@ -1927,7 +1928,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         with sync_server.stage_lock:
             sync_server.stage.UnmuteLayer(p.layer.identifier)
             sync_server.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(sync_server.stage, events, op_cache=sync_server._op_cache)
+            apply_events(sync_server.stage, events, op_cache=sync_server.op_cache)
             sync_server.stage.MuteLayer(p.layer.identifier)
         p.events.extend(events)
         LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
@@ -1936,13 +1937,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 class ThreadedTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
     request_queue_size = 128
-    _MAX_WORKERS = 256
+    MAX_WORKERS = 256
 
     def __init__(self, server_address, handler_class, sync_server: UsdSyncServer,
                  max_workers: int | None = None):
         self.sync_server = sync_server
         self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers or self._MAX_WORKERS,
+            max_workers=max_workers or self.MAX_WORKERS,
             thread_name_prefix="conn",
         )
         super().__init__(server_address, handler_class)
@@ -2080,7 +2081,7 @@ def main():
     )
     ap.add_argument(
         "--max-connections", type=int, default=None, metavar="N",
-        help=f"Max concurrent client connections (default: {ThreadedTCPServer._MAX_WORKERS})",
+        help=f"Max concurrent client connections (default: {ThreadedTCPServer.MAX_WORKERS})",
     )
     ap.add_argument(
         "--txn-rate", type=float, default=0, metavar="N",

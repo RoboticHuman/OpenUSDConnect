@@ -27,6 +27,7 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
 from integrations.blender.blender_adapter import BlenderAdapter
+from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -34,7 +35,6 @@ from openusdconnect.protocol import (
     K_SET_XFORM_TRS,
     MSG_EVENT,
 )
-from openusdconnect.codec import message_to_dict
 from openusdconnect.receiver import ReceiverThread
 
 

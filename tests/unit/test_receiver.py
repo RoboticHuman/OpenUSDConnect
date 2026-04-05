@@ -3,7 +3,7 @@
 import socket
 import time
 
-from openusdconnect.codec import decode_envelope, encode_message, message_to_dict, resolve_payload
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.receiver import ReceiverThread
 

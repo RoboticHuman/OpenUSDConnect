@@ -87,6 +87,7 @@ def main():
     print(f"\n[Loopback] Starting receiver (port {port})")
 
     from integrations.blender.blender_adapter import BlenderAdapter
+    from openusdconnect.codec import message_to_dict
     from openusdconnect.protocol import (
         K_DEACTIVATE_PRIM,
         K_DELETE_PRIM,
@@ -101,7 +102,6 @@ def main():
         K_SET_XFORM_TRS,
         MSG_EVENT,
     )
-    from openusdconnect.codec import message_to_dict
     from openusdconnect.receiver import ReceiverThread
 
     adapter = BlenderAdapter()

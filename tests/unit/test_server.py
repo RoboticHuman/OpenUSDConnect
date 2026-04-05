@@ -441,7 +441,7 @@ class TestBroadcast:
             def __init__(self):
                 self.request = io.BytesIO()
                 self.client_address = ("fake", 0)
-                self._send_lock = threading.Lock()
+                self.send_lock = threading.Lock()
 
         h1 = FakeHandler()
         h1.request.sendall = h1.request.write
@@ -469,7 +469,7 @@ class TestBroadcast:
 
         class DeadHandler:
             client_address = ("dead", 0)
-            _send_lock = threading.Lock()
+            send_lock = threading.Lock()
 
             class request:
                 @staticmethod
