@@ -18,6 +18,9 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 tests_dir = os.path.dirname(os.path.dirname(_scripts_dir))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:

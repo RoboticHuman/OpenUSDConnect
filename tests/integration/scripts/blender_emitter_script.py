@@ -6,12 +6,16 @@ Run via: blender --background --python tests/blender_emitter_script.py -- --port
 
 import os
 import sys
+import time
 
 # Add project root to sys.path (tests/integration/scripts/ → repo root)
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
@@ -72,6 +76,7 @@ def main():
     print(f"[Emitter] Sent {len(events)} events")
 
     send_line(sock, make_quit())
+    time.sleep(0.5)  # let server process before closing
     sock.close()
     print("[Emitter] Done")
 

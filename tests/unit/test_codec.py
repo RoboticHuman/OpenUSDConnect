@@ -1,0 +1,570 @@
+"""Round-trip tests for the FlatBuffers codec.
+
+Tests encode_message → decode via zero-copy API and message_to_dict for
+all message types and all 17 event kinds.
+"""
+
+import numpy as np
+import pytest
+
+from openusdconnect.codec import (
+    AttrValueType,
+    PayloadType,
+    decode_envelope,
+    encode_message,
+    is_ping,
+    message_to_dict,
+    payload_type,
+    resolve_event,
+    resolve_payload,
+)
+
+# ===================================================================
+# Helper
+# ===================================================================
+
+
+def _roundtrip(msg_dict):
+    """Encode dict → FlatBuffers bytes → decode back to dict."""
+    buf = encode_message(msg_dict)
+    return message_to_dict(buf), buf
+
+
+# ===================================================================
+# Message-level tests
+# ===================================================================
+
+
+class TestSchemaVersion:
+    def test_version_set(self):
+        from openusdconnect.codec import SCHEMA_VERSION
+        buf = encode_message({"type": "ping"})
+        env = decode_envelope(buf)
+        assert env.SchemaVersion() == SCHEMA_VERSION
+
+    def test_version_is_one(self):
+        from openusdconnect.codec import SCHEMA_VERSION
+        assert SCHEMA_VERSION == 1
+
+
+class TestPing:
+    def test_encode_decode(self):
+        buf = encode_message({"type": "ping"})
+        assert is_ping(buf)
+        assert payload_type(buf) == PayloadType.Ping
+        assert message_to_dict(buf) == {"type": "ping"}
+
+    def test_not_ping(self):
+        buf = encode_message({"type": "quit"})
+        assert not is_ping(buf)
+
+
+class TestHello:
+    def test_full(self):
+        msg = {
+            "type": "hello",
+            "role": "emitter",
+            "protocol_version": 2,
+            "sync_from": 42,
+            "client_id": "c1",
+            "origin": "blender-1",
+            "department": "anim",
+            "token": "tok-abc",
+        }
+        d, _ = _roundtrip(msg)
+        assert d == msg
+
+    def test_minimal(self):
+        msg = {"type": "hello", "role": "receiver", "protocol_version": 1}
+        d, _ = _roundtrip(msg)
+        assert d["role"] == "receiver"
+        assert d["protocol_version"] == 1
+
+    def test_zero_copy_access(self):
+        msg = {
+            "type": "hello", "role": "emitter", "protocol_version": 2,
+            "client_id": "c1", "origin": "o1",
+        }
+        buf = encode_message(msg)
+        env = decode_envelope(buf)
+        mt, hello = resolve_payload(env)
+        assert mt == "hello"
+        # FlatBuffers returns bytes for strings
+        assert hello.Role() in (b"emitter", "emitter")
+        assert hello.ProtocolVersion() == 2
+
+
+class TestHelloOk:
+    def test_with_token(self):
+        d, _ = _roundtrip({"type": "hello_ok", "token": "new-tok"})
+        assert d == {"type": "hello_ok", "token": "new-tok"}
+
+    def test_without_token(self):
+        d, _ = _roundtrip({"type": "hello_ok"})
+        assert d == {"type": "hello_ok"}
+
+
+class TestAuthRejected:
+    def test_roundtrip(self):
+        d, _ = _roundtrip({"type": "auth_rejected", "reason": "bad token"})
+        assert d["reason"] == "bad token"
+
+
+class TestResyncCompactQuit:
+    @pytest.mark.parametrize("msg_type", ["resync", "compact", "quit"])
+    def test_empty_messages(self, msg_type):
+        d, _ = _roundtrip({"type": msg_type})
+        assert d == {"type": msg_type}
+
+
+class TestRateLimited:
+    def test_roundtrip(self):
+        d, _ = _roundtrip({"type": "rate_limited", "retry_after": 1.5})
+        assert abs(d["retry_after"] - 1.5) < 0.01
+
+
+class TestProposalCreated:
+    def test_roundtrip(self):
+        d, _ = _roundtrip({"type": "proposal_created", "proposal_id": "p-123"})
+        assert d["proposal_id"] == "p-123"
+
+
+# ===================================================================
+# Event-level tests — all 17 kinds
+# ===================================================================
+
+
+def _txn_roundtrip(event_dict):
+    """Wrap an event in a txn, encode, decode, return the event dict."""
+    msg = {"type": "txn", "client_id": "test", "events": [event_dict]}
+    d, buf = _roundtrip(msg)
+    return d["events"][0]
+
+
+def _txn_zerocopy(event_dict):
+    """Wrap event in txn, encode, return (kind, typed_fb_object) via zero-copy."""
+    msg = {"type": "txn", "client_id": "test", "events": [event_dict]}
+    buf = encode_message(msg)
+    env = decode_envelope(buf)
+    _, txn = resolve_payload(env)
+    ew = txn.Events(0)
+    return resolve_event(ew)
+
+
+class TestEnsurePrim:
+    def test_roundtrip(self):
+        ev = {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Xform"}
+        d = _txn_roundtrip(ev)
+        assert d == ev
+
+    def test_no_typename(self):
+        ev = {"k": "ensure_prim", "prim": "/World/Scope"}
+        d = _txn_roundtrip(ev)
+        assert d["prim"] == "/World/Scope"
+
+
+class TestEnsureXformOps:
+    def test_roundtrip(self):
+        ev = {"k": "ensure_xform_ops", "prim": "/World/Cube"}
+        assert _txn_roundtrip(ev) == ev
+
+
+class TestSetXformTrs:
+    def test_full_trs(self):
+        ev = {
+            "k": "set_xform_trs", "prim": "/World/Cube",
+            "fields": ["t", "r", "s"],
+            "t": [1.0, 2.0, 3.0],
+            "r": [1.0, 0.0, 0.0, 0.0],
+            "s": [2.0, 2.0, 2.0],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["fields"] == ["t", "r", "s"]
+        assert d["t"] == pytest.approx([1, 2, 3])
+        assert d["r"] == pytest.approx([1, 0, 0, 0])
+        assert d["s"] == pytest.approx([2, 2, 2])
+
+    def test_partial_translate_only(self):
+        ev = {
+            "k": "set_xform_trs", "prim": "/World/Cube",
+            "fields": ["t"], "t": [5.0, 0.0, 0.0],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["fields"] == ["t"]
+        assert "r" not in d
+        assert "s" not in d
+
+    def test_zero_copy_access(self):
+        ev = {
+            "k": "set_xform_trs", "prim": "/World/Cube",
+            "fields": ["t", "r", "s"],
+            "t": [1.0, 2.0, 3.0],
+            "r": [1.0, 0.0, 0.0, 0.0],
+            "s": [1.0, 1.0, 1.0],
+        }
+        kind, trs = _txn_zerocopy(ev)
+        assert kind == "set_xform_trs"
+        assert trs.TLength() == 3
+        assert trs.T(0) == pytest.approx(1.0)
+        np_t = trs.TAsNumpy()
+        assert np_t.dtype == np.float32
+        assert list(np_t) == pytest.approx([1, 2, 3])
+
+
+class TestSetXformMatrices:
+    def test_roundtrip(self):
+        identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        ev = {
+            "k": "set_xform_matrices", "prim": "/World/X",
+            "local_m": [float(x) for x in identity],
+            "world_m": [float(x) for x in identity],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["local_m"] == pytest.approx(identity)
+
+
+class TestDeletePrim:
+    def test_roundtrip(self):
+        ev = {"k": "delete_prim", "prim": "/World/Gone"}
+        assert _txn_roundtrip(ev) == ev
+
+
+class TestDeactivatePrim:
+    def test_roundtrip(self):
+        ev = {"k": "deactivate_prim", "prim": "/World/X", "active": False}
+        d = _txn_roundtrip(ev)
+        assert d["active"] is False
+
+    def test_active_true(self):
+        """active=True must survive round-trip (verifies schema default change)."""
+        ev = {"k": "deactivate_prim", "prim": "/World/X", "active": True}
+        d = _txn_roundtrip(ev)
+        assert d["active"] is True
+
+
+class TestRenamePrim:
+    def test_roundtrip(self):
+        ev = {"k": "rename_prim", "prim": "/World/Old", "new_name": "New"}
+        assert _txn_roundtrip(ev) == ev
+
+
+class TestSetVisibility:
+    def test_roundtrip(self):
+        ev = {"k": "set_visibility", "prim": "/World/X", "visible": False}
+        d = _txn_roundtrip(ev)
+        assert d["visible"] is False
+
+
+class TestSetGprimAttrs:
+    def test_scalar_attrs(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"radius": 2.5, "subdivisionScheme": "catmullClark"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["attrs"]["radius"] == pytest.approx(2.5)
+        assert d["attrs"]["subdivisionScheme"] == "catmullClark"
+
+    def test_float_array(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"extent": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["attrs"]["extent"] == pytest.approx([1, 2, 3, 4, 5, 6])
+
+    def test_int_array(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"faceVertexCounts": [3, 3, 4, 4]},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["attrs"]["faceVertexCounts"] == [3, 3, 4, 4]
+
+    def test_nested_vec3_array(self):
+        """Vec3fArray encoded as flattened float array with stride=3."""
+        points = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"points": points},
+        }
+        d = _txn_roundtrip(ev)
+        result = d["attrs"]["points"]
+        assert len(result) == 3
+        for got, expected in zip(result, points, strict=True):
+            assert got == pytest.approx(expected)
+
+    def test_zero_copy_numpy_access(self):
+        """Verify zero-copy numpy access to large float arrays."""
+        points = [[float(i), float(i + 1), float(i + 2)] for i in range(0, 3000, 3)]
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"points": points},
+        }
+        kind, sg = _txn_zerocopy(ev)
+        assert kind == "set_gprim_attrs"
+        na = sg.Attrs(0)
+        av = na.Value()
+        assert av.ValueType() == AttrValueType.FloatArray
+        assert av.Stride() == 3
+        np_arr = av.FloatArrayAsNumpy()
+        assert np_arr.dtype == np.float32
+        assert len(np_arr) == 3000
+        # Reshape using stride
+        reshaped = np_arr.reshape(-1, av.Stride())
+        assert reshaped.shape == (1000, 3)
+        assert reshaped[0].tolist() == pytest.approx([0, 1, 2])
+
+    def test_primvar_meta(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"primvars:st": [[0.0, 1.0], [1.0, 0.0]]},
+            "primvar_meta": {
+                "primvars:st": {"typeName": "texCoord2f[]", "interpolation": "faceVarying"}
+            },
+        }
+        d = _txn_roundtrip(ev)
+        assert d["primvar_meta"]["primvars:st"]["typeName"] == "texCoord2f[]"
+        assert d["primvar_meta"]["primvars:st"]["interpolation"] == "faceVarying"
+
+    def test_attr_interp(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"normals": [[0.0, 1.0, 0.0]]},
+            "attr_interp": {"normals": "faceVarying"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["attr_interp"]["normals"] == "faceVarying"
+
+    def test_bool_attr(self):
+        ev = {
+            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "attrs": {"doubleSided": True},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["attrs"]["doubleSided"] is True
+
+
+class TestSetReference:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_reference", "prim": "/World/Chair",
+            "refs": [
+                {"asset_path": "./chair.usd", "prim_path": "/Model"},
+                {"asset_path": "./table.usd"},
+            ],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["refs"][0] == {"asset_path": "./chair.usd", "prim_path": "/Model"}
+        assert d["refs"][1] == {"asset_path": "./table.usd"}
+
+
+class TestSetPayload:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_payload", "prim": "/World/Asset",
+            "payloads": [{"asset_path": "./heavy.usda", "prim_path": "/Root"}],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["payloads"][0]["asset_path"] == "./heavy.usda"
+
+
+class TestLoadUnloadPayload:
+    def test_load(self):
+        ev = {"k": "load_payload", "prim": "/World/Asset"}
+        assert _txn_roundtrip(ev) == ev
+
+    def test_unload(self):
+        ev = {"k": "unload_payload", "prim": "/World/Asset"}
+        assert _txn_roundtrip(ev) == ev
+
+
+class TestSetVariantSelections:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_variant_selections", "prim": "/World/Car",
+            "selections": {"wheels": "wide", "color": "red"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["selections"] == {"wheels": "wide", "color": "red"}
+
+
+class TestSetMaterialBinding:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_material_binding", "prim": "/World/Mesh",
+            "material_path": "/World/Materials/Wood",
+        }
+        assert _txn_roundtrip(ev) == ev
+
+
+class TestSetShaderInput:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_shader_input", "prim": "/World/Mat/Shader",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {"metallic": 0.8, "diffuseColor": [0.5, 0.5, 0.5]},
+            "input_types": {"metallic": "float", "diffuseColor": "color3f"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["metallic"] == pytest.approx(0.8)
+        assert d["inputs"]["diffuseColor"] == pytest.approx([0.5, 0.5, 0.5])
+        assert d["input_types"]["metallic"] == "float"
+
+    def test_falsy_bool(self):
+        """bool=False must round-trip as False, not 0.0."""
+        ev = {
+            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "inputs": {"flag": False},
+            "input_types": {"flag": "bool"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["flag"] is False
+
+    def test_zero_int(self):
+        """int=0 must round-trip as int 0, not float 0.0."""
+        ev = {
+            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "inputs": {"count": 0},
+            "input_types": {"count": "int"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["count"] == 0
+        assert isinstance(d["inputs"]["count"], int)
+
+    def test_zero_float(self):
+        """float=0.0 must round-trip correctly."""
+        ev = {
+            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "inputs": {"metallic": 0.0},
+            "input_types": {"metallic": "float"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["metallic"] == 0.0
+
+    def test_empty_string(self):
+        """Empty string must round-trip as '', not None or 0.0."""
+        ev = {
+            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "inputs": {"file": ""},
+            "input_types": {"file": "asset"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["file"] == ""
+
+
+class TestSetShaderConnection:
+    def test_roundtrip(self):
+        ev = {
+            "k": "set_shader_connection", "prim": "/World/Mat/Shader",
+            "connections": {
+                "diffuseColor": {"source_prim": "/World/Mat/Tex", "source_output": "rgb"},
+            },
+            "disconnections": ["opacity"],
+        }
+        d = _txn_roundtrip(ev)
+        assert d["connections"]["diffuseColor"]["source_prim"] == "/World/Mat/Tex"
+        assert d["disconnections"] == ["opacity"]
+
+
+# ===================================================================
+# Broadcast event (wraps an event with seq + origin)
+# ===================================================================
+
+
+class TestBroadcastEvent:
+    def test_roundtrip(self):
+        msg = {
+            "type": "event", "seq": 42,
+            "event": {"k": "set_visibility", "prim": "/World/X", "visible": True},
+            "origin": "blender-1",
+        }
+        d, _ = _roundtrip(msg)
+        assert d["seq"] == 42
+        assert d["event"]["k"] == "set_visibility"
+        assert d["origin"] == "blender-1"
+
+
+# ===================================================================
+# CreateProposal
+# ===================================================================
+
+
+class TestCreateProposal:
+    def test_roundtrip(self):
+        msg = {
+            "type": "create_proposal",
+            "target_department": "lighting",
+            "events": [{"k": "set_visibility", "prim": "/World/X", "visible": False}],
+            "description": "hide for lighting pass",
+        }
+        d, _ = _roundtrip(msg)
+        assert d["target_department"] == "lighting"
+        assert d["events"][0]["visible"] is False
+        assert d["description"] == "hide for lighting pass"
+
+
+# ===================================================================
+# Multi-event transaction
+# ===================================================================
+
+
+class TestMultiEventTxn:
+    def test_multiple_events(self):
+        msg = {
+            "type": "txn", "client_id": "c1",
+            "events": [
+                {"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/World/New"},
+                {
+                    "k": "set_xform_trs", "prim": "/World/New",
+                    "fields": ["t"], "t": [1.0, 0.0, 0.0],
+                },
+                {"k": "set_visibility", "prim": "/World/New", "visible": True},
+            ],
+        }
+        d, _ = _roundtrip(msg)
+        assert len(d["events"]) == 4
+        assert d["events"][0]["k"] == "ensure_prim"
+        assert d["events"][2]["t"] == pytest.approx([1, 0, 0])
+
+
+# ===================================================================
+# Schema ↔ protocol sync guards
+# ===================================================================
+
+
+class TestSchemaProtocolSync:
+    """Fail if the FlatBuffers schema and protocol.py / codec.py drift apart."""
+
+    @staticmethod
+    def _enum_values(cls):
+        """Extract non-zero enum values from a FlatBuffers enum class."""
+        return {v for k, v in vars(cls).items()
+                if isinstance(v, int) and v != 0 and not k.startswith("_")}
+
+    def test_event_kinds_cover_schema(self):
+        """Every FB EventPayload variant has a codec entry and K_* constant."""
+        from openusdconnect.codec import _TAG_TO_EVENT_KIND, EventPayloadType
+
+        fb_tags = self._enum_values(EventPayloadType)
+        codec_tags = set(_TAG_TO_EVENT_KIND.keys())
+
+        assert fb_tags == codec_tags, (
+            f"Schema/codec mismatch — "
+            f"in schema but not codec: {fb_tags - codec_tags}, "
+            f"in codec but not schema: {codec_tags - fb_tags}"
+        )
+
+    def test_message_types_cover_schema(self):
+        """Every FB Payload variant has a codec entry and MSG_* constant."""
+        from openusdconnect.codec import _PAYLOAD_TO_MSG_TYPE, PayloadType
+
+        fb_tags = self._enum_values(PayloadType)
+        codec_tags = set(_PAYLOAD_TO_MSG_TYPE.keys())
+
+        assert fb_tags == codec_tags, (
+            f"Schema/codec mismatch — "
+            f"in schema but not codec: {fb_tags - codec_tags}, "
+            f"in codec but not schema: {codec_tags - fb_tags}"
+        )

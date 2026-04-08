@@ -128,158 +128,88 @@ uv run python scripts/dump_events.py my_events.db
 
 ### Sending events manually (one-shot client)
 
-You can send events to the server using Python one-liners over TCP. These connect as an emitter, send a transaction, then disconnect.
+Use the built-in send tool to fire events at a running server. It handles FlatBuffers encoding, the hello/hello_ok handshake, and graceful disconnect automatically. Events are passed as JSON strings.
+
+```bash
+# Full help
+uv run python -m openusdconnect.send --help
+```
 
 **Create a prim:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'ensure_prim','prim':'/World/MySphere','typeName':'Sphere'},
-  {'k':'ensure_xform_ops','prim':'/World/MySphere'}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"ensure_prim","prim":"/World/MySphere","typeName":"Sphere"}' \
+  '{"k":"ensure_xform_ops","prim":"/World/MySphere"}'
 ```
 
 **Move a prim:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'set_xform_trs','prim':'/World/MySphere','fields':['t'],'t':[3.0, 1.0, 0.0]}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"set_xform_trs","prim":"/World/MySphere","fields":["t"],"t":[3.0,1.0,0.0]}'
 ```
 
 **Set gprim attributes (e.g., radius):**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'set_gprim_attrs','prim':'/World/MySphere','attrs':{'radius':2.5}}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"set_gprim_attrs","prim":"/World/MySphere","attrs":{"radius":2.5}}'
 ```
 
 **Set a reference on a prim:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'ensure_prim','prim':'/World/Chair','typeName':'Xform'},
-  {'k':'set_reference','prim':'/World/Chair','refs':[{'asset_path':'./chair.usd','prim_path':'/Model'}]}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"ensure_prim","prim":"/World/Chair","typeName":"Xform"}' \
+  '{"k":"set_reference","prim":"/World/Chair","refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}'
 ```
 
 **Clear references from a prim:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'set_reference','prim':'/World/Chair','refs':[]}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"set_reference","prim":"/World/Chair","refs":[]}'
 ```
 
 **Set a payload on a prim:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'ensure_prim','prim':'/World/Asset','typeName':'Xform'},
-  {'k':'set_payload','prim':'/World/Asset','payloads':[{'asset_path':'./heavy_geo.usd','prim_path':'/Model'}]}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send \
+  '{"k":"ensure_prim","prim":"/World/Asset","typeName":"Xform"}' \
+  '{"k":"set_payload","prim":"/World/Asset","payloads":[{"asset_path":"./heavy_geo.usd","prim_path":"/Model"}]}'
 ```
 
-**Load a payload:**
+**Load / unload a payload:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'load_payload','prim':'/World/Asset'}
-]}) + '\n').encode())
-s.close()
-"
-```
-
-**Unload a payload:**
-
-```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'txn','client_id':'cli','events':[
-  {'k':'unload_payload','prim':'/World/Asset'}
-]}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send '{"k":"load_payload","prim":"/World/Asset"}'
+uv run python -m openusdconnect.send '{"k":"unload_payload","prim":"/World/Asset"}'
 ```
 
 **Request log compaction:**
 
 ```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'emitter','protocol_version':1}) + '\n').encode())
-s.sendall((json.dumps({'type':'compact'}) + '\n').encode())
-s.close()
-"
+uv run python -m openusdconnect.send --msg '{"type":"compact"}'
+```
+
+**Read events from a file (one JSON per line):**
+
+```bash
+cat events.jsonl | uv run python -m openusdconnect.send --stdin
+```
+
+**Custom host/port:**
+
+```bash
+uv run python -m openusdconnect.send --host 10.0.0.1 --port 7201 \
+  '{"k":"ensure_prim","prim":"/World/Foo","typeName":"Xform"}'
 ```
 
 **Delete the event log and start fresh:**
 
 ```bash
 rm usd_events.db
-```
-
-### Listening for events (receiver)
-
-```bash
-uv run python -c "
-import socket, json
-s = socket.create_connection(('127.0.0.1', 7200))
-s.sendall((json.dumps({'type':'hello','role':'receiver','protocol_version':1}) + '\n').encode())
-f = s.makefile()
-try:
-    while True:
-        line = f.readline()
-        if not line: break
-        print(json.dumps(json.loads(line), indent=2))
-except KeyboardInterrupt:
-    pass
-s.close()
-"
 ```
 
 ## Asset Integration Tests (E2E)

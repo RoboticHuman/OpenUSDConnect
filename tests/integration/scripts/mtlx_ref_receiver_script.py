@@ -20,10 +20,14 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+_venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
+if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
+    sys.path.append(_venv_sp)
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
 from integrations.blender.blender_adapter import BlenderAdapter
+from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -94,12 +98,15 @@ def main():
         batch = receiver.drain_queue()
         if batch:
             lines.extend(batch)
-            if any('"set_reference"' in line for line in batch):
+            if any(
+                message_to_dict(b).get("event", {}).get("k") == "set_reference"
+                for b in batch
+            ):
                 break
     print(f"[MtlxRefReceiver] Got {len(lines)} messages from queue")
 
-    for raw_line in lines:
-        msg = json.loads(raw_line)
+    for raw_buf in lines:
+        msg = message_to_dict(raw_buf)
         if msg.get("type") != MSG_EVENT:
             continue
         ev = msg.get("event", {})

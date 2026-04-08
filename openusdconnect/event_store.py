@@ -3,6 +3,10 @@
 Defines the EventStore interface and a SQLite implementation.  Other
 backends (PostgreSQL, DuckDB, etc.) can be plugged in by implementing
 the same interface.
+
+Events are stored as binary FlatBuffers blobs.  Dict conversion is done
+on read via ``codec.message_to_dict()`` only when needed (compaction,
+dashboard).
 """
 
 from __future__ import annotations
@@ -19,15 +23,19 @@ class EventStore(ABC):
     """Abstract interface for persisting and querying the event log."""
 
     @abstractmethod
-    def append(self, seq: int, record_json: str, client_id: str | None = None) -> None:
-        """Persist a single event record (already JSON-serialized)."""
+    def append(self, seq: int, record_bin: bytes,
+               client_id: str | None = None,
+               kind: str | None = None,
+               prim: str | None = None) -> None:
+        """Persist a single event record (FlatBuffers binary)."""
         raise NotImplementedError
 
     @abstractmethod
-    def append_batch(self, records: list[tuple[int, str, str | None]]) -> None:
+    def append_batch(self, records: list[tuple[int, bytes, str | None,
+                       str | None, str | None]]) -> None:
         """Persist multiple event records in a single transaction.
 
-        Each record is (seq, record_json, client_id).
+        Each record is (seq, record_bin, client_id, kind, prim).
         """
         raise NotImplementedError
 
@@ -42,18 +50,22 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_all_asc(self) -> list[tuple[int, str]]:
-        """Return all (seq, record_json) tuples ordered by seq ascending."""
+    def get_all_asc(self) -> list[tuple[int, bytes]]:
+        """Return all (seq, record_bin) tuples ordered by seq ascending."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_from_seq(self, seq_start: int) -> list[str]:
-        """Return record_json strings for all events with seq >= seq_start."""
+    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
+        """Return binary blobs for all events with seq >= seq_start.
+
+        This is the primary replay path — binary is sent directly to
+        receivers without re-serialization.
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
-        """Return (seq, record_json) tuples for events with seq >= seq_start."""
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, bytes]]:
+        """Return (seq, record_bin) tuples for events with seq >= seq_start."""
         raise NotImplementedError
 
     @abstractmethod
@@ -63,21 +75,27 @@ class EventStore(ABC):
         limit: int = 50,
         kind: str = "",
         prim_contains: str = "",
-    ) -> tuple[list[str], int]:
-        """Return a page of record_json strings (newest first) and total count.
+    ) -> tuple[list[bytes], int]:
+        """Return a page of record blobs (newest first) and total count.
 
         Filtering by event kind and prim path substring is optional.
+        Callers decode with ``codec.message_to_dict()`` as needed.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def search_like(self, pattern: str) -> list[str]:
-        """Return record_json strings where the stored text matches *pattern*."""
+    def search_like_decoded(self, match_fn) -> list[bytes]:
+        """Return record blobs where match_fn(decoded_dict) is True.
+
+        Each blob is decoded via codec.message_to_dict() and tested.
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def clear_and_rewrite(self, records: list[tuple[int, str]]) -> None:
-        """Delete all events and insert *records* as (seq, record_json) pairs."""
+    def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
+                       str | None, str | None]]) -> None:
+        """Delete all events and insert *records* as
+        (seq, record_bin, client_id, kind, prim) tuples."""
         raise NotImplementedError
 
     @abstractmethod
@@ -95,30 +113,44 @@ class SqliteEventStore(EventStore):
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY,
-                event TEXT NOT NULL,
-                client_id TEXT
+                event_bin BLOB NOT NULL,
+                client_id TEXT,
+                kind TEXT,
+                prim TEXT
             )
         """)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_client_id ON events(client_id)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_prim ON events(prim)"
+        )
         self._conn.commit()
         self._lock = threading.Lock()
 
-    def append(self, seq: int, record_json: str, client_id: str | None = None) -> None:
+    def append(self, seq: int, record_bin: bytes,
+               client_id: str | None = None,
+               kind: str | None = None,
+               prim: str | None = None) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
-                (seq, record_json, client_id),
+                "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (seq, record_bin, client_id, kind, prim),
             )
             self._conn.commit()
 
-    def append_batch(self, records: list[tuple[int, str, str | None]]) -> None:
+    def append_batch(self, records: list[tuple[int, bytes, str | None,
+                       str | None, str | None]]) -> None:
         if not records:
             return
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
+                "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
+                " VALUES (?, ?, ?, ?, ?)",
                 records,
             )
             self._conn.commit()
@@ -136,24 +168,24 @@ class SqliteEventStore(EventStore):
                 "SELECT COUNT(*) FROM events"
             ).fetchone()[0]
 
-    def get_all_asc(self) -> list[tuple[int, str]]:
+    def get_all_asc(self) -> list[tuple[int, bytes]]:
         with self._lock:
             return self._conn.execute(
-                "SELECT seq, event FROM events ORDER BY seq"
+                "SELECT seq, event_bin FROM events ORDER BY seq"
             ).fetchall()
 
-    def get_from_seq(self, seq_start: int) -> list[str]:
+    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
+                "SELECT event_bin FROM events WHERE seq >= ? ORDER BY seq",
                 (seq_start,),
             ).fetchall()
-        return [row[1] for row in rows]
+        return [row[0] for row in rows]
 
-    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, str]]:
+    def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, bytes]]:
         with self._lock:
             return self._conn.execute(
-                "SELECT seq, event FROM events WHERE seq >= ? ORDER BY seq",
+                "SELECT seq, event_bin FROM events WHERE seq >= ? ORDER BY seq",
                 (seq_start,),
             ).fetchall()
 
@@ -163,53 +195,48 @@ class SqliteEventStore(EventStore):
         limit: int = 50,
         kind: str = "",
         prim_contains: str = "",
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[bytes], int]:
         with self._lock:
-            if kind or prim_contains:
-                where_parts = []
-                params: list = []
-                if kind:
-                    where_parts.append("event LIKE ?")
-                    params.append(f'%"k": "{kind}"%')
-                if prim_contains:
-                    where_parts.append("event LIKE ?")
-                    params.append(f'%"prim": "%{prim_contains}%')
-                where_clause = " AND ".join(where_parts)
+            conditions = []
+            params: list = []
+            if kind:
+                conditions.append("kind = ?")
+                params.append(kind)
+            if prim_contains:
+                conditions.append("prim LIKE '%' || ? || '%'")
+                params.append(prim_contains)
 
-                count = self._conn.execute(
-                    f"SELECT COUNT(*) FROM events WHERE {where_clause}",
-                    params,
-                ).fetchone()[0]
-                rows = self._conn.execute(
-                    f"SELECT event FROM events WHERE {where_clause}"
-                    " ORDER BY seq DESC LIMIT ? OFFSET ?",
-                    [*params, limit, offset],
-                ).fetchall()
-            else:
-                count = self._conn.execute(
-                    "SELECT COUNT(*) FROM events"
-                ).fetchone()[0]
-                rows = self._conn.execute(
-                    "SELECT event FROM events ORDER BY seq DESC"
-                    " LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
-        return [r[0] for r in rows], count
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM events{where}", params,
+            ).fetchone()[0]
 
-    def search_like(self, pattern: str) -> list[str]:
-        with self._lock:
             rows = self._conn.execute(
-                "SELECT event FROM events WHERE event LIKE ? ORDER BY seq",
-                (pattern,),
+                f"SELECT event_bin FROM events{where}"
+                " ORDER BY seq DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
             ).fetchall()
-        return [r[0] for r in rows]
 
-    def clear_and_rewrite(self, records: list[tuple[int, str, str | None]]) -> None:
+        return [r[0] for r in rows], total
+
+    def search_like_decoded(self, match_fn) -> list[bytes]:
+        from .codec import message_to_dict
+
+        with self._lock:
+            all_rows = self._conn.execute(
+                "SELECT event_bin FROM events ORDER BY seq"
+            ).fetchall()
+
+        return [blob for (blob,) in all_rows if match_fn(message_to_dict(blob))]
+
+    def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
+                       str | None, str | None]]) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM events")
             self._conn.executemany(
-                "INSERT INTO events(seq, event, client_id) VALUES (?, ?, ?)",
+                "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
+                " VALUES (?, ?, ?, ?, ?)",
                 records,
             )
             self._conn.commit()

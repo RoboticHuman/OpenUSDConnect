@@ -1,44 +1,14 @@
-"""Event schema, message types, and validation for JSON Lines over TCP protocol.
+"""Protocol constants, dict builders, and validation.
 
-Message types:
-  hello:   {"type":"hello","role":"emitter"|"receiver","sync_from":<int optional>}
-  txn:     {"type":"txn","client_id":"...", "events":[ <event>, ... ]}
-  event:   {"type":"event","seq":123,"event":{...}}   (server broadcasts)
-  resync:  {"type":"resync"}  (server broadcasts after log compaction —
-           receivers must reset their sequence counter and expect a full replay)
-  compact: {"type":"compact"}  (client requests server to compact event log;
-           triggers resync broadcast to all receivers)
-  ping:    {"type":"ping"}  (server sends during idle to detect dead receivers)
-  quit:    {"type":"quit"}
+String constants for message types (MSG_*) and event kinds (K_*), plus
+helpers for constructing well-formed protocol dicts (make_hello, make_txn,
+etc.) and validating inbound events.
 
-Event types (inside txn.events):
-  ensure_prim:        {"k":"ensure_prim","prim":"/World/Sphere","typeName":"Xform"}
-  ensure_xform_ops:   {"k":"ensure_xform_ops","prim":"/World/Sphere"}
-  set_xform_trs:      {"k":"set_xform_trs","prim":"/World/Sphere","fields":["t","r","s"],
-                        "t":[x,y,z], "r":[w,x,y,z], "s":[x,y,z]}
-  set_xform_matrices: {"k":"set_xform_matrices","prim":"/World/Sphere",
-                        "local_m":[16 floats], "world_m":[16 floats]}
-  deactivate_prim:    {"k":"deactivate_prim","prim":"/World/Sphere","active":false}
-  rename_prim:        {"k":"rename_prim","prim":"/World/OldName","new_name":"NewName"}
-  set_visibility:     {"k":"set_visibility","prim":"/World/Sphere","visible":false}
-  set_gprim_attrs:    {"k":"set_gprim_attrs","prim":"/World/Sphere/Geom",
-                        "attrs":{"radius":2.0}}
-  set_reference:      {"k":"set_reference","prim":"/World/Chair",
-                        "refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}
-  set_payload:        {"k":"set_payload","prim":"/World/Asset",
-                        "payloads":[{"asset_path":"./payload.usda","prim_path":"/Model"}]}
-  load_payload:       {"k":"load_payload","prim":"/World/Asset"}
-  unload_payload:     {"k":"unload_payload","prim":"/World/Asset"}
-  set_variant_selections: {"k":"set_variant_selections","prim":"/World/Car",
-                        "selections":{"wheels":"wheelWide","color":"red"}}
-  set_material_binding: {"k":"set_material_binding","prim":"/World/Mesh",
-                        "material_path":"/World/Materials/Wood"}
-  set_shader_input:   {"k":"set_shader_input","prim":"/World/Mat/Shader",
-                        "shader_id":"UsdPreviewSurface",
-                        "inputs":{"metallic":0.8}, "input_types":{"metallic":"float"}}
-  set_shader_connection: {"k":"set_shader_connection","prim":"/World/Mat/Shader",
-                        "connections":{"diffuseColor":{"source_prim":"/World/Mat/Tex",
-                        "source_output":"rgb"}}, "disconnections":["opacity"]}
+The wire format is length-prefixed FlatBuffers — see codec.py and framing.py.
+The FlatBuffers schema (schema/events.fbs, schema/messages.fbs) is the
+canonical reference for per-event field definitions.  This module defines
+the Python-side constants and dict-level contracts; the codec handles
+dict ↔ FlatBuffers conversion.
 """
 
 from __future__ import annotations

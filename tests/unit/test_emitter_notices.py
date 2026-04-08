@@ -4,6 +4,7 @@ Tests creation, deletion, deactivation, rename detection,
 suppress flag, and ChangeBlock batching — all DCC-agnostic.
 """
 
+import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
@@ -1246,9 +1247,9 @@ class TestGprimAttrEmission:
         assert "points" in attrs
         assert "faceVertexCounts" in attrs
         assert "faceVertexIndices" in attrs
-        assert attrs["points"] == [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
-        assert attrs["faceVertexCounts"] == [3]
-        assert attrs["faceVertexIndices"] == [0, 1, 2]
+        assert np.array_equal(attrs["points"], [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        assert np.array_equal(attrs["faceVertexCounts"], [3])
+        assert np.array_equal(attrs["faceVertexIndices"], [0, 1, 2])
 
     def test_primvar_uv_emitted(self):
         """Primvar UVs (primvars:st) are detected and emitted with interpolation."""
@@ -1267,7 +1268,7 @@ class TestGprimAttrEmission:
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "primvars:st" in attrs
-        assert attrs["primvars:st"] == [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+        assert np.array_equal(attrs["primvars:st"], [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
         # Interpolation metadata
         meta = attr_evs[0].get("primvar_meta", {})
         assert meta["primvars:st"]["typeName"] == "texCoord2f[]"
@@ -1290,7 +1291,8 @@ class TestGprimAttrEmission:
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "primvars:displayColor" in attrs
-        assert attrs["primvars:displayColor"] == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        expected = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        assert np.array_equal(attrs["primvars:displayColor"], expected)
         meta = attr_evs[0].get("primvar_meta", {})
         assert meta["primvars:displayColor"]["typeName"] == "color3f[]"
         assert meta["primvars:displayColor"]["interpolation"] == "vertex"
@@ -1341,7 +1343,7 @@ class TestGprimAttrEmission:
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "normals" in attrs
-        assert attrs["normals"] == [[0.0, 0.0, 1.0]] * 3
+        assert np.array_equal(attrs["normals"], [[0.0, 0.0, 1.0]] * 3)
         # Interpolation in attr_interp (not primvar_meta — normals isn't a primvar)
         interp = attr_evs[0].get("attr_interp", {})
         assert interp.get("normals") == "faceVarying"

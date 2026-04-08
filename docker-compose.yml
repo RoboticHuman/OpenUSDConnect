@@ -1,0 +1,50 @@
+services:
+  server:
+    build:
+      context: .
+      args:
+        DASHBOARD: "0"
+    ports:
+      - "7200:7200"
+    volumes:
+      - ./scenes:/scenes
+      - server-data:/data
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "7200"
+      - "--base"
+      - "/scenes/test_scene.usda"
+      - "--log"
+      - "/data/events.db"
+    profiles:
+      - default
+
+  server-dashboard:
+    build:
+      context: .
+      args:
+        DASHBOARD: "1"
+    ports:
+      - "7200:7200"
+      - "8080:8080"
+    volumes:
+      - ./scenes:/scenes
+      - server-data:/data
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "7200"
+      - "--base"
+      - "/scenes/test_scene.usda"
+      - "--log"
+      - "/data/events.db"
+      - "--dashboard"
+      - "8080"
+    profiles:
+      - dashboard
+
+volumes:
+  server-data:

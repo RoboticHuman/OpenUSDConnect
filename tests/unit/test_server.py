@@ -4,12 +4,12 @@ Instantiates UsdSyncServer directly and exercises its core logic:
 sequence assignment, event log, compaction, replay, apply_txn, edit layer, etc.
 """
 
-import json
 import threading
 
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom
 
+from openusdconnect.codec import message_to_dict
 from openusdconnect.server import TokenBucket, UsdSyncServer
 
 
@@ -51,7 +51,7 @@ class TestAppendLog:
         rows = srv.store.get_all_asc()
         assert len(rows) == 1
         assert rows[0][0] == 1
-        assert json.loads(rows[0][1])["event"]["prim"] == "/A"
+        assert message_to_dict(rows[0][1])["event"]["prim"] == "/A"
 
     def test_multiple_appends(self, srv):
         for i in range(5):
@@ -132,7 +132,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         trs = [e for e in events if e["k"] == "set_xform_trs"]
         assert len(trs) == 1
         assert trs[0]["t"] == [5, 0, 0]
@@ -153,7 +153,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         assert len(events) == 1
         assert events[0]["k"] == "delete_prim"
 
@@ -170,7 +170,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         prims = [e["prim"] for e in events]
         # Only the rename should remain for /A
         assert all(
@@ -191,7 +191,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         vis = [e for e in events if e["k"] == "set_visibility"]
         assert len(vis) == 1
         assert vis[0]["visible"] is True
@@ -209,7 +209,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         load_events = [e for e in events if e["k"] in ("load_payload", "unload_payload")]
         assert len(load_events) == 1
         assert load_events[0]["k"] == "unload_payload"
@@ -229,7 +229,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         vsel = [e for e in events if e["k"] == "set_variant_selections"]
         assert len(vsel) == 1
         assert vsel[0]["selections"]["size"] == "large"
@@ -247,7 +247,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
         assert attr_evs[0]["attrs"]["radius"] == 5.0
@@ -273,7 +273,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
         # Both attrs survive — merged, not replaced
@@ -299,7 +299,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
         assert attr_evs[0]["attrs"]["normals"] == [[0, 0, 1]]
@@ -325,7 +325,7 @@ class TestCompaction:
         srv.compact_log()
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
-        events = [json.loads(r[0])["event"] for r in rows]
+        events = [message_to_dict(r[0])["event"] for r in rows]
         shader_evs = [e for e in events if e["k"] == "set_shader_input"]
         assert len(shader_evs) == 1
         # Both inputs survive — merged, not replaced
@@ -364,14 +364,15 @@ class TestCompaction:
 
 class TestReplay:
     def test_replay_from_sends_events(self, srv):
-        """replay_from writes events to a handler's request socket."""
-        # Insert some events
+        """replay_from writes length-prefixed FB events to a handler's socket."""
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.framing import recv_framed_rfile
+
         for i in range(3):
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": {"k": "ensure_prim", "prim": f"/P{i}"}}
             srv.append_log(rec)
 
-        # Mock handler with a writable buffer
         import io
 
         class FakeHandler:
@@ -379,19 +380,25 @@ class TestReplay:
                 self.request = io.BytesIO()
 
         handler = FakeHandler()
-        # BytesIO doesn't have sendall — monkey-patch it
         handler.request.sendall = handler.request.write
 
         srv.replay_from(handler, 1)
 
-        output = handler.request.getvalue().decode("utf-8")
-        lines = [json.loads(x) for x in output.strip().split("\n") if x.strip()]
-        assert len(lines) == 3
-        assert lines[0]["seq"] == 1
-        assert lines[2]["seq"] == 3
+        handler.request.seek(0)
+        msgs = []
+        raw = handler.request.getvalue()
+        while handler.request.tell() < len(raw):
+            buf = recv_framed_rfile(handler.request)
+            msgs.append(message_to_dict(buf))
+        assert len(msgs) == 3
+        assert msgs[0]["seq"] == 1
+        assert msgs[2]["seq"] == 3
 
     def test_replay_from_with_offset(self, srv):
         """replay_from with seq_start=2 skips earlier events."""
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.framing import recv_framed_rfile
+
         for i in range(3):
             seq = srv.assign_seq()
             srv.append_log({
@@ -410,10 +417,14 @@ class TestReplay:
 
         srv.replay_from(handler, 2)
 
-        output = handler.request.getvalue().decode("utf-8")
-        lines = [json.loads(x) for x in output.strip().split("\n") if x.strip()]
-        assert len(lines) == 2
-        assert lines[0]["seq"] == 2
+        handler.request.seek(0)
+        raw = handler.request.getvalue()
+        msgs = []
+        while handler.request.tell() < len(raw):
+            buf = recv_framed_rfile(handler.request)
+            msgs.append(message_to_dict(buf))
+        assert len(msgs) == 2
+        assert msgs[0]["seq"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +441,7 @@ class TestBroadcast:
             def __init__(self):
                 self.request = io.BytesIO()
                 self.client_address = ("fake", 0)
-                self._send_lock = threading.Lock()
+                self.send_lock = threading.Lock()
 
         h1 = FakeHandler()
         h1.request.sendall = h1.request.write
@@ -443,9 +454,13 @@ class TestBroadcast:
         srv.broadcast({"type": "event", "seq": 1, "event": {"k": "ensure_prim", "prim": "/A"}})
         srv._broadcast_queue.join()  # wait for async broadcast thread
 
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.framing import recv_framed_rfile
+
         for h in (h1, h2):
-            data = h.request.getvalue().decode("utf-8").strip()
-            msg = json.loads(data)
+            h.request.seek(0)
+            buf = recv_framed_rfile(h.request)
+            msg = message_to_dict(buf)
             assert msg["type"] == "event"
             assert msg["event"]["prim"] == "/A"
 
@@ -454,7 +469,7 @@ class TestBroadcast:
 
         class DeadHandler:
             client_address = ("dead", 0)
-            _send_lock = threading.Lock()
+            send_lock = threading.Lock()
 
             class request:
                 @staticmethod
@@ -463,7 +478,10 @@ class TestBroadcast:
 
         h = DeadHandler()
         srv.receivers.add(h)
-        srv.broadcast({"type": "event", "seq": 1, "event": {}})
+        srv.broadcast({
+            "type": "event", "seq": 1,
+            "event": {"k": "ensure_prim", "prim": "/X"},
+        })
         srv._broadcast_queue.join()  # wait for async broadcast thread
         assert h not in srv.receivers
 

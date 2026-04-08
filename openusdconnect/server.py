@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
-import json
 import logging
 import os
 import queue
@@ -26,8 +25,21 @@ from dataclasses import dataclass, field
 
 from pxr import Sdf, Usd, UsdGeom
 
+from .codec import (
+    PayloadType,
+    decode_envelope,
+    encode_message,
+    message_to_dict,
+    resolve_payload,
+)
 from .emitter import as_matrix, decompose_trs_from_matrix
 from .event_store import EventStore, SqliteEventStore
+from .framing import (
+    IncompleteRead,
+    MessageTooLarge,
+    frame_batch,
+    recv_framed_rfile,
+)
 from .protocol import (
     EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
@@ -48,17 +60,12 @@ from .protocol import (
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
-    MSG_COMPACT,
-    MSG_CREATE_PROPOSAL,
     MSG_EVENT,
-    MSG_HELLO,
     MSG_HELLO_OK,
     MSG_PING,
     MSG_PROPOSAL_CREATED,
-    MSG_QUIT,
     MSG_RATE_LIMITED,
     MSG_RESYNC,
-    MSG_TXN,
 )
 
 LOG = logging.getLogger(__name__)
@@ -250,7 +257,7 @@ class UsdSyncServer:
         self._event_listeners: list = []
         self._start_time = time.time()
         self._seq_lock = threading.Lock()
-        self._txn_barrier = _TxnBarrier()
+        self.txn_barrier = _TxnBarrier()
 
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
@@ -304,7 +311,7 @@ class UsdSyncServer:
 
         # LRU cache: prim_path → (translate_op, orient_op, scale_op).
         from cachetools import LRUCache
-        self._op_cache: LRUCache = LRUCache(
+        self.op_cache: LRUCache = LRUCache(
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
 
@@ -379,8 +386,8 @@ class UsdSyncServer:
         if self.department_priority:
             # Per-client layers: route events to the correct client layer.
             by_client: dict[str | None, list[dict]] = {}
-            for _seq, record_json in rows:
-                rec = json.loads(record_json)
+            for _seq, record_bin in rows:
+                rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
                 cid = rec.get("client_id")
                 by_client.setdefault(cid, []).append(ev)
@@ -389,18 +396,18 @@ class UsdSyncServer:
             for cid, evts in by_client.items():
                 layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
                 self.stage.SetEditTarget(Usd.EditTarget(layer))
-                apply_events(self.stage, evts, op_cache=self._op_cache)
+                apply_events(self.stage, evts, op_cache=self.op_cache)
 
             total = sum(len(v) for v in by_client.values())
         else:
             # Legacy mode: all events to the shared edit_layer.
             events = []
-            for _seq, record_json in rows:
-                rec = json.loads(record_json)
+            for _seq, record_bin in rows:
+                rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
                 events.append(ev)
                 all_events.append(ev)
-            apply_events(self.stage, events, op_cache=self._op_cache)
+            apply_events(self.stage, events, op_cache=self.op_cache)
             total = len(events)
 
         # Populate incremental prim tracking from replayed events.
@@ -547,6 +554,7 @@ class UsdSyncServer:
             # receivers for log consistency. No corrections needed
             # since no active receiver has the proposal origin.
             records = []
+            persist_tuples = []
             for ev in p.events:
                 rec = {
                     "type": MSG_EVENT,
@@ -555,8 +563,13 @@ class UsdSyncServer:
                     "client_id": p.from_client,
                     "origin": f"proposal-{p.proposal_id}",
                 }
+                rec_bin = encode_message(rec)
                 records.append(rec)
-            self.append_log_batch(records)
+                persist_tuples.append((
+                    rec["seq"], rec_bin, p.from_client,
+                    ev.get("k"), ev.get("prim"),
+                ))
+            self.append_log_batch(persist_tuples)
             for rec in records:
                 self.broadcast(rec)
 
@@ -835,27 +848,27 @@ class UsdSyncServer:
         original_count = len(rows)
 
         # Phase 2 — merge delta + commit (exclusive, emitters blocked)
-        self._txn_barrier.acquire_exclusive()
+        self.txn_barrier.acquire_exclusive()
         try:
             # Catch any events that arrived during phase 1
             delta = self.store.get_from_seq_asc(max_seq + 1)
             if delta:
-                for _seq, event_json in delta:
-                    self._merge_event(latest, tombstoned, event_json)
+                for _seq, record_bin in delta:
+                    self._merge_event(latest, tombstoned, record_bin)
                 original_count += len(delta)
 
             self._commit_compaction(latest, original_count)
         finally:
-            self._txn_barrier.release_exclusive()
+            self.txn_barrier.release_exclusive()
 
     @staticmethod
     def _merge_event(
         latest: dict[tuple[str, str], tuple[dict, dict]],
         tombstoned: set[str],
-        event_json: str,
+        record_bin: bytes,
     ):
         """Merge a single event record into the compacted state."""
-        rec = json.loads(event_json)
+        rec = message_to_dict(record_bin)
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
@@ -890,11 +903,11 @@ class UsdSyncServer:
             existing = latest.get((prim, k))
             if existing:
                 prev = existing[0]
-                for field in ("t", "r", "s"):
-                    if field in ev.get("fields", []):
-                        prev[field] = ev[field]
-                        if field not in prev["fields"]:
-                            prev["fields"].append(field)
+                for comp in ("t", "r", "s"):
+                    if comp in ev.get("fields", []):
+                        prev[comp] = ev[comp]
+                        if comp not in prev["fields"]:
+                            prev["fields"].append(comp)
                 latest[(prim, k)] = (prev, meta)
             else:
                 latest[(prim, k)] = (ev, meta)
@@ -930,7 +943,7 @@ class UsdSyncServer:
 
     @staticmethod
     def _build_compacted(
-        rows: list[tuple[int, str]],
+        rows: list[tuple[int, bytes]],
     ) -> tuple[dict[tuple[str, str], tuple[dict, dict]], set[str]]:
         """Build compacted event dict from raw log rows.
 
@@ -940,8 +953,8 @@ class UsdSyncServer:
         """
         tombstoned: set[str] = set()
         latest: dict[tuple[str, str], tuple[dict, dict]] = {}
-        for _seq, event_json in rows:
-            UsdSyncServer._merge_event(latest, tombstoned, event_json)
+        for _seq, record_bin in rows:
+            UsdSyncServer._merge_event(latest, tombstoned, record_bin)
         return latest, tombstoned
 
     def _commit_compaction(
@@ -951,7 +964,7 @@ class UsdSyncServer:
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
-        Must be called under exclusive _txn_barrier.
+        Must be called under exclusive txn_barrier.
         """
         sorted_entries = sorted(
             latest.values(),
@@ -969,12 +982,13 @@ class UsdSyncServer:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
-            records.append((seq, json.dumps(rec), meta.get("client_id")))
+            records.append((seq, encode_message(rec), meta.get("client_id"),
+                            ev.get("k"), ev.get("prim")))
         self.store.clear_and_rewrite(records)
         with self._seq_lock:
             self._event_count = len(records)
 
-        self._op_cache.clear()
+        self.op_cache.clear()
 
         # Rebuild incremental prim tracking from compacted state.
         self._prim_paths.clear()
@@ -988,16 +1002,16 @@ class UsdSyncServer:
         with self.clients_lock:
             targets = list(self.receivers)
         for handler in targets:
-            with handler._send_lock:
+            with handler.send_lock:
                 self.replay_from(handler, 1)
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
-        self._txn_barrier.acquire_exclusive()
+        self.txn_barrier.acquire_exclusive()
         try:
             self._purge_inner()
         finally:
-            self._txn_barrier.release_exclusive()
+            self.txn_barrier.release_exclusive()
 
     def _purge_inner(self):
         self.store.clear_and_rewrite([])
@@ -1006,7 +1020,7 @@ class UsdSyncServer:
             self._next_seq = 1
         with self.stage_lock:
             self.edit_layer.Clear()
-        self._op_cache.clear()
+        self.op_cache.clear()
         self._prim_paths.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
@@ -1066,31 +1080,22 @@ class UsdSyncServer:
         Raises on persistence failure — callers should not broadcast
         events that were not successfully persisted.
         """
-        self.store.append(rec["seq"], json.dumps(rec))
+        ev = rec.get("event", {})
+        rec_bin = encode_message(rec)
+        self.store.append(rec["seq"], rec_bin,
+                          kind=ev.get("k"), prim=ev.get("prim"))
         with self._seq_lock:
             self._event_count += 1
 
-    def append_log_batch(self, records: list[dict]):
-        """Persist multiple event records.
+    def append_log_batch(
+        self, tuples: list[tuple[int, bytes, str | None, str | None, str | None]],
+    ):
+        """Persist pre-serialized event records.
 
+        Each tuple is (seq, record_bin, client_id, kind, prim).
         In strict mode, writes synchronously (caller blocks until DB commit).
         In realtime mode, enqueues for async write (caller returns immediately).
         """
-        tuples = [
-            (rec["seq"], json.dumps(rec), rec.get("client_id"))
-            for rec in records
-        ]
-        if self._persist_queue is not None:
-            self._persist_queue.put(tuples)
-        else:
-            self.store.append_batch(tuples)
-            with self._seq_lock:
-                self._event_count += len(tuples)
-
-    def append_log_batch_preserialized(
-        self, tuples: list[tuple[int, str, str | None]],
-    ):
-        """Persist pre-serialized event records: (seq, json_str, client_id)."""
         if self._persist_queue is not None:
             self._persist_queue.put(tuples)
         else:
@@ -1122,14 +1127,16 @@ class UsdSyncServer:
             K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
         }
 
-        record_jsons = self.store.search_like(f'%"prim": "{prefix}%')
+        record_blobs = self.store.search_like_decoded(
+            lambda d: d.get("event", d).get("prim", "").startswith(prefix)
+        )
 
         # Collect the latest event of each relevant kind per child prim.
         # Store (ev, origin) tuples so replayed broadcasts can suppress
         # echo back to the original sender.
         latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
-        for event_json in record_jsons:
-            rec = json.loads(event_json)
+        for blob in record_blobs:
+            rec = message_to_dict(blob)
             ev = rec.get("event", rec)
             ep = ev.get("prim", "")
             ek = ev.get("k", "")
@@ -1200,9 +1207,8 @@ class UsdSyncServer:
         """
         if not records:
             return
-        payload = "".join(
-            json.dumps(rec) + "\n" for rec in records
-        ).encode("utf-8")
+        framed_payloads = [encode_message(rec) for rec in records]
+        payload = frame_batch(framed_payloads)
         self._broadcast_queue.put((payload, exclude_origin, None))
         # Notify event listeners synchronously — these are in-process
         # callbacks (e.g. dashboard) that are fast and must see events
@@ -1220,7 +1226,7 @@ class UsdSyncServer:
         self, payload: bytes, records: list[dict],
         exclude_origin: str | None = None,
     ):
-        """Enqueue pre-encoded payload for broadcast and notify listeners."""
+        """Enqueue pre-framed payload for broadcast and notify listeners."""
         self._broadcast_queue.put((payload, exclude_origin, None))
         for listener in list(self._event_listeners):
             for rec in records:
@@ -1233,8 +1239,8 @@ class UsdSyncServer:
 
     def send_to_origin(self, rec: dict, origin: str):
         """Enqueue a record for async send to receivers matching an origin."""
-        line = (json.dumps(rec) + "\n").encode("utf-8")
-        self._broadcast_queue.put((line, None, origin))
+        payload = frame_batch([encode_message(rec)])
+        self._broadcast_queue.put((payload, None, origin))
 
     def _broadcast_loop(self):
         """Dedicated thread: drain the broadcast queue and send to receivers.
@@ -1242,7 +1248,7 @@ class UsdSyncServer:
         During idle periods, sends periodic pings to detect dead receivers.
         Exits cleanly when a None sentinel is enqueued via shutdown().
         """
-        _ping_payload = (json.dumps({"type": MSG_PING}) + "\n").encode("utf-8")
+        _ping_payload = frame_batch([encode_message({"type": MSG_PING})])
 
         while True:
             try:
@@ -1300,7 +1306,7 @@ class UsdSyncServer:
             if exclude_origin and h_origin == exclude_origin:
                 continue
             try:
-                with h._send_lock:
+                with h.send_lock:
                     h.request.sendall(payload)
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead",
@@ -1445,6 +1451,11 @@ class UsdSyncServer:
 
         Uses per-attribute strength checking via ``GetPropertyStack`` and
         ``PrimSpec.HasInfo`` — works for all event types without snapshotting.
+
+        Winning checks are cached per (prim_path, event_kind) for the
+        duration of the txn.  The layer stack is frozen while we hold
+        stage_lock, so the result cannot change between the first and
+        subsequent checks for the same prim+kind.
         """
         from .event_apply import apply_events
 
@@ -1453,7 +1464,12 @@ class UsdSyncServer:
         changed_indices = []
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
-            apply_events(self.stage, events, op_cache=self._op_cache)
+            apply_events(self.stage, events, op_cache=self.op_cache)
+
+            # Cache winning results per (prim_path, event_kind) — the
+            # layer stack is frozen for the duration of this txn so the
+            # result is stable across events touching the same prim.
+            winning_cache: dict[tuple[str, str], bool] = {}
 
             for i, ev in enumerate(events):
                 k = ev.get("k")
@@ -1464,11 +1480,22 @@ class UsdSyncServer:
                 if not pp:
                     changed_indices.append(i)
                     continue
+
+                cache_key = (pp, k)
+                cached = winning_cache.get(cache_key)
+                if cached is not None:
+                    if cached:
+                        changed_indices.append(i)
+                    continue
+
                 prim = self.stage.GetPrimAtPath(pp)
                 if not prim or not prim.IsValid():
+                    winning_cache[cache_key] = True
                     changed_indices.append(i)
                     continue
-                if self._is_layer_winning(prim, target, ev):
+                wins = self._is_layer_winning(prim, target, ev)
+                winning_cache[cache_key] = wins
+                if wins:
                     changed_indices.append(i)
 
         return changed_indices
@@ -1497,11 +1524,11 @@ class UsdSyncServer:
         prim_contains: str = "",
     ) -> tuple[list[dict], int]:
         """Return a page of events and total matching count (thread-safe)."""
-        record_jsons, count = self.store.query(
+        blobs, count = self.store.query(
             offset=offset, limit=limit,
             kind=kind, prim_contains=prim_contains,
         )
-        return [json.loads(r) for r in record_jsons], count
+        return [message_to_dict(b) for b in blobs], count
 
     def get_client_list(self) -> list[dict]:
         """Return a snapshot of connected clients (thread-safe)."""
@@ -1602,22 +1629,24 @@ class UsdSyncServer:
         All events are replayed regardless of origin — the receiver needs
         its own prior edits (which share its origin) to restore state.
         Origin filtering only applies to live broadcast to prevent echo.
+
+        Sends binary blobs directly from the store — no re-serialization.
         """
         _REPLAY_CHUNK = 65536
         try:
-            record_jsons = self.store.get_from_seq(seq_start)
-            buf: list[str] = []
+            blobs = self.store.get_from_seq_bin(seq_start)
+            buf_parts: list[bytes] = []
             buf_size = 0
-            for record_json in record_jsons:
-                line = record_json + "\n"
-                buf.append(line)
-                buf_size += len(line)
+            for blob in blobs:
+                framed = frame_batch([blob])
+                buf_parts.append(framed)
+                buf_size += len(framed)
                 if buf_size >= _REPLAY_CHUNK:
-                    handler.request.sendall("".join(buf).encode("utf-8"))
-                    buf.clear()
+                    handler.request.sendall(b"".join(buf_parts))
+                    buf_parts.clear()
                     buf_size = 0
-            if buf:
-                handler.request.sendall("".join(buf).encode("utf-8"))
+            if buf_parts:
+                handler.request.sendall(b"".join(buf_parts))
         except Exception:
             LOG.exception("Failed to replay events")
 
@@ -1641,47 +1670,49 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Per-receiver send lock: serializes replay and broadcast sends on
         # this socket without holding the global clients_lock during I/O.
-        self._send_lock = threading.Lock()
+        self.send_lock = threading.Lock()
         self._rate_bucket = (
             TokenBucket(sync_server.txn_rate, sync_server.txn_burst)
             if sync_server.txn_rate > 0 else None
         )
 
-        # Read hello
+        # Read hello (length-prefixed FlatBuffers)
         try:
-            line = self.rfile.readline(_MAX_LINE_SIZE)
-        except TimeoutError:
+            hello_buf = recv_framed_rfile(self.rfile)
+        except (TimeoutError, IncompleteRead, MessageTooLarge):
             return
-        if not line:
-            return
-        if not line.endswith(b"\n"):
-            LOG.warning("Hello line exceeded %d bytes from %s, disconnecting",
-                        _MAX_LINE_SIZE, self.client_address)
-            return
+
         try:
-            hello = json.loads(line.decode("utf-8"))
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            env = decode_envelope(hello_buf)
+            if env.PayloadType() != PayloadType.Hello:
+                return
+            _, hello_fb = resolve_payload(env)
+        except Exception as e:
             LOG.warning("Failed to parse hello message: %s", e)
             return
 
-        if hello.get("type") != MSG_HELLO:
-            return
-
-        role = hello.get("role")
-        client_id = hello.get("client_id")
-        self._origin = hello.get("origin")
-        self._department = hello.get("department")
+        role_raw = hello_fb.Role()
+        role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
+        client_id_raw = hello_fb.ClientId()
+        client_id = (client_id_raw.decode("utf-8")
+                     if isinstance(client_id_raw, bytes) else client_id_raw)
+        origin_raw = hello_fb.Origin()
+        self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
+        dept_raw = hello_fb.Department()
+        self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
+        token_raw = hello_fb.Token()
+        hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
         self._client_id = client_id
         self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
         # TOFU authentication
-        from .transport import send_line
+        from .transport import send_msg
 
         accepted, issued_token = sync_server.authenticate(
-            client_id, hello.get("token"), self._department,
+            client_id, hello_token, self._department,
         )
         if not accepted:
-            send_line(self.request, {
+            send_msg(self.request, {
                 "type": MSG_AUTH_REJECTED,
                 "reason": "invalid or missing token",
             })
@@ -1692,7 +1723,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         hello_ok = {"type": MSG_HELLO_OK}
         if issued_token:
             hello_ok["token"] = issued_token
-        send_line(self.request, hello_ok)
+        send_msg(self.request, hello_ok)
 
         LOG.info(
             "Client connected: role=%s origin=%s dept=%s from %s",
@@ -1712,23 +1743,23 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             )
 
         if role == "receiver":
-            sync_from = int(hello.get("sync_from", 1))
+            sync_from = hello_fb.SyncFrom() or 1
 
             # If sync_from is beyond the current log (e.g., after compaction
             # reset seq numbers), send resync so the receiver resets its
             # sequence counter, then replay the full log.
             max_seq = sync_server.store.get_max_seq()
             if sync_from > max_seq > 0:
-                send_line(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
+                send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 
-            # Acquire _send_lock first, then add to broadcast set and replay.
-            # The _send_lock prevents broadcasts from reaching this receiver
+            # Acquire send_lock first, then add to broadcast set and replay.
+            # The send_lock prevents broadcasts from reaching this receiver
             # until replay is complete (preserving event ordering). The
             # broadcast thread never holds both locks simultaneously (it
             # snapshots under clients_lock, releases it, then acquires
-            # _send_lock per target), so no deadlock is possible.
-            with self._send_lock:
+            # send_lock per target), so no deadlock is possible.
+            with self.send_lock:
                 with sync_server.clients_lock:
                     sync_server.receivers.add(self)
                 sync_server.replay_from(self, sync_from)
@@ -1749,68 +1780,62 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             LOG.info("Client disconnected: %s", self.client_address)
 
     def _read_loop(self, sync_server: UsdSyncServer):
+        from .codec import event_to_dict
+
         while True:
             try:
-                line = self.rfile.readline(_MAX_LINE_SIZE)
+                buf = recv_framed_rfile(self.rfile)
             except ConnectionResetError:
+                break
+            except (IncompleteRead, MessageTooLarge):
                 break
             except TimeoutError:
                 continue
-            if not line:
-                break
-            if not line.endswith(b"\n"):
-                LOG.warning("Message line exceeded %d bytes from %s, disconnecting",
-                            _MAX_LINE_SIZE, self.client_address)
-                break
-            try:
-                msg = json.loads(line.decode("utf-8"))
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                LOG.warning("Failed to parse message: %s", e)
-                continue
 
-            if msg.get("type") == MSG_QUIT:
+            env = decode_envelope(buf)
+            pt = env.PayloadType()
+
+            if pt == PayloadType.Quit:
                 break
 
-            if msg.get("type") == MSG_COMPACT:
+            if pt == PayloadType.Compact:
                 LOG.info("Compact requested by %s", self.client_address)
                 sync_server.compact_log()
                 continue
 
-            if msg.get("type") == MSG_CREATE_PROPOSAL:
+            if pt == PayloadType.CreateProposal:
+                msg = message_to_dict(buf)
                 self._handle_create_proposal(sync_server, msg)
                 continue
 
-            if msg.get("type") != MSG_TXN:
+            if pt != PayloadType.Txn:
                 continue
 
-            events = msg.get("events", [])
-            if not isinstance(events, list) or not events:
-                continue
-
-            # Check if txn targets a proposal (no broadcast, just apply to muted layer)
-            proposal_id = msg.get("proposal_id")
-            if proposal_id:
-                self._handle_proposal_txn(sync_server, proposal_id, events)
+            # Decode txn events to dicts for apply_txn — numpy arrays
+            # for geometry attrs to avoid per-element Python iteration.
+            _, txn_fb = resolve_payload(env)
+            events = [event_to_dict(txn_fb.Events(i), numpy_arrays=True)
+                      for i in range(txn_fb.EventsLength())]
+            if not events:
                 continue
 
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
                 if wait > 0:
-                    from .transport import send_line as _send_line
-                    _send_line(self.request, {
+                    from .transport import send_msg as _send_msg
+                    _send_msg(self.request, {
                         "type": MSG_RATE_LIMITED,
                         "retry_after": round(wait, 3),
                     })
                     continue
 
-            sync_server._txn_barrier.acquire_shared()
+            sync_server.txn_barrier.acquire_shared()
             try:
                 changed = sync_server.apply_txn(events, layer=self._client_layer)
                 changed_set = set(changed)
 
                 # Serialize once, use for both persist and broadcast.
                 records = []
-                json_strs = []
                 persist_tuples = []
                 for ev in events:
                     rec = {
@@ -1822,19 +1847,21 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     }
                     if self._origin:
                         rec["origin"] = self._origin
-                    js = json.dumps(rec)
-                    records.append(rec)
-                    json_strs.append(js)
-                    persist_tuples.append((rec["seq"], js, self._client_id))
-                sync_server.append_log_batch_preserialized(persist_tuples)
+                    rec_bin = encode_message(rec)
+                    records.append((rec, rec_bin))
+                    persist_tuples.append(
+                        (rec["seq"], rec_bin, self._client_id,
+                         ev.get("k"), ev.get("prim"))
+                    )
+                sync_server.append_log_batch(persist_tuples)
 
                 # Broadcast changed events; send corrections for overridden ones.
                 changed_records = []
-                changed_strs = []
-                for i, (rec, js) in enumerate(zip(records, json_strs, strict=True)):
+                changed_bins = []
+                for i, (rec, rec_bin) in enumerate(records):
                     if i in changed_set:
                         changed_records.append(rec)
-                        changed_strs.append(js)
+                        changed_bins.append(rec_bin)
                     else:
                         correction = sync_server.build_correction(events[i])
                         if correction:
@@ -1847,15 +1874,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                                 correction_rec, self._origin,
                             )
                 if changed_records:
-                    payload = "".join(
-                        s + "\n" for s in changed_strs
-                    ).encode("utf-8")
+                    payload = frame_batch(changed_bins)
                     sync_server.broadcast_bytes(
                         payload, changed_records,
                         exclude_origin=self._origin,
                     )
             finally:
-                sync_server._txn_barrier.release_shared()
+                sync_server.txn_barrier.release_shared()
 
             # Update client activity tracking.
             with sync_server.clients_lock:
@@ -1872,7 +1897,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
     def _handle_create_proposal(self, sync_server: UsdSyncServer, msg: dict):
         """Handle a create_proposal message from an emitter."""
-        from .transport import send_line
+        from .transport import send_msg
 
         target = msg.get("target_department", "")
         desc = msg.get("description", "")
@@ -1881,7 +1906,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         pid = sync_server.create_proposal(
             self._client_id or "", target, desc,
         )
-        send_line(self.request, {
+        send_msg(self.request, {
             "type": MSG_PROPOSAL_CREATED,
             "proposal_id": pid,
         })
@@ -1903,7 +1928,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         with sync_server.stage_lock:
             sync_server.stage.UnmuteLayer(p.layer.identifier)
             sync_server.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(sync_server.stage, events, op_cache=sync_server._op_cache)
+            apply_events(sync_server.stage, events, op_cache=sync_server.op_cache)
             sync_server.stage.MuteLayer(p.layer.identifier)
         p.events.extend(events)
         LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
@@ -1912,13 +1937,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 class ThreadedTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
     request_queue_size = 128
-    _MAX_WORKERS = 256
+    MAX_WORKERS = 256
 
     def __init__(self, server_address, handler_class, sync_server: UsdSyncServer,
                  max_workers: int | None = None):
         self.sync_server = sync_server
         self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers or self._MAX_WORKERS,
+            max_workers=max_workers or self.MAX_WORKERS,
             thread_name_prefix="conn",
         )
         super().__init__(server_address, handler_class)
@@ -2056,7 +2081,7 @@ def main():
     )
     ap.add_argument(
         "--max-connections", type=int, default=None, metavar="N",
-        help=f"Max concurrent client connections (default: {ThreadedTCPServer._MAX_WORKERS})",
+        help=f"Max concurrent client connections (default: {ThreadedTCPServer.MAX_WORKERS})",
     )
     ap.add_argument(
         "--txn-rate", type=float, default=0, metavar="N",

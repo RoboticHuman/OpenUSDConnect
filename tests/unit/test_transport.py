@@ -1,31 +1,37 @@
-"""Tests for transport helpers (send_line)."""
+"""Tests for transport helpers (send_msg / recv_msg)."""
 
-import json
 import socket
 
-from openusdconnect.transport import send_line
+from openusdconnect.codec import message_to_dict
+from openusdconnect.framing import recv_framed
+from openusdconnect.transport import send_msg
 
 
-class TestSendLine:
-    def test_sends_json_newline(self):
+class TestSendMsg:
+    def test_sends_framed_flatbuffers(self):
         a, b = socket.socketpair()
         try:
-            send_line(a, {"type": "hello", "role": "emitter"})
-            data = b.recv(4096)
-            assert data.endswith(b"\n")
-            parsed = json.loads(data.decode("utf-8").strip())
-            assert parsed == {"type": "hello", "role": "emitter"}
+            send_msg(a, {"type": "hello", "role": "emitter", "protocol_version": 1})
+            buf = recv_framed(b)
+            parsed = message_to_dict(buf)
+            assert parsed["type"] == "hello"
+            assert parsed["role"] == "emitter"
         finally:
             a.close()
             b.close()
 
-    def test_sends_unicode(self):
+    def test_roundtrip_event(self):
         a, b = socket.socketpair()
         try:
-            send_line(a, {"name": "test\u2603"})
-            data = b.recv(4096)
-            parsed = json.loads(data.decode("utf-8").strip())
-            assert parsed["name"] == "test\u2603"
+            msg = {
+                "type": "event", "seq": 42,
+                "event": {"k": "set_visibility", "prim": "/World/X", "visible": True},
+            }
+            send_msg(a, msg)
+            buf = recv_framed(b)
+            parsed = message_to_dict(buf)
+            assert parsed["seq"] == 42
+            assert parsed["event"]["visible"] is True
         finally:
             a.close()
             b.close()

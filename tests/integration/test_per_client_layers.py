@@ -29,14 +29,17 @@ def _make_server(tmp_path, department_priority=None):
 
 def _emit_events(srv, client_id, events, department=None):
     """Simulate an emitter: create layer, apply txn, persist."""
+    from openusdconnect.codec import encode_message
+
     layer = srv.get_or_create_client_layer(client_id, department=department)
     srv.apply_txn(events, layer=layer)
-    records = []
+    tuples = []
     for ev in events:
         seq = srv.assign_seq()
         rec = {"type": MSG_EVENT, "seq": seq, "event": ev, "client_id": client_id}
-        records.append(rec)
-    srv.append_log_batch(records)
+        rec_bin = encode_message(rec)
+        tuples.append((seq, rec_bin, client_id, ev.get("k"), ev.get("prim")))
+    srv.append_log_batch(tuples)
 
 
 def _read_translate(stage, prim_path):
@@ -508,7 +511,7 @@ class TestCorrectionPath:
         srv = _make_server(tmp_path)
 
         # Verify method exists and doesn't crash with no receivers
-        srv.send_to_origin({"type": "test"}, "nonexistent-origin")
+        srv.send_to_origin({"type": "ping"}, "nonexistent-origin")
 
 
 class TestReplayWithClientLayers:
@@ -555,7 +558,8 @@ class TestConcurrentDepartmentWrites:
         land in the correct layer (not cross-written due to SetEditTarget
         race) and that per-layer values are independently correct."""
         import threading
-        from pxr import Sdf, UsdGeom
+
+        from pxr import Sdf
 
         srv = _make_server(tmp_path, department_priority=["animation", "lighting", "fx"])
         barrier = threading.Barrier(3)
@@ -578,8 +582,12 @@ class TestConcurrentDepartmentWrites:
         t3 = threading.Thread(target=_writer, args=(
             "carol", "fx", "/World/FX", (0, 0, 1), 20))
 
-        t1.start(); t2.start(); t3.start()
-        t1.join(timeout=10); t2.join(timeout=10); t3.join(timeout=10)
+        t1.start()
+        t2.start()
+        t3.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+        t3.join(timeout=10)
 
         assert not errors, f"Writer threads raised: {errors}"
 
@@ -648,8 +656,10 @@ class TestConcurrentDepartmentWrites:
         t2 = threading.Thread(target=_writer, args=(
             "bob", "lighting", (0, 200, 0), 20))
 
-        t1.start(); t2.start()
-        t1.join(timeout=10); t2.join(timeout=10)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
 
         assert not errors, f"Writer threads raised: {errors}"
 
@@ -733,8 +743,12 @@ class TestConcurrentDepartmentWrites:
             "bob", "lighting", "/World/Sphere", (0, 1, 0), 30))
         t3 = threading.Thread(target=_reader)
 
-        t1.start(); t2.start(); t3.start()
-        t1.join(timeout=15); t2.join(timeout=15); t3.join(timeout=15)
+        t1.start()
+        t2.start()
+        t3.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        t3.join(timeout=15)
 
         assert not errors, f"Threads raised: {errors}"
         assert read_count > 0, "Reader thread never completed a read cycle"
@@ -788,6 +802,7 @@ class TestMultiDepartmentContention:
     def test_concurrent_contention_on_shared_prims(self, tmp_path):
         """Concurrent department writes with shared and private prims."""
         import threading
+
         from pxr import Sdf
 
         srv = _make_server(tmp_path, department_priority=self.DEPTS)

@@ -10,12 +10,20 @@ per-department layers, mute/unmute, and strength ordering.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
 import sys
 import time
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from openusdconnect.codec import message_to_dict
+from openusdconnect.framing import recv_framed
+from openusdconnect.transport import send_msg
 
 SERVER_PORT = 7200
 DASHBOARD_PORT = 8080
@@ -23,14 +31,10 @@ DEPARTMENTS = "lighting,animation,layout"
 DB_PATH = "demo_layer_dashboard.db"
 
 
-def send(sock, msg):
-    sock.sendall((json.dumps(msg) + "\n").encode())
-
-
 def connect_emitter(port, client_id, origin, department):
     """Connect an emitter socket and send hello."""
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
-    send(s, {
+    send_msg(s, {
         "type": "hello",
         "role": "emitter",
         "protocol_version": 1,
@@ -41,8 +45,8 @@ def connect_emitter(port, client_id, origin, department):
     # Read hello_ok response
     s.settimeout(2)
     try:
-        s.recv(4096)
-    except TimeoutError:
+        recv_framed(s)
+    except Exception:
         pass
     s.settimeout(5)
     return s
@@ -52,7 +56,7 @@ def send_txn(sock, client_id, events, proposal_id=None):
     msg = {"type": "txn", "client_id": client_id, "events": events}
     if proposal_id:
         msg["proposal_id"] = proposal_id
-    send(sock, msg)
+    send_msg(sock, msg)
 
 
 def _check_port_free(port):
@@ -87,7 +91,7 @@ def main():
 
     # Start the server
     print(f"Starting server on port {SERVER_PORT} with dashboard on {DASHBOARD_PORT}...")
-    print(f"Departments (strongest → weakest): {DEPARTMENTS}")
+    print(f"Departments (strongest -> weakest): {DEPARTMENTS}")
     server_proc = subprocess.Popen(
         [
             sys.executable, "-m", "openusdconnect.server",
@@ -143,7 +147,7 @@ def main():
         ])
         time.sleep(0.5)
 
-        # -- Bob animates (animation — stronger than layout) ---------------
+        # -- Bob animates (animation -- stronger than layout) ---------------
         print("Bob (animation): moving Cube to animated position...")
         send_txn(bob, "bob-workstation-maya", [
             {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"},
@@ -153,7 +157,7 @@ def main():
         ])
         time.sleep(0.5)
 
-        # -- Carol sets lighting positions (lighting — strongest) ----------
+        # -- Carol sets lighting positions (lighting -- strongest) ----------
         print("Carol (lighting): positioning light rig...")
         send_txn(carol, "carol-workstation-houdini", [
             {"k": "ensure_prim", "prim": "/World/KeyLight", "typeName": "Xform"},
@@ -173,7 +177,7 @@ def main():
 
         # -- Alice proposes a lighting change --------------------------------
         print("Alice (layout): proposing a lighting change...")
-        send(alice, {
+        send_msg(alice, {
             "type": "create_proposal",
             "target_department": "lighting",
             "description": "Add rim light for hero shot\n\n"
@@ -184,8 +188,8 @@ def main():
         time.sleep(0.5)
         # Read the proposal_created response
         try:
-            resp = alice.recv(4096).decode()
-            proposal_resp = json.loads(resp.strip().split("\n")[0])
+            resp_buf = recv_framed(alice)
+            proposal_resp = message_to_dict(resp_buf)
             proposal_id = proposal_resp.get("proposal_id", "")
             print(f"  Proposal created: {proposal_id}")
 
@@ -197,7 +201,7 @@ def main():
                     {"k": "set_xform_trs", "prim": "/World/RimLight",
                      "fields": ["t"], "t": [0.0, 12.0, -8.0]},
                 ], proposal_id=proposal_id)
-                print("  Alice sent edits to proposal (muted — not visible yet)")
+                print("  Alice sent edits to proposal (muted -- not visible yet)")
         except Exception as e:
             print(f"  (proposal response: {e})")
 
@@ -206,12 +210,12 @@ def main():
         print("\n" + "=" * 60)
         print(f"  Dashboard ready at: http://localhost:{DASHBOARD_PORT}")
         print()
-        print("  Layer stack (strongest → weakest):")
-        print("    #1  lighting  — carol-workstation-houdini")
-        print("    #2  animation — bob-workstation-maya")
-        print("    #3  layout    — alice-workstation-blender")
+        print("  Layer stack (strongest -> weakest):")
+        print("    #1  lighting  -- carol-workstation-houdini")
+        print("    #2  animation -- bob-workstation-maya")
+        print("    #3  layout    -- alice-workstation-blender")
         print()
-        print("  Proposal from Alice → lighting:")
+        print("  Proposal from Alice -> lighting:")
         print("    'Add rim light for hero shot'")
         print()
         print("  Try in the dashboard:")
@@ -248,7 +252,7 @@ def main():
                 if os.path.exists(p):
                     os.remove(p)
             except PermissionError:
-                pass  # OS still releasing — cleaned on next run
+                pass  # OS still releasing -- cleaned on next run
         print("Done.")
 
 

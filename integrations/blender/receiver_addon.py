@@ -6,7 +6,6 @@ on the main thread via bpy.app.timers.
 
 from __future__ import annotations
 
-import json
 import logging
 
 try:
@@ -17,6 +16,12 @@ try:
 except Exception:
     BPY_AVAILABLE = False
 
+from openusdconnect.codec import (
+    PayloadType,
+    decode_envelope,
+    event_to_dict,
+    resolve_payload,
+)
 from openusdconnect.protocol import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -35,8 +40,6 @@ from openusdconnect.protocol import (
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
-    MSG_EVENT,
-    MSG_RESYNC,
 )
 from openusdconnect.receiver import ReceiverThread
 
@@ -371,29 +374,29 @@ def _parse_events(lines) -> list[dict]:
     """
     global _LAST_SEQ, _ADAPTER
     events = []
-    for raw_line in lines:
+    for raw_buf in lines:
         try:
-            msg = json.loads(raw_line)
+            env = decode_envelope(raw_buf)
+            pt = env.PayloadType()
 
-            if msg.get("type") == MSG_RESYNC:
+            if pt == PayloadType.Resync:
                 LOG.info("Server requested resync — resetting sequence and adapter")
                 _LAST_SEQ = 0
                 _ADAPTER = None
                 events.clear()
                 continue
 
-            seq = msg.get("seq")
-            if seq is not None:
-                seq_int = int(seq)
+            if pt == PayloadType.BroadcastEvent:
+                _, be = resolve_payload(env)
+                seq_int = be.Seq()
                 if seq_int <= _LAST_SEQ:
                     continue
                 _LAST_SEQ = seq_int
-            if msg.get("type") == MSG_EVENT:
-                ev = msg.get("event", {})
-                if ev:
-                    events.append(ev)
+                ew = be.Event()
+                if ew:
+                    events.append(event_to_dict(ew))
         except Exception:
-            LOG.exception("Error parsing received line")
+            LOG.exception("Error parsing received message")
     return events
 
 

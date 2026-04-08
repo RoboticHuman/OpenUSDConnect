@@ -29,7 +29,7 @@ def srv_with_layers(srv):
         {"k": "ensure_xform_ops", "prim": "/World/Cube"},
         {"k": "set_xform_trs", "prim": "/World/Cube",
          "fields": ["t"], "t": [1.0, 0.0, 0.0]},
-    ], op_cache=srv._op_cache)
+    ], op_cache=srv.op_cache)
 
     layer_b = srv.get_or_create_client_layer("bob", "animation")
     srv.stage.SetEditTarget(Usd.EditTarget(layer_b))
@@ -38,7 +38,7 @@ def srv_with_layers(srv):
         {"k": "ensure_xform_ops", "prim": "/World/Cube"},
         {"k": "set_xform_trs", "prim": "/World/Cube",
          "fields": ["t"], "t": [5.0, 3.0, 0.0]},
-    ], op_cache=srv._op_cache)
+    ], op_cache=srv.op_cache)
 
     return srv
 
@@ -142,7 +142,7 @@ def _apply_to_proposal(srv, proposal_id, events):
     with srv.stage_lock:
         srv.stage.UnmuteLayer(layer.identifier)
         srv.stage.SetEditTarget(Usd.EditTarget(layer))
-        apply_events(srv.stage, events, op_cache=srv._op_cache)
+        apply_events(srv.stage, events, op_cache=srv.op_cache)
         srv.stage.MuteLayer(layer.identifier)
     return layer
 

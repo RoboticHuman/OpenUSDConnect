@@ -1,0 +1,89 @@
+// OpenUSDConnect wire protocol — FlatBuffers schema
+// Message envelope with union payload for all message types.
+
+include "events.fbs";
+
+namespace OpenUSDConnect;
+
+// ---------------------------------------------------------------------------
+// Message-level types
+// ---------------------------------------------------------------------------
+
+table Hello {
+    role:string;              // "emitter" or "receiver"
+    protocol_version:int;
+    sync_from:int;            // sequence number to replay from (receivers)
+    client_id:string;
+    origin:string;            // session-level id for echo suppression
+    department:string;
+    token:string;             // TOFU auth token
+}
+
+table HelloOk {
+    token:string;             // issued token (if newly registered)
+}
+
+table AuthRejected {
+    reason:string;
+}
+
+table Txn {
+    client_id:string;
+    events:[EventWrapper];
+}
+
+table BroadcastEvent {
+    seq:int;
+    event:EventWrapper;
+    origin:string;
+    client_id:string;
+    client:string;              // address key e.g. "127.0.0.1:1234"
+}
+
+table Resync {}
+
+table Compact {}
+
+table Ping {}
+
+table Quit {}
+
+table CreateProposal {
+    target_department:string;
+    events:[EventWrapper];
+    description:string;
+}
+
+table ProposalCreated {
+    proposal_id:string;
+}
+
+table RateLimited {
+    retry_after:float;
+}
+
+// ---------------------------------------------------------------------------
+// Top-level envelope
+// ---------------------------------------------------------------------------
+
+union Payload {
+    Hello,
+    HelloOk,
+    AuthRejected,
+    Txn,
+    BroadcastEvent,
+    Resync,
+    Compact,
+    Ping,
+    Quit,
+    CreateProposal,
+    ProposalCreated,
+    RateLimited,
+}
+
+table Envelope {
+    payload:Payload;
+    schema_version:uint16 = 1;
+}
+
+root_type Envelope;
