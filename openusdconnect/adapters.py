@@ -123,7 +123,7 @@ class DCCAdapter(ABC):
     def set_shader_connection(self, prim_path: str,
                               connections: dict,
                               disconnections: list | None = None) -> bool:
-        """Connect/disconnect shader inputs to/from other shader outputs."""
+        """Apply UsdShade input/output connection and disconnection edges."""
         raise NotImplementedError
 
 

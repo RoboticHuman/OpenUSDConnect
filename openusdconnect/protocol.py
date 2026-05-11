@@ -50,6 +50,10 @@ K_SET_SHADER_CONNECTION = "set_shader_connection"
 
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
+SHADER_INPUT_PREFIX = "inputs:"
+SHADER_OUTPUT_PREFIX = "outputs:"
+SHADER_ATTR_SIDE_INPUT = "input"
+SHADER_ATTR_SIDE_OUTPUT = "output"
 
 # Valid event keys
 EVENT_KEYS = frozenset(
@@ -275,8 +279,9 @@ def validate_event(ev: dict) -> bool:
         if not isinstance(connections, dict):
             return False
         for local_attr, conn in connections.items():
-            # local_attr must be namespace-qualified (inputs:* or outputs:*)
-            # so the receiver can dispatch via UsdShade.ConnectableAPI.
+            # local_attr must be namespace-qualified (inputs:<name> or
+            # outputs:<name>) so the receiver can dispatch via
+            # UsdShade.ConnectableAPI.
             if not split_qualified_attr(local_attr)[0]:
                 return False
             if not isinstance(conn, dict):
@@ -306,8 +311,14 @@ def split_qualified_attr(attr_name) -> tuple[str, str]:
     """
     if not isinstance(attr_name, str):
         return "", ""
-    if attr_name.startswith("inputs:") and len(attr_name) > len("inputs:"):
-        return "input", attr_name[len("inputs:"):]
-    if attr_name.startswith("outputs:") and len(attr_name) > len("outputs:"):
-        return "output", attr_name[len("outputs:"):]
+    if (
+        attr_name.startswith(SHADER_INPUT_PREFIX)
+        and len(attr_name) > len(SHADER_INPUT_PREFIX)
+    ):
+        return SHADER_ATTR_SIDE_INPUT, attr_name[len(SHADER_INPUT_PREFIX):]
+    if (
+        attr_name.startswith(SHADER_OUTPUT_PREFIX)
+        and len(attr_name) > len(SHADER_OUTPUT_PREFIX)
+    ):
+        return SHADER_ATTR_SIDE_OUTPUT, attr_name[len(SHADER_OUTPUT_PREFIX):]
     return "", ""

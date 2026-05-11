@@ -31,6 +31,8 @@ from .protocol import (
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     REL_MATERIAL_BINDING,
+    SHADER_ATTR_SIDE_INPUT,
+    SHADER_ATTR_SIDE_OUTPUT,
     STRUCTURAL_EVENT_KINDS,
     split_qualified_attr,
 )
@@ -441,9 +443,10 @@ def _set_shader_input_value(connectable: UsdShade.ConnectableAPI, name: str,
 def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     """Apply shader-id and authored input values to a UsdShade connectable.
 
-    Polymorphic over Shader, NodeGraph, and Material.  Authors `info:id`
-    when the prim is a Shader and a non-empty shader_id is provided;
-    NodeGraph/Material carry no info:id.
+    Existing Shader, NodeGraph, and Material prims all support interface
+    inputs through ConnectableAPI.  If the prim does not exist, this event
+    has no typeName field, so we define a Shader; new NodeGraph/Material
+    containers should arrive with a preceding ensure_prim event.
     """
     prim = get_or_define_prim(stage, ev["prim"], "Shader")
     shader_id = ev.get("shader_id", "")
@@ -458,12 +461,11 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
         _set_shader_input_value(connectable, name, value, type_name)
 
 
-def _resolve_sdr_type_for_attr(prim: Usd.Prim, side: str, base_name: str):
-    """Resolve the USD type of a Shader's input/output via Sdr's NodeDef.
+def _resolve_shader_port_type(prim: Usd.Prim, side: str, base_name: str):
+    """Resolve a Shader input/output type from its Sdr NodeDef.
 
-    *side* is "input" or "output". Returns None if the prim isn't a Shader
-    or the NodeDef / port isn't registered — callers fall back to other
-    sources of truth (the connected source's type, or Sdf.ValueTypeNames.Token).
+    Returns None when the prim is not a registered Shader node; connection
+    application then falls back to the connected source's type, then Token.
     """
     if not prim or not prim.IsA(UsdShade.Shader):
         return None
@@ -474,27 +476,34 @@ def _resolve_sdr_type_for_attr(prim: Usd.Prim, side: str, base_name: str):
     node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
     if node is None:
         return None
-    port = node.GetShaderInput(base_name) if side == "input" \
+    port = (
+        node.GetShaderInput(base_name)
+        if side == SHADER_ATTR_SIDE_INPUT
         else node.GetShaderOutput(base_name)
+    )
     if port is None:
         return None
     return port.GetTypeAsSdfType().GetSdfType()
 
 
-def _get_or_create_connectable_port(connectable: UsdShade.ConnectableAPI,
-                                     side: str, base_name: str, fallback_type):
+def _get_or_create_connectable_port(
+    connectable: UsdShade.ConnectableAPI,
+    side: str,
+    base_name: str,
+    fallback_type,
+):
     """Return the named input/output, creating it with the right type if absent.
 
     Type resolution prefers Sdr (when the prim is a Shader with a known
     info:id), then *fallback_type* (typically the type of the other end of
     the connection), then Token.
     """
-    if side == "input":
+    if side == SHADER_ATTR_SIDE_INPUT:
         port = connectable.GetInput(base_name)
         if port:
             return port
-        sdr_type = _resolve_sdr_type_for_attr(
-            connectable.GetPrim(), "input", base_name,
+        sdr_type = _resolve_shader_port_type(
+            connectable.GetPrim(), SHADER_ATTR_SIDE_INPUT, base_name,
         )
         return connectable.CreateInput(
             base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
@@ -503,11 +512,35 @@ def _get_or_create_connectable_port(connectable: UsdShade.ConnectableAPI,
     port = connectable.GetOutput(base_name)
     if port:
         return port
-    sdr_type = _resolve_sdr_type_for_attr(
-        connectable.GetPrim(), "output", base_name,
+    sdr_type = _resolve_shader_port_type(
+        connectable.GetPrim(), SHADER_ATTR_SIDE_OUTPUT, base_name,
     )
     return connectable.CreateOutput(
         base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
+    )
+
+
+def _parse_wire_shader_attr(attr_name: str) -> tuple[str, str]:
+    """Parse a protocol shader attr name and fail fast on contract violations."""
+    side, base = split_qualified_attr(attr_name)
+    if not side:
+        raise ValueError(
+            "Shader connection attributes must be qualified as "
+            f"'inputs:<name>' or 'outputs:<name>', got {attr_name!r}"
+        )
+    return side, base
+
+
+def _get_connectable_port(
+    connectable: UsdShade.ConnectableAPI,
+    side: str,
+    base_name: str,
+):
+    """Return an existing connectable input/output without creating it."""
+    return (
+        connectable.GetInput(base_name)
+        if side == SHADER_ATTR_SIDE_INPUT
+        else connectable.GetOutput(base_name)
     )
 
 
@@ -526,14 +559,9 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
     local_connectable = UsdShade.ConnectableAPI(prim)
 
     for local_attr, conn in ev.get("connections", {}).items():
-        local_side, local_base = split_qualified_attr(local_attr)
-        if not local_side:
-            continue  # malformed — caller-validated, defensive
-
+        local_side, local_base = _parse_wire_shader_attr(local_attr)
         source_attr = conn["source_attr"]
-        source_side, source_base = split_qualified_attr(source_attr)
-        if not source_side:
-            continue
+        source_side, source_base = _parse_wire_shader_attr(source_attr)
 
         # Source prim: define as Shader if missing (set_shader_input
         # for the source will arrive later in the same txn or a
@@ -556,11 +584,8 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
         local_port.ConnectToSource(source_port)
 
     for local_attr in ev.get("disconnections", []):
-        side, base = split_qualified_attr(local_attr)
-        if not side:
-            continue
-        port = (local_connectable.GetInput(base) if side == "input"
-                else local_connectable.GetOutput(base))
+        side, base = _parse_wire_shader_attr(local_attr)
+        port = _get_connectable_port(local_connectable, side, base)
         if port:
             port.DisconnectSource()
 

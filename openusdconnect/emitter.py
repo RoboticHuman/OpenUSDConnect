@@ -30,6 +30,10 @@ from .protocol import (
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
     REL_MATERIAL_BINDING,
+    SHADER_ATTR_SIDE_INPUT,
+    SHADER_ATTR_SIDE_OUTPUT,
+    SHADER_INPUT_PREFIX,
+    SHADER_OUTPUT_PREFIX,
 )
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
@@ -46,8 +50,8 @@ _C_SHADER_INPUTS = "shader_inputs"
 _C_SHADER_CONNECTIONS = "shader_connections"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
-# inputs:/outputs: are UsdShade namespace — handled by set_shader_input.
-_SKIP_ATTR_PREFIXES = ("xformOp:", "inputs:", "outputs:")
+# UsdShade inputs/outputs are mirrored by dedicated shader interface events.
+_SKIP_ATTR_PREFIXES = ("xformOp:", SHADER_INPUT_PREFIX, SHADER_OUTPUT_PREFIX)
 
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
@@ -279,36 +283,26 @@ def _read_material_binding(stage, prim_path):
     return str(targets[0]) if targets else ""
 
 
-def resolve_nodegraph_connection(stage, source_prim_path, source_output):
-    """Resolve a NodeGraph interface output to the internal shader.
-
-    If the source is a NodeGraph, follows its output connection to the
-    actual shader that produces the value.  Returns the resolved
-    (prim_path, output_name) tuple.  If the source is already a Shader
-    or resolution fails, returns the original values unchanged.
-    """
-    prim = stage.GetPrimAtPath(source_prim_path)
-    if prim and prim.IsA(UsdShade.NodeGraph):
-        ng = UsdShade.NodeGraph(prim)
-        ng_out = ng.GetOutput(source_output)
-        if ng_out:
-            srcs, _ = ng_out.GetConnectedSources()
-            if srcs:
-                return str(srcs[0].source.GetPath()), srcs[0].sourceName
-    return source_prim_path, source_output
-
-
-def _qualified_source_attr(src) -> str:
-    """Build a namespace-qualified source attribute name from a
-    ConnectedSourceInfo.
+def _connected_source_attr_name(src) -> str:
+    """Return the wire attribute name for a UsdShade connection source.
 
     Uses `sourceType` to choose `inputs:` vs `outputs:` so we cover the
     NodeGraph interface-forwarding case where the source is itself an
     input.
     """
-    prefix = "outputs:" if src.sourceType == UsdShade.AttributeType.Output \
-        else "inputs:"
-    return prefix + src.sourceName
+    side = (
+        SHADER_ATTR_SIDE_OUTPUT
+        if src.sourceType == UsdShade.AttributeType.Output
+        else SHADER_ATTR_SIDE_INPUT
+    )
+    return _shader_attr_name(side, src.sourceName)
+
+
+def _shader_attr_name(side: str, base_name: str) -> str:
+    """Build the protocol attribute name for a UsdShade input or output."""
+    if side == SHADER_ATTR_SIDE_INPUT:
+        return SHADER_INPUT_PREFIX + base_name
+    return SHADER_OUTPUT_PREFIX + base_name
 
 
 def _read_usdshade_connectable(stage, prim_path):
@@ -364,9 +358,9 @@ def _read_usdshade_connectable(stage, prim_path):
         name = inp.GetBaseName()
         sources, _ = inp.GetConnectedSources()
         if sources:
-            connections["inputs:" + name] = {
+            connections[_shader_attr_name(SHADER_ATTR_SIDE_INPUT, name)] = {
                 "source_prim": str(sources[0].source.GetPath()),
-                "source_attr": _qualified_source_attr(sources[0]),
+                "source_attr": _connected_source_attr_name(sources[0]),
             }
             continue
         val = _usd_value_to_python(inp.Get())
@@ -384,9 +378,9 @@ def _read_usdshade_connectable(stage, prim_path):
         sources, _ = outp.GetConnectedSources()
         if not sources:
             continue
-        connections["outputs:" + outp.GetBaseName()] = {
+        connections[_shader_attr_name(SHADER_ATTR_SIDE_OUTPUT, outp.GetBaseName())] = {
             "source_prim": str(sources[0].source.GetPath()),
-            "source_attr": _qualified_source_attr(sources[0]),
+            "source_attr": _connected_source_attr_name(sources[0]),
         }
 
     return container_kind, shader_id, inputs, input_types, connections
@@ -777,7 +771,7 @@ class NoticeEmitter:
             changed_inputs = {}
             changed_types = {}
             for name, val in current_inputs.items():
-                if val != last_inputs.get(name):
+                if not _values_equal(val, last_inputs.get(name)):
                     changed_inputs[name] = val
                     changed_types[name] = current_types[name]
             if changed_inputs:
