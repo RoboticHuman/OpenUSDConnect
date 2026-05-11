@@ -988,6 +988,85 @@ class TestStageToStageRoundtrip:
         assert isinstance(scale_b, Gf.Vec4f)
         assert list(scale_b) == [2.0, 2.0, 2.0, 2.0]
 
+    def test_open_pbr_mtlx_asset_codec_roundtrip(self):
+        """Real-asset roundtrip: load gold_openpbr.mtlx, walk it the way
+        _enrich_materialx_from_import does, encode through the codec, apply
+        to a fresh stage, and verify the OpenPBR Material gets a wired
+        outputs:surface on the receiver.  Regression guard for the
+        _MATERIAL_TERMINAL_WIRING entry."""
+        from pxr import UsdShade
+
+        from openusdconnect import codec
+        from openusdconnect.emitter import (
+            _read_material_binding,
+            _read_shader_inputs,
+        )
+        from openusdconnect.protocol import (
+            K_SET_MATERIAL_BINDING,
+            K_SET_SHADER_INPUT,
+        )
+
+        asset_path = os.path.join(
+            os.path.dirname(__file__), "..", "..",
+            "assets", "full_assets", "StandardShaderBall",
+            "example_materials", "gold_openpbr.mtlx",
+        )
+        if not os.path.isfile(asset_path):
+            pytest.skip(f"OpenPBR asset not present: {asset_path}")
+
+        src = Usd.Stage.Open(asset_path)
+        assert src is not None
+
+        events = []
+        for prim in src.Traverse():
+            pp = str(prim.GetPath())
+            tn = prim.GetTypeName()
+            if tn:
+                events.append({"k": K_ENSURE_PRIM, "prim": pp, "typeName": tn})
+            binding = _read_material_binding(src, pp)
+            if binding:
+                events.append({
+                    "k": K_SET_MATERIAL_BINDING, "prim": pp,
+                    "material_path": binding,
+                })
+            if prim.IsA(UsdShade.Shader):
+                sid, inputs, itypes, _ = _read_shader_inputs(src, pp)
+                if sid:
+                    events.append({
+                        "k": K_SET_SHADER_INPUT, "prim": pp,
+                        "shader_id": sid, "inputs": inputs,
+                        "input_types": itypes,
+                    })
+
+        shader_ids = {
+            e["shader_id"] for e in events if e["k"] == K_SET_SHADER_INPUT
+        }
+        assert "ND_open_pbr_surface_surfaceshader" in shader_ids
+
+        wire = codec.encode_message(
+            {"type": "txn", "client_id": "t", "events": events},
+        )
+        decoded = codec.message_to_dict(wire)
+
+        dst = Usd.Stage.CreateInMemory()
+        apply_events(dst, decoded["events"])
+
+        gold = UsdShade.Material(dst.GetPrimAtPath("/MaterialX/Materials/gold"))
+        assert gold
+        so = gold.GetSurfaceOutput()
+        assert so is not None
+        # Without ND_open_pbr_surface_surfaceshader in _MATERIAL_TERMINAL_WIRING
+        # this is False — the regression we're guarding against.
+        assert so.GetAttr().HasAuthoredConnections()
+        sources, _ = so.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == (
+            "/MaterialX/Materials/gold/open_pbr_surface"
+        )
+        assert sources[0].sourceName == "out"
+        # Displacement must NOT be auto-wired for OpenPBR (single-terminal).
+        assert not gold.GetDisplacementOutput().GetAttr().HasAuthoredConnections()
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

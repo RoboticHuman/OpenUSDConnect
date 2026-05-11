@@ -49,6 +49,7 @@ _MATERIAL_TERMINAL_WIRING: dict[str, list[tuple[str, str]]] = {
     ],
     "ND_UsdPreviewSurface_surfaceshader": [("surface", "out")],
     "ND_standard_surface_surfaceshader": [("surface", "out")],
+    "ND_open_pbr_surface_surfaceshader": [("surface", "out")],
 }
 
 
