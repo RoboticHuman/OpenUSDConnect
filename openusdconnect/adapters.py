@@ -181,6 +181,17 @@ class MultiNodeShaderMapper(ShaderMapper):
     def is_multi_node(self) -> bool:
         return True
 
+    @property
+    def is_surface_shader(self) -> bool:
+        """True when this mapper's `out` socket is a Shader output that
+        belongs on Material Output.Surface.  Helper mappers (normal-map,
+        displacement pre-processing, etc.) override to False so they
+        don't misroute their Vector/Color outputs into the Shader-typed
+        Surface input — and don't clear an already-authored surface BSDF
+        when the receiver adapter prepares the node tree.
+        """
+        return True
+
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
         pass  # Not used — create_network handles everything
 

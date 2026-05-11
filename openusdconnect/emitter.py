@@ -97,10 +97,12 @@ def _usd_value_to_python(val):
     # Simple scalars
     if isinstance(val, (int, float, bool, str)):
         return val
-    # Sdf.AssetPath → authored path string. The receiver re-resolves through
-    # its own asset resolver, so transmit the authored form, not resolvedPath.
+    # Sdf.AssetPath → prefer the resolved absolute path so the receiver
+    # doesn't have to recover the source layer's anchor to make sense of
+    # a bare relative string.  Falls back to the authored form when the
+    # source layer's resolver couldn't resolve (e.g. in-memory stages).
     if isinstance(val, Sdf.AssetPath):
-        return val.path
+        return val.resolvedPath or val.path
     # GfVec types → list of floats (small, not worth numpy overhead)
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
         if isinstance(val, vec_type):
@@ -296,23 +298,41 @@ def resolve_nodegraph_connection(stage, source_prim_path, source_output):
     return source_prim_path, source_output
 
 
+def _qualified_source_attr(src) -> str:
+    """Build a namespace-qualified source attribute name from a
+    ConnectedSourceInfo.
+
+    Uses `sourceType` to choose `inputs:` vs `outputs:` so we cover the
+    NodeGraph interface-forwarding case where the source is itself an
+    input.
+    """
+    prefix = "outputs:" if src.sourceType == UsdShade.AttributeType.Output \
+        else "inputs:"
+    return prefix + src.sourceName
+
+
 def _read_usdshade_connectable(stage, prim_path):
     """Read interface data from a UsdShade.ConnectableAPI-bearing prim.
 
     Polymorphic over Shader, NodeGraph, and Material (Material inherits
     NodeGraph in UsdShade).  Reads authored input values, their USD types,
-    and any input-side connections.
+    and any authored connections — on inputs AND outputs.
 
     Returns (container_kind, shader_id, inputs, input_types, connections):
       - container_kind: "" if the prim doesn't bear an interface, otherwise
         "shader" or "nodegraph" (the latter also covers Material).
       - shader_id: info:id for Shader prims, "" for NodeGraph/Material
         which carry no info:id by design.
-      - connections: {input_name: {"source_prim", "source_output"}} for
-        connected inputs.  Connected inputs are excluded from `inputs`
-        since their value comes from the connection, not direct authoring.
+      - inputs/input_types: keyed by the input's base name (no namespace
+        prefix), since these are direct values, not connection edges.
+      - connections: keyed by namespace-qualified local attribute name
+        ("inputs:foo" or "outputs:bar") and valued by
+        {"source_prim", "source_attr"} where source_attr is similarly
+        qualified.  Mirrors USD's .connect authoring shape.  Inputs that
+        have a connection are excluded from `inputs` since their value
+        comes from the source, not direct authoring.
 
-    Callers can gate on `container_kind` to distinguish "no interface here"
+    Callers gate on `container_kind` to distinguish "no interface here"
     from "interface present but nothing authored yet".
     """
     prim = stage.GetPrimAtPath(prim_path)
@@ -337,23 +357,38 @@ def _read_usdshade_connectable(stage, prim_path):
     inputs = {}
     input_types = {}
     connections = {}
+
     for inp in connectable.GetInputs():
         if not inp.GetAttr().IsAuthored():
             continue
         name = inp.GetBaseName()
-        # Check for connection first — connected inputs get their
-        # value from the source, not from direct authoring.
         sources, _ = inp.GetConnectedSources()
         if sources:
-            connections[name] = {
+            connections["inputs:" + name] = {
                 "source_prim": str(sources[0].source.GetPath()),
-                "source_output": sources[0].sourceName,
+                "source_attr": _qualified_source_attr(sources[0]),
             }
             continue
         val = _usd_value_to_python(inp.Get())
         if val is not None:
             inputs[name] = val
             input_types[name] = str(inp.GetAttr().GetTypeName())
+
+    # Output-side authored connections: NodeGraph/Material output ports
+    # that bubble internal shader values up to consumers outside.  Shaders
+    # generally don't author connections on their outputs, but the check
+    # is uniform so we read them either way.
+    for outp in connectable.GetOutputs():
+        if not outp.GetAttr().HasAuthoredConnections():
+            continue
+        sources, _ = outp.GetConnectedSources()
+        if not sources:
+            continue
+        connections["outputs:" + outp.GetBaseName()] = {
+            "source_prim": str(sources[0].source.GetPath()),
+            "source_attr": _qualified_source_attr(sources[0]),
+        }
+
     return container_kind, shader_id, inputs, input_types, connections
 
 

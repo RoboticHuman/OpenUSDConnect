@@ -29,6 +29,7 @@ from openusdconnect.axis_conversion import (
     yup_to_zup_scale,
     yup_to_zup_vec,
 )
+from openusdconnect.protocol import split_qualified_attr
 
 from .shader_mapper import create_default_registry
 
@@ -553,9 +554,14 @@ class BlenderAdapter(DCCAdapter):
         return True
 
     def _prepare_tree_for_network(self, tree):
-        """Remove the default Principled BSDF so the mapper starts clean."""
+        """Remove Blender's auto-created default Principled BSDF.
+
+        Leaves BSDFs tagged with `usd_shader_path` alone — those were
+        authored by another pipeline-driven mapper and removing them
+        would orphan that mapper's network.
+        """
         for node in list(tree.nodes):
-            if node.type == "BSDF_PRINCIPLED":
+            if node.type == "BSDF_PRINCIPLED" and not node.get("usd_shader_path"):
                 tree.nodes.remove(node)
 
     def _wire_surface_to_material_output(self, tree, output_map):
@@ -590,7 +596,11 @@ class BlenderAdapter(DCCAdapter):
 
         if input_map is None:
             tree = mat.node_tree
-            self._prepare_tree_for_network(tree)
+            # Helper mappers (normal-map, etc.) coexist with the material's
+            # surface shader; only surface mappers clear the default BSDF
+            # and own Material Output.Surface.
+            if mapper.is_surface_shader:
+                self._prepare_tree_for_network(tree)
 
             nodes, input_map, output_map = mapper.create_network(
                 tree, inputs,
@@ -605,7 +615,8 @@ class BlenderAdapter(DCCAdapter):
             nodes[0].label = node_name
             nodes[0]["usd_shader_path"] = prim_path
             nodes[0]["usd_shader_id"] = mapper.shader_id
-            self._wire_surface_to_material_output(tree, output_map)
+            if mapper.is_surface_shader:
+                self._wire_surface_to_material_output(tree, output_map)
 
             self._registry.set_shader(prim_path, output_map=output_map, input_map=input_map)
 
@@ -719,31 +730,52 @@ class BlenderAdapter(DCCAdapter):
         # to preprocessing nodes (e.g., base_color → Mix.B, not BSDF)
         cached_inputs = self._registry.get_shader(prim_path).get("input_map")
 
-        for input_name, conn in connections.items():
+        for local_attr, conn in connections.items():
+            local_side, local_base = split_qualified_attr(local_attr)
+            if local_side != "input":
+                # Output-side connections live on Material/NodeGraph prims;
+                # Blender has no first-class node for either. Material's
+                # outputs:surface wiring is already synthesized by the
+                # ShaderMapper's _wire_surface_to_material_output path on
+                # set_shader_input.  NodeGraph output ports are flattened
+                # at asset-import time. Live skip is correct for both.
+                continue
+
             source_prim = conn["source_prim"]
-            source_output = conn["source_output"]
+            source_side, source_base = split_qualified_attr(conn["source_attr"])
+            if not source_side:
+                continue
 
             source_node = self._find_or_create_shader_node(
                 tree, source_prim,
             )
 
-            # Resolve source socket — check multi-node output map first
+            # Resolve source socket — multi-node output map first.  Only
+            # consult it when the source side is an output; multi-node
+            # input maps are for the destination side, not the source.
             cached_outputs = self._registry.get_shader(source_prim).get("output_map")
-            if cached_outputs and source_output in cached_outputs:
-                src_socket = cached_outputs[source_output]
+            if source_side == "output" and cached_outputs \
+                    and source_base in cached_outputs:
+                src_socket = cached_outputs[source_base]
             elif source_node:
-                src_socket = self._get_output_socket(
-                    source_node, source_output,
-                )
+                # Source is normally an output; on the rare input-to-input
+                # forwarding path, fall back to the input socket of the same
+                # base name.
+                if source_side == "output":
+                    src_socket = self._get_output_socket(
+                        source_node, source_base,
+                    )
+                else:
+                    src_socket = source_node.inputs.get(source_base)
             else:
                 continue
 
-            # Resolve target socket — check multi-node input map first
-            if cached_inputs and input_name in cached_inputs:
-                tgt_socket = cached_inputs[input_name]
+            # Resolve target socket — check multi-node input map first.
+            if cached_inputs and local_base in cached_inputs:
+                tgt_socket = cached_inputs[local_base]
             elif target_node:
                 tgt_socket = self._get_input_socket(
-                    target_node, input_name,
+                    target_node, local_base,
                 )
             else:
                 continue
@@ -751,13 +783,16 @@ class BlenderAdapter(DCCAdapter):
             if src_socket and tgt_socket:
                 tree.links.new(src_socket, tgt_socket)
 
-        for input_name in disconnections or []:
-            if cached_inputs and input_name in cached_inputs:
-                socket = cached_inputs[input_name]
+        for disc_attr in disconnections or []:
+            d_side, d_base = split_qualified_attr(disc_attr)
+            if d_side != "input":
+                continue
+            if cached_inputs and d_base in cached_inputs:
+                socket = cached_inputs[d_base]
                 for link in list(socket.links):
                     tree.links.remove(link)
-            elif target_node and input_name in target_node.inputs:
-                for link in list(target_node.inputs[input_name].links):
+            elif target_node and d_base in target_node.inputs:
+                for link in list(target_node.inputs[d_base].links):
                     tree.links.remove(link)
 
         LOG.info(
@@ -1059,16 +1094,30 @@ class BlenderAdapter(DCCAdapter):
                             resolve_nodegraph_connection,
                         )
                         remapped_conns = {}
-                        for inp_name, conn in conns.items():
-                            # Resolve NodeGraph outputs to internal shaders
-                            # so Blender can wire directly between nodes.
-                            src, out = resolve_nodegraph_connection(
-                                stage, conn["source_prim"], conn["source_output"],
+                        for local_attr, conn in conns.items():
+                            src_side, src_base = split_qualified_attr(
+                                conn["source_attr"],
                             )
-                            remapped_conns[inp_name] = {
-                                "source_prim": _remap(src),
-                                "source_output": out,
-                            }
+                            if src_side == "output":
+                                # Flatten NodeGraph passthroughs so Blender
+                                # wires directly between real shader nodes
+                                # (Blender has no NodeGroup-in-USD concept).
+                                flat_path, flat_base = (
+                                    resolve_nodegraph_connection(
+                                        stage, conn["source_prim"], src_base,
+                                    )
+                                )
+                                remapped_conns[local_attr] = {
+                                    "source_prim": _remap(flat_path),
+                                    "source_attr": "outputs:" + flat_base,
+                                }
+                            else:
+                                # Input-side source (NodeGraph interface
+                                # forwarding) — preserve direction.
+                                remapped_conns[local_attr] = {
+                                    "source_prim": _remap(conn["source_prim"]),
+                                    "source_attr": conn["source_attr"],
+                                }
                         connection_events.append((scene_path, remapped_conns))
 
         # Bindings first so materials are tagged with usd_material_path
@@ -1076,20 +1125,22 @@ class BlenderAdapter(DCCAdapter):
         for scene_path, target in binding_events:
             self.set_material_binding(scene_path, target)
         # Blender's USD importer already handles UsdPreviewSurface shaders.
-        # When a material also has a MaterialX shader (multi-node), prefer
-        # the MaterialX version — it's more expressive and isn't handled
-        # by the importer.  Applying both would overwrite the node tree.
-        multi_node_mats = set()
+        # When a material's surface shader is multi-node MaterialX, the
+        # mapper builds the full network itself — applying our texture
+        # mappers on top would create redundant/conflicting nodes.  Gate
+        # on `is_surface_shader` so helper multi-node mappers (Normal Map,
+        # etc.) don't suppress siblings under the same NodeGraph.
+        surface_multi_node_mats = set()
         for scene_path, sid, _inputs, _itypes in shader_events:
             mapper = self._shader_registry.get(sid)
-            if mapper and mapper.is_multi_node:
+            if mapper and mapper.is_multi_node and mapper.is_surface_shader:
                 mat_path = scene_path.rsplit("/", 1)[0]
-                multi_node_mats.add(mat_path)
+                surface_multi_node_mats.add(mat_path)
         for scene_path, sid, inputs, itypes in shader_events:
             mapper = self._shader_registry.get(sid)
             if mapper and not mapper.is_multi_node:
                 mat_path = scene_path.rsplit("/", 1)[0]
-                if mat_path in multi_node_mats:
+                if mat_path in surface_multi_node_mats:
                     continue
             self.set_shader_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:

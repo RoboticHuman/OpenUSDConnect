@@ -70,3 +70,9 @@ def test_two_teapots_identity(blender_exe, tmp_path):
 def test_vehicles_multi_binding(blender_exe, tmp_path):
     """Vehicles 4WD: multiple material bindings per asset."""
     _run_asset_test(blender_exe, tmp_path, "test_vehicles.py", 7213)
+
+
+
+
+
+

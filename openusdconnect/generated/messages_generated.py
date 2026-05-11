@@ -442,7 +442,7 @@ class ShaderConnection(object):
         self._tab = flatbuffers.table.Table(buf, pos)
 
     # ShaderConnection
-    def InputName(self):
+    def LocalAttr(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
@@ -456,7 +456,7 @@ class ShaderConnection(object):
         return None
 
     # ShaderConnection
-    def SourceOutput(self):
+    def SourceAttr(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
@@ -465,14 +465,14 @@ class ShaderConnection(object):
 def ShaderConnectionStart(builder):
     builder.StartObject(3)
 
-def ShaderConnectionAddInputName(builder, inputName):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(inputName), 0)
+def ShaderConnectionAddLocalAttr(builder, localAttr):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(localAttr), 0)
 
 def ShaderConnectionAddSourcePrim(builder, sourcePrim):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(sourcePrim), 0)
 
-def ShaderConnectionAddSourceOutput(builder, sourceOutput):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(sourceOutput), 0)
+def ShaderConnectionAddSourceAttr(builder, sourceAttr):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(sourceAttr), 0)
 
 def ShaderConnectionEnd(builder):
     return builder.EndObject()

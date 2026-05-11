@@ -637,8 +637,10 @@ class TestSetShaderInput:
         assert abs(shader.GetInput("metallic").Get()) < 1e-6
         assert abs(shader.GetInput("roughness").Get() - 0.5) < 1e-6
 
-    def test_shader_connects_to_material_output(self, stage):
-        """Shader auto-connects outputs:surface to parent Material."""
+    def test_material_output_explicit_connection(self, stage):
+        """An explicit set_shader_connection event with port_kind=output
+        authors Material.outputs:surface.connect — the only mechanism by
+        which a Material terminal gets wired (no auto-wire fallback)."""
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
@@ -649,43 +651,29 @@ class TestSetShaderInput:
             "inputs": {"roughness": 0.3},
             "input_types": {"roughness": "float"},
         })
-
-        material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Mat"))
-        output = material.GetSurfaceOutput()
-        sources, _ = output.GetConnectedSources()
-        assert len(sources) == 1
-        assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
-
-    def test_preview_surface_wires_displacement_terminal(self, stage):
-        """UsdPreviewSurface natively has both surface and displacement
-        outputs; both Material terminals should auto-wire to the shader."""
-        from pxr import UsdShade
-
-        stage.DefinePrim("/Materials/Mat", "Material")
         apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {"roughness": 0.3},
-            "input_types": {"roughness": "float"},
+            "k": "set_shader_connection",
+            "prim": "/Materials/Mat",
+            "connections": {
+                "outputs:surface": {
+                    "source_prim": "/Materials/Mat/PBR",
+                    "source_attr": "outputs:surface",
+                },
+            },
         })
 
         material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Mat"))
-        surface_out = material.GetSurfaceOutput()
-        sources, _ = surface_out.GetConnectedSources()
+        sources, _ = material.GetSurfaceOutput().GetConnectedSources()
         assert len(sources) == 1
         assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
         assert sources[0].sourceName == "surface"
 
-        disp_out = material.GetDisplacementOutput()
-        sources, _ = disp_out.GetConnectedSources()
-        assert len(sources) == 1
-        assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
-        assert sources[0].sourceName == "displacement"
-
-    def test_mtlx_surface_shader_wires_only_surface(self, stage):
-        """ND_standard_surface_surfaceshader has only a single 'out' terminal
-        that routes to Material.outputs:surface — no displacement."""
+    def test_material_no_phantom_outputs(self, stage):
+        """set_shader_input on a surface shader must not synthesize any
+        Material output connections — the wire-driven design requires the
+        emitter to author them via set_shader_connection.  Verifies the
+        receiver stage matches the source-of-truth shape rather than
+        guessing at terminals from shader_id."""
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Brass", "Material")
@@ -698,11 +686,12 @@ class TestSetShaderInput:
         })
 
         material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Brass"))
-        sources, _ = material.GetSurfaceOutput().GetConnectedSources()
-        assert len(sources) == 1
-        assert sources[0].sourceName == "out"
-        # Displacement should NOT be auto-wired for MaterialX surface shaders.
+        assert not material.GetSurfaceOutput().GetAttr().HasAuthoredConnections()
         assert not material.GetDisplacementOutput().GetAttr().HasAuthoredConnections()
+        # And no phantom outputs were created on the shader itself.
+        ss = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Brass/SS"))
+        authored_outputs = [o for o in ss.GetOutputs() if o.GetAttr().IsAuthored()]
+        assert authored_outputs == []
 
     def test_update_existing_input(self, stage):
         """Updating a shader input changes the value."""
@@ -783,7 +772,8 @@ class TestSetShaderInput:
         assert list(tint) == [1.0, 0.5, 0.25, 0.75]
 
     def test_full_material_pipeline(self, stage):
-        """Full pipeline: create material + shader + bind to geometry."""
+        """Full pipeline: create material + shader + bind to geometry +
+        explicit Material output wiring via set_shader_connection."""
         from pxr import UsdShade
 
         events = [
@@ -804,6 +794,14 @@ class TestSetShaderInput:
              "input_types": {
                  "diffuseColor": "color3f",
                  "roughness": "float",
+             }},
+            {"k": "set_shader_connection",
+             "prim": "/Materials/Red",
+             "connections": {
+                 "outputs:surface": {
+                     "source_prim": "/Materials/Red/PBR",
+                     "source_attr": "outputs:surface",
+                 },
              }},
             {"k": "set_material_binding",
              "prim": "/World/Sphere",
@@ -855,9 +853,9 @@ class TestSetShaderConnection:
             "k": "set_shader_connection",
             "prim": "/Mat/PBR",
             "connections": {
-                "diffuseColor": {
+                "inputs:diffuseColor": {
                     "source_prim": "/Mat/Tex",
-                    "source_output": "rgb",
+                    "source_attr": "outputs:rgb",
                 },
             },
         })
@@ -893,9 +891,9 @@ class TestSetShaderConnection:
             "k": "set_shader_connection",
             "prim": "/Mat/PBR",
             "connections": {
-                "normal": {
+                "inputs:normal": {
                     "source_prim": "/Mat/NormalMap",
-                    "source_output": "rgb",
+                    "source_attr": "outputs:rgb",
                 },
             },
         })
@@ -930,9 +928,9 @@ class TestSetShaderConnection:
             "k": "set_shader_connection",
             "prim": "/Mat/CustomDst",
             "connections": {
-                "foo": {
+                "inputs:foo": {
                     "source_prim": "/Mat/CustomSrc",
-                    "source_output": "out",
+                    "source_attr": "outputs:out",
                 },
             },
         })

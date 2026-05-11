@@ -64,10 +64,16 @@ table ArcEntry {
 // Shader connection / disconnection
 // ---------------------------------------------------------------------------
 
+// A connection edge: an attribute on `prim` is connected to an
+// attribute on `source_prim`. Names are USD namespace-qualified
+// (`inputs:foo` or `outputs:foo`) — the same form that appears in
+// .usda syntax. Direction is encoded in the prefix; no separate
+// discriminator field. Uniform for input-side and output-side
+// connections at any depth.
 table ShaderConnection {
-    input_name:string;
-    source_prim:string;
-    source_output:string;
+    local_attr:string;     // attribute on this event's prim
+    source_prim:string;    // upstream prim path
+    source_attr:string;    // attribute on the upstream prim
 }
 
 // ---------------------------------------------------------------------------

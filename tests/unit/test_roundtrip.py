@@ -989,11 +989,12 @@ class TestStageToStageRoundtrip:
         assert list(scale_b) == [2.0, 2.0, 2.0, 2.0]
 
     def test_open_pbr_mtlx_asset_codec_roundtrip(self):
-        """Real-asset roundtrip: load gold_openpbr.mtlx, walk it the way
-        _enrich_materialx_from_import does, encode through the codec, apply
-        to a fresh stage, and verify the OpenPBR Material gets a wired
-        outputs:surface on the receiver.  Regression guard for the
-        _MATERIAL_TERMINAL_WIRING entry."""
+        """Real-asset roundtrip: load gold_openpbr.mtlx, emit shader-input
+        and shader-connection events for every UsdShade connectable, encode
+        through the codec, apply to a fresh stage, and verify the receiver's
+        Material output structure matches the source exactly — same
+        namespace-qualified output name, same source path, same source
+        attribute name."""
         from pxr import UsdShade
 
         from openusdconnect import codec
@@ -1003,6 +1004,7 @@ class TestStageToStageRoundtrip:
         )
         from openusdconnect.protocol import (
             K_SET_MATERIAL_BINDING,
+            K_SET_SHADER_CONNECTION,
             K_SET_SHADER_INPUT,
         )
 
@@ -1029,15 +1031,19 @@ class TestStageToStageRoundtrip:
                     "k": K_SET_MATERIAL_BINDING, "prim": pp,
                     "material_path": binding,
                 })
-            if prim.IsA(UsdShade.Shader):
-                _kind, sid, inputs, itypes, _ = _read_usdshade_connectable(
-                    src, pp,
-                )
-                if sid:
+            kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
+                src, pp,
+            )
+            if kind:
+                events.append({
+                    "k": K_SET_SHADER_INPUT, "prim": pp,
+                    "shader_id": sid, "inputs": inputs,
+                    "input_types": itypes,
+                })
+                if conns:
                     events.append({
-                        "k": K_SET_SHADER_INPUT, "prim": pp,
-                        "shader_id": sid, "inputs": inputs,
-                        "input_types": itypes,
+                        "k": K_SET_SHADER_CONNECTION, "prim": pp,
+                        "connections": conns,
                     })
 
         shader_ids = {
@@ -1053,21 +1059,76 @@ class TestStageToStageRoundtrip:
         dst = Usd.Stage.CreateInMemory()
         apply_events(dst, decoded["events"])
 
-        gold = UsdShade.Material(dst.GetPrimAtPath("/MaterialX/Materials/gold"))
-        assert gold
-        so = gold.GetSurfaceOutput()
-        assert so is not None
-        # Without ND_open_pbr_surface_surfaceshader in _MATERIAL_TERMINAL_WIRING
-        # this is False — the regression we're guarding against.
-        assert so.GetAttr().HasAuthoredConnections()
-        sources, _ = so.GetConnectedSources()
-        assert len(sources) == 1
-        assert str(sources[0].source.GetPath()) == (
-            "/MaterialX/Materials/gold/open_pbr_surface"
+        # Receiver Material output structure must match source exactly.
+        src_mat = UsdShade.Material(src.GetPrimAtPath("/MaterialX/Materials/gold"))
+        dst_mat = UsdShade.Material(dst.GetPrimAtPath("/MaterialX/Materials/gold"))
+        assert dst_mat
+
+        src_outs = {
+            o.GetBaseName(): o for o in src_mat.GetOutputs()
+            if o.GetAttr().HasAuthoredConnections()
+        }
+        dst_outs = {
+            o.GetBaseName(): o for o in dst_mat.GetOutputs()
+            if o.GetAttr().HasAuthoredConnections()
+        }
+        assert set(src_outs.keys()) == set(dst_outs.keys())
+
+        for name, src_out in src_outs.items():
+            src_srcs, _ = src_out.GetConnectedSources()
+            dst_srcs, _ = dst_outs[name].GetConnectedSources()
+            assert len(src_srcs) == len(dst_srcs) == 1
+            assert str(src_srcs[0].source.GetPath()) == str(
+                dst_srcs[0].source.GetPath()
+            )
+            assert src_srcs[0].sourceName == dst_srcs[0].sourceName
+
+    def test_nodegraph_output_port_codec_roundtrip(self):
+        """End-to-end gap #7: a NodeGraph that bubbles an interior shader's
+        output through its own output port replicates faithfully through
+        emitter → codec → apply, including the NodeGraph prim and the
+        output-side connection edge on the wire."""
+        from pxr import UsdShade
+
+        from openusdconnect import codec
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage_a)
+
+        UsdShade.Material.Define(stage_a, "/Mat")
+        ng = UsdShade.NodeGraph.Define(stage_a, "/Mat/NG")
+        diffuse = UsdShade.Shader.Define(stage_a, "/Mat/NG/diffuse")
+        diffuse.CreateIdAttr("UsdUVTexture")
+        rgb = diffuse.CreateOutput("rgb", Sdf.ValueTypeNames.Color3f)
+        ng_out = ng.CreateOutput("result", Sdf.ValueTypeNames.Color3f)
+        ng_out.ConnectToSource(rgb)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        wire = codec.encode_message(
+            {"type": "txn", "client_id": "t", "events": events},
         )
-        assert sources[0].sourceName == "out"
-        # Displacement must NOT be auto-wired for OpenPBR (single-terminal).
-        assert not gold.GetDisplacementOutput().GetAttr().HasAuthoredConnections()
+        decoded = codec.message_to_dict(wire)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        apply_events(stage_b, decoded["events"])
+
+        # NodeGraph prim made it across and is typed correctly.
+        ng_b = stage_b.GetPrimAtPath("/Mat/NG")
+        assert ng_b and ng_b.IsValid()
+        assert ng_b.IsA(UsdShade.NodeGraph)
+
+        # Output-port connection landed on the NodeGraph, pointing at the
+        # interior shader's output.
+        ng_out_b = UsdShade.NodeGraph(ng_b).GetOutput("result")
+        assert ng_out_b
+        assert ng_out_b.GetAttr().HasAuthoredConnections()
+        sources, _ = ng_out_b.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Mat/NG/diffuse"
+        assert sources[0].sourceName == "rgb"
 
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""

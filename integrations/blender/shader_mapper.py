@@ -76,7 +76,18 @@ class PBRShaderMapper(BlenderShaderMapper):
 
 
 class TextureShaderMapper(ShaderMapper):
-    """UsdUVTexture and MaterialX image nodes → Image Texture."""
+    """UsdUVTexture and MaterialX image nodes → Image Texture.
+
+    The optional *colorspace* selects the Blender image color space for
+    loaded textures: "sRGB" for albedo/color textures, "Non-Color" for
+    data textures (normal maps, roughness, metallic) so Blender's
+    sampling pipeline doesn't apply gamma correction to vector data.
+    """
+
+    def __init__(self, shader_id: str, node_type: str, input_map: dict,
+                 colorspace: str = "sRGB"):
+        super().__init__(shader_id, node_type, input_map)
+        self._colorspace = colorspace
 
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
         blender_name = self.get_native_input(usd_name)
@@ -94,10 +105,18 @@ class TextureShaderMapper(ShaderMapper):
         if not img:
             resolved = resolve_asset(value) if resolve_asset else None
             if resolved:
-                img = bpy.data.images.load(resolved)
-            else:
-                img = bpy.data.images.new(value, 1, 1)
-        node.image = img
+                # check_existing reuses a datablock already loaded from this
+                # absolute path (e.g. by Blender's USD importer) instead of
+                # creating a duplicate.
+                img = bpy.data.images.load(resolved, check_existing=True)
+        # Only assign when we resolved a real image.  If resolution failed
+        # and the node already has an image (commonly loaded by Blender's
+        # USD importer using pxr's asset resolver), keep it — clobbering
+        # with a placeholder loses the working texture.
+        if img is not None:
+            node.image = img
+            if hasattr(img, "colorspace_settings"):
+                img.colorspace_settings.name = self._colorspace
 
 
 class UVReaderMapper(ShaderMapper):
@@ -109,6 +128,41 @@ class UVReaderMapper(ShaderMapper):
             if hasattr(node, "uv_map"):
                 node.uv_map = str(value)
             return
+        if not blender_name or blender_name not in node.inputs:
+            return
+        node.inputs[blender_name].default_value = value
+
+
+class AttributeReaderMapper(ShaderMapper):
+    """Non-UV UsdPrimvarReader variants → ShaderNodeAttribute.
+
+    Routes USD's varname input to Blender's attribute_name so the node
+    reads the named primvar (vertex color, custom normal, etc.) at
+    render time.
+    """
+
+    def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
+        blender_name = self.get_native_input(usd_name)
+        if blender_name == "_attribute_name":
+            if hasattr(node, "attribute_name"):
+                node.attribute_name = str(value)
+            return
+        if not blender_name or blender_name not in node.inputs:
+            return
+        node.inputs[blender_name].default_value = value
+
+
+class NormalMapShaderMapper(ShaderMapper):
+    """ND_normalmap_* → ShaderNodeNormalMap.
+
+    Both MaterialX and Blender's Normal Map node interpret tangent-space
+    normal map textures using the OpenGL convention (R=X, G=+Y, B=Z), so
+    no coordinate flip is needed at the output — the decoded world-space
+    normal feeds straight into BSDF.Normal.
+    """
+
+    def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
+        blender_name = self.get_native_input(usd_name)
         if not blender_name or blender_name not in node.inputs:
             return
         node.inputs[blender_name].default_value = value
@@ -352,16 +406,54 @@ def create_default_registry() -> ShaderMapperRegistry:
     reg.register(TextureShaderMapper(
         "UsdUVTexture", "ShaderNodeTexImage", _tex_map,
     ))
-    for mtlx_tex in ("ND_tiledimage_color3", "ND_tiledimage_float",
-                      "ND_image_color3"):
+    # Color-typed MaterialX image variants load as sRGB so Blender's
+    # color pipeline gamma-corrects them for display correctness.
+    for color_tex in (
+        "ND_image_color3", "ND_image_color4",
+        "ND_tiledimage_color3", "ND_tiledimage_color4",
+    ):
         reg.register(TextureShaderMapper(
-            mtlx_tex, "ShaderNodeTexImage", {"file": "_image"},
+            color_tex, "ShaderNodeTexImage", {"file": "_image"},
+            colorspace="sRGB",
+        ))
+    # Data-typed image variants (floats, vectors) carry per-pixel data,
+    # not color — load as Non-Color so Blender skips gamma correction.
+    # Critical for normal maps, roughness, metallic, displacement, etc.
+    for data_tex in (
+        "ND_image_float",
+        "ND_image_vector2", "ND_image_vector3", "ND_image_vector4",
+        "ND_tiledimage_float",
+        "ND_tiledimage_vector2", "ND_tiledimage_vector3",
+        "ND_tiledimage_vector4",
+    ):
+        reg.register(TextureShaderMapper(
+            data_tex, "ShaderNodeTexImage", {"file": "_image"},
+            colorspace="Non-Color",
         ))
 
     reg.register(UVReaderMapper(
         "UsdPrimvarReader_float2", "ShaderNodeUVMap",
         {"varname": "_uv_map"},
     ))
+    for primvar_id in (
+        "UsdPrimvarReader_float", "UsdPrimvarReader_float3",
+        "UsdPrimvarReader_float4", "UsdPrimvarReader_int",
+        "UsdPrimvarReader_normal", "UsdPrimvarReader_point",
+        "UsdPrimvarReader_vector",
+    ):
+        reg.register(AttributeReaderMapper(
+            primvar_id, "ShaderNodeAttribute",
+            {"varname": "_attribute_name"},
+        ))
+
+    for nm_id in (
+        "ND_normalmap_float", "ND_normalmap_vector2",
+        "ND_normalmap_vector3", "ND_normalmap_vector4",
+    ):
+        reg.register(NormalMapShaderMapper(
+            nm_id, "ShaderNodeNormalMap",
+            {"in": "Color", "scale": "Strength"},
+        ))
 
     # Vendored MaterialX handlers — adds Standard Surface, OpenPBR,
     # and 23 utility node handlers from io_blender_mtlx.

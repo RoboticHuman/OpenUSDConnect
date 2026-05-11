@@ -458,13 +458,35 @@ class TestSetShaderConnection:
         ev = {
             "k": "set_shader_connection", "prim": "/World/Mat/Shader",
             "connections": {
-                "diffuseColor": {"source_prim": "/World/Mat/Tex", "source_output": "rgb"},
+                "inputs:diffuseColor": {
+                    "source_prim": "/World/Mat/Tex",
+                    "source_attr": "outputs:rgb",
+                },
             },
-            "disconnections": ["opacity"],
+            "disconnections": ["inputs:opacity"],
         }
         d = _txn_roundtrip(ev)
-        assert d["connections"]["diffuseColor"]["source_prim"] == "/World/Mat/Tex"
-        assert d["disconnections"] == ["opacity"]
+        conn = d["connections"]["inputs:diffuseColor"]
+        assert conn["source_prim"] == "/World/Mat/Tex"
+        assert conn["source_attr"] == "outputs:rgb"
+        assert d["disconnections"] == ["inputs:opacity"]
+
+    def test_roundtrip_output_side(self):
+        """Material/NodeGraph output port connections ride the same wire
+        shape — only the namespace prefix on local_attr differs."""
+        ev = {
+            "k": "set_shader_connection", "prim": "/World/Mat",
+            "connections": {
+                "outputs:surface": {
+                    "source_prim": "/World/Mat/PBR",
+                    "source_attr": "outputs:surface",
+                },
+            },
+        }
+        d = _txn_roundtrip(ev)
+        conn = d["connections"]["outputs:surface"]
+        assert conn["source_prim"] == "/World/Mat/PBR"
+        assert conn["source_attr"] == "outputs:surface"
 
 
 # ===================================================================

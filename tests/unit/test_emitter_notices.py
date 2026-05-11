@@ -17,6 +17,7 @@ from openusdconnect.protocol import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
@@ -1452,6 +1453,83 @@ class TestMaterialEmission:
         assert ev["shader_id"] == ""        # NodeGraph has no info:id
         assert ev["inputs"].get("tint") == [1.0, 0.5, 0.25]
         assert ev["input_types"].get("tint") == "color3f"
+
+    def test_material_output_connection_emitted(self):
+        """A Material's outputs:surface.connect = <shader.outputs:surface>
+        edge emits a K_SET_SHADER_CONNECTION event with the qualified
+        local_attr "outputs:surface" — same wire shape as input-side
+        connections, just a different prefix."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        mat = UsdShade.Material.Define(stage, "/Mat")
+        pbr = UsdShade.Shader.Define(stage, "/Mat/PBR")
+        pbr.CreateIdAttr("UsdPreviewSurface")
+        shader_out = pbr.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat_out = mat.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat_out.ConnectToSource(shader_out)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        mat_conn_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat"
+        ]
+        assert len(mat_conn_evs) == 1
+        conns = mat_conn_evs[0]["connections"]
+        assert "outputs:surface" in conns
+        assert conns["outputs:surface"]["source_prim"] == "/Mat/PBR"
+        assert conns["outputs:surface"]["source_attr"] == "outputs:surface"
+
+    def test_nodegraph_output_port_emitted(self):
+        """A NodeGraph's outputs:result.connect = <internal_shader.outputs:rgb>
+        emits the output-port edge — the core gap #7 capability that lets
+        MaterialX scenes with NodeGraph wrappers replicate faithfully."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        ng = UsdShade.NodeGraph.Define(stage, "/Mat/NG")
+        diffuse = UsdShade.Shader.Define(stage, "/Mat/NG/diffuse")
+        diffuse.CreateIdAttr("UsdUVTexture")
+        rgb = diffuse.CreateOutput("rgb", Sdf.ValueTypeNames.Color3f)
+        ng_out = ng.CreateOutput("result", Sdf.ValueTypeNames.Color3f)
+        ng_out.ConnectToSource(rgb)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        ng_conn_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG"
+        ]
+        assert len(ng_conn_evs) == 1
+        conns = ng_conn_evs[0]["connections"]
+        assert "outputs:result" in conns
+        assert conns["outputs:result"]["source_prim"] == "/Mat/NG/diffuse"
+        assert conns["outputs:result"]["source_attr"] == "outputs:rgb"
+
+    def test_interface_forwarding_emitted_as_input_source(self):
+        """An input-to-input edge (NodeGraph interface forwarding) emits
+        with source_attr starting with 'inputs:' — proves the prefix on
+        source_attr correctly reflects the source's USD attribute type."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        ng = UsdShade.NodeGraph.Define(stage, "/Mat/NG")
+        ng_tint = ng.CreateInput("tint", Sdf.ValueTypeNames.Color3f)
+        mul = UsdShade.Shader.Define(stage, "/Mat/NG/mul")
+        mul.CreateIdAttr("ND_multiply_color3")
+        mul_in2 = mul.CreateInput("in2", Sdf.ValueTypeNames.Color3f)
+        mul_in2.ConnectToSource(ng_tint)
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        mul_conn_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG/mul"
+        ]
+        assert len(mul_conn_evs) == 1
+        conn = mul_conn_evs[0]["connections"]["inputs:in2"]
+        assert conn["source_prim"] == "/Mat/NG"
+        assert conn["source_attr"] == "inputs:tint"  # input-to-input
 
     def test_shader_input_change_selective(self):
         """Changing one input does not re-emit unchanged inputs."""

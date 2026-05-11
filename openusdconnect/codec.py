@@ -860,14 +860,14 @@ def _encode_set_shader_connection(b, ev):
     disconnections = ev.get("disconnections", [])
 
     conn_offsets = []
-    for input_name, conn in connections.items():
-        in_off = b.CreateString(input_name)
+    for local_attr, conn in connections.items():
+        la_off = b.CreateString(local_attr)
         sp_off = b.CreateString(conn["source_prim"])
-        so_off = b.CreateString(conn["source_output"])
+        sa_off = b.CreateString(conn["source_attr"])
         _fb.ShaderConnectionStart(b)
-        _fb.ShaderConnectionAddInputName(b, in_off)
+        _fb.ShaderConnectionAddLocalAttr(b, la_off)
         _fb.ShaderConnectionAddSourcePrim(b, sp_off)
-        _fb.ShaderConnectionAddSourceOutput(b, so_off)
+        _fb.ShaderConnectionAddSourceAttr(b, sa_off)
         conn_offsets.append(_fb.ShaderConnectionEnd(b))
 
     _fb.SetShaderConnectionStartConnectionsVector(b, len(conn_offsets))
@@ -1247,9 +1247,9 @@ def _dict_set_shader_connection(sc, kind):
     connections = {}
     for i in range(sc.ConnectionsLength()):
         c = sc.Connections(i)
-        connections[_str(c.InputName())] = {
+        connections[_str(c.LocalAttr())] = {
             "source_prim": _str(c.SourcePrim()),
-            "source_output": _str(c.SourceOutput()),
+            "source_attr": _str(c.SourceAttr()),
         }
     disconnections = [_str(sc.Disconnections(i)) for i in range(sc.DisconnectionsLength())]
     ev = {"k": kind, "prim": _str(sc.Prim()), "connections": connections}

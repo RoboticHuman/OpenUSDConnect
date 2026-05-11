@@ -555,9 +555,9 @@ def test_adapter_brass_material(r):
     adapter.set_shader_connection(
         "/MaterialX/Materials/Tiled_Brass/ND_standard_surface_surfaceshader",
         {
-            "coat_color": {
+            "inputs:coat_color": {
                 "source_prim": "/MaterialX/Materials/Tiled_Brass/NG_brass1/image_color",
-                "source_output": "out",
+                "source_attr": "outputs:out",
             },
         },
     )

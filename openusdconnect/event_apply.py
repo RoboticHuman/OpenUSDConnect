@@ -32,25 +32,8 @@ from .protocol import (
     K_UNLOAD_PAYLOAD,
     REL_MATERIAL_BINDING,
     STRUCTURAL_EVENT_KINDS,
+    split_qualified_attr,
 )
-
-# Material terminal wiring per surface shader ID.  Each entry maps a shader
-# ID to a list of (material_terminal, shader_output_name) pairs.  At apply
-# time, for each pair the shader's named output is created (if missing)
-# and the Material's terminal output is connected to it.
-#
-# UsdPreviewSurface natively has both `surface` and `displacement` outputs;
-# MaterialX shaders expose a single `out` terminal that the USD bridge
-# routes to the Material's `surface`.
-_MATERIAL_TERMINAL_WIRING: dict[str, list[tuple[str, str]]] = {
-    "UsdPreviewSurface": [
-        ("surface", "surface"),
-        ("displacement", "displacement"),
-    ],
-    "ND_UsdPreviewSurface_surfaceshader": [("surface", "out")],
-    "ND_standard_surface_surfaceshader": [("surface", "out")],
-    "ND_open_pbr_surface_surfaceshader": [("surface", "out")],
-}
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -423,15 +406,19 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
         binding_rel.AddTarget(Sdf.Path(material_path))
 
 
-def _set_shader_input_value(shader: UsdShade.Shader, name: str,
+def _set_shader_input_value(connectable: UsdShade.ConnectableAPI, name: str,
                             value, type_name: str) -> None:
-    """Set a single shader input, creating it with the correct type if needed."""
+    """Set a single input on a UsdShade connectable, creating it if needed.
+
+    Works on Shader, NodeGraph, and Material — all share GetInput / CreateInput
+    through ConnectableAPI.
+    """
     sdf_type = Sdf.ValueTypeNames.Find(type_name)
     if not sdf_type:
         return
-    inp = shader.GetInput(name)
+    inp = connectable.GetInput(name)
     if not inp:
-        inp = shader.CreateInput(name, sdf_type)
+        inp = connectable.CreateInput(name, sdf_type)
 
     if isinstance(value, list):
         if type_name in ("color3f", "float3", "normal3f"):
@@ -451,132 +438,131 @@ def _set_shader_input_value(shader: UsdShade.Shader, name: str,
             inp.Set(value)
 
 
-def _wire_material_terminal(
-    material: UsdShade.Material, shader: UsdShade.Shader,
-    shader_prim: Usd.Prim, terminal: str, shader_output: str,
-) -> None:
-    """Connect a Material terminal (surface/displacement/volume) to a shader output.
-
-    Creates the shader's output (Token type) and the Material's terminal output
-    if either doesn't exist.  No-op if the Material terminal is already connected
-    to this shader.
-    """
-    if not shader.GetOutput(shader_output):
-        shader.CreateOutput(shader_output, Sdf.ValueTypeNames.Token)
-    mat_output = material.GetOutput(terminal)
-    if not mat_output:
-        mat_output = material.CreateOutput(terminal, Sdf.ValueTypeNames.Token)
-        mat_output.ConnectToSource(shader.GetOutput(shader_output))
-        return
-    sources, _ = mat_output.GetConnectedSources()
-    if not sources or sources[0].source.GetPath() != shader_prim.GetPath():
-        mat_output.ConnectToSource(shader.GetOutput(shader_output))
-
-
 def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
-    """Set shader ID and input values on a Shader prim."""
+    """Apply shader-id and authored input values to a UsdShade connectable.
+
+    Polymorphic over Shader, NodeGraph, and Material.  Authors `info:id`
+    when the prim is a Shader and a non-empty shader_id is provided;
+    NodeGraph/Material carry no info:id.
+    """
     prim = get_or_define_prim(stage, ev["prim"], "Shader")
-    shader = UsdShade.Shader(prim)
-
-    # Set the shader type (e.g., "UsdPreviewSurface")
     shader_id = ev.get("shader_id", "")
-    if shader_id:
-        shader.CreateIdAttr(shader_id)
+    if shader_id and prim.IsA(UsdShade.Shader):
+        UsdShade.Shader(prim).CreateIdAttr(shader_id)
 
-    terminals = _MATERIAL_TERMINAL_WIRING.get(shader_id)
-    if terminals:
-        parent = prim.GetParent()
-        if parent and parent.IsA(UsdShade.Material):
-            material = UsdShade.Material(parent)
-            for terminal, shader_output in terminals:
-                _wire_material_terminal(
-                    material, shader, prim, terminal, shader_output,
-                )
-
-    # Set input values
+    connectable = UsdShade.ConnectableAPI(prim)
     inputs = ev.get("inputs", {})
     input_types = ev.get("input_types", {})
     for name, value in inputs.items():
         type_name = input_types.get(name, "float")
-        _set_shader_input_value(shader, name, value, type_name)
+        _set_shader_input_value(connectable, name, value, type_name)
 
 
-def _resolve_shader_output_type(shader: UsdShade.Shader, output_name: str):
-    """Resolve a shader output's USD type via Sdr, fall back to Token.
+def _resolve_sdr_type_for_attr(prim: Usd.Prim, side: str, base_name: str):
+    """Resolve the USD type of a Shader's input/output via Sdr's NodeDef.
 
-    Queries the shader's NodeDef by its info:id.  Works for both USD-native
-    shaders (UsdUVTexture, UsdPrimvarReader_*, etc.) and registered MaterialX
-    nodes (ND_image_color3, ND_standard_surface_surfaceshader, etc.).
+    *side* is "input" or "output". Returns None if the prim isn't a Shader
+    or the NodeDef / port isn't registered — callers fall back to other
+    sources of truth (the connected source's type, or Sdf.ValueTypeNames.Token).
     """
+    if not prim or not prim.IsA(UsdShade.Shader):
+        return None
+    shader = UsdShade.Shader(prim)
     shader_id = shader.GetIdAttr().Get() if shader.GetIdAttr() else ""
-    if shader_id:
-        node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
-        if node:
-            out = node.GetShaderOutput(output_name)
-            if out:
-                return out.GetTypeAsSdfType().GetSdfType()
-    return Sdf.ValueTypeNames.Token
+    if not shader_id:
+        return None
+    node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
+    if node is None:
+        return None
+    port = node.GetShaderInput(base_name) if side == "input" \
+        else node.GetShaderOutput(base_name)
+    if port is None:
+        return None
+    return port.GetTypeAsSdfType().GetSdfType()
 
 
-def _resolve_shader_input_type(shader: UsdShade.Shader, input_name: str,
-                                fallback):
-    """Resolve a shader input's USD type via Sdr.
+def _get_or_create_connectable_port(connectable: UsdShade.ConnectableAPI,
+                                     side: str, base_name: str, fallback_type):
+    """Return the named input/output, creating it with the right type if absent.
 
-    Falls back to *fallback* (typically the source output's type) when the
-    NodeDef isn't registered.
+    Type resolution prefers Sdr (when the prim is a Shader with a known
+    info:id), then *fallback_type* (typically the type of the other end of
+    the connection), then Token.
     """
-    shader_id = shader.GetIdAttr().Get() if shader.GetIdAttr() else ""
-    if shader_id:
-        node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
-        if node:
-            inp = node.GetShaderInput(input_name)
-            if inp:
-                return inp.GetTypeAsSdfType().GetSdfType()
-    return fallback
+    if side == "input":
+        port = connectable.GetInput(base_name)
+        if port:
+            return port
+        sdr_type = _resolve_sdr_type_for_attr(
+            connectable.GetPrim(), "input", base_name,
+        )
+        return connectable.CreateInput(
+            base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
+        )
+    # output
+    port = connectable.GetOutput(base_name)
+    if port:
+        return port
+    sdr_type = _resolve_sdr_type_for_attr(
+        connectable.GetPrim(), "output", base_name,
+    )
+    return connectable.CreateOutput(
+        base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
+    )
 
 
 def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
-    """Connect or disconnect shader inputs to/from other shader outputs."""
+    """Apply a batch of shader/nodegraph connection edges to the stage.
+
+    Each entry in `connections` is keyed by a namespace-qualified attribute
+    name on `ev["prim"]` (e.g. "inputs:diffuseColor", "outputs:surface") and
+    valued by `{source_prim, source_attr}` where `source_attr` is similarly
+    qualified.  Mirrors USD's `.connect` authoring shape — the connection
+    record lives on the local attribute and points upstream.
+    """
     prim = stage.GetPrimAtPath(ev["prim"])
     if not prim or not prim.IsValid():
         return
-    shader = UsdShade.Shader(prim)
+    local_connectable = UsdShade.ConnectableAPI(prim)
 
-    for input_name, conn in ev.get("connections", {}).items():
-        source_prim = stage.GetPrimAtPath(conn["source_prim"])
+    for local_attr, conn in ev.get("connections", {}).items():
+        local_side, local_base = split_qualified_attr(local_attr)
+        if not local_side:
+            continue  # malformed — caller-validated, defensive
+
+        source_attr = conn["source_attr"]
+        source_side, source_base = split_qualified_attr(source_attr)
+        if not source_side:
+            continue
+
+        # Source prim: define as Shader if missing (set_shader_input
+        # for the source will arrive later in the same txn or a
+        # subsequent one).
+        source_prim_path = conn["source_prim"]
+        source_prim = stage.GetPrimAtPath(source_prim_path)
         if not source_prim or not source_prim.IsValid():
-            # Source shader may not exist yet — create it so the
-            # connection can be established. Its set_shader_input
-            # event will set the ID and other properties later.
-            source_prim = get_or_define_prim(
-                stage, conn["source_prim"], "Shader",
-            )
-        source_shader = UsdShade.Shader(source_prim)
-        source_output = source_shader.GetOutput(conn["source_output"])
-        if not source_output:
-            # Resolve the correct type from the source shader's NodeDef
-            # so connections like UsdUVTexture.outputs:rgb are float3,
-            # not Token.
-            out_type = _resolve_shader_output_type(
-                source_shader, conn["source_output"],
-            )
-            source_output = source_shader.CreateOutput(
-                conn["source_output"], out_type,
-            )
-        target_input = shader.GetInput(input_name)
-        if not target_input:
-            # Prefer the target shader's NodeDef-declared type; fall back
-            # to the source output's type (legacy behavior).
-            in_type = _resolve_shader_input_type(
-                shader, input_name, source_output.GetTypeName(),
-            )
-            target_input = shader.CreateInput(input_name, in_type)
-        target_input.ConnectToSource(source_output)
+            source_prim = get_or_define_prim(stage, source_prim_path, "Shader")
+        source_connectable = UsdShade.ConnectableAPI(source_prim)
 
-    for input_name in ev.get("disconnections", []):
-        inp = shader.GetInput(input_name)
-        if inp:
-            inp.DisconnectSource()
+        # Source first so we can use its declared type as the fallback for
+        # the local end when Sdr can't resolve the local side.
+        source_port = _get_or_create_connectable_port(
+            source_connectable, source_side, source_base, fallback_type=None,
+        )
+        local_port = _get_or_create_connectable_port(
+            local_connectable, local_side, local_base,
+            fallback_type=source_port.GetTypeName(),
+        )
+        local_port.ConnectToSource(source_port)
+
+    for local_attr in ev.get("disconnections", []):
+        side, base = split_qualified_attr(local_attr)
+        if not side:
+            continue
+        port = (local_connectable.GetInput(base) if side == "input"
+                else local_connectable.GetOutput(base))
+        if port:
+            port.DisconnectSource()
 
 
 _EVENT_DISPATCH: dict[str, callable] = {

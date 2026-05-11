@@ -274,14 +274,40 @@ def validate_event(ev: dict) -> bool:
         connections = ev.get("connections", {})
         if not isinstance(connections, dict):
             return False
-        for conn in connections.values():
+        for local_attr, conn in connections.items():
+            # local_attr must be namespace-qualified (inputs:* or outputs:*)
+            # so the receiver can dispatch via UsdShade.ConnectableAPI.
+            if not split_qualified_attr(local_attr)[0]:
+                return False
             if not isinstance(conn, dict):
                 return False
             if not isinstance(conn.get("source_prim"), str):
                 return False
-            if not isinstance(conn.get("source_output"), str):
+            source_attr = conn.get("source_attr")
+            if not split_qualified_attr(source_attr)[0]:
                 return False
         disconnections = ev.get("disconnections", [])
         if not isinstance(disconnections, list):
             return False
+        for d in disconnections:
+            if not split_qualified_attr(d)[0]:
+                return False
     return True
+
+
+def split_qualified_attr(attr_name) -> tuple[str, str]:
+    """Split a USD-style namespaced shader attribute name.
+
+    Returns ("input", base) for "inputs:<base>",
+            ("output", base) for "outputs:<base>",
+    and ("", "") for anything else (non-string, missing prefix, or empty
+    base name).  Shared by validate_event, apply, emitter, and DCC adapters
+    as the single parser for the wire's namespace-qualified attr names.
+    """
+    if not isinstance(attr_name, str):
+        return "", ""
+    if attr_name.startswith("inputs:") and len(attr_name) > len("inputs:"):
+        return "input", attr_name[len("inputs:"):]
+    if attr_name.startswith("outputs:") and len(attr_name) > len("outputs:"):
+        return "output", attr_name[len("outputs:"):]
+    return "", ""
