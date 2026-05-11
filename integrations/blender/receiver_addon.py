@@ -346,11 +346,16 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
 
         elif k == K_SET_SHADER_INPUT:
             if ne is not None:
-                from openusdconnect.emitter import _C_SHADER_INPUTS, _read_shader_inputs
+                from openusdconnect.emitter import (
+                    _C_SHADER_INPUTS,
+                    _read_usdshade_connectable,
+                )
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
-                sid, inps, _, _ = _read_shader_inputs(stage, prim_path)
-                if sid:
+                kind, sid, inps, _, _ = _read_usdshade_connectable(
+                    stage, prim_path,
+                )
+                if kind:
                     pc[_C_SHADER_INPUTS] = {"shader_id": sid, "inputs": inps}
 
 

@@ -397,3 +397,35 @@ class TestValidateEvent:
              "selections": {"wheels": 42}}
         )
 
+    def test_set_shader_input_with_shader_id_valid(self):
+        assert validate_event(
+            {"k": "set_shader_input", "prim": "/Mat/PBR",
+             "shader_id": "UsdPreviewSurface",
+             "inputs": {"roughness": 0.5},
+             "input_types": {"roughness": "float"}}
+        )
+
+    def test_set_shader_input_empty_shader_id_valid(self):
+        """Empty shader_id is permitted for NodeGraph/Material container
+        prims that have no info:id but carry interface inputs."""
+        assert validate_event(
+            {"k": "set_shader_input", "prim": "/Mat/NG_Inner",
+             "shader_id": "",
+             "inputs": {"tint": [1.0, 0.5, 0.25]},
+             "input_types": {"tint": "color3f"}}
+        )
+
+    def test_set_shader_input_missing_shader_id_invalid(self):
+        """Missing shader_id (None) is still rejected — only an explicit
+        empty string is the valid 'no info:id' signal."""
+        assert not validate_event(
+            {"k": "set_shader_input", "prim": "/Mat/PBR",
+             "inputs": {}, "input_types": {}}
+        )
+
+    def test_set_shader_input_non_string_shader_id_invalid(self):
+        assert not validate_event(
+            {"k": "set_shader_input", "prim": "/Mat/PBR",
+             "shader_id": 42, "inputs": {}, "input_types": {}}
+        )
+

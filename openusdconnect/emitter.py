@@ -296,36 +296,53 @@ def resolve_nodegraph_connection(stage, source_prim_path, source_output):
     return source_prim_path, source_output
 
 
-def _read_shader_inputs(stage, prim_path):
-    """Read shader inputs and metadata from a Shader prim.
+def _read_usdshade_connectable(stage, prim_path):
+    """Read interface data from a UsdShade.ConnectableAPI-bearing prim.
 
-    Returns (shader_id, inputs_dict, input_types_dict, connections_dict)
-    or ("", {}, {}, {}) if the prim is not a shader.
+    Polymorphic over Shader, NodeGraph, and Material (Material inherits
+    NodeGraph in UsdShade).  Reads authored input values, their USD types,
+    and any input-side connections.
 
-    connections_dict maps input_name → {"source_prim": str, "source_output": str}
-    for connected inputs. Connected inputs are excluded from inputs_dict
-    since their values come from the connection, not direct authoring.
+    Returns (container_kind, shader_id, inputs, input_types, connections):
+      - container_kind: "" if the prim doesn't bear an interface, otherwise
+        "shader" or "nodegraph" (the latter also covers Material).
+      - shader_id: info:id for Shader prims, "" for NodeGraph/Material
+        which carry no info:id by design.
+      - connections: {input_name: {"source_prim", "source_output"}} for
+        connected inputs.  Connected inputs are excluded from `inputs`
+        since their value comes from the connection, not direct authoring.
+
+    Callers can gate on `container_kind` to distinguish "no interface here"
+    from "interface present but nothing authored yet".
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        return "", {}, {}, {}
-    if not prim.IsA(UsdShade.Shader):
-        return "", {}, {}, {}
+        return "", "", {}, {}, {}
 
-    shader = UsdShade.Shader(prim)
-    shader_id = shader.GetIdAttr().Get() or ""
-    if not shader_id:
-        return "", {}, {}, {}
+    if prim.IsA(UsdShade.Shader):
+        container_kind = "shader"
+        shader = UsdShade.Shader(prim)
+        shader_id = shader.GetIdAttr().Get() or ""
+        if not shader_id:
+            return "", "", {}, {}, {}
+        connectable = shader
+    elif prim.IsA(UsdShade.NodeGraph):
+        # NodeGraph covers Material — Material inherits from NodeGraph.
+        container_kind = "nodegraph"
+        shader_id = ""
+        connectable = UsdShade.NodeGraph(prim)
+    else:
+        return "", "", {}, {}, {}
 
     inputs = {}
     input_types = {}
     connections = {}
-    for inp in shader.GetInputs():
+    for inp in connectable.GetInputs():
         if not inp.GetAttr().IsAuthored():
             continue
         name = inp.GetBaseName()
         # Check for connection first — connected inputs get their
-        # value from the source, not from direct authoring
+        # value from the source, not from direct authoring.
         sources, _ = inp.GetConnectedSources()
         if sources:
             connections[name] = {
@@ -337,7 +354,7 @@ def _read_shader_inputs(stage, prim_path):
         if val is not None:
             inputs[name] = val
             input_types[name] = str(inp.GetAttr().GetTypeName())
-    return shader_id, inputs, input_types, connections
+    return container_kind, shader_id, inputs, input_types, connections
 
 
 class _SuppressScope:
@@ -453,9 +470,11 @@ class NoticeEmitter:
                         gprim_snapshot[name] = val
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
-            # Seed shader inputs/connections
-            shader_id, inputs, _types, connections = _read_shader_inputs(stage, cp)
-            if shader_id:
+            # Seed shader/nodegraph interface inputs and connections.
+            container_kind, shader_id, inputs, _types, connections = (
+                _read_usdshade_connectable(stage, cp)
+            )
+            if container_kind:
                 pc[_C_SHADER_INPUTS] = {"shader_id": shader_id, "inputs": inputs}
                 if connections:
                     pc[_C_SHADER_CONNECTIONS] = connections
@@ -712,11 +731,11 @@ class NoticeEmitter:
             })
             pc[_C_MATERIAL_BINDING] = current_binding
 
-        # Shader input + connection diff
-        shader_id, current_inputs, current_types, current_conns = (
-            _read_shader_inputs(self.stage, prim_path)
+        # Shader/NodeGraph interface input + connection diff
+        container_kind, shader_id, current_inputs, current_types, current_conns = (
+            _read_usdshade_connectable(self.stage, prim_path)
         )
-        if shader_id:
+        if container_kind:
             # Value diff
             last_shader = pc.get(_C_SHADER_INPUTS, {})
             last_inputs = last_shader.get("inputs", {})

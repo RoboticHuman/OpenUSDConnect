@@ -256,8 +256,11 @@ def validate_event(ev: dict) -> bool:
         if material_path and not material_path.startswith("/"):
             return False
     if k == K_SET_SHADER_INPUT:
+        # shader_id may be empty for container prims that carry interface
+        # inputs without an info:id (NodeGraph, Material).  Apply skips
+        # CreateIdAttr when empty.
         shader_id = ev.get("shader_id")
-        if not isinstance(shader_id, str) or not shader_id:
+        if not isinstance(shader_id, str):
             return False
         inputs = ev.get("inputs")
         if not isinstance(inputs, dict):

@@ -1428,6 +1428,31 @@ class TestMaterialEmission:
         assert ev["inputs"].get("file") == "./r_normal_map.png"
         assert ev["input_types"].get("file") == "asset"
 
+    def test_nodegraph_interface_input_emitted(self):
+        """A NodeGraph with an authored interface input emits a
+        K_SET_SHADER_INPUT event with empty shader_id (NodeGraphs and
+        Materials carry no info:id).  Required for replicating MaterialX
+        scenes that promote inputs onto a wrapping NodeGraph."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        ng = UsdShade.NodeGraph.Define(stage, "/Mat/NG_Inner")
+        ng.CreateInput("tint", Sdf.ValueTypeNames.Color3f).Set(
+            (1.0, 0.5, 0.25),
+        )
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        ng_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/NG_Inner"
+        ]
+        assert len(ng_evs) == 1
+        ev = ng_evs[0]
+        assert ev["shader_id"] == ""        # NodeGraph has no info:id
+        assert ev["inputs"].get("tint") == [1.0, 0.5, 0.25]
+        assert ev["input_types"].get("tint") == "color3f"
+
     def test_shader_input_change_selective(self):
         """Changing one input does not re-emit unchanged inputs."""
         from pxr import Sdf, UsdShade

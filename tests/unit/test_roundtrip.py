@@ -999,7 +999,7 @@ class TestStageToStageRoundtrip:
         from openusdconnect import codec
         from openusdconnect.emitter import (
             _read_material_binding,
-            _read_shader_inputs,
+            _read_usdshade_connectable,
         )
         from openusdconnect.protocol import (
             K_SET_MATERIAL_BINDING,
@@ -1030,7 +1030,9 @@ class TestStageToStageRoundtrip:
                     "material_path": binding,
                 })
             if prim.IsA(UsdShade.Shader):
-                sid, inputs, itypes, _ = _read_shader_inputs(src, pp)
+                _kind, sid, inputs, itypes, _ = _read_usdshade_connectable(
+                    src, pp,
+                )
                 if sid:
                     events.append({
                         "k": K_SET_SHADER_INPUT, "prim": pp,

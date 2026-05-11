@@ -1012,7 +1012,7 @@ class BlenderAdapter(DCCAdapter):
 
             from openusdconnect.emitter import (
                 _read_material_binding,
-                _read_shader_inputs,
+                _read_usdshade_connectable,
             )
         except ImportError:
             return
@@ -1049,7 +1049,9 @@ class BlenderAdapter(DCCAdapter):
                 binding_events.append((scene_path, _remap(binding_target)))
 
             if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
-                sid, inputs, itypes, conns = _read_shader_inputs(stage, file_path)
+                _kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
+                    stage, file_path,
+                )
                 if sid:
                     shader_events.append((scene_path, sid, inputs, itypes))
                     if conns:
