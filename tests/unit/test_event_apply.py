@@ -656,6 +656,54 @@ class TestSetShaderInput:
         assert len(sources) == 1
         assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
 
+    def test_preview_surface_wires_displacement_terminal(self, stage):
+        """UsdPreviewSurface natively has both surface and displacement
+        outputs; both Material terminals should auto-wire to the shader."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {"roughness": 0.3},
+            "input_types": {"roughness": "float"},
+        })
+
+        material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Mat"))
+        surface_out = material.GetSurfaceOutput()
+        sources, _ = surface_out.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
+        assert sources[0].sourceName == "surface"
+
+        disp_out = material.GetDisplacementOutput()
+        sources, _ = disp_out.GetConnectedSources()
+        assert len(sources) == 1
+        assert str(sources[0].source.GetPath()) == "/Materials/Mat/PBR"
+        assert sources[0].sourceName == "displacement"
+
+    def test_mtlx_surface_shader_wires_only_surface(self, stage):
+        """ND_standard_surface_surfaceshader has only a single 'out' terminal
+        that routes to Material.outputs:surface — no displacement."""
+        from pxr import UsdShade
+
+        stage.DefinePrim("/Materials/Brass", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Brass/SS",
+            "shader_id": "ND_standard_surface_surfaceshader",
+            "inputs": {"metalness": 1.0},
+            "input_types": {"metalness": "float"},
+        })
+
+        material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Brass"))
+        sources, _ = material.GetSurfaceOutput().GetConnectedSources()
+        assert len(sources) == 1
+        assert sources[0].sourceName == "out"
+        # Displacement should NOT be auto-wired for MaterialX surface shaders.
+        assert not material.GetDisplacementOutput().GetAttr().HasAuthoredConnections()
+
     def test_update_existing_input(self, stage):
         """Updating a shader input changes the value."""
         from pxr import UsdShade
@@ -678,6 +726,61 @@ class TestSetShaderInput:
 
         shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/PBR"))
         assert abs(shader.GetInput("roughness").Get() - 0.9) < 1e-6
+
+    def test_asset_path_input_applied(self, stage):
+        """Asset-typed shader input arrives as a plain string but is authored
+        as Sdf.AssetPath on an attribute declared with the asset type.
+        pxr auto-converts strings on asset-typed inputs."""
+        from pxr import Sdf, UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/Tex",
+            "shader_id": "UsdUVTexture",
+            "inputs": {"file": "./r_normal_map.png"},
+            "input_types": {"file": "asset"},
+        })
+
+        shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/Tex"))
+        file_input = shader.GetInput("file")
+        assert str(file_input.GetAttr().GetTypeName()) == "asset"
+        val = file_input.Get()
+        assert isinstance(val, Sdf.AssetPath)
+        assert val.path == "./r_normal_map.png"
+
+    def test_float4_and_color4f_inputs_applied(self, stage):
+        """float4 (UsdUVTexture bias/scale) and color4f survive apply.
+        Previously fell through to inp.Set(list) and raised a type mismatch."""
+        from pxr import Gf, UsdShade
+
+        stage.DefinePrim("/Materials/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Materials/Mat/Tex",
+            "shader_id": "UsdUVTexture",
+            "inputs": {
+                "bias": [-1.0, -1.0, -1.0, -1.0],
+                "scale": [2.0, 2.0, 2.0, 2.0],
+                "tint": [1.0, 0.5, 0.25, 0.75],
+            },
+            "input_types": {
+                "bias": "float4",
+                "scale": "float4",
+                "tint": "color4f",
+            },
+        })
+
+        shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/Tex"))
+        bias = shader.GetInput("bias").Get()
+        assert isinstance(bias, Gf.Vec4f)
+        assert list(bias) == [-1.0, -1.0, -1.0, -1.0]
+        scale = shader.GetInput("scale").Get()
+        assert isinstance(scale, Gf.Vec4f)
+        assert list(scale) == [2.0, 2.0, 2.0, 2.0]
+        tint = shader.GetInput("tint").Get()
+        assert isinstance(tint, Gf.Vec4f)
+        assert list(tint) == [1.0, 0.5, 0.25, 0.75]
 
     def test_full_material_pipeline(self, stage):
         """Full pipeline: create material + shader + bind to geometry."""
@@ -720,6 +823,123 @@ class TestSetShaderInput:
         dc = shader.GetInput("diffuseColor").Get()
         assert abs(dc[0] - 1.0) < 1e-6
         assert abs(dc[1]) < 1e-6
+
+
+class TestSetShaderConnection:
+    """Connection events should produce correctly-typed attributes using Sdr."""
+
+    def test_lazy_source_output_uses_sdr_type(self, stage):
+        """When the source output doesn't exist yet, its type is resolved
+        from the source shader's NodeDef (via Sdr) — UsdUVTexture.outputs:rgb
+        is float3, not Token."""
+        from pxr import Sdf, UsdShade
+
+        stage.DefinePrim("/Mat", "Material")
+        # set_shader_input for the source establishes its info:id but doesn't
+        # author outputs.  Connection event then materializes outputs:rgb.
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/Tex",
+            "shader_id": "UsdUVTexture",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_connection",
+            "prim": "/Mat/PBR",
+            "connections": {
+                "diffuseColor": {
+                    "source_prim": "/Mat/Tex",
+                    "source_output": "rgb",
+                },
+            },
+        })
+
+        tex = UsdShade.Shader(stage.GetPrimAtPath("/Mat/Tex"))
+        rgb = tex.GetOutput("rgb")
+        assert rgb
+        # Sdr says UsdUVTexture.outputs:rgb is float3.
+        assert rgb.GetTypeName() == Sdf.ValueTypeNames.Float3
+
+    def test_lazy_target_input_uses_sdr_type(self, stage):
+        """When the target input doesn't exist yet, its type comes from the
+        consumer shader's NodeDef — UsdPreviewSurface.inputs:normal is
+        normal3f, not whatever Token the source is."""
+        from pxr import Sdf, UsdShade
+
+        stage.DefinePrim("/Mat", "Material")
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/PBR",
+            "shader_id": "UsdPreviewSurface",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/NormalMap",
+            "shader_id": "UsdUVTexture",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_connection",
+            "prim": "/Mat/PBR",
+            "connections": {
+                "normal": {
+                    "source_prim": "/Mat/NormalMap",
+                    "source_output": "rgb",
+                },
+            },
+        })
+
+        pbr = UsdShade.Shader(stage.GetPrimAtPath("/Mat/PBR"))
+        normal_in = pbr.GetInput("normal")
+        assert normal_in
+        assert normal_in.GetAttr().GetTypeName() == Sdf.ValueTypeNames.Normal3f
+
+    def test_unknown_shader_falls_back_to_token(self, stage):
+        """A shader whose info:id isn't in Sdr keeps the old Token behavior
+        for outputs — graceful fallback, no exception."""
+        from pxr import Sdf, UsdShade
+
+        stage.DefinePrim("/Mat", "Material")
+        # Custom shader ID that Sdr doesn't know about.
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/CustomSrc",
+            "shader_id": "MyStudio_UnregisteredNode",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_input",
+            "prim": "/Mat/CustomDst",
+            "shader_id": "MyStudio_AlsoUnregistered",
+            "inputs": {},
+            "input_types": {},
+        })
+        apply_event(stage, {
+            "k": "set_shader_connection",
+            "prim": "/Mat/CustomDst",
+            "connections": {
+                "foo": {
+                    "source_prim": "/Mat/CustomSrc",
+                    "source_output": "out",
+                },
+            },
+        })
+
+        src = UsdShade.Shader(stage.GetPrimAtPath("/Mat/CustomSrc"))
+        out = src.GetOutput("out")
+        assert out.GetTypeName() == Sdf.ValueTypeNames.Token
 
 
 class TestAtomicApply:

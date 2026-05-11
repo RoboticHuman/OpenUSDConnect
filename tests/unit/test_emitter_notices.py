@@ -1401,6 +1401,33 @@ class TestMaterialEmission:
         assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
         assert shader_evs[0]["input_types"]["roughness"] == "float"
 
+    def test_asset_path_input_emitted(self):
+        """Asset-typed shader inputs (e.g. UsdUVTexture file) are emitted
+        with the authored path and type 'asset' — not silently dropped."""
+        from pxr import Sdf, UsdShade
+
+        stage, emitter = _make_stage_and_emitter()
+        UsdShade.Material.Define(stage, "/Mat")
+        tex = UsdShade.Shader.Define(stage, "/Mat/Tex")
+        tex.CreateIdAttr("UsdUVTexture")
+        tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+            Sdf.AssetPath("./r_normal_map.png"),
+        )
+        # Co-author a non-asset input so we know the shader event fires
+        # for the right reason even if asset handling regresses.
+        tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+        shader_evs = [
+            e for e in events
+            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/Tex"
+        ]
+        assert len(shader_evs) == 1
+        ev = shader_evs[0]
+        assert ev["shader_id"] == "UsdUVTexture"
+        assert ev["inputs"].get("file") == "./r_normal_map.png"
+        assert ev["input_types"].get("file") == "asset"
+
     def test_shader_input_change_selective(self):
         """Changing one input does not re-emit unchanged inputs."""
         from pxr import Sdf, UsdShade

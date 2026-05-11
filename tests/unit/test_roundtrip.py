@@ -898,6 +898,96 @@ class TestStageToStageRoundtrip:
         # Verify roughness value (not connected)
         assert abs(pbr_b.GetInput("roughness").Get() - 0.3) < 1e-6
 
+        # Verify asset-typed file input roundtripped (previously silently dropped).
+        file_inp = tex_b.GetInput("file")
+        assert str(file_inp.GetAttr().GetTypeName()) == "asset"
+        file_val = file_inp.Get()
+        assert isinstance(file_val, Sdf.AssetPath)
+        assert file_val.path == "tex/diffuse.png"
+
+    def test_asset_path_codec_roundtrip(self):
+        """Full pipeline: stage A emitter -> codec encode/decode -> stage B
+        apply. Verifies asset-typed shader inputs survive the FlatBuffers
+        wire format, not just direct event_apply."""
+        from pxr import UsdShade
+
+        from openusdconnect import codec
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+
+        # Attach emitter before authoring so notices fire ensure_prim events.
+        emitter = NoticeEmitter(stage_a)
+
+        UsdShade.Material.Define(stage_a, "/Mat")
+        tex = UsdShade.Shader.Define(stage_a, "/Mat/NormalTex")
+        tex.CreateIdAttr("UsdUVTexture")
+        tex.CreateInput(
+            "file", Sdf.ValueTypeNames.Asset,
+        ).Set(Sdf.AssetPath("./r_normal_map.png"))
+        tex.CreateInput(
+            "sourceColorSpace", Sdf.ValueTypeNames.Token,
+        ).Set("raw")
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        # Wrap events in a txn, encode to FlatBuffers, decode back.
+        txn = {"type": "txn", "client_id": "test", "events": events}
+        wire = codec.encode_message(txn)
+        decoded = codec.message_to_dict(wire)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        apply_events(stage_b, decoded["events"])
+
+        tex_b = UsdShade.Shader(stage_b.GetPrimAtPath("/Mat/NormalTex"))
+        assert tex_b.GetIdAttr().Get() == "UsdUVTexture"
+        file_inp = tex_b.GetInput("file")
+        assert str(file_inp.GetAttr().GetTypeName()) == "asset"
+        val = file_inp.Get()
+        assert isinstance(val, Sdf.AssetPath)
+        assert val.path == "./r_normal_map.png"
+
+    def test_float4_bias_scale_codec_roundtrip(self):
+        """Full pipeline for UsdUVTexture bias/scale: Gf.Vec4f on stage A
+        survives emitter -> FlatBuffers -> apply -> Gf.Vec4f on stage B."""
+        from pxr import UsdShade
+
+        from openusdconnect import codec
+
+        stage_a = Usd.Stage.CreateInMemory()
+        session = stage_a.GetSessionLayer()
+        stage_a.SetEditTarget(Usd.EditTarget(session))
+        emitter = NoticeEmitter(stage_a)
+
+        UsdShade.Material.Define(stage_a, "/Mat")
+        tex = UsdShade.Shader.Define(stage_a, "/Mat/NormalTex")
+        tex.CreateIdAttr("UsdUVTexture")
+        tex.CreateInput(
+            "bias", Sdf.ValueTypeNames.Float4,
+        ).Set(Gf.Vec4f(-1, -1, -1, -1))
+        tex.CreateInput(
+            "scale", Sdf.ValueTypeNames.Float4,
+        ).Set(Gf.Vec4f(2, 2, 2, 2))
+
+        events = emitter.build_events_for_dirty(include_matrices=False)
+
+        wire = codec.encode_message(
+            {"type": "txn", "client_id": "test", "events": events},
+        )
+        decoded = codec.message_to_dict(wire)
+
+        stage_b = Usd.Stage.CreateInMemory()
+        apply_events(stage_b, decoded["events"])
+
+        tex_b = UsdShade.Shader(stage_b.GetPrimAtPath("/Mat/NormalTex"))
+        bias_b = tex_b.GetInput("bias").Get()
+        assert isinstance(bias_b, Gf.Vec4f)
+        assert list(bias_b) == [-1.0, -1.0, -1.0, -1.0]
+        scale_b = tex_b.GetInput("scale").Get()
+        assert isinstance(scale_b, Gf.Vec4f)
+        assert list(scale_b) == [2.0, 2.0, 2.0, 2.0]
+
     def test_reference_stage_to_stage(self):
         """Reference arc replicates between stages."""
         src_stage = Usd.Stage.CreateInMemory("ref_asset.usda")

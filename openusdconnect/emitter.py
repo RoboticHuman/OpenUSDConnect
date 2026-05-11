@@ -97,6 +97,10 @@ def _usd_value_to_python(val):
     # Simple scalars
     if isinstance(val, (int, float, bool, str)):
         return val
+    # Sdf.AssetPath → authored path string. The receiver re-resolves through
+    # its own asset resolver, so transmit the authored form, not resolvedPath.
+    if isinstance(val, Sdf.AssetPath):
+        return val.path
     # GfVec types → list of floats (small, not worth numpy overhead)
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
         if isinstance(val, vec_type):
