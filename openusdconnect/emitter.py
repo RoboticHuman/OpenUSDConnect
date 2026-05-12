@@ -611,6 +611,27 @@ class NoticeEmitter:
         """Manually mark a prim as dirty (useful for DCC integrations)."""
         self.dirty.add(prim_path)
 
+    def snapshot_events(
+        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
+    ) -> list[dict]:
+        """Build events for every prim on the stage as if newly authored.
+
+        Marks every prim under the pseudo-root dirty and runs the normal
+        build-events pipeline. Equivalent to walking ``Usd.PrimRange`` and
+        calling ``mark_dirty`` on each path, then ``build_events_for_dirty``.
+
+        Useful for initial-sync scenarios — a DCC plugin coming online with
+        a populated stage, a replay harness reproducing a captured scene,
+        or tests that need a full event stream for an authored stage.
+        """
+        for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
+            path = str(prim.GetPath())
+            if path != "/":
+                self.mark_dirty(path)
+        return self.build_events_for_dirty(
+            eps_trs=eps_trs, eps_mat=eps_mat, include_matrices=include_matrices
+        )
+
     def snapshot_prim(self, prim_path: str) -> dict | None:
         """Snapshot the current local transform of a prim as TRS + matrices."""
         prim = self.stage.GetPrimAtPath(prim_path)

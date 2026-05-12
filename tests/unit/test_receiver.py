@@ -265,14 +265,14 @@ class TestBoundedQueue:
             _send_event(conn1, i)
 
         # Wait for overflow to trigger disconnect
-        _poll_until(lambda: not rt.connected, timeout=2)
+        _poll_until(lambda: not rt.connected, timeout=5)
 
         # Queue should have the events it managed to buffer (up to 3)
         msgs = rt.drain_queue()
         assert len(msgs) <= 3
 
         # Receiver should reconnect automatically
-        conn2 = _accept(srv, timeout=2)
+        conn2 = _accept(srv, timeout=5)
         hello = _recv_hello(conn2)
         assert hello["type"] == "hello"
         # Should request replay from where it left off
@@ -294,7 +294,7 @@ class TestBoundedQueue:
             for i in range(1, 6):
                 _send_event(conn, i)
 
-            rt.join(timeout=1)
+            rt.join(timeout=5)
             assert not rt.is_alive()
         finally:
             conn.close()

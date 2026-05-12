@@ -650,8 +650,16 @@ def apply_event(stage: Usd.Stage, ev: dict) -> None:
 def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
     """Apply a list of events to a USD stage.
 
-    Structural events are applied outside a ChangeBlock, then value-setting
-    events inside one for atomicity.
+    Ordering: callers may pass events in any order. The structural pass
+    is sorted internally by ``EVENT_KIND_ORDER`` (stable), so dependency
+    ordering — ensure_prim before set_shader_connection, ensure_xform_ops
+    before set_xform_trs, etc. — is guaranteed regardless of input order.
+    This is enforced by ``test_apply_events_sorts_structural_pass_by_kind_order``
+    and ``test_receiver_matches_sender_under_shuffled_event_order``; do
+    not remove the sort without removing those tests.
+
+    Structural events are applied outside a ChangeBlock; value-setting events run inside one for
+    atomicity.
 
     *op_cache* is an optional dict-like mapping prim_path to
     (translate_op, orient_op, scale_op).  Pass a persistent cache
@@ -661,13 +669,20 @@ def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
     if op_cache is None:
         op_cache = {}
 
-    # Structural ops outside ChangeBlock (DefinePrim fails inside on our USD build).
-    # Sort by EVENT_KIND_ORDER (stable) so ensure_prim runs before
-    # set_shader_connection — otherwise a connection whose source_prim names
-    # a not-yet-ensured NodeGraph/Material would fall back to creating that
-    # prim as a Shader in _apply_set_shader_connection.
+    # Primary sort: EVENT_KIND_ORDER so ensure_prim runs before set_shader_connection
+    # (otherwise a connection whose source_prim names a not-yet-ensured
+    # NodeGraph/Material falls back to creating it as Shader).
+    # Secondary sort: path depth so ancestor ensure_prim runs before descendant.
+    # DefinePrim auto-creates intermediate ancestors as untyped, and a later
+    # ensure_prim for the ancestor with the correct typeName cannot upgrade it
+    # (get_or_define_prim only sets typeName when creating a fresh spec).
     structural = [ev for ev in events if ev.get("k") in STRUCTURAL_EVENT_KINDS]
-    structural.sort(key=lambda ev: EVENT_KIND_ORDER.get(ev.get("k"), 0))
+    structural.sort(
+        key=lambda ev: (
+            EVENT_KIND_ORDER.get(ev.get("k"), 0),
+            ev.get("prim", "").count("/"),
+        )
+    )
     for ev in structural:
         k = ev.get("k")
         if k == K_ENSURE_XFORM_OPS:

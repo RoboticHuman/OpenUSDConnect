@@ -330,11 +330,7 @@ class TestMaterialXComposeParity:
         _compose_materialx_scene(sender_stage)
 
         # Mark everything dirty and emit
-        for prim in Usd.PrimRange(sender_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
         assert events, "Emitter produced no events from a freshly authored scene"
 
         # Server applies + logs; receiver replays the log into a fresh stage
@@ -351,6 +347,39 @@ class TestMaterialXComposeParity:
             _compare_material_binding(sender_stage, stage_b, mesh_path)
             _compare_shader_topology(sender_stage, stage_b, "sender", label_b)
 
+    def test_receiver_matches_sender_under_shuffled_event_order(self, srv):
+        """apply_events must be order-invariant within a transaction.
+
+        The structural pass in apply_events sorts by EVENT_KIND_ORDER, so
+        arbitrary caller-provided order must yield the same receiver stage
+        as the natural emitted order. Shuffles deterministically so any
+        failure is reproducible from the seed.
+
+        This test is the regression net for the class of bug where a new
+        event kind has an implicit ordering dependency that the emitter
+        happens to honor but the protocol contract does not guarantee.
+        """
+        import random
+
+        sender_stage = Usd.Stage.CreateInMemory()
+        sender_stage.SetEditTarget(Usd.EditTarget(sender_stage.GetSessionLayer()))
+        emitter = NoticeEmitter(sender_stage)
+        _compose_materialx_scene(sender_stage)
+
+        events = emitter.snapshot_events()
+
+        rng = random.Random(0x12345678)
+        rng.shuffle(events)
+
+        replayed = _server_process_and_replay(srv, events)
+        receiver_stage = Usd.Stage.CreateInMemory()
+        apply_events(receiver_stage, replayed)
+
+        mesh_path = "/World/Geom/CarBody"
+        _compare_mesh(sender_stage, receiver_stage, mesh_path)
+        _compare_material_binding(sender_stage, receiver_stage, mesh_path)
+        _compare_shader_topology(sender_stage, receiver_stage, "sender", "receiver")
+
     def test_event_kind_coverage(self):
         """Authoring this scene must produce every key event kind we expect.
 
@@ -364,11 +393,7 @@ class TestMaterialXComposeParity:
 
         _compose_materialx_scene(sender_stage)
 
-        for prim in Usd.PrimRange(sender_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
 
         kinds = {e["k"] for e in events}
         expected = {
@@ -397,11 +422,7 @@ class TestMaterialXComposeParity:
         emitter = NoticeEmitter(sender_stage)
         _compose_materialx_scene(sender_stage)
 
-        for prim in Usd.PrimRange(sender_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
         replayed = _server_process_and_replay(srv, events)
         receiver_stage = Usd.Stage.CreateInMemory()
         apply_events(receiver_stage, replayed)
@@ -485,11 +506,7 @@ class TestAssetReproduce:
         sender_stage = Usd.Stage.Open(str(_BASIC_MTLX_ASSET))
         emitter = NoticeEmitter(sender_stage)
 
-        for prim in Usd.PrimRange(sender_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
         assert events, "Emitter produced no events from the asset"
 
         replayed = _server_process_and_replay(srv, events)

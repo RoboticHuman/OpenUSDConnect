@@ -218,11 +218,7 @@ class TestStageParity:
         """Full scene: emitter, server, and receiver stages have identical content."""
         emitter_stage, emitter = _build_emitter_stage()
 
-        for prim in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
 
         replayed = _server_process_and_replay(srv, events)
 
@@ -237,11 +233,7 @@ class TestStageParity:
         emitter_stage, emitter = _build_emitter_stage()
 
         # Initial sync
-        for prim in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        initial_events = emitter.build_events_for_dirty(include_matrices=False)
+        initial_events = emitter.snapshot_events()
         _server_process_and_replay(srv, initial_events)
 
         # Incremental: move sphere, change radius, hide cylinder
@@ -266,11 +258,7 @@ class TestStageParity:
         """Deactivated prim is inactive on all three stages."""
         emitter_stage, emitter = _build_emitter_stage()
 
-        for prim in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        initial_events = emitter.build_events_for_dirty(include_matrices=False)
+        initial_events = emitter.snapshot_events()
         _server_process_and_replay(srv, initial_events)
 
         emitter_stage.GetPrimAtPath("/World/Cone").SetActive(False)
@@ -289,11 +277,7 @@ class TestStageParity:
         """Renamed prim appears at new path on all three stages."""
         emitter_stage, emitter = _build_emitter_stage()
 
-        for prim in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        initial_events = emitter.build_events_for_dirty(include_matrices=False)
+        initial_events = emitter.snapshot_events()
         _server_process_and_replay(srv, initial_events)
 
         prim = emitter_stage.GetPrimAtPath("/World/Cube")
@@ -335,11 +319,7 @@ class TestStageParity:
         s.Set(Gf.Vec3d(1.0, 1.0, 1.0))
 
         emitter = NoticeEmitter(emitter_stage)
-        for p in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(p.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
 
         replayed = _server_process_and_replay(srv, events)
 
@@ -402,11 +382,7 @@ class TestStageParity:
         emitter_stage, emitter = _build_emitter_stage()
 
         # Initial sync
-        for prim in Usd.PrimRange(emitter_stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                emitter.mark_dirty(path)
-        initial_events = emitter.build_events_for_dirty(include_matrices=False)
+        initial_events = emitter.snapshot_events()
         _server_process_and_replay(srv, initial_events)
 
         # Several incremental updates
@@ -462,11 +438,7 @@ class TestStageParity:
         s.Set(Gf.Vec3d(1, 1, 1))
 
         emitter = NoticeEmitter(stage)
-        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
-            p = str(prim.GetPath())
-            if p != "/":
-                emitter.mark_dirty(p)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.snapshot_events()
 
         shader_evts = [e for e in events if e.get("k") == "set_shader_input"]
         binding_evts = [e for e in events if e.get("k") == "set_material_binding"]
@@ -507,11 +479,7 @@ class TestStageParity:
         shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
 
         emitter = NoticeEmitter(stage)
-        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
-            p = str(prim.GetPath())
-            if p != "/":
-                emitter.mark_dirty(p)
-        _server_process_and_replay(srv, emitter.build_events_for_dirty(include_matrices=False))
+        _server_process_and_replay(srv, emitter.snapshot_events())
 
         # Incremental: change metallic only
         shader.GetInput("metallic").Set(0.9)

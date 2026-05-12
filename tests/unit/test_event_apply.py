@@ -31,6 +31,7 @@ from openusdconnect.protocol_constants import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SHADER_CONNECTION,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -1197,3 +1198,45 @@ class TestReceiverStageFirstFlow:
         assert not stage.GetPrimAtPath("/World/New2").IsValid()
         assert stage.GetPrimAtPath("/World/Existing").IsValid()
         assert adapter.get_trs("/World/Existing").get("t") == [100.0, 200.0, 300.0]
+
+
+def test_apply_events_sorts_structural_pass_by_kind_order():
+    """apply_events must sort structural events by EVENT_KIND_ORDER so
+    ensure_prim runs before set_shader_connection.
+
+    Without the sort, a set_shader_connection whose source_prim names a
+    not-yet-ensured NodeGraph would fall through _apply_set_shader_connection's
+    Shader-default branch in get_or_define_prim, and the later ensure_prim
+    would not be able to upgrade the typeName (get_or_define_prim only sets
+    typeName when creating a fresh spec; it is a no-op when the prim already
+    exists). The sort closes that gap by guaranteeing ensure_prim for the
+    source lands first.
+
+    This test pins the invariant: anyone tempted to remove the sort in
+    apply_events should hit this test failing and read why the sort exists.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    events = [
+        {
+            "k": K_SET_SHADER_CONNECTION,
+            "prim": "/Test/MX",
+            "connections": {
+                "inputs:base_color": {
+                    "source_prim": "/Test/NG",
+                    "source_attr": "outputs:result",
+                },
+            },
+            "disconnections": [],
+        },
+        {"k": K_ENSURE_PRIM, "prim": "/Test", "typeName": "Xform"},
+        {"k": K_ENSURE_PRIM, "prim": "/Test/NG", "typeName": "NodeGraph"},
+        {"k": K_ENSURE_PRIM, "prim": "/Test/MX", "typeName": "Shader"},
+    ]
+    apply_events(stage, events)
+
+    ng = stage.GetPrimAtPath("/Test/NG")
+    assert ng.IsValid()
+    assert str(ng.GetTypeName()) == "NodeGraph"
+    mx = stage.GetPrimAtPath("/Test/MX")
+    assert mx.IsValid()
+    assert str(mx.GetTypeName()) == "Shader"
