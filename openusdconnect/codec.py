@@ -1048,7 +1048,9 @@ _DICT_DECODE_DISPATCH = {
 def _dict_ensure_prim(ep, kind):
     ev = {"k": kind, "prim": _str(ep.Prim())}
     tn = _str(ep.TypeName())
-    if tn:
+    # Preserve empty typeName ("" means untyped def in USD, distinct from
+    # missing-key legacy behavior which defaults to Xform at apply time).
+    if tn is not None:
         ev["typeName"] = tn
     return ev
 

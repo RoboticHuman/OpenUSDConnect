@@ -1558,6 +1558,61 @@ class UsdSyncServer:
 
         return changed_indices
 
+    def process_txn(
+        self,
+        events: list[dict],
+        *,
+        client_id: str | None = None,
+        origin: str | None = None,
+        client_addr: str | None = None,
+        layer: Sdf.Layer | None = None,
+    ) -> tuple[list[tuple[dict, bytes]], set[int]]:
+        """Apply, seq-assign, encode, and persist a transaction.
+
+        Runs apply_txn, assigns monotonic sequence numbers, encodes each
+        event as a FlatBuffers record, and batches the persist to the
+        event store. Callers that need txn_barrier coordination (e.g.
+        ConnectionHandler around broadcast) must acquire/release the
+        shared lock themselves — this method does not, so it stays
+        composable with broader critical sections.
+
+        Returns:
+            records: list of (rec_dict, rec_bin) in input order — used by
+                callers that need to broadcast the encoded records.
+            changed_indices: set of event indices whose composed value
+                actually landed on the stage (the rest were overridden by
+                a stronger layer). Broadcast callers typically send only
+                the changed records and emit corrections for the rest.
+
+        Callers that need broadcast/correction (ConnectionHandler) consume
+        the return value. Callers that just want authoritative state plus
+        a populated log (tests, replay tooling) can ignore it.
+        """
+        changed = self.apply_txn(events, layer=layer)
+        changed_set = set(changed)
+
+        records: list[tuple[dict, bytes]] = []
+        persist_tuples: list[
+            tuple[int, bytes, str | None, str | None, str | None]
+        ] = []
+        for ev in events:
+            rec: dict = {
+                "type": MSG_EVENT,
+                "seq": self.assign_seq(),
+                "event": ev,
+                "client": client_addr,
+                "client_id": client_id,
+            }
+            if origin:
+                rec["origin"] = origin
+            rec_bin = encode_message(rec)
+            records.append((rec, rec_bin))
+            persist_tuples.append(
+                (rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim"))
+            )
+        self.append_log_batch(persist_tuples)
+        return records, changed_set
+
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe, cached)."""
         if self._prim_count_dirty:
@@ -1912,28 +1967,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             sync_server.txn_barrier.acquire_shared()
             try:
-                changed = sync_server.apply_txn(events, layer=self._client_layer)
-                changed_set = set(changed)
-
-                # Serialize once, use for both persist and broadcast.
-                records = []
-                persist_tuples = []
-                for ev in events:
-                    rec = {
-                        "type": MSG_EVENT,
-                        "seq": sync_server.assign_seq(),
-                        "event": ev,
-                        "client": self._addr_key,
-                        "client_id": self._client_id,
-                    }
-                    if self._origin:
-                        rec["origin"] = self._origin
-                    rec_bin = encode_message(rec)
-                    records.append((rec, rec_bin))
-                    persist_tuples.append(
-                        (rec["seq"], rec_bin, self._client_id, ev.get("k"), ev.get("prim"))
-                    )
-                sync_server.append_log_batch(persist_tuples)
+                records, changed_set = sync_server.process_txn(
+                    events,
+                    client_id=self._client_id,
+                    origin=self._origin,
+                    client_addr=self._addr_key,
+                    layer=self._client_layer,
+                )
 
                 # Broadcast changed events; send corrections for overridden ones.
                 changed_records = []

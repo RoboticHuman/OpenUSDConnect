@@ -689,11 +689,12 @@ class NoticeEmitter:
 
         # Structural events on first encounter
         if prim_path not in self._known_prims:
-            type_name = "Xform"
+            # Preserve untyped prims (empty typeName) — Materials/Shaders
+            # scopes are commonly authored as `def "Materials"` with no type.
+            # Fall back to Xform only when the prim itself is invalid.
+            type_name = ""
             if prim and prim.IsValid():
-                tn = prim.GetTypeName()
-                if tn:
-                    type_name = tn
+                type_name = str(prim.GetTypeName())
             events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
             # Only emit xform ops for prims that have transforms —
             # Materials, Shaders, NodeGraphs, Scopes don't.
@@ -779,7 +780,11 @@ class NoticeEmitter:
                 if not _values_equal(val, last_inputs.get(name)):
                     changed_inputs[name] = val
                     changed_types[name] = current_types[name]
-            if changed_inputs:
+            # Also emit when the shader_id itself transitions (e.g. first
+            # encounter of a Shader whose inputs are all connections — its
+            # info:id would otherwise never reach the receiver).
+            shader_id_changed = bool(shader_id) and shader_id != last_shader.get("shader_id")
+            if changed_inputs or shader_id_changed:
                 events.append(
                     {
                         "k": K_SET_SHADER_INPUT,

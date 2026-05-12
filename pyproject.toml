@@ -80,6 +80,7 @@ select = [
 "tests/unit/test_event_apply.py" = ["E402"]
 "tests/unit/test_blender_stage_author.py" = ["E402"]
 "tests/unit/test_stage_parity.py" = ["E402", "I001"]
+"tests/unit/test_materialx_compose_parity.py" = ["E402", "I001"]
 "scripts/*.py" = ["E402", "E501"]
 "integrations/unreal/connect.py" = ["E402"]
 

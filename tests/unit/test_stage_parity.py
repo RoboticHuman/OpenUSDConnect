@@ -22,7 +22,6 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops, find_op
-from openusdconnect.protocol_constants import MSG_EVENT
 from openusdconnect.server import UsdSyncServer
 
 
@@ -186,10 +185,7 @@ def _server_process_and_replay(srv, events):
 
     Returns the list of event dicts as a receiver would see them.
     """
-    srv.apply_txn(events)
-    for ev in events:
-        rec = {"type": MSG_EVENT, "seq": srv.assign_seq(), "event": ev}
-        srv.append_log(rec)
+    srv.process_txn(events)
 
     # Replay full log (what a new receiver would get)
     rows = srv.store.get_all_asc()

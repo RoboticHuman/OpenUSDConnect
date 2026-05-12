@@ -13,6 +13,7 @@ from __future__ import annotations
 from pxr import Gf, Sdf, Sdr, Usd, UsdGeom, UsdShade, Vt
 
 from .protocol_constants import (
+    EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -661,10 +662,14 @@ def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
         op_cache = {}
 
     # Structural ops outside ChangeBlock (DefinePrim fails inside on our USD build).
-    for ev in events:
+    # Sort by EVENT_KIND_ORDER (stable) so ensure_prim runs before
+    # set_shader_connection — otherwise a connection whose source_prim names
+    # a not-yet-ensured NodeGraph/Material would fall back to creating that
+    # prim as a Shader in _apply_set_shader_connection.
+    structural = [ev for ev in events if ev.get("k") in STRUCTURAL_EVENT_KINDS]
+    structural.sort(key=lambda ev: EVENT_KIND_ORDER.get(ev.get("k"), 0))
+    for ev in structural:
         k = ev.get("k")
-        if k not in STRUCTURAL_EVENT_KINDS:
-            continue
         if k == K_ENSURE_XFORM_OPS:
             _prim, _xf, t, o, s = ensure_canonical_ops(
                 stage,
