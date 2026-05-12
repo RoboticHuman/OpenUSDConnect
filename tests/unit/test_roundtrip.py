@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
@@ -244,9 +244,7 @@ class TestNoticeEmitterRoundtrip:
         # First encounter — visibility is not authored on either prim
         events = emitter.build_events_for_dirty(include_matrices=False)
         vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
-        assert len(vis_events) == 0, (
-            f"Got spurious visibility events: {vis_events}"
-        )
+        assert len(vis_events) == 0, f"Got spurious visibility events: {vis_events}"
 
         # Verify both prims are still visible via schema default
         for path in ("/World", "/World/Sphere"):
@@ -452,9 +450,7 @@ class TestPayloadRoundtrip:
         # (so relative paths resolve)
         from pxr import Sdf
 
-        dest_layer = Sdf.Layer.CreateNew(
-            os.path.join(fixture_dir, "_test_dest.usda")
-        )
+        dest_layer = Sdf.Layer.CreateNew(os.path.join(fixture_dir, "_test_dest.usda"))
         dest_stage = Usd.Stage.Open(dest_layer)
         dest_stage.DefinePrim(prim_path, "Xform")
 
@@ -646,9 +642,15 @@ class TestStageToStageRoundtrip:
         stage_a.SetEditTarget(Usd.EditTarget(session))
         stage_a.DefinePrim("/World", "Xform")
         mesh = UsdGeom.Mesh.Define(stage_a, "/World/Tri")
-        mesh.GetPointsAttr().Set(Vt.Vec3fArray([
-            Gf.Vec3f(0, 0, 0), Gf.Vec3f(2, 0, 0), Gf.Vec3f(0, 3, 0),
-        ]))
+        mesh.GetPointsAttr().Set(
+            Vt.Vec3fArray(
+                [
+                    Gf.Vec3f(0, 0, 0),
+                    Gf.Vec3f(2, 0, 0),
+                    Gf.Vec3f(0, 3, 0),
+                ]
+            )
+        )
         mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3]))
         mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2]))
 
@@ -678,8 +680,9 @@ class TestStageToStageRoundtrip:
         stage_a.DefinePrim("/World", "Xform")
         mesh = UsdGeom.Mesh.Define(stage_a, "/World/UVMesh")
         pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
-        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
-                                 UsdGeom.Tokens.faceVarying)
+        st = pvapi.CreatePrimvar(
+            "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
+        )
         st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(0, 1)]))
 
         emitter = NoticeEmitter(stage_a)
@@ -709,8 +712,9 @@ class TestStageToStageRoundtrip:
         stage_a.DefinePrim("/World", "Xform")
         mesh = UsdGeom.Mesh.Define(stage_a, "/World/ColorMesh")
         pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
-        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
-                                 UsdGeom.Tokens.vertex)
+        dc = pvapi.CreatePrimvar(
+            "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
+        )
         dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0)]))
 
         emitter = NoticeEmitter(stage_a)
@@ -739,9 +743,15 @@ class TestStageToStageRoundtrip:
         stage_a.SetEditTarget(Usd.EditTarget(session))
         stage_a.DefinePrim("/World", "Xform")
         mesh = UsdGeom.Mesh.Define(stage_a, "/World/NMesh")
-        mesh.GetNormalsAttr().Set(Vt.Vec3fArray([
-            Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 1, 0), Gf.Vec3f(1, 0, 0),
-        ]))
+        mesh.GetNormalsAttr().Set(
+            Vt.Vec3fArray(
+                [
+                    Gf.Vec3f(0, 0, 1),
+                    Gf.Vec3f(0, 1, 0),
+                    Gf.Vec3f(1, 0, 0),
+                ]
+            )
+        )
         mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
 
         emitter = NoticeEmitter(stage_a)
@@ -767,9 +777,7 @@ class TestStageToStageRoundtrip:
         stage_a.SetEditTarget(Usd.EditTarget(session))
         stage_a.DefinePrim("/World", "Xform")
         xf = UsdGeom.Xform.Define(stage_a, "/World/Guide")
-        UsdGeom.Imageable(xf.GetPrim()).GetPurposeAttr().Set(
-            UsdGeom.Tokens.guide
-        )
+        UsdGeom.Imageable(xf.GetPrim()).GetPurposeAttr().Set(UsdGeom.Tokens.guide)
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Guide")
@@ -796,10 +804,12 @@ class TestStageToStageRoundtrip:
         shader = UsdShade.Shader.Define(stage_a, "/Materials/Red/PBR")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput(
-            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+            "diffuseColor",
+            Sdf.ValueTypeNames.Color3f,
         ).Set(Gf.Vec3f(1, 0, 0))
         shader.CreateInput(
-            "roughness", Sdf.ValueTypeNames.Float,
+            "roughness",
+            Sdf.ValueTypeNames.Float,
         ).Set(0.4)
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
         mat.CreateSurfaceOutput().ConnectToSource(
@@ -811,8 +821,7 @@ class TestStageToStageRoundtrip:
         binding.Bind(mat)
 
         emitter = NoticeEmitter(stage_a)
-        for p in ["/World", "/World/Sphere", "/Materials/Red",
-                  "/Materials/Red/PBR"]:
+        for p in ["/World", "/World/Sphere", "/Materials/Red", "/Materials/Red/PBR"]:
             emitter.mark_dirty(p)
         events = emitter.build_events_for_dirty(include_matrices=False)
 
@@ -855,7 +864,8 @@ class TestStageToStageRoundtrip:
         tex = UsdShade.Shader.Define(stage_a, "/Mat/DiffuseTex")
         tex.CreateIdAttr("UsdUVTexture")
         tex.CreateInput(
-            "file", Sdf.ValueTypeNames.Asset,
+            "file",
+            Sdf.ValueTypeNames.Asset,
         ).Set(Sdf.AssetPath("tex/diffuse.png"))
         tex.CreateInput("st", Sdf.ValueTypeNames.Float2)
         tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -868,12 +878,12 @@ class TestStageToStageRoundtrip:
         tex.GetInput("st").ConnectToSource(uv.GetOutput("result"))
         pbr.GetInput("roughness")  # value only, no connection
         pbr.CreateInput(
-            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+            "diffuseColor",
+            Sdf.ValueTypeNames.Color3f,
         ).ConnectToSource(tex.GetOutput("rgb"))
 
         emitter = NoticeEmitter(stage_a)
-        for p in ["/World", "/Mat", "/Mat/PBR", "/Mat/DiffuseTex",
-                  "/Mat/UVReader"]:
+        for p in ["/World", "/Mat", "/Mat/PBR", "/Mat/DiffuseTex", "/Mat/UVReader"]:
             emitter.mark_dirty(p)
         events = emitter.build_events_for_dirty(include_matrices=False)
 
@@ -924,10 +934,12 @@ class TestStageToStageRoundtrip:
         tex = UsdShade.Shader.Define(stage_a, "/Mat/NormalTex")
         tex.CreateIdAttr("UsdUVTexture")
         tex.CreateInput(
-            "file", Sdf.ValueTypeNames.Asset,
+            "file",
+            Sdf.ValueTypeNames.Asset,
         ).Set(Sdf.AssetPath("./r_normal_map.png"))
         tex.CreateInput(
-            "sourceColorSpace", Sdf.ValueTypeNames.Token,
+            "sourceColorSpace",
+            Sdf.ValueTypeNames.Token,
         ).Set("raw")
 
         events = emitter.build_events_for_dirty(include_matrices=False)
@@ -964,10 +976,12 @@ class TestStageToStageRoundtrip:
         tex = UsdShade.Shader.Define(stage_a, "/Mat/NormalTex")
         tex.CreateIdAttr("UsdUVTexture")
         tex.CreateInput(
-            "bias", Sdf.ValueTypeNames.Float4,
+            "bias",
+            Sdf.ValueTypeNames.Float4,
         ).Set(Gf.Vec4f(-1, -1, -1, -1))
         tex.CreateInput(
-            "scale", Sdf.ValueTypeNames.Float4,
+            "scale",
+            Sdf.ValueTypeNames.Float4,
         ).Set(Gf.Vec4f(2, 2, 2, 2))
 
         events = emitter.build_events_for_dirty(include_matrices=False)
@@ -1002,16 +1016,21 @@ class TestStageToStageRoundtrip:
             _read_material_binding,
             _read_usdshade_connectable,
         )
-        from openusdconnect.protocol import (
+        from openusdconnect.protocol_constants import (
             K_SET_MATERIAL_BINDING,
             K_SET_SHADER_CONNECTION,
             K_SET_SHADER_INPUT,
         )
 
         asset_path = os.path.join(
-            os.path.dirname(__file__), "..", "..",
-            "assets", "full_assets", "StandardShaderBall",
-            "example_materials", "gold_openpbr.mtlx",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "assets",
+            "full_assets",
+            "StandardShaderBall",
+            "example_materials",
+            "gold_openpbr.mtlx",
         )
         if not os.path.isfile(asset_path):
             pytest.skip(f"OpenPBR asset not present: {asset_path}")
@@ -1027,28 +1046,37 @@ class TestStageToStageRoundtrip:
                 events.append({"k": K_ENSURE_PRIM, "prim": pp, "typeName": tn})
             binding = _read_material_binding(src, pp)
             if binding:
-                events.append({
-                    "k": K_SET_MATERIAL_BINDING, "prim": pp,
-                    "material_path": binding,
-                })
+                events.append(
+                    {
+                        "k": K_SET_MATERIAL_BINDING,
+                        "prim": pp,
+                        "material_path": binding,
+                    }
+                )
             kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
-                src, pp,
+                src,
+                pp,
             )
             if kind:
-                events.append({
-                    "k": K_SET_SHADER_INPUT, "prim": pp,
-                    "shader_id": sid, "inputs": inputs,
-                    "input_types": itypes,
-                })
+                events.append(
+                    {
+                        "k": K_SET_SHADER_INPUT,
+                        "prim": pp,
+                        "shader_id": sid,
+                        "inputs": inputs,
+                        "input_types": itypes,
+                    }
+                )
                 if conns:
-                    events.append({
-                        "k": K_SET_SHADER_CONNECTION, "prim": pp,
-                        "connections": conns,
-                    })
+                    events.append(
+                        {
+                            "k": K_SET_SHADER_CONNECTION,
+                            "prim": pp,
+                            "connections": conns,
+                        }
+                    )
 
-        shader_ids = {
-            e["shader_id"] for e in events if e["k"] == K_SET_SHADER_INPUT
-        }
+        shader_ids = {e["shader_id"] for e in events if e["k"] == K_SET_SHADER_INPUT}
         assert "ND_open_pbr_surface_surfaceshader" in shader_ids
 
         wire = codec.encode_message(
@@ -1065,12 +1093,10 @@ class TestStageToStageRoundtrip:
         assert dst_mat
 
         src_outs = {
-            o.GetBaseName(): o for o in src_mat.GetOutputs()
-            if o.GetAttr().HasAuthoredConnections()
+            o.GetBaseName(): o for o in src_mat.GetOutputs() if o.GetAttr().HasAuthoredConnections()
         }
         dst_outs = {
-            o.GetBaseName(): o for o in dst_mat.GetOutputs()
-            if o.GetAttr().HasAuthoredConnections()
+            o.GetBaseName(): o for o in dst_mat.GetOutputs() if o.GetAttr().HasAuthoredConnections()
         }
         assert set(src_outs.keys()) == set(dst_outs.keys())
 
@@ -1078,9 +1104,7 @@ class TestStageToStageRoundtrip:
             src_srcs, _ = src_out.GetConnectedSources()
             dst_srcs, _ = dst_outs[name].GetConnectedSources()
             assert len(src_srcs) == len(dst_srcs) == 1
-            assert str(src_srcs[0].source.GetPath()) == str(
-                dst_srcs[0].source.GetPath()
-            )
+            assert str(src_srcs[0].source.GetPath()) == str(dst_srcs[0].source.GetPath())
             assert src_srcs[0].sourceName == dst_srcs[0].sourceName
 
     def test_nodegraph_output_port_codec_roundtrip(self):
@@ -1309,8 +1333,11 @@ class TestLIVERPS:
     @staticmethod
     def _fixture(name):
         import os
+
         return os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "fixtures", name,
+            os.path.dirname(os.path.dirname(__file__)),
+            "fixtures",
+            name,
         )
 
     def test_local_beats_variant(self):
@@ -1385,8 +1412,7 @@ class TestLIVERPS:
         events = emitter.build_events_for_dirty(include_matrices=False)
 
         gprim_evs = [
-            e for e in events
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
         assert len(gprim_evs) == 1
         # Local opinion (1.0) wins over variant "big" (10.0)
@@ -1518,4 +1544,3 @@ class TestSublayerOwnership:
         child = recv_stage.GetPrimAtPath("/World/Chair/Geom")
         assert child.IsValid()
         assert child.GetTypeName() == "Cube"
-

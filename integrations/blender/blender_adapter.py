@@ -29,7 +29,8 @@ from openusdconnect.axis_conversion import (
     yup_to_zup_scale,
     yup_to_zup_vec,
 )
-from openusdconnect.protocol import split_qualified_attr
+from openusdconnect.shader_attrs import shader_output_attr, split_qualified_attr
+from openusdconnect.shader_connections import resolve_nodegraph_connection
 
 from .shader_mapper import create_default_registry
 
@@ -46,6 +47,7 @@ def _has_axis_rotation(obj) -> bool:
     if not BPY_AVAILABLE or obj is None:
         return False
     return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
+
 
 LOG = logging.getLogger(__name__)
 
@@ -78,7 +80,9 @@ class BlenderAdapter(DCCAdapter):
                         ref_asset = obj.get("usd_ref_asset", "")
                         if ref_asset:
                             self._registry.set_imported_ref(
-                                pp, ref_asset, obj.get("usd_ref_prim", ""),
+                                pp,
+                                ref_asset,
+                                obj.get("usd_ref_prim", ""),
                             )
 
     @staticmethod
@@ -396,11 +400,7 @@ class BlenderAdapter(DCCAdapter):
             return False
 
         # Raw mesh topology: points + faceVertexCounts + faceVertexIndices
-        if (
-            "points" in attrs
-            and "faceVertexCounts" in attrs
-            and "faceVertexIndices" in attrs
-        ):
+        if "points" in attrs and "faceVertexCounts" in attrs and "faceVertexIndices" in attrs:
             self._apply_mesh_topology(obj, attrs)
 
         # Standalone primvar:st update (without full topology rebuild)
@@ -471,7 +471,6 @@ class BlenderAdapter(DCCAdapter):
             len(faces),
         )
 
-
     def set_material_binding(self, prim_path: str, material_path: str) -> bool:
         if not BPY_AVAILABLE:
             return True
@@ -507,16 +506,31 @@ class BlenderAdapter(DCCAdapter):
         # Assign to the target object if it exists
         obj = self._find_object_by_prim(prim_path)
         if not obj or not obj.data:
+            self._remove_unused_material_duplicates(mat, material_path)
             return True
         if not obj.data.materials:
             obj.data.materials.append(mat)
         else:
             obj.data.materials[0] = mat
+        self._remove_unused_material_duplicates(mat, material_path)
         LOG.info("set_material_binding: %s -> %s", prim_path, mat.name)
         return True
 
-    def set_shader_input(self, prim_path: str, shader_id: str,
-                         inputs: dict, input_types: dict) -> bool:
+    def _remove_unused_material_duplicates(self, keep, material_path: str) -> None:
+        """Remove importer leftovers after rebinding to the path-stable material."""
+        mat_name = material_path.rsplit("/", 1)[-1]
+        for mat in list(bpy.data.materials):
+            if mat == keep or not mat.name.startswith(mat_name):
+                continue
+            if mat.users != 0:
+                continue
+            tagged_path = mat.get("usd_material_path", "")
+            if not tagged_path or tagged_path == material_path:
+                bpy.data.materials.remove(mat)
+
+    def set_shader_input(
+        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
         mapper = self._shader_registry.get(shader_id)
@@ -534,7 +548,8 @@ class BlenderAdapter(DCCAdapter):
     def _apply_single_node_shader(self, prim_path, mapper, inputs):
         """Apply shader inputs to a single Blender node."""
         mat, node = self._get_or_create_shader_node_for_input(
-            prim_path, mapper.node_type,
+            prim_path,
+            mapper.node_type,
         )
         if not mat or not node:
             LOG.warning("set_shader_input: no mat/node for %s", prim_path)
@@ -545,7 +560,9 @@ class BlenderAdapter(DCCAdapter):
 
         for usd_name, value in inputs.items():
             mapper.apply_value(
-                node, usd_name, value,
+                node,
+                usd_name,
+                value,
                 resolve_asset=self._resolve_asset_path,
             )
         mapper.post_apply(node, inputs)
@@ -603,7 +620,8 @@ class BlenderAdapter(DCCAdapter):
                 self._prepare_tree_for_network(tree)
 
             nodes, input_map, output_map = mapper.create_network(
-                tree, inputs,
+                tree,
+                inputs,
                 resolve_asset=self._resolve_asset_path,
             )
             if not nodes:
@@ -638,7 +656,8 @@ class BlenderAdapter(DCCAdapter):
 
         LOG.info(
             "set_shader_input (multi-node): %s on %s",
-            list(inputs.keys()), prim_path,
+            list(inputs.keys()),
+            prim_path,
         )
         return True
 
@@ -711,15 +730,16 @@ class BlenderAdapter(DCCAdapter):
         ("ShaderNodeUVMap", "result"): "UV",
     }
 
-    def set_shader_connection(self, prim_path: str,
-                              connections: dict,
-                              disconnections: list | None = None) -> bool:
+    def set_shader_connection(
+        self, prim_path: str, connections: dict, disconnections: list | None = None
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
         mat = self._find_material_for_shader(prim_path)
         if not mat or not mat.use_nodes:
             LOG.warning(
-                "set_shader_connection: no material for %s", prim_path,
+                "set_shader_connection: no material for %s",
+                prim_path,
             )
             return False
 
@@ -747,15 +767,15 @@ class BlenderAdapter(DCCAdapter):
                 continue
 
             source_node = self._find_or_create_shader_node(
-                tree, source_prim,
+                tree,
+                source_prim,
             )
 
             # Resolve source socket — multi-node output map first.  Only
             # consult it when the source side is an output; multi-node
             # input maps are for the destination side, not the source.
             cached_outputs = self._registry.get_shader(source_prim).get("output_map")
-            if source_side == "output" and cached_outputs \
-                    and source_base in cached_outputs:
+            if source_side == "output" and cached_outputs and source_base in cached_outputs:
                 src_socket = cached_outputs[source_base]
             elif source_node:
                 # Source is normally an output; on the rare input-to-input
@@ -763,7 +783,8 @@ class BlenderAdapter(DCCAdapter):
                 # base name.
                 if source_side == "output":
                     src_socket = self._get_output_socket(
-                        source_node, source_base,
+                        source_node,
+                        source_base,
                     )
                 else:
                     src_socket = source_node.inputs.get(source_base)
@@ -775,7 +796,8 @@ class BlenderAdapter(DCCAdapter):
                 tgt_socket = cached_inputs[local_base]
             elif target_node:
                 tgt_socket = self._get_input_socket(
-                    target_node, local_base,
+                    target_node,
+                    local_base,
                 )
             else:
                 continue
@@ -797,7 +819,8 @@ class BlenderAdapter(DCCAdapter):
 
         LOG.info(
             "set_shader_connection: %s on %s",
-            list(connections.keys()), mat.name,
+            list(connections.keys()),
+            mat.name,
         )
         return True
 
@@ -864,9 +887,7 @@ class BlenderAdapter(DCCAdapter):
         if not os.path.isabs(resolved):
             asset_root = getattr(bpy.context.scene, "usd_connect_asset_root", "")
             if not asset_root:
-                base_path = getattr(
-                    bpy.context.scene, "usd_connect_base_usd_path", ""
-                )
+                base_path = getattr(bpy.context.scene, "usd_connect_base_usd_path", "")
                 if base_path:
                     asset_root = os.path.dirname(bpy.path.abspath(base_path))
             if asset_root:
@@ -917,25 +938,21 @@ class BlenderAdapter(DCCAdapter):
         # we check for newly created objects below.
         if window is not None:
             with bpy.context.temp_override(window=window):
-                bpy.ops.wm.usd_import('EXEC_DEFAULT', **import_kwargs)
+                bpy.ops.wm.usd_import("EXEC_DEFAULT", **import_kwargs)
         else:
-            bpy.ops.wm.usd_import('EXEC_DEFAULT', **import_kwargs)
+            bpy.ops.wm.usd_import("EXEC_DEFAULT", **import_kwargs)
 
         USD_CONNECT_Hook._skip_root_inference = False
 
         new_objs = set(bpy.data.objects) - before
         if not new_objs:
-            LOG.warning(
-                "BlenderAdapter: no objects imported from %s", resolved
-            )
+            LOG.warning("BlenderAdapter: no objects imported from %s", resolved)
             return set(), None
 
         LOG.info("set_reference: imported %d objects from %s", len(new_objs), resolved)
 
         imported_roots = [
-            obj
-            for obj in new_objs
-            if obj.parent is None or obj.parent not in new_objs
+            obj for obj in new_objs if obj.parent is None or obj.parent not in new_objs
         ]
 
         # Remap file-internal paths to composed scene paths.
@@ -946,7 +963,7 @@ class BlenderAdapter(DCCAdapter):
         for obj in new_objs:
             hook_path = obj.get("usd_prim_path", "")
             if hook_path and prim_path_ref and hook_path.startswith(prim_path_ref):
-                composed_path = prim_path + hook_path[len(prim_path_ref):]
+                composed_path = prim_path + hook_path[len(prim_path_ref) :]
             else:
                 obj_name = obj.name.replace(".", "_")
                 composed_path = f"{prim_path}/{obj_name}"
@@ -1066,7 +1083,7 @@ class BlenderAdapter(DCCAdapter):
         def _remap(file_path):
             """Remap a USD file path to the composed scene path."""
             if prim_path_ref and file_path.startswith(prim_path_ref):
-                return prim_path + file_path[len(prim_path_ref):]
+                return prim_path + file_path[len(prim_path_ref) :]
             return prim_path + "/" + file_path.lstrip("/")
 
         # Collect material bindings, shader inputs, and connections
@@ -1085,14 +1102,12 @@ class BlenderAdapter(DCCAdapter):
 
             if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
                 _kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
-                    stage, file_path,
+                    stage,
+                    file_path,
                 )
                 if sid:
                     shader_events.append((scene_path, sid, inputs, itypes))
                     if conns:
-                        from openusdconnect.emitter import (
-                            resolve_nodegraph_connection,
-                        )
                         remapped_conns = {}
                         for local_attr, conn in conns.items():
                             src_side, src_base = split_qualified_attr(
@@ -1102,14 +1117,16 @@ class BlenderAdapter(DCCAdapter):
                                 # Flatten NodeGraph passthroughs so Blender
                                 # wires directly between real shader nodes
                                 # (Blender has no NodeGroup-in-USD concept).
-                                flat_path, flat_base = (
-                                    resolve_nodegraph_connection(
-                                        stage, conn["source_prim"], src_base,
-                                    )
+                                flat_path, flat_base = resolve_nodegraph_connection(
+                                    stage,
+                                    conn["source_prim"],
+                                    src_base,
                                 )
                                 remapped_conns[local_attr] = {
                                     "source_prim": _remap(flat_path),
-                                    "source_attr": "outputs:" + flat_base,
+                                    "source_attr": shader_output_attr(
+                                        flat_base,
+                                    ).qualified_name,
                                 }
                             else:
                                 # Input-side source (NodeGraph interface
@@ -1154,7 +1171,8 @@ class BlenderAdapter(DCCAdapter):
         if shader_events:
             LOG.info(
                 "Post-import enrichment: applied %d shaders from %s",
-                len(shader_events), resolved,
+                len(shader_events),
+                resolved,
             )
 
     def _fix_missing_textures(self, stage, root_prim, prim_path, remap_fn):
@@ -1248,7 +1266,9 @@ class BlenderAdapter(DCCAdapter):
                     container["usd_type_name"] = "Reference"
                     container["usd_ref_asset"] = resolved_refs[0][0]
                     self._registry.set_imported_ref(
-                        prim_path, resolved_refs[0][0], resolved_refs[0][1],
+                        prim_path,
+                        resolved_refs[0][0],
+                        resolved_refs[0][1],
                     )
                 LOG.info(
                     "set_reference: children already exist for %s, skipping re-import",
@@ -1282,9 +1302,7 @@ class BlenderAdapter(DCCAdapter):
         total_imported = 0
         prim_obj = container  # may be replaced by merge
         for resolved, prim_path_ref in resolved_refs:
-            new_objs, merged = self._import_ref_asset(
-                prim_obj, prim_path, resolved, prim_path_ref
-            )
+            new_objs, merged = self._import_ref_asset(prim_obj, prim_path, resolved, prim_path_ref)
             total_imported += len(new_objs)
             if merged is not None:
                 prim_obj = merged  # container was consumed by merge
@@ -1293,8 +1311,10 @@ class BlenderAdapter(DCCAdapter):
         # Record composed children so ensure_prim doesn't create duplicates
         # when the emitter sends events for prims the import already created.
         from . import capture
+
         if capture._state.author is not None:
             from pxr import Usd
+
             stage = capture._state.author.stage
             ref_prim = stage.GetPrimAtPath(prim_path)
             if ref_prim and ref_prim.IsValid():
@@ -1324,6 +1344,10 @@ class BlenderAdapter(DCCAdapter):
         if container is None:
             return False
         return self._registry.children_exist(prim_path)
+
+    def has_imported_ref_children(self, prim_path: str) -> bool:
+        """Return True when a reference/payload prim has imported DCC children."""
+        return self._ref_children_exist(prim_path)
 
     def _remove_imported_ref_children(self, prim_path: str):
         """Remove child objects previously imported for a reference prim (keep container)."""
@@ -1399,7 +1423,10 @@ class BlenderAdapter(DCCAdapter):
             resolved = self._resolve_asset_path(asset_path)
             if resolved is not None:
                 new_objs, merged = self._import_ref_asset(
-                    prim_obj, prim_path, resolved, prim_path_ref,
+                    prim_obj,
+                    prim_path,
+                    resolved,
+                    prim_path_ref,
                 )
                 if merged is not None:
                     prim_obj = merged
@@ -1453,7 +1480,9 @@ class BlenderAdapter(DCCAdapter):
         for tmp_dir in (asset_dir, None):
             try:
                 tmp = tempfile.NamedTemporaryFile(
-                    suffix=".usda", delete=False, dir=tmp_dir,
+                    suffix=".usda",
+                    delete=False,
+                    dir=tmp_dir,
                 )
                 tmp_path = tmp.name
                 tmp.close()
@@ -1485,14 +1514,21 @@ class BlenderAdapter(DCCAdapter):
             container = self._find_object_by_prim(prim_path)
             if container is not None:
                 temp_path = self._create_variant_stage(
-                    prev_asset, prev_prim_ref, selections,
+                    prev_asset,
+                    prev_prim_ref,
+                    selections,
                 )
                 import_path = temp_path or prev_asset
                 _objs, _merged = self._import_ref_asset(
-                    container, prim_path, import_path, prev_prim_ref,
+                    container,
+                    prim_path,
+                    import_path,
+                    prev_prim_ref,
                 )
                 self._enrich_materialx_from_import(
-                    import_path, prim_path, prev_prim_ref,
+                    import_path,
+                    prim_path,
+                    prev_prim_ref,
                 )
                 self._registry.set_imported_ref(prim_path, prev_asset, prev_prim_ref)
                 if temp_path:
@@ -1502,11 +1538,13 @@ class BlenderAdapter(DCCAdapter):
                         pass
             LOG.info(
                 "set_variant_selections: re-imported %s after variant change %s",
-                prim_path, selections,
+                prim_path,
+                selections,
             )
         else:
             LOG.info(
                 "BlenderAdapter.set_variant_selections: %s -> %s",
-                prim_path, selections,
+                prim_path,
+                selections,
             )
         return True

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pxr import Gf, Sdf, Sdr, Usd, UsdGeom, UsdShade, Vt
 
-from .protocol import (
+from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -31,10 +31,10 @@ from .protocol import (
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     REL_MATERIAL_BINDING,
-    SHADER_ATTR_SIDE_INPUT,
-    SHADER_ATTR_SIDE_OUTPUT,
     STRUCTURAL_EVENT_KINDS,
-    split_qualified_attr,
+)
+from .shader_attrs import (
+    ShaderAttr,
 )
 
 
@@ -149,14 +149,14 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
         stage.OverridePrim(prim_path)
         layer_spec = layer.GetPrimAtPath(prim_path)
         for attr_name, type_name in _XFORM_OP_SPECS:
-            if not layer_spec.GetAttributeAtPath(
-                Sdf.Path(prim_path).AppendProperty(attr_name)
-            ):
+            if not layer_spec.GetAttributeAtPath(Sdf.Path(prim_path).AppendProperty(attr_name)):
                 Sdf.AttributeSpec(layer_spec, attr_name, type_name)
 
         if not layer_spec.GetAttributeAtPath(path_order):
             order_attr = Sdf.AttributeSpec(
-                layer_spec, "xformOpOrder", Sdf.ValueTypeNames.TokenArray,
+                layer_spec,
+                "xformOpOrder",
+                Sdf.ValueTypeNames.TokenArray,
             )
             order_attr.SetInfo("variability", Sdf.VariabilityUniform)
         else:
@@ -183,8 +183,9 @@ def quatf_from_wxyz(q) -> Gf.Quatf:
     return Gf.Quatf(w, Gf.Vec3f(x, y, z))
 
 
-def _ensure_primvar_attr(prim: Usd.Prim, name: str, meta: dict,
-                         pvapi: UsdGeom.PrimvarsAPI) -> Usd.Attribute | None:
+def _ensure_primvar_attr(
+    prim: Usd.Prim, name: str, meta: dict, pvapi: UsdGeom.PrimvarsAPI
+) -> Usd.Attribute | None:
     """Create a primvar attribute from metadata if it doesn't exist yet.
 
     Returns the attribute (newly created or existing), or None on failure.
@@ -192,7 +193,7 @@ def _ensure_primvar_attr(prim: Usd.Prim, name: str, meta: dict,
     sdf_type = Sdf.ValueTypeNames.Find(meta["typeName"])
     if not sdf_type:
         return None
-    pv_name = name[len("primvars:"):]
+    pv_name = name[len("primvars:") :]
     interp = meta.get("interpolation", "")
     pv = pvapi.CreatePrimvar(pv_name, sdf_type, interp)
     return pv.GetAttr()
@@ -224,8 +225,10 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
             attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)))
         elif type_name == "float[]":
             attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)))
-        elif type_name in ("float3", "vector3f", "normal3f", "point3f",
-                          "color3f") and value.size == 3:
+        elif (
+            type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
+            and value.size == 3
+        ):
             attr.Set(Gf.Vec3f(*value.flat))
         elif type_name in ("float2", "texCoord2f") and value.size == 2:
             attr.Set(Gf.Vec2f(*value.flat))
@@ -246,8 +249,10 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
             attr.Set(Vt.IntArray(value))
         elif type_name == "float[]":
             attr.Set(Vt.FloatArray(value))
-        elif type_name in ("float3", "vector3f", "normal3f", "point3f",
-                          "color3f") and len(value) == 3:
+        elif (
+            type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
+            and len(value) == 3
+        ):
             attr.Set(Gf.Vec3f(*value))
         elif type_name in ("float2", "texCoord2f") and len(value) == 2:
             attr.Set(Gf.Vec2f(*value))
@@ -323,7 +328,7 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
         for attr_name, meta in primvar_meta.items():
             interp = meta.get("interpolation")
             if interp:
-                pv_name = attr_name[len("primvars:"):]
+                pv_name = attr_name[len("primvars:") :]
                 pv = pvapi.GetPrimvar(pv_name)
                 if pv:
                     pv.SetInterpolation(interp)
@@ -408,8 +413,9 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
         binding_rel.AddTarget(Sdf.Path(material_path))
 
 
-def _set_shader_input_value(connectable: UsdShade.ConnectableAPI, name: str,
-                            value, type_name: str) -> None:
+def _set_shader_input_value(
+    connectable: UsdShade.ConnectableAPI, name: str, value, type_name: str
+) -> None:
     """Set a single input on a UsdShade connectable, creating it if needed.
 
     Works on Shader, NodeGraph, and Material — all share GetInput / CreateInput
@@ -461,7 +467,7 @@ def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
         _set_shader_input_value(connectable, name, value, type_name)
 
 
-def _resolve_shader_port_type(prim: Usd.Prim, side: str, base_name: str):
+def _resolve_shader_port_type(prim: Usd.Prim, shader_attr: ShaderAttr):
     """Resolve a Shader input/output type from its Sdr NodeDef.
 
     Returns None when the prim is not a registered Shader node; connection
@@ -477,9 +483,9 @@ def _resolve_shader_port_type(prim: Usd.Prim, side: str, base_name: str):
     if node is None:
         return None
     port = (
-        node.GetShaderInput(base_name)
-        if side == SHADER_ATTR_SIDE_INPUT
-        else node.GetShaderOutput(base_name)
+        node.GetShaderInput(shader_attr.base_name)
+        if shader_attr.is_input
+        else node.GetShaderOutput(shader_attr.base_name)
     )
     if port is None:
         return None
@@ -488,8 +494,7 @@ def _resolve_shader_port_type(prim: Usd.Prim, side: str, base_name: str):
 
 def _get_or_create_connectable_port(
     connectable: UsdShade.ConnectableAPI,
-    side: str,
-    base_name: str,
+    shader_attr: ShaderAttr,
     fallback_type,
 ):
     """Return the named input/output, creating it with the right type if absent.
@@ -498,49 +503,46 @@ def _get_or_create_connectable_port(
     info:id), then *fallback_type* (typically the type of the other end of
     the connection), then Token.
     """
-    if side == SHADER_ATTR_SIDE_INPUT:
-        port = connectable.GetInput(base_name)
+    if shader_attr.is_input:
+        port = connectable.GetInput(shader_attr.base_name)
         if port:
             return port
-        sdr_type = _resolve_shader_port_type(
-            connectable.GetPrim(), SHADER_ATTR_SIDE_INPUT, base_name,
-        )
+        sdr_type = _resolve_shader_port_type(connectable.GetPrim(), shader_attr)
         return connectable.CreateInput(
-            base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
+            shader_attr.base_name,
+            sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
         )
     # output
-    port = connectable.GetOutput(base_name)
+    port = connectable.GetOutput(shader_attr.base_name)
     if port:
         return port
-    sdr_type = _resolve_shader_port_type(
-        connectable.GetPrim(), SHADER_ATTR_SIDE_OUTPUT, base_name,
-    )
+    sdr_type = _resolve_shader_port_type(connectable.GetPrim(), shader_attr)
     return connectable.CreateOutput(
-        base_name, sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
+        shader_attr.base_name,
+        sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
     )
 
 
-def _parse_wire_shader_attr(attr_name: str) -> tuple[str, str]:
+def _parse_wire_shader_attr(attr_name: str) -> ShaderAttr:
     """Parse a protocol shader attr name and fail fast on contract violations."""
-    side, base = split_qualified_attr(attr_name)
-    if not side:
+    shader_attr = ShaderAttr.from_qualified_name(attr_name)
+    if shader_attr is None:
         raise ValueError(
             "Shader connection attributes must be qualified as "
             f"'inputs:<name>' or 'outputs:<name>', got {attr_name!r}"
         )
-    return side, base
+    return shader_attr
 
 
 def _get_connectable_port(
     connectable: UsdShade.ConnectableAPI,
-    side: str,
-    base_name: str,
+    shader_attr: ShaderAttr,
 ):
     """Return an existing connectable input/output without creating it."""
     return (
-        connectable.GetInput(base_name)
-        if side == SHADER_ATTR_SIDE_INPUT
-        else connectable.GetOutput(base_name)
+        connectable.GetInput(shader_attr.base_name)
+        if shader_attr.is_input
+        else connectable.GetOutput(shader_attr.base_name)
     )
 
 
@@ -559,9 +561,9 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
     local_connectable = UsdShade.ConnectableAPI(prim)
 
     for local_attr, conn in ev.get("connections", {}).items():
-        local_side, local_base = _parse_wire_shader_attr(local_attr)
+        local_shader_attr = _parse_wire_shader_attr(local_attr)
         source_attr = conn["source_attr"]
-        source_side, source_base = _parse_wire_shader_attr(source_attr)
+        source_shader_attr = _parse_wire_shader_attr(source_attr)
 
         # Source prim: define as Shader if missing (set_shader_input
         # for the source will arrive later in the same txn or a
@@ -575,17 +577,20 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
         # Source first so we can use its declared type as the fallback for
         # the local end when Sdr can't resolve the local side.
         source_port = _get_or_create_connectable_port(
-            source_connectable, source_side, source_base, fallback_type=None,
+            source_connectable,
+            source_shader_attr,
+            fallback_type=None,
         )
         local_port = _get_or_create_connectable_port(
-            local_connectable, local_side, local_base,
+            local_connectable,
+            local_shader_attr,
             fallback_type=source_port.GetTypeName(),
         )
         local_port.ConnectToSource(source_port)
 
     for local_attr in ev.get("disconnections", []):
-        side, base = _parse_wire_shader_attr(local_attr)
-        port = _get_connectable_port(local_connectable, side, base)
+        local_shader_attr = _parse_wire_shader_attr(local_attr)
+        port = _get_connectable_port(local_connectable, local_shader_attr)
         if port:
             port.DisconnectSource()
 
@@ -662,7 +667,9 @@ def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
             continue
         if k == K_ENSURE_XFORM_OPS:
             _prim, _xf, t, o, s = ensure_canonical_ops(
-                stage, ev["prim"], op_cache=op_cache,
+                stage,
+                ev["prim"],
+                op_cache=op_cache,
             )
             op_cache[ev["prim"]] = (t, o, s)
         else:

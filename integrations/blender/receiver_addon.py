@@ -22,7 +22,7 @@ from openusdconnect.codec import (
     event_to_dict,
     resolve_payload,
 )
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -108,6 +108,7 @@ _DISPATCH_TABLE: dict[str, str] = {
     K_SET_SHADER_CONNECTION: "set_shader_connection",
 }
 
+
 # Per-event-type argument builders (returns kwargs for the adapter method).
 def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
     """Return (args, kwargs) for the adapter method identified by *k*."""
@@ -175,19 +176,17 @@ def _arc_changed(stage, ev, k):
 
     if k == K_SET_REFERENCE:
         current = _normalize_arcs(_read_references(stage, prim_path))
-        incoming = _normalize_arcs([
-            (e.get("asset_path", ""), e.get("prim_path", ""))
-            for e in ev.get("refs", [])
-        ])
+        incoming = _normalize_arcs(
+            [(e.get("asset_path", ""), e.get("prim_path", "")) for e in ev.get("refs", [])]
+        )
         changed = current != incoming
         LOG.debug("arc ref %s changed=%s", prim_path, changed)
         return changed
     if k == K_SET_PAYLOAD:
         current = _normalize_arcs(_read_payloads(stage, prim_path))
-        incoming = _normalize_arcs([
-            (e.get("asset_path", ""), e.get("prim_path", ""))
-            for e in ev.get("payloads", [])
-        ])
+        incoming = _normalize_arcs(
+            [(e.get("asset_path", ""), e.get("prim_path", "")) for e in ev.get("payloads", [])]
+        )
         changed = current != incoming
         LOG.debug("arc payload %s changed=%s", prim_path, changed)
         return changed
@@ -221,11 +220,18 @@ def _ensure_adapter():
 # Transforms go directly to the BlenderAdapter — the emitter stage
 # only needs composition arcs and materials to keep its composed view
 # in sync with what the receiver imported.
-_STAGE_SYNC_KINDS = frozenset({
-    K_SET_REFERENCE, K_SET_PAYLOAD, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD,
-    K_SET_VARIANT_SELECTIONS,
-    K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
-})
+_STAGE_SYNC_KINDS = frozenset(
+    {
+        K_SET_REFERENCE,
+        K_SET_PAYLOAD,
+        K_LOAD_PAYLOAD,
+        K_UNLOAD_PAYLOAD,
+        K_SET_VARIANT_SELECTIONS,
+        K_SET_MATERIAL_BINDING,
+        K_SET_SHADER_INPUT,
+        K_SET_SHADER_CONNECTION,
+    }
+)
 
 
 def _commit_to_stage(events: list[dict], stage) -> None:
@@ -310,10 +316,12 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
                     _read_references,
                     _read_variant_selections,
                 )
+
                 pc = ne._prim_cache.setdefault(prim_path, {})
                 pc[_C_REFERENCES] = _read_references(stage, prim_path)
                 pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
-                    stage, prim_path,
+                    stage,
+                    prim_path,
                 )
                 prim = stage.GetPrimAtPath(prim_path)
                 if prim and prim.IsValid():
@@ -332,14 +340,13 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
                     _C_VARIANT_SELECTIONS,
                     _read_variant_selections,
                 )
+
                 pc = ne._prim_cache.setdefault(prim_path, {})
                 pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
-                    stage, prim_path,
+                    stage,
+                    prim_path,
                 )
-                to_purge = [
-                    p for p in list(ne._known_prims)
-                    if p.startswith(prefix)
-                ]
+                to_purge = [p for p in list(ne._known_prims) if p.startswith(prefix)]
                 for p in to_purge:
                     ne._purge_caches(p)
             cap._state.author.purge_prim_refs(prefix)
@@ -353,7 +360,8 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
                 kind, sid, inps, _, _ = _read_usdshade_connectable(
-                    stage, prim_path,
+                    stage,
+                    prim_path,
                 )
                 if kind:
                     pc[_C_SHADER_INPUTS] = {"shader_id": sid, "inputs": inps}
@@ -431,7 +439,8 @@ def _seed_multi_node_shader_maps(cap, prim_path: str):
                 author._last_shader_values[shader_path] = values
                 LOG.debug(
                     "seeded shader map %s with %d inputs",
-                    shader_path, len(values),
+                    shader_path,
+                    len(values),
                 )
 
 
@@ -474,30 +483,42 @@ def _process_queue_timer():
         # Unchanged arcs are excluded from stage commit too — ClearReferences()
         # followed by re-adding identical references triggers recomposition
         # even when the final state is identical.
-        skip_indices: set[int] = set()
+        stage_skip_indices: set[int] = set()
         if stage is not None:
             for i, ev in enumerate(events):
                 k = ev.get("k")
                 if k in (K_SET_VARIANT_SELECTIONS, K_SET_REFERENCE, K_SET_PAYLOAD):
                     if not _arc_changed(stage, ev, k):
-                        skip_indices.add(i)
+                        stage_skip_indices.add(i)
+
+        # Stage idempotence and DCC idempotence are not identical. A USD stage
+        # arc can already match before Blender has imported the corresponding
+        # objects, so only skip adapter dispatch when composed children are
+        # already present in the DCC scene. Variant selections still dispatch
+        # because they may need to rebuild imported children for the selection.
+        adapter_skip_indices: set[int] = set()
+        if stage_skip_indices:
+            adapter = _ensure_adapter()
+            for i in stage_skip_indices:
+                ev = events[i]
+                if ev.get("k") == K_SET_VARIANT_SELECTIONS:
+                    continue
+                if adapter.has_imported_ref_children(ev.get("prim", "")):
+                    adapter_skip_indices.add(i)
 
         # Phase 3: Commit stage-sync events to the emitter's USD stage
         # (atomic).  Unchanged arcs (skip_indices) are excluded to avoid
         # spurious recomposition from ClearReferences + re-add.
         if stage is not None:
-            sync_events = [
-                ev for i, ev in enumerate(events)
-                if i not in skip_indices
-            ]
+            sync_events = [ev for i, ev in enumerate(events) if i not in stage_skip_indices]
             _commit_to_stage(sync_events, stage)
 
         # Phase 4: Dispatch to BlenderAdapter (stage is committed)
-        _dispatch_to_adapter(events, skip_indices)
+        _dispatch_to_adapter(events, adapter_skip_indices)
 
         # Phase 5: Update emitter caches from committed stage state
         if stage is not None:
-            _update_emitter_caches(events, stage, skip_indices)
+            _update_emitter_caches(events, stage, adapter_skip_indices)
 
         # Refresh viewport once after processing all events (not per-event)
         try:
@@ -563,7 +584,9 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             from . import STABLE_CLIENT_ID
 
             _RECEIVER = ReceiverThread(
-                host=host, port=port, sync_from=sync_from,
+                host=host,
+                port=port,
+                sync_from=sync_from,
                 client_id=STABLE_CLIENT_ID,
                 origin=_ORIGIN,
             )

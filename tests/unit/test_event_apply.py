@@ -21,7 +21,7 @@ from openusdconnect.event_apply import (
     ensure_canonical_ops,
     get_or_define_prim,
 )
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -293,7 +293,6 @@ class TestSetReference:
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
 
-
     def test_add_multiple_references(self, stage):
         ref_stage_1 = Usd.Stage.CreateInMemory("ref1.usda")
         ref_stage_1.DefinePrim("/A", "Xform")
@@ -443,9 +442,14 @@ class TestSetPayload:
         payload_path = payload_stage.GetRootLayer().identifier
 
         # Set payload arc
-        apply_event(stage, {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [
-            {"asset_path": payload_path, "prim_path": "/Model"}
-        ]})
+        apply_event(
+            stage,
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": payload_path, "prim_path": "/Model"}],
+            },
+        )
         # Unload by default
         stage.Unload(Sdf.Path("/World/Asset"))
         assert not stage.GetPrimAtPath("/World/Asset").IsLoaded()
@@ -465,9 +469,14 @@ class TestSetPayload:
         payload_stage.DefinePrim("/Model/Child", "Mesh")
         payload_path = payload_stage.GetRootLayer().identifier
 
-        apply_event(stage, {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [
-            {"asset_path": payload_path, "prim_path": "/Model"}
-        ]})
+        apply_event(
+            stage,
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": "/World/Asset",
+                "payloads": [{"asset_path": payload_path, "prim_path": "/Model"}],
+            },
+        )
         # Load first
         stage.Load(Sdf.Path("/World/Asset"))
         assert stage.GetPrimAtPath("/World/Asset").IsLoaded()
@@ -492,20 +501,26 @@ class TestSetVariantSelections:
         prim = stage.GetPrimAtPath("/World/Sphere")
         assert prim.GetVariantSets().GetVariantSelection("size") == "small"
 
-        apply_event(stage, {
-            "k": K_SET_VARIANT_SELECTIONS,
-            "prim": "/World/Sphere",
-            "selections": {"size": "large"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": K_SET_VARIANT_SELECTIONS,
+                "prim": "/World/Sphere",
+                "selections": {"size": "large"},
+            },
+        )
         assert prim.GetVariantSets().GetVariantSelection("size") == "large"
 
     def test_variant_selection_affects_composed_value(self):
         stage = self._make_variant_stage()
-        apply_event(stage, {
-            "k": K_SET_VARIANT_SELECTIONS,
-            "prim": "/World/Sphere",
-            "selections": {"size": "medium"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": K_SET_VARIANT_SELECTIONS,
+                "prim": "/World/Sphere",
+                "selections": {"size": "medium"},
+            },
+        )
         prim = stage.GetPrimAtPath("/World/Sphere")
         radius = prim.GetAttribute("radius").Get()
         assert abs(radius - 5.0) < 1e-6
@@ -513,11 +528,14 @@ class TestSetVariantSelections:
     def test_nonexistent_variant_set_ignored(self, stage):
         stage.DefinePrim("/World/Plain", "Xform")
         # Should not raise — just skip the non-existent set
-        apply_event(stage, {
-            "k": K_SET_VARIANT_SELECTIONS,
-            "prim": "/World/Plain",
-            "selections": {"bogus": "nope"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": K_SET_VARIANT_SELECTIONS,
+                "prim": "/World/Plain",
+                "selections": {"bogus": "nope"},
+            },
+        )
 
 
 class TestApplyEvents:
@@ -545,11 +563,14 @@ class TestSetMaterialBinding:
 
         stage.DefinePrim("/World/Sphere", "Sphere")
         stage.DefinePrim("/Materials/Plastic", "Material")
-        apply_event(stage, {
-            "k": "set_material_binding",
-            "prim": "/World/Sphere",
-            "material_path": "/Materials/Plastic",
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "/Materials/Plastic",
+            },
+        )
 
         prim = stage.GetPrimAtPath("/World/Sphere")
         binding = UsdShade.MaterialBindingAPI(prim)
@@ -562,16 +583,22 @@ class TestSetMaterialBinding:
 
         stage.DefinePrim("/World/Sphere", "Sphere")
         stage.DefinePrim("/Materials/Plastic", "Material")
-        apply_event(stage, {
-            "k": "set_material_binding",
-            "prim": "/World/Sphere",
-            "material_path": "/Materials/Plastic",
-        })
-        apply_event(stage, {
-            "k": "set_material_binding",
-            "prim": "/World/Sphere",
-            "material_path": "",
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "/Materials/Plastic",
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "",
+            },
+        )
 
         prim = stage.GetPrimAtPath("/World/Sphere")
         binding = UsdShade.MaterialBindingAPI(prim)
@@ -585,16 +612,22 @@ class TestSetMaterialBinding:
         stage.DefinePrim("/World/Sphere", "Sphere")
         stage.DefinePrim("/Materials/A", "Material")
         stage.DefinePrim("/Materials/B", "Material")
-        apply_event(stage, {
-            "k": "set_material_binding",
-            "prim": "/World/Sphere",
-            "material_path": "/Materials/A",
-        })
-        apply_event(stage, {
-            "k": "set_material_binding",
-            "prim": "/World/Sphere",
-            "material_path": "/Materials/B",
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "/Materials/A",
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "/Materials/B",
+            },
+        )
 
         prim = stage.GetPrimAtPath("/World/Sphere")
         binding = UsdShade.MaterialBindingAPI(prim)
@@ -613,21 +646,24 @@ class TestSetShaderInput:
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {
-                "diffuseColor": [0.8, 0.2, 0.2],
-                "metallic": 0.0,
-                "roughness": 0.5,
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {
+                    "diffuseColor": [0.8, 0.2, 0.2],
+                    "metallic": 0.0,
+                    "roughness": 0.5,
+                },
+                "input_types": {
+                    "diffuseColor": "color3f",
+                    "metallic": "float",
+                    "roughness": "float",
+                },
             },
-            "input_types": {
-                "diffuseColor": "color3f",
-                "metallic": "float",
-                "roughness": "float",
-            },
-        })
+        )
 
         shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/PBR"))
         assert shader.GetIdAttr().Get() == "UsdPreviewSurface"
@@ -644,23 +680,29 @@ class TestSetShaderInput:
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {"roughness": 0.3},
-            "input_types": {"roughness": "float"},
-        })
-        apply_event(stage, {
-            "k": "set_shader_connection",
-            "prim": "/Materials/Mat",
-            "connections": {
-                "outputs:surface": {
-                    "source_prim": "/Materials/Mat/PBR",
-                    "source_attr": "outputs:surface",
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {"roughness": 0.3},
+                "input_types": {"roughness": "float"},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_connection",
+                "prim": "/Materials/Mat",
+                "connections": {
+                    "outputs:surface": {
+                        "source_prim": "/Materials/Mat/PBR",
+                        "source_attr": "outputs:surface",
+                    },
                 },
             },
-        })
+        )
 
         material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Mat"))
         sources, _ = material.GetSurfaceOutput().GetConnectedSources()
@@ -677,13 +719,16 @@ class TestSetShaderInput:
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Brass", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Brass/SS",
-            "shader_id": "ND_standard_surface_surfaceshader",
-            "inputs": {"metalness": 1.0},
-            "input_types": {"metalness": "float"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Brass/SS",
+                "shader_id": "ND_standard_surface_surfaceshader",
+                "inputs": {"metalness": 1.0},
+                "input_types": {"metalness": "float"},
+            },
+        )
 
         material = UsdShade.Material(stage.GetPrimAtPath("/Materials/Brass"))
         assert not material.GetSurfaceOutput().GetAttr().HasAuthoredConnections()
@@ -698,20 +743,26 @@ class TestSetShaderInput:
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {"roughness": 0.3},
-            "input_types": {"roughness": "float"},
-        })
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {"roughness": 0.9},
-            "input_types": {"roughness": "float"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {"roughness": 0.3},
+                "input_types": {"roughness": "float"},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {"roughness": 0.9},
+                "input_types": {"roughness": "float"},
+            },
+        )
 
         shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/PBR"))
         assert abs(shader.GetInput("roughness").Get() - 0.9) < 1e-6
@@ -723,13 +774,16 @@ class TestSetShaderInput:
         from pxr import Sdf, UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/Tex",
-            "shader_id": "UsdUVTexture",
-            "inputs": {"file": "./r_normal_map.png"},
-            "input_types": {"file": "asset"},
-        })
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/Tex",
+                "shader_id": "UsdUVTexture",
+                "inputs": {"file": "./r_normal_map.png"},
+                "input_types": {"file": "asset"},
+            },
+        )
 
         shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/Tex"))
         file_input = shader.GetInput("file")
@@ -744,21 +798,24 @@ class TestSetShaderInput:
         from pxr import Gf, UsdShade
 
         stage.DefinePrim("/Materials/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Materials/Mat/Tex",
-            "shader_id": "UsdUVTexture",
-            "inputs": {
-                "bias": [-1.0, -1.0, -1.0, -1.0],
-                "scale": [2.0, 2.0, 2.0, 2.0],
-                "tint": [1.0, 0.5, 0.25, 0.75],
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Mat/Tex",
+                "shader_id": "UsdUVTexture",
+                "inputs": {
+                    "bias": [-1.0, -1.0, -1.0, -1.0],
+                    "scale": [2.0, 2.0, 2.0, 2.0],
+                    "tint": [1.0, 0.5, 0.25, 0.75],
+                },
+                "input_types": {
+                    "bias": "float4",
+                    "scale": "float4",
+                    "tint": "color4f",
+                },
             },
-            "input_types": {
-                "bias": "float4",
-                "scale": "float4",
-                "tint": "color4f",
-            },
-        })
+        )
 
         shader = UsdShade.Shader(stage.GetPrimAtPath("/Materials/Mat/Tex"))
         bias = shader.GetInput("bias").Get()
@@ -778,34 +835,37 @@ class TestSetShaderInput:
 
         events = [
             {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
-            {"k": "ensure_prim", "prim": "/World/Sphere",
-             "typeName": "Sphere"},
-            {"k": "ensure_prim", "prim": "/Materials",
-             "typeName": "Scope"},
-            {"k": "ensure_prim", "prim": "/Materials/Red",
-             "typeName": "Material"},
-            {"k": "set_shader_input",
-             "prim": "/Materials/Red/PBR",
-             "shader_id": "UsdPreviewSurface",
-             "inputs": {
-                 "diffuseColor": [1.0, 0.0, 0.0],
-                 "roughness": 0.4,
-             },
-             "input_types": {
-                 "diffuseColor": "color3f",
-                 "roughness": "float",
-             }},
-            {"k": "set_shader_connection",
-             "prim": "/Materials/Red",
-             "connections": {
-                 "outputs:surface": {
-                     "source_prim": "/Materials/Red/PBR",
-                     "source_attr": "outputs:surface",
-                 },
-             }},
-            {"k": "set_material_binding",
-             "prim": "/World/Sphere",
-             "material_path": "/Materials/Red"},
+            {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
+            {"k": "ensure_prim", "prim": "/Materials", "typeName": "Scope"},
+            {"k": "ensure_prim", "prim": "/Materials/Red", "typeName": "Material"},
+            {
+                "k": "set_shader_input",
+                "prim": "/Materials/Red/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {
+                    "diffuseColor": [1.0, 0.0, 0.0],
+                    "roughness": 0.4,
+                },
+                "input_types": {
+                    "diffuseColor": "color3f",
+                    "roughness": "float",
+                },
+            },
+            {
+                "k": "set_shader_connection",
+                "prim": "/Materials/Red",
+                "connections": {
+                    "outputs:surface": {
+                        "source_prim": "/Materials/Red/PBR",
+                        "source_attr": "outputs:surface",
+                    },
+                },
+            },
+            {
+                "k": "set_material_binding",
+                "prim": "/World/Sphere",
+                "material_path": "/Materials/Red",
+            },
         ]
         apply_events(stage, events)
 
@@ -835,30 +895,39 @@ class TestSetShaderConnection:
         stage.DefinePrim("/Mat", "Material")
         # set_shader_input for the source establishes its info:id but doesn't
         # author outputs.  Connection event then materializes outputs:rgb.
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/Tex",
-            "shader_id": "UsdUVTexture",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_connection",
-            "prim": "/Mat/PBR",
-            "connections": {
-                "inputs:diffuseColor": {
-                    "source_prim": "/Mat/Tex",
-                    "source_attr": "outputs:rgb",
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/Tex",
+                "shader_id": "UsdUVTexture",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_connection",
+                "prim": "/Mat/PBR",
+                "connections": {
+                    "inputs:diffuseColor": {
+                        "source_prim": "/Mat/Tex",
+                        "source_attr": "outputs:rgb",
+                    },
                 },
             },
-        })
+        )
 
         tex = UsdShade.Shader(stage.GetPrimAtPath("/Mat/Tex"))
         rgb = tex.GetOutput("rgb")
@@ -873,30 +942,39 @@ class TestSetShaderConnection:
         from pxr import Sdf, UsdShade
 
         stage.DefinePrim("/Mat", "Material")
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/PBR",
-            "shader_id": "UsdPreviewSurface",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/NormalMap",
-            "shader_id": "UsdUVTexture",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_connection",
-            "prim": "/Mat/PBR",
-            "connections": {
-                "inputs:normal": {
-                    "source_prim": "/Mat/NormalMap",
-                    "source_attr": "outputs:rgb",
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/NormalMap",
+                "shader_id": "UsdUVTexture",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_connection",
+                "prim": "/Mat/PBR",
+                "connections": {
+                    "inputs:normal": {
+                        "source_prim": "/Mat/NormalMap",
+                        "source_attr": "outputs:rgb",
+                    },
                 },
             },
-        })
+        )
 
         pbr = UsdShade.Shader(stage.GetPrimAtPath("/Mat/PBR"))
         normal_in = pbr.GetInput("normal")
@@ -910,30 +988,39 @@ class TestSetShaderConnection:
 
         stage.DefinePrim("/Mat", "Material")
         # Custom shader ID that Sdr doesn't know about.
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/CustomSrc",
-            "shader_id": "MyStudio_UnregisteredNode",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_input",
-            "prim": "/Mat/CustomDst",
-            "shader_id": "MyStudio_AlsoUnregistered",
-            "inputs": {},
-            "input_types": {},
-        })
-        apply_event(stage, {
-            "k": "set_shader_connection",
-            "prim": "/Mat/CustomDst",
-            "connections": {
-                "inputs:foo": {
-                    "source_prim": "/Mat/CustomSrc",
-                    "source_attr": "outputs:out",
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/CustomSrc",
+                "shader_id": "MyStudio_UnregisteredNode",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/CustomDst",
+                "shader_id": "MyStudio_AlsoUnregistered",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        apply_event(
+            stage,
+            {
+                "k": "set_shader_connection",
+                "prim": "/Mat/CustomDst",
+                "connections": {
+                    "inputs:foo": {
+                        "source_prim": "/Mat/CustomSrc",
+                        "source_attr": "outputs:out",
+                    },
                 },
             },
-        })
+        )
 
         src = UsdShade.Shader(stage.GetPrimAtPath("/Mat/CustomSrc"))
         out = src.GetOutput("out")
@@ -946,8 +1033,7 @@ class TestAtomicApply:
     def test_commits_on_success(self, stage):
         events = [
             {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A",
-             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
         ]
         with atomic_apply(stage):
             apply_events(stage, events)
@@ -961,9 +1047,12 @@ class TestAtomicApply:
 
         with pytest.raises(RuntimeError):
             with atomic_apply(stage):
-                apply_events(stage, [
-                    {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
-                ])
+                apply_events(
+                    stage,
+                    [
+                        {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
+                    ],
+                )
                 # Verify B exists mid-transaction
                 assert stage.GetPrimAtPath("/World/B").IsValid()
                 raise RuntimeError("simulated failure")
@@ -978,12 +1067,19 @@ class TestAtomicApply:
 
     def test_partial_batch_rollback(self, stage):
         # Set up a known starting point
-        apply_events(stage, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/Pre", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Pre"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Pre",
-             "fields": ["t"], "t": [10.0, 20.0, 30.0]},
-        ])
+        apply_events(
+            stage,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Pre", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Pre"},
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Pre",
+                    "fields": ["t"],
+                    "t": [10.0, 20.0, 30.0],
+                },
+            ],
+        )
 
         # Build a batch where event 3 will fail
         events = [
@@ -1020,8 +1116,7 @@ class TestReceiverStageFirstFlow:
         events = [
             {"k": K_ENSURE_PRIM, "prim": "/World/X", "typeName": "Xform"},
             {"k": K_ENSURE_XFORM_OPS, "prim": "/World/X"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/X",
-             "fields": ["t"], "t": [5.0, 6.0, 7.0]},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/X", "fields": ["t"], "t": [5.0, 6.0, 7.0]},
         ]
 
         with atomic_apply(stage):
@@ -1048,8 +1143,7 @@ class TestReceiverStageFirstFlow:
         adapter = MockAdapter()
         events = [
             {"k": K_ENSURE_PRIM, "prim": "/World/Y", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Y",
-             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Y", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
         ]
 
         adapter_called = False
@@ -1069,25 +1163,34 @@ class TestReceiverStageFirstFlow:
         """Existing stage state survives a failed batch."""
         from openusdconnect.adapters import MockAdapter
 
-        apply_events(stage, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/Existing", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Existing"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Existing",
-             "fields": ["t"], "t": [100.0, 200.0, 300.0]},
-        ])
+        apply_events(
+            stage,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Existing", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Existing"},
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Existing",
+                    "fields": ["t"],
+                    "t": [100.0, 200.0, 300.0],
+                },
+            ],
+        )
 
         adapter = MockAdapter()
         adapter.ensure_prim("/World/Existing", "Xform")
         adapter.ensure_xform_ops("/World/Existing")
-        adapter.set_xform_trs("/World/Existing",
-                              {"fields": ["t"], "t": [100.0, 200.0, 300.0]})
+        adapter.set_xform_trs("/World/Existing", {"fields": ["t"], "t": [100.0, 200.0, 300.0]})
 
         with pytest.raises(RuntimeError):
             with atomic_apply(stage):
-                apply_events(stage, [
-                    {"k": K_ENSURE_PRIM, "prim": "/World/New1", "typeName": "Xform"},
-                    {"k": K_ENSURE_PRIM, "prim": "/World/New2", "typeName": "Xform"},
-                ])
+                apply_events(
+                    stage,
+                    [
+                        {"k": K_ENSURE_PRIM, "prim": "/World/New1", "typeName": "Xform"},
+                        {"k": K_ENSURE_PRIM, "prim": "/World/New2", "typeName": "Xform"},
+                    ],
+                )
                 raise RuntimeError("fail")
 
         assert not stage.GetPrimAtPath("/World/New1").IsValid()

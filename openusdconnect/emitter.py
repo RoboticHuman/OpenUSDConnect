@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
-from .protocol import (
+from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -30,10 +30,13 @@ from .protocol import (
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
     REL_MATERIAL_BINDING,
-    SHADER_ATTR_SIDE_INPUT,
-    SHADER_ATTR_SIDE_OUTPUT,
+)
+from .shader_attrs import (
     SHADER_INPUT_PREFIX,
     SHADER_OUTPUT_PREFIX,
+    ShaderAttr,
+    shader_input_attr,
+    shader_output_attr,
 )
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
@@ -58,9 +61,15 @@ _SKIP_ATTR_PREFIXES = ("xformOp:", SHADER_INPUT_PREFIX, SHADER_OUTPUT_PREFIX)
 #   extent     — bounding box, computed from geometry by USD
 #   proxyPrim  — relationship target, not a value attribute
 #   info:id    — shader type identifier, handled by set_shader_input
-_SKIP_ATTR_NAMES = frozenset({
-    "visibility", "xformOpOrder", "extent", "proxyPrim", "info:id",
-})
+_SKIP_ATTR_NAMES = frozenset(
+    {
+        "visibility",
+        "xformOpOrder",
+        "extent",
+        "proxyPrim",
+        "info:id",
+    }
+)
 
 
 def _should_track_attr(attr_name: str) -> bool:
@@ -78,6 +87,7 @@ def _should_track_attr(attr_name: str) -> bool:
 def _values_equal(a, b) -> bool:
     """Compare two attribute values, handling numpy arrays."""
     import numpy as np
+
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         try:
             return np.array_equal(a, b)
@@ -283,26 +293,16 @@ def _read_material_binding(stage, prim_path):
     return str(targets[0]) if targets else ""
 
 
-def _connected_source_attr_name(src) -> str:
-    """Return the wire attribute name for a UsdShade connection source.
+def _connected_source_attr(src) -> ShaderAttr:
+    """Return the protocol attribute reference for a UsdShade connection source.
 
     Uses `sourceType` to choose `inputs:` vs `outputs:` so we cover the
     NodeGraph interface-forwarding case where the source is itself an
     input.
     """
-    side = (
-        SHADER_ATTR_SIDE_OUTPUT
-        if src.sourceType == UsdShade.AttributeType.Output
-        else SHADER_ATTR_SIDE_INPUT
-    )
-    return _shader_attr_name(side, src.sourceName)
-
-
-def _shader_attr_name(side: str, base_name: str) -> str:
-    """Build the protocol attribute name for a UsdShade input or output."""
-    if side == SHADER_ATTR_SIDE_INPUT:
-        return SHADER_INPUT_PREFIX + base_name
-    return SHADER_OUTPUT_PREFIX + base_name
+    if src.sourceType == UsdShade.AttributeType.Output:
+        return shader_output_attr(src.sourceName)
+    return shader_input_attr(src.sourceName)
 
 
 def _read_usdshade_connectable(stage, prim_path):
@@ -358,9 +358,9 @@ def _read_usdshade_connectable(stage, prim_path):
         name = inp.GetBaseName()
         sources, _ = inp.GetConnectedSources()
         if sources:
-            connections[_shader_attr_name(SHADER_ATTR_SIDE_INPUT, name)] = {
+            connections[shader_input_attr(name).qualified_name] = {
                 "source_prim": str(sources[0].source.GetPath()),
-                "source_attr": _connected_source_attr_name(sources[0]),
+                "source_attr": _connected_source_attr(sources[0]).qualified_name,
             }
             continue
         val = _usd_value_to_python(inp.Get())
@@ -378,9 +378,9 @@ def _read_usdshade_connectable(stage, prim_path):
         sources, _ = outp.GetConnectedSources()
         if not sources:
             continue
-        connections[_shader_attr_name(SHADER_ATTR_SIDE_OUTPUT, outp.GetBaseName())] = {
+        connections[shader_output_attr(outp.GetBaseName()).qualified_name] = {
             "source_prim": str(sources[0].source.GetPath()),
-            "source_attr": _connected_source_attr_name(sources[0]),
+            "source_attr": _connected_source_attr(sources[0]).qualified_name,
         }
 
     return container_kind, shader_id, inputs, input_types, connections
@@ -500,8 +500,8 @@ class NoticeEmitter:
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
             # Seed shader/nodegraph interface inputs and connections.
-            container_kind, shader_id, inputs, _types, connections = (
-                _read_usdshade_connectable(stage, cp)
+            container_kind, shader_id, inputs, _types, connections = _read_usdshade_connectable(
+                stage, cp
             )
             if container_kind:
                 pc[_C_SHADER_INPUTS] = {"shader_id": shader_id, "inputs": inputs}
@@ -522,9 +522,7 @@ class NoticeEmitter:
         Decrements the suppress depth. Notices are only collected
         again when depth reaches zero.
         """
-        assert self._suppress_depth > 0, (
-            "unsuppress() called without matching suppress()"
-        )
+        assert self._suppress_depth > 0, "unsuppress() called without matching suppress()"
         self._suppress_depth -= 1
 
     def suppressed(self):
@@ -677,7 +675,11 @@ class NoticeEmitter:
         return events
 
     def _build_dirty_prim_events(
-        self, prim_path: str, snap: dict, eps_trs: float, eps_mat: float,
+        self,
+        prim_path: str,
+        snap: dict,
+        eps_trs: float,
+        eps_mat: float,
         include_matrices: bool,
     ) -> list[dict]:
         """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
@@ -704,11 +706,13 @@ class NoticeEmitter:
         current_vsel = _read_variant_selections(self.stage, prim_path)
         last_vsel = pc.get(_C_VARIANT_SELECTIONS, {})
         if current_vsel != last_vsel:
-            events.append({
-                "k": K_SET_VARIANT_SELECTIONS,
-                "prim": prim_path,
-                "selections": dict(current_vsel),
-            })
+            events.append(
+                {
+                    "k": K_SET_VARIANT_SELECTIONS,
+                    "prim": prim_path,
+                    "selections": dict(current_vsel),
+                }
+            )
             pc[_C_VARIANT_SELECTIONS] = current_vsel
 
         # Reference diff
@@ -737,7 +741,6 @@ class NoticeEmitter:
             events.append(pay_ev)
             pc[_C_PAYLOADS] = current_payloads
 
-
         # Payload load-state diff
         if prim and prim.IsValid() and prim.HasAuthoredPayloads():
             is_loaded = prim.IsLoaded()
@@ -753,11 +756,13 @@ class NoticeEmitter:
         current_binding = _read_material_binding(self.stage, prim_path)
         last_binding = pc.get(_C_MATERIAL_BINDING, "")
         if current_binding != last_binding:
-            events.append({
-                "k": K_SET_MATERIAL_BINDING,
-                "prim": prim_path,
-                "material_path": current_binding,
-            })
+            events.append(
+                {
+                    "k": K_SET_MATERIAL_BINDING,
+                    "prim": prim_path,
+                    "material_path": current_binding,
+                }
+            )
             pc[_C_MATERIAL_BINDING] = current_binding
 
         # Shader/NodeGraph interface input + connection diff
@@ -775,13 +780,15 @@ class NoticeEmitter:
                     changed_inputs[name] = val
                     changed_types[name] = current_types[name]
             if changed_inputs:
-                events.append({
-                    "k": K_SET_SHADER_INPUT,
-                    "prim": prim_path,
-                    "shader_id": shader_id,
-                    "inputs": changed_inputs,
-                    "input_types": changed_types,
-                })
+                events.append(
+                    {
+                        "k": K_SET_SHADER_INPUT,
+                        "prim": prim_path,
+                        "shader_id": shader_id,
+                        "inputs": changed_inputs,
+                        "input_types": changed_types,
+                    }
+                )
             pc[_C_SHADER_INPUTS] = {
                 "shader_id": shader_id,
                 "inputs": current_inputs,
@@ -790,13 +797,8 @@ class NoticeEmitter:
             # Connection diff
             last_conns = pc.get(_C_SHADER_CONNECTIONS, {})
             if current_conns != last_conns:
-                new_conns = {
-                    k: v for k, v in current_conns.items()
-                    if v != last_conns.get(k)
-                }
-                removed = [
-                    k for k in last_conns if k not in current_conns
-                ]
+                new_conns = {k: v for k, v in current_conns.items() if v != last_conns.get(k)}
+                removed = [k for k in last_conns if k not in current_conns]
                 if new_conns or removed:
                     ev = {
                         "k": K_SET_SHADER_CONNECTION,
@@ -839,11 +841,13 @@ class NoticeEmitter:
                 vis_val = vis_attr.Get() or "inherited"
                 last_vis = pc.get(_C_VISIBILITY)
                 if vis_val != last_vis:
-                    events.append({
-                        "k": K_SET_VISIBILITY,
-                        "prim": prim_path,
-                        "visible": vis_val != "invisible",
-                    })
+                    events.append(
+                        {
+                            "k": K_SET_VISIBILITY,
+                            "prim": prim_path,
+                            "visible": vis_val != "invisible",
+                        }
+                    )
                     pc[_C_VISIBILITY] = vis_val
 
         # Gprim attribute diff
@@ -883,7 +887,7 @@ class NoticeEmitter:
                         # exact type.
                         if pvapi is None:
                             pvapi = UsdGeom.PrimvarsAPI(prim)
-                        pv = pvapi.GetPrimvar(attr_name[len(PRIMVAR_PREFIX):])
+                        pv = pvapi.GetPrimvar(attr_name[len(PRIMVAR_PREFIX) :])
                         if pv:
                             meta = {"typeName": str(attr.GetTypeName())}
                             if pv.HasAuthoredInterpolation():
@@ -915,12 +919,14 @@ class NoticeEmitter:
             if not near_list(snap["local_m16"], last_mats.get("local"), eps_mat) or not near_list(
                 snap["world_m16"], last_mats.get("world"), eps_mat
             ):
-                events.append({
-                    "k": K_SET_XFORM_MATRICES,
-                    "prim": prim_path,
-                    "local_m": snap["local_m16"],
-                    "world_m": snap["world_m16"],
-                })
+                events.append(
+                    {
+                        "k": K_SET_XFORM_MATRICES,
+                        "prim": prim_path,
+                        "local_m": snap["local_m16"],
+                        "world_m": snap["world_m16"],
+                    }
+                )
                 pc[_C_MATS] = {
                     "local": snap["local_m16"],
                     "world": snap["world_m16"],

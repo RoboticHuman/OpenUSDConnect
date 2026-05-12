@@ -26,6 +26,7 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 from integrations.blender.shader_mapper import (
     ActivisionMtlxMapper,
     MaterialXStandardSurfaceMapper,
+    NormalMapShaderMapper,
     create_default_registry,
 )
 
@@ -62,6 +63,7 @@ def _clear_materials():
 # Test: registry returns vendored mapper for Standard Surface
 # ------------------------------------------------------------------
 
+
 def test_registry_returns_vendored_mapper(r):
     name = "registry_returns_vendored_mapper"
     reg = create_default_registry()
@@ -82,6 +84,7 @@ def test_registry_returns_vendored_mapper(r):
 # Test: registry has OpenPBR and utility handlers from io_blender_mtlx
 # ------------------------------------------------------------------
 
+
 def test_registry_vendored_coverage(r):
     name = "registry_vendored_coverage"
     reg = create_default_registry()
@@ -90,7 +93,6 @@ def test_registry_vendored_coverage(r):
         "ND_standard_surface_surfaceshader",
         "ND_open_pbr_surface_surfaceshader",
         "ND_surfacematerial",
-        "ND_normalmap_float",
         "ND_multiply_float",
         "ND_mix_color3",
     ]
@@ -106,6 +108,15 @@ def test_registry_vendored_coverage(r):
         r.fail(name, f"missing vendored mappers: {missing}")
         return
 
+    normal_mapper = reg.get("ND_normalmap_float")
+    if not isinstance(normal_mapper, NormalMapShaderMapper):
+        r.fail(
+            name,
+            "ND_normalmap_float should use the specialized normal-map mapper, "
+            f"got {type(normal_mapper).__name__}",
+        )
+        return
+
     # Texture nodes should NOT be vendored (our TextureShaderMapper handles them)
     tex_mapper = reg.get("ND_image_color3")
     if tex_mapper is not None and isinstance(tex_mapper, ActivisionMtlxMapper):
@@ -119,15 +130,19 @@ def test_registry_vendored_coverage(r):
 # Test: our mapper creates 5 nodes of the correct types
 # ------------------------------------------------------------------
 
+
 def test_our_mapper_node_count_and_types(r):
     name = "our_mapper_node_count_and_types"
     _clear_materials()
     mat = _fresh_material("TestStdSurf")
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     nodes, input_map, output_map = mapper.create_network(
-        mat.node_tree, {},
+        mat.node_tree,
+        {},
     )
     if len(nodes) != 5:
         r.fail(name, f"expected 5 nodes, got {len(nodes)}")
@@ -151,12 +166,15 @@ def test_our_mapper_node_count_and_types(r):
 # Test: 4 internal links wired correctly
 # ------------------------------------------------------------------
 
+
 def _link_key(link):
     """Return a comparable tuple for a node tree link."""
     return (
-        link.from_node.bl_idname, link.from_node.name,
+        link.from_node.bl_idname,
+        link.from_node.name,
         link.from_socket.name,
-        link.to_node.bl_idname, link.to_node.name,
+        link.to_node.bl_idname,
+        link.to_node.name,
         link.to_socket.name,
     )
 
@@ -170,7 +188,9 @@ def test_our_mapper_internal_links(r):
         mat.node_tree.nodes.remove(node)
 
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     nodes, _, _ = mapper.create_network(mat.node_tree, {})
     bsdf, mix_base, huesat_base, mix_spec, huesat_spec = nodes
@@ -183,20 +203,20 @@ def test_our_mapper_internal_links(r):
     # Build set of (from_node, from_socket_idx, to_node, to_socket_idx)
     link_set = set()
     for link in links:
-        link_set.add((
-            link.from_node.name, link.from_socket.name,
-            link.to_node.name, link.to_socket.name,
-        ))
+        link_set.add(
+            (
+                link.from_node.name,
+                link.from_socket.name,
+                link.to_node.name,
+                link.to_socket.name,
+            )
+        )
 
     expected = {
-        (huesat_base.name, huesat_base.outputs[0].name,
-         mix_base.name, mix_base.inputs[6].name),
-        (mix_base.name, mix_base.outputs[2].name,
-         bsdf.name, bsdf.inputs["Base Color"].name),
-        (huesat_spec.name, huesat_spec.outputs[0].name,
-         mix_spec.name, mix_spec.inputs[6].name),
-        (mix_spec.name, mix_spec.outputs[2].name,
-         bsdf.name, bsdf.inputs["Specular Tint"].name),
+        (huesat_base.name, huesat_base.outputs[0].name, mix_base.name, mix_base.inputs[6].name),
+        (mix_base.name, mix_base.outputs[2].name, bsdf.name, bsdf.inputs["Base Color"].name),
+        (huesat_spec.name, huesat_spec.outputs[0].name, mix_spec.name, mix_spec.inputs[6].name),
+        (mix_spec.name, mix_spec.outputs[2].name, bsdf.name, bsdf.inputs["Specular Tint"].name),
     }
 
     if link_set != expected:
@@ -210,17 +230,35 @@ def test_our_mapper_internal_links(r):
 # ------------------------------------------------------------------
 
 _EXPECTED_INPUTS = {
-    "base", "base_color", "metalness", "diffuse_roughness",
-    "specular", "specular_color", "specular_IOR",
-    "specular_anisotropy", "specular_rotation", "specular_roughness",
+    "base",
+    "base_color",
+    "metalness",
+    "diffuse_roughness",
+    "specular",
+    "specular_color",
+    "specular_IOR",
+    "specular_anisotropy",
+    "specular_rotation",
+    "specular_roughness",
     "transmission",
-    "subsurface", "subsurface_radius", "subsurface_scale",
+    "subsurface",
+    "subsurface_radius",
+    "subsurface_scale",
     "subsurface_anisotropy",
-    "sheen", "sheen_color", "sheen_roughness",
-    "coat", "coat_color", "coat_roughness", "coat_ior", "coat_normal",
-    "thin_film_thickness", "thin_film_IOR",
-    "emission", "emission_color",
-    "normal", "tangent",
+    "sheen",
+    "sheen_color",
+    "sheen_roughness",
+    "coat",
+    "coat_color",
+    "coat_roughness",
+    "coat_ior",
+    "coat_normal",
+    "thin_film_thickness",
+    "thin_film_IOR",
+    "emission",
+    "emission_color",
+    "normal",
+    "tangent",
 }
 
 
@@ -229,7 +267,9 @@ def test_our_mapper_input_coverage(r):
     _clear_materials()
     mat = _fresh_material("TestCoverage")
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     _, input_map, output_map = mapper.create_network(mat.node_tree, {})
 
@@ -248,12 +288,15 @@ def test_our_mapper_input_coverage(r):
 # Test: values are applied to the correct sockets
 # ------------------------------------------------------------------
 
+
 def test_our_mapper_value_application(r):
     name = "our_mapper_value_application"
     _clear_materials()
     mat = _fresh_material("TestValues")
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     test_inputs = {
         "base_color": [0.8, 0.2, 0.1],
@@ -306,12 +349,15 @@ def test_our_mapper_value_application(r):
 # Test: idempotent — second call reuses existing nodes
 # ------------------------------------------------------------------
 
+
 def test_our_mapper_idempotent(r):
     name = "our_mapper_idempotent"
     _clear_materials()
     mat = _fresh_material("TestIdemp")
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     nodes1, _, _ = mapper.create_network(mat.node_tree, {})
     nodes2, _, _ = mapper.create_network(mat.node_tree, {})
@@ -338,6 +384,7 @@ def test_our_mapper_idempotent(r):
 # Test: parity with io_blender_mtlx handler
 # ------------------------------------------------------------------
 
+
 def _socket_identity(socket):
     """Comparable identity: (node_type, node_name, socket_name)."""
     return (socket.node.bl_idname, socket.name)
@@ -348,8 +395,11 @@ def _compare_against_reference(r, name, our_tree, our_nodes, our_inputs, our_out
     import MaterialX as mx
 
     vendor_path = os.path.join(
-        project_root, "vendor", "io_blender_mtlx",
-        "bl_env", "addons",
+        project_root,
+        "vendor",
+        "io_blender_mtlx",
+        "bl_env",
+        "addons",
     )
     if vendor_path not in sys.path:
         sys.path.insert(0, vendor_path)
@@ -362,14 +412,17 @@ def _compare_against_reference(r, name, our_tree, our_nodes, our_inputs, our_out
     mx.loadLibraries(mx.getDefaultDataLibraryFolders(), mx.getDefaultDataSearchPath(), doc)
     node_graph = doc.addNodeGraph(f"NG_{name}")
     mx_node = node_graph.addNode(
-        "standard_surface", "test_std_surf", "surfaceshader",
+        "standard_surface",
+        "test_std_surf",
+        "surfaceshader",
     )
 
     ref_mat = _fresh_material(f"Ref_{name}")
     for node in list(ref_mat.node_tree.nodes):
         ref_mat.node_tree.nodes.remove(node)
     ref_nodes, ref_inputs, ref_outputs = ref_handler(
-        ref_mat.node_tree, mx_node,
+        ref_mat.node_tree,
+        mx_node,
     )
 
     # Compare node count
@@ -388,10 +441,14 @@ def _compare_against_reference(r, name, our_tree, our_nodes, our_inputs, our_out
     def link_topology(tree):
         result = set()
         for link in tree.links:
-            result.add((
-                link.from_node.bl_idname, link.from_socket.name,
-                link.to_node.bl_idname, link.to_socket.name,
-            ))
+            result.add(
+                (
+                    link.from_node.bl_idname,
+                    link.from_socket.name,
+                    link.to_node.bl_idname,
+                    link.to_socket.name,
+                )
+            )
         return result
 
     ref_links = link_topology(ref_mat.node_tree)
@@ -434,13 +491,21 @@ def test_fallback_parity_with_io_blender_mtlx(r):
     for node in list(our_mat.node_tree.nodes):
         our_mat.node_tree.nodes.remove(node)
     mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader", "ShaderNodeBsdfPrincipled", {},
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
     )
     our_nodes, our_inputs, our_outputs = mapper.create_network(
-        our_mat.node_tree, {},
+        our_mat.node_tree,
+        {},
     )
     _compare_against_reference(
-        r, name, our_mat.node_tree, our_nodes, our_inputs, our_outputs,
+        r,
+        name,
+        our_mat.node_tree,
+        our_nodes,
+        our_inputs,
+        our_outputs,
     )
 
 
@@ -457,13 +522,21 @@ def test_vendored_parity_with_io_blender_mtlx(r):
     for node in list(our_mat.node_tree.nodes):
         our_mat.node_tree.nodes.remove(node)
     mapper = ActivisionMtlxMapper(
-        "ND_standard_surface_surfaceshader", "", {},
+        "ND_standard_surface_surfaceshader",
+        "",
+        {},
     )
     our_nodes, our_inputs, our_outputs = mapper.create_network(
-        our_mat.node_tree, {},
+        our_mat.node_tree,
+        {},
     )
     _compare_against_reference(
-        r, name, our_mat.node_tree, our_nodes, our_inputs, our_outputs,
+        r,
+        name,
+        our_mat.node_tree,
+        our_nodes,
+        our_inputs,
+        our_outputs,
     )
 
 
@@ -476,7 +549,9 @@ def test_vendored_open_pbr(r):
     for node in list(mat.node_tree.nodes):
         mat.node_tree.nodes.remove(node)
     mapper = ActivisionMtlxMapper(
-        "ND_open_pbr_surface_surfaceshader", "", {},
+        "ND_open_pbr_surface_surfaceshader",
+        "",
+        {},
     )
     nodes, input_map, output_map = mapper.create_network(mat.node_tree, {})
 
@@ -495,6 +570,7 @@ def test_vendored_open_pbr(r):
 # ------------------------------------------------------------------
 # End-to-end: full adapter flow with brass material from basicTextured
 # ------------------------------------------------------------------
+
 
 def test_adapter_brass_material(r):
     """End-to-end: BlenderAdapter creates Standard Surface brass material.
@@ -648,6 +724,7 @@ def test_adapter_brass_material(r):
 # Post-import MaterialX enrichment from USD reference
 # ------------------------------------------------------------------
 
+
 def test_enrichment_from_reference(r):
     """set_reference imports teapot, enrichment applies MaterialX material."""
     name = "enrichment_from_reference"
@@ -659,12 +736,22 @@ def test_enrichment_from_reference(r):
 
     adapter = BlenderAdapter()
     adapter.ensure_prim("/World/Teapot", "Xform")
-    adapter.set_reference("/World/Teapot", [{
-        "asset_path": os.path.join(
-            project_root, "assets", "intent-vfx", "assets", "teapot", "teapot.usd",
-        ),
-        "prim_path": "/teapot",
-    }])
+    adapter.set_reference(
+        "/World/Teapot",
+        [
+            {
+                "asset_path": os.path.join(
+                    project_root,
+                    "assets",
+                    "intent-vfx",
+                    "assets",
+                    "teapot",
+                    "teapot.usd",
+                ),
+                "prim_path": "/teapot",
+            }
+        ],
+    )
 
     # Verify: material should exist and have MaterialX Standard Surface network
     mat = bpy.data.materials.get("default_material")
@@ -709,6 +796,7 @@ def test_enrichment_from_reference(r):
 # ------------------------------------------------------------------
 # Runner
 # ------------------------------------------------------------------
+
 
 def main():
     print("\n=== MaterialX Shader Mapper Tests ===\n")

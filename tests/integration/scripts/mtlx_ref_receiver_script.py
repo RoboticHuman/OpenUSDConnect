@@ -28,7 +28,7 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 
 from integrations.blender.blender_adapter import BlenderAdapter
 from openusdconnect.codec import message_to_dict
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_MATERIAL_BINDING,
@@ -60,8 +60,10 @@ def _process_event(adapter, ev):
         adapter.set_material_binding(prim_path, ev.get("material_path", ""))
     elif k == K_SET_SHADER_INPUT:
         adapter.set_shader_input(
-            prim_path, ev.get("shader_id", ""),
-            ev.get("inputs", {}), ev.get("input_types", {}),
+            prim_path,
+            ev.get("shader_id", ""),
+            ev.get("inputs", {}),
+            ev.get("input_types", {}),
         )
     elif k == K_SET_SHADER_CONNECTION:
         adapter.set_shader_connection(prim_path, ev.get("connections", {}))
@@ -73,7 +75,7 @@ def main():
     out_path = ""
 
     if "--" in argv:
-        script_args = argv[argv.index("--") + 1:]
+        script_args = argv[argv.index("--") + 1 :]
         for i, arg in enumerate(script_args):
             if arg == "--port" and i + 1 < len(script_args):
                 port = int(script_args[i + 1])
@@ -98,10 +100,7 @@ def main():
         batch = receiver.drain_queue()
         if batch:
             lines.extend(batch)
-            if any(
-                message_to_dict(b).get("event", {}).get("k") == "set_reference"
-                for b in batch
-            ):
+            if any(message_to_dict(b).get("event", {}).get("k") == "set_reference" for b in batch):
                 break
     print(f"[MtlxRefReceiver] Got {len(lines)} messages from queue")
 
@@ -143,10 +142,7 @@ def main():
     # Container should have children (imported content parented under it)
     if container:
         child_names = [c.name for c in container.children]
-        results["has_children"] = (
-            "PASS" if child_names
-            else "FAIL: container has no children"
-        )
+        results["has_children"] = "PASS" if child_names else "FAIL: container has no children"
     else:
         results["has_children"] = "SKIP"
 

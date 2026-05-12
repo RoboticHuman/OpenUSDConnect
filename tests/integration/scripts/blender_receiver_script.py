@@ -28,7 +28,7 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 
 from integrations.blender.blender_adapter import BlenderAdapter
 from openusdconnect.codec import message_to_dict
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_VISIBILITY,

@@ -8,7 +8,7 @@ import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -233,15 +233,15 @@ class TestReentrantSuppress:
         """Inner unsuppress does not re-enable when outer suppress is active."""
         stage, emitter = _make_stage_and_emitter()
 
-        emitter.suppress()       # depth 1
-        emitter.suppress()       # depth 2
-        emitter.unsuppress()     # depth 1 — still suppressed
+        emitter.suppress()  # depth 1
+        emitter.suppress()  # depth 2
+        emitter.unsuppress()  # depth 1 — still suppressed
 
         stage.DefinePrim("/World/ShouldBeHidden", "Xform")
         events = emitter.build_events_for_dirty()
         assert events == []
 
-        emitter.unsuppress()     # depth 0
+        emitter.unsuppress()  # depth 0
 
     def test_nested_suppress_resumes_at_zero(self):
         """Full unnesting resumes collection."""
@@ -250,7 +250,7 @@ class TestReentrantSuppress:
         emitter.suppress()
         emitter.suppress()
         emitter.unsuppress()
-        emitter.unsuppress()     # depth 0
+        emitter.unsuppress()  # depth 0
 
         stage.DefinePrim("/World/Visible", "Xform")
         events = emitter.build_events_for_dirty()
@@ -1081,8 +1081,7 @@ class TestGprimAttrEmission:
 
         events = emitter.build_events_for_dirty()
         attr_evs = [
-            e for e in events
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
         assert len(attr_evs) == 1
         assert abs(attr_evs[0]["attrs"]["radius"] - 2.0) < 1e-6
@@ -1098,8 +1097,7 @@ class TestGprimAttrEmission:
         prim.GetAttribute("radius").Set(5.0)
         events = emitter.build_events_for_dirty()
         attr_evs = [
-            e for e in events
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
         assert len(attr_evs) == 1
         assert abs(attr_evs[0]["attrs"]["radius"] - 5.0) < 1e-6
@@ -1182,8 +1180,7 @@ class TestGprimAttrEmission:
         emitter.mark_dirty("/World/Sphere")
         events1 = emitter.build_events_for_dirty(include_matrices=False)
         attr_evs1 = [
-            e for e in events1
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+            e for e in events1 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
         assert len(attr_evs1) == 1
         initial_radius = attr_evs1[0]["attrs"]["radius"]
@@ -1194,8 +1191,7 @@ class TestGprimAttrEmission:
         events2 = emitter.build_events_for_dirty(include_matrices=False)
 
         attr_evs2 = [
-            e for e in events2
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
+            e for e in events2 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
         assert len(attr_evs2) == 1
         new_radius = attr_evs2[0]["attrs"]["radius"]
@@ -1223,8 +1219,7 @@ class TestGprimAttrEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         attr_evs = [
-            e for e in events
-            if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Guide"
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Guide"
         ]
         assert len(attr_evs) == 1
         assert attr_evs[0]["attrs"]["purpose"] == "guide"
@@ -1235,9 +1230,15 @@ class TestGprimAttrEmission:
 
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/Tri")
-        mesh.GetPointsAttr().Set(Vt.Vec3fArray([
-            Gf.Vec3f(0, 0, 0), Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0),
-        ]))
+        mesh.GetPointsAttr().Set(
+            Vt.Vec3fArray(
+                [
+                    Gf.Vec3f(0, 0, 0),
+                    Gf.Vec3f(1, 0, 0),
+                    Gf.Vec3f(0, 1, 0),
+                ]
+            )
+        )
         mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3]))
         mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2]))
 
@@ -1259,13 +1260,15 @@ class TestGprimAttrEmission:
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/UVMesh")
         pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
-        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
-                                 UsdGeom.Tokens.faceVarying)
+        st = pvapi.CreatePrimvar(
+            "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
+        )
         st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(0, 1)]))
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
-                     and e["prim"] == "/World/UVMesh"]
+        attr_evs = [
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/UVMesh"
+        ]
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "primvars:st" in attrs
@@ -1282,13 +1285,15 @@ class TestGprimAttrEmission:
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/ColorMesh")
         pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
-        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
-                                 UsdGeom.Tokens.vertex)
+        dc = pvapi.CreatePrimvar(
+            "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
+        )
         dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0), Gf.Vec3f(0, 0, 1)]))
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
-                     and e["prim"] == "/World/ColorMesh"]
+        attr_evs = [
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/ColorMesh"
+        ]
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "primvars:displayColor" in attrs
@@ -1305,11 +1310,13 @@ class TestGprimAttrEmission:
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/Multi")
         pvapi = UsdGeom.PrimvarsAPI(mesh.GetPrim())
-        st = pvapi.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
-                                 UsdGeom.Tokens.faceVarying)
+        st = pvapi.CreatePrimvar(
+            "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
+        )
         st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0)]))
-        dc = pvapi.CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray,
-                                 UsdGeom.Tokens.vertex)
+        dc = pvapi.CreatePrimvar(
+            "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
+        )
         dc.Set(Vt.Vec3fArray([Gf.Vec3f(1, 1, 1)]))
 
         # Flush initial events
@@ -1319,8 +1326,9 @@ class TestGprimAttrEmission:
         st.Set(Vt.Vec2fArray([Gf.Vec2f(0.5, 0.5), Gf.Vec2f(1, 1)]))
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
-                     and e["prim"] == "/World/Multi"]
+        attr_evs = [
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Multi"
+        ]
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         # Only the changed primvar is in the event
@@ -1333,14 +1341,21 @@ class TestGprimAttrEmission:
 
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/NMesh")
-        mesh.GetNormalsAttr().Set(Vt.Vec3fArray([
-            Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 0, 1), Gf.Vec3f(0, 0, 1),
-        ]))
+        mesh.GetNormalsAttr().Set(
+            Vt.Vec3fArray(
+                [
+                    Gf.Vec3f(0, 0, 1),
+                    Gf.Vec3f(0, 0, 1),
+                    Gf.Vec3f(0, 0, 1),
+                ]
+            )
+        )
         mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS
-                     and e["prim"] == "/World/NMesh"]
+        attr_evs = [
+            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/NMesh"
+        ]
         assert len(attr_evs) == 1
         attrs = attr_evs[0]["attrs"]
         assert "normals" in attrs
@@ -1367,9 +1382,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         bind_evs = [
-            e for e in events
-            if e["k"] == K_SET_MATERIAL_BINDING
-            and e["prim"] == "/World/Sphere"
+            e for e in events if e["k"] == K_SET_MATERIAL_BINDING and e["prim"] == "/World/Sphere"
         ]
         assert len(bind_evs) == 1
         assert bind_evs[0]["material_path"] == "/Materials/Red"
@@ -1383,18 +1396,17 @@ class TestMaterialEmission:
         shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput(
-            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+            "diffuseColor",
+            Sdf.ValueTypeNames.Color3f,
         ).Set(Gf.Vec3f(0.8, 0.2, 0.2))
         shader.CreateInput(
-            "roughness", Sdf.ValueTypeNames.Float,
+            "roughness",
+            Sdf.ValueTypeNames.Float,
         ).Set(0.5)
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"
-        ]
+        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"]
         assert len(shader_evs) == 1
         assert shader_evs[0]["shader_id"] == "UsdPreviewSurface"
         assert "diffuseColor" in shader_evs[0]["inputs"]
@@ -1419,10 +1431,7 @@ class TestMaterialEmission:
         tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/Tex"
-        ]
+        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/Tex"]
         assert len(shader_evs) == 1
         ev = shader_evs[0]
         assert ev["shader_id"] == "UsdUVTexture"
@@ -1445,12 +1454,11 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         ng_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/NG_Inner"
+            e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/NG_Inner"
         ]
         assert len(ng_evs) == 1
         ev = ng_evs[0]
-        assert ev["shader_id"] == ""        # NodeGraph has no info:id
+        assert ev["shader_id"] == ""  # NodeGraph has no info:id
         assert ev["inputs"].get("tint") == [1.0, 0.5, 0.25]
         assert ev["input_types"].get("tint") == "color3f"
 
@@ -1471,8 +1479,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         mat_conn_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat"
+            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat"
         ]
         assert len(mat_conn_evs) == 1
         conns = mat_conn_evs[0]["connections"]
@@ -1497,8 +1504,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         ng_conn_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG"
+            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG"
         ]
         assert len(ng_conn_evs) == 1
         conns = ng_conn_evs[0]["connections"]
@@ -1523,8 +1529,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         mul_conn_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG/mul"
+            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG/mul"
         ]
         assert len(mul_conn_evs) == 1
         conn = mul_conn_evs[0]["connections"]["inputs:in2"]
@@ -1540,10 +1545,12 @@ class TestMaterialEmission:
         shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput(
-            "diffuseColor", Sdf.ValueTypeNames.Color3f,
+            "diffuseColor",
+            Sdf.ValueTypeNames.Color3f,
         ).Set(Gf.Vec3f(1, 0, 0))
         shader.CreateInput(
-            "roughness", Sdf.ValueTypeNames.Float,
+            "roughness",
+            Sdf.ValueTypeNames.Float,
         ).Set(0.4)
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
@@ -1553,10 +1560,7 @@ class TestMaterialEmission:
         # Change only roughness
         shader.GetInput("roughness").Set(0.9)
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"
-        ]
+        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"]
         assert len(shader_evs) == 1
         assert "roughness" in shader_evs[0]["inputs"]
         assert "diffuseColor" not in shader_evs[0]["inputs"]
@@ -1570,7 +1574,8 @@ class TestMaterialEmission:
         shader = UsdShade.Shader.Define(stage, "/Mat/PBR")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput(
-            "roughness", Sdf.ValueTypeNames.Float,
+            "roughness",
+            Sdf.ValueTypeNames.Float,
         ).Set(0.5)
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
@@ -1580,9 +1585,5 @@ class TestMaterialEmission:
         # Mark dirty but don't change anything
         emitter.mark_dirty("/Mat/PBR")
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [
-            e for e in events
-            if e["k"] == K_SET_SHADER_INPUT
-        ]
+        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT]
         assert len(shader_evs) == 0
-

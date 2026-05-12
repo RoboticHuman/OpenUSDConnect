@@ -36,16 +36,16 @@ LOG = logging.getLogger("openusdconnect.unreal")
 
 # -- Module state --------------------------------------------------------
 
-_receiver = None        # ReceiverThread
-_emitter = None         # NoticeEmitter
-_sender_sock = None     # TCP socket for emitter txn messages
-_tick_handle = None     # Slate tick callback handle
-_last_seq: int = 0      # Highest sequence number received
-_stage = None           # Cached Usd.Stage reference
-_root_layer_id = ""     # Root layer identifier for staleness detection
-_root_layer_name = ""   # For stage re-lookup on lifecycle events
-_client_id: str = ""    # Per-session identifier
-_origin: str = ""       # Shared origin for echo suppression
+_receiver = None  # ReceiverThread
+_emitter = None  # NoticeEmitter
+_sender_sock = None  # TCP socket for emitter txn messages
+_tick_handle = None  # Slate tick callback handle
+_last_seq: int = 0  # Highest sequence number received
+_stage = None  # Cached Usd.Stage reference
+_root_layer_id = ""  # Root layer identifier for staleness detection
+_root_layer_name = ""  # For stage re-lookup on lifecycle events
+_client_id: str = ""  # Per-session identifier
+_origin: str = ""  # Shared origin for echo suppression
 _host: str = ""
 _port: int = 0
 _coalesce_seconds: float = 0.1
@@ -54,6 +54,7 @@ _running: bool = False
 
 
 # -- Stage lookup --------------------------------------------------------
+
 
 def _find_stage(root_layer_name: str):
     """Find a stage in UsdUtils.StageCache matching the root layer name.
@@ -93,8 +94,7 @@ def _ensure_stage():
         current_id = _stage.GetRootLayer().GetDisplayName()
         if current_id == _root_layer_id:
             return _stage
-        LOG.info("Stage root layer changed (%s → %s), re-attaching...",
-                 _root_layer_id, current_id)
+        LOG.info("Stage root layer changed (%s → %s), re-attaching...", _root_layer_id, current_id)
 
     # Stage missing or stale — try to find it again
     stage = _find_stage(_root_layer_name)
@@ -142,6 +142,7 @@ def _reattach_emitter(stage):
 
 # -- Tick callback -------------------------------------------------------
 
+
 def _on_tick(delta_seconds: float):
     """Slate post-tick callback. Drains receiver queue and flushes emitter."""
     global _last_seq, _last_send_time
@@ -169,7 +170,10 @@ def _apply_received_lines(stage, lines: list[str]):
     global _last_seq
 
     from openusdconnect.event_apply import apply_events, atomic_apply
-    from openusdconnect.protocol import MSG_EVENT, MSG_RESYNC
+    from openusdconnect.protocol_constants import (
+        MSG_EVENT,
+        MSG_RESYNC,
+    )
 
     events_to_apply = []
 
@@ -233,6 +237,7 @@ def _flush_emitter():
 
 # -- Public API ----------------------------------------------------------
 
+
 def start(
     host: str = "127.0.0.1",
     port: int = 7200,
@@ -271,6 +276,7 @@ def start(
     _host = host
     _port = port
     from openusdconnect.client_id import make_stable_client_id
+
     _client_id = client_id or make_stable_client_id("ue")
     _origin = origin or f"ue-{uuid.uuid4().hex[:8]}"
     _coalesce_seconds = coalesce

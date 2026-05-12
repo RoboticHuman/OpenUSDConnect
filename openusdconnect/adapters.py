@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
-from .protocol import (
+from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
@@ -114,15 +114,16 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_shader_input(self, prim_path: str, shader_id: str,
-                         inputs: dict, input_types: dict) -> bool:
+    def set_shader_input(
+        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    ) -> bool:
         """Set shader input values on a shader prim."""
         raise NotImplementedError
 
     @abstractmethod
-    def set_shader_connection(self, prim_path: str,
-                              connections: dict,
-                              disconnections: list | None = None) -> bool:
+    def set_shader_connection(
+        self, prim_path: str, connections: dict, disconnections: list | None = None
+    ) -> bool:
         """Apply UsdShade input/output connection and disconnection edges."""
         raise NotImplementedError
 
@@ -148,10 +149,7 @@ class ShaderMapper(ABC):
     def get_usd_input(self, native_name: str) -> str | None:
         """Return the USD input name for a DCC-native input (reverse lookup)."""
         if not hasattr(self, "_reverse_map"):
-            self._reverse_map = {
-                v: k for k, v in self._input_map.items()
-                if not v.startswith("_")
-            }
+            self._reverse_map = {v: k for k, v in self._input_map.items() if not v.startswith("_")}
         return self._reverse_map.get(native_name)
 
     @abstractmethod
@@ -359,33 +357,40 @@ class UsdStageAdapter(DCCAdapter):
 
         apply_event(
             self.stage,
-            {"k": K_SET_MATERIAL_BINDING, "prim": prim_path,
-             "material_path": material_path},
+            {"k": K_SET_MATERIAL_BINDING, "prim": prim_path, "material_path": material_path},
         )
         return True
 
-    def set_shader_input(self, prim_path: str, shader_id: str,
-                         inputs: dict, input_types: dict) -> bool:
+    def set_shader_input(
+        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    ) -> bool:
         from .event_apply import apply_event
 
         apply_event(
             self.stage,
-            {"k": K_SET_SHADER_INPUT, "prim": prim_path,
-             "shader_id": shader_id, "inputs": inputs,
-             "input_types": input_types},
+            {
+                "k": K_SET_SHADER_INPUT,
+                "prim": prim_path,
+                "shader_id": shader_id,
+                "inputs": inputs,
+                "input_types": input_types,
+            },
         )
         return True
 
-    def set_shader_connection(self, prim_path: str,
-                              connections: dict,
-                              disconnections: list | None = None) -> bool:
+    def set_shader_connection(
+        self, prim_path: str, connections: dict, disconnections: list | None = None
+    ) -> bool:
         from .event_apply import apply_event
 
         apply_event(
             self.stage,
-            {"k": K_SET_SHADER_CONNECTION, "prim": prim_path,
-             "connections": connections,
-             "disconnections": disconnections or []},
+            {
+                "k": K_SET_SHADER_CONNECTION,
+                "prim": prim_path,
+                "connections": connections,
+                "disconnections": disconnections or [],
+            },
         )
         return True
 
@@ -519,8 +524,9 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set material binding %s -> %s", prim_path, material_path)
         return True
 
-    def set_shader_input(self, prim_path: str, shader_id: str,
-                         inputs: dict, input_types: dict) -> bool:
+    def set_shader_input(
+        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
@@ -531,9 +537,9 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set shader input on %s", prim_path)
         return True
 
-    def set_shader_connection(self, prim_path: str,
-                              connections: dict,
-                              disconnections: list | None = None) -> bool:
+    def set_shader_connection(
+        self, prim_path: str, connections: dict, disconnections: list | None = None
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}

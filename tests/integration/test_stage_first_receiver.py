@@ -15,13 +15,15 @@ from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events, atomic_apply
 from openusdconnect.protocol import (
+    make_hello,
+    make_txn,
+)
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_XFORM_TRS,
     MSG_EVENT,
     MSG_RESYNC,
-    make_hello,
-    make_txn,
 )
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.transport import send_msg
@@ -51,8 +53,9 @@ def _send_events_to_server(events, port=PORT):
 
 def _receive_events(wait=0.5):
     """Connect as receiver and collect events."""
-    rt = ReceiverThread(host="127.0.0.1", port=PORT, sync_from=1,
-                        client_id="test-receiver", origin="test-recv")
+    rt = ReceiverThread(
+        host="127.0.0.1", port=PORT, sync_from=1, client_id="test-receiver", origin="test-recv"
+    )
     rt.start()
     time.sleep(wait)
     lines = rt.drain_queue()
@@ -87,8 +90,7 @@ class TestStageFirstIntegration:
         events = [
             {"k": K_ENSURE_PRIM, "prim": "/World/Cube", "typeName": "Xform"},
             {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Cube"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
-             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
         ]
 
         # Emitter sends events to server
@@ -162,12 +164,19 @@ class TestStageFirstIntegration:
         stage.DefinePrim("/World", "Xform")
 
         # Pre-existing state
-        apply_events(stage, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/Old", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Old"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Old",
-             "fields": ["t"], "t": [10.0, 20.0, 30.0]},
-        ])
+        apply_events(
+            stage,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Old", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Old"},
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Old",
+                    "fields": ["t"],
+                    "t": [10.0, 20.0, 30.0],
+                },
+            ],
+        )
 
         events = [
             {"k": K_ENSURE_PRIM, "prim": "/World/New", "typeName": "Xform"},

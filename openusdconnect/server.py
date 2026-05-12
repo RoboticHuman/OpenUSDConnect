@@ -40,7 +40,7 @@ from .framing import (
     frame_batch,
     recv_framed_rfile,
 )
-from .protocol import (
+from .protocol_constants import (
     EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -88,11 +88,13 @@ def _set_send_timeout(sock: socket.socket, timeout_s: float):
     """
     import struct
     import sys
+
     if sys.platform == "win32":
         # Windows: SO_SNDTIMEO takes a DWORD (4 bytes) in milliseconds
         ms = int(timeout_s * 1000)
         sock.setsockopt(
-            socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+            socket.SOL_SOCKET,
+            socket.SO_SNDTIMEO,
             ms.to_bytes(4, "little"),
         )
     else:
@@ -100,22 +102,26 @@ def _set_send_timeout(sock: socket.socket, timeout_s: float):
         secs = int(timeout_s)
         usecs = int((timeout_s - secs) * 1_000_000)
         sock.setsockopt(
-            socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+            socket.SOL_SOCKET,
+            socket.SO_SNDTIMEO,
             struct.pack("ll", secs, usecs),
         )
 
+
 # Event kinds where only the latest event per prim matters.
-LATEST_WINS_KINDS = frozenset({
-    K_SET_XFORM_TRS,
-    K_SET_XFORM_MATRICES,
-    K_SET_VISIBILITY,
-    K_SET_REFERENCE,
-    K_SET_PAYLOAD,
-    K_SET_VARIANT_SELECTIONS,
-    K_SET_MATERIAL_BINDING,
-    K_SET_SHADER_CONNECTION,
-    K_DEACTIVATE_PRIM,
-})
+LATEST_WINS_KINDS = frozenset(
+    {
+        K_SET_XFORM_TRS,
+        K_SET_XFORM_MATRICES,
+        K_SET_VISIBILITY,
+        K_SET_REFERENCE,
+        K_SET_PAYLOAD,
+        K_SET_VARIANT_SELECTIONS,
+        K_SET_MATERIAL_BINDING,
+        K_SET_SHADER_CONNECTION,
+        K_DEACTIVATE_PRIM,
+    }
+)
 
 
 class _TxnBarrier:
@@ -157,7 +163,7 @@ class TokenBucket:
     """Simple token bucket for per-client transaction rate limiting."""
 
     def __init__(self, rate: float, burst: int):
-        self.rate = rate    # tokens per second
+        self.rate = rate  # tokens per second
         self.burst = burst
         self._tokens = float(burst)
         self._last = time.monotonic()
@@ -242,7 +248,7 @@ class UsdSyncServer:
         # (last-write-wins within a department). Department ordering controls
         # strength between departments.
         self.client_layers: dict[str, Sdf.Layer] = {}  # client_id or dept → layer
-        self._dept_layers: dict[str, Sdf.Layer] = {}   # department → shared layer
+        self._dept_layers: dict[str, Sdf.Layer] = {}  # department → shared layer
         self._client_departments: dict[str, str] = {}  # client_id → department
         self.department_priority: list[str] = list(department_priority or [])
 
@@ -269,6 +275,7 @@ class UsdSyncServer:
         self.token_store = None
         if require_token:
             from .token_store import TokenStore
+
             _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
             self.token_store = TokenStore(_token_path)
 
@@ -290,7 +297,8 @@ class UsdSyncServer:
         #   both None          → broadcast to everyone
         self._broadcast_queue: queue.Queue = queue.Queue(maxsize=_BROADCAST_QUEUE_MAX)
         self._broadcast_thread = threading.Thread(
-            target=self._broadcast_loop, daemon=True,
+            target=self._broadcast_loop,
+            daemon=True,
         )
         self._broadcast_thread.start()
 
@@ -305,12 +313,14 @@ class UsdSyncServer:
         if durability == "realtime":
             self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
             self._persist_thread = threading.Thread(
-                target=self._persist_loop, daemon=True,
+                target=self._persist_loop,
+                daemon=True,
             )
             self._persist_thread.start()
 
         # LRU cache: prim_path → (translate_op, orient_op, scale_op).
         from cachetools import LRUCache
+
         self.op_cache: LRUCache = LRUCache(
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
@@ -418,8 +428,9 @@ class UsdSyncServer:
 
     # -- TOFU authentication -------------------------------------------
 
-    def authenticate(self, client_id: str | None, token: str | None,
-                     department: str | None = None) -> tuple[bool, str | None]:
+    def authenticate(
+        self, client_id: str | None, token: str | None, department: str | None = None
+    ) -> tuple[bool, str | None]:
         """Authenticate a client using TOFU.
 
         Returns (accepted, issued_token).
@@ -457,7 +468,10 @@ class UsdSyncServer:
     # -- Proposals (cross-department edit requests) ----------------------
 
     def create_proposal(
-        self, from_client: str, target_department: str, description: str = "",
+        self,
+        from_client: str,
+        target_department: str,
+        description: str = "",
     ) -> str:
         """Create a proposal targeting another department.
 
@@ -468,6 +482,7 @@ class UsdSyncServer:
         Returns the proposal_id.
         """
         import uuid
+
         proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
         from_dept = self._client_departments.get(from_client)
 
@@ -491,12 +506,17 @@ class UsdSyncServer:
             self.proposals[proposal_id] = proposal
         LOG.info(
             "Proposal %s created: %s → %s (%s)",
-            proposal_id, from_client, target_department, description,
+            proposal_id,
+            from_client,
+            target_department,
+            description,
         )
         return proposal_id
 
     def list_proposals(
-        self, department: str | None = None, include_usda: bool = True,
+        self,
+        department: str | None = None,
+        include_usda: bool = True,
     ) -> list[dict]:
         """List proposals, optionally filtered by target department.
 
@@ -540,7 +560,8 @@ class UsdSyncServer:
         if not target_layer:
             LOG.warning(
                 "Cannot approve proposal %s — target department '%s' has no layer",
-                proposal_id, p.target_department,
+                proposal_id,
+                p.target_department,
             )
             return False
 
@@ -565,10 +586,15 @@ class UsdSyncServer:
                 }
                 rec_bin = encode_message(rec)
                 records.append(rec)
-                persist_tuples.append((
-                    rec["seq"], rec_bin, p.from_client,
-                    ev.get("k"), ev.get("prim"),
-                ))
+                persist_tuples.append(
+                    (
+                        rec["seq"],
+                        rec_bin,
+                        p.from_client,
+                        ev.get("k"),
+                        ev.get("prim"),
+                    )
+                )
             self.append_log_batch(persist_tuples)
             for rec in records:
                 self.broadcast(rec)
@@ -617,7 +643,9 @@ class UsdSyncServer:
     # -- Per-client layer management ------------------------------------
 
     def get_or_create_client_layer(
-        self, client_id: str, department: str | None = None,
+        self,
+        client_id: str,
+        department: str | None = None,
     ) -> Sdf.Layer:
         """Get or create a layer for this client.
 
@@ -677,10 +705,7 @@ class UsdSyncServer:
 
     def resolve_layer(self, key: str) -> Sdf.Layer | None:
         """Resolve a layer by client_id or department name."""
-        return (
-            self._dept_layers.get(key)
-            or self.client_layers.get(key)
-        )
+        return self._dept_layers.get(key) or self.client_layers.get(key)
 
     def mute_layer(self, key: str) -> bool:
         """Mute a layer by client_id or department — opinions hidden but preserved."""
@@ -803,24 +828,28 @@ class UsdSyncServer:
                 continue
             seen.add(layer.identifier)
             clients = [cid for cid, d in dept_map.items() if d == dept]
-            result.append({
-                "department": dept,
-                "clients": clients,
-                "identifier": layer.identifier,
-                "muted": layer.identifier in muted,
-            })
+            result.append(
+                {
+                    "department": dept,
+                    "clients": clients,
+                    "identifier": layer.identifier,
+                    "muted": layer.identifier in muted,
+                }
+            )
 
         # Non-department client layers
         for cid, layer in client_items:
             if layer.identifier in seen:
                 continue
             seen.add(layer.identifier)
-            result.append({
-                "department": None,
-                "clients": [cid],
-                "identifier": layer.identifier,
-                "muted": layer.identifier in muted,
-            })
+            result.append(
+                {
+                    "department": None,
+                    "clients": [cid],
+                    "identifier": layer.identifier,
+                    "muted": layer.identifier in muted,
+                }
+            )
 
         # Sort by session sublayer order (strongest first)
         path_order = {p: i for i, p in enumerate(sublayer_paths)}
@@ -982,8 +1011,9 @@ class UsdSyncServer:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
-            records.append((seq, encode_message(rec), meta.get("client_id"),
-                            ev.get("k"), ev.get("prim")))
+            records.append(
+                (seq, encode_message(rec), meta.get("client_id"), ev.get("k"), ev.get("prim"))
+            )
         self.store.clear_and_rewrite(records)
         with self._seq_lock:
             self._event_count = len(records)
@@ -1046,21 +1076,27 @@ class UsdSyncServer:
                 local = xf.GetLocalTransformation(Usd.TimeCode.Default())
                 t, r, s = decompose_trs_from_matrix(as_matrix(local))
                 return {
-                    "k": K_SET_XFORM_TRS, "prim": pp,
-                    "fields": ["t", "r", "s"], "t": t, "r": r, "s": s,
+                    "k": K_SET_XFORM_TRS,
+                    "prim": pp,
+                    "fields": ["t", "r", "s"],
+                    "t": t,
+                    "r": r,
+                    "s": s,
                 }
 
             if k == K_SET_VISIBILITY:
                 img = UsdGeom.Imageable(prim)
                 vis = img.GetVisibilityAttr().Get()
                 return {
-                    "k": K_SET_VISIBILITY, "prim": pp,
+                    "k": K_SET_VISIBILITY,
+                    "prim": pp,
                     "visible": vis != "invisible",
                 }
 
             if k == K_DEACTIVATE_PRIM:
                 return {
-                    "k": K_DEACTIVATE_PRIM, "prim": pp,
+                    "k": K_DEACTIVATE_PRIM,
+                    "prim": pp,
                     "active": prim.IsActive(),
                 }
 
@@ -1082,13 +1118,13 @@ class UsdSyncServer:
         """
         ev = rec.get("event", {})
         rec_bin = encode_message(rec)
-        self.store.append(rec["seq"], rec_bin,
-                          kind=ev.get("k"), prim=ev.get("prim"))
+        self.store.append(rec["seq"], rec_bin, kind=ev.get("k"), prim=ev.get("prim"))
         with self._seq_lock:
             self._event_count += 1
 
     def append_log_batch(
-        self, tuples: list[tuple[int, bytes, str | None, str | None, str | None]],
+        self,
+        tuples: list[tuple[int, bytes, str | None, str | None, str | None]],
     ):
         """Persist pre-serialized event records.
 
@@ -1123,8 +1159,13 @@ class UsdSyncServer:
 
         prefix = prim_path + "/"
         replay_kinds = {
-            K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY,
-            K_SET_MATERIAL_BINDING, K_SET_SHADER_INPUT, K_SET_SHADER_CONNECTION,
+            K_ENSURE_PRIM,
+            K_ENSURE_XFORM_OPS,
+            K_SET_XFORM_TRS,
+            K_SET_VISIBILITY,
+            K_SET_MATERIAL_BINDING,
+            K_SET_SHADER_INPUT,
+            K_SET_SHADER_CONNECTION,
         }
 
         record_blobs = self.store.search_like_decoded(
@@ -1175,16 +1216,22 @@ class UsdSyncServer:
             self._event_listeners.remove(callback)
 
     def register_client(
-        self, address: tuple, role: str,
-        client_id: str | None = None, origin: str | None = None,
+        self,
+        address: tuple,
+        role: str,
+        client_id: str | None = None,
+        origin: str | None = None,
         department: str | None = None,
     ):
         """Register a connected client for tracking."""
         key = f"{address[0]}:{address[1]}"
         with self.clients_lock:
             self.clients[key] = ClientInfo(
-                role=role, address=address, client_id=client_id,
-                origin=origin, department=department,
+                role=role,
+                address=address,
+                client_id=client_id,
+                origin=origin,
+                department=department,
             )
 
     def unregister_client(self, address: tuple):
@@ -1198,7 +1245,9 @@ class UsdSyncServer:
         self.broadcast_batch([rec], exclude_origin=exclude_origin)
 
     def broadcast_batch(
-        self, records: list[dict], exclude_origin: str | None = None,
+        self,
+        records: list[dict],
+        exclude_origin: str | None = None,
     ):
         """Enqueue records for async broadcast to all receivers.
 
@@ -1223,7 +1272,9 @@ class UsdSyncServer:
                     break
 
     def broadcast_bytes(
-        self, payload: bytes, records: list[dict],
+        self,
+        payload: bytes,
+        records: list[dict],
         exclude_origin: str | None = None,
     ):
         """Enqueue pre-framed payload for broadcast and notify listeners."""
@@ -1291,7 +1342,8 @@ class UsdSyncServer:
                 self._broadcast_queue.task_done()
 
     def _send_to_all(
-        self, payload: bytes,
+        self,
+        payload: bytes,
         exclude_origin: str | None = None,
         target_origin: str | None = None,
     ):
@@ -1309,8 +1361,7 @@ class UsdSyncServer:
                 with h.send_lock:
                     h.request.sendall(payload)
             except (OSError, TimeoutError):
-                LOG.debug("Send failed for %s, marking as dead",
-                          h.client_address)
+                LOG.debug("Send failed for %s, marking as dead", h.client_address)
                 dead.append(h)
         if dead:
             with self.clients_lock:
@@ -1356,7 +1407,9 @@ class UsdSyncServer:
         K_ENSURE_PRIM: [],  # structural — check prim definer
         K_ENSURE_XFORM_OPS: [],
         K_SET_XFORM_TRS: [
-            "xformOp:translate", "xformOp:orient", "xformOp:scale",
+            "xformOp:translate",
+            "xformOp:orient",
+            "xformOp:scale",
         ],
         K_SET_XFORM_MATRICES: [],
         K_SET_VISIBILITY: ["visibility"],
@@ -1393,7 +1446,9 @@ class UsdSyncServer:
             if attr_name == "meta:active":
                 # Walk session sublayers; first with HasInfo("active") wins.
                 return self._is_first_layer_with_info(
-                    prim_path, target, "active",
+                    prim_path,
+                    target,
+                    "active",
                 )
             elif attr_name.startswith("rel:"):
                 rel = prim.GetRelationship(attr_name[4:])
@@ -1428,7 +1483,10 @@ class UsdSyncServer:
         return True
 
     def _is_first_layer_with_info(
-        self, prim_path: str, target, field: str,
+        self,
+        prim_path: str,
+        target,
+        field: str,
     ) -> bool:
         """Check if target is the strongest layer with a given metadata field."""
         for layer in self._ordered_session_layers:
@@ -1525,8 +1583,10 @@ class UsdSyncServer:
     ) -> tuple[list[dict], int]:
         """Return a page of events and total matching count (thread-safe)."""
         blobs, count = self.store.query(
-            offset=offset, limit=limit,
-            kind=kind, prim_contains=prim_contains,
+            offset=offset,
+            limit=limit,
+            kind=kind,
+            prim_contains=prim_contains,
         )
         return [message_to_dict(b) for b in blobs], count
 
@@ -1574,16 +1634,17 @@ class UsdSyncServer:
             parent = path.rsplit("/", 1)[0] or "/"
             depth = path.count("/")
             has_children = any(
-                p.startswith(path + "/") and p.count("/") == depth + 1
-                for p in prims
+                p.startswith(path + "/") and p.count("/") == depth + 1 for p in prims
             )
-            result.append({
-                "path": path,
-                "typeName": prims[path],
-                "parent": parent,
-                "depth": depth,
-                "has_children": has_children,
-            })
+            result.append(
+                {
+                    "path": path,
+                    "typeName": prims[path],
+                    "parent": parent,
+                    "depth": depth,
+                    "has_children": has_children,
+                }
+            )
         return result
 
     def export_edit_layer(self, file_path: str | None = None) -> str:
@@ -1673,7 +1734,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self.send_lock = threading.Lock()
         self._rate_bucket = (
             TokenBucket(sync_server.txn_rate, sync_server.txn_burst)
-            if sync_server.txn_rate > 0 else None
+            if sync_server.txn_rate > 0
+            else None
         )
 
         # Read hello (length-prefixed FlatBuffers)
@@ -1694,8 +1756,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         role_raw = hello_fb.Role()
         role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
         client_id_raw = hello_fb.ClientId()
-        client_id = (client_id_raw.decode("utf-8")
-                     if isinstance(client_id_raw, bytes) else client_id_raw)
+        client_id = (
+            client_id_raw.decode("utf-8") if isinstance(client_id_raw, bytes) else client_id_raw
+        )
         origin_raw = hello_fb.Origin()
         self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
         dept_raw = hello_fb.Department()
@@ -1709,13 +1772,18 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         from .transport import send_msg
 
         accepted, issued_token = sync_server.authenticate(
-            client_id, hello_token, self._department,
+            client_id,
+            hello_token,
+            self._department,
         )
         if not accepted:
-            send_msg(self.request, {
-                "type": MSG_AUTH_REJECTED,
-                "reason": "invalid or missing token",
-            })
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_AUTH_REJECTED,
+                    "reason": "invalid or missing token",
+                },
+            )
             LOG.warning("Rejected %s from %s", client_id, self.client_address)
             return
 
@@ -1727,11 +1795,17 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         LOG.info(
             "Client connected: role=%s origin=%s dept=%s from %s",
-            role, self._origin, self._department, self.client_address,
+            role,
+            self._origin,
+            self._department,
+            self.client_address,
         )
         sync_server.register_client(
-            self.client_address, role, client_id,
-            origin=self._origin, department=self._department,
+            self.client_address,
+            role,
+            client_id,
+            origin=self._origin,
+            department=self._department,
         )
 
         # Create per-client layer only when department ordering is enabled.
@@ -1739,7 +1813,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._client_layer = None
         if role == "emitter" and client_id and sync_server.department_priority:
             self._client_layer = sync_server.get_or_create_client_layer(
-                client_id, department=self._department,
+                client_id,
+                department=self._department,
             )
 
         if role == "receiver":
@@ -1814,8 +1889,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # Decode txn events to dicts for apply_txn — numpy arrays
             # for geometry attrs to avoid per-element Python iteration.
             _, txn_fb = resolve_payload(env)
-            events = [event_to_dict(txn_fb.Events(i), numpy_arrays=True)
-                      for i in range(txn_fb.EventsLength())]
+            events = [
+                event_to_dict(txn_fb.Events(i), numpy_arrays=True)
+                for i in range(txn_fb.EventsLength())
+            ]
             if not events:
                 continue
 
@@ -1823,10 +1900,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 wait = self._rate_bucket.try_consume()
                 if wait > 0:
                     from .transport import send_msg as _send_msg
-                    _send_msg(self.request, {
-                        "type": MSG_RATE_LIMITED,
-                        "retry_after": round(wait, 3),
-                    })
+
+                    _send_msg(
+                        self.request,
+                        {
+                            "type": MSG_RATE_LIMITED,
+                            "retry_after": round(wait, 3),
+                        },
+                    )
                     continue
 
             sync_server.txn_barrier.acquire_shared()
@@ -1850,8 +1931,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     rec_bin = encode_message(rec)
                     records.append((rec, rec_bin))
                     persist_tuples.append(
-                        (rec["seq"], rec_bin, self._client_id,
-                         ev.get("k"), ev.get("prim"))
+                        (rec["seq"], rec_bin, self._client_id, ev.get("k"), ev.get("prim"))
                     )
                 sync_server.append_log_batch(persist_tuples)
 
@@ -1871,12 +1951,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                                 "event": correction,
                             }
                             sync_server.send_to_origin(
-                                correction_rec, self._origin,
+                                correction_rec,
+                                self._origin,
                             )
                 if changed_records:
                     payload = frame_batch(changed_bins)
                     sync_server.broadcast_bytes(
-                        payload, changed_records,
+                        payload,
+                        changed_records,
                         exclude_origin=self._origin,
                     )
             finally:
@@ -1904,15 +1986,23 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         if not target:
             return
         pid = sync_server.create_proposal(
-            self._client_id or "", target, desc,
+            self._client_id or "",
+            target,
+            desc,
         )
-        send_msg(self.request, {
-            "type": MSG_PROPOSAL_CREATED,
-            "proposal_id": pid,
-        })
+        send_msg(
+            self.request,
+            {
+                "type": MSG_PROPOSAL_CREATED,
+                "proposal_id": pid,
+            },
+        )
 
     def _handle_proposal_txn(
-        self, sync_server: UsdSyncServer, proposal_id: str, events: list[dict],
+        self,
+        sync_server: UsdSyncServer,
+        proposal_id: str,
+        events: list[dict],
     ):
         """Apply a txn to a proposal's muted layer (no broadcast).
 
@@ -1939,8 +2029,13 @@ class ThreadedTCPServer(socketserver.TCPServer):
     request_queue_size = 128
     MAX_WORKERS = 256
 
-    def __init__(self, server_address, handler_class, sync_server: UsdSyncServer,
-                 max_workers: int | None = None):
+    def __init__(
+        self,
+        server_address,
+        handler_class,
+        sync_server: UsdSyncServer,
+        max_workers: int | None = None,
+    ):
         self.sync_server = sync_server
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers or self.MAX_WORKERS,
@@ -2001,8 +2096,9 @@ def run_server(
         run_dashboard(sync_server, dashboard_port)
         LOG.info("Dashboard running on http://localhost:%d", dashboard_port)
 
-    server = ThreadedTCPServer((host, port), ConnectionHandler, sync_server,
-                               max_workers=max_connections)
+    server = ThreadedTCPServer(
+        (host, port), ConnectionHandler, sync_server, max_workers=max_connections
+    )
 
     _cleaned_up = False
 
@@ -2027,8 +2123,13 @@ def run_server(
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
 
-    LOG.info("Server listening on %s:%s (PID %d) durability=%s",
-             host, port, os.getpid(), sync_server.durability)
+    LOG.info(
+        "Server listening on %s:%s (PID %d) durability=%s",
+        host,
+        port,
+        os.getpid(),
+        sync_server.durability,
+    )
     LOG.info("Event log: %s", log_path)
     if base_usd_path:
         LOG.info("Base USD: %s", base_usd_path)
@@ -2052,43 +2153,65 @@ def main():
     ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
     ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
     ap.add_argument(
-        "--export-diff", default=None, metavar="PATH",
+        "--export-diff",
+        default=None,
+        metavar="PATH",
         help="Export the override layer as USDA on shutdown",
     )
     ap.add_argument(
-        "--dashboard", type=int, default=None, metavar="PORT",
+        "--dashboard",
+        type=int,
+        default=None,
+        metavar="PORT",
         help="Start admin dashboard on this port (e.g. --dashboard 8080)",
     )
     ap.add_argument(
-        "--op-cache-size", type=int, default=None, metavar="N",
+        "--op-cache-size",
+        type=int,
+        default=None,
+        metavar="N",
         help=f"Max xform op cache entries (default: {UsdSyncServer.DEFAULT_OP_CACHE_SIZE})",
     )
     ap.add_argument(
-        "--departments", default=None, metavar="LIST",
+        "--departments",
+        default=None,
+        metavar="LIST",
         help="Comma-separated department priority (strongest first). "
-             "Enables per-client layer ordering by department. "
-             "Example: --departments lighting,fx,animation,layout",
+        "Enables per-client layer ordering by department. "
+        "Example: --departments lighting,fx,animation,layout",
     )
     ap.add_argument(
-        "--require-token", action="store_true",
+        "--require-token",
+        action="store_true",
         help="Enable TOFU token authentication. Clients are issued a token "
-             "on first connect and must present it on reconnect.",
+        "on first connect and must present it on reconnect.",
     )
     ap.add_argument(
-        "--durability", choices=["strict", "realtime"], default="strict",
+        "--durability",
+        choices=["strict", "realtime"],
+        default="strict",
         help="strict: persist to DB before broadcast (no lost events). "
-             "realtime: broadcast first, persist async (lower latency).",
+        "realtime: broadcast first, persist async (lower latency).",
     )
     ap.add_argument(
-        "--max-connections", type=int, default=None, metavar="N",
+        "--max-connections",
+        type=int,
+        default=None,
+        metavar="N",
         help=f"Max concurrent client connections (default: {ThreadedTCPServer.MAX_WORKERS})",
     )
     ap.add_argument(
-        "--txn-rate", type=float, default=0, metavar="N",
+        "--txn-rate",
+        type=float,
+        default=0,
+        metavar="N",
         help="Max transactions per second per client (0 = unlimited, default: 0)",
     )
     ap.add_argument(
-        "--txn-burst", type=int, default=0, metavar="N",
+        "--txn-burst",
+        type=int,
+        default=0,
+        metavar="N",
         help="Max burst size for transaction rate limiter (default: 0 = disabled)",
     )
     args = ap.parse_args()

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops, find_op
-from openusdconnect.protocol import MSG_EVENT
+from openusdconnect.protocol_constants import MSG_EVENT
 from openusdconnect.server import UsdSyncServer
 
 
@@ -30,14 +30,13 @@ from openusdconnect.server import UsdSyncServer
 # Comparison helpers
 # ---------------------------------------------------------------------------
 
+
 def _compare_attr(stage_a, stage_b, prim_path, attr_name, eps=1e-6):
     """Assert that a single attribute has the same composed value on both stages."""
     val_a = stage_a.GetPrimAtPath(prim_path).GetAttribute(attr_name).Get()
     val_b = stage_b.GetPrimAtPath(prim_path).GetAttribute(attr_name).Get()
     if isinstance(val_a, float):
-        assert abs(val_a - val_b) < eps, (
-            f"{prim_path}.{attr_name}: {val_a} != {val_b}"
-        )
+        assert abs(val_a - val_b) < eps, f"{prim_path}.{attr_name}: {val_a} != {val_b}"
     else:
         assert val_a == val_b, f"{prim_path}.{attr_name}: {val_a} != {val_b}"
 
@@ -100,10 +99,12 @@ def _compare_stages(stage_a, stage_b, label_a="A", label_b="B"):
 
         for attr in prim_a.GetAttributes():
             name = attr.GetName()
-            if (not name.startswith("xformOp:")
-                    and not name.startswith("primvars:")
-                    and name not in ("visibility", "xformOpOrder", "extent")
-                    and attr.IsAuthored()):
+            if (
+                not name.startswith("xformOp:")
+                and not name.startswith("primvars:")
+                and name not in ("visibility", "xformOpOrder", "extent")
+                and attr.IsAuthored()
+            ):
                 target_attr = prim_b.GetAttribute(name)
                 if target_attr and target_attr.IsValid():
                     _compare_attr(stage_a, stage_b, prim_path, name)
@@ -112,6 +113,7 @@ def _compare_stages(stage_a, stage_b, label_a="A", label_b="B"):
 # ---------------------------------------------------------------------------
 # Scene builder
 # ---------------------------------------------------------------------------
+
 
 def _build_emitter_stage():
     """Build a rich emitter stage with multiple prim types and features."""
@@ -178,6 +180,7 @@ def _build_emitter_stage():
 # Server simulation helper
 # ---------------------------------------------------------------------------
 
+
 def _server_process_and_replay(srv, events):
     """Simulate what the server does: apply_txn, assign seqs, log, then replay.
 
@@ -197,6 +200,7 @@ def _server_process_and_replay(srv, events):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def srv(tmp_path):
     """Create a UsdSyncServer with a temp SQLite DB."""
@@ -209,6 +213,7 @@ def srv(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestStageParity:
     """True parity tests: emitter → server.apply_txn → log replay → receiver.apply_events."""
@@ -385,9 +390,11 @@ class TestStageParity:
             receiver_stage = Usd.Stage.Open(fixture)
             apply_events(receiver_stage, replayed)
 
-            for label, stage in [("emitter", emitter_stage),
-                                 ("server", variant_srv.stage),
-                                 ("receiver", receiver_stage)]:
+            for label, stage in [
+                ("emitter", emitter_stage),
+                ("server", variant_srv.stage),
+                ("receiver", receiver_stage),
+            ]:
                 prim = stage.GetPrimAtPath("/World/Sphere")
                 sel = prim.GetVariantSets().GetVariantSelection("size")
                 assert sel == "large", f"{label} variant selection: {sel}"
@@ -525,7 +532,9 @@ class TestStageParity:
         apply_events(receiver_stage, replayed)
 
         for label, target in [
-            ("emitter", stage), ("server", srv.stage), ("receiver", receiver_stage),
+            ("emitter", stage),
+            ("server", srv.stage),
+            ("receiver", receiver_stage),
         ]:
             sh = UsdShade.Shader(target.GetPrimAtPath("/World/Mat/Surface"))
             assert abs(sh.GetInput("metallic").Get() - 0.9) < 1e-6, f"metallic on {label}"

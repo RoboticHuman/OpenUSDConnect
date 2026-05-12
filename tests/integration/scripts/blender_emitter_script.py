@@ -22,13 +22,15 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 import socket
 
 from openusdconnect.protocol import (
+    make_hello,
+    make_quit,
+    make_txn,
+)
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
-    make_hello,
-    make_quit,
-    make_txn,
 )
 from openusdconnect.transport import send_line
 

@@ -1,7 +1,7 @@
 """Tests for server event log compaction."""
 
 from openusdconnect.codec import message_to_dict
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -32,7 +32,7 @@ def _read_log(server):
     """Read all events from the DB, return list of event dicts."""
     rows = server.store.get_all_asc()
     result = []
-    for (_seq, record_bin) in rows:
+    for _seq, record_bin in rows:
         rec = message_to_dict(record_bin)
         result.append(rec.get("event", rec))
     return result
@@ -42,12 +42,15 @@ class TestCompaction:
     def test_trs_merged(self, tmp_path):
         """Multiple set_xform_trs for same prim collapse to one with merged fields."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["r"], "r": [1, 0, 0, 0]},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [2, 0, 0]},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["r"], "r": [1, 0, 0, 0]},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [2, 0, 0]},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -61,11 +64,14 @@ class TestCompaction:
     def test_visibility_latest_wins(self, tmp_path):
         """Multiple set_visibility for same prim keeps only the last."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": False},
-            {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": True},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": False},
+                {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": True},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -77,12 +83,15 @@ class TestCompaction:
     def test_delete_tombstones_prim(self, tmp_path):
         """delete_prim removes all earlier events for that prim."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
-            {"k": K_DELETE_PRIM, "prim": "/World/A"},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_DELETE_PRIM, "prim": "/World/A"},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -95,12 +104,15 @@ class TestCompaction:
     def test_deactivate_preserves_trs(self, tmp_path):
         """deactivate_prim does NOT tombstone — TRS is kept for payload reload."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [5, 0, 0]},
-            {"k": K_DEACTIVATE_PRIM, "prim": "/World/A", "active": False},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [5, 0, 0]},
+                {"k": K_DEACTIVATE_PRIM, "prim": "/World/A", "active": False},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -115,13 +127,16 @@ class TestCompaction:
     def test_rename_tombstones_old_path(self, tmp_path):
         """rename_prim tombstones the old path."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/Old", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Old", "fields": ["t"], "t": [1, 0, 0]},
-            {"k": K_RENAME_PRIM, "prim": "/World/Old", "new_name": "New"},
-            {"k": K_ENSURE_PRIM, "prim": "/World/New", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/New", "fields": ["t"], "t": [2, 0, 0]},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Old", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/Old", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_RENAME_PRIM, "prim": "/World/Old", "new_name": "New"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/New", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/New", "fields": ["t"], "t": [2, 0, 0]},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -138,12 +153,15 @@ class TestCompaction:
     def test_structural_before_values(self, tmp_path):
         """Compacted output orders ensure_prim before set_xform_trs."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
-            {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": True},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/A"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": True},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -155,14 +173,17 @@ class TestCompaction:
     def test_multiple_prims(self, tmp_path):
         """Compaction handles multiple prims independently."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
-            {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/B", "fields": ["t"], "t": [2, 0, 0]},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [3, 0, 0]},
-            {"k": K_SET_XFORM_TRS, "prim": "/World/B", "fields": ["t"], "t": [4, 0, 0]},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/B", "fields": ["t"], "t": [2, 0, 0]},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [3, 0, 0]},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/B", "fields": ["t"], "t": [4, 0, 0]},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)
@@ -183,12 +204,14 @@ class TestCompaction:
         ]
         # 100 TRS updates (simulating dragging an object)
         for i in range(100):
-            events.append({
-                "k": K_SET_XFORM_TRS,
-                "prim": "/World/Sphere",
-                "fields": ["t"],
-                "t": [float(i), 0.0, 0.0],
-            })
+            events.append(
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Sphere",
+                    "fields": ["t"],
+                    "t": [float(i), 0.0, 0.0],
+                }
+            )
         _inject_events(srv, events)
         assert len(_read_log(srv)) == 102
 
@@ -202,15 +225,14 @@ class TestCompaction:
     def test_set_reference_latest_wins(self, tmp_path):
         """Multiple set_reference for same prim keeps only the last."""
         srv = _make_server(tmp_path)
-        _inject_events(srv, [
-            {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
-            {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [
-                {"asset_path": "old.usda"}
-            ]},
-            {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [
-                {"asset_path": "new.usda"}
-            ]},
-        ])
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "old.usda"}]},
+                {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "new.usda"}]},
+            ],
+        )
 
         srv.compact_log()
         events = _read_log(srv)

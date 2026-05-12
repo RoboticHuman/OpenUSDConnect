@@ -59,6 +59,7 @@ def main():
     # Register USDHook so it fires during import
     try:
         from integrations.blender.capture import USD_CONNECT_Hook, _ensure_scene_props
+
         _ensure_scene_props()
         try:
             bpy.utils.register_class(USD_CONNECT_Hook)
@@ -88,7 +89,7 @@ def main():
 
     from integrations.blender.blender_adapter import BlenderAdapter
     from openusdconnect.codec import message_to_dict
-    from openusdconnect.protocol import (
+    from openusdconnect.protocol_constants import (
         K_DEACTIVATE_PRIM,
         K_DELETE_PRIM,
         K_ENSURE_PRIM,
@@ -164,8 +165,7 @@ def main():
         parent_name = obj.parent.name if obj.parent else "(root)"
         loc = tuple(round(v, 4) for v in obj.location)
         print(
-            f"  obj='{obj.name}' prim_path='{pp}' "
-            f"parent='{parent_name}' type={obj.type} loc={loc}"
+            f"  obj='{obj.name}' prim_path='{pp}' parent='{parent_name}' type={obj.type} loc={loc}"
         )
         if pp:
             prim_path_counts[pp] = prim_path_counts.get(pp, 0) + 1
@@ -178,9 +178,7 @@ def main():
     blender_suffixed = [
         obj.name
         for obj in bpy.data.objects
-        if obj.get("usd_prim_path")
-        and "." in obj.name
-        and obj.name.rsplit(".", 1)[-1].isdigit()
+        if obj.get("usd_prim_path") and "." in obj.name and obj.name.rsplit(".", 1)[-1].isdigit()
     ]
     if blender_suffixed:
         print("\n=== Blender-suffixed names (duplicates) ===")
@@ -222,17 +220,14 @@ def main():
         if any(c > 1 for c in prim_path_counts.values())
         else "PASS"
     )
-    results["no_blender_suffixes"] = (
-        f"FAIL: {blender_suffixed}" if blender_suffixed else "PASS"
-    )
+    results["no_blender_suffixes"] = f"FAIL: {blender_suffixed}" if blender_suffixed else "PASS"
 
     # TRS results
     if chair_obj:
         # The emitter sends t=[3,0,0] in its last txn (phase 2 movement)
         cx = round(chair_obj.location.x, 2)
         results["chair_trs"] = (
-            "PASS" if abs(cx - 3.0) < 0.1
-            else f"FAIL: chair.location.x={cx}, expected 3.0"
+            "PASS" if abs(cx - 3.0) < 0.1 else f"FAIL: chair.location.x={cx}, expected 3.0"
         )
     else:
         results["chair_trs"] = "FAIL: Chair not found"

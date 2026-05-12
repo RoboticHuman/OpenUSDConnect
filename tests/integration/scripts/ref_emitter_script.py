@@ -33,7 +33,11 @@ from pxr import Gf, Usd, UsdGeom
 
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import ensure_canonical_ops
-from openusdconnect.protocol import make_hello, make_quit, make_txn
+from openusdconnect.protocol import (
+    make_hello,
+    make_quit,
+    make_txn,
+)
 from openusdconnect.transport import send_line
 
 

@@ -11,7 +11,7 @@ import pytest
 from pxr import Usd, UsdGeom
 
 from openusdconnect.event_apply import apply_events
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_XFORM_TRS,
@@ -20,6 +20,7 @@ from openusdconnect.protocol import (
 from openusdconnect.server import UsdSyncServer
 
 # -- Helpers -------------------------------------------------------------
+
 
 def _make_server(tmp_path, department_priority=None):
     """Create an in-process UsdSyncServer with a temp DB."""
@@ -60,23 +61,22 @@ def _make_trs_events(prim_path, t):
     return [
         {"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": "Xform"},
         {"k": K_ENSURE_XFORM_OPS, "prim": prim_path},
-        {"k": K_SET_XFORM_TRS, "prim": prim_path,
-         "fields": ["t"], "t": list(t)},
+        {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": ["t"], "t": list(t)},
     ]
 
 
 # -- Tests ---------------------------------------------------------------
 
-class TestLayerIsolation:
 
+class TestLayerIsolation:
     def test_separate_layers_isolation(self, tmp_path):
         """Two departments editing different prims — both visible in composed stage."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)),
-                     department="animation")
-        _emit_events(srv, "bob", _make_trs_events("/World/Sphere", (4, 5, 6)),
-                     department="layout")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)), department="animation"
+        )
+        _emit_events(srv, "bob", _make_trs_events("/World/Sphere", (4, 5, 6)), department="layout")
 
         assert _read_translate(srv.stage, "/World/Cube") == (1, 2, 3)
         assert _read_translate(srv.stage, "/World/Sphere") == (4, 5, 6)
@@ -90,10 +90,8 @@ class TestLayerIsolation:
         """Two departments editing same prim — stronger department wins."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                     department="layout")
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                     department="animation")
+        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Animation is stronger than layout
         t = _read_translate(srv.stage, "/World/Cube")
@@ -125,7 +123,6 @@ class TestLayerIsolation:
 
 
 class TestDepartmentOrdering:
-
     def test_no_departments_last_write_wins(self, tmp_path):
         """Without departments, all clients share edit_layer (last write wins)."""
         srv = _make_server(tmp_path)
@@ -146,12 +143,10 @@ class TestDepartmentOrdering:
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
         # Alice (layout) connects FIRST
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="layout")
+        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
         time.sleep(0.01)
         # Bob (animation) connects SECOND
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Animation is stronger than layout regardless of connection order
         t = _read_translate(srv.stage, "/World/Cube")
@@ -160,16 +155,14 @@ class TestDepartmentOrdering:
         # Verify layer stack order
         info = srv.get_layer_stack_info()
         assert info[0]["department"] == "animation"  # strongest
-        assert info[1]["department"] == "layout"     # weaker
+        assert info[1]["department"] == "layout"  # weaker
 
     def test_department_priority_change_reorders(self, tmp_path):
         """Changing department priority reorders existing layers."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="layout")
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Animation wins
         assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
@@ -183,23 +176,21 @@ class TestDepartmentOrdering:
         srv = _make_server(tmp_path, department_priority=["animation"])
 
         _emit_events(srv, "anon", _make_trs_events("/World/Cube", (1, 0, 0)))
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Bob (animation dept) is stronger than anon (shared edit_layer)
         assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
 
 
 class TestSharedDepartmentLayer:
-
     def test_same_department_shares_layer(self, tmp_path):
         """Two clients in the same department write to the same layer."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="animation")
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="animation"
+        )
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Same layer object
         assert srv.client_layers["alice"] is srv.client_layers["bob"]
@@ -211,12 +202,13 @@ class TestSharedDepartmentLayer:
         """Within a shared department layer, the last write wins."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="animation")
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (3, 0, 0)),
-                      department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="animation"
+        )
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (3, 0, 0)), department="animation"
+        )
 
         # Alice wrote last — her value wins
         assert _read_translate(srv.stage, "/World/Cube") == (3, 0, 0)
@@ -225,8 +217,9 @@ class TestSharedDepartmentLayer:
         """Events from same department always change composed view (shared layer)."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="animation"
+        )
 
         layer = srv.get_or_create_client_layer("bob", department="animation")
         events = _make_trs_events("/World/Cube", (2, 0, 0))
@@ -237,15 +230,15 @@ class TestSharedDepartmentLayer:
 
 
 class TestLayerLifecycle:
-
     def test_layer_survives_disconnect(self, tmp_path):
         """Department layer persists after simulated disconnect — opinions stay."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
         addr = ("127.0.0.1", 12345)
         srv.register_client(addr, "emitter", client_id="alice", department="animation")
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)),
-                     department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)), department="animation"
+        )
         assert _read_translate(srv.stage, "/World/Cube") == (1, 2, 3)
 
         # Disconnect — client removed from tracking, but layer stays
@@ -261,8 +254,9 @@ class TestLayerLifecycle:
         """Muting hides department opinions, unmuting restores them."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)),
-                     department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)), department="animation"
+        )
         assert _read_translate(srv.stage, "/World/Cube") == (1, 2, 3)
 
         srv.mute_layer("animation")
@@ -275,8 +269,9 @@ class TestLayerLifecycle:
         """Deleting a department layer removes it and its opinions permanently."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)),
-                     department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (1, 2, 3)), department="animation"
+        )
         assert "alice" in srv.client_layers
 
         srv.delete_layer("alice")
@@ -293,8 +288,9 @@ class TestLayerLifecycle:
         apply_events(srv.stage, _make_trs_events("/World/Existing", (99, 99, 99)))
 
         # Bob edits in his department layer
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (10, 20, 30)),
-                     department="animation")
+        _emit_events(
+            srv, "bob", _make_trs_events("/World/Cube", (10, 20, 30)), department="animation"
+        )
 
         # Both visible before merge
         assert _read_translate(srv.stage, "/World/Existing") == (99, 99, 99)
@@ -308,15 +304,12 @@ class TestLayerLifecycle:
 
 
 class TestLayerStackInfo:
-
     def test_get_layer_stack_info(self, tmp_path):
         """get_layer_stack_info returns correct metadata."""
         srv = _make_server(tmp_path, department_priority=["fx", "layout"])
 
-        _emit_events(srv, "alice", _make_trs_events("/World/A", (1, 0, 0)),
-                      department="layout")
-        _emit_events(srv, "bob", _make_trs_events("/World/B", (2, 0, 0)),
-                      department="fx")
+        _emit_events(srv, "alice", _make_trs_events("/World/A", (1, 0, 0)), department="layout")
+        _emit_events(srv, "bob", _make_trs_events("/World/B", (2, 0, 0)), department="fx")
 
         info = srv.get_layer_stack_info()
         assert len(info) == 2
@@ -328,8 +321,7 @@ class TestLayerStackInfo:
 
     def test_muted_reflected_in_info(self, tmp_path):
         srv = _make_server(tmp_path, department_priority=["animation"])
-        _emit_events(srv, "alice", _make_trs_events("/World/A", (1, 0, 0)),
-                     department="animation")
+        _emit_events(srv, "alice", _make_trs_events("/World/A", (1, 0, 0)), department="animation")
 
         srv.mute_layer("animation")
         info = srv.get_layer_stack_info()
@@ -341,7 +333,6 @@ class TestLayerStackInfo:
 
 
 class TestMergeParity:
-
     def test_merge_preserves_composed_parity(self, tmp_path):
         """Composed stage is identical before and after merge."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
@@ -352,16 +343,16 @@ class TestMergeParity:
         apply_events(srv.stage, _make_trs_events("/World/RootPrim", (1, 1, 1)))
 
         # Alice (layout) and Bob (animation) each edit different prims
-        _emit_events(srv, "alice", _make_trs_events("/World/A", (10, 20, 30)),
-                     department="layout")
-        _emit_events(srv, "bob", _make_trs_events("/World/B", (40, 50, 60)),
-                     department="animation")
+        _emit_events(srv, "alice", _make_trs_events("/World/A", (10, 20, 30)), department="layout")
+        _emit_events(srv, "bob", _make_trs_events("/World/B", (40, 50, 60)), department="animation")
 
         # Both also edit same prim — animation is stronger
-        _emit_events(srv, "alice", _make_trs_events("/World/Shared", (1, 0, 0)),
-                     department="layout")
-        _emit_events(srv, "bob", _make_trs_events("/World/Shared", (2, 0, 0)),
-                     department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Shared", (1, 0, 0)), department="layout"
+        )
+        _emit_events(
+            srv, "bob", _make_trs_events("/World/Shared", (2, 0, 0)), department="animation"
+        )
 
         # Snapshot composed state before merge
         before = {}
@@ -401,14 +392,12 @@ class TestMergeParity:
 
 
 class TestBroadcastGating:
-
     def test_overridden_event_not_broadcast(self, tmp_path):
         """Events that don't change the composed view are persisted but not broadcast."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
         # Bob (animation = stronger) sets /World/Cube
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Alice (layout = weaker) writes to same prim — composed value unchanged
         layer = srv.get_or_create_client_layer("alice", department="layout")
@@ -425,8 +414,7 @@ class TestBroadcastGating:
         """Events that change the composed view are reported."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Alice writes to a different prim — composed value changes
         layer = srv.get_or_create_client_layer("alice", department="layout")
@@ -441,8 +429,7 @@ class TestBroadcastGating:
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
         # Alice (layout = weaker) writes first
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="layout")
+        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
 
         # Bob (animation = stronger) writes to same prim — his value wins
         layer = srv.get_or_create_client_layer("bob", department="animation")
@@ -454,20 +441,18 @@ class TestBroadcastGating:
 
 
 class TestCorrectionPath:
-
     def test_build_correction_for_overridden_transform(self, tmp_path):
         """Server builds a correction event with composed TRS for overridden writes."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (99, 99, 99)),
-                      department="layout")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
+        _emit_events(
+            srv, "alice", _make_trs_events("/World/Cube", (99, 99, 99)), department="layout"
+        )
 
         # Alice's event was overridden — build correction
         correction = srv.build_correction(
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
-             "fields": ["t"], "t": [99, 99, 99]},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [99, 99, 99]},
         )
 
         assert correction is not None
@@ -481,8 +466,7 @@ class TestCorrectionPath:
         """Correction for overridden deactivation returns composed active state."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (1, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (1, 0, 0)), department="animation")
 
         # Bob's prim is active, Alice tries to deactivate (weaker)
         correction = srv.build_correction(
@@ -496,8 +480,7 @@ class TestCorrectionPath:
         """No correction needed when the sender's layer wins."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)),
-                      department="animation")
+        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
 
         # Bob is strongest — no correction
         changed = srv.apply_txn(
@@ -515,7 +498,6 @@ class TestCorrectionPath:
 
 
 class TestReplayWithClientLayers:
-
     def test_replay_routes_to_client_layers(self, tmp_path):
         """Events replayed on startup go to the correct client layers."""
         db = str(tmp_path / "replay.db")
@@ -524,10 +506,8 @@ class TestReplayWithClientLayers:
 
         # First server session: two clients emit events
         srv1 = UsdSyncServer(log_path=db, department_priority=depts)
-        _emit_events(srv1, "alice", _make_trs_events("/World/A", (1, 2, 3)),
-                      department="layout")
-        _emit_events(srv1, "bob", _make_trs_events("/World/B", (4, 5, 6)),
-                      department="animation")
+        _emit_events(srv1, "alice", _make_trs_events("/World/A", (1, 2, 3)), department="layout")
+        _emit_events(srv1, "bob", _make_trs_events("/World/B", (4, 5, 6)), department="animation")
         srv1.store.close()
 
         # Second server session: replays from same DB
@@ -570,17 +550,17 @@ class TestConcurrentDepartmentWrites:
                 barrier.wait(timeout=5)
                 for i in range(count):
                     t = (base[0] + i, base[1] + i, base[2] + i)
-                    _emit_events(srv, client_id, _make_trs_events(prim, t),
-                                 department=dept)
+                    _emit_events(srv, client_id, _make_trs_events(prim, t), department=dept)
             except Exception as exc:
                 errors.append(exc)
 
-        t1 = threading.Thread(target=_writer, args=(
-            "alice", "animation", "/World/Anim", (1, 0, 0), 20))
-        t2 = threading.Thread(target=_writer, args=(
-            "bob", "lighting", "/World/Light", (0, 1, 0), 20))
-        t3 = threading.Thread(target=_writer, args=(
-            "carol", "fx", "/World/FX", (0, 0, 1), 20))
+        t1 = threading.Thread(
+            target=_writer, args=("alice", "animation", "/World/Anim", (1, 0, 0), 20)
+        )
+        t2 = threading.Thread(
+            target=_writer, args=("bob", "lighting", "/World/Light", (0, 1, 0), 20)
+        )
+        t3 = threading.Thread(target=_writer, args=("carol", "fx", "/World/FX", (0, 0, 1), 20))
 
         t1.start()
         t2.start()
@@ -646,15 +626,14 @@ class TestConcurrentDepartmentWrites:
                 barrier.wait(timeout=5)
                 for i in range(count):
                     t = (base[0] + i, base[1] + i, base[2] + i)
-                    _emit_events(srv, client_id, _make_trs_events("/World/Shared", t),
-                                 department=dept)
+                    _emit_events(
+                        srv, client_id, _make_trs_events("/World/Shared", t), department=dept
+                    )
             except Exception as exc:
                 errors.append(exc)
 
-        t1 = threading.Thread(target=_writer, args=(
-            "alice", "animation", (100, 0, 0), 20))
-        t2 = threading.Thread(target=_writer, args=(
-            "bob", "lighting", (0, 200, 0), 20))
+        t1 = threading.Thread(target=_writer, args=("alice", "animation", (100, 0, 0), 20))
+        t2 = threading.Thread(target=_writer, args=("bob", "lighting", (0, 200, 0), 20))
 
         t1.start()
         t2.start()
@@ -699,8 +678,9 @@ class TestConcurrentDepartmentWrites:
         srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
 
         # Seed some data so reads have something to traverse
-        _emit_events(srv, "seed", _make_trs_events("/World/Seed", (0, 0, 0)),
-                     department="animation")
+        _emit_events(
+            srv, "seed", _make_trs_events("/World/Seed", (0, 0, 0)), department="animation"
+        )
 
         write_done = threading.Event()
         barrier = threading.Barrier(3)
@@ -713,8 +693,7 @@ class TestConcurrentDepartmentWrites:
                 barrier.wait(timeout=5)
                 for i in range(count):
                     t = (base[0] + i, base[1] + i, base[2] + i)
-                    _emit_events(srv, client_id, _make_trs_events(prim, t),
-                                 department=dept)
+                    _emit_events(srv, client_id, _make_trs_events(prim, t), department=dept)
             except Exception as exc:
                 errors.append(exc)
             finally:
@@ -737,10 +716,12 @@ class TestConcurrentDepartmentWrites:
             except Exception as exc:
                 errors.append(exc)
 
-        t1 = threading.Thread(target=_writer, args=(
-            "alice", "animation", "/World/Cube", (1, 0, 0), 30))
-        t2 = threading.Thread(target=_writer, args=(
-            "bob", "lighting", "/World/Sphere", (0, 1, 0), 30))
+        t1 = threading.Thread(
+            target=_writer, args=("alice", "animation", "/World/Cube", (1, 0, 0), 30)
+        )
+        t2 = threading.Thread(
+            target=_writer, args=("bob", "lighting", "/World/Sphere", (0, 1, 0), 30)
+        )
         t3 = threading.Thread(target=_reader)
 
         t1.start()
@@ -776,25 +757,41 @@ class TestMultiDepartmentContention:
     # Format: (client_id, department, prims_spec)
     # prims_spec: list of (prim_path, base_translate, is_shared)
     CLIENTS = [
-        ("alice", "animation", [
-            ("/World/AnimRig", (100, 0, 0), False),
-            ("/World/Hero", (1, 0, 0), True),        # shared — animation wins
-            ("/World/Camera", (10, 0, 0), True),      # shared — animation wins
-        ]),
-        ("bob", "lighting", [
-            ("/World/KeyLight", (0, 100, 0), False),
-            ("/World/Hero", (0, 1, 0), True),         # shared — weaker
-            ("/World/EnvSphere", (0, 10, 0), True),   # shared — lighting wins vs fx/layout
-        ]),
-        ("carol", "fx", [
-            ("/World/Particles", (0, 0, 100), False),
-            ("/World/Hero", (0, 0, 1), True),         # shared — weakest with opinion
-            ("/World/EnvSphere", (0, 0, 10), True),   # shared — weaker than lighting
-        ]),
-        ("dave", "layout", [
-            ("/World/Ground", (50, 50, 0), False),
-            ("/World/Camera", (50, 0, 50), True),     # shared — weaker than animation
-        ]),
+        (
+            "alice",
+            "animation",
+            [
+                ("/World/AnimRig", (100, 0, 0), False),
+                ("/World/Hero", (1, 0, 0), True),  # shared — animation wins
+                ("/World/Camera", (10, 0, 0), True),  # shared — animation wins
+            ],
+        ),
+        (
+            "bob",
+            "lighting",
+            [
+                ("/World/KeyLight", (0, 100, 0), False),
+                ("/World/Hero", (0, 1, 0), True),  # shared — weaker
+                ("/World/EnvSphere", (0, 10, 0), True),  # shared — lighting wins vs fx/layout
+            ],
+        ),
+        (
+            "carol",
+            "fx",
+            [
+                ("/World/Particles", (0, 0, 100), False),
+                ("/World/Hero", (0, 0, 1), True),  # shared — weakest with opinion
+                ("/World/EnvSphere", (0, 0, 10), True),  # shared — weaker than lighting
+            ],
+        ),
+        (
+            "dave",
+            "layout",
+            [
+                ("/World/Ground", (50, 50, 0), False),
+                ("/World/Camera", (50, 0, 50), True),  # shared — weaker than animation
+            ],
+        ),
     ]
 
     ITERATIONS = 50
@@ -816,7 +813,8 @@ class TestMultiDepartmentContention:
                     for prim_path, base, _shared in prims_spec:
                         t = (base[0] + i, base[1] + i, base[2] + i)
                         _emit_events(
-                            srv, client_id,
+                            srv,
+                            client_id,
                             _make_trs_events(prim_path, t),
                             department=dept,
                         )
@@ -886,9 +884,7 @@ class TestMultiDepartmentContention:
             assert spec is not None, f"Missing Hero opinion in {layer.identifier}"
             val = spec.default
             expected = (dept_base[0] + n, dept_base[1] + n, dept_base[2] + n)
-            assert (val[0], val[1], val[2]) == expected, (
-                f"Hero layer opinion: {val} != {expected}"
-            )
+            assert (val[0], val[1], val[2]) == expected, f"Hero layer opinion: {val} != {expected}"
 
         # layout should NOT have /World/Hero (dave never wrote to it)
         assert layout_layer.GetPrimAtPath("/World/Hero") is None

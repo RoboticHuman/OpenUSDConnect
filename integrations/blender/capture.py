@@ -94,66 +94,112 @@ def sanitize_usd_name(name: str) -> str:
 # Scene properties
 # ---------------------------------------------------------------------------
 _SCENE_PROPS = [
-    ("usd_connect_base_usd_path", bpy.props.StringProperty, {
-        "name": "Base USD File",
-        "description": "Path to the base USD file (.usda/.usd/.usdc)",
-        "subtype": "FILE_PATH",
-        "default": "",
-    }),
-    ("usd_connect_emit_to_file", bpy.props.BoolProperty, {
-        "name": "Emit to File",
-        "default": False,
-    }),
-    ("usd_connect_emit_file_path", bpy.props.StringProperty, {
-        "name": "Diff Output File",
-        "subtype": "FILE_PATH",
-        "default": "",
-    }),
-    ("usd_connect_coalesce_seconds", bpy.props.FloatProperty, {
-        "name": "Coalesce (sec)",
-        "default": DEFAULT_COALESCE_SECONDS,
-        "min": 0.0,
-        "max": 5.0,
-    }),
-    ("usd_connect_emit_host", bpy.props.StringProperty, {
-        "name": "Server Host",
-        "default": "127.0.0.1",
-    }),
-    ("usd_connect_emit_port", bpy.props.IntProperty, {
-        "name": "Server Port",
-        "default": 7200,
-        "min": 1,
-        "max": 65535,
-    }),
-    ("usd_connect_emit_hz", bpy.props.FloatProperty, {
-        "name": "Send Rate (Hz)",
-        "default": 60.0,
-        "min": 1.0,
-        "max": 120.0,
-    }),
-    ("usd_connect_net_emitter_running", bpy.props.BoolProperty, {
-        "name": "Net Emitter Running",
-        "default": False,
-    }),
-    ("usd_connect_auto_track", bpy.props.BoolProperty, {
-        "name": "Auto-track New Objects",
-        "description": (
-            "Automatically register objects as USD prims when they are "
-            "first manipulated, using the root prim path below"
-        ),
-        "default": False,
-    }),
-    ("usd_connect_auto_track_root", bpy.props.StringProperty, {
-        "name": "Root Prim",
-        "description": "Parent prim path for auto-tracked objects (e.g. /World)",
-        "default": "/World",
-    }),
-    ("usd_connect_asset_root", bpy.props.StringProperty, {
-        "name": "Asset Root",
-        "description": "Root directory for resolving relative asset paths in set_reference events",
-        "subtype": "DIR_PATH",
-        "default": "",
-    }),
+    (
+        "usd_connect_base_usd_path",
+        bpy.props.StringProperty,
+        {
+            "name": "Base USD File",
+            "description": "Path to the base USD file (.usda/.usd/.usdc)",
+            "subtype": "FILE_PATH",
+            "default": "",
+        },
+    ),
+    (
+        "usd_connect_emit_to_file",
+        bpy.props.BoolProperty,
+        {
+            "name": "Emit to File",
+            "default": False,
+        },
+    ),
+    (
+        "usd_connect_emit_file_path",
+        bpy.props.StringProperty,
+        {
+            "name": "Diff Output File",
+            "subtype": "FILE_PATH",
+            "default": "",
+        },
+    ),
+    (
+        "usd_connect_coalesce_seconds",
+        bpy.props.FloatProperty,
+        {
+            "name": "Coalesce (sec)",
+            "default": DEFAULT_COALESCE_SECONDS,
+            "min": 0.0,
+            "max": 5.0,
+        },
+    ),
+    (
+        "usd_connect_emit_host",
+        bpy.props.StringProperty,
+        {
+            "name": "Server Host",
+            "default": "127.0.0.1",
+        },
+    ),
+    (
+        "usd_connect_emit_port",
+        bpy.props.IntProperty,
+        {
+            "name": "Server Port",
+            "default": 7200,
+            "min": 1,
+            "max": 65535,
+        },
+    ),
+    (
+        "usd_connect_emit_hz",
+        bpy.props.FloatProperty,
+        {
+            "name": "Send Rate (Hz)",
+            "default": 60.0,
+            "min": 1.0,
+            "max": 120.0,
+        },
+    ),
+    (
+        "usd_connect_net_emitter_running",
+        bpy.props.BoolProperty,
+        {
+            "name": "Net Emitter Running",
+            "default": False,
+        },
+    ),
+    (
+        "usd_connect_auto_track",
+        bpy.props.BoolProperty,
+        {
+            "name": "Auto-track New Objects",
+            "description": (
+                "Automatically register objects as USD prims when they are "
+                "first manipulated, using the root prim path below"
+            ),
+            "default": False,
+        },
+    ),
+    (
+        "usd_connect_auto_track_root",
+        bpy.props.StringProperty,
+        {
+            "name": "Root Prim",
+            "description": "Parent prim path for auto-tracked objects (e.g. /World)",
+            "default": "/World",
+        },
+    ),
+    (
+        "usd_connect_asset_root",
+        bpy.props.StringProperty,
+        {
+            "name": "Asset Root",
+            "description": (
+                "Root directory for resolving relative asset paths in set_reference events"
+            ),
+            "subtype": "DIR_PATH",
+            "default": "",
+        },
+    ),
 ]
 
 
@@ -282,9 +328,7 @@ class BlenderStageAuthor:
         # Axis conversion: detect whether the stage is Y-up (needs Z↔Y swap)
         from openusdconnect.axis_conversion import needs_conversion
 
-        self._needs_axis_conv: bool = needs_conversion(
-            UsdGeom.GetStageUpAxis(self.stage)
-        )
+        self._needs_axis_conv: bool = needs_conversion(UsdGeom.GetStageUpAxis(self.stage))
 
         self._last_matrix: dict = {}
         self._prim_refs: dict = {}  # prim_path -> bpy.types.Object reference
@@ -295,6 +339,7 @@ class BlenderStageAuthor:
         self._unloaded_payload_roots: set[str] = set()  # prim paths with unloaded payloads
 
         from .shader_mapper import create_default_registry
+
         self._shader_registry = create_default_registry()
         self._last_shader_values: dict[str, dict] = {}  # shader_path -> {usd_name: value}
         self._shader_input_maps: dict[str, dict] = {}  # shader_path -> {usd_name: socket}
@@ -367,10 +412,7 @@ class BlenderStageAuthor:
 
     def _is_under_unloaded_payload(self, prim_path: str) -> bool:
         """Check if prim_path is under a known unloaded payload root."""
-        return any(
-            prim_path.startswith(root + "/")
-            for root in self._unloaded_payload_roots
-        )
+        return any(prim_path.startswith(root + "/") for root in self._unloaded_payload_roots)
 
     def _ensure_ancestors_on_stage(self, obj):
         """Ensure all ancestor prims exist on the local stage with xform ops.
@@ -501,7 +543,8 @@ class BlenderStageAuthor:
                     shader_id = self._NODE_TYPE_TO_SHADER_ID.get(node.type)
                     if shader_id:
                         shader_path = self._find_shader_on_stage(
-                            mat_path, shader_id,
+                            mat_path,
+                            shader_id,
                         )
                 if not shader_path or not shader_id:
                     continue
@@ -614,9 +657,7 @@ class BlenderStageAuthor:
 
         # Single O(N) scan instead of O(N) per stale prim
         path_to_obj = {
-            obj.get("usd_prim_path"): obj
-            for obj in bpy.data.objects
-            if obj.get("usd_prim_path")
+            obj.get("usd_prim_path"): obj for obj in bpy.data.objects if obj.get("usd_prim_path")
         }
 
         for prim_path in stale_prims:
@@ -731,18 +772,26 @@ class NetworkSender:
     """Thin TCP connection for sending protocol events to the server."""
 
     def __init__(
-        self, host: str, port: int,
-        client_id: str | None = None, origin: str | None = None,
+        self,
+        host: str,
+        port: int,
+        client_id: str | None = None,
+        origin: str | None = None,
     ):
         self.host = host
         self.port = port
         from . import SESSION_ORIGIN, STABLE_CLIENT_ID
+
         self.client_id = client_id or STABLE_CLIENT_ID
         self.origin = origin or SESSION_ORIGIN
         self.sock: socket.socket | None = None
 
         # Lazy import to support vendored openusdconnect
-        from openusdconnect.protocol import make_hello, make_quit, make_txn
+        from openusdconnect.protocol import (
+            make_hello,
+            make_quit,
+            make_txn,
+        )
         from openusdconnect.transport import send_line as _send_line
 
         self._make_hello = make_hello
@@ -753,7 +802,9 @@ class NetworkSender:
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
         hello = self._make_hello(
-            "emitter", client_id=self.client_id, origin=self.origin,
+            "emitter",
+            client_id=self.client_id,
+            origin=self.origin,
         )
         self._send_line(self.sock, hello)
         LOG.info("Network sender connected to %s:%d", self.host, self.port)
@@ -805,15 +856,12 @@ _state = _State()
 
 def _try_send_dirty_events(include_matrices: bool = False):
     """Build and send dirty events if emitter and sender are both connected."""
-    if (
-        _state.notice_emitter is None
-        or _state.sender is None
-        or _state.sender.sock is None
-    ):
+    if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
         return
     events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
     if events:
         from collections import Counter
+
         kinds = Counter(e["k"] for e in events)
         LOG.debug("sending %d events: %s", len(events), dict(kinds))
         _state.sender.send_events(events)

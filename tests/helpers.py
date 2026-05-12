@@ -6,7 +6,10 @@ import subprocess
 import sys
 import time
 
-from openusdconnect.protocol import K_SET_REFERENCE, K_SET_XFORM_TRS
+from openusdconnect.protocol_constants import (
+    K_SET_REFERENCE,
+    K_SET_XFORM_TRS,
+)
 
 TESTS_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
@@ -58,19 +61,20 @@ def stop_server(proc):
         proc.kill()
 
 
-def run_blender(blender_exe, script, port, extra_args=None, timeout=60,
-                background=True):
+def run_blender(blender_exe, script, port, extra_args=None, timeout=60, background=True):
     """Run a Blender script and return the subprocess result."""
     cmd = [blender_exe]
     if background:
         cmd.append("--background")
-    cmd.extend([
-        "--python",
-        script,
-        "--",
-        "--port",
-        str(port),
-    ])
+    cmd.extend(
+        [
+            "--python",
+            script,
+            "--",
+            "--port",
+            str(port),
+        ]
+    )
     if extra_args:
         cmd.extend(extra_args)
     # Isolate Blender user data to repo-local directory (not system AppData)
@@ -91,6 +95,7 @@ def dump_server_log(tmp_path, port):
     rows = conn.execute("SELECT seq, event_bin FROM events ORDER BY seq").fetchall()
     conn.close()
     from openusdconnect.codec import message_to_dict
+
     print(f"\n=== Server Event Log ({len(rows)} events) ===")
     for seq, event_bin in rows:
         record = message_to_dict(event_bin)

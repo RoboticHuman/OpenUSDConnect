@@ -201,7 +201,7 @@ class MockDepsgraphUpdate:
 # ---------------------------------------------------------------------------
 from integrations.blender.capture import BlenderStageAuthor
 from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.protocol import (
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,

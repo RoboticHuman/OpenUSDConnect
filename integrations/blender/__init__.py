@@ -67,21 +67,34 @@ if "capture" in locals():
 
     # Reload vendored core library first (dependency).
     # The package itself must be reloaded so submodule references are fresh,
-    # then each submodule is reloaded so `from .protocol import X` picks up
-    # new symbols added since the last load.
+    # then each submodule is reloaded so imports pick up new symbols added
+    # since the last load.
     from . import openusdconnect as _ouc_pkg
 
     importlib.reload(_ouc_pkg)
-    _subs = ("protocol", "transport", "event_apply", "emitter", "receiver", "adapters", "server")
+    _subs = (
+        "protocol_constants",
+        "protocol_validation",
+        "shader_attrs",
+        "shader_connections",
+        "protocol",
+        "transport",
+        "event_apply",
+        "emitter",
+        "receiver",
+        "adapters",
+        "server",
+    )
     for _sub in _subs:
         _mod = getattr(_ouc_pkg, _sub, None)
         if _mod is not None:
             importlib.reload(_mod)
-    # Then reload addon modules (shader_mapper before blender_adapter which imports it)
-    importlib.reload(capture)  # noqa: F821
-    importlib.reload(receiver_addon)  # noqa: F821
+    # Then reload addon modules in dependency order. receiver_addon imports
+    # BlenderAdapter by name, so blender_adapter must be fresh first.
     importlib.reload(shader_mapper)  # noqa: F821
     importlib.reload(blender_adapter)  # noqa: F821
+    importlib.reload(capture)  # noqa: F821
+    importlib.reload(receiver_addon)  # noqa: F821
     importlib.reload(ui)  # noqa: F821
 
 from . import capture
@@ -100,6 +113,7 @@ def register():
 def unregister():
     # Grab the timer ref before module reload creates a new function object.
     import bpy
+
     timer = getattr(capture, "_timer_tick", None)
     ui.unregister()
     receiver_addon.unregister()

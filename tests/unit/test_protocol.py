@@ -1,6 +1,11 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
 from openusdconnect.protocol import (
+    make_hello,
+    make_quit,
+    make_txn,
+)
+from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -15,14 +20,21 @@ from openusdconnect.protocol import (
     MSG_QUIT,
     MSG_TXN,
     PROTOCOL_VERSION,
+)
+from openusdconnect.protocol_validation import (
     clamp_fields,
     is_mat16_valid,
     is_quat_valid,
     is_vec3_valid,
-    make_hello,
-    make_quit,
-    make_txn,
     validate_event,
+)
+from openusdconnect.shader_attrs import (
+    SHADER_ATTR_SIDE_INPUT,
+    SHADER_ATTR_SIDE_OUTPUT,
+    ShaderAttr,
+    shader_input_attr,
+    shader_output_attr,
+    split_qualified_attr,
 )
 
 
@@ -56,6 +68,26 @@ class TestValidationHelpers:
         assert clamp_fields(["t", "r", "s"]) == ["t", "r", "s"]
         assert clamp_fields(["t", "bogus", "s"]) == ["t", "s"]
         assert clamp_fields([]) == []
+
+
+class TestShaderAttrHelpers:
+    def test_builds_qualified_input_and_output_names(self):
+        assert shader_input_attr("diffuseColor").qualified_name == "inputs:diffuseColor"
+        assert shader_output_attr("surface").qualified_name == "outputs:surface"
+
+    def test_parses_qualified_names(self):
+        inp = ShaderAttr.from_qualified_name("inputs:tint")
+        out = ShaderAttr.from_qualified_name("outputs:rgb")
+
+        assert inp == ShaderAttr(SHADER_ATTR_SIDE_INPUT, "tint")
+        assert out == ShaderAttr(SHADER_ATTR_SIDE_OUTPUT, "rgb")
+        assert inp.is_input
+        assert out.is_output
+
+    def test_rejects_unqualified_or_empty_base_names(self):
+        assert ShaderAttr.from_qualified_name("diffuseColor") is None
+        assert ShaderAttr.from_qualified_name("inputs:") is None
+        assert split_qualified_attr("outputs:") == ("", "")
 
 
 class TestMessageConstruction:
@@ -243,14 +275,10 @@ class TestValidateEvent:
         assert not validate_event({"k": K_SET_REFERENCE, "prim": "/World/Chair"})
 
     def test_set_reference_refs_not_list(self):
-        assert not validate_event(
-            {"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": "bad"}
-        )
+        assert not validate_event({"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": "bad"})
 
     def test_set_reference_empty_refs_clears(self):
-        assert validate_event(
-            {"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": []}
-        )
+        assert validate_event({"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": []})
 
     def test_set_reference_multiple_refs(self):
         assert validate_event(
@@ -265,9 +293,7 @@ class TestValidateEvent:
         )
 
     def test_set_reference_entry_not_dict(self):
-        assert not validate_event(
-            {"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": ["bad"]}
-        )
+        assert not validate_event({"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": ["bad"]})
 
     def test_set_reference_internal_ref_valid(self):
         """Same-file reference with only prim_path is valid."""
@@ -277,9 +303,7 @@ class TestValidateEvent:
 
     def test_set_reference_entry_missing_both(self):
         """Entry with neither asset_path nor prim_path is invalid."""
-        assert not validate_event(
-            {"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": [{}]}
-        )
+        assert not validate_event({"k": K_SET_REFERENCE, "prim": "/World/Chair", "refs": [{}]})
 
     def test_set_reference_entry_empty_asset_path(self):
         assert not validate_event(
@@ -318,9 +342,7 @@ class TestValidateEvent:
         assert not validate_event({"k": K_SET_PAYLOAD, "prim": "/World/Asset"})
 
     def test_set_payload_empty_clears(self):
-        assert validate_event(
-            {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": []}
-        )
+        assert validate_event({"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": []})
 
     def test_set_payload_internal_valid(self):
         assert validate_event(
@@ -328,9 +350,7 @@ class TestValidateEvent:
         )
 
     def test_set_payload_entry_missing_both(self):
-        assert not validate_event(
-            {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [{}]}
-        )
+        assert not validate_event({"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": [{}]})
 
     def test_set_payload_entry_empty_asset_path(self):
         assert not validate_event(
@@ -338,9 +358,7 @@ class TestValidateEvent:
         )
 
     def test_set_payload_entry_not_dict(self):
-        assert not validate_event(
-            {"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": ["bad"]}
-        )
+        assert not validate_event({"k": K_SET_PAYLOAD, "prim": "/World/Asset", "payloads": ["bad"]})
 
     def test_set_payload_entry_bad_prim_path(self):
         assert not validate_event(
@@ -361,14 +379,16 @@ class TestValidateEvent:
     # --- set_variant_selections ---
     def test_set_variant_selections_valid(self):
         assert validate_event(
-            {"k": "set_variant_selections", "prim": "/World/Car",
-             "selections": {"wheels": "sport"}}
+            {"k": "set_variant_selections", "prim": "/World/Car", "selections": {"wheels": "sport"}}
         )
 
     def test_set_variant_selections_multiple(self):
         assert validate_event(
-            {"k": "set_variant_selections", "prim": "/World/Car",
-             "selections": {"wheels": "sport", "color": "red"}}
+            {
+                "k": "set_variant_selections",
+                "prim": "/World/Car",
+                "selections": {"wheels": "sport", "color": "red"},
+            }
         )
 
     def test_set_variant_selections_empty_clears(self):
@@ -377,9 +397,7 @@ class TestValidateEvent:
         )
 
     def test_set_variant_selections_missing_key(self):
-        assert not validate_event(
-            {"k": "set_variant_selections", "prim": "/World/Car"}
-        )
+        assert not validate_event({"k": "set_variant_selections", "prim": "/World/Car"})
 
     def test_set_variant_selections_not_dict(self):
         assert not validate_event(
@@ -393,39 +411,47 @@ class TestValidateEvent:
 
     def test_set_variant_selections_non_string_value(self):
         assert not validate_event(
-            {"k": "set_variant_selections", "prim": "/World/Car",
-             "selections": {"wheels": 42}}
+            {"k": "set_variant_selections", "prim": "/World/Car", "selections": {"wheels": 42}}
         )
 
     def test_set_shader_input_with_shader_id_valid(self):
         assert validate_event(
-            {"k": "set_shader_input", "prim": "/Mat/PBR",
-             "shader_id": "UsdPreviewSurface",
-             "inputs": {"roughness": 0.5},
-             "input_types": {"roughness": "float"}}
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/PBR",
+                "shader_id": "UsdPreviewSurface",
+                "inputs": {"roughness": 0.5},
+                "input_types": {"roughness": "float"},
+            }
         )
 
     def test_set_shader_input_empty_shader_id_valid(self):
         """Empty shader_id is permitted for NodeGraph/Material container
         prims that have no info:id but carry interface inputs."""
         assert validate_event(
-            {"k": "set_shader_input", "prim": "/Mat/NG_Inner",
-             "shader_id": "",
-             "inputs": {"tint": [1.0, 0.5, 0.25]},
-             "input_types": {"tint": "color3f"}}
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/NG_Inner",
+                "shader_id": "",
+                "inputs": {"tint": [1.0, 0.5, 0.25]},
+                "input_types": {"tint": "color3f"},
+            }
         )
 
     def test_set_shader_input_missing_shader_id_invalid(self):
         """Missing shader_id (None) is still rejected — only an explicit
         empty string is the valid 'no info:id' signal."""
         assert not validate_event(
-            {"k": "set_shader_input", "prim": "/Mat/PBR",
-             "inputs": {}, "input_types": {}}
+            {"k": "set_shader_input", "prim": "/Mat/PBR", "inputs": {}, "input_types": {}}
         )
 
     def test_set_shader_input_non_string_shader_id_invalid(self):
         assert not validate_event(
-            {"k": "set_shader_input", "prim": "/Mat/PBR",
-             "shader_id": 42, "inputs": {}, "input_types": {}}
+            {
+                "k": "set_shader_input",
+                "prim": "/Mat/PBR",
+                "shader_id": 42,
+                "inputs": {},
+                "input_types": {},
+            }
         )
-

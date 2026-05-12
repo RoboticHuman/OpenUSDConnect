@@ -44,7 +44,8 @@ class PrimRegistry:
     """
 
     def __init__(
-        self, *,
+        self,
+        *,
         scan_fn: Callable | None = None,
         alive_fn: Callable | None = None,
     ):
@@ -106,7 +107,9 @@ class PrimRegistry:
         children = {pp for pp in self._objects if pp.startswith(prefix)}
         for pp in children:
             self._objects.pop(pp)
+        for pp in {pp for pp in self._ref_children if pp.startswith(prefix)}:
             self._ref_children.discard(pp)
+        for pp in {pp for pp in self._shaders if pp.startswith(prefix)}:
             self._shaders.pop(pp, None)
         return children
 

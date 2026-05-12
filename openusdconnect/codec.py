@@ -34,7 +34,7 @@ import flatbuffers
 import numpy as np
 
 from .generated import messages_generated as _fb
-from .protocol import (
+from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -263,9 +263,7 @@ def payload_type(buf: bytes | bytearray) -> int:
 def encode_message(msg: dict) -> bytes:
     """Encode a protocol dict to FlatBuffers wire bytes."""
     msg_type = msg["type"]
-    builder = flatbuffers.Builder(
-        _BUILDER_SIZE_HINT.get(msg_type, _DEFAULT_BUILDER_SIZE)
-    )
+    builder = flatbuffers.Builder(_BUILDER_SIZE_HINT.get(msg_type, _DEFAULT_BUILDER_SIZE))
 
     payload_tag = _MSG_TYPE_TO_PAYLOAD[msg_type]
     payload_offset = _ENCODE_DISPATCH[msg_type](builder, msg)
@@ -281,6 +279,7 @@ def encode_message(msg: dict) -> bytes:
 
 
 # --- Per-message-type encoders ---
+
 
 def _encode_hello(b, msg):
     role = b.CreateString(msg["role"])
@@ -420,6 +419,7 @@ _ENCODE_DISPATCH = {
 
 # --- Event wrapper encoder ---
 
+
 def _encode_event_wrapper(b, ev: dict) -> int:
     kind = ev["k"]
     tag = _EVENT_KIND_TO_TAG[kind]
@@ -431,6 +431,7 @@ def _encode_event_wrapper(b, ev: dict) -> int:
 
 
 # --- Per-event-kind encoders ---
+
 
 def _create_float_vector(b, values):
     """Create a FlatBuffers float32 vector via numpy bulk copy."""
@@ -942,6 +943,7 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
 
 # --- Helpers ---
 
+
 def _str(val) -> str | None:
     if val is None:
         return None
@@ -952,13 +954,18 @@ def _str(val) -> str | None:
 
 # --- Per-message dict decoders ---
 
+
 def _dict_hello(h, msg_type):
     msg = {"type": msg_type, "role": _str(h.Role()), "protocol_version": h.ProtocolVersion()}
     sf = h.SyncFrom()
     if sf:
         msg["sync_from"] = sf
-    for key, getter in [("client_id", h.ClientId), ("origin", h.Origin),
-                        ("department", h.Department), ("token", h.Token)]:
+    for key, getter in [
+        ("client_id", h.ClientId),
+        ("origin", h.Origin),
+        ("department", h.Department),
+        ("token", h.Token),
+    ]:
         v = _str(getter())
         if v:
             msg[key] = v
@@ -978,8 +985,9 @@ def _dict_auth_rejected(h, msg_type):
 
 
 def _dict_txn(t, msg_type, numpy_arrays=False):
-    events = [event_to_dict(t.Events(i), numpy_arrays=numpy_arrays)
-              for i in range(t.EventsLength())]
+    events = [
+        event_to_dict(t.Events(i), numpy_arrays=numpy_arrays) for i in range(t.EventsLength())
+    ]
     return {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
 
 
@@ -987,8 +995,7 @@ def _dict_broadcast_event(be, msg_type, numpy_arrays=False):
     ew = be.Event()
     event_dict = event_to_dict(ew, numpy_arrays=numpy_arrays) if ew else {}
     msg = {"type": msg_type, "seq": be.Seq(), "event": event_dict}
-    for key, getter in [("origin", be.Origin), ("client_id", be.ClientId),
-                        ("client", be.Client)]:
+    for key, getter in [("origin", be.Origin), ("client_id", be.ClientId), ("client", be.Client)]:
         v = _str(getter())
         if v:
             msg[key] = v
@@ -1000,8 +1007,9 @@ def _dict_empty(_obj, msg_type):
 
 
 def _dict_create_proposal(cp, msg_type, numpy_arrays=False):
-    events = [event_to_dict(cp.Events(i), numpy_arrays=numpy_arrays)
-              for i in range(cp.EventsLength())]
+    events = [
+        event_to_dict(cp.Events(i), numpy_arrays=numpy_arrays) for i in range(cp.EventsLength())
+    ]
     return {
         "type": msg_type,
         "target_department": _str(cp.TargetDepartment()),
@@ -1035,6 +1043,7 @@ _DICT_DECODE_DISPATCH = {
 
 
 # --- Per-event dict decoders ---
+
 
 def _dict_ensure_prim(ep, kind):
     ev = {"k": kind, "prim": _str(ep.Prim())}
