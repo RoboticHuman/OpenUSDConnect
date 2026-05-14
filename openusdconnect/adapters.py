@@ -58,123 +58,57 @@ from .protocol_constants import (
 LOG = logging.getLogger(__name__)
 
 
-# Protocol-event-kind → handler dispatch table.  Mirrors the
-# @register_encoder / @register_decoder / @register_applier pattern in
-# codec.py and event_apply.py: each route is a named function on the
-# DCCAdapter base class, decorated with @_adapter_route(K_*).  Routes
-# unwrap the event dict and delegate to the corresponding abstract method
-# on self, so subclasses get dispatch for free and only need to implement
-# the per-kind methods.
-_ADAPTER_DISPATCH: dict[str, Callable] = {}
-
-
-def _adapter_route(kind: str):
-    """Register a method as the handler for one protocol event kind."""
-
-    def decorator(fn: Callable) -> Callable:
-        _ADAPTER_DISPATCH[kind] = fn
-        return fn
-
-    return decorator
+# Per-kind args extractor.  The dispatch key (a K_* constant) is also the
+# adapter method name, so apply_event uses ``getattr(self, event["k"])`` —
+# no method-name strings duplicated in this table.  Each lambda reads
+# schema-required fields directly so malformed events fail fast; only
+# NotRequired fields use ``.get`` with a default.
+_DISPATCH: dict[str, Callable[[dict], tuple]] = {
+    K_ENSURE_PRIM: lambda ev: (ev["prim"], ev["typeName"]),
+    K_ENSURE_XFORM_OPS: lambda ev: (ev["prim"],),
+    K_SET_XFORM_TRS: lambda ev: (ev["prim"], ev),
+    K_SET_XFORM_MATRICES: lambda ev: (ev["prim"], ev),
+    K_DELETE_PRIM: lambda ev: (ev["prim"],),
+    K_DEACTIVATE_PRIM: lambda ev: (ev["prim"], ev["active"]),
+    K_RENAME_PRIM: lambda ev: (ev["prim"], ev["new_name"]),
+    K_SET_VISIBILITY: lambda ev: (ev["prim"], ev["visible"]),
+    K_SET_GPRIM_ATTRS: lambda ev: (ev["prim"], ev["attrs"]),
+    K_SET_REFERENCE: lambda ev: (ev["prim"], ev["refs"]),
+    K_SET_VARIANT_SELECTIONS: lambda ev: (ev["prim"], ev["selections"]),
+    K_SET_PAYLOAD: lambda ev: (ev["prim"], ev["payloads"]),
+    K_LOAD_PAYLOAD: lambda ev: (ev["prim"],),
+    K_UNLOAD_PAYLOAD: lambda ev: (ev["prim"],),
+    K_SET_MATERIAL_BINDING: lambda ev: (ev["prim"], ev["material_path"]),
+    K_SET_SHADER_INPUT: lambda ev: (
+        ev["prim"],
+        ev["shader_id"],
+        ev["inputs"],
+        ev.get("input_types", {}),
+    ),
+    K_SET_SHADER_CONNECTION: lambda ev: (
+        ev["prim"],
+        ev["connections"],
+        ev.get("disconnections", []),
+    ),
+}
 
 
 class DCCAdapter(ABC):
     """Abstract interface a DCC integration must implement."""
 
     def apply_event(self, event: dict):
-        """Route one protocol event dict to its registered handler.
-
-        Unknown event kinds return ``None``.  Override for adapters that
-        prefer a faster path (e.g. UsdStageAdapter batches through
-        event_apply directly).
-        """
-        handler = _ADAPTER_DISPATCH.get(event.get("k"))
-        if handler is None:
+        """Route one protocol event dict to the matching adapter method."""
+        k = event["k"]
+        args_of = _DISPATCH.get(k)
+        if args_of is None:
             return None
-        return handler(self, event)
+        return getattr(self, k)(*args_of(event))
 
     def apply_events(self, events: list[dict]) -> int:
         """Apply a batch of protocol events to this adapter."""
         for event in events:
             self.apply_event(event)
         return len(events)
-
-    @_adapter_route(K_ENSURE_PRIM)
-    def _route_ensure_prim(self, ev: dict):
-        return self.ensure_prim(ev.get("prim", ""), ev["typeName"])
-
-    @_adapter_route(K_ENSURE_XFORM_OPS)
-    def _route_ensure_xform_ops(self, ev: dict):
-        return self.ensure_xform_ops(ev.get("prim", ""))
-
-    @_adapter_route(K_SET_XFORM_TRS)
-    def _route_set_xform_trs(self, ev: dict):
-        return self.set_xform_trs(ev.get("prim", ""), ev)
-
-    @_adapter_route(K_SET_XFORM_MATRICES)
-    def _route_set_xform_matrices(self, ev: dict):
-        return self.set_xform_matrices(ev.get("prim", ""), ev)
-
-    @_adapter_route(K_DELETE_PRIM)
-    def _route_delete_prim(self, ev: dict):
-        return self.delete_prim(ev.get("prim", ""))
-
-    @_adapter_route(K_DEACTIVATE_PRIM)
-    def _route_deactivate_prim(self, ev: dict):
-        return self.deactivate_prim(ev.get("prim", ""), ev.get("active", False))
-
-    @_adapter_route(K_RENAME_PRIM)
-    def _route_rename_prim(self, ev: dict):
-        return self.rename_prim(ev.get("prim", ""), ev.get("new_name", ""))
-
-    @_adapter_route(K_SET_VISIBILITY)
-    def _route_set_visibility(self, ev: dict):
-        return self.set_visibility(ev.get("prim", ""), ev.get("visible", True))
-
-    @_adapter_route(K_SET_GPRIM_ATTRS)
-    def _route_set_gprim_attrs(self, ev: dict):
-        return self.set_gprim_attrs(ev.get("prim", ""), ev.get("attrs", {}))
-
-    @_adapter_route(K_SET_REFERENCE)
-    def _route_set_reference(self, ev: dict):
-        return self.set_reference(ev.get("prim", ""), ev.get("refs", []))
-
-    @_adapter_route(K_SET_VARIANT_SELECTIONS)
-    def _route_set_variant_selections(self, ev: dict):
-        return self.set_variant_selections(ev.get("prim", ""), ev.get("selections", {}))
-
-    @_adapter_route(K_SET_PAYLOAD)
-    def _route_set_payload(self, ev: dict):
-        return self.set_payload(ev.get("prim", ""), ev.get("payloads", []))
-
-    @_adapter_route(K_LOAD_PAYLOAD)
-    def _route_load_payload(self, ev: dict):
-        return self.load_payload(ev.get("prim", ""))
-
-    @_adapter_route(K_UNLOAD_PAYLOAD)
-    def _route_unload_payload(self, ev: dict):
-        return self.unload_payload(ev.get("prim", ""))
-
-    @_adapter_route(K_SET_MATERIAL_BINDING)
-    def _route_set_material_binding(self, ev: dict):
-        return self.set_material_binding(ev.get("prim", ""), ev.get("material_path", ""))
-
-    @_adapter_route(K_SET_SHADER_INPUT)
-    def _route_set_shader_input(self, ev: dict):
-        return self.set_shader_input(
-            ev.get("prim", ""),
-            ev.get("shader_id", ""),
-            ev.get("inputs", {}),
-            ev.get("input_types", {}),
-        )
-
-    @_adapter_route(K_SET_SHADER_CONNECTION)
-    def _route_set_shader_connection(self, ev: dict):
-        return self.set_shader_connection(
-            ev.get("prim", ""),
-            ev.get("connections", {}),
-            ev.get("disconnections", []),
-        )
 
     @abstractmethod
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:

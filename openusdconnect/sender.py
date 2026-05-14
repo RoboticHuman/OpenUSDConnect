@@ -1,9 +1,4 @@
-"""TCP client for sending protocol events to a sync server.
-
-Generic, DCC-independent.  Integrations construct an ``EventSender`` with
-their host/port and stable client identity, call :meth:`connect` once,
-then :meth:`send_events` per batch of dirty events from the emitter.
-"""
+"""TCP client for sending protocol events to a sync server."""
 
 from __future__ import annotations
 
@@ -17,13 +12,10 @@ LOG = logging.getLogger(__name__)
 
 
 class EventSender:
-    """Thin TCP connection for sending protocol events to a sync server.
+    """Owns one TCP socket and ``hello`` handshake per connect cycle.
 
-    The sender owns one socket and one ``hello`` handshake per connect
-    cycle.  ``send_events`` packages a batch into a ``txn`` message; on
-    socket error it logs, disconnects, and returns — callers can attempt
-    a reconnect.  Programmer errors (serialization failures, etc.)
-    propagate.
+    On socket error during ``send_events`` the sender logs and
+    disconnects; the caller is expected to reconnect.
     """
 
     def __init__(
@@ -70,13 +62,7 @@ class EventSender:
         self.sock = None
 
     def send_events(self, events: list) -> None:
-        """Wrap *events* in a ``txn`` and send.  No-op if disconnected or empty.
-
-        Network failures are logged and the sender disconnects so the
-        caller's next ``connect`` cycles cleanly.  The send is not
-        retried; the next batch's :meth:`send_events` will simply no-op
-        until the caller reconnects.
-        """
+        """Wrap *events* in a ``txn`` and send.  No-op if disconnected or empty."""
         if self.sock is None or not events:
             return
         try:

@@ -951,8 +951,8 @@ def decode_messages(
 ) -> DecodeResult:
     """Decode a batch of wire messages with sequence dedup and resync handling.
 
-    Pure function — caller threads *last_seq* in and reads it back out.
-    Per-message decode failures are captured into ``result.errors``.
+    Per-message decode failures are captured into ``result.errors``
+    rather than raised.
     """
     result = DecodeResult(last_seq=last_seq)
     for raw in raw_messages:

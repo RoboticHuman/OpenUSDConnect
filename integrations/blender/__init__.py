@@ -63,9 +63,7 @@ except Exception:
     pass
 
 # Reload addon submodules when the addon is re-enabled (F3 → Reload Scripts
-# or disable/enable toggle).  The openusdconnect cache was already purged at
-# the top of this file, so the reloads below pick up fresh vendored files via
-# their `from openusdconnect.*` imports.  Order matters: receiver_addon imports
+# or disable/enable toggle).  Order matters: receiver_addon imports
 # BlenderAdapter, so blender_adapter must be reloaded first.
 if _is_addon_reload:
     import importlib
