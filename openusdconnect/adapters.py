@@ -11,29 +11,14 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-try:
-    from pxr import Usd
-except ImportError:
-    Usd = None
+from pxr import Usd
 
-try:
-    from .event_apply import (
-        apply_event as _apply_event_to_stage,
-    )
-    from .event_apply import (
-        apply_events as _apply_events_to_stage,
-    )
-    from .event_apply import (
-        ensure_canonical_ops as _ensure_canonical_ops,
-    )
-    from .event_apply import (
-        get_or_define_prim as _get_or_define_prim,
-    )
-except ImportError:
-    _apply_event_to_stage = None
-    _apply_events_to_stage = None
-    _ensure_canonical_ops = None
-    _get_or_define_prim = None
+from .event_apply import (
+    apply_event as _apply_event_to_stage,
+    apply_events as _apply_events_to_stage,
+    ensure_canonical_ops as _ensure_canonical_ops,
+    get_or_define_prim as _get_or_define_prim,
+)
 
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
@@ -339,8 +324,6 @@ class UsdStageAdapter(DCCAdapter):
     """
 
     def __init__(self, stage):
-        if Usd is None:
-            raise ImportError("UsdStageAdapter requires pxr.Usd")
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdStageAdapter requires a Usd.Stage")
         self.stage = stage

@@ -1267,7 +1267,7 @@ class UsdSyncServer:
                 try:
                     listener(rec)
                 except Exception:
-                    LOG.debug("Event listener failed, removing")
+                    LOG.exception("Event listener failed, removing")
                     self._event_listeners.remove(listener)
                     break
 
@@ -1284,7 +1284,7 @@ class UsdSyncServer:
                 try:
                     listener(rec)
                 except Exception:
-                    LOG.debug("Event listener failed, removing")
+                    LOG.exception("Event listener failed, removing")
                     self._event_listeners.remove(listener)
                     break
 
