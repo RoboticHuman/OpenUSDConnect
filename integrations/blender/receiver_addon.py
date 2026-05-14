@@ -16,31 +16,17 @@ try:
 except Exception:
     BPY_AVAILABLE = False
 
-from openusdconnect.codec import (
-    PayloadType,
-    decode_envelope,
-    event_to_dict,
-    resolve_payload,
-)
 from openusdconnect.protocol_constants import (
-    K_DEACTIVATE_PRIM,
-    K_DELETE_PRIM,
-    K_ENSURE_PRIM,
-    K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
-    K_RENAME_PRIM,
-    K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
-    K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
-    K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
+from openusdconnect.codec import decode_messages
 from openusdconnect.receiver import ReceiverThread
 
 from . import SESSION_ORIGIN as _ORIGIN
@@ -87,86 +73,12 @@ def _ensure_scene_props():
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
 
 
-# Module-level dispatch table — method names resolved at call time.
-_DISPATCH_TABLE: dict[str, str] = {
-    K_ENSURE_PRIM: "ensure_prim",
-    K_ENSURE_XFORM_OPS: "ensure_xform_ops",
-    K_SET_XFORM_TRS: "set_xform_trs",
-    K_SET_XFORM_MATRICES: "set_xform_matrices",
-    K_DELETE_PRIM: "delete_prim",
-    K_DEACTIVATE_PRIM: "deactivate_prim",
-    K_RENAME_PRIM: "rename_prim",
-    K_SET_VISIBILITY: "set_visibility",
-    K_SET_GPRIM_ATTRS: "set_gprim_attrs",
-    K_SET_REFERENCE: "set_reference",
-    K_SET_VARIANT_SELECTIONS: "set_variant_selections",
-    K_SET_PAYLOAD: "set_payload",
-    K_LOAD_PAYLOAD: "load_payload",
-    K_UNLOAD_PAYLOAD: "unload_payload",
-    K_SET_MATERIAL_BINDING: "set_material_binding",
-    K_SET_SHADER_INPUT: "set_shader_input",
-    K_SET_SHADER_CONNECTION: "set_shader_connection",
-}
-
-
-# Per-event-type argument builders (returns kwargs for the adapter method).
-def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
-    """Return (args, kwargs) for the adapter method identified by *k*."""
-    if k == K_ENSURE_PRIM:
-        return (prim_path, ev["typeName"]), {}
-    if k == K_DEACTIVATE_PRIM:
-        return (prim_path, ev.get("active", False)), {}
-    if k == K_RENAME_PRIM:
-        return (prim_path, ev.get("new_name", "")), {}
-    if k == K_SET_VISIBILITY:
-        return (prim_path, ev.get("visible", True)), {}
-    if k == K_SET_GPRIM_ATTRS:
-        return (prim_path, ev.get("attrs", {})), {}
-    if k == K_SET_REFERENCE:
-        return (prim_path, ev.get("refs", [])), {}
-    if k == K_SET_VARIANT_SELECTIONS:
-        return (prim_path, ev.get("selections", {})), {}
-    if k == K_SET_PAYLOAD:
-        return (prim_path, ev.get("payloads", [])), {}
-    if k == K_SET_MATERIAL_BINDING:
-        return (prim_path, ev.get("material_path", "")), {}
-    if k == K_SET_SHADER_INPUT:
-        return (
-            prim_path,
-            ev.get("shader_id", ""),
-            ev.get("inputs", {}),
-            ev.get("input_types", {}),
-        ), {}
-    if k == K_SET_SHADER_CONNECTION:
-        return (
-            prim_path,
-            ev.get("connections", {}),
-            ev.get("disconnections", []),
-        ), {}
-    # set_xform_trs, set_xform_matrices, ensure_xform_ops, delete_prim
-    if k in (K_SET_XFORM_TRS, K_SET_XFORM_MATRICES):
-        return (prim_path, ev), {}
-    return (prim_path,), {}
-
-
-def _dispatch_event(adapter, k, prim_path, ev):
-    """Route an event to the appropriate adapter method."""
-    method_name = _DISPATCH_TABLE.get(k)
-    if method_name is None:
-        return
-    method = getattr(adapter, method_name, None)
-    if method is None:
-        return
-    args, kwargs = _dispatch_args(k, prim_path, ev)
-    method(*args, **kwargs)
-
-
 def _arc_changed(stage, ev, k):
     """Check if a composition arc event differs from the emitter's stage."""
     from openusdconnect.emitter import (
-        _read_payloads,
-        _read_references,
-        _read_variant_selections,
+        read_payloads,
+        read_references,
+        read_variant_selections,
     )
 
     prim_path = ev.get("prim", "")
@@ -175,7 +87,7 @@ def _arc_changed(stage, ev, k):
         return [(p.replace("\\", "/"), r) for p, r in arcs]
 
     if k == K_SET_REFERENCE:
-        current = _normalize_arcs(_read_references(stage, prim_path))
+        current = _normalize_arcs(read_references(stage, prim_path))
         incoming = _normalize_arcs(
             [(e.get("asset_path", ""), e.get("prim_path", "")) for e in ev.get("refs", [])]
         )
@@ -183,7 +95,7 @@ def _arc_changed(stage, ev, k):
         LOG.debug("arc ref %s changed=%s", prim_path, changed)
         return changed
     if k == K_SET_PAYLOAD:
-        current = _normalize_arcs(_read_payloads(stage, prim_path))
+        current = _normalize_arcs(read_payloads(stage, prim_path))
         incoming = _normalize_arcs(
             [(e.get("asset_path", ""), e.get("prim_path", "")) for e in ev.get("payloads", [])]
         )
@@ -191,7 +103,7 @@ def _arc_changed(stage, ev, k):
         LOG.debug("arc payload %s changed=%s", prim_path, changed)
         return changed
     if k == K_SET_VARIANT_SELECTIONS:
-        current = dict(_read_variant_selections(stage, prim_path))
+        current = dict(read_variant_selections(stage, prim_path))
         incoming = ev.get("selections", {})
         changed = current != incoming
         LOG.debug("arc variant %s changed=%s", prim_path, changed)
@@ -272,7 +184,7 @@ def _dispatch_to_adapter(events: list[dict], skip_indices: set[int]) -> None:
         k = ev.get("k")
         prim_path = ev.get("prim", "")
         LOG.debug("event: k=%s prim=%s", k, prim_path)
-        _dispatch_event(adapter, k, prim_path, ev)
+        adapter.apply_event(ev)
         # Track import events for post-batch cache seeding.
         if k in (K_LOAD_PAYLOAD, K_SET_REFERENCE):
             _pending_seed_paths.add(prim_path)
@@ -313,13 +225,13 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
                 from openusdconnect.emitter import (
                     _C_REFERENCES,
                     _C_VARIANT_SELECTIONS,
-                    _read_references,
-                    _read_variant_selections,
+                    read_references,
+                    read_variant_selections,
                 )
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
-                pc[_C_REFERENCES] = _read_references(stage, prim_path)
-                pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                pc[_C_REFERENCES] = read_references(stage, prim_path)
+                pc[_C_VARIANT_SELECTIONS] = read_variant_selections(
                     stage,
                     prim_path,
                 )
@@ -329,7 +241,7 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
                         cp = str(child.GetPath())
                         if cp == prim_path:
                             continue
-                        cvs = _read_variant_selections(stage, cp)
+                        cvs = read_variant_selections(stage, cp)
                         if cvs:
                             cpc = ne._prim_cache.setdefault(cp, {})
                             cpc[_C_VARIANT_SELECTIONS] = cvs
@@ -338,11 +250,11 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
             if ne is not None:
                 from openusdconnect.emitter import (
                     _C_VARIANT_SELECTIONS,
-                    _read_variant_selections,
+                    read_variant_selections,
                 )
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
-                pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(
+                pc[_C_VARIANT_SELECTIONS] = read_variant_selections(
                     stage,
                     prim_path,
                 )
@@ -355,11 +267,11 @@ def _update_emitter_caches(events: list[dict], stage, skip_indices: set[int]) ->
             if ne is not None:
                 from openusdconnect.emitter import (
                     _C_SHADER_INPUTS,
-                    _read_usdshade_connectable,
+                    read_usdshade_connectable,
                 )
 
                 pc = ne._prim_cache.setdefault(prim_path, {})
-                kind, sid, inps, _, _ = _read_usdshade_connectable(
+                kind, sid, inps, _, _ = read_usdshade_connectable(
                     stage,
                     prim_path,
                 )
@@ -380,37 +292,23 @@ def _set_applying_remote(value: bool):
 
 
 def _parse_events(lines) -> list[dict]:
-    """Parse and deduplicate raw JSON lines into a list of event dicts.
+    """Parse and deduplicate raw network messages into a list of event dicts.
 
     Handles resync messages (resets sequence and adapter).  Returns the
     collected events for the caller to process in phases.
     """
     global _LAST_SEQ, _ADAPTER
-    events = []
-    for raw_buf in lines:
-        try:
-            env = decode_envelope(raw_buf)
-            pt = env.PayloadType()
-
-            if pt == PayloadType.Resync:
-                LOG.info("Server requested resync — resetting sequence and adapter")
-                _LAST_SEQ = 0
-                _ADAPTER = None
-                events.clear()
-                continue
-
-            if pt == PayloadType.BroadcastEvent:
-                _, be = resolve_payload(env)
-                seq_int = be.Seq()
-                if seq_int <= _LAST_SEQ:
-                    continue
-                _LAST_SEQ = seq_int
-                ew = be.Event()
-                if ew:
-                    events.append(event_to_dict(ew))
-        except Exception:
-            LOG.exception("Error parsing received message")
-    return events
+    result = decode_messages(lines, last_seq=_LAST_SEQ, clear_on_resync=True)
+    if result.resync_requested:
+        LOG.info("Server requested resync — resetting sequence and adapter")
+        _ADAPTER = None
+    for exc in result.errors:
+        LOG.exception(
+            "Error parsing received message",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+    _LAST_SEQ = result.last_seq
+    return result.received
 
 
 def _seed_multi_node_shader_maps(cap, prim_path: str):

@@ -24,10 +24,14 @@ import uuid
 # this addon's directory (e.g. during hot-reload).
 _addon_dir = os.path.dirname(os.path.abspath(__file__))
 _bundled_prefix = os.path.join(_addon_dir, "openusdconnect")
+# On reload, also purge bundled openusdconnect modules so the freshly-extracted
+# addon files load — otherwise the package __init__'s `from .codec import ...`
+# resolves against the stale cached submodule and misses newly-added symbols.
+_is_addon_reload = "capture" in dir()
 for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     _mod = sys.modules[_k]
     _mod_file = getattr(_mod, "__file__", "") or ""
-    if not _mod_file.startswith(_bundled_prefix):
+    if _is_addon_reload or not _mod_file.startswith(_bundled_prefix):
         del sys.modules[_k]
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
@@ -58,39 +62,14 @@ try:
 except Exception:
     pass
 
-# Reload submodules when the addon is re-enabled (F3 → Reload Scripts,
-# or disable/enable toggle).  Without this, Blender only notices changes
-# to __init__.py — edits in capture.py, receiver_addon.py, etc. are
-# silently ignored until a full restart.
-if "capture" in locals():
+# Reload addon submodules when the addon is re-enabled (F3 → Reload Scripts
+# or disable/enable toggle).  The openusdconnect cache was already purged at
+# the top of this file, so the reloads below pick up fresh vendored files via
+# their `from openusdconnect.*` imports.  Order matters: receiver_addon imports
+# BlenderAdapter, so blender_adapter must be reloaded first.
+if _is_addon_reload:
     import importlib
 
-    # Reload vendored core library first (dependency).
-    # The package itself must be reloaded so submodule references are fresh,
-    # then each submodule is reloaded so imports pick up new symbols added
-    # since the last load.
-    from . import openusdconnect as _ouc_pkg
-
-    importlib.reload(_ouc_pkg)
-    _subs = (
-        "protocol_constants",
-        "protocol_validation",
-        "shader_attrs",
-        "shader_connections",
-        "protocol",
-        "transport",
-        "event_apply",
-        "emitter",
-        "receiver",
-        "adapters",
-        "server",
-    )
-    for _sub in _subs:
-        _mod = getattr(_ouc_pkg, _sub, None)
-        if _mod is not None:
-            importlib.reload(_mod)
-    # Then reload addon modules in dependency order. receiver_addon imports
-    # BlenderAdapter by name, so blender_adapter must be fresh first.
     importlib.reload(shader_mapper)  # noqa: F821
     importlib.reload(blender_adapter)  # noqa: F821
     importlib.reload(capture)  # noqa: F821

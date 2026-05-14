@@ -248,17 +248,17 @@ def _read_composition_arcs(stage, prim_path, arc_attr):
     return result
 
 
-def _read_references(stage, prim_path):
+def read_references(stage, prim_path):
     """Read reference arcs authored on this stage's own layers."""
     return _read_composition_arcs(stage, prim_path, "referenceList")
 
 
-def _read_payloads(stage, prim_path):
+def read_payloads(stage, prim_path):
     """Read payload arcs authored on this stage's own layers."""
     return _read_composition_arcs(stage, prim_path, "payloadList")
 
 
-def _read_variant_selections(stage, prim_path):
+def read_variant_selections(stage, prim_path):
     """Read variant selections on a prim.
 
     Returns a dict mapping variant set name -> selected variant name,
@@ -276,7 +276,7 @@ def _read_variant_selections(stage, prim_path):
     return result
 
 
-def _read_material_binding(stage, prim_path):
+def read_material_binding(stage, prim_path):
     """Read the material:binding relationship target from the composed stage.
 
     Returns the target material prim path string, or empty string if unbound.
@@ -305,7 +305,7 @@ def _connected_source_attr(src) -> ShaderAttr:
     return shader_input_attr(src.sourceName)
 
 
-def _read_usdshade_connectable(stage, prim_path):
+def read_usdshade_connectable(stage, prim_path):
     """Read interface data from a UsdShade.ConnectableAPI-bearing prim.
 
     Polymorphic over Shader, NodeGraph, and Material (Material inherits
@@ -484,10 +484,10 @@ class NoticeEmitter:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            pc[_C_REFERENCES] = _read_references(stage, cp)
-            pc[_C_PAYLOADS] = _read_payloads(stage, cp)
-            pc[_C_VARIANT_SELECTIONS] = _read_variant_selections(stage, cp)
-            pc[_C_MATERIAL_BINDING] = _read_material_binding(stage, cp)
+            pc[_C_REFERENCES] = read_references(stage, cp)
+            pc[_C_PAYLOADS] = read_payloads(stage, cp)
+            pc[_C_VARIANT_SELECTIONS] = read_variant_selections(stage, cp)
+            pc[_C_MATERIAL_BINDING] = read_material_binding(stage, cp)
             if child.HasAuthoredPayloads():
                 pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
             gprim_snapshot = {}
@@ -500,7 +500,7 @@ class NoticeEmitter:
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
             # Seed shader/nodegraph interface inputs and connections.
-            container_kind, shader_id, inputs, _types, connections = _read_usdshade_connectable(
+            container_kind, shader_id, inputs, _types, connections = read_usdshade_connectable(
                 stage, cp
             )
             if container_kind:
@@ -725,7 +725,7 @@ class NoticeEmitter:
             self._known_prims.add(prim_path)
 
         # Variant selection diff (V before R in LIVERPS)
-        current_vsel = _read_variant_selections(self.stage, prim_path)
+        current_vsel = read_variant_selections(self.stage, prim_path)
         last_vsel = pc.get(_C_VARIANT_SELECTIONS, {})
         if current_vsel != last_vsel:
             events.append(
@@ -738,7 +738,7 @@ class NoticeEmitter:
             pc[_C_VARIANT_SELECTIONS] = current_vsel
 
         # Reference diff
-        current_refs = _read_references(self.stage, prim_path)
+        current_refs = read_references(self.stage, prim_path)
         last_refs = pc.get(_C_REFERENCES, [])
         if current_refs != last_refs:
             ref_ev = {"k": K_SET_REFERENCE, "prim": prim_path, "refs": []}
@@ -751,7 +751,7 @@ class NoticeEmitter:
             pc[_C_REFERENCES] = current_refs
 
         # Payload diff
-        current_payloads = _read_payloads(self.stage, prim_path)
+        current_payloads = read_payloads(self.stage, prim_path)
         last_payloads = pc.get(_C_PAYLOADS, [])
         if current_payloads != last_payloads:
             pay_ev: dict = {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": []}
@@ -775,7 +775,7 @@ class NoticeEmitter:
                 pc[_C_PAYLOAD_LOADED] = is_loaded
 
         # Material binding diff
-        current_binding = _read_material_binding(self.stage, prim_path)
+        current_binding = read_material_binding(self.stage, prim_path)
         last_binding = pc.get(_C_MATERIAL_BINDING, "")
         if current_binding != last_binding:
             events.append(
@@ -789,7 +789,7 @@ class NoticeEmitter:
 
         # Shader/NodeGraph interface input + connection diff
         container_kind, shader_id, current_inputs, current_types, current_conns = (
-            _read_usdshade_connectable(self.stage, prim_path)
+            read_usdshade_connectable(self.stage, prim_path)
         )
         if container_kind:
             # Value diff

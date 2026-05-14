@@ -1063,8 +1063,8 @@ class BlenderAdapter(DCCAdapter):
             from pxr import Usd, UsdShade
 
             from openusdconnect.emitter import (
-                _read_material_binding,
-                _read_usdshade_connectable,
+                read_material_binding,
+                read_usdshade_connectable,
             )
         except ImportError:
             return
@@ -1096,12 +1096,12 @@ class BlenderAdapter(DCCAdapter):
             file_path = str(prim.GetPath())
             scene_path = _remap(file_path)
 
-            binding_target = _read_material_binding(stage, file_path)
+            binding_target = read_material_binding(stage, file_path)
             if binding_target:
                 binding_events.append((scene_path, _remap(binding_target)))
 
             if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
-                _kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
+                _kind, sid, inputs, itypes, conns = read_usdshade_connectable(
                     stage,
                     file_path,
                 )

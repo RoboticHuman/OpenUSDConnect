@@ -433,9 +433,9 @@ class TestPayloadRoundtrip:
         prim_path = str(root_prim.GetPath())
 
         # Read payloads from the root prim
-        from openusdconnect.emitter import _read_payloads
+        from openusdconnect.emitter import read_payloads
 
-        payloads = _read_payloads(src_stage, prim_path)
+        payloads = read_payloads(src_stage, prim_path)
         assert len(payloads) >= 1, f"Expected payloads on {prim_path}, got {payloads}"
 
         # Build the event
@@ -1013,8 +1013,8 @@ class TestStageToStageRoundtrip:
 
         from openusdconnect import codec
         from openusdconnect.emitter import (
-            _read_material_binding,
-            _read_usdshade_connectable,
+            read_material_binding,
+            read_usdshade_connectable,
         )
         from openusdconnect.protocol_constants import (
             K_SET_MATERIAL_BINDING,
@@ -1044,7 +1044,7 @@ class TestStageToStageRoundtrip:
             tn = prim.GetTypeName()
             if tn:
                 events.append({"k": K_ENSURE_PRIM, "prim": pp, "typeName": tn})
-            binding = _read_material_binding(src, pp)
+            binding = read_material_binding(src, pp)
             if binding:
                 events.append(
                     {
@@ -1053,7 +1053,7 @@ class TestStageToStageRoundtrip:
                         "material_path": binding,
                     }
                 )
-            kind, sid, inputs, itypes, conns = _read_usdshade_connectable(
+            kind, sid, inputs, itypes, conns = read_usdshade_connectable(
                 src,
                 pp,
             )

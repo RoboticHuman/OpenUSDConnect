@@ -9,13 +9,12 @@ Architecture:
     -> BlenderStageAuthor writes to local USD stage
       -> Usd.Notice.ObjectsChanged fires
         -> NoticeEmitter builds protocol events
-          -> NetworkSender sends events over TCP
+          -> EventSender sends events over TCP
 """
 
 from __future__ import annotations
 
 import logging
-import socket
 import time
 
 import bpy
@@ -33,6 +32,9 @@ from openusdconnect.axis_conversion import (
     zup_to_yup_scale,
     zup_to_yup_vec,
 )
+from openusdconnect.sender import EventSender
+
+from . import SESSION_ORIGIN, STABLE_CLIENT_ID
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom
@@ -766,73 +768,6 @@ class BlenderStageAuthor:
 
 
 # ---------------------------------------------------------------------------
-# NetworkSender — thin TCP sender for protocol events
-# ---------------------------------------------------------------------------
-class NetworkSender:
-    """Thin TCP connection for sending protocol events to the server."""
-
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        client_id: str | None = None,
-        origin: str | None = None,
-    ):
-        self.host = host
-        self.port = port
-        from . import SESSION_ORIGIN, STABLE_CLIENT_ID
-
-        self.client_id = client_id or STABLE_CLIENT_ID
-        self.origin = origin or SESSION_ORIGIN
-        self.sock: socket.socket | None = None
-
-        # Lazy import to support vendored openusdconnect
-        from openusdconnect.protocol import (
-            make_hello,
-            make_quit,
-            make_txn,
-        )
-        from openusdconnect.transport import send_line as _send_line
-
-        self._make_hello = make_hello
-        self._make_txn = make_txn
-        self._make_quit = make_quit
-        self._send_line = _send_line
-
-    def connect(self):
-        self.sock = socket.create_connection((self.host, self.port))
-        hello = self._make_hello(
-            "emitter",
-            client_id=self.client_id,
-            origin=self.origin,
-        )
-        self._send_line(self.sock, hello)
-        LOG.info("Network sender connected to %s:%d", self.host, self.port)
-
-    def disconnect(self):
-        if self.sock:
-            try:
-                self._send_line(self.sock, self._make_quit())
-            except OSError:
-                pass
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-            self.sock = None
-
-    def send_events(self, events: list):
-        if not self.sock or not events:
-            return
-        txn = self._make_txn(self.client_id, events)
-        try:
-            self._send_line(self.sock, txn)
-        except Exception:
-            LOG.exception("Failed to send events")
-            self.disconnect()
-
-
-# ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
 class _State:
@@ -847,7 +782,7 @@ class _State:
     def __init__(self):
         self.author: BlenderStageAuthor | None = None
         self.notice_emitter = None  # Optional[NoticeEmitter]
-        self.sender: NetworkSender | None = None
+        self.sender: EventSender | None = None
         self._last_send_time: float = 0.0
 
 
@@ -1130,9 +1065,11 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
 
             _state.notice_emitter = NoticeEmitter(_state.author.stage)
 
-            _state.sender = NetworkSender(
+            _state.sender = EventSender(
                 host=scene.usd_connect_emit_host,
                 port=scene.usd_connect_emit_port,
+                client_id=STABLE_CLIENT_ID,
+                origin=SESSION_ORIGIN,
             )
             _state.sender.connect()
 

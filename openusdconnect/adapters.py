@@ -9,9 +9,37 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+
+try:
+    from pxr import Usd
+except ImportError:
+    Usd = None
+
+try:
+    from .event_apply import (
+        apply_event as _apply_event_to_stage,
+    )
+    from .event_apply import (
+        apply_events as _apply_events_to_stage,
+    )
+    from .event_apply import (
+        ensure_canonical_ops as _ensure_canonical_ops,
+    )
+    from .event_apply import (
+        get_or_define_prim as _get_or_define_prim,
+    )
+except ImportError:
+    _apply_event_to_stage = None
+    _apply_events_to_stage = None
+    _ensure_canonical_ops = None
+    _get_or_define_prim = None
 
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
@@ -22,14 +50,131 @@ from .protocol_constants import (
     K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
+    K_SET_XFORM_MATRICES,
+    K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
 
 LOG = logging.getLogger(__name__)
 
 
+# Protocol-event-kind → handler dispatch table.  Mirrors the
+# @register_encoder / @register_decoder / @register_applier pattern in
+# codec.py and event_apply.py: each route is a named function on the
+# DCCAdapter base class, decorated with @_adapter_route(K_*).  Routes
+# unwrap the event dict and delegate to the corresponding abstract method
+# on self, so subclasses get dispatch for free and only need to implement
+# the per-kind methods.
+_ADAPTER_DISPATCH: dict[str, Callable] = {}
+
+
+def _adapter_route(kind: str):
+    """Register a method as the handler for one protocol event kind."""
+
+    def decorator(fn: Callable) -> Callable:
+        _ADAPTER_DISPATCH[kind] = fn
+        return fn
+
+    return decorator
+
+
 class DCCAdapter(ABC):
     """Abstract interface a DCC integration must implement."""
+
+    def apply_event(self, event: dict):
+        """Route one protocol event dict to its registered handler.
+
+        Unknown event kinds return ``None``.  Override for adapters that
+        prefer a faster path (e.g. UsdStageAdapter batches through
+        event_apply directly).
+        """
+        handler = _ADAPTER_DISPATCH.get(event.get("k"))
+        if handler is None:
+            return None
+        return handler(self, event)
+
+    def apply_events(self, events: list[dict]) -> int:
+        """Apply a batch of protocol events to this adapter."""
+        for event in events:
+            self.apply_event(event)
+        return len(events)
+
+    @_adapter_route(K_ENSURE_PRIM)
+    def _route_ensure_prim(self, ev: dict):
+        return self.ensure_prim(ev.get("prim", ""), ev["typeName"])
+
+    @_adapter_route(K_ENSURE_XFORM_OPS)
+    def _route_ensure_xform_ops(self, ev: dict):
+        return self.ensure_xform_ops(ev.get("prim", ""))
+
+    @_adapter_route(K_SET_XFORM_TRS)
+    def _route_set_xform_trs(self, ev: dict):
+        return self.set_xform_trs(ev.get("prim", ""), ev)
+
+    @_adapter_route(K_SET_XFORM_MATRICES)
+    def _route_set_xform_matrices(self, ev: dict):
+        return self.set_xform_matrices(ev.get("prim", ""), ev)
+
+    @_adapter_route(K_DELETE_PRIM)
+    def _route_delete_prim(self, ev: dict):
+        return self.delete_prim(ev.get("prim", ""))
+
+    @_adapter_route(K_DEACTIVATE_PRIM)
+    def _route_deactivate_prim(self, ev: dict):
+        return self.deactivate_prim(ev.get("prim", ""), ev.get("active", False))
+
+    @_adapter_route(K_RENAME_PRIM)
+    def _route_rename_prim(self, ev: dict):
+        return self.rename_prim(ev.get("prim", ""), ev.get("new_name", ""))
+
+    @_adapter_route(K_SET_VISIBILITY)
+    def _route_set_visibility(self, ev: dict):
+        return self.set_visibility(ev.get("prim", ""), ev.get("visible", True))
+
+    @_adapter_route(K_SET_GPRIM_ATTRS)
+    def _route_set_gprim_attrs(self, ev: dict):
+        return self.set_gprim_attrs(ev.get("prim", ""), ev.get("attrs", {}))
+
+    @_adapter_route(K_SET_REFERENCE)
+    def _route_set_reference(self, ev: dict):
+        return self.set_reference(ev.get("prim", ""), ev.get("refs", []))
+
+    @_adapter_route(K_SET_VARIANT_SELECTIONS)
+    def _route_set_variant_selections(self, ev: dict):
+        return self.set_variant_selections(ev.get("prim", ""), ev.get("selections", {}))
+
+    @_adapter_route(K_SET_PAYLOAD)
+    def _route_set_payload(self, ev: dict):
+        return self.set_payload(ev.get("prim", ""), ev.get("payloads", []))
+
+    @_adapter_route(K_LOAD_PAYLOAD)
+    def _route_load_payload(self, ev: dict):
+        return self.load_payload(ev.get("prim", ""))
+
+    @_adapter_route(K_UNLOAD_PAYLOAD)
+    def _route_unload_payload(self, ev: dict):
+        return self.unload_payload(ev.get("prim", ""))
+
+    @_adapter_route(K_SET_MATERIAL_BINDING)
+    def _route_set_material_binding(self, ev: dict):
+        return self.set_material_binding(ev.get("prim", ""), ev.get("material_path", ""))
+
+    @_adapter_route(K_SET_SHADER_INPUT)
+    def _route_set_shader_input(self, ev: dict):
+        return self.set_shader_input(
+            ev.get("prim", ""),
+            ev.get("shader_id", ""),
+            ev.get("inputs", {}),
+            ev.get("input_types", {}),
+        )
+
+    @_adapter_route(K_SET_SHADER_CONNECTION)
+    def _route_set_shader_connection(self, ev: dict):
+        return self.set_shader_connection(
+            ev.get("prim", ""),
+            ev.get("connections", {}),
+            ev.get("disconnections", []),
+        )
 
     @abstractmethod
     def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
@@ -260,28 +405,30 @@ class UsdStageAdapter(DCCAdapter):
     """
 
     def __init__(self, stage):
-        from pxr import Usd
-
+        if Usd is None:
+            raise ImportError("UsdStageAdapter requires pxr.Usd")
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdStageAdapter requires a Usd.Stage")
         self.stage = stage
 
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
-        from .event_apply import get_or_define_prim
+    def apply_event(self, event: dict):
+        _apply_event_to_stage(self.stage, event)
+        return True
 
-        get_or_define_prim(self.stage, prim_path, type_name)
+    def apply_events(self, events: list[dict]) -> int:
+        _apply_events_to_stage(self.stage, events)
+        return len(events)
+
+    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
+        _get_or_define_prim(self.stage, prim_path, type_name)
         return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
-        from .event_apply import ensure_canonical_ops
-
-        ensure_canonical_ops(self.stage, prim_path)
+        _ensure_canonical_ops(self.stage, prim_path)
         return True
 
     def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, payload)
+        _apply_event_to_stage(self.stage, payload)
         return True
 
     def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
@@ -293,69 +440,67 @@ class UsdStageAdapter(DCCAdapter):
         return True
 
     def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": active})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": active},
+        )
         return True
 
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_RENAME_PRIM, "prim": prim_path, "new_name": new_name})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_RENAME_PRIM, "prim": prim_path, "new_name": new_name},
+        )
         return True
 
     def set_visibility(self, prim_path: str, visible: bool) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible},
+        )
         return True
 
     def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs},
+        )
         return True
 
     def set_reference(self, prim_path: str, refs: list) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_SET_REFERENCE, "prim": prim_path, "refs": refs})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_SET_REFERENCE, "prim": prim_path, "refs": refs},
+        )
         return True
 
     def set_payload(self, prim_path: str, payloads: list) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads})
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads},
+        )
         # Payloads are unloaded by default — users opt-in to load.
         if payloads:
             self.stage.Unload(prim_path)
         return True
 
     def load_payload(self, prim_path: str) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_LOAD_PAYLOAD, "prim": prim_path})
+        _apply_event_to_stage(self.stage, {"k": K_LOAD_PAYLOAD, "prim": prim_path})
         return True
 
     def unload_payload(self, prim_path: str) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(self.stage, {"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
+        _apply_event_to_stage(self.stage, {"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
         return True
 
     def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(
+        _apply_event_to_stage(
             self.stage,
             {"k": K_SET_VARIANT_SELECTIONS, "prim": prim_path, "selections": selections},
         )
         return True
 
     def set_material_binding(self, prim_path: str, material_path: str) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(
+        _apply_event_to_stage(
             self.stage,
             {"k": K_SET_MATERIAL_BINDING, "prim": prim_path, "material_path": material_path},
         )
@@ -364,9 +509,7 @@ class UsdStageAdapter(DCCAdapter):
     def set_shader_input(
         self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
     ) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(
+        _apply_event_to_stage(
             self.stage,
             {
                 "k": K_SET_SHADER_INPUT,
@@ -381,9 +524,7 @@ class UsdStageAdapter(DCCAdapter):
     def set_shader_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
-        from .event_apply import apply_event
-
-        apply_event(
+        _apply_event_to_stage(
             self.stage,
             {
                 "k": K_SET_SHADER_CONNECTION,
