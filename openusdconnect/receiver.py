@@ -33,10 +33,10 @@ from .transport import send_msg
 LOG = logging.getLogger(__name__)
 
 # Reconnection defaults
-_RECONNECT_BASE_DELAY = 1.0   # seconds
-_RECONNECT_MAX_DELAY = 30.0   # seconds
-_SOCKET_TIMEOUT = 30.0        # seconds — detect hung connections
-_MAX_QUEUE_DEPTH = 50_000     # max queued messages before overflow (disconnect + replay)
+_RECONNECT_BASE_DELAY = 1.0  # seconds
+_RECONNECT_MAX_DELAY = 30.0  # seconds
+_SOCKET_TIMEOUT = 30.0  # seconds — detect hung connections
+_MAX_QUEUE_DEPTH = 50_000  # max queued messages before overflow (disconnect + replay)
 _MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
 
 
@@ -154,15 +154,18 @@ class ReceiverThread(threading.Thread):
         """Single connection attempt: connect, handshake, read until EOF/error."""
         LOG.info("ReceiverThread connecting to %s:%s", self.host, self.port)
         self.sock = socket.create_connection(
-            (self.host, self.port), timeout=self.socket_timeout,
+            (self.host, self.port),
+            timeout=self.socket_timeout,
         )
         self.sock.settimeout(self.socket_timeout)
 
         # Send hello as receiver — use last_seq + 1 for replay on reconnect
         sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
         hello = make_hello(
-            "receiver", sync_from=sync_from,
-            client_id=self.client_id, origin=self.origin,
+            "receiver",
+            sync_from=sync_from,
+            client_id=self.client_id,
+            origin=self.origin,
             token=self.token,
         )
         send_msg(self.sock, hello)
@@ -180,8 +183,11 @@ class ReceiverThread(threading.Thread):
                         consecutive_timeouts,
                     )
                     break
-                LOG.debug("ReceiverThread: recv timeout (%d/%d)",
-                          consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS)
+                LOG.debug(
+                    "ReceiverThread: recv timeout (%d/%d)",
+                    consecutive_timeouts,
+                    _MAX_CONSECUTIVE_TIMEOUTS,
+                )
                 continue
             except (IncompleteRead, MessageTooLarge):
                 if not self._stop_event.is_set():

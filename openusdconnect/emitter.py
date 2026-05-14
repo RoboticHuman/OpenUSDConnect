@@ -961,7 +961,7 @@ class NoticeEmitter:
         return events
 
     def build_events_for_dirty(
-        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = True
+        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
     ) -> list[dict]:
         """Build events for all dirty prims, diffing against last-sent state.
 

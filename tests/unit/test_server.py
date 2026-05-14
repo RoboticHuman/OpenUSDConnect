@@ -45,7 +45,11 @@ class TestAssignSeq:
 
 class TestAppendLog:
     def test_append_and_read(self, srv):
-        rec = {"type": "event", "seq": 1, "event": {"k": "ensure_prim", "prim": "/A"}}
+        rec = {
+            "type": "event",
+            "seq": 1,
+            "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+        }
         srv.append_log(rec)
 
         rows = srv.store.get_all_asc()
@@ -55,10 +59,13 @@ class TestAppendLog:
 
     def test_multiple_appends(self, srv):
         for i in range(5):
-            srv.append_log({
-                "type": "event", "seq": i + 1,
-                "event": {"k": "ensure_prim", "prim": f"/P{i}"},
-            })
+            srv.append_log(
+                {
+                    "type": "event",
+                    "seq": i + 1,
+                    "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                }
+            )
         rows = (srv.store.get_count(),)
         assert rows[0] == 5
 
@@ -91,8 +98,7 @@ class TestApplyTxn:
         events = [
             {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Cube"},
             {"k": "ensure_xform_ops", "prim": "/World/Cube"},
-            {"k": "set_xform_trs", "prim": "/World/Cube",
-             "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+            {"k": "set_xform_trs", "prim": "/World/Cube", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
         ]
         srv.apply_txn(events)
 
@@ -117,15 +123,26 @@ class TestCompaction:
 
     def test_trs_merged(self, srv):
         """Two TRS events for the same prim should merge into one."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/A"},
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t", "r"],
-             "t": [5, 0, 0], "r": [1, 0, 0, 0]},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/A"},
+                {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/A",
+                    "fields": ["t", "r"],
+                    "t": [5, 0, 0],
+                    "r": [1, 0, 0, 0],
+                },
+            ],
+        )
         count_before = (srv.store.get_count(),)[0]
         assert count_before == 4
 
@@ -141,14 +158,20 @@ class TestCompaction:
 
     def test_delete_tombstones(self, srv):
         """delete_prim removes all prior events for that prim."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/A"},
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
-        ])
-        self._insert_events(srv, [
-            {"k": "delete_prim", "prim": "/A"},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/A"},
+                {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "delete_prim", "prim": "/A"},
+            ],
+        )
 
         srv.compact_log()
 
@@ -159,13 +182,19 @@ class TestCompaction:
 
     def test_rename_tombstones_old(self, srv):
         """rename_prim removes prior events for the old path."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
-        ])
-        self._insert_events(srv, [
-            {"k": "rename_prim", "prim": "/A", "new_name": "B"},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "rename_prim", "prim": "/A", "new_name": "B"},
+            ],
+        )
 
         srv.compact_log()
 
@@ -173,20 +202,23 @@ class TestCompaction:
         events = [message_to_dict(r[0])["event"] for r in rows]
         prims = [e["prim"] for e in events]
         # Only the rename should remain for /A
-        assert all(
-            p != "/A" or e["k"] == "rename_prim"
-            for p, e in zip(prims, events, strict=True)
-        )
+        assert all(p != "/A" or e["k"] == "rename_prim" for p, e in zip(prims, events, strict=True))
 
     def test_visibility_latest_wins(self, srv):
         """Only the latest visibility event per prim survives compaction."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "set_visibility", "prim": "/A", "visible": False},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_visibility", "prim": "/A", "visible": True},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "set_visibility", "prim": "/A", "visible": False},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_visibility", "prim": "/A", "visible": True},
+            ],
+        )
 
         srv.compact_log()
 
@@ -198,13 +230,19 @@ class TestCompaction:
 
     def test_load_unload_latest_wins(self, srv):
         """load/unload are mutually exclusive — only last one kept."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "load_payload", "prim": "/A"},
-        ])
-        self._insert_events(srv, [
-            {"k": "unload_payload", "prim": "/A"},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "load_payload", "prim": "/A"},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "unload_payload", "prim": "/A"},
+            ],
+        )
 
         srv.compact_log()
 
@@ -216,15 +254,19 @@ class TestCompaction:
 
     def test_variant_selections_latest_wins(self, srv):
         """Only the latest variant selection per prim survives compaction."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "set_variant_selections", "prim": "/A",
-             "selections": {"size": "small"}},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_variant_selections", "prim": "/A",
-             "selections": {"size": "large"}},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "set_variant_selections", "prim": "/A", "selections": {"size": "small"}},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_variant_selections", "prim": "/A", "selections": {"size": "large"}},
+            ],
+        )
 
         srv.compact_log()
 
@@ -236,13 +278,19 @@ class TestCompaction:
 
     def test_gprim_attrs_latest_wins(self, srv):
         """Only the latest gprim attrs event per prim survives compaction."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Sphere"},
-            {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 1.0}},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 5.0}},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Sphere"},
+                {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 1.0}},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 5.0}},
+            ],
+        )
 
         srv.compact_log()
 
@@ -254,21 +302,29 @@ class TestCompaction:
 
     def test_gprim_attrs_merged_across_events(self, srv):
         """Compaction merges attrs dicts from separate events on the same prim."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
-            {"k": "set_gprim_attrs", "prim": "/A",
-             "attrs": {"primvars:st": [[0, 0], [1, 0]]},
-             "primvar_meta": {
-                 "primvars:st": {
-                     "typeName": "texCoord2f[]",
-                     "interpolation": "faceVarying",
-                 },
-             }},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_gprim_attrs", "prim": "/A",
-             "attrs": {"radius": 2.0}},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
+                {
+                    "k": "set_gprim_attrs",
+                    "prim": "/A",
+                    "attrs": {"primvars:st": [[0, 0], [1, 0]]},
+                    "primvar_meta": {
+                        "primvars:st": {
+                            "typeName": "texCoord2f[]",
+                            "interpolation": "faceVarying",
+                        },
+                    },
+                },
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 2.0}},
+            ],
+        )
 
         srv.compact_log()
 
@@ -285,16 +341,24 @@ class TestCompaction:
 
     def test_attr_interp_merged_across_events(self, srv):
         """Compaction merges attr_interp from separate events on the same prim."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
-            {"k": "set_gprim_attrs", "prim": "/A",
-             "attrs": {"normals": [[0, 0, 1]]},
-             "attr_interp": {"normals": "faceVarying"}},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_gprim_attrs", "prim": "/A",
-             "attrs": {"radius": 2.0}},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Mesh"},
+                {
+                    "k": "set_gprim_attrs",
+                    "prim": "/A",
+                    "attrs": {"normals": [[0, 0, 1]]},
+                    "attr_interp": {"normals": "faceVarying"},
+                },
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_gprim_attrs", "prim": "/A", "attrs": {"radius": 2.0}},
+            ],
+        )
 
         srv.compact_log()
 
@@ -308,19 +372,31 @@ class TestCompaction:
 
     def test_shader_inputs_merged_across_events(self, srv):
         """Compaction merges shader inputs from separate events on the same prim."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/Mat", "typeName": "Material"},
-            {"k": "set_shader_input", "prim": "/Mat/PBR",
-             "shader_id": "UsdPreviewSurface",
-             "inputs": {"diffuseColor": [1, 0, 0]},
-             "input_types": {"diffuseColor": "color3f"}},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_shader_input", "prim": "/Mat/PBR",
-             "shader_id": "UsdPreviewSurface",
-             "inputs": {"roughness": 0.5},
-             "input_types": {"roughness": "float"}},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/Mat", "typeName": "Material"},
+                {
+                    "k": "set_shader_input",
+                    "prim": "/Mat/PBR",
+                    "shader_id": "UsdPreviewSurface",
+                    "inputs": {"diffuseColor": [1, 0, 0]},
+                    "input_types": {"diffuseColor": "color3f"},
+                },
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {
+                    "k": "set_shader_input",
+                    "prim": "/Mat/PBR",
+                    "shader_id": "UsdPreviewSurface",
+                    "inputs": {"roughness": 0.5},
+                    "input_types": {"roughness": "float"},
+                },
+            ],
+        )
 
         srv.compact_log()
 
@@ -343,10 +419,13 @@ class TestCompaction:
 
     def test_seq_resets_after_compact(self, srv):
         """After compaction, sequence numbers restart from 1."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "ensure_prim", "prim": "/B", "typeName": "Xform"},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "ensure_prim", "prim": "/B", "typeName": "Xform"},
+            ],
+        )
         assert srv.assign_seq() == 3  # next would be 3
 
         srv.compact_log()
@@ -370,7 +449,11 @@ class TestReplay:
 
         for i in range(3):
             seq = srv.assign_seq()
-            rec = {"type": "event", "seq": seq, "event": {"k": "ensure_prim", "prim": f"/P{i}"}}
+            rec = {
+                "type": "event",
+                "seq": seq,
+                "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+            }
             srv.append_log(rec)
 
         import io
@@ -401,10 +484,13 @@ class TestReplay:
 
         for i in range(3):
             seq = srv.assign_seq()
-            srv.append_log({
-                "type": "event", "seq": seq,
-                "event": {"k": "ensure_prim", "prim": f"/P{i}"},
-            })
+            srv.append_log(
+                {
+                    "type": "event",
+                    "seq": seq,
+                    "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                }
+            )
 
         import io
 
@@ -451,7 +537,13 @@ class TestBroadcast:
         srv.receivers.add(h1)
         srv.receivers.add(h2)
 
-        srv.broadcast({"type": "event", "seq": 1, "event": {"k": "ensure_prim", "prim": "/A"}})
+        srv.broadcast(
+            {
+                "type": "event",
+                "seq": 1,
+                "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+            }
+        )
         srv._broadcast_queue.join()  # wait for async broadcast thread
 
         from openusdconnect.codec import message_to_dict
@@ -478,10 +570,13 @@ class TestBroadcast:
 
         h = DeadHandler()
         srv.receivers.add(h)
-        srv.broadcast({
-            "type": "event", "seq": 1,
-            "event": {"k": "ensure_prim", "prim": "/X"},
-        })
+        srv.broadcast(
+            {
+                "type": "event",
+                "seq": 1,
+                "event": {"k": "ensure_prim", "prim": "/X", "typeName": "Xform"},
+            }
+        )
         srv._broadcast_queue.join()  # wait for async broadcast thread
         assert h not in srv.receivers
 
@@ -500,10 +595,13 @@ class TestDBResume:
         s1 = UsdSyncServer(log_path=db)
         for i in range(5):
             seq = s1.assign_seq()
-            s1.append_log({
-                "type": "event", "seq": seq,
-                "event": {"k": "ensure_prim", "prim": f"/P{i}"},
-            })
+            s1.append_log(
+                {
+                    "type": "event",
+                    "seq": seq,
+                    "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                }
+            )
         s1.store.close()
 
         # Second server should resume from seq 6
@@ -521,8 +619,7 @@ class TestDBResume:
             {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/World/Box", "typeName": "Cube"},
             {"k": "ensure_xform_ops", "prim": "/World/Box"},
-            {"k": "set_xform_trs", "prim": "/World/Box",
-             "fields": ["t"], "t": [5.0, 0.0, 0.0]},
+            {"k": "set_xform_trs", "prim": "/World/Box", "fields": ["t"], "t": [5.0, 0.0, 0.0]},
         ]
         s1.apply_txn(events)
         for ev in events:
@@ -572,12 +669,18 @@ class TestEditLayer:
         root = srv.stage.GetRootLayer()
         root_specs_before = set(root.rootPrims.keys())
 
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
-            {"k": "ensure_xform_ops", "prim": "/World/Sphere"},
-            {"k": "set_xform_trs", "prim": "/World/Sphere",
-             "fields": ["t"], "t": [5.0, 0.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Sphere"},
+                {"k": "ensure_xform_ops", "prim": "/World/Sphere"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Sphere",
+                    "fields": ["t"],
+                    "t": [5.0, 0.0, 0.0],
+                },
+            ]
+        )
 
         root_specs_after = set(root.rootPrims.keys())
         assert root_specs_after == root_specs_before
@@ -587,9 +690,11 @@ class TestEditLayer:
 
     def test_edits_land_in_edit_layer(self, srv):
         """Applied events should create specs in the edit layer."""
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Box", "typeName": "Cube"},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Box", "typeName": "Cube"},
+            ]
+        )
 
         spec = srv.edit_layer.GetPrimAtPath("/World/Box")
         assert spec is not None
@@ -638,12 +743,18 @@ class TestEditLayerWithBaseFile:
         srv, base_path = base_srv
         base_layer = srv.stage.GetRootLayer()
 
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Table", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/World/Table"},
-            {"k": "set_xform_trs", "prim": "/World/Table",
-             "fields": ["t"], "t": [-2.0, 0.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Table", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/World/Table"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Table",
+                    "fields": ["t"],
+                    "t": [-2.0, 0.0, 0.0],
+                },
+            ]
+        )
 
         # Table should NOT be in the base layer
         assert base_layer.GetPrimAtPath("/World/Table") is None
@@ -655,11 +766,17 @@ class TestEditLayerWithBaseFile:
         srv, _ = base_srv
 
         # Override Chair's position (originally at (3, 0, 0))
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [10.0, 0.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [10.0, 0.0, 0.0],
+                },
+            ]
+        )
 
         # Composed value should be the override
         prim = srv.stage.GetPrimAtPath("/World/Chair")
@@ -697,12 +814,18 @@ class TestEditLayerWithBaseFile:
         srv = UsdSyncServer(base_usd_path=shot_path, log_path=db)
 
         # Server applies edits
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Table", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/World/Table"},
-            {"k": "set_xform_trs", "prim": "/World/Table",
-             "fields": ["t"], "t": [0.0, 5.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Table", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/World/Table"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Table",
+                    "fields": ["t"],
+                    "t": [0.0, 5.0, 0.0],
+                },
+            ]
+        )
 
         # Composed stage sees both Chair (from layout) and Table (from edit layer)
         assert srv.stage.GetPrimAtPath("/World/Chair").IsValid()
@@ -729,21 +852,29 @@ class TestExportEditLayer:
 
     def test_export_contains_edits(self, srv):
         """Exported USDA contains authored opinions."""
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Mesh", "typeName": "Mesh"},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Mesh", "typeName": "Mesh"},
+            ]
+        )
         usda = srv.export_edit_layer()
         assert "Mesh" in usda
         assert "World" in usda
 
     def test_export_to_file(self, srv, tmp_path):
         """Exported file composes correctly with a base stage."""
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/Exported", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/World/Exported"},
-            {"k": "set_xform_trs", "prim": "/World/Exported",
-             "fields": ["t"], "t": [7.0, 8.0, 9.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Exported", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/World/Exported"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Exported",
+                    "fields": ["t"],
+                    "t": [7.0, 8.0, 9.0],
+                },
+            ]
+        )
 
         diff_path = str(tmp_path / "diff.usda")
         srv.export_edit_layer(diff_path)
@@ -770,15 +901,25 @@ class TestExportEditLayer:
         srv = UsdSyncServer(base_usd_path=base_path, log_path=db)
 
         # Server overrides Chair, adds a new prim
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [10.0, 0.0, 0.0]},
-            {"k": "ensure_prim", "prim": "/World/Lamp", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/World/Lamp"},
-            {"k": "set_xform_trs", "prim": "/World/Lamp",
-             "fields": ["t"], "t": [0.0, 5.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [10.0, 0.0, 0.0],
+                },
+                {"k": "ensure_prim", "prim": "/World/Lamp", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/World/Lamp"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Lamp",
+                    "fields": ["t"],
+                    "t": [0.0, 5.0, 0.0],
+                },
+            ]
+        )
 
         # Collect composed values from the live stage
         def get_translate(stage, path):
@@ -895,18 +1036,32 @@ class TestNestedLayerEditing:
         session.subLayerPaths.append(bob_layer.identifier)
 
         # Alice moves Table
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Table"},
-            {"k": "set_xform_trs", "prim": "/World/Table",
-             "fields": ["t"], "t": [0.0, 10.0, 0.0]},
-        ], layer=alice_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Table"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Table",
+                    "fields": ["t"],
+                    "t": [0.0, 10.0, 0.0],
+                },
+            ],
+            layer=alice_layer,
+        )
 
         # Bob moves Chair
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 20.0]},
-        ], layer=bob_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 20.0],
+                },
+            ],
+            layer=bob_layer,
+        )
 
         # Both edits are visible in the composed stage
         t_table = self._get_composed_translate(srv.stage, "/World/Table")
@@ -932,18 +1087,32 @@ class TestNestedLayerEditing:
         session.subLayerPaths.append(bob_layer.identifier)
 
         # Bob edits Chair first
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 99.0]},
-        ], layer=bob_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 99.0],
+                },
+            ],
+            layer=bob_layer,
+        )
 
         # Alice edits Chair after
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 42.0]},
-        ], layer=alice_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 42.0],
+                },
+            ],
+            layer=alice_layer,
+        )
 
         # Alice wins — her layer is stronger regardless of write order
         t = self._get_composed_translate(srv.stage, "/World/Chair")
@@ -958,11 +1127,17 @@ class TestNestedLayerEditing:
         srv, _ = nested_srv
 
         # Chair is at (3,0,5) from char_anim.usda — override via default edit layer
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 0.0]},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 0.0],
+                },
+            ]
+        )
 
         t = self._get_composed_translate(srv.stage, "/World/Chair")
         assert abs(t[0]) < 1e-6
@@ -978,9 +1153,11 @@ class TestNestedLayerEditing:
         """All original base sublayer opinions survive server edits."""
         srv, tmp_path = nested_srv
 
-        srv.apply_txn([
-            {"k": "ensure_prim", "prim": "/World/NewPrim", "typeName": "Xform"},
-        ])
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/NewPrim", "typeName": "Xform"},
+            ]
+        )
 
         # layout.usda still has Chair and Table
         layout_layer = Sdf.Layer.Find(str(tmp_path / "layout.usda"))
@@ -1015,22 +1192,36 @@ class TestNestedLayerEditing:
         session.subLayerPaths.append(alice_layer.identifier)
 
         # Bob edits Chair
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 99.0]},
-        ], layer=bob_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 99.0],
+                },
+            ],
+            layer=bob_layer,
+        )
 
         # Before Alice edits, Bob's value is visible
         t = self._get_composed_translate(srv.stage, "/World/Chair")
         assert abs(t[2] - 99.0) < 1e-6
 
         # Alice edits the same prim on her (parent) layer
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 7.0]},
-        ], layer=alice_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 7.0],
+                },
+            ],
+            layer=alice_layer,
+        )
 
         # Alice wins — parent layer is stronger than child sublayer
         t = self._get_composed_translate(srv.stage, "/World/Chair")
@@ -1073,18 +1264,32 @@ class TestNestedLayerEditing:
         session.subLayerPaths.append(alice_layer.identifier)
 
         # Alice edits Table
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Table"},
-            {"k": "set_xform_trs", "prim": "/World/Table",
-             "fields": ["t"], "t": [0.0, 50.0, 0.0]},
-        ], layer=alice_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Table"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Table",
+                    "fields": ["t"],
+                    "t": [0.0, 50.0, 0.0],
+                },
+            ],
+            layer=alice_layer,
+        )
 
         # Bob edits Chair
-        srv.apply_txn([
-            {"k": "ensure_xform_ops", "prim": "/World/Chair"},
-            {"k": "set_xform_trs", "prim": "/World/Chair",
-             "fields": ["t"], "t": [0.0, 0.0, 60.0]},
-        ], layer=bob_layer)
+        srv.apply_txn(
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Chair"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 60.0],
+                },
+            ],
+            layer=bob_layer,
+        )
 
         # Both visible — no conflict
         t_table = self._get_composed_translate(srv.stage, "/World/Table")
@@ -1130,14 +1335,20 @@ class TestCompactionWithEditLayer:
 
     def test_compaction_preserves_edit_layer_isolation(self, srv):
         """After compaction, root layer is still untouched."""
-        self._insert_events(srv, [
-            {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            {"k": "ensure_xform_ops", "prim": "/A"},
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
-        ])
-        self._insert_events(srv, [
-            {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [5, 0, 0]},
-        ])
+        self._insert_events(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                {"k": "ensure_xform_ops", "prim": "/A"},
+                {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [1, 0, 0]},
+            ],
+        )
+        self._insert_events(
+            srv,
+            [
+                {"k": "set_xform_trs", "prim": "/A", "fields": ["t"], "t": [5, 0, 0]},
+            ],
+        )
 
         srv.compact_log()
 

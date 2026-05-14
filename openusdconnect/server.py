@@ -366,7 +366,7 @@ class UsdSyncServer:
         k = ev.get("k")
         prim = ev.get("prim", "")
         if k == K_ENSURE_PRIM:
-            self._prim_paths[prim] = ev.get("typeName", "Xform")
+            self._prim_paths[prim] = ev["typeName"]
         elif k == K_DELETE_PRIM:
             self._prim_paths.pop(prim, None)
         elif k == K_RENAME_PRIM:
@@ -1592,9 +1592,7 @@ class UsdSyncServer:
         changed_set = set(changed)
 
         records: list[tuple[dict, bytes]] = []
-        persist_tuples: list[
-            tuple[int, bytes, str | None, str | None, str | None]
-        ] = []
+        persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]] = []
         for ev in events:
             rec: dict = {
                 "type": MSG_EVENT,
@@ -1607,9 +1605,7 @@ class UsdSyncServer:
                 rec["origin"] = origin
             rec_bin = encode_message(rec)
             records.append((rec, rec_bin))
-            persist_tuples.append(
-                (rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim"))
-            )
+            persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
         self.append_log_batch(persist_tuples)
         return records, changed_set
 

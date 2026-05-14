@@ -103,7 +103,7 @@ class TestMessageConstruction:
         assert msg["sync_from"] == 5
 
     def test_make_txn(self):
-        events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo"}]
+        events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo", "typeName": "Xform"}]
         msg = make_txn("client-1", events)
         assert msg["type"] == MSG_TXN
         assert msg["client_id"] == "client-1"
@@ -120,6 +120,9 @@ class TestValidateEvent:
 
     def test_ensure_prim_missing_prim(self):
         assert not validate_event({"k": K_ENSURE_PRIM})
+
+    def test_ensure_prim_missing_typename(self):
+        assert not validate_event({"k": K_ENSURE_PRIM, "prim": "/World/Sphere"})
 
     def test_unknown_key(self):
         assert not validate_event({"k": "unknown_key", "prim": "/Foo"})

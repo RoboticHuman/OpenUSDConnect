@@ -146,7 +146,7 @@ class TestNoticeEmitterRoundtrip:
             k = ev.get("k")
             prim = ev.get("prim", "")
             if k == K_ENSURE_PRIM:
-                adapter.ensure_prim(prim, ev.get("typeName", "Xform"))
+                adapter.ensure_prim(prim, ev["typeName"])
             elif k == K_ENSURE_XFORM_OPS:
                 adapter.ensure_xform_ops(prim)
             elif k == K_SET_XFORM_TRS:

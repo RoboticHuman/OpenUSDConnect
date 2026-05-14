@@ -67,6 +67,7 @@ EVENT_KEYS = frozenset(
 # destructive last.  This is dependency order (prim must exist before
 # values can be set), not strength order.  LIVERPS strength (L strongest,
 # S weakest) is handled by USD's composition engine, not by event ordering.
+# fmt: off
 _EVENT_KIND_SEQUENCE = [
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -86,6 +87,7 @@ _EVENT_KIND_SEQUENCE = [
     K_RENAME_PRIM,
     K_UNLOAD_PAYLOAD,
 ]
+# fmt: on
 EVENT_KIND_ORDER: dict[str, int] = {k: i for i, k in enumerate(_EVENT_KIND_SEQUENCE)}
 
 # Events that must be applied outside a ChangeBlock.

@@ -12,6 +12,7 @@ dict <-> FlatBuffers conversion.
 
 from __future__ import annotations
 
+from .events import Event
 from .protocol_constants import MSG_HELLO, MSG_QUIT, MSG_TXN, PROTOCOL_VERSION
 
 __all__ = ["make_hello", "make_quit", "make_txn"]
@@ -53,7 +54,7 @@ def make_hello(
     return msg
 
 
-def make_txn(client_id: str, events: list[dict]) -> dict:
+def make_txn(client_id: str, events: list[Event]) -> dict:
     """Build a transaction message."""
     return {"type": MSG_TXN, "client_id": client_id, "events": events}
 

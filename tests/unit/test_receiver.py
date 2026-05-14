@@ -44,7 +44,7 @@ def _recv_hello(conn):
 def _send_event(conn, seq, event=None):
     """Send a broadcast event message."""
     if event is None:
-        event = {"k": "ensure_prim", "prim": "/World/X"}
+        event = {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}
     msg = {"type": "event", "seq": seq, "event": event}
     send_framed(conn, encode_message(msg))
 
@@ -115,7 +115,9 @@ class TestReceiverThread:
         """ReceiverThread stops cleanly when server closes connection."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
             socket_timeout=0.1,
         )
         rt.start()
@@ -152,8 +154,11 @@ class TestReconnection:
         """After server closes, receiver reconnects to a new server."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=True,
-            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
         )
         rt.start()
 
@@ -177,8 +182,11 @@ class TestReconnection:
         """Reconnection sends sync_from based on last received seq."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=True,
-            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
         )
         rt.start()
 
@@ -202,7 +210,9 @@ class TestReconnection:
         """With reconnect=False, thread exits after connection loss."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
             socket_timeout=0.1,
         )
         rt.start()
@@ -223,7 +233,10 @@ class TestSocketTimeout:
         """Socket timeout triggers but connection stays alive if server responds later."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False, socket_timeout=0.05,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            socket_timeout=0.05,
         )
         rt.start()
         conn = _accept_and_hello(srv)
@@ -252,8 +265,12 @@ class TestBoundedQueue:
         """When queue is full, receiver disconnects and reconnects for replay."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=True, max_queue=3,
-            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            max_queue=3,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
         )
         rt.start()
 
@@ -285,7 +302,10 @@ class TestBoundedQueue:
         """With reconnect=False, overflow stops the thread."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False, max_queue=3,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            max_queue=3,
             socket_timeout=0.1,
         )
         rt.start()
@@ -326,10 +346,13 @@ class TestPingHandling:
         """Receiving a ping prevents consecutive timeout disconnect."""
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
             socket_timeout=0.05,
         )
         import openusdconnect.receiver as recv_mod
+
         original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
         recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
         try:
@@ -353,10 +376,13 @@ class TestConsecutiveTimeouts:
     def test_max_consecutive_timeouts(self):
         srv, port = _make_server()
         rt = ReceiverThread(
-            host="127.0.0.1", port=port, reconnect=False,
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
             socket_timeout=0.02,
         )
         import openusdconnect.receiver as recv_mod
+
         original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
         recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
         try:

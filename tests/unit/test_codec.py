@@ -38,12 +38,14 @@ def _roundtrip(msg_dict):
 class TestSchemaVersion:
     def test_version_set(self):
         from openusdconnect.codec import SCHEMA_VERSION
+
         buf = encode_message({"type": "ping"})
         env = decode_envelope(buf)
         assert env.SchemaVersion() == SCHEMA_VERSION
 
     def test_version_is_one(self):
         from openusdconnect.codec import SCHEMA_VERSION
+
         assert SCHEMA_VERSION == 1
 
 
@@ -82,8 +84,11 @@ class TestHello:
 
     def test_zero_copy_access(self):
         msg = {
-            "type": "hello", "role": "emitter", "protocol_version": 2,
-            "client_id": "c1", "origin": "o1",
+            "type": "hello",
+            "role": "emitter",
+            "protocol_version": 2,
+            "client_id": "c1",
+            "origin": "o1",
         }
         buf = encode_message(msg)
         env = decode_envelope(buf)
@@ -157,10 +162,10 @@ class TestEnsurePrim:
         d = _txn_roundtrip(ev)
         assert d == ev
 
-    def test_no_typename(self):
+    def test_missing_typename_rejected(self):
         ev = {"k": "ensure_prim", "prim": "/World/Scope"}
-        d = _txn_roundtrip(ev)
-        assert d["prim"] == "/World/Scope"
+        with pytest.raises(KeyError):
+            _txn_roundtrip(ev)
 
 
 class TestEnsureXformOps:
@@ -172,7 +177,8 @@ class TestEnsureXformOps:
 class TestSetXformTrs:
     def test_full_trs(self):
         ev = {
-            "k": "set_xform_trs", "prim": "/World/Cube",
+            "k": "set_xform_trs",
+            "prim": "/World/Cube",
             "fields": ["t", "r", "s"],
             "t": [1.0, 2.0, 3.0],
             "r": [1.0, 0.0, 0.0, 0.0],
@@ -186,8 +192,10 @@ class TestSetXformTrs:
 
     def test_partial_translate_only(self):
         ev = {
-            "k": "set_xform_trs", "prim": "/World/Cube",
-            "fields": ["t"], "t": [5.0, 0.0, 0.0],
+            "k": "set_xform_trs",
+            "prim": "/World/Cube",
+            "fields": ["t"],
+            "t": [5.0, 0.0, 0.0],
         }
         d = _txn_roundtrip(ev)
         assert d["fields"] == ["t"]
@@ -196,7 +204,8 @@ class TestSetXformTrs:
 
     def test_zero_copy_access(self):
         ev = {
-            "k": "set_xform_trs", "prim": "/World/Cube",
+            "k": "set_xform_trs",
+            "prim": "/World/Cube",
             "fields": ["t", "r", "s"],
             "t": [1.0, 2.0, 3.0],
             "r": [1.0, 0.0, 0.0, 0.0],
@@ -215,7 +224,8 @@ class TestSetXformMatrices:
     def test_roundtrip(self):
         identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
         ev = {
-            "k": "set_xform_matrices", "prim": "/World/X",
+            "k": "set_xform_matrices",
+            "prim": "/World/X",
             "local_m": [float(x) for x in identity],
             "world_m": [float(x) for x in identity],
         }
@@ -258,7 +268,8 @@ class TestSetVisibility:
 class TestSetGprimAttrs:
     def test_scalar_attrs(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"radius": 2.5, "subdivisionScheme": "catmullClark"},
         }
         d = _txn_roundtrip(ev)
@@ -267,7 +278,8 @@ class TestSetGprimAttrs:
 
     def test_float_array(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"extent": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},
         }
         d = _txn_roundtrip(ev)
@@ -275,7 +287,8 @@ class TestSetGprimAttrs:
 
     def test_int_array(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"faceVertexCounts": [3, 3, 4, 4]},
         }
         d = _txn_roundtrip(ev)
@@ -285,7 +298,8 @@ class TestSetGprimAttrs:
         """Vec3fArray encoded as flattened float array with stride=3."""
         points = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"points": points},
         }
         d = _txn_roundtrip(ev)
@@ -298,7 +312,8 @@ class TestSetGprimAttrs:
         """Verify zero-copy numpy access to large float arrays."""
         points = [[float(i), float(i + 1), float(i + 2)] for i in range(0, 3000, 3)]
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"points": points},
         }
         kind, sg = _txn_zerocopy(ev)
@@ -317,7 +332,8 @@ class TestSetGprimAttrs:
 
     def test_primvar_meta(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"primvars:st": [[0.0, 1.0], [1.0, 0.0]]},
             "primvar_meta": {
                 "primvars:st": {"typeName": "texCoord2f[]", "interpolation": "faceVarying"}
@@ -329,7 +345,8 @@ class TestSetGprimAttrs:
 
     def test_attr_interp(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"normals": [[0.0, 1.0, 0.0]]},
             "attr_interp": {"normals": "faceVarying"},
         }
@@ -338,7 +355,8 @@ class TestSetGprimAttrs:
 
     def test_bool_attr(self):
         ev = {
-            "k": "set_gprim_attrs", "prim": "/World/Mesh/Geom",
+            "k": "set_gprim_attrs",
+            "prim": "/World/Mesh/Geom",
             "attrs": {"doubleSided": True},
         }
         d = _txn_roundtrip(ev)
@@ -348,7 +366,8 @@ class TestSetGprimAttrs:
 class TestSetReference:
     def test_roundtrip(self):
         ev = {
-            "k": "set_reference", "prim": "/World/Chair",
+            "k": "set_reference",
+            "prim": "/World/Chair",
             "refs": [
                 {"asset_path": "./chair.usd", "prim_path": "/Model"},
                 {"asset_path": "./table.usd"},
@@ -362,7 +381,8 @@ class TestSetReference:
 class TestSetPayload:
     def test_roundtrip(self):
         ev = {
-            "k": "set_payload", "prim": "/World/Asset",
+            "k": "set_payload",
+            "prim": "/World/Asset",
             "payloads": [{"asset_path": "./heavy.usda", "prim_path": "/Root"}],
         }
         d = _txn_roundtrip(ev)
@@ -382,7 +402,8 @@ class TestLoadUnloadPayload:
 class TestSetVariantSelections:
     def test_roundtrip(self):
         ev = {
-            "k": "set_variant_selections", "prim": "/World/Car",
+            "k": "set_variant_selections",
+            "prim": "/World/Car",
             "selections": {"wheels": "wide", "color": "red"},
         }
         d = _txn_roundtrip(ev)
@@ -392,7 +413,8 @@ class TestSetVariantSelections:
 class TestSetMaterialBinding:
     def test_roundtrip(self):
         ev = {
-            "k": "set_material_binding", "prim": "/World/Mesh",
+            "k": "set_material_binding",
+            "prim": "/World/Mesh",
             "material_path": "/World/Materials/Wood",
         }
         assert _txn_roundtrip(ev) == ev
@@ -401,7 +423,8 @@ class TestSetMaterialBinding:
 class TestSetShaderInput:
     def test_roundtrip(self):
         ev = {
-            "k": "set_shader_input", "prim": "/World/Mat/Shader",
+            "k": "set_shader_input",
+            "prim": "/World/Mat/Shader",
             "shader_id": "UsdPreviewSurface",
             "inputs": {"metallic": 0.8, "diffuseColor": [0.5, 0.5, 0.5]},
             "input_types": {"metallic": "float", "diffuseColor": "color3f"},
@@ -414,7 +437,9 @@ class TestSetShaderInput:
     def test_falsy_bool(self):
         """bool=False must round-trip as False, not 0.0."""
         ev = {
-            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "k": "set_shader_input",
+            "prim": "/S",
+            "shader_id": "X",
             "inputs": {"flag": False},
             "input_types": {"flag": "bool"},
         }
@@ -424,7 +449,9 @@ class TestSetShaderInput:
     def test_zero_int(self):
         """int=0 must round-trip as int 0, not float 0.0."""
         ev = {
-            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "k": "set_shader_input",
+            "prim": "/S",
+            "shader_id": "X",
             "inputs": {"count": 0},
             "input_types": {"count": "int"},
         }
@@ -435,7 +462,9 @@ class TestSetShaderInput:
     def test_zero_float(self):
         """float=0.0 must round-trip correctly."""
         ev = {
-            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "k": "set_shader_input",
+            "prim": "/S",
+            "shader_id": "X",
             "inputs": {"metallic": 0.0},
             "input_types": {"metallic": "float"},
         }
@@ -445,7 +474,9 @@ class TestSetShaderInput:
     def test_empty_string(self):
         """Empty string must round-trip as '', not None or 0.0."""
         ev = {
-            "k": "set_shader_input", "prim": "/S", "shader_id": "X",
+            "k": "set_shader_input",
+            "prim": "/S",
+            "shader_id": "X",
             "inputs": {"file": ""},
             "input_types": {"file": "asset"},
         }
@@ -456,7 +487,8 @@ class TestSetShaderInput:
 class TestSetShaderConnection:
     def test_roundtrip(self):
         ev = {
-            "k": "set_shader_connection", "prim": "/World/Mat/Shader",
+            "k": "set_shader_connection",
+            "prim": "/World/Mat/Shader",
             "connections": {
                 "inputs:diffuseColor": {
                     "source_prim": "/World/Mat/Tex",
@@ -475,7 +507,8 @@ class TestSetShaderConnection:
         """Material/NodeGraph output port connections ride the same wire
         shape — only the namespace prefix on local_attr differs."""
         ev = {
-            "k": "set_shader_connection", "prim": "/World/Mat",
+            "k": "set_shader_connection",
+            "prim": "/World/Mat",
             "connections": {
                 "outputs:surface": {
                     "source_prim": "/World/Mat/PBR",
@@ -497,7 +530,8 @@ class TestSetShaderConnection:
 class TestBroadcastEvent:
     def test_roundtrip(self):
         msg = {
-            "type": "event", "seq": 42,
+            "type": "event",
+            "seq": 42,
             "event": {"k": "set_visibility", "prim": "/World/X", "visible": True},
             "origin": "blender-1",
         }
@@ -534,13 +568,16 @@ class TestCreateProposal:
 class TestMultiEventTxn:
     def test_multiple_events(self):
         msg = {
-            "type": "txn", "client_id": "c1",
+            "type": "txn",
+            "client_id": "c1",
             "events": [
                 {"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"},
                 {"k": "ensure_xform_ops", "prim": "/World/New"},
                 {
-                    "k": "set_xform_trs", "prim": "/World/New",
-                    "fields": ["t"], "t": [1.0, 0.0, 0.0],
+                    "k": "set_xform_trs",
+                    "prim": "/World/New",
+                    "fields": ["t"],
+                    "t": [1.0, 0.0, 0.0],
                 },
                 {"k": "set_visibility", "prim": "/World/New", "visible": True},
             ],
@@ -562,20 +599,24 @@ class TestSchemaProtocolSync:
     @staticmethod
     def _enum_values(cls):
         """Extract non-zero enum values from a FlatBuffers enum class."""
-        return {v for k, v in vars(cls).items()
-                if isinstance(v, int) and v != 0 and not k.startswith("_")}
+        return {
+            v
+            for k, v in vars(cls).items()
+            if isinstance(v, int) and v != 0 and not k.startswith("_")
+        }
 
     def test_event_kinds_cover_schema(self):
         """Every FB EventPayload variant has a codec entry and K_* constant."""
-        from openusdconnect.codec import _TAG_TO_EVENT_KIND, EventPayloadType
+        from openusdconnect import events
+        from openusdconnect.codec import EventPayloadType
 
         fb_tags = self._enum_values(EventPayloadType)
-        codec_tags = set(_TAG_TO_EVENT_KIND.keys())
+        registered_tags = {spec.fb_tag for spec in events.all_specs() if spec.fb_tag is not None}
 
-        assert fb_tags == codec_tags, (
-            f"Schema/codec mismatch — "
-            f"in schema but not codec: {fb_tags - codec_tags}, "
-            f"in codec but not schema: {codec_tags - fb_tags}"
+        assert fb_tags == registered_tags, (
+            f"Schema/registry mismatch — "
+            f"in schema but not registered: {fb_tags - registered_tags}, "
+            f"registered but not in schema: {registered_tags - fb_tags}"
         )
 
     def test_message_types_cover_schema(self):

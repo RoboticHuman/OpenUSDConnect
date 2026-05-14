@@ -81,7 +81,7 @@ def main():
                 print(f"[Receiver] Processing: {k} {prim_path}")
 
                 if k == K_ENSURE_PRIM:
-                    adapter.ensure_prim(prim_path, ev.get("typeName", "Xform"))
+                    adapter.ensure_prim(prim_path, ev["typeName"])
                 elif k == K_ENSURE_XFORM_OPS:
                     adapter.ensure_xform_ops(prim_path)
                 elif k == K_SET_XFORM_TRS:

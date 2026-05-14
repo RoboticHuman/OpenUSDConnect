@@ -37,12 +37,15 @@ def _connect_and_hello(host: str, port: int, client_id: str) -> socket.socket:
     from .transport import send_msg
 
     sock = socket.create_connection((host, port), timeout=10)
-    send_msg(sock, {
-        "type": "hello",
-        "role": "emitter",
-        "protocol_version": 1,
-        "client_id": client_id,
-    })
+    send_msg(
+        sock,
+        {
+            "type": "hello",
+            "role": "emitter",
+            "protocol_version": 1,
+            "client_id": client_id,
+        },
+    )
     # Wait for hello_ok before sending events.
     recv_framed(sock)
     return sock
@@ -51,11 +54,14 @@ def _connect_and_hello(host: str, port: int, client_id: str) -> socket.socket:
 def _send_txn(sock: socket.socket, events: list[dict], client_id: str) -> None:
     from .transport import send_msg
 
-    send_msg(sock, {
-        "type": "txn",
-        "client_id": client_id,
-        "events": events,
-    })
+    send_msg(
+        sock,
+        {
+            "type": "txn",
+            "client_id": client_id,
+            "events": events,
+        },
+    )
 
 
 def _send_raw_msg(sock: socket.socket, msg: dict) -> None:
@@ -79,18 +85,24 @@ def main():
         description="Send events to a running OpenUSDConnect server.",
     )
     parser.add_argument(
-        "events", nargs="*",
-        help="JSON event dicts (e.g. '{\"k\":\"ensure_prim\",\"prim\":\"/World/X\"}')",
+        "events",
+        nargs="*",
+        help=(
+            'JSON event dicts (e.g. \'{"k":"ensure_prim","prim":"/World/X","typeName":"Xform"}\')'
+        ),
     )
     parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=7200, help="Server port (default: 7200)")
     parser.add_argument("--client-id", default="cli", help="Client ID (default: cli)")
     parser.add_argument(
-        "--msg", action="append", default=[],
+        "--msg",
+        action="append",
+        default=[],
         help="Raw message JSON (for non-event messages like compact, quit). Repeatable.",
     )
     parser.add_argument(
-        "--stdin", action="store_true",
+        "--stdin",
+        action="store_true",
         help="Read JSON events from stdin, one per line.",
     )
     args = parser.parse_args()

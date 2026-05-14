@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pxr import Gf, Sdf, Sdr, Usd, UsdGeom, UsdShade, Vt
 
+from . import events as _events
+from .events import Event, register_applier
 from .protocol_constants import (
     EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
@@ -265,6 +267,7 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
         attr.Set(value)
 
 
+@register_applier(K_SET_XFORM_TRS)
 def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
     prim_path = ev["prim"]
     cached = op_cache.get(prim_path) if op_cache else None
@@ -292,6 +295,7 @@ def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
         s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
 
 
+@register_applier(K_RENAME_PRIM)
 def _apply_rename_prim(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
     if prim and prim.IsValid():
@@ -300,6 +304,7 @@ def _apply_rename_prim(stage: Usd.Stage, ev: dict) -> None:
         editor.ApplyEdits()
 
 
+@register_applier(K_SET_VISIBILITY)
 def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
     if prim and prim.IsValid():
@@ -308,6 +313,7 @@ def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
         imageable.GetVisibilityAttr().Set(vis_value)
 
 
+@register_applier(K_SET_GPRIM_ATTRS)
 def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
     if not prim or not prim.IsValid():
@@ -342,6 +348,7 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
             attr.SetMetadata("interpolation", interp)
 
 
+@register_applier(K_SET_VARIANT_SELECTIONS)
 def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
     prim = get_or_define_prim(stage, prim_path)
@@ -351,6 +358,7 @@ def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
             vsets.GetVariantSet(set_name).SetVariantSelection(variant_name)
 
 
+@register_applier(K_SET_REFERENCE)
 def _apply_set_reference(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
     prim = get_or_define_prim(stage, prim_path)
@@ -369,6 +377,7 @@ def _apply_set_reference(stage: Usd.Stage, ev: dict) -> None:
             refs.AddInternalReference(Sdf.Path(prim_path_ref))
 
 
+@register_applier(K_SET_PAYLOAD)
 def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
     prim = get_or_define_prim(stage, prim_path)
@@ -387,14 +396,17 @@ def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
             payloads.AddInternalPayload(Sdf.Path(prim_path_ref))
 
 
+@register_applier(K_LOAD_PAYLOAD)
 def _apply_load_payload(stage: Usd.Stage, ev: dict) -> None:
     stage.Load(Sdf.Path(ev["prim"]))
 
 
+@register_applier(K_UNLOAD_PAYLOAD)
 def _apply_unload_payload(stage: Usd.Stage, ev: dict) -> None:
     stage.Unload(Sdf.Path(ev["prim"]))
 
 
+@register_applier(K_SET_MATERIAL_BINDING)
 def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
     """Bind or unbind a material to a geometry prim.
 
@@ -447,6 +459,7 @@ def _set_shader_input_value(
             inp.Set(value)
 
 
+@register_applier(K_SET_SHADER_INPUT)
 def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
     """Apply shader-id and authored input values to a UsdShade connectable.
 
@@ -547,6 +560,7 @@ def _get_connectable_port(
     )
 
 
+@register_applier(K_SET_SHADER_CONNECTION)
 def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
     """Apply a batch of shader/nodegraph connection edges to the stage.
 
@@ -596,58 +610,42 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
             port.DisconnectSource()
 
 
-_EVENT_DISPATCH: dict[str, callable] = {
-    K_SET_VARIANT_SELECTIONS: _apply_set_variant_selections,
-    K_SET_XFORM_TRS: _apply_set_xform_trs,
-    K_RENAME_PRIM: _apply_rename_prim,
-    K_SET_VISIBILITY: _apply_set_visibility,
-    K_SET_GPRIM_ATTRS: _apply_set_gprim_attrs,
-    K_SET_REFERENCE: _apply_set_reference,
-    K_SET_PAYLOAD: _apply_set_payload,
-    K_LOAD_PAYLOAD: _apply_load_payload,
-    K_UNLOAD_PAYLOAD: _apply_unload_payload,
-    K_SET_MATERIAL_BINDING: _apply_set_material_binding,
-    K_SET_SHADER_INPUT: _apply_set_shader_input,
-    K_SET_SHADER_CONNECTION: _apply_set_shader_connection,
-}
+@register_applier(K_ENSURE_PRIM)
+def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
+    get_or_define_prim(stage, ev["prim"], ev["typeName"])
 
 
-def apply_event(stage: Usd.Stage, ev: dict) -> None:
-    """Apply a single event dict to a USD stage.
-
-    Handles all event types: ensure_prim, ensure_xform_ops, set_xform_trs,
-    set_xform_matrices, delete_prim, set_visibility, set_gprim_attrs,
-    set_reference.
-    """
-    k = ev.get("k")
-
-    if k == K_ENSURE_PRIM:
-        get_or_define_prim(stage, ev["prim"], ev.get("typeName", "Xform"))
-        return
-
-    if k == K_ENSURE_XFORM_OPS:
-        ensure_canonical_ops(stage, ev["prim"])
-        return
-
-    if k == K_SET_XFORM_MATRICES:
-        return
-
-    if k == K_DELETE_PRIM:
-        stage.RemovePrim(ev["prim"])
-        return
-
-    if k == K_DEACTIVATE_PRIM:
-        prim = stage.GetPrimAtPath(ev["prim"])
-        if prim and prim.IsValid():
-            prim.SetActive(ev.get("active", False))
-        return
-
-    handler = _EVENT_DISPATCH.get(k)
-    if handler is not None:
-        handler(stage, ev)
+@register_applier(K_ENSURE_XFORM_OPS)
+def _apply_ensure_xform_ops(stage: Usd.Stage, ev: dict) -> None:
+    ensure_canonical_ops(stage, ev["prim"])
 
 
-def apply_events(stage: Usd.Stage, events: list, op_cache=None) -> None:
+@register_applier(K_SET_XFORM_MATRICES)
+def _apply_set_xform_matrices(stage: Usd.Stage, ev: dict) -> None:
+    # Diagnostic payload — no stage mutation.
+    pass
+
+
+@register_applier(K_DELETE_PRIM)
+def _apply_delete_prim(stage: Usd.Stage, ev: dict) -> None:
+    stage.RemovePrim(ev["prim"])
+
+
+@register_applier(K_DEACTIVATE_PRIM)
+def _apply_deactivate_prim(stage: Usd.Stage, ev: dict) -> None:
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if prim and prim.IsValid():
+        prim.SetActive(ev.get("active", False))
+
+
+def apply_event(stage: Usd.Stage, ev: Event) -> None:
+    """Apply a single event dict to a USD stage."""
+    spec = _events.get(ev.get("k"))
+    if spec is not None and spec.apply is not None:
+        spec.apply(stage, ev)
+
+
+def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     """Apply a list of events to a USD stage.
 
     Ordering: callers may pass events in any order. The structural pass

@@ -113,7 +113,7 @@ _DISPATCH_TABLE: dict[str, str] = {
 def _dispatch_args(k: str, prim_path: str, ev: dict) -> tuple[tuple, dict]:
     """Return (args, kwargs) for the adapter method identified by *k*."""
     if k == K_ENSURE_PRIM:
-        return (prim_path, ev.get("typeName", "Xform")), {}
+        return (prim_path, ev["typeName"]), {}
     if k == K_DEACTIVATE_PRIM:
         return (prim_path, ev.get("active", False)), {}
     if k == K_RENAME_PRIM:

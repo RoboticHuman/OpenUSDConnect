@@ -33,6 +33,8 @@ import json
 import flatbuffers
 import numpy as np
 
+from . import events as _events
+from .events import register_decoder, register_encoder
 from .generated import messages_generated as _fb
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
@@ -150,48 +152,6 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.RateLimited: RateLimited,
 }
 
-_EVENT_KIND_TO_TAG = {
-    K_ENSURE_PRIM: EventPayloadType.EnsurePrim,
-    K_ENSURE_XFORM_OPS: EventPayloadType.EnsureXformOps,
-    K_SET_XFORM_TRS: EventPayloadType.SetXformTrs,
-    K_SET_XFORM_MATRICES: EventPayloadType.SetXformMatrices,
-    K_DELETE_PRIM: EventPayloadType.DeletePrim,
-    K_DEACTIVATE_PRIM: EventPayloadType.DeactivatePrim,
-    K_RENAME_PRIM: EventPayloadType.RenamePrim,
-    K_SET_VISIBILITY: EventPayloadType.SetVisibility,
-    K_SET_GPRIM_ATTRS: EventPayloadType.SetGprimAttrs,
-    K_SET_REFERENCE: EventPayloadType.SetReference,
-    K_SET_PAYLOAD: EventPayloadType.SetPayload,
-    K_LOAD_PAYLOAD: EventPayloadType.LoadPayload,
-    K_UNLOAD_PAYLOAD: EventPayloadType.UnloadPayload,
-    K_SET_VARIANT_SELECTIONS: EventPayloadType.SetVariantSelections,
-    K_SET_MATERIAL_BINDING: EventPayloadType.SetMaterialBinding,
-    K_SET_SHADER_INPUT: EventPayloadType.SetShaderInput,
-    K_SET_SHADER_CONNECTION: EventPayloadType.SetShaderConnection,
-}
-
-_TAG_TO_EVENT_KIND = {v: k for k, v in _EVENT_KIND_TO_TAG.items()}
-
-_EVENT_TAG_TO_CLASS = {
-    EventPayloadType.EnsurePrim: EnsurePrim,
-    EventPayloadType.EnsureXformOps: EnsureXformOps,
-    EventPayloadType.SetXformTrs: SetXformTrs,
-    EventPayloadType.SetXformMatrices: SetXformMatrices,
-    EventPayloadType.DeletePrim: DeletePrim,
-    EventPayloadType.DeactivatePrim: DeactivatePrim,
-    EventPayloadType.RenamePrim: RenamePrim,
-    EventPayloadType.SetVisibility: SetVisibility,
-    EventPayloadType.SetGprimAttrs: SetGprimAttrs,
-    EventPayloadType.SetReference: SetReference,
-    EventPayloadType.SetPayload: SetPayload,
-    EventPayloadType.LoadPayload: LoadPayload,
-    EventPayloadType.UnloadPayload: UnloadPayload,
-    EventPayloadType.SetVariantSelections: SetVariantSelections,
-    EventPayloadType.SetMaterialBinding: SetMaterialBinding,
-    EventPayloadType.SetShaderInput: SetShaderInput,
-    EventPayloadType.SetShaderConnection: SetShaderConnection,
-}
-
 _TRS_BITS = {"t": 1, "r": 2, "s": 4}
 
 _BUILDER_SIZE_HINT: dict[str, int] = {
@@ -235,14 +195,13 @@ def resolve_event(event_wrapper: EventWrapper):
     ("set_gprim_attrs", SetGprimAttrs).
     """
     tag = event_wrapper.EventType()
-    kind = _TAG_TO_EVENT_KIND.get(tag)
-    if kind is None:
+    spec = _events.by_tag(tag)
+    if spec is None:
         raise ValueError(f"unknown event payload type {tag}")
-    cls = _EVENT_TAG_TO_CLASS[tag]
     raw_table = event_wrapper.Event()
-    obj = cls()
+    obj = spec.fb_class()
     obj.Init(raw_table.Bytes, raw_table.Pos)
-    return kind, obj
+    return spec.kind, obj
 
 
 def is_ping(buf: bytes | bytearray) -> bool:
@@ -422,10 +381,12 @@ _ENCODE_DISPATCH = {
 
 def _encode_event_wrapper(b, ev: dict) -> int:
     kind = ev["k"]
-    tag = _EVENT_KIND_TO_TAG[kind]
-    event_offset = _EVENT_ENCODE_DISPATCH[kind](b, ev)
+    spec = _events.get(kind)
+    if spec is None or spec.encode is None or spec.fb_tag is None:
+        raise KeyError(f"no registered encoder for event kind {kind!r}")
+    event_offset = spec.encode(b, ev)
     _fb.EventWrapperStart(b)
-    _fb.EventWrapperAddEventType(b, tag)
+    _fb.EventWrapperAddEventType(b, spec.fb_tag)
     _fb.EventWrapperAddEvent(b, event_offset)
     return _fb.EventWrapperEnd(b)
 
@@ -443,15 +404,21 @@ def _create_int_vector(b, values):
     return b.CreateNumpyVector(np.asarray(values, dtype=np.int32))
 
 
+@register_encoder(K_ENSURE_PRIM, fb_tag=EventPayloadType.EnsurePrim, fb_class=EnsurePrim)
 def _encode_ensure_prim(b, ev):
     prim = b.CreateString(ev["prim"])
-    tn = b.CreateString(ev.get("typeName", ""))
+    tn = b.CreateString(ev["typeName"])
     _fb.EnsurePrimStart(b)
     _fb.EnsurePrimAddPrim(b, prim)
     _fb.EnsurePrimAddTypeName(b, tn)
     return _fb.EnsurePrimEnd(b)
 
 
+@register_encoder(
+    K_ENSURE_XFORM_OPS,
+    fb_tag=EventPayloadType.EnsureXformOps,
+    fb_class=EnsureXformOps,
+)
 def _encode_ensure_xform_ops(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.EnsureXformOpsStart(b)
@@ -459,6 +426,7 @@ def _encode_ensure_xform_ops(b, ev):
     return _fb.EnsureXformOpsEnd(b)
 
 
+@register_encoder(K_SET_XFORM_TRS, fb_tag=EventPayloadType.SetXformTrs, fb_class=SetXformTrs)
 def _encode_set_xform_trs(b, ev):
     prim = b.CreateString(ev["prim"])
     fields = ev.get("fields", [])
@@ -482,6 +450,11 @@ def _encode_set_xform_trs(b, ev):
     return _fb.SetXformTrsEnd(b)
 
 
+@register_encoder(
+    K_SET_XFORM_MATRICES,
+    fb_tag=EventPayloadType.SetXformMatrices,
+    fb_class=SetXformMatrices,
+)
 def _encode_set_xform_matrices(b, ev):
     prim = b.CreateString(ev["prim"])
     local_vec = _create_float_vector(b, ev["local_m"])
@@ -493,6 +466,7 @@ def _encode_set_xform_matrices(b, ev):
     return _fb.SetXformMatricesEnd(b)
 
 
+@register_encoder(K_DELETE_PRIM, fb_tag=EventPayloadType.DeletePrim, fb_class=DeletePrim)
 def _encode_delete_prim(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.DeletePrimStart(b)
@@ -500,6 +474,11 @@ def _encode_delete_prim(b, ev):
     return _fb.DeletePrimEnd(b)
 
 
+@register_encoder(
+    K_DEACTIVATE_PRIM,
+    fb_tag=EventPayloadType.DeactivatePrim,
+    fb_class=DeactivatePrim,
+)
 def _encode_deactivate_prim(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.DeactivatePrimStart(b)
@@ -508,6 +487,7 @@ def _encode_deactivate_prim(b, ev):
     return _fb.DeactivatePrimEnd(b)
 
 
+@register_encoder(K_RENAME_PRIM, fb_tag=EventPayloadType.RenamePrim, fb_class=RenamePrim)
 def _encode_rename_prim(b, ev):
     prim = b.CreateString(ev["prim"])
     new_name = b.CreateString(ev["new_name"])
@@ -517,6 +497,7 @@ def _encode_rename_prim(b, ev):
     return _fb.RenamePrimEnd(b)
 
 
+@register_encoder(K_SET_VISIBILITY, fb_tag=EventPayloadType.SetVisibility, fb_class=SetVisibility)
 def _encode_set_visibility(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.SetVisibilityStart(b)
@@ -666,6 +647,7 @@ def _encode_attr_value_list(b, value: list) -> int:
     return _fb.AttrValueEnd(b)
 
 
+@register_encoder(K_SET_GPRIM_ATTRS, fb_tag=EventPayloadType.SetGprimAttrs, fb_class=SetGprimAttrs)
 def _encode_set_gprim_attrs(b, ev):
     prim = b.CreateString(ev["prim"])
     attrs = ev.get("attrs", {})
@@ -737,6 +719,7 @@ def _encode_arc_entries(b, entries):
     return offsets
 
 
+@register_encoder(K_SET_REFERENCE, fb_tag=EventPayloadType.SetReference, fb_class=SetReference)
 def _encode_set_reference(b, ev):
     prim = b.CreateString(ev["prim"])
     arc_offsets = _encode_arc_entries(b, ev["refs"])
@@ -750,6 +733,7 @@ def _encode_set_reference(b, ev):
     return _fb.SetReferenceEnd(b)
 
 
+@register_encoder(K_SET_PAYLOAD, fb_tag=EventPayloadType.SetPayload, fb_class=SetPayload)
 def _encode_set_payload(b, ev):
     prim = b.CreateString(ev["prim"])
     arc_offsets = _encode_arc_entries(b, ev["payloads"])
@@ -763,6 +747,7 @@ def _encode_set_payload(b, ev):
     return _fb.SetPayloadEnd(b)
 
 
+@register_encoder(K_LOAD_PAYLOAD, fb_tag=EventPayloadType.LoadPayload, fb_class=LoadPayload)
 def _encode_load_payload(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.LoadPayloadStart(b)
@@ -770,6 +755,7 @@ def _encode_load_payload(b, ev):
     return _fb.LoadPayloadEnd(b)
 
 
+@register_encoder(K_UNLOAD_PAYLOAD, fb_tag=EventPayloadType.UnloadPayload, fb_class=UnloadPayload)
 def _encode_unload_payload(b, ev):
     prim = b.CreateString(ev["prim"])
     _fb.UnloadPayloadStart(b)
@@ -777,6 +763,11 @@ def _encode_unload_payload(b, ev):
     return _fb.UnloadPayloadEnd(b)
 
 
+@register_encoder(
+    K_SET_VARIANT_SELECTIONS,
+    fb_tag=EventPayloadType.SetVariantSelections,
+    fb_class=SetVariantSelections,
+)
 def _encode_set_variant_selections(b, ev):
     prim = b.CreateString(ev["prim"])
     sp_offsets = []
@@ -797,6 +788,11 @@ def _encode_set_variant_selections(b, ev):
     return _fb.SetVariantSelectionsEnd(b)
 
 
+@register_encoder(
+    K_SET_MATERIAL_BINDING,
+    fb_tag=EventPayloadType.SetMaterialBinding,
+    fb_class=SetMaterialBinding,
+)
 def _encode_set_material_binding(b, ev):
     prim = b.CreateString(ev["prim"])
     mp = b.CreateString(ev["material_path"])
@@ -806,6 +802,11 @@ def _encode_set_material_binding(b, ev):
     return _fb.SetMaterialBindingEnd(b)
 
 
+@register_encoder(
+    K_SET_SHADER_INPUT,
+    fb_tag=EventPayloadType.SetShaderInput,
+    fb_class=SetShaderInput,
+)
 def _encode_set_shader_input(b, ev):
     prim = b.CreateString(ev["prim"])
     shader_id = b.CreateString(ev["shader_id"])
@@ -855,6 +856,11 @@ def _encode_set_shader_input(b, ev):
     return _fb.SetShaderInputEnd(b)
 
 
+@register_encoder(
+    K_SET_SHADER_CONNECTION,
+    fb_tag=EventPayloadType.SetShaderConnection,
+    fb_class=SetShaderConnection,
+)
 def _encode_set_shader_connection(b, ev):
     prim = b.CreateString(ev["prim"])
     connections = ev.get("connections", {})
@@ -889,27 +895,6 @@ def _encode_set_shader_connection(b, ev):
     return _fb.SetShaderConnectionEnd(b)
 
 
-_EVENT_ENCODE_DISPATCH = {
-    K_ENSURE_PRIM: _encode_ensure_prim,
-    K_ENSURE_XFORM_OPS: _encode_ensure_xform_ops,
-    K_SET_XFORM_TRS: _encode_set_xform_trs,
-    K_SET_XFORM_MATRICES: _encode_set_xform_matrices,
-    K_DELETE_PRIM: _encode_delete_prim,
-    K_DEACTIVATE_PRIM: _encode_deactivate_prim,
-    K_RENAME_PRIM: _encode_rename_prim,
-    K_SET_VISIBILITY: _encode_set_visibility,
-    K_SET_GPRIM_ATTRS: _encode_set_gprim_attrs,
-    K_SET_REFERENCE: _encode_set_reference,
-    K_SET_PAYLOAD: _encode_set_payload,
-    K_LOAD_PAYLOAD: _encode_load_payload,
-    K_UNLOAD_PAYLOAD: _encode_unload_payload,
-    K_SET_VARIANT_SELECTIONS: _encode_set_variant_selections,
-    K_SET_MATERIAL_BINDING: _encode_set_material_binding,
-    K_SET_SHADER_INPUT: _encode_set_shader_input,
-    K_SET_SHADER_CONNECTION: _encode_set_shader_connection,
-}
-
-
 # ===================================================================
 # DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
 # ===================================================================
@@ -938,7 +923,10 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
     kind, obj = resolve_event(ew)
     if kind == K_SET_GPRIM_ATTRS:
         return _dict_set_gprim_attrs(obj, kind, numpy_arrays=numpy_arrays)
-    return _EVENT_DICT_DECODE_DISPATCH[kind](obj, kind)
+    spec = _events.get(kind)
+    if spec is None or spec.decode is None:
+        raise KeyError(f"no registered decoder for event kind {kind!r}")
+    return spec.decode(obj, kind)
 
 
 # --- Helpers ---
@@ -1045,6 +1033,7 @@ _DICT_DECODE_DISPATCH = {
 # --- Per-event dict decoders ---
 
 
+@register_decoder(K_ENSURE_PRIM)
 def _dict_ensure_prim(ep, kind):
     ev = {"k": kind, "prim": _str(ep.Prim())}
     tn = _str(ep.TypeName())
@@ -1055,10 +1044,12 @@ def _dict_ensure_prim(ep, kind):
     return ev
 
 
+@register_decoder(K_ENSURE_XFORM_OPS)
 def _dict_ensure_xform_ops(exo, kind):
     return {"k": kind, "prim": _str(exo.Prim())}
 
 
+@register_decoder(K_SET_XFORM_TRS)
 def _dict_set_xform_trs(trs, kind):
     bitmask = trs.Fields()
     fields = []
@@ -1076,6 +1067,7 @@ def _dict_set_xform_trs(trs, kind):
     return ev
 
 
+@register_decoder(K_SET_XFORM_MATRICES)
 def _dict_set_xform_matrices(m, kind):
     return {
         "k": kind,
@@ -1085,18 +1077,22 @@ def _dict_set_xform_matrices(m, kind):
     }
 
 
+@register_decoder(K_DELETE_PRIM)
 def _dict_delete_prim(dp, kind):
     return {"k": kind, "prim": _str(dp.Prim())}
 
 
+@register_decoder(K_DEACTIVATE_PRIM)
 def _dict_deactivate_prim(dp, kind):
     return {"k": kind, "prim": _str(dp.Prim()), "active": dp.Active()}
 
 
+@register_decoder(K_RENAME_PRIM)
 def _dict_rename_prim(rp, kind):
     return {"k": kind, "prim": _str(rp.Prim()), "new_name": _str(rp.NewName())}
 
 
+@register_decoder(K_SET_VISIBILITY)
 def _dict_set_visibility(sv, kind):
     return {"k": kind, "prim": _str(sv.Prim()), "visible": sv.Visible()}
 
@@ -1148,6 +1144,7 @@ def _attr_value_to_python(av, numpy_arrays: bool = False):
     return None
 
 
+@register_decoder(K_SET_GPRIM_ATTRS)
 def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
     attrs = {}
     for i in range(sg.AttrsLength()):
@@ -1177,6 +1174,7 @@ def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
     return ev
 
 
+@register_decoder(K_SET_REFERENCE)
 def _dict_set_reference(sr, kind):
     refs = []
     for i in range(sr.RefsLength()):
@@ -1192,6 +1190,7 @@ def _dict_set_reference(sr, kind):
     return {"k": kind, "prim": _str(sr.Prim()), "refs": refs}
 
 
+@register_decoder(K_SET_PAYLOAD)
 def _dict_set_payload(sp, kind):
     payloads = []
     for i in range(sp.PayloadsLength()):
@@ -1207,14 +1206,17 @@ def _dict_set_payload(sp, kind):
     return {"k": kind, "prim": _str(sp.Prim()), "payloads": payloads}
 
 
+@register_decoder(K_LOAD_PAYLOAD)
 def _dict_load_payload(lp, kind):
     return {"k": kind, "prim": _str(lp.Prim())}
 
 
+@register_decoder(K_UNLOAD_PAYLOAD)
 def _dict_unload_payload(up, kind):
     return {"k": kind, "prim": _str(up.Prim())}
 
 
+@register_decoder(K_SET_VARIANT_SELECTIONS)
 def _dict_set_variant_selections(sv, kind):
     selections = {}
     for i in range(sv.SelectionsLength()):
@@ -1223,10 +1225,12 @@ def _dict_set_variant_selections(sv, kind):
     return {"k": kind, "prim": _str(sv.Prim()), "selections": selections}
 
 
+@register_decoder(K_SET_MATERIAL_BINDING)
 def _dict_set_material_binding(mb, kind):
     return {"k": kind, "prim": _str(mb.Prim()), "material_path": _str(mb.MaterialPath())}
 
 
+@register_decoder(K_SET_SHADER_INPUT)
 def _dict_set_shader_input(si, kind):
     inputs = {}
     input_types = {}
@@ -1254,6 +1258,7 @@ def _dict_set_shader_input(si, kind):
     }
 
 
+@register_decoder(K_SET_SHADER_CONNECTION)
 def _dict_set_shader_connection(sc, kind):
     connections = {}
     for i in range(sc.ConnectionsLength()):
@@ -1267,24 +1272,3 @@ def _dict_set_shader_connection(sc, kind):
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
-
-
-_EVENT_DICT_DECODE_DISPATCH = {
-    K_ENSURE_PRIM: _dict_ensure_prim,
-    K_ENSURE_XFORM_OPS: _dict_ensure_xform_ops,
-    K_SET_XFORM_TRS: _dict_set_xform_trs,
-    K_SET_XFORM_MATRICES: _dict_set_xform_matrices,
-    K_DELETE_PRIM: _dict_delete_prim,
-    K_DEACTIVATE_PRIM: _dict_deactivate_prim,
-    K_RENAME_PRIM: _dict_rename_prim,
-    K_SET_VISIBILITY: _dict_set_visibility,
-    K_SET_GPRIM_ATTRS: _dict_set_gprim_attrs,
-    K_SET_REFERENCE: _dict_set_reference,
-    K_SET_PAYLOAD: _dict_set_payload,
-    K_LOAD_PAYLOAD: _dict_load_payload,
-    K_UNLOAD_PAYLOAD: _dict_unload_payload,
-    K_SET_VARIANT_SELECTIONS: _dict_set_variant_selections,
-    K_SET_MATERIAL_BINDING: _dict_set_material_binding,
-    K_SET_SHADER_INPUT: _dict_set_shader_input,
-    K_SET_SHADER_CONNECTION: _dict_set_shader_connection,
-}

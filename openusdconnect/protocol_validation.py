@@ -5,6 +5,7 @@ from __future__ import annotations
 from .protocol_constants import (
     EVENT_KEYS,
     K_DEACTIVATE_PRIM,
+    K_ENSURE_PRIM,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
@@ -65,6 +66,8 @@ def validate_event(ev: dict) -> bool:
     if k not in EVENT_KEYS:
         return False
     if "prim" not in ev:
+        return False
+    if k == K_ENSURE_PRIM and not isinstance(ev.get("typeName"), str):
         return False
     if k == K_SET_XFORM_TRS:
         fields = ev.get("fields", [])
