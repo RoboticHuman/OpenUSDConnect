@@ -15,19 +15,24 @@ def _set_send_timeout(sock: socket.socket, timeout_s: float):
     timeouts, causing spurious TimeoutError in the read loop.
     """
     if sys.platform == "win32":
-        # Windows: SO_SNDTIMEO takes a DWORD (4 bytes) in milliseconds
+        # Windows: SO_SNDTIMEO takes a DWORD (4 bytes) in milliseconds.
         ms = int(timeout_s * 1000)
         sock.setsockopt(
             socket.SOL_SOCKET,
             socket.SO_SNDTIMEO,
             ms.to_bytes(4, "little"),
         )
-    else:
-        # Unix/macOS: SO_SNDTIMEO takes struct timeval {long sec, long usec}
-        secs = int(timeout_s)
-        usecs = int((timeout_s - secs) * 1_000_000)
-        sock.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDTIMEO,
-            struct.pack("ll", secs, usecs),
-        )
+        return
+
+    # Unix variants take ``struct timeval`` but the field widths differ:
+    #   Linux / *BSD: { long tv_sec; long tv_usec; }              → 16 B on 64-bit
+    #   macOS:        { time_t tv_sec; suseconds_t tv_usec; }     → 12 B on 64-bit
+    #                 (suseconds_t is int32_t on Darwin)
+    secs = int(timeout_s)
+    usecs = int((timeout_s - secs) * 1_000_000)
+    fmt = "@li" if sys.platform == "darwin" else "@ll"
+    sock.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_SNDTIMEO,
+        struct.pack(fmt, secs, usecs),
+    )
