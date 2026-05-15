@@ -15,11 +15,16 @@ from pxr import Usd
 
 from .event_apply import (
     apply_event as _apply_event_to_stage,
+)
+from .event_apply import (
     apply_events as _apply_events_to_stage,
+)
+from .event_apply import (
     ensure_canonical_ops as _ensure_canonical_ops,
+)
+from .event_apply import (
     get_or_define_prim as _get_or_define_prim,
 )
-
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -43,38 +48,54 @@ from .protocol_constants import (
 LOG = logging.getLogger(__name__)
 
 
-# Per-kind args extractor.  The dispatch key (a K_* constant) is also the
+# Per-kind kwargs extractor.  The dispatch key (a K_* constant) is also the
 # adapter method name, so apply_event uses ``getattr(self, event["k"])`` —
-# no method-name strings duplicated in this table.  Each lambda reads
-# schema-required fields directly so malformed events fail fast; only
-# NotRequired fields use ``.get`` with a default.
-_DISPATCH: dict[str, Callable[[dict], tuple]] = {
-    K_ENSURE_PRIM: lambda ev: (ev["prim"], ev["typeName"]),
-    K_ENSURE_XFORM_OPS: lambda ev: (ev["prim"],),
-    K_SET_XFORM_TRS: lambda ev: (ev["prim"], ev),
-    K_SET_XFORM_MATRICES: lambda ev: (ev["prim"], ev),
-    K_DELETE_PRIM: lambda ev: (ev["prim"],),
-    K_DEACTIVATE_PRIM: lambda ev: (ev["prim"], ev["active"]),
-    K_RENAME_PRIM: lambda ev: (ev["prim"], ev["new_name"]),
-    K_SET_VISIBILITY: lambda ev: (ev["prim"], ev["visible"]),
-    K_SET_GPRIM_ATTRS: lambda ev: (ev["prim"], ev["attrs"]),
-    K_SET_REFERENCE: lambda ev: (ev["prim"], ev["refs"]),
-    K_SET_VARIANT_SELECTIONS: lambda ev: (ev["prim"], ev["selections"]),
-    K_SET_PAYLOAD: lambda ev: (ev["prim"], ev["payloads"]),
-    K_LOAD_PAYLOAD: lambda ev: (ev["prim"],),
-    K_UNLOAD_PAYLOAD: lambda ev: (ev["prim"],),
-    K_SET_MATERIAL_BINDING: lambda ev: (ev["prim"], ev["material_path"]),
-    K_SET_SHADER_INPUT: lambda ev: (
-        ev["prim"],
-        ev["shader_id"],
-        ev["inputs"],
-        ev.get("input_types", {}),
-    ),
-    K_SET_SHADER_CONNECTION: lambda ev: (
-        ev["prim"],
-        ev["connections"],
-        ev.get("disconnections", []),
-    ),
+# no method-name strings duplicated in this table.  Each lambda returns the
+# kwargs to splat into the adapter method, so signatures stay semantic
+# (no raw event dicts leaking into adapter implementations).
+def _trs_kwargs(ev: dict) -> dict:
+    """Extract t/r/s kwargs from a SetXformTRS event (only fields present)."""
+    fields = ev.get("fields", [])
+    return {f: ev[f] for f in ("t", "r", "s") if f in fields}
+
+
+_DISPATCH: dict[str, Callable[[dict], dict]] = {
+    K_ENSURE_PRIM: lambda ev: {"prim_path": ev["prim"], "type_name": ev["typeName"]},
+    K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
+    K_SET_XFORM_TRS: lambda ev: {"prim_path": ev["prim"], **_trs_kwargs(ev)},
+    K_SET_XFORM_MATRICES: lambda ev: {
+        "prim_path": ev["prim"],
+        "local_m": ev.get("local_m"),
+        "world_m": ev.get("world_m"),
+    },
+    K_DELETE_PRIM: lambda ev: {"prim_path": ev["prim"]},
+    K_DEACTIVATE_PRIM: lambda ev: {"prim_path": ev["prim"], "active": ev["active"]},
+    K_RENAME_PRIM: lambda ev: {"prim_path": ev["prim"], "new_name": ev["new_name"]},
+    K_SET_VISIBILITY: lambda ev: {"prim_path": ev["prim"], "visible": ev["visible"]},
+    K_SET_GPRIM_ATTRS: lambda ev: {"prim_path": ev["prim"], "attrs": ev["attrs"]},
+    K_SET_REFERENCE: lambda ev: {"prim_path": ev["prim"], "refs": ev["refs"]},
+    K_SET_VARIANT_SELECTIONS: lambda ev: {
+        "prim_path": ev["prim"],
+        "selections": ev["selections"],
+    },
+    K_SET_PAYLOAD: lambda ev: {"prim_path": ev["prim"], "payloads": ev["payloads"]},
+    K_LOAD_PAYLOAD: lambda ev: {"prim_path": ev["prim"]},
+    K_UNLOAD_PAYLOAD: lambda ev: {"prim_path": ev["prim"]},
+    K_SET_MATERIAL_BINDING: lambda ev: {
+        "prim_path": ev["prim"],
+        "material_path": ev["material_path"],
+    },
+    K_SET_SHADER_INPUT: lambda ev: {
+        "prim_path": ev["prim"],
+        "shader_id": ev["shader_id"],
+        "inputs": ev["inputs"],
+        "input_types": ev.get("input_types", {}),
+    },
+    K_SET_SHADER_CONNECTION: lambda ev: {
+        "prim_path": ev["prim"],
+        "connections": ev["connections"],
+        "disconnections": ev.get("disconnections", []),
+    },
 }
 
 
@@ -84,10 +105,10 @@ class DCCAdapter(ABC):
     def apply_event(self, event: dict):
         """Route one protocol event dict to the matching adapter method."""
         k = event["k"]
-        args_of = _DISPATCH.get(k)
-        if args_of is None:
+        extract = _DISPATCH.get(k)
+        if extract is None:
             return None
-        return getattr(self, k)(*args_of(event))
+        return getattr(self, k)(**extract(event))
 
     def apply_events(self, events: list[dict]) -> int:
         """Apply a batch of protocol events to this adapter."""
@@ -122,12 +143,49 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
+    def set_xform_trs(
+        self,
+        prim_path: str,
+        *,
+        t: list[float] | None = None,
+        r: list[float] | None = None,
+        s: list[float] | None = None,
+    ) -> bool:
+        """Apply local translation, quaternion rotation, and/or scale.
+
+        Only the components passed (non-``None``) are written; absent
+        components are unchanged.  Rotation ``r`` is a quaternion
+        ``[w, x, y, z]``.
+        """
         raise NotImplementedError
 
-    @abstractmethod
-    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
-        raise NotImplementedError
+    def set_xform_matrices(
+        self,
+        prim_path: str,
+        local_m: list[float] | None = None,
+        world_m: list[float] | None = None,
+    ) -> bool:
+        """Diagnostic: full local + world 4x4 matrices (row-major, length 16).
+
+        Default no-op — ``apply_events`` does not require this for stage
+        replication (TRS is the canonical channel).  Override only if the
+        adapter has a use for the redundant matrix payload (e.g. test
+        introspection or external diagnostics).
+        """
+        return True
+
+    def has_imported_children(self, prim_path: str) -> bool:
+        """Return True when this adapter has already imported the children
+        composed under ``prim_path`` (a reference or payload root).
+
+        Used by ``EventDispatcher`` to skip a redundant adapter dispatch
+        when the composed stage already matches the incoming arc event
+        AND the consumer side has materialised the children.  Adapters
+        that import composition arcs (references, payloads) should
+        override this; the default returns ``False``, meaning "always
+        dispatch".
+        """
+        return False
 
     @abstractmethod
     def delete_prim(self, prim_path: str) -> bool:
@@ -344,12 +402,26 @@ class UsdStageAdapter(DCCAdapter):
         _ensure_canonical_ops(self.stage, prim_path)
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
+    def set_xform_trs(
+        self,
+        prim_path: str,
+        *,
+        t: list[float] | None = None,
+        r: list[float] | None = None,
+        s: list[float] | None = None,
+    ) -> bool:
+        fields: list[str] = []
+        payload: dict = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
+        if t is not None:
+            fields.append("t")
+            payload["t"] = t
+        if r is not None:
+            fields.append("r")
+            payload["r"] = r
+        if s is not None:
+            fields.append("s")
+            payload["s"] = s
         _apply_event_to_stage(self.stage, payload)
-        return True
-
-    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
-        # Diagnostic only — no action needed on USD stage
         return True
 
     def delete_prim(self, prim_path: str) -> bool:
@@ -478,23 +550,41 @@ class MockAdapter(DCCAdapter):
         p["ops"].update({"translate", "orient", "scale"})
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
+    def set_xform_trs(
+        self,
+        prim_path: str,
+        *,
+        t: list[float] | None = None,
+        r: list[float] | None = None,
+        s: list[float] | None = None,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             LOG.warning("MockAdapter: set_xform_trs prim missing %s", prim_path)
             return False
-        fields = payload.get("fields", [])
-        for f in fields:
-            if f in payload:
-                p["trs"][f] = payload[f]
-        LOG.info("MockAdapter: applied TRS to %s fields=%s", prim_path, fields)
+        fields_set = []
+        if t is not None:
+            p["trs"]["t"] = t
+            fields_set.append("t")
+        if r is not None:
+            p["trs"]["r"] = r
+            fields_set.append("r")
+        if s is not None:
+            p["trs"]["s"] = s
+            fields_set.append("s")
+        LOG.info("MockAdapter: applied TRS to %s fields=%s", prim_path, fields_set)
         return True
 
-    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
+    def set_xform_matrices(
+        self,
+        prim_path: str,
+        local_m: list[float] | None = None,
+        world_m: list[float] | None = None,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             return False
-        p["matrices"] = {"local": payload.get("local_m"), "world": payload.get("world_m")}
+        p["matrices"] = {"local": local_m, "world": world_m}
         return True
 
     def delete_prim(self, prim_path: str) -> bool:

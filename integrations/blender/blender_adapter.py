@@ -274,13 +274,19 @@ class BlenderAdapter(DCCAdapter):
             obj.matrix_basis = old_mpi @ old_basis
         return True
 
-    def set_xform_trs(self, prim_path: str, payload: dict) -> bool:
+    def set_xform_trs(
+        self,
+        prim_path: str,
+        *,
+        t: list[float] | None = None,
+        r: list[float] | None = None,
+        s: list[float] | None = None,
+    ) -> bool:
         obj = self._find_object_by_prim(prim_path)
         if obj is None:
             LOG.warning("BlenderAdapter: object not found for prim %s", prim_path)
             return False
 
-        fields = payload.get("fields", [])
         is_imported = obj.get(_PROP_USD_IMPORTED, False)
         parent_handles = _has_axis_rotation(obj.parent)
         # Axis conversion for T and S applies to ALL objects (imported or not)
@@ -289,15 +295,13 @@ class BlenderAdapter(DCCAdapter):
         # vs yup_to_zup_quat) — it should not skip T/S conversion.
         convert = self._needs_axis_conv and not parent_handles
 
-        if "t" in fields and "t" in payload:
-            t = payload["t"]
+        if t is not None:
             tx, ty, tz = float(t[0]), float(t[1]), float(t[2])
             if convert:
                 tx, ty, tz = yup_to_zup_vec(tx, ty, tz)
             obj.location = (tx, ty, tz)
 
-        if "r" in fields and "r" in payload:
-            r = payload["r"]
+        if r is not None:
             rw, rx, ry, rz = float(r[0]), float(r[1]), float(r[2]), float(r[3])
             # Imported roots carry Rx(90°) for geometry display; compose it
             # onto the incoming USD rotation when the parent doesn't already.
@@ -313,17 +317,12 @@ class BlenderAdapter(DCCAdapter):
                     e = q.to_euler(obj.rotation_mode)
                     obj.rotation_euler = e
 
-        if "s" in fields and "s" in payload:
-            s = payload["s"]
+        if s is not None:
             sx, sy, sz = float(s[0]), float(s[1]), float(s[2])
             if convert:
                 sx, sy, sz = yup_to_zup_scale(sx, sy, sz)
             obj.scale = (sx, sy, sz)
 
-        return True
-
-    def set_xform_matrices(self, prim_path: str, payload: dict) -> bool:
-        # Diagnostic only
         return True
 
     def delete_prim(self, prim_path: str) -> bool:
@@ -1345,7 +1344,7 @@ class BlenderAdapter(DCCAdapter):
             return False
         return self._registry.children_exist(prim_path)
 
-    def has_imported_ref_children(self, prim_path: str) -> bool:
+    def has_imported_children(self, prim_path: str) -> bool:
         """Return True when a reference/payload prim has imported DCC children."""
         return self._ref_children_exist(prim_path)
 

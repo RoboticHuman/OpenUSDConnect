@@ -29,10 +29,6 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 from integrations.blender.blender_adapter import BlenderAdapter
 from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import (
-    K_ENSURE_PRIM,
-    K_ENSURE_XFORM_OPS,
-    K_SET_VISIBILITY,
-    K_SET_XFORM_TRS,
     MSG_EVENT,
 )
 from openusdconnect.receiver import ReceiverThread
@@ -80,14 +76,7 @@ def main():
                 prim_path = ev.get("prim", "")
                 print(f"[Receiver] Processing: {k} {prim_path}")
 
-                if k == K_ENSURE_PRIM:
-                    adapter.ensure_prim(prim_path, ev["typeName"])
-                elif k == K_ENSURE_XFORM_OPS:
-                    adapter.ensure_xform_ops(prim_path)
-                elif k == K_SET_XFORM_TRS:
-                    adapter.set_xform_trs(prim_path, ev)
-                elif k == K_SET_VISIBILITY:
-                    adapter.set_visibility(prim_path, ev.get("visible", True))
+                adapter.apply_event(ev)
         except Exception as e:
             print(f"[Receiver] Error processing: {e}")
 

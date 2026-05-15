@@ -1124,14 +1124,7 @@ class TestReceiverStageFirstFlow:
             apply_events(stage, events)
 
         for ev in events:
-            k = ev["k"]
-            prim = ev["prim"]
-            if k == K_ENSURE_PRIM:
-                adapter.ensure_prim(prim, ev["typeName"])
-            elif k == K_ENSURE_XFORM_OPS:
-                adapter.ensure_xform_ops(prim)
-            elif k == K_SET_XFORM_TRS:
-                adapter.set_xform_trs(prim, ev)
+            adapter.apply_event(ev)
 
         assert stage.GetPrimAtPath("/World/X").IsValid()
         assert "/World/X" in adapter._prims
@@ -1181,7 +1174,7 @@ class TestReceiverStageFirstFlow:
         adapter = MockAdapter()
         adapter.ensure_prim("/World/Existing", "Xform")
         adapter.ensure_xform_ops("/World/Existing")
-        adapter.set_xform_trs("/World/Existing", {"fields": ["t"], "t": [100.0, 200.0, 300.0]})
+        adapter.set_xform_trs("/World/Existing", t=[100.0, 200.0, 300.0])
 
         with pytest.raises(RuntimeError):
             with atomic_apply(stage):

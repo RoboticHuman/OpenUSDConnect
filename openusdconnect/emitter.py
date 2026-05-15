@@ -13,6 +13,7 @@ from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
@@ -386,6 +387,144 @@ def read_usdshade_connectable(stage, prim_path):
     return container_kind, shader_id, inputs, input_types, connections
 
 
+# ---------------------------------------------------------------------------
+# Cache invalidation — for receivers applying remote events
+# ---------------------------------------------------------------------------
+#
+# After a remote event is applied to the stage, the per-prim diff cache
+# reflects pre-mutation state.  Without invalidation, the next emit cycle
+# would compare current stage state to the stale cache and re-emit the
+# change the server already knows about (a feedback loop).
+#
+# Each entry maps an event kind to a callable that re-syncs the affected
+# channel from the emitter's stage.  Only stage-affecting kinds need
+# entries; kinds that mutate DCC objects directly (TRS, visibility,
+# gprim attrs) are absorbed by the depsgraph's normal write-back path,
+# and ``suppressed()`` keeps them from echoing.
+
+
+def _invalidate_ensure_prim(emitter, prim_path, _ev):
+    emitter._known_prims.add(prim_path)
+
+
+def _invalidate_delete_prim(emitter, prim_path, _ev):
+    emitter._purge_caches(prim_path)
+    prefix = prim_path + "/"
+    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
+        emitter._purge_caches(p)
+
+
+def _invalidate_deactivate_prim(emitter, prim_path, ev):
+    # Active=False removes the subtree from the composed view; on the next
+    # reactivation the child set re-composes, so child caches become stale.
+    if not ev.get("active", True):
+        emitter._purge_caches(prim_path)
+        prefix = prim_path + "/"
+        for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
+            emitter._purge_caches(p)
+
+
+def _invalidate_rename_prim(emitter, prim_path, ev):
+    new_name = ev.get("new_name", "")
+    if not new_name:
+        return
+    parent = prim_path.rsplit("/", 1)[0]
+    new_path = f"{parent}/{new_name}" if parent else f"/{new_name}"
+    emitter._migrate_caches(prim_path, new_path)
+
+
+def _invalidate_set_reference(emitter, prim_path, _ev):
+    pc = emitter._prim_cache.setdefault(prim_path, {})
+    pc[_C_REFERENCES] = read_references(emitter.stage, prim_path)
+    pc[_C_VARIANT_SELECTIONS] = read_variant_selections(emitter.stage, prim_path)
+    # Composed children may carry their own variant selections — capture
+    # them so subsequent diffs don't fire on imported state.
+    prim = emitter.stage.GetPrimAtPath(prim_path)
+    if prim and prim.IsValid():
+        for child in Usd.PrimRange(prim):
+            cp = str(child.GetPath())
+            if cp == prim_path:
+                continue
+            cvs = read_variant_selections(emitter.stage, cp)
+            if cvs:
+                emitter._prim_cache.setdefault(cp, {})[_C_VARIANT_SELECTIONS] = cvs
+
+
+def _invalidate_set_payload(emitter, prim_path, _ev):
+    emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOADS] = read_payloads(
+        emitter.stage, prim_path,
+    )
+
+
+def _invalidate_load_payload(emitter, prim_path, _ev):
+    prim = emitter.stage.GetPrimAtPath(prim_path)
+    if prim and prim.IsValid():
+        emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOAD_LOADED] = prim.IsLoaded()
+
+
+def _invalidate_unload_payload(emitter, prim_path, _ev):
+    # Children have left the composed stage — drop their caches so they're
+    # rediscovered on the next load_payload.
+    prefix = prim_path + "/"
+    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
+        emitter._purge_caches(p)
+    prim = emitter.stage.GetPrimAtPath(prim_path)
+    if prim and prim.IsValid():
+        emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOAD_LOADED] = prim.IsLoaded()
+
+
+def _invalidate_set_variant_selections(emitter, prim_path, _ev):
+    emitter._prim_cache.setdefault(prim_path, {})[_C_VARIANT_SELECTIONS] = (
+        read_variant_selections(emitter.stage, prim_path)
+    )
+    # Variant change rewrites the child set — purge caches under this prim
+    # so they're rebuilt from the new composition.
+    prefix = prim_path + "/"
+    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
+        emitter._purge_caches(p)
+
+
+def _invalidate_set_material_binding(emitter, prim_path, _ev):
+    emitter._prim_cache.setdefault(prim_path, {})[_C_MATERIAL_BINDING] = read_material_binding(
+        emitter.stage, prim_path,
+    )
+
+
+def _invalidate_set_shader_input(emitter, prim_path, _ev):
+    container_kind, shader_id, inputs, _, _ = read_usdshade_connectable(
+        emitter.stage, prim_path,
+    )
+    if container_kind:
+        emitter._prim_cache.setdefault(prim_path, {})[_C_SHADER_INPUTS] = {
+            "shader_id": shader_id,
+            "inputs": inputs,
+        }
+
+
+def _invalidate_set_shader_connection(emitter, prim_path, _ev):
+    container_kind, _, _, _, connections = read_usdshade_connectable(
+        emitter.stage, prim_path,
+    )
+    if container_kind:
+        emitter._prim_cache.setdefault(prim_path, {})[_C_SHADER_CONNECTIONS] = connections
+
+
+_INVALIDATE_DISPATCH = {
+    K_ENSURE_PRIM: _invalidate_ensure_prim,
+    K_DELETE_PRIM: _invalidate_delete_prim,
+    K_DEACTIVATE_PRIM: _invalidate_deactivate_prim,
+    K_RENAME_PRIM: _invalidate_rename_prim,
+    K_SET_REFERENCE: _invalidate_set_reference,
+    K_SET_PAYLOAD: _invalidate_set_payload,
+    K_LOAD_PAYLOAD: _invalidate_load_payload,
+    K_UNLOAD_PAYLOAD: _invalidate_unload_payload,
+    K_SET_VARIANT_SELECTIONS: _invalidate_set_variant_selections,
+    K_SET_MATERIAL_BINDING: _invalidate_set_material_binding,
+    K_SET_SHADER_INPUT: _invalidate_set_shader_input,
+    K_SET_SHADER_CONNECTION: _invalidate_set_shader_connection,
+}
+
+
 class _SuppressScope:
     """Context manager for NoticeEmitter.suppressed().
 
@@ -610,6 +749,30 @@ class NoticeEmitter:
     def mark_dirty(self, prim_path: str):
         """Manually mark a prim as dirty (useful for DCC integrations)."""
         self.dirty.add(prim_path)
+
+    def invalidate_for_event(self, ev: dict) -> None:
+        """Sync internal diff caches with a remotely-applied event.
+
+        After a receiver applies a network event to the stage, the diff
+        cache reflects pre-mutation state.  Pass each applied event
+        through here so the next ``build_events_for_dirty()`` doesn't
+        re-emit a change the server already knows about.
+
+        Idempotent.  Safe inside or outside a ``suppressed()`` block.
+        Unknown event kinds are no-ops.
+        """
+        k = ev.get("k")
+        prim_path = ev.get("prim", "")
+        if not k or not prim_path:
+            return
+        fn = _INVALIDATE_DISPATCH.get(k)
+        if fn is not None:
+            fn(self, prim_path, ev)
+
+    def invalidate_for_events(self, events: list[dict]) -> None:
+        """Batch version of :meth:`invalidate_for_event`."""
+        for ev in events:
+            self.invalidate_for_event(ev)
 
     def snapshot_events(
         self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False

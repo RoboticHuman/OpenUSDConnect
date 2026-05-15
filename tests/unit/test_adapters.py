@@ -48,14 +48,14 @@ class TestMockAdapterTRS:
     def test_set_xform_trs(self):
         a = MockAdapter()
         a.ensure_prim("/A")
-        a.set_xform_trs("/A", {"fields": ["t", "r"], "t": [1, 2, 3], "r": [1, 0, 0, 0]})
+        a.set_xform_trs("/A", t=[1, 2, 3], r=[1, 0, 0, 0])
         trs = a.get_trs("/A")
         assert trs["t"] == [1, 2, 3]
         assert trs["r"] == [1, 0, 0, 0]
 
     def test_missing_prim_returns_false(self):
         a = MockAdapter()
-        assert not a.set_xform_trs("/missing", {"fields": ["t"], "t": [0, 0, 0]})
+        assert not a.set_xform_trs("/missing", t=[0, 0, 0])
 
 
 class TestMockAdapterMatrices:
@@ -64,14 +64,14 @@ class TestMockAdapterMatrices:
         a.ensure_prim("/A")
         local = list(range(16))
         world = list(range(16, 32))
-        assert a.set_xform_matrices("/A", {"local_m": local, "world_m": world})
+        assert a.set_xform_matrices("/A", local_m=local, world_m=world)
         p = a.get_prim("/A")
         assert p["matrices"]["local"] == local
         assert p["matrices"]["world"] == world
 
     def test_missing_prim_returns_false(self):
         a = MockAdapter()
-        assert not a.set_xform_matrices("/missing", {})
+        assert not a.set_xform_matrices("/missing")
 
 
 class TestMockAdapterDelete:
@@ -235,10 +235,7 @@ class TestUsdStageAdapterDirectMethods:
         stage, adapter = self._make_stage()
         adapter.ensure_prim("/A")
         adapter.ensure_xform_ops("/A")
-        adapter.set_xform_trs("/A", {
-            "k": "set_xform_trs", "prim": "/A",
-            "fields": ["t"], "t": [5, 10, 0],
-        })
+        adapter.set_xform_trs("/A", t=[5, 10, 0])
         from openusdconnect.event_apply import find_op
 
         xf = UsdGeom.Xformable(stage.GetPrimAtPath("/A"))
@@ -247,7 +244,7 @@ class TestUsdStageAdapterDirectMethods:
 
     def test_set_xform_matrices_noop(self):
         _, adapter = self._make_stage()
-        assert adapter.set_xform_matrices("/A", {})
+        assert adapter.set_xform_matrices("/A")
 
     def test_delete_prim(self):
         stage, adapter = self._make_stage()

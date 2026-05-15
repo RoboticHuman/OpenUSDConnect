@@ -109,14 +109,7 @@ class TestStageFirstIntegration:
 
         # Stage committed — dispatch to adapter
         for ev in parsed:
-            k = ev["k"]
-            prim = ev["prim"]
-            if k == K_ENSURE_PRIM:
-                adapter.ensure_prim(prim, ev["typeName"])
-            elif k == K_ENSURE_XFORM_OPS:
-                adapter.ensure_xform_ops(prim)
-            elif k == K_SET_XFORM_TRS:
-                adapter.set_xform_trs(prim, ev)
+            adapter.apply_event(ev)
 
         # Verify both stage and adapter
         prim = stage.GetPrimAtPath("/World/Cube")

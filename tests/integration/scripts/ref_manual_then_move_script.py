@@ -59,7 +59,6 @@ def main():
         K_ENSURE_PRIM,
         K_ENSURE_XFORM_OPS,
         K_SET_REFERENCE,
-        K_SET_VISIBILITY,
         K_SET_XFORM_TRS,
         MSG_EVENT,
     )
@@ -114,16 +113,7 @@ def main():
         prim_path = ev.get("prim", "")
         print(f"  Processing: {k} {prim_path}")
 
-        if k == K_ENSURE_PRIM:
-            adapter.ensure_prim(prim_path, ev["typeName"])
-        elif k == K_ENSURE_XFORM_OPS:
-            adapter.ensure_xform_ops(prim_path)
-        elif k == K_SET_XFORM_TRS:
-            adapter.set_xform_trs(prim_path, ev)
-        elif k == K_SET_REFERENCE:
-            adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == K_SET_VISIBILITY:
-            adapter.set_visibility(prim_path, ev.get("visible", True))
+        adapter.apply_event(ev)
 
     print("\n=== After Phase 1 (initial import) ===")
     for obj in bpy.data.objects:
@@ -188,16 +178,7 @@ def main():
         prim_path = ev.get("prim", "")
         print(f"  Processing: {k} {prim_path}")
 
-        if k == K_ENSURE_PRIM:
-            adapter.ensure_prim(prim_path, ev["typeName"])
-        elif k == K_ENSURE_XFORM_OPS:
-            adapter.ensure_xform_ops(prim_path)
-        elif k == K_SET_XFORM_TRS:
-            adapter.set_xform_trs(prim_path, ev)
-        elif k == K_SET_REFERENCE:
-            adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == K_SET_VISIBILITY:
-            adapter.set_visibility(prim_path, ev.get("visible", True))
+        adapter.apply_event(ev)
 
     receiver.stop()
     try:

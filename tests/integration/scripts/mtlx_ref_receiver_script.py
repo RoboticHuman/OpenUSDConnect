@@ -29,44 +29,13 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 from integrations.blender.blender_adapter import BlenderAdapter
 from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import (
-    K_ENSURE_PRIM,
-    K_ENSURE_XFORM_OPS,
-    K_SET_MATERIAL_BINDING,
-    K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
-    K_SET_VISIBILITY,
-    K_SET_XFORM_TRS,
     MSG_EVENT,
 )
 from openusdconnect.receiver import ReceiverThread
 
 
 def _process_event(adapter, ev):
-    k = ev.get("k")
-    prim_path = ev.get("prim", "")
-
-    if k == K_ENSURE_PRIM:
-        adapter.ensure_prim(prim_path, ev["typeName"])
-    elif k == K_ENSURE_XFORM_OPS:
-        adapter.ensure_xform_ops(prim_path)
-    elif k == K_SET_XFORM_TRS:
-        adapter.set_xform_trs(prim_path, ev)
-    elif k == K_SET_REFERENCE:
-        adapter.set_reference(prim_path, ev.get("refs", []))
-    elif k == K_SET_VISIBILITY:
-        adapter.set_visibility(prim_path, ev.get("visible", True))
-    elif k == K_SET_MATERIAL_BINDING:
-        adapter.set_material_binding(prim_path, ev.get("material_path", ""))
-    elif k == K_SET_SHADER_INPUT:
-        adapter.set_shader_input(
-            prim_path,
-            ev.get("shader_id", ""),
-            ev.get("inputs", {}),
-            ev.get("input_types", {}),
-        )
-    elif k == K_SET_SHADER_CONNECTION:
-        adapter.set_shader_connection(prim_path, ev.get("connections", {}))
+    adapter.apply_event(ev)
 
 
 def main():

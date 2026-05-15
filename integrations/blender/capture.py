@@ -1071,7 +1071,13 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 client_id=STABLE_CLIENT_ID,
                 origin=SESSION_ORIGIN,
             )
-            _state.sender.connect()
+            if not _state.sender.connect():
+                reason = (
+                    "auth rejected" if _state.sender.auth_rejected else "could not connect"
+                )
+                _state.sender = None
+                self.report({"ERROR"}, f"Connection failed: {reason}")
+                return {"CANCELLED"}
 
             _remove_handler()
             bpy.app.handlers.depsgraph_update_post.append(_depsgraph_handler)

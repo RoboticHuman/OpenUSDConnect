@@ -90,17 +90,7 @@ def main():
     from integrations.blender.blender_adapter import BlenderAdapter
     from openusdconnect.codec import message_to_dict
     from openusdconnect.protocol_constants import (
-        K_DEACTIVATE_PRIM,
-        K_DELETE_PRIM,
-        K_ENSURE_PRIM,
-        K_ENSURE_XFORM_OPS,
-        K_RENAME_PRIM,
-        K_SET_GPRIM_ATTRS,
-        K_SET_PAYLOAD,
         K_SET_REFERENCE,
-        K_SET_VISIBILITY,
-        K_SET_XFORM_MATRICES,
-        K_SET_XFORM_TRS,
         MSG_EVENT,
     )
     from openusdconnect.receiver import ReceiverThread
@@ -126,28 +116,7 @@ def main():
             extra = f" refs={ev.get('refs')}"
         print(f"  Processing: {k} {prim_path}{extra}")
 
-        if k == K_ENSURE_PRIM:
-            adapter.ensure_prim(prim_path, ev["typeName"])
-        elif k == K_ENSURE_XFORM_OPS:
-            adapter.ensure_xform_ops(prim_path)
-        elif k == K_SET_XFORM_TRS:
-            adapter.set_xform_trs(prim_path, ev)
-        elif k == K_SET_REFERENCE:
-            adapter.set_reference(prim_path, ev.get("refs", []))
-        elif k == K_SET_VISIBILITY:
-            adapter.set_visibility(prim_path, ev.get("visible", True))
-        elif k == K_DELETE_PRIM:
-            adapter.delete_prim(prim_path)
-        elif k == K_DEACTIVATE_PRIM:
-            adapter.deactivate_prim(prim_path, ev.get("active", False))
-        elif k == K_SET_XFORM_MATRICES:
-            adapter.set_xform_matrices(prim_path, ev)
-        elif k == K_SET_GPRIM_ATTRS:
-            adapter.set_gprim_attrs(prim_path, ev.get("attrs", {}))
-        elif k == K_RENAME_PRIM:
-            adapter.rename_prim(prim_path, ev.get("new_name", ""))
-        elif k == K_SET_PAYLOAD:
-            adapter.set_payload(prim_path, ev.get("payloads", []))
+        adapter.apply_event(ev)
 
     receiver.stop()
     try:
