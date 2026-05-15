@@ -191,11 +191,8 @@ def test_set_xform_trs(r):
     adapter.ensure_prim("/World/Box", "Cube")
     adapter.set_xform_trs(
         "/World/Box",
-        {
-            "fields": ["t", "s"],
-            "t": [3.0, 4.0, 5.0],
-            "s": [2.0, 2.0, 2.0],
-        },
+        t=[3.0, 4.0, 5.0],
+        s=[2.0, 2.0, 2.0],
     )
     obj = _find_by_prim(adapter, "/World/Box")
     if obj is None:

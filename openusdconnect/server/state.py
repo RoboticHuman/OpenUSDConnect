@@ -1,46 +1,25 @@
-"""Authoritative TCP sequencer server.
+"""UsdSyncServer — authoritative state for the sync protocol.
 
-Maintains an in-memory Usd.Stage, accepts transactions from emitters,
-applies them atomically, assigns monotonic sequence numbers, broadcasts
-to all connected receivers, and logs events to a SQLite database for replay.
-
-CLI usage:
-    python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.db
+Holds the in-memory ``Usd.Stage``, the per-client/per-department layer
+stack, the SQLite event log, the broadcast and persistence threads, the
+TOFU token store, and proposal bookkeeping.  Network handling lives in
+``connection.py``; the CLI lives in ``cli.py``.
 """
 
 from __future__ import annotations
 
-import argparse
-import atexit
-import concurrent.futures
 import logging
-import os
 import queue
-import signal
-import socket
-import socketserver
 import threading
 import time
-from dataclasses import dataclass, field
 
 from pxr import Sdf, Usd, UsdGeom
 
-from .codec import (
-    PayloadType,
-    decode_envelope,
-    encode_message,
-    message_to_dict,
-    resolve_payload,
-)
-from .emitter import as_matrix, decompose_trs_from_matrix
-from .event_store import EventStore, SqliteEventStore
-from .framing import (
-    IncompleteRead,
-    MessageTooLarge,
-    frame_batch,
-    recv_framed_rfile,
-)
-from .protocol_constants import (
+from ..codec import encode_message, message_to_dict
+from ..emitter import as_matrix, decompose_trs_from_matrix
+from ..event_store import EventStore, SqliteEventStore
+from ..framing import frame_batch
+from ..protocol_constants import (
     EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -50,23 +29,18 @@ from .protocol_constants import (
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
-    K_SET_PAYLOAD,
-    K_SET_REFERENCE,
     K_SET_SHADER_CONNECTION,
     K_SET_SHADER_INPUT,
-    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
-    MSG_AUTH_REJECTED,
     MSG_EVENT,
-    MSG_HELLO_OK,
     MSG_PING,
-    MSG_PROPOSAL_CREATED,
-    MSG_RATE_LIMITED,
     MSG_RESYNC,
 )
+from ._txn_barrier import _TxnBarrier
+from .types import ClientInfo, Proposal
 
 LOG = logging.getLogger(__name__)
 
@@ -74,145 +48,7 @@ LOG = logging.getLogger(__name__)
 # persistence can't keep up, preventing unbounded memory growth.
 _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
-_MAX_LINE_SIZE = 16 * 1024 * 1024  # 16 MiB — generous for large geometry
 _PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
-_SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
-
-
-def _set_send_timeout(sock: socket.socket, timeout_s: float):
-    """Set a send-only timeout on a socket (platform-aware).
-
-    Uses SO_SNDTIMEO so only sends are affected — recv stays blocking.
-    settimeout() cannot be used here because it sets both send and recv
-    timeouts, causing spurious TimeoutError in the read loop.
-    """
-    import struct
-    import sys
-
-    if sys.platform == "win32":
-        # Windows: SO_SNDTIMEO takes a DWORD (4 bytes) in milliseconds
-        ms = int(timeout_s * 1000)
-        sock.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDTIMEO,
-            ms.to_bytes(4, "little"),
-        )
-    else:
-        # Unix/macOS: SO_SNDTIMEO takes struct timeval {long sec, long usec}
-        secs = int(timeout_s)
-        usecs = int((timeout_s - secs) * 1_000_000)
-        sock.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDTIMEO,
-            struct.pack("ll", secs, usecs),
-        )
-
-
-# Event kinds where only the latest event per prim matters.
-LATEST_WINS_KINDS = frozenset(
-    {
-        K_SET_XFORM_TRS,
-        K_SET_XFORM_MATRICES,
-        K_SET_VISIBILITY,
-        K_SET_REFERENCE,
-        K_SET_PAYLOAD,
-        K_SET_VARIANT_SELECTIONS,
-        K_SET_MATERIAL_BINDING,
-        K_SET_SHADER_CONNECTION,
-        K_DEACTIVATE_PRIM,
-    }
-)
-
-
-class _TxnBarrier:
-    """Read-write barrier: multiple shared (txn) holders, exclusive for compaction.
-
-    Lock ordering: _TxnBarrier is acquired BEFORE stage_lock / _seq_lock.
-    """
-
-    def __init__(self):
-        self._cond = threading.Condition(threading.Lock())
-        self._readers = 0
-        self._exclusive = False
-
-    def acquire_shared(self):
-        with self._cond:
-            while self._exclusive:
-                self._cond.wait()
-            self._readers += 1
-
-    def release_shared(self):
-        with self._cond:
-            self._readers -= 1
-            if self._readers == 0:
-                self._cond.notify_all()
-
-    def acquire_exclusive(self):
-        with self._cond:
-            self._exclusive = True
-            while self._readers > 0:
-                self._cond.wait()
-
-    def release_exclusive(self):
-        with self._cond:
-            self._exclusive = False
-            self._cond.notify_all()
-
-
-class TokenBucket:
-    """Simple token bucket for per-client transaction rate limiting."""
-
-    def __init__(self, rate: float, burst: int):
-        self.rate = rate  # tokens per second
-        self.burst = burst
-        self._tokens = float(burst)
-        self._last = time.monotonic()
-
-    def try_consume(self) -> float:
-        """Try to consume one token.
-
-        Returns 0.0 if a token was consumed, otherwise the number of
-        seconds to wait before a token becomes available.
-        """
-        now = time.monotonic()
-        self._tokens = min(
-            self.burst,
-            self._tokens + (now - self._last) * self.rate,
-        )
-        self._last = now
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return 0.0
-        return (1.0 - self._tokens) / self.rate
-
-
-@dataclass
-class ClientInfo:
-    """Metadata for a connected client (emitter or receiver)."""
-
-    role: str
-    address: tuple
-    client_id: str | None = None
-    origin: str | None = None
-    department: str | None = None
-    connected_at: float = field(default_factory=time.time)
-    last_activity: float = field(default_factory=time.time)
-    event_count: int = 0
-
-
-@dataclass
-class Proposal:
-    """Metadata for a cross-department edit proposal."""
-
-    proposal_id: str
-    from_client: str
-    from_department: str | None
-    target_department: str
-    description: str
-    layer: Sdf.Layer
-    status: str = "pending"  # pending, approved, rejected
-    created_at: float = field(default_factory=time.time)
-    events: list = field(default_factory=list)  # accumulated events for log persistence
 
 
 class UsdSyncServer:
@@ -274,7 +110,7 @@ class UsdSyncServer:
         self.require_token = require_token
         self.token_store = None
         if require_token:
-            from .token_store import TokenStore
+            from ..token_store import TokenStore
 
             _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
             self.token_store = TokenStore(_token_path)
@@ -384,7 +220,7 @@ class UsdSyncServer:
         Events without a client_id go to the shared edit_layer.
         Also populates _prim_paths for incremental prim tracking.
         """
-        from .event_apply import apply_events
+        from ..event_apply import apply_events
 
         rows = self.store.get_all_asc()
         if not rows:
@@ -1267,7 +1103,7 @@ class UsdSyncServer:
                 try:
                     listener(rec)
                 except Exception:
-                    LOG.debug("Event listener failed, removing")
+                    LOG.exception("Event listener failed, removing")
                     self._event_listeners.remove(listener)
                     break
 
@@ -1284,7 +1120,7 @@ class UsdSyncServer:
                 try:
                     listener(rec)
                 except Exception:
-                    LOG.debug("Event listener failed, removing")
+                    LOG.exception("Event listener failed, removing")
                     self._event_listeners.remove(listener)
                     break
 
@@ -1515,7 +1351,7 @@ class UsdSyncServer:
         stage_lock, so the result cannot change between the first and
         subsequent checks for the same prim+kind.
         """
-        from .event_apply import apply_events
+        from ..event_apply import apply_events
 
         target = layer or self.edit_layer
 
@@ -1761,514 +1597,3 @@ class UsdSyncServer:
                 handler.request.sendall(b"".join(buf_parts))
         except Exception:
             LOG.exception("Failed to replay events")
-
-
-class ConnectionHandler(socketserver.StreamRequestHandler):
-    """Handles a single client connection (emitter or receiver)."""
-
-    server: ThreadedTCPServer
-
-    def handle(self):
-        sync_server = self.server.sync_server
-
-        # Socket hardening: disable Nagle (small JSON messages benefit from
-        # immediate sends), enable keepalive (detect dead peers), and set a
-        # handshake timeout so misbehaving clients don't block handler threads.
-        # The timeout is cleared before _read_loop since receivers legitimately
-        # sit idle (only consuming broadcasts); SO_KEEPALIVE detects dead peers.
-        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        self.request.settimeout(60.0)
-
-        # Per-receiver send lock: serializes replay and broadcast sends on
-        # this socket without holding the global clients_lock during I/O.
-        self.send_lock = threading.Lock()
-        self._rate_bucket = (
-            TokenBucket(sync_server.txn_rate, sync_server.txn_burst)
-            if sync_server.txn_rate > 0
-            else None
-        )
-
-        # Read hello (length-prefixed FlatBuffers)
-        try:
-            hello_buf = recv_framed_rfile(self.rfile)
-        except (TimeoutError, IncompleteRead, MessageTooLarge):
-            return
-
-        try:
-            env = decode_envelope(hello_buf)
-            if env.PayloadType() != PayloadType.Hello:
-                return
-            _, hello_fb = resolve_payload(env)
-        except Exception as e:
-            LOG.warning("Failed to parse hello message: %s", e)
-            return
-
-        role_raw = hello_fb.Role()
-        role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
-        client_id_raw = hello_fb.ClientId()
-        client_id = (
-            client_id_raw.decode("utf-8") if isinstance(client_id_raw, bytes) else client_id_raw
-        )
-        origin_raw = hello_fb.Origin()
-        self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
-        dept_raw = hello_fb.Department()
-        self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
-        token_raw = hello_fb.Token()
-        hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
-        self._client_id = client_id
-        self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
-
-        # TOFU authentication
-        from .transport import send_msg
-
-        accepted, issued_token = sync_server.authenticate(
-            client_id,
-            hello_token,
-            self._department,
-        )
-        if not accepted:
-            send_msg(
-                self.request,
-                {
-                    "type": MSG_AUTH_REJECTED,
-                    "reason": "invalid or missing token",
-                },
-            )
-            LOG.warning("Rejected %s from %s", client_id, self.client_address)
-            return
-
-        # Send hello_ok with token (issued on first connect, None on reconnect)
-        hello_ok = {"type": MSG_HELLO_OK}
-        if issued_token:
-            hello_ok["token"] = issued_token
-        send_msg(self.request, hello_ok)
-
-        LOG.info(
-            "Client connected: role=%s origin=%s dept=%s from %s",
-            role,
-            self._origin,
-            self._department,
-            self.client_address,
-        )
-        sync_server.register_client(
-            self.client_address,
-            role,
-            client_id,
-            origin=self._origin,
-            department=self._department,
-        )
-
-        # Create per-client layer only when department ordering is enabled.
-        # Without departments, all clients share edit_layer (last-write-wins).
-        self._client_layer = None
-        if role == "emitter" and client_id and sync_server.department_priority:
-            self._client_layer = sync_server.get_or_create_client_layer(
-                client_id,
-                department=self._department,
-            )
-
-        if role == "receiver":
-            sync_from = hello_fb.SyncFrom() or 1
-
-            # If sync_from is beyond the current log (e.g., after compaction
-            # reset seq numbers), send resync so the receiver resets its
-            # sequence counter, then replay the full log.
-            max_seq = sync_server.store.get_max_seq()
-            if sync_from > max_seq > 0:
-                send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
-                sync_from = 1
-
-            # Acquire send_lock first, then add to broadcast set and replay.
-            # The send_lock prevents broadcasts from reaching this receiver
-            # until replay is complete (preserving event ordering). The
-            # broadcast thread never holds both locks simultaneously (it
-            # snapshots under clients_lock, releases it, then acquires
-            # send_lock per target), so no deadlock is possible.
-            with self.send_lock:
-                with sync_server.clients_lock:
-                    sync_server.receivers.add(self)
-                sync_server.replay_from(self, sync_from)
-
-        # Send-only timeout so the broadcast thread isn't blocked
-        # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
-        # aware) so recv stays blocking — settimeout() can't be used
-        # because it would cause spurious TimeoutError in _read_loop.
-        if role == "receiver":
-            _set_send_timeout(self.request, _SEND_TIMEOUT_S)
-        self.request.settimeout(None)
-        try:
-            self._read_loop(sync_server)
-        finally:
-            with sync_server.clients_lock:
-                sync_server.receivers.discard(self)
-            sync_server.unregister_client(self.client_address)
-            LOG.info("Client disconnected: %s", self.client_address)
-
-    def _read_loop(self, sync_server: UsdSyncServer):
-        from .codec import event_to_dict
-
-        while True:
-            try:
-                buf = recv_framed_rfile(self.rfile)
-            except ConnectionResetError:
-                break
-            except (IncompleteRead, MessageTooLarge):
-                break
-            except TimeoutError:
-                continue
-
-            env = decode_envelope(buf)
-            pt = env.PayloadType()
-
-            if pt == PayloadType.Quit:
-                break
-
-            if pt == PayloadType.Compact:
-                LOG.info("Compact requested by %s", self.client_address)
-                sync_server.compact_log()
-                continue
-
-            if pt == PayloadType.CreateProposal:
-                msg = message_to_dict(buf)
-                self._handle_create_proposal(sync_server, msg)
-                continue
-
-            if pt != PayloadType.Txn:
-                continue
-
-            # Decode txn events to dicts for apply_txn — numpy arrays
-            # for geometry attrs to avoid per-element Python iteration.
-            _, txn_fb = resolve_payload(env)
-            events = [
-                event_to_dict(txn_fb.Events(i), numpy_arrays=True)
-                for i in range(txn_fb.EventsLength())
-            ]
-            if not events:
-                continue
-
-            if self._rate_bucket is not None:
-                wait = self._rate_bucket.try_consume()
-                if wait > 0:
-                    from .transport import send_msg as _send_msg
-
-                    _send_msg(
-                        self.request,
-                        {
-                            "type": MSG_RATE_LIMITED,
-                            "retry_after": round(wait, 3),
-                        },
-                    )
-                    continue
-
-            sync_server.txn_barrier.acquire_shared()
-            try:
-                records, changed_set = sync_server.process_txn(
-                    events,
-                    client_id=self._client_id,
-                    origin=self._origin,
-                    client_addr=self._addr_key,
-                    layer=self._client_layer,
-                )
-
-                # Broadcast changed events; send corrections for overridden ones.
-                changed_records = []
-                changed_bins = []
-                for i, (rec, rec_bin) in enumerate(records):
-                    if i in changed_set:
-                        changed_records.append(rec)
-                        changed_bins.append(rec_bin)
-                    else:
-                        correction = sync_server.build_correction(events[i])
-                        if correction:
-                            correction_rec = {
-                                "type": MSG_EVENT,
-                                "seq": sync_server.assign_seq(),
-                                "event": correction,
-                            }
-                            sync_server.send_to_origin(
-                                correction_rec,
-                                self._origin,
-                            )
-                if changed_records:
-                    payload = frame_batch(changed_bins)
-                    sync_server.broadcast_bytes(
-                        payload,
-                        changed_records,
-                        exclude_origin=self._origin,
-                    )
-            finally:
-                sync_server.txn_barrier.release_shared()
-
-            # Update client activity tracking.
-            with sync_server.clients_lock:
-                info = sync_server.clients.get(self._addr_key)
-                if info:
-                    info.last_activity = time.time()
-                    info.event_count += len(events)
-
-            # After load_payload, re-broadcast latest child state so
-            # receivers re-apply authoritative TRS after re-import.
-            for ev in events:
-                if ev.get("k") == K_LOAD_PAYLOAD:
-                    sync_server.replay_children_after_load(ev["prim"])
-
-    def _handle_create_proposal(self, sync_server: UsdSyncServer, msg: dict):
-        """Handle a create_proposal message from an emitter."""
-        from .transport import send_msg
-
-        target = msg.get("target_department", "")
-        desc = msg.get("description", "")
-        if not target:
-            return
-        pid = sync_server.create_proposal(
-            self._client_id or "",
-            target,
-            desc,
-        )
-        send_msg(
-            self.request,
-            {
-                "type": MSG_PROPOSAL_CREATED,
-                "proposal_id": pid,
-            },
-        )
-
-    def _handle_proposal_txn(
-        self,
-        sync_server: UsdSyncServer,
-        proposal_id: str,
-        events: list[dict],
-    ):
-        """Apply a txn to a proposal's muted layer (no broadcast).
-
-        Muted layers can't be SetEditTarget — temporarily unmute during
-        the write, then re-mute so opinions stay invisible to composition.
-        Events are accumulated on the proposal for log persistence on approval.
-        """
-        p = sync_server.proposals.get(proposal_id)
-        if not p or p.status != "pending":
-            return
-        from .event_apply import apply_events
-
-        with sync_server.stage_lock:
-            sync_server.stage.UnmuteLayer(p.layer.identifier)
-            sync_server.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(sync_server.stage, events, op_cache=sync_server.op_cache)
-            sync_server.stage.MuteLayer(p.layer.identifier)
-        p.events.extend(events)
-        LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
-
-
-class ThreadedTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-    request_queue_size = 128
-    MAX_WORKERS = 256
-
-    def __init__(
-        self,
-        server_address,
-        handler_class,
-        sync_server: UsdSyncServer,
-        max_workers: int | None = None,
-    ):
-        self.sync_server = sync_server
-        self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers or self.MAX_WORKERS,
-            thread_name_prefix="conn",
-        )
-        super().__init__(server_address, handler_class)
-
-    def process_request(self, request, client_address):
-        self._pool.submit(self._handle_request, request, client_address)
-
-    def _handle_request(self, request, client_address):
-        try:
-            self.finish_request(request, client_address)
-        except Exception:
-            self.handle_error(request, client_address)
-        finally:
-            self.shutdown_request(request)
-
-    def server_close(self):
-        super().server_close()
-        self._pool.shutdown(wait=False)
-
-
-def run_server(
-    host: str = "127.0.0.1",
-    port: int = 7200,
-    base_usd_path: str | None = None,
-    log_path: str = "usd_events.db",
-    compact: bool = False,
-    export_diff: str | None = None,
-    dashboard_port: int | None = None,
-    op_cache_size: int | None = None,
-    department_priority: list[str] | None = None,
-    require_token: bool = False,
-    durability: str = "strict",
-    max_connections: int | None = None,
-    txn_rate: float = 0,
-    txn_burst: int = 0,
-):
-    """Start the server (blocking)."""
-    sync_server = UsdSyncServer(
-        base_usd_path=base_usd_path,
-        log_path=log_path,
-        op_cache_size=op_cache_size,
-        department_priority=department_priority,
-        require_token=require_token,
-        durability=durability,
-        txn_rate=txn_rate,
-        txn_burst=txn_burst,
-    )
-
-    if compact:
-        sync_server.compact_log()
-
-    if dashboard_port:
-        from integrations.dashboard import run_dashboard
-
-        run_dashboard(sync_server, dashboard_port)
-        LOG.info("Dashboard running on http://localhost:%d", dashboard_port)
-
-    server = ThreadedTCPServer(
-        (host, port), ConnectionHandler, sync_server, max_workers=max_connections
-    )
-
-    _cleaned_up = False
-
-    def _cleanup():
-        nonlocal _cleaned_up
-        if _cleaned_up:
-            return
-        _cleaned_up = True
-        if export_diff:
-            sync_server.export_edit_layer(export_diff)
-        try:
-            sync_server.shutdown()
-        except Exception:
-            LOG.exception("Failed to shut down background threads")
-        try:
-            sync_server.store.close()
-            LOG.info("Event store closed")
-        except Exception:
-            LOG.exception("Failed to close event store")
-
-    atexit.register(_cleanup)
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
-
-    LOG.info(
-        "Server listening on %s:%s (PID %d) durability=%s",
-        host,
-        port,
-        os.getpid(),
-        sync_server.durability,
-    )
-    LOG.info("Event log: %s", log_path)
-    if base_usd_path:
-        LOG.info("Base USD: %s", base_usd_path)
-    if export_diff:
-        LOG.info("Will export diff to %s on shutdown", export_diff)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        LOG.info("Server shutting down")
-    finally:
-        server.shutdown()
-        _cleanup()
-
-
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
-    ap = argparse.ArgumentParser(description="OpenUSDConnect sync server")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=7200)
-    ap.add_argument("--base", default=None, help="Base USD file to load")
-    ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
-    ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
-    ap.add_argument(
-        "--export-diff",
-        default=None,
-        metavar="PATH",
-        help="Export the override layer as USDA on shutdown",
-    )
-    ap.add_argument(
-        "--dashboard",
-        type=int,
-        default=None,
-        metavar="PORT",
-        help="Start admin dashboard on this port (e.g. --dashboard 8080)",
-    )
-    ap.add_argument(
-        "--op-cache-size",
-        type=int,
-        default=None,
-        metavar="N",
-        help=f"Max xform op cache entries (default: {UsdSyncServer.DEFAULT_OP_CACHE_SIZE})",
-    )
-    ap.add_argument(
-        "--departments",
-        default=None,
-        metavar="LIST",
-        help="Comma-separated department priority (strongest first). "
-        "Enables per-client layer ordering by department. "
-        "Example: --departments lighting,fx,animation,layout",
-    )
-    ap.add_argument(
-        "--require-token",
-        action="store_true",
-        help="Enable TOFU token authentication. Clients are issued a token "
-        "on first connect and must present it on reconnect.",
-    )
-    ap.add_argument(
-        "--durability",
-        choices=["strict", "realtime"],
-        default="strict",
-        help="strict: persist to DB before broadcast (no lost events). "
-        "realtime: broadcast first, persist async (lower latency).",
-    )
-    ap.add_argument(
-        "--max-connections",
-        type=int,
-        default=None,
-        metavar="N",
-        help=f"Max concurrent client connections (default: {ThreadedTCPServer.MAX_WORKERS})",
-    )
-    ap.add_argument(
-        "--txn-rate",
-        type=float,
-        default=0,
-        metavar="N",
-        help="Max transactions per second per client (0 = unlimited, default: 0)",
-    )
-    ap.add_argument(
-        "--txn-burst",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Max burst size for transaction rate limiter (default: 0 = disabled)",
-    )
-    args = ap.parse_args()
-    dept_list = args.departments.split(",") if args.departments else None
-    run_server(
-        host=args.host,
-        port=args.port,
-        base_usd_path=args.base,
-        log_path=args.log,
-        compact=args.compact,
-        export_diff=args.export_diff,
-        dashboard_port=args.dashboard,
-        op_cache_size=args.op_cache_size,
-        department_priority=dept_list,
-        require_token=args.require_token,
-        durability=args.durability,
-        max_connections=args.max_connections,
-        txn_rate=args.txn_rate,
-        txn_burst=args.txn_burst,
-    )
-
-
-if __name__ == "__main__":
-    main()

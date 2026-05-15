@@ -28,46 +28,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import socket
 import sys
 
-
-def _connect_and_hello(host: str, port: int, client_id: str) -> socket.socket:
-    from .framing import recv_framed
-    from .transport import send_msg
-
-    sock = socket.create_connection((host, port), timeout=10)
-    send_msg(
-        sock,
-        {
-            "type": "hello",
-            "role": "emitter",
-            "protocol_version": 1,
-            "client_id": client_id,
-        },
-    )
-    # Wait for hello_ok before sending events.
-    recv_framed(sock)
-    return sock
-
-
-def _send_txn(sock: socket.socket, events: list[dict], client_id: str) -> None:
-    from .transport import send_msg
-
-    send_msg(
-        sock,
-        {
-            "type": "txn",
-            "client_id": client_id,
-            "events": events,
-        },
-    )
-
-
-def _send_raw_msg(sock: socket.socket, msg: dict) -> None:
-    from .transport import send_msg
-
-    send_msg(sock, msg)
+from .sender import EventSender
 
 
 def _parse_json(text: str) -> dict:
@@ -107,44 +70,37 @@ def main():
     )
     args = parser.parse_args()
 
-    events: list[dict] = []
-    raw_msgs: list[dict] = []
-
-    # Collect events from positional args
-    for text in args.events:
-        events.append(_parse_json(text))
-
-    # Collect events from stdin
+    events: list[dict] = [_parse_json(text) for text in args.events]
     if args.stdin:
         for line in sys.stdin:
             line = line.strip()
-            if not line:
-                continue
-            events.append(_parse_json(line))
-
-    # Collect raw messages
-    for text in args.msg:
-        raw_msgs.append(_parse_json(text))
+            if line:
+                events.append(_parse_json(line))
+    raw_msgs: list[dict] = [_parse_json(text) for text in args.msg]
 
     if not events and not raw_msgs:
         parser.print_help()
         sys.exit(1)
 
-    sock = _connect_and_hello(args.host, args.port, args.client_id)
+    sender = EventSender(args.host, args.port, client_id=args.client_id)
+    if not sender.connect():
+        print("Failed to connect to server", file=sys.stderr)
+        sys.exit(1)
 
     try:
         if events:
-            _send_txn(sock, events, args.client_id)
+            if not sender.send_events(events):
+                print("Failed to send events", file=sys.stderr)
+                sys.exit(1)
             print(f"Sent {len(events)} event(s)")
 
         for msg in raw_msgs:
-            _send_raw_msg(sock, msg)
+            if not sender.send_message(msg):
+                print(f"Failed to send {msg.get('type', '?')} message", file=sys.stderr)
+                sys.exit(1)
             print(f"Sent {msg.get('type', '?')} message")
-
-        # Graceful disconnect — tells server we're done.
-        _send_raw_msg(sock, {"type": "quit"})
     finally:
-        sock.close()
+        sender.disconnect()
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ dashboard = [
 server = [
     "usd-core==26.3",
 ]
+profile = [
+    "py-spy==0.4.2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

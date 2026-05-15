@@ -23,7 +23,7 @@ def load_token(host: str, port: int) -> str | None:
         with open(_TOKEN_FILE, encoding="utf-8") as f:
             tokens = json.load(f)
         return tokens.get(key)
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, json.JSONDecodeError):
         return None
 
 

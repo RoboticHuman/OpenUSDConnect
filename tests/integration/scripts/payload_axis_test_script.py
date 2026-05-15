@@ -67,16 +67,16 @@ def _pump(cycles=50, delay=0.05):
     from integrations.blender import receiver_addon
 
     for i in range(cycles):
-        # Drain receiver
+        # Drain receiver via the dispatcher.  ``_drain_and_process`` lazily
+        # builds the dispatcher on first call when ``_RECEIVER`` is set
+        # directly (test setup bypasses the start_receiver operator).
         if receiver_addon._RECEIVER is not None:
-            lines = receiver_addon._RECEIVER.drain_queue()
-            if lines:
-                receiver_addon._set_applying_remote(True)
-                try:
-                    receiver_addon._drain_and_process(lines)
-                    bpy.context.view_layer.update()
-                finally:
-                    receiver_addon._set_applying_remote(False)
+            receiver_addon._set_applying_remote(True)
+            try:
+                receiver_addon._drain_and_process()
+                bpy.context.view_layer.update()
+            finally:
+                receiver_addon._set_applying_remote(False)
 
         # Force depsgraph + emitter
         bpy.context.view_layer.update()
@@ -115,12 +115,12 @@ def main():
     from integrations.blender import capture as cap_mod
     from integrations.blender import receiver_addon
     from integrations.blender.capture import (
-        NetworkSender,
         USD_CONNECT_Hook,
         _ensure_scene_props,
         _get_stage_author,
     )
     from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.sender import EventSender
 
     _ensure_scene_props()
     receiver_addon._ensure_scene_props()
@@ -148,7 +148,14 @@ def main():
     author.initialize_baseline()
     author.seed_used_paths()
     cap_mod._state.notice_emitter = NoticeEmitter(author.stage)
-    cap_mod._state.sender = NetworkSender(host="127.0.0.1", port=port)
+    from integrations.blender import SESSION_ORIGIN, STABLE_CLIENT_ID
+
+    cap_mod._state.sender = EventSender(
+        host="127.0.0.1",
+        port=port,
+        client_id=STABLE_CLIENT_ID,
+        origin=SESSION_ORIGIN,
+    )
 
     # ==================================================================
     # Step 3: Start receiver

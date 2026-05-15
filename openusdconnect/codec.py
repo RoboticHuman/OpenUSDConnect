@@ -29,12 +29,14 @@ Fast checks:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 import flatbuffers
 import numpy as np
 
 from . import events as _events
-from .events import register_decoder, register_encoder
+from .events import Event, register_decoder, register_encoder
 from .generated import messages_generated as _fb
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
@@ -927,6 +929,66 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
     if spec is None or spec.decode is None:
         raise KeyError(f"no registered decoder for event kind {kind!r}")
     return spec.decode(obj, kind)
+
+
+@dataclass(slots=True)
+class DecodeResult:
+    """Outcome of decoding one batch of wire messages."""
+
+    received: list[Event] = field(default_factory=list)
+    last_seq: int = 0
+    resync_requested: bool = False
+    rate_limited_retry_after: float | None = None
+    errors: list[Exception] = field(default_factory=list)
+
+
+def decode_messages(
+    raw_messages: Iterable[bytes],
+    *,
+    last_seq: int = 0,
+    numpy_arrays: bool = False,
+    clear_on_resync: bool = False,
+) -> DecodeResult:
+    """Decode a batch of wire messages with sequence dedup and resync handling.
+
+    Per-message decode failures are captured into ``result.errors``
+    rather than raised.
+    """
+    result = DecodeResult(last_seq=last_seq)
+    for raw in raw_messages:
+        try:
+            msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
+        except Exception as exc:  # noqa: BLE001 — surfaced via result.errors
+            result.errors.append(exc)
+            continue
+
+        msg_type = msg.get("type")
+        if msg_type == MSG_RESYNC:
+            result.last_seq = 0
+            result.resync_requested = True
+            if clear_on_resync:
+                result.received.clear()
+            continue
+
+        if msg_type == MSG_RATE_LIMITED:
+            retry_after = msg.get("retry_after")
+            if isinstance(retry_after, (int, float)):
+                result.rate_limited_retry_after = float(retry_after)
+            continue
+
+        if msg_type != MSG_EVENT:
+            continue
+
+        seq = int(msg.get("seq") or 0)
+        if seq and seq <= result.last_seq:
+            continue
+        if seq:
+            result.last_seq = seq
+        event = msg.get("event")
+        if event:
+            result.received.append(event)
+
+    return result
 
 
 # --- Helpers ---

@@ -17,14 +17,11 @@ Once imported, the module self-bootstraps — no init_unreal.py needed.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import socket
 import sys
 import time
 import uuid
-from contextlib import nullcontext
 
 # Self-bootstrap: ensure the project root is on sys.path so that
 # `openusdconnect` is importable without any external setup.
@@ -38,9 +35,9 @@ LOG = logging.getLogger("openusdconnect.unreal")
 
 _receiver = None  # ReceiverThread
 _emitter = None  # NoticeEmitter
-_sender_sock = None  # TCP socket for emitter txn messages
+_sender = None  # EventSender
+_dispatcher = None  # EventDispatcher
 _tick_handle = None  # Slate tick callback handle
-_last_seq: int = 0  # Highest sequence number received
 _stage = None  # Cached Usd.Stage reference
 _root_layer_id = ""  # Root layer identifier for staleness detection
 _root_layer_name = ""  # For stage re-lookup on lifecycle events
@@ -114,30 +111,37 @@ def _ensure_stage():
         LOG.info("Attached to stage '%s' (%s)", _root_layer_name, new_id)
         _stage = stage
         _root_layer_id = new_id
-        _reattach_emitter(stage)
+        _reattach_to_stage(stage)
 
     return _stage
 
 
-def _reattach_emitter(stage):
-    """Create or replace the NoticeEmitter on a (possibly new) stage."""
+def _reattach_to_stage(stage):
+    """Rebind emitter and dispatcher adapter to a (possibly new) stage."""
     global _emitter
 
     if _emitter is not None:
         _emitter.cleanup()
         _emitter = None
 
-    if _sender_sock is None:
-        return  # Emitter not requested
+    if _sender is not None:
+        from openusdconnect.emitter import NoticeEmitter
 
-    from openusdconnect.emitter import NoticeEmitter
+        _emitter = NoticeEmitter(stage)
+        # Seed caches for existing prims so we don't dump full state
+        root = stage.GetPseudoRoot()
+        for child in root.GetChildren():
+            _emitter.seed_prim_cache(stage, str(child.GetPath()))
+        LOG.info("NoticeEmitter attached to stage")
 
-    _emitter = NoticeEmitter(stage)
-    # Seed caches for existing prims so we don't dump full state
-    root = stage.GetPseudoRoot()
-    for child in root.GetChildren():
-        _emitter.seed_prim_cache(stage, str(child.GetPath()))
-    LOG.info("NoticeEmitter attached to stage")
+    # Repoint the dispatcher's adapter at the new stage and refresh its
+    # emitter reference.  The dispatcher's invalidate path requires the
+    # emitter and adapter to share the same stage.
+    if _dispatcher is not None:
+        from openusdconnect.adapters import UsdStageAdapter
+
+        _dispatcher.adapter = UsdStageAdapter(stage)
+        _dispatcher.emitter = _emitter
 
 
 # -- Tick callback -------------------------------------------------------
@@ -145,94 +149,31 @@ def _reattach_emitter(stage):
 
 def _on_tick(delta_seconds: float):
     """Slate post-tick callback. Drains receiver queue and flushes emitter."""
-    global _last_seq, _last_send_time
+    global _last_send_time
 
     stage = _ensure_stage()
     if stage is None:
         return
 
-    # -- Receiver: drain queue and apply events --------------------------
-    if _receiver is not None:
-        lines = _receiver.drain_queue()
-        if lines:
-            _apply_received_lines(stage, lines)
+    # -- Receiver: drive the dispatcher's drain-and-apply pipeline -------
+    if _dispatcher is not None:
+        _dispatcher.drain_and_apply()
 
     # -- Emitter: flush dirty events -------------------------------------
-    if _emitter is not None and _sender_sock is not None:
+    if _emitter is not None and _sender is not None and _sender.connected:
         now = time.time()
         if (now - _last_send_time) >= _coalesce_seconds:
             _flush_emitter()
             _last_send_time = now
 
 
-def _apply_received_lines(stage, lines: list[str]):
-    """Parse, deduplicate, and apply received JSON lines to the stage."""
-    global _last_seq
-
-    from openusdconnect.event_apply import apply_events, atomic_apply
-    from openusdconnect.protocol_constants import (
-        MSG_EVENT,
-        MSG_RESYNC,
-    )
-
-    events_to_apply = []
-
-    for raw_line in lines:
-        try:
-            msg = json.loads(raw_line)
-        except json.JSONDecodeError:
-            LOG.warning("Malformed JSON line: %.100s...", raw_line)
-            continue
-
-        msg_type = msg.get("type")
-
-        if msg_type == MSG_RESYNC:
-            LOG.info("Server requested resync — resetting sequence")
-            _last_seq = 0
-            events_to_apply.clear()
-            continue
-
-        seq = msg.get("seq")
-        if seq is not None:
-            seq_int = int(seq)
-            if seq_int <= _last_seq:
-                continue
-            _last_seq = seq_int
-
-        if msg_type == MSG_EVENT:
-            ev = msg.get("event")
-            if ev:
-                events_to_apply.append(ev)
-
-    if not events_to_apply:
-        return
-
-    suppress_ctx = _emitter.suppressed() if _emitter is not None else nullcontext()
-    with suppress_ctx, atomic_apply(stage):
-        apply_events(stage, events_to_apply)
-
-
 def _flush_emitter():
     """Build events from dirty prims and send to server."""
-    global _sender_sock
-
     events = _emitter.build_events_for_dirty(include_matrices=False)
     if not events:
         return
-
-    from openusdconnect.protocol import make_txn
-    from openusdconnect.transport import send_line
-
-    txn = make_txn(_client_id, events)
-    try:
-        send_line(_sender_sock, txn)
-    except (OSError, BrokenPipeError):
-        LOG.warning("Emitter socket lost — closing")
-        try:
-            _sender_sock.close()
-        except Exception:
-            pass
-        _sender_sock = None
+    if not _sender.send_events(events):
+        LOG.warning("Emitter send failed — will retry on next tick")
 
 
 # -- Public API ----------------------------------------------------------
@@ -262,9 +203,9 @@ def start(
         client_id: Optional client identifier (auto-generated if None).
         origin: Optional origin identifier for echo suppression.
     """
-    global _receiver, _sender_sock, _emitter, _tick_handle
+    global _receiver, _sender, _dispatcher, _tick_handle
     global _root_layer_name, _client_id, _origin, _host, _port
-    global _coalesce_seconds, _last_send_time, _running, _last_seq
+    global _coalesce_seconds, _last_send_time, _running
 
     if _running:
         LOG.warning("Already running — call stop() first")
@@ -281,7 +222,6 @@ def start(
     _origin = origin or f"ue-{uuid.uuid4().hex[:8]}"
     _coalesce_seconds = coalesce
     _last_send_time = 0.0
-    _last_seq = 0
 
     # Find the stage up front
     stage = _find_stage(root_layer_name)
@@ -314,19 +254,36 @@ def start(
 
     # -- Start emitter ---------------------------------------------------
     if emit:
-        from openusdconnect.protocol import make_hello
-        from openusdconnect.transport import send_line
+        from openusdconnect.sender import EventSender
 
-        try:
-            _sender_sock = socket.create_connection((host, port), timeout=5.0)
-            hello = make_hello("emitter", client_id=_client_id, origin=_origin)
-            send_line(_sender_sock, hello)
+        _sender = EventSender(
+            host,
+            port,
+            client_id=_client_id,
+            origin=_origin,
+        )
+        if _sender.connect():
             LOG.info("Emitter connected → %s:%d", host, port)
-        except OSError as exc:
-            LOG.error("Failed to connect emitter socket: %s", exc)
-            _sender_sock = None
+        else:
+            LOG.error("Failed to connect emitter")
+            _sender = None
 
-        _reattach_emitter(stage)
+        _reattach_to_stage(stage)
+
+    # -- Build dispatcher ------------------------------------------------
+    # The receive→apply pipeline is driven by EventDispatcher.  The
+    # adapter writes to the stage directly (UsdStageAdapter), so no
+    # separate mirror_stage is needed — the adapter and the emitter
+    # share the same stage.
+    if _receiver is not None:
+        from openusdconnect.adapters import UsdStageAdapter
+        from openusdconnect.dispatcher import EventDispatcher
+
+        _dispatcher = EventDispatcher(
+            receiver=_receiver,
+            adapter=UsdStageAdapter(stage),
+            emitter=_emitter,
+        )
 
     # -- Register tick callback ------------------------------------------
     _tick_handle = unreal.register_slate_post_tick_callback(_on_tick)
@@ -336,8 +293,8 @@ def start(
 
 def stop():
     """Stop the OpenUSDConnect sync bridge and clean up."""
-    global _receiver, _emitter, _sender_sock, _tick_handle
-    global _stage, _root_layer_id, _running, _last_seq
+    global _receiver, _emitter, _sender, _dispatcher, _tick_handle
+    global _stage, _root_layer_id, _running
 
     if not _running:
         return
@@ -354,22 +311,21 @@ def stop():
         _receiver.stop()
         _receiver = None
 
+    # Drop dispatcher (no separate state to flush — last_seq dies with it)
+    _dispatcher = None
+
     # Clean up emitter
     if _emitter is not None:
         _emitter.cleanup()
         _emitter = None
 
-    # Close sender socket
-    if _sender_sock is not None:
-        try:
-            _sender_sock.close()
-        except Exception:
-            pass
-        _sender_sock = None
+    # Close sender
+    if _sender is not None:
+        _sender.disconnect()
+        _sender = None
 
     _stage = None
     _root_layer_id = ""
-    _last_seq = 0
     _running = False
     LOG.info("OpenUSDConnect sync stopped")
 
@@ -381,8 +337,8 @@ def status() -> dict:
         "root_layer": _root_layer_name,
         "stage_attached": _stage is not None,
         "receiver_connected": _receiver.connected if _receiver else False,
-        "emitter_connected": _sender_sock is not None,
-        "last_seq": _last_seq,
+        "emitter_connected": _sender.connected if _sender else False,
+        "last_seq": _dispatcher.last_seq if _dispatcher else 0,
         "client_id": _client_id,
         "origin": _origin,
     }
