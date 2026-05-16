@@ -62,39 +62,10 @@ _C_CAMERA_ATTRS = "camera_attrs"
 # construction.
 _SPECIALIZED_CACHE_KEYS = frozenset({_C_TRS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
 
-# Import-time snapshot used by _schema_attrs before any NoticeEmitter exists.
-# Keep this in sync with built-in channel declarations.
-_BUILTIN_CHANNEL_WATCHED_ATTRS = frozenset({"visibility", "info:id"})
-_BUILTIN_CHANNEL_WATCHED_PREFIXES = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
-_IS_TRANSFORM_AFFECTED_BY_ATTR = getattr(
-    UsdGeom.Xformable,
-    "IsTransformationAffectedByAttrNamed",
-    None,
-)
-
 
 def _is_transform_attr(attr_name: str) -> bool:
     """Return True for attrs that affect UsdGeomXformable transforms."""
-    if _IS_TRANSFORM_AFFECTED_BY_ATTR is not None:
-        return _IS_TRANSFORM_AFFECTED_BY_ATTR(attr_name)
-    return attr_name == "xformOpOrder" or attr_name.startswith("xformOp:")
-
-
-def _schema_attrs(schema_cls) -> frozenset[str]:
-    """Return direct schema attrs not owned by specialized paths or channels."""
-    skip_attrs = _BUILTIN_CHANNEL_WATCHED_ATTRS
-    skip_prefixes = _BUILTIN_CHANNEL_WATCHED_PREFIXES
-    return frozenset(
-        n for n in schema_cls.GetSchemaAttributeNames(False)
-        if not _is_transform_attr(n)
-        and n not in skip_attrs
-        and not any(n.startswith(p) for p in skip_prefixes)
-    )
-
-
-# Camera attrs come from USD's schema registry so new schema fields are picked
-# up without touching this list.
-_CAMERA_ATTR_NAMES = _schema_attrs(UsdGeom.Camera)
+    return UsdGeom.Xformable.IsTransformationAffectedByAttrNamed(attr_name)
 
 
 # ---------------------------------------------------------------------------
@@ -482,27 +453,6 @@ def read_usdshade_connectable(stage, prim_path):
     return container_kind, info_id, inputs, input_types, connections
 
 
-def read_camera_attrs(stage, prim_path):
-    """Read authored UsdGeomCamera attributes from a prim.
-
-    Returns a ``{name: python_value}`` dict for every authored camera attr,
-    or ``None`` if the prim is not a ``UsdGeom.Camera``. CameraAttrsChannel
-    intentionally reads the full authored set when it runs, so first encounter
-    and resync cycles send complete camera state.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
-        return None
-    attrs = {}
-    for name in _CAMERA_ATTR_NAMES:
-        attr = prim.GetAttribute(name)
-        if attr and attr.IsValid() and attr.IsAuthored():
-            val = _usd_value_to_python(attr.Get())
-            if val is not None:
-                attrs[name] = val
-    return attrs
-
-
 # ---------------------------------------------------------------------------
 # PrimChannel - snapshot/diff/emit pipeline for one prim state slice
 # ---------------------------------------------------------------------------
@@ -741,34 +691,6 @@ class ConnectableChannel(PrimChannel):
         return events
 
 
-class CameraAttrsChannel(PrimChannel):
-    """UsdGeomCamera typed-schema attribute replication.
-
-    Camera attrs use the generic ``set_gprim_attrs`` wire event so receivers
-    do not need a camera-specific event kind.
-    """
-
-    cache_key = _C_CAMERA_ATTRS
-    watched_attrs = tuple(_CAMERA_ATTR_NAMES)
-
-    def applies_to(self, prim):
-        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.Camera))
-
-    def read(self, stage, prim_path):
-        return read_camera_attrs(stage, prim_path) or {}
-
-    def diff(self, current, cached):
-        cached = cached or {}
-        changed = {
-            n: v for n, v in current.items()
-            if not _values_equal(v, cached.get(n))
-        }
-        return changed if changed else None
-
-    def to_event(self, prim_path, diff):
-        return {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": diff}
-
-
 class VisibilityChannel(PrimChannel):
     cache_key = _C_VISIBILITY
     watched_attrs = ("visibility",)
@@ -807,6 +729,92 @@ class PayloadLoadStateChannel(PrimChannel):
             "k": K_LOAD_PAYLOAD if diff else K_UNLOAD_PAYLOAD,
             "prim": prim_path,
         }
+
+
+# ---------------------------------------------------------------------------
+# Typed-schema channels
+# ---------------------------------------------------------------------------
+#
+# Channels that adopt a typed USD schema emit every authored attr of that
+# schema through the generic set_gprim_attrs wire event. _typed_schema_attrs()
+# drops attrs already owned by a peer channel (visibility, info:id, inputs:*,
+# material:binding, ...) so the same property never emits twice from one prim.
+
+_TYPED_SCHEMA_PEER_CHANNELS: tuple[type[PrimChannel], ...] = (
+    VariantSelectionsChannel,
+    ReferencesChannel,
+    PayloadsChannel,
+    PayloadLoadStateChannel,
+    MaterialBindingChannel,
+    ConnectableChannel,
+    VisibilityChannel,
+)
+
+
+def _typed_schema_attrs(schema_cls) -> frozenset[str]:
+    """Return direct typed-schema attrs that no peer channel already handles."""
+    skip_attrs: set[str] = set()
+    skip_prefixes: list[str] = []
+    for cls in _TYPED_SCHEMA_PEER_CHANNELS:
+        skip_attrs.update(cls.watched_attrs)
+        skip_prefixes.extend(cls.watched_prefixes)
+    skip_prefixes_t = tuple(skip_prefixes)
+    return frozenset(
+        n for n in schema_cls.GetSchemaAttributeNames(False)
+        if not _is_transform_attr(n)
+        and n not in skip_attrs
+        and not n.startswith(skip_prefixes_t)
+    )
+
+
+_CAMERA_ATTR_NAMES = _typed_schema_attrs(UsdGeom.Camera)
+
+
+def read_camera_attrs(stage, prim_path):
+    """Read authored UsdGeomCamera attributes from a prim.
+
+    Returns ``{name: python_value}`` for every authored camera attr, or
+    ``None`` if the prim is not a ``UsdGeom.Camera``.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
+        return None
+    attrs = {}
+    for name in _CAMERA_ATTR_NAMES:
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsValid() and attr.IsAuthored():
+            val = _usd_value_to_python(attr.Get())
+            if val is not None:
+                attrs[name] = val
+    return attrs
+
+
+class CameraAttrsChannel(PrimChannel):
+    """UsdGeomCamera typed-schema attribute replication.
+
+    Camera attrs use the generic ``set_gprim_attrs`` wire event so receivers
+    do not need a camera-specific event kind.
+    """
+
+    cache_key = _C_CAMERA_ATTRS
+    watched_attrs = tuple(_CAMERA_ATTR_NAMES)
+
+    def applies_to(self, prim):
+        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.Camera))
+
+    def read(self, stage, prim_path):
+        return read_camera_attrs(stage, prim_path) or {}
+
+    def diff(self, current, cached):
+        cached = cached or {}
+        changed = {
+            n: v for n, v in current.items()
+            if not _values_equal(v, cached.get(n))
+        }
+        return changed if changed else None
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": diff}
 
 
 # Framework-owned channels. Receive-side ordering still sorts events before
