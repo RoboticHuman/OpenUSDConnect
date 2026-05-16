@@ -22,9 +22,6 @@ from .event_apply import (
 from .event_apply import (
     ensure_canonical_ops as _ensure_canonical_ops,
 )
-from .event_apply import (
-    get_or_define_prim as _get_or_define_prim,
-)
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,

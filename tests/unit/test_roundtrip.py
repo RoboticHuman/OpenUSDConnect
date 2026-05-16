@@ -1010,9 +1010,9 @@ class TestStageToStageRoundtrip:
             read_usdshade_connectable,
         )
         from openusdconnect.protocol_constants import (
-            K_SET_MATERIAL_BINDING,
             K_SET_CONNECTABLE_CONNECTION,
             K_SET_CONNECTABLE_INPUT,
+            K_SET_MATERIAL_BINDING,
         )
 
         asset_path = os.path.join(

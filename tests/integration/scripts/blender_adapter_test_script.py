@@ -507,7 +507,7 @@ def test_set_connectable_input_writes_light_attributes(r):
     )
     rect = _find_by_prim(adapter, "/World/Rect")
     if rect is None or rect.data.type != "AREA" or rect.data.shape != "RECTANGLE":
-        r.fail(name, f"RectLight not created as AREA/RECTANGLE")
+        r.fail(name, "RectLight not created as AREA/RECTANGLE")
         return
     if abs(rect.data.size - 2.5) > 1e-4 or abs(rect.data.size_y - 1.5) > 1e-4:
         r.fail(name, f"RectLight size=({rect.data.size},{rect.data.size_y}), expected (2.5,1.5)")
@@ -525,7 +525,7 @@ def test_set_connectable_input_writes_light_attributes(r):
     )
     disk = _find_by_prim(adapter, "/World/Disk")
     if disk is None or disk.data.type != "AREA" or disk.data.shape != "DISK":
-        r.fail(name, f"DiskLight not created as AREA/DISK")
+        r.fail(name, "DiskLight not created as AREA/DISK")
         return
     # USD radius=1.0 → Blender size=2.0 (diameter).
     if abs(disk.data.size - 2.0) > 1e-4:

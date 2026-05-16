@@ -25,9 +25,9 @@ from openusdconnect.codec import (
     event_to_dict,
 )
 from openusdconnect.emitter import (
+    _REPLICATED_API_SCHEMAS,
     DEFAULT_REPLICATED_API_SCHEMAS,
     NoticeEmitter,
-    _REPLICATED_API_SCHEMAS,
     register_replicated_api_schema,
     unregister_replicated_api_schema,
 )

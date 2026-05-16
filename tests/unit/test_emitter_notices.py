@@ -13,12 +13,12 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_CONNECTABLE_CONNECTION,
-    K_SET_CONNECTABLE_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
 )
@@ -1406,7 +1406,9 @@ class TestMaterialEmission:
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"
+        ]
         assert len(shader_evs) == 1
         assert shader_evs[0]["info_id"] == "UsdPreviewSurface"
         assert "diffuseColor" in shader_evs[0]["inputs"]
@@ -1431,7 +1433,9 @@ class TestMaterialEmission:
         tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/Tex"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/Tex"
+        ]
         assert len(shader_evs) == 1
         ev = shader_evs[0]
         assert ev["info_id"] == "UsdUVTexture"
@@ -1529,7 +1533,8 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         mul_conn_evs = [
-            e for e in events if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat/NG/mul"
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat/NG/mul"
         ]
         assert len(mul_conn_evs) == 1
         conn = mul_conn_evs[0]["connections"]["inputs:in2"]
@@ -1560,7 +1565,9 @@ class TestMaterialEmission:
         # Change only roughness
         shader.GetInput("roughness").Set(0.9)
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"
+        ]
         assert len(shader_evs) == 1
         assert "roughness" in shader_evs[0]["inputs"]
         assert "diffuseColor" not in shader_evs[0]["inputs"]

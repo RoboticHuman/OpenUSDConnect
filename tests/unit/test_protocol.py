@@ -1,5 +1,13 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
+from openusdconnect.connectable_attrs import (
+    SIDE_INPUT,
+    SIDE_OUTPUT,
+    ConnectableAttr,
+    input_attr,
+    output_attr,
+    split_qualified_attr,
+)
 from openusdconnect.protocol import (
     make_hello,
     make_quit,
@@ -27,14 +35,6 @@ from openusdconnect.protocol_validation import (
     is_quat_valid,
     is_vec3_valid,
     validate_event,
-)
-from openusdconnect.connectable_attrs import (
-    SIDE_INPUT,
-    SIDE_OUTPUT,
-    ConnectableAttr,
-    input_attr,
-    output_attr,
-    split_qualified_attr,
 )
 
 

@@ -78,9 +78,7 @@ def _parse_qualified_attr(attr_name) -> ConnectableAttr | None:
             SIDE_INPUT,
             attr_name[len(USDSHADE_INPUT_PREFIX) :],
         )
-    if attr_name.startswith(USDSHADE_OUTPUT_PREFIX) and len(attr_name) > len(USDSHADE_OUTPUT_PREFIX):
-        return ConnectableAttr(
-            SIDE_OUTPUT,
-            attr_name[len(USDSHADE_OUTPUT_PREFIX) :],
-        )
+    out_prefix = USDSHADE_OUTPUT_PREFIX
+    if attr_name.startswith(out_prefix) and len(attr_name) > len(out_prefix):
+        return ConnectableAttr(SIDE_OUTPUT, attr_name[len(out_prefix) :])
     return None

@@ -34,7 +34,9 @@ from openusdconnect.protocol_constants import (
 )
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-STANDARD_SHADER_BALL = _REPO_ROOT / "assets/full_assets/StandardShaderBall/standard_shader_ball_scene.usda"
+STANDARD_SHADER_BALL = (
+    _REPO_ROOT / "assets/full_assets/StandardShaderBall/standard_shader_ball_scene.usda"
+)
 REFERENCES_ENVIRONMENT = _REPO_ROOT / "assets/test_assets/References/utils/Environment.usda"
 
 LIGHT_TYPES = ["DistantLight", "SphereLight", "RectLight", "DiskLight", "DomeLight"]
@@ -329,8 +331,13 @@ class TestRealAssetReplication:
 
         events = em.build_events_for_dirty(include_matrices=False)
 
-        ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH]
-        sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.LIGHT_PATH]
+        ensure = [
+            e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH
+        ]
+        sci = [
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.LIGHT_PATH
+        ]
         assert ensure
         assert ensure[0]["typeName"] == "RectLight"
         assert sci
@@ -401,12 +408,17 @@ class TestRealAssetReplication:
         events = em.build_events_for_dirty(include_matrices=False)
 
         # The ensure_prim event must carry ShapingAPI in api_schemas.
-        ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH]
+        ensure = [
+            e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH
+        ]
         assert ensure
         assert "ShapingAPI" in ensure[0]["api_schemas"]
 
         # The set_connectable_input event must carry the shaping cone angle.
-        sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.LIGHT_PATH]
+        sci = [
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.LIGHT_PATH
+        ]
         assert sci
         assert sci[0]["inputs"].get("shaping:cone:angle") == pytest.approx(30.0)
 
@@ -511,7 +523,10 @@ class TestRealAssetShapingAPIReplication:
         # set_connectable_input must carry both the SphereLight inputs
         # (intensity, radius) AND the ShapingAPI inputs (shaping:cone:angle,
         # shaping:focus) — they share the connectable interface.
-        sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.SPOT_PATH]
+        sci = [
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.SPOT_PATH
+        ]
         assert sci
         inputs = sci[0]["inputs"]
         assert "intensity" in inputs
@@ -543,7 +558,10 @@ class TestRealAssetShapingAPIReplication:
 
         events = em.build_events_for_dirty(include_matrices=False)
 
-        sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.SPOT_PATH]
+        sci = [
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.SPOT_PATH
+        ]
         assert sci
         assert sci[0]["inputs"].get("shaping:cone:angle") == pytest.approx(45.0)
 
