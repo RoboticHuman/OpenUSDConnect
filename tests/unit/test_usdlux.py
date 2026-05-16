@@ -313,16 +313,32 @@ class TestRealAssetReplication:
     LIGHT_PATH = "/standard_shader_ball_scene/lights/emitterLeft/light"
     EMITTER_XFORM_PATH = "/standard_shader_ball_scene/lights/emitterLeft"
 
-    def _open_src(self):
+    @pytest.fixture(scope="class")
+    def _shared_stage(self):
+        # Opens the heavy StandardShaderBall asset once per class —
+        # USD composition for this scene is ~1.7s; sharing across the
+        # class drops the suite's total open time from N*1.7s to 1.7s.
         return Usd.Stage.Open(str(STANDARD_SHADER_BALL))
 
-    def test_asset_has_five_rect_lights(self):
-        s = self._open_src()
-        lights = [p for p in s.Traverse() if p.IsA(UsdLux.RectLight)]
+    @pytest.fixture
+    def src(self, _shared_stage):
+        # Per-test stage view with a session-layer edit target. Each
+        # test's mutations land in the session layer, which we clear at
+        # teardown so they don't leak between tests sharing the stage.
+        session = _shared_stage.GetSessionLayer()
+        original_target = _shared_stage.GetEditTarget()
+        _shared_stage.SetEditTarget(Usd.EditTarget(session))
+        try:
+            yield _shared_stage
+        finally:
+            session.Clear()
+            _shared_stage.SetEditTarget(original_target)
+
+    def test_asset_has_five_rect_lights(self, src):
+        lights = [p for p in src.Traverse() if p.IsA(UsdLux.RectLight)]
         assert len(lights) == 5
 
-    def test_intensity_change_replicates(self):
-        src = self._open_src()
+    def test_intensity_change_replicates(self, src):
         em = NoticeEmitter(src)
 
         light = UsdLux.RectLight(src.GetPrimAtPath(self.LIGHT_PATH))
@@ -350,11 +366,10 @@ class TestRealAssetReplication:
         dst_light = UsdLux.RectLight(dst.GetPrimAtPath(self.LIGHT_PATH))
         assert dst_light.GetIntensityAttr().Get() == pytest.approx(15.0)
 
-    def test_xform_translation_replicates(self):
+    def test_xform_translation_replicates(self, src):
         """Mutating the parent Xform's matrix should replicate the new world
         translation to the destination — exact value doesn't matter, what
         matters is src world translation == dst world translation."""
-        src = self._open_src()
         em = NoticeEmitter(src)
 
         em_prim = src.GetPrimAtPath(self.EMITTER_XFORM_PATH)
@@ -392,12 +407,11 @@ class TestRealAssetReplication:
         for axis in (0, 1, 2):
             assert dst_t[axis] == pytest.approx(src_t[axis], abs=1e-3)
 
-    def test_user_applied_shaping_api_replicates(self):
+    def test_user_applied_shaping_api_replicates(self, src):
         """Apply ShapingAPI to a real asset RectLight (turning it into a spot)
         and verify both the schema and its cone-angle input land on the
         destination — exercises the api_schemas wire field end-to-end on a
         real asset, distinct from typed-schema built-ins."""
-        src = self._open_src()
         em = NoticeEmitter(src)
 
         light_prim = src.GetPrimAtPath(self.LIGHT_PATH)
@@ -429,10 +443,9 @@ class TestRealAssetReplication:
         assert dst_prim.HasAPI(UsdLux.ShapingAPI)
         assert UsdLux.ShapingAPI(dst_prim).GetShapingConeAngleAttr().Get() == pytest.approx(30.0)
 
-    def test_combined_intensity_and_move_replicate(self):
+    def test_combined_intensity_and_move_replicate(self, src):
         """One emit cycle carrying both a light input change and a parent
         Xform move — exercises the full receive-side ordering."""
-        src = self._open_src()
         em = NoticeEmitter(src)
 
         # Move parent Xform.
@@ -481,27 +494,37 @@ class TestRealAssetShapingAPIReplication:
     SPOT_PATH = "/Environment/Lights/SphereLight"
     SPOT_PARENT_XFORM = "/Environment/Lights"
 
-    def _open_src(self):
+    @pytest.fixture(scope="class")
+    def _shared_stage(self):
         return Usd.Stage.Open(str(REFERENCES_ENVIRONMENT))
 
-    def test_source_lights_have_shaping_api_applied(self):
-        s = self._open_src()
+    @pytest.fixture
+    def src(self, _shared_stage):
+        session = _shared_stage.GetSessionLayer()
+        original_target = _shared_stage.GetEditTarget()
+        _shared_stage.SetEditTarget(Usd.EditTarget(session))
+        try:
+            yield _shared_stage
+        finally:
+            session.Clear()
+            _shared_stage.SetEditTarget(original_target)
+
+    def test_source_lights_have_shaping_api_applied(self, src):
         spots = [
             "/Environment/Lights/SphereLight",
             "/Environment/Lights/SphereLight_01",
             "/Environment/Lights/SphereLight_02",
         ]
         for path in spots:
-            p = s.GetPrimAtPath(path)
+            p = src.GetPrimAtPath(path)
             assert p.IsValid(), path
             assert p.IsA(UsdLux.SphereLight)
             assert p.HasAPI(UsdLux.ShapingAPI), f"{path} missing ShapingAPI"
 
-    def test_shaping_replicates_to_destination(self):
+    def test_shaping_replicates_to_destination(self, src):
         """Authored ShapingAPI on the source must arrive on the destination
         via the api_schemas wire field — not via the typed-schema built-ins
         path (SphereLight doesn't bring ShapingAPI as a built-in)."""
-        src = self._open_src()
         em = NoticeEmitter(src)
 
         # Drive a notice on one of the existing spots so the emitter sees
@@ -545,11 +568,10 @@ class TestRealAssetShapingAPIReplication:
         assert dst_shape.GetShapingConeAngleAttr().Get() == pytest.approx(180.0)
         assert dst_light.GetRadiusAttr().Get() == pytest.approx(5.0)
 
-    def test_shaping_cone_angle_change_replicates(self):
+    def test_shaping_cone_angle_change_replicates(self, src):
         """Authoring a tighter cone angle on the source spot — verify the
         shaping value change rides on set_connectable_input and the receiver
         retains the ShapingAPI."""
-        src = self._open_src()
         em = NoticeEmitter(src)
 
         spot_prim = src.GetPrimAtPath(self.SPOT_PATH)
