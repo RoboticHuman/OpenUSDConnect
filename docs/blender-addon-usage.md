@@ -98,7 +98,7 @@ In the emitter Blender:
 
 | Event | What triggers it | What happens on the receiver |
 |-------|-----------------|------------------------------|
-| `ensure_prim` | First encounter of an object | Creates the prim (Xform, Sphere, Cube, etc.) |
+| `ensure_prim` | First encounter of an object | Creates the prim (Xform, Sphere, Cube, SphereLight, etc.) and applies any API schemas in `api_schemas` (e.g. `ShapingAPI` for spot lights) |
 | `ensure_xform_ops` | First encounter of an object | Establishes translate/orient/scale ops |
 | `set_xform_trs` | Object moved/rotated/scaled | Applies the transform delta |
 | `set_visibility` | Visibility toggled | Shows/hides the object |
@@ -108,6 +108,9 @@ In the emitter Blender:
 | `load_payload` | Payload load requested | Imports the payload asset |
 | `unload_payload` | Payload unload requested | Removes imported payload children |
 | `set_variant_selections` | Variant selection changed | Updates the active variant |
+| `set_material_binding` | Material bound/unbound | Updates the material:binding relationship |
+| `set_connectable_input` | Shader, NodeGraph, Material, or UsdLux light input value changed | Writes the typed input via `UsdShade.ConnectableAPI` |
+| `set_connectable_connection` | Shader/NodeGraph/Material/light input or output connection authored or cleared | Updates the connection edge |
 | `deactivate_prim` | Object deleted | Deactivates the prim |
 | `delete_prim` | Prim removed from stage | Removes the prim |
 | `rename_prim` | Object renamed | Renames the prim path |
@@ -117,6 +120,12 @@ Rotation is transmitted as quaternion `[w, x, y, z]` (USD convention). Only chan
 `set_gprim_attrs` events include `primvar_meta` (USD type name and interpolation) for
 primvar attributes and `attr_interp` for non-primvar attributes with interpolation metadata
 (e.g., normals).
+
+### UsdLux lights
+
+Light prims (`DistantLight`, `SphereLight`, `RectLight`, `DiskLight`, `DomeLight`) replicate through the same machinery as shaders and materials — they're `UsdShade.ConnectableAPI` containers and their parameters (`intensity`, `color`, `radius`, `shaping:cone:angle`, `texture:file`, etc.) ride on `set_connectable_input` events with empty `info_id`. Applied API schemas (`ShapingAPI` for spot/cone lights, `ShadowAPI` for shadow controls, `MeshLightAPI`/`VolumeLightAPI` for mesh-as-light) flow via the optional `api_schemas` field on `ensure_prim` (additive only — removing an API schema is out of scope for v1).
+
+The Blender adapter's UsdLux→Blender light translation (intensity↔energy conversion, mapping ShapingAPI to Blender's spot data) is not yet wired up — the receive path lands the schema on the mirror USD stage but doesn't currently create a Blender light object.
 
 ## Auto-track Mode
 

@@ -259,7 +259,7 @@ def _test_step():
             else:
                 log("  WARNING: author is None!")
 
-            _initial_event_count = len(query_db_events("set_shader_input"))
+            _initial_event_count = len(query_db_events("set_connectable_input"))
             log(f"  Initial set_shader_input events in DB: {_initial_event_count}")
 
             _step = 4
@@ -344,7 +344,7 @@ def _test_step():
         elif _step == 5:
             # Check if event reached the server
             log("Step 5: Checking for set_shader_input event in DB...")
-            shader_events = query_db_events("set_shader_input")
+            shader_events = query_db_events("set_connectable_input")
             new_count = len(shader_events) - _initial_event_count
             log(f"  New set_shader_input events: {new_count}")
 

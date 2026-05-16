@@ -98,10 +98,10 @@ def _test_step():
                 log(f"  Material: {m.name} (path={mp})")
                 if m.node_tree:
                     for n in m.node_tree.nodes:
-                        sid = n.get("usd_shader_id", "")
+                        sid = n.get("usd_info_id", "")
                         node_info = f"    Node: {n.name} type={n.type}"
                         if sid:
-                            node_info += f" shader_id={sid}"
+                            node_info += f" info_id={sid}"
                         # Check Base Color connection
                         if n.type == "BSDF_PRINCIPLED" and "Base Color" in n.inputs:
                             bc = n.inputs["Base Color"]

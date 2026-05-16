@@ -21,8 +21,8 @@ from openusdconnect.events import (
     SetMaterialBinding,
     SetPayload,
     SetReference,
-    SetShaderConnection,
-    SetShaderInput,
+    SetConnectableConnection,
+    SetConnectableInput,
     SetVariantSelections,
     SetVisibility,
     SetXformMatrices,
@@ -137,19 +137,19 @@ _CASES: list[tuple[str, Event]] = [
         ),
     ),
     (
-        "set_shader_input",
-        SetShaderInput(
-            k="set_shader_input",
+        "set_connectable_input",
+        SetConnectableInput(
+            k="set_connectable_input",
             prim="/World/Mat/Surface",
-            shader_id="UsdPreviewSurface",
+            info_id="UsdPreviewSurface",
             inputs={"metallic": 0.75, "roughness": 0.4},
             input_types={"metallic": "Float", "roughness": "Float"},
         ),
     ),
     (
-        "set_shader_connection",
-        SetShaderConnection(
-            k="set_shader_connection",
+        "set_connectable_connection",
+        SetConnectableConnection(
+            k="set_connectable_connection",
             prim="/World/Mat/Surface",
             connections={
                 "inputs:diffuseColor": {
@@ -222,14 +222,14 @@ class TestRoundtrip:
         assert out["selections"] == {"size": "large"}
 
     def test_set_shader_input_preserved(self):
-        ev = next(e for k, e in _CASES if k == "set_shader_input")
+        ev = next(e for k, e in _CASES if k == "set_connectable_input")
         out = _roundtrip(ev)
-        assert out["shader_id"] == "UsdPreviewSurface"
+        assert out["info_id"] == "UsdPreviewSurface"
         assert out["inputs"]["metallic"] == 0.75
         assert out["input_types"]["metallic"] == "Float"
 
     def test_set_shader_connection_preserved(self):
-        ev = next(e for k, e in _CASES if k == "set_shader_connection")
+        ev = next(e for k, e in _CASES if k == "set_connectable_connection")
         out = _roundtrip(ev)
         conn = out["connections"]["inputs:diffuseColor"]
         assert conn["source_prim"] == "/World/Mat/Tex"

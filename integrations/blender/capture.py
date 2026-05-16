@@ -528,7 +528,7 @@ class BlenderStageAuthor:
         detected.  Reads current node socket values via the shader mapper
         and writes them to the corresponding UsdShade.Shader inputs on the
         emitter's stage.  The NoticeEmitter then picks up the USD change
-        and emits set_shader_input events through the normal pipeline.
+        and emits set_connectable_input events through the normal pipeline.
         """
         if not self.enabled or self._applying_remote:
             return

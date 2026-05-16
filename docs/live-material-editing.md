@@ -108,8 +108,8 @@ uv run python -c "
 In Blender A (emitter + receiver running): the Teapot imports with the Ceramic material. Change `Roughness` on the Principled BSDF. The server log shows:
 
 ```json
-{"k": "set_shader_input", "prim": "/World/Teapot/Materials/Ceramic/UsdPreview/usdpreviewsurface",
- "shader_id": "UsdPreviewSurface", "inputs": {"roughness": 0.8}}
+{"k": "set_connectable_input", "prim": "/World/Teapot/Materials/Ceramic/UsdPreview/usdpreviewsurface",
+ "info_id": "UsdPreviewSurface", "inputs": {"roughness": 0.8}}
 ```
 
 Blender B (receiver): the Ceramic material's roughness updates to 0.8.
@@ -125,9 +125,9 @@ uv run python -c "
   s = socket.create_connection(('127.0.0.1', 7200), timeout=5)
   send_line(s, make_hello('emitter', client_id='cli'))
   send_line(s, {'type': 'txn', 'client_id': 'cli', 'events': [
-    {'k': 'set_shader_input',
+    {'k': 'set_connectable_input',
      'prim': '/World/Teapot/Materials/Ceramic/UsdPreview/usdpreviewsurface',
-     'shader_id': 'UsdPreviewSurface',
+     'info_id': 'UsdPreviewSurface',
      'inputs': {'roughness': 0.1, 'ior': 2.0},
      'input_types': {'roughness': 'float', 'ior': 'float'}},
   ]})
@@ -147,13 +147,13 @@ class MyDCCAdapter(DCCAdapter):
         # Assign material to geometry in your DCC
         ...
 
-    def set_shader_input(self, prim_path, shader_id, inputs, input_types):
+    def set_connectable_input(self, prim_path, info_id, inputs, input_types):
         # Apply shader values to your DCC's shader nodes
-        mapper = self._shader_registry.get(shader_id)
+        mapper = self._shader_registry.get(info_id)
         mapper.apply_value(node, usd_name, value)
         ...
 
-    def set_shader_connection(self, prim_path, connections, disconnections=None):
+    def set_connectable_connection(self, prim_path, connections, disconnections=None):
         # Wire shader nodes together in your DCC
         ...
 ```

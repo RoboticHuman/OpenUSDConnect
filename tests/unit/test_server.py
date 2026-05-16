@@ -377,9 +377,9 @@ class TestCompaction:
             [
                 {"k": "ensure_prim", "prim": "/Mat", "typeName": "Material"},
                 {
-                    "k": "set_shader_input",
+                    "k": "set_connectable_input",
                     "prim": "/Mat/PBR",
-                    "shader_id": "UsdPreviewSurface",
+                    "info_id": "UsdPreviewSurface",
                     "inputs": {"diffuseColor": [1, 0, 0]},
                     "input_types": {"diffuseColor": "color3f"},
                 },
@@ -389,9 +389,9 @@ class TestCompaction:
             srv,
             [
                 {
-                    "k": "set_shader_input",
+                    "k": "set_connectable_input",
                     "prim": "/Mat/PBR",
-                    "shader_id": "UsdPreviewSurface",
+                    "info_id": "UsdPreviewSurface",
                     "inputs": {"roughness": 0.5},
                     "input_types": {"roughness": "float"},
                 },
@@ -402,14 +402,14 @@ class TestCompaction:
 
         rows = [(r,) for _, r in srv.store.get_all_asc()]
         events = [message_to_dict(r[0])["event"] for r in rows]
-        shader_evs = [e for e in events if e["k"] == "set_shader_input"]
+        shader_evs = [e for e in events if e["k"] == "set_connectable_input"]
         assert len(shader_evs) == 1
         # Both inputs survive — merged, not replaced
         assert shader_evs[0]["inputs"]["diffuseColor"] == [1, 0, 0]
         assert shader_evs[0]["inputs"]["roughness"] == 0.5
         assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
         assert shader_evs[0]["input_types"]["roughness"] == "float"
-        assert shader_evs[0]["shader_id"] == "UsdPreviewSurface"
+        assert shader_evs[0]["info_id"] == "UsdPreviewSurface"
 
     def test_compact_empty_log_noop(self, srv):
         """Compacting an empty log doesn't crash."""

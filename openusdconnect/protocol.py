@@ -2,7 +2,7 @@
 
 Message and event constants live in protocol_constants.py.  Event validation
 lives in protocol_validation.py.  UsdShade input/output attribute helpers live
-in shader_attrs.py.
+in connectable_attrs.py.
 
 The wire format is length-prefixed FlatBuffers -- see codec.py and framing.py.
 The FlatBuffers schema (schema/events.fbs, schema/messages.fbs) is the

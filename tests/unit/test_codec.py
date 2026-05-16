@@ -420,12 +420,12 @@ class TestSetMaterialBinding:
         assert _txn_roundtrip(ev) == ev
 
 
-class TestSetShaderInput:
+class TestSetConnectableInput:
     def test_roundtrip(self):
         ev = {
-            "k": "set_shader_input",
+            "k": "set_connectable_input",
             "prim": "/World/Mat/Shader",
-            "shader_id": "UsdPreviewSurface",
+            "info_id": "UsdPreviewSurface",
             "inputs": {"metallic": 0.8, "diffuseColor": [0.5, 0.5, 0.5]},
             "input_types": {"metallic": "float", "diffuseColor": "color3f"},
         }
@@ -437,9 +437,9 @@ class TestSetShaderInput:
     def test_falsy_bool(self):
         """bool=False must round-trip as False, not 0.0."""
         ev = {
-            "k": "set_shader_input",
+            "k": "set_connectable_input",
             "prim": "/S",
-            "shader_id": "X",
+            "info_id": "X",
             "inputs": {"flag": False},
             "input_types": {"flag": "bool"},
         }
@@ -449,9 +449,9 @@ class TestSetShaderInput:
     def test_zero_int(self):
         """int=0 must round-trip as int 0, not float 0.0."""
         ev = {
-            "k": "set_shader_input",
+            "k": "set_connectable_input",
             "prim": "/S",
-            "shader_id": "X",
+            "info_id": "X",
             "inputs": {"count": 0},
             "input_types": {"count": "int"},
         }
@@ -462,9 +462,9 @@ class TestSetShaderInput:
     def test_zero_float(self):
         """float=0.0 must round-trip correctly."""
         ev = {
-            "k": "set_shader_input",
+            "k": "set_connectable_input",
             "prim": "/S",
-            "shader_id": "X",
+            "info_id": "X",
             "inputs": {"metallic": 0.0},
             "input_types": {"metallic": "float"},
         }
@@ -474,9 +474,9 @@ class TestSetShaderInput:
     def test_empty_string(self):
         """Empty string must round-trip as '', not None or 0.0."""
         ev = {
-            "k": "set_shader_input",
+            "k": "set_connectable_input",
             "prim": "/S",
-            "shader_id": "X",
+            "info_id": "X",
             "inputs": {"file": ""},
             "input_types": {"file": "asset"},
         }
@@ -484,10 +484,10 @@ class TestSetShaderInput:
         assert d["inputs"]["file"] == ""
 
 
-class TestSetShaderConnection:
+class TestSetConnectableConnection:
     def test_roundtrip(self):
         ev = {
-            "k": "set_shader_connection",
+            "k": "set_connectable_connection",
             "prim": "/World/Mat/Shader",
             "connections": {
                 "inputs:diffuseColor": {
@@ -507,7 +507,7 @@ class TestSetShaderConnection:
         """Material/NodeGraph output port connections ride the same wire
         shape — only the namespace prefix on local_attr differs."""
         ev = {
-            "k": "set_shader_connection",
+            "k": "set_connectable_connection",
             "prim": "/World/Mat",
             "connections": {
                 "outputs:surface": {

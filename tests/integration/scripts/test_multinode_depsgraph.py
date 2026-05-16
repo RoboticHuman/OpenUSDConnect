@@ -347,7 +347,7 @@ def _test_step():
 
                     # Try manual read
                     for sp, im in maps.items():
-                        sid_key = sp + ":shader_id"
+                        sid_key = sp + ":info_id"
                         # We know it's ND_standard_surface_surfaceshader
                         mapper = _state.author._shader_registry.get("ND_standard_surface_surfaceshader")
                         if mapper:

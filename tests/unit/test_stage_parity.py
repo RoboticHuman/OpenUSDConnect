@@ -440,12 +440,12 @@ class TestStageParity:
         emitter = NoticeEmitter(stage)
         events = emitter.snapshot_events()
 
-        shader_evts = [e for e in events if e.get("k") == "set_shader_input"]
+        shader_evts = [e for e in events if e.get("k") == "set_connectable_input"]
         binding_evts = [e for e in events if e.get("k") == "set_material_binding"]
         assert shader_evts, "No shader events generated"
         assert binding_evts, "No binding events generated"
         surface_ev = next(e for e in shader_evts if e["prim"] == "/World/Mat/Surface")
-        assert surface_ev["shader_id"] == "UsdPreviewSurface"
+        assert surface_ev["info_id"] == "UsdPreviewSurface"
         assert "metallic" in surface_ev["inputs"]
 
         replayed = _server_process_and_replay(srv, events)
@@ -486,7 +486,7 @@ class TestStageParity:
         emitter.mark_dirty("/World/Mat/Surface")
         update = emitter.build_events_for_dirty(include_matrices=False)
 
-        shader_updates = [e for e in update if e.get("k") == "set_shader_input"]
+        shader_updates = [e for e in update if e.get("k") == "set_connectable_input"]
         assert len(shader_updates) == 1
         assert "metallic" in shader_updates[0]["inputs"]
         assert "roughness" not in shader_updates[0]["inputs"]

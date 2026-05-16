@@ -18,7 +18,7 @@ class AttrValueType(object):
     NestedList = 8
 
 
-class ShaderInputValueType(object):
+class ConnectableInputValueType(object):
     None_ = 0
     ScalarFloat = 1
     ScalarInt = 2
@@ -44,8 +44,8 @@ class EventPayload(object):
     UnloadPayload = 13
     SetVariantSelections = 14
     SetMaterialBinding = 15
-    SetShaderInput = 16
-    SetShaderConnection = 17
+    SetConnectableInput = 16
+    SetConnectableConnection = 17
 
 
 class Payload(object):
@@ -423,58 +423,58 @@ def ArcEntryEnd(builder):
 
 
 
-class ShaderConnection(object):
+class Connection(object):
     __slots__ = ['_tab']
 
     @classmethod
     def GetRootAs(cls, buf, offset=0):
         n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = ShaderConnection()
+        x = Connection()
         x.Init(buf, n + offset)
         return x
 
     @classmethod
-    def GetRootAsShaderConnection(cls, buf, offset=0):
+    def GetRootAsConnection(cls, buf, offset=0):
         """This method is deprecated. Please switch to GetRootAs."""
         return cls.GetRootAs(buf, offset)
-    # ShaderConnection
+    # Connection
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
-    # ShaderConnection
+    # Connection
     def LocalAttr(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # ShaderConnection
+    # Connection
     def SourcePrim(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # ShaderConnection
+    # Connection
     def SourceAttr(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-def ShaderConnectionStart(builder):
+def ConnectionStart(builder):
     builder.StartObject(3)
 
-def ShaderConnectionAddLocalAttr(builder, localAttr):
+def ConnectionAddLocalAttr(builder, localAttr):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(localAttr), 0)
 
-def ShaderConnectionAddSourcePrim(builder, sourcePrim):
+def ConnectionAddSourcePrim(builder, sourcePrim):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(sourcePrim), 0)
 
-def ShaderConnectionAddSourceAttr(builder, sourceAttr):
+def ConnectionAddSourceAttr(builder, sourceAttr):
     builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(sourceAttr), 0)
 
-def ShaderConnectionEnd(builder):
+def ConnectionEnd(builder):
     return builder.EndObject()
 
 
@@ -525,74 +525,74 @@ def StringPairEnd(builder):
 
 
 
-class ShaderInputValue(object):
+class ConnectableInputValue(object):
     __slots__ = ['_tab']
 
     @classmethod
     def GetRootAs(cls, buf, offset=0):
         n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = ShaderInputValue()
+        x = ConnectableInputValue()
         x.Init(buf, n + offset)
         return x
 
     @classmethod
-    def GetRootAsShaderInputValue(cls, buf, offset=0):
+    def GetRootAsConnectableInputValue(cls, buf, offset=0):
         """This method is deprecated. Please switch to GetRootAs."""
         return cls.GetRootAs(buf, offset)
-    # ShaderInputValue
+    # ConnectableInputValue
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def Name(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def TypeName(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def ValueType(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Int8Flags, o + self._tab.Pos)
         return 0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def ScalarFloat(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float32Flags, o + self._tab.Pos)
         return 0.0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def ScalarInt(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Int32Flags, o + self._tab.Pos)
         return 0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def ScalarBool(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         if o != 0:
             return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
         return False
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def ScalarString(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def FloatArray(self, j):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
         if o != 0:
@@ -600,56 +600,56 @@ class ShaderInputValue(object):
             return self._tab.Get(flatbuffers.number_types.Float32Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
         return 0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def FloatArrayAsNumpy(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
         if o != 0:
             return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Float32Flags, o)
         return 0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def FloatArrayLength(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
-    # ShaderInputValue
+    # ConnectableInputValue
     def FloatArrayIsNone(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
         return o == 0
 
-def ShaderInputValueStart(builder):
+def ConnectableInputValueStart(builder):
     builder.StartObject(8)
 
-def ShaderInputValueAddName(builder, name):
+def ConnectableInputValueAddName(builder, name):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(name), 0)
 
-def ShaderInputValueAddTypeName(builder, typeName):
+def ConnectableInputValueAddTypeName(builder, typeName):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(typeName), 0)
 
-def ShaderInputValueAddValueType(builder, valueType):
+def ConnectableInputValueAddValueType(builder, valueType):
     builder.PrependInt8Slot(2, valueType, 0)
 
-def ShaderInputValueAddScalarFloat(builder, scalarFloat):
+def ConnectableInputValueAddScalarFloat(builder, scalarFloat):
     builder.PrependFloat32Slot(3, scalarFloat, 0.0)
 
-def ShaderInputValueAddScalarInt(builder, scalarInt):
+def ConnectableInputValueAddScalarInt(builder, scalarInt):
     builder.PrependInt32Slot(4, scalarInt, 0)
 
-def ShaderInputValueAddScalarBool(builder, scalarBool):
+def ConnectableInputValueAddScalarBool(builder, scalarBool):
     builder.PrependBoolSlot(5, scalarBool, 0)
 
-def ShaderInputValueAddScalarString(builder, scalarString):
+def ConnectableInputValueAddScalarString(builder, scalarString):
     builder.PrependUOffsetTRelativeSlot(6, flatbuffers.number_types.UOffsetTFlags.py_type(scalarString), 0)
 
-def ShaderInputValueAddFloatArray(builder, floatArray):
+def ConnectableInputValueAddFloatArray(builder, floatArray):
     builder.PrependUOffsetTRelativeSlot(7, flatbuffers.number_types.UOffsetTFlags.py_type(floatArray), 0)
 
-def ShaderInputValueStartFloatArrayVector(builder, numElems):
+def ConnectableInputValueStartFloatArrayVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def ShaderInputValueEnd(builder):
+def ConnectableInputValueEnd(builder):
     return builder.EndObject()
 
 
@@ -686,14 +686,40 @@ class EnsurePrim(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # EnsurePrim
+    def ApiSchemas(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return ""
+
+    # EnsurePrim
+    def ApiSchemasLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # EnsurePrim
+    def ApiSchemasIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        return o == 0
+
 def EnsurePrimStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def EnsurePrimAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
 def EnsurePrimAddTypeName(builder, typeName):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(typeName), 0)
+
+def EnsurePrimAddApiSchemas(builder, apiSchemas):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(apiSchemas), 0)
+
+def EnsurePrimStartApiSchemasVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
 
 def EnsurePrimEnd(builder):
     return builder.EndObject()
@@ -1599,132 +1625,132 @@ def SetMaterialBindingEnd(builder):
 
 
 
-class SetShaderInput(object):
+class SetConnectableInput(object):
     __slots__ = ['_tab']
 
     @classmethod
     def GetRootAs(cls, buf, offset=0):
         n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = SetShaderInput()
+        x = SetConnectableInput()
         x.Init(buf, n + offset)
         return x
 
     @classmethod
-    def GetRootAsSetShaderInput(cls, buf, offset=0):
+    def GetRootAsSetConnectableInput(cls, buf, offset=0):
         """This method is deprecated. Please switch to GetRootAs."""
         return cls.GetRootAs(buf, offset)
-    # SetShaderInput
+    # SetConnectableInput
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
-    # SetShaderInput
+    # SetConnectableInput
     def Prim(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetShaderInput
-    def ShaderId(self):
+    # SetConnectableInput
+    def InfoId(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetShaderInput
+    # SetConnectableInput
     def Inputs(self, j):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             x = self._tab.Vector(o)
             x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
             x = self._tab.Indirect(x)
-            obj = ShaderInputValue()
+            obj = ConnectableInputValue()
             obj.Init(self._tab.Bytes, x)
             return obj
         return None
 
-    # SetShaderInput
+    # SetConnectableInput
     def InputsLength(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
-    # SetShaderInput
+    # SetConnectableInput
     def InputsIsNone(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         return o == 0
 
-def SetShaderInputStart(builder):
+def SetConnectableInputStart(builder):
     builder.StartObject(3)
 
-def SetShaderInputAddPrim(builder, prim):
+def SetConnectableInputAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
-def SetShaderInputAddShaderId(builder, shaderId):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(shaderId), 0)
+def SetConnectableInputAddInfoId(builder, infoId):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(infoId), 0)
 
-def SetShaderInputAddInputs(builder, inputs):
+def SetConnectableInputAddInputs(builder, inputs):
     builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(inputs), 0)
 
-def SetShaderInputStartInputsVector(builder, numElems):
+def SetConnectableInputStartInputsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def SetShaderInputEnd(builder):
+def SetConnectableInputEnd(builder):
     return builder.EndObject()
 
 
 
-class SetShaderConnection(object):
+class SetConnectableConnection(object):
     __slots__ = ['_tab']
 
     @classmethod
     def GetRootAs(cls, buf, offset=0):
         n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = SetShaderConnection()
+        x = SetConnectableConnection()
         x.Init(buf, n + offset)
         return x
 
     @classmethod
-    def GetRootAsSetShaderConnection(cls, buf, offset=0):
+    def GetRootAsSetConnectableConnection(cls, buf, offset=0):
         """This method is deprecated. Please switch to GetRootAs."""
         return cls.GetRootAs(buf, offset)
-    # SetShaderConnection
+    # SetConnectableConnection
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def Prim(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def Connections(self, j):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             x = self._tab.Vector(o)
             x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
             x = self._tab.Indirect(x)
-            obj = ShaderConnection()
+            obj = Connection()
             obj.Init(self._tab.Bytes, x)
             return obj
         return None
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def ConnectionsLength(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def ConnectionsIsNone(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         return o == 0
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def Disconnections(self, j):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
@@ -1732,37 +1758,37 @@ class SetShaderConnection(object):
             return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
         return ""
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def DisconnectionsLength(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
-    # SetShaderConnection
+    # SetConnectableConnection
     def DisconnectionsIsNone(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         return o == 0
 
-def SetShaderConnectionStart(builder):
+def SetConnectableConnectionStart(builder):
     builder.StartObject(3)
 
-def SetShaderConnectionAddPrim(builder, prim):
+def SetConnectableConnectionAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
-def SetShaderConnectionAddConnections(builder, connections):
+def SetConnectableConnectionAddConnections(builder, connections):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(connections), 0)
 
-def SetShaderConnectionStartConnectionsVector(builder, numElems):
+def SetConnectableConnectionStartConnectionsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def SetShaderConnectionAddDisconnections(builder, disconnections):
+def SetConnectableConnectionAddDisconnections(builder, disconnections):
     builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(disconnections), 0)
 
-def SetShaderConnectionStartDisconnectionsVector(builder, numElems):
+def SetConnectableConnectionStartDisconnectionsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def SetShaderConnectionEnd(builder):
+def SetConnectableConnectionEnd(builder):
     return builder.EndObject()
 
 

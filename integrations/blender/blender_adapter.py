@@ -29,7 +29,7 @@ from openusdconnect.axis_conversion import (
     yup_to_zup_scale,
     yup_to_zup_vec,
 )
-from openusdconnect.shader_attrs import shader_output_attr, split_qualified_attr
+from openusdconnect.connectable_attrs import output_attr, split_qualified_attr
 from openusdconnect.shader_connections import resolve_nodegraph_connection
 
 from .shader_mapper import create_default_registry
@@ -177,6 +177,33 @@ class BlenderAdapter(DCCAdapter):
         mesh.update()
         return bpy.data.objects.new(name, mesh)
 
+    # USD UsdLux typed light → (Blender light data type, optional shape).
+    # Mapping mirrors Blender's own USD importer behavior; lights absent from
+    # this map are either handled differently (DomeLight = World environment)
+    # or have no direct Blender equivalent (CylinderLight/Geometry/Portal/Plugin).
+    _USDLUX_TO_BLENDER_LIGHT = {
+        "SphereLight": ("POINT", None),
+        "DistantLight": ("SUN", None),
+        "RectLight": ("AREA", "RECTANGLE"),
+        "DiskLight": ("AREA", "DISK"),
+    }
+
+    def _create_blender_light(self, name: str, type_name: str):
+        """Create a Blender light object for a USD UsdLux typed light prim.
+
+        Returns the new bpy.types.Object wrapping a bpy.types.Light, or
+        ``None`` if the USD light type has no direct Blender equivalent
+        (caller should skip those via ``_NON_SCENE_TYPES``).
+        """
+        mapping = self._USDLUX_TO_BLENDER_LIGHT.get(type_name)
+        if mapping is None:
+            return None
+        light_type, shape = mapping
+        light_data = bpy.data.lights.new(name + "_data", type=light_type)
+        if shape:
+            light_data.shape = shape
+        return bpy.data.objects.new(name, light_data)
+
     def _create_blender_object(self, prim_path: str, type_name: str):
         """Create the appropriate Blender object for a USD prim type.
 
@@ -186,7 +213,9 @@ class BlenderAdapter(DCCAdapter):
         LOG.info("ensure_prim: creating %s '%s' for %s", type_name, name, prim_path)
 
         new = None
-        if type_name in ("Sphere", "Cube", "Cylinder", "Cone"):
+        if type_name in self._USDLUX_TO_BLENDER_LIGHT:
+            new = self._create_blender_light(name, type_name)
+        if new is None and type_name in ("Sphere", "Cube", "Cylinder", "Cone"):
             new = self._create_mesh_primitive(name, type_name)
         if new is None and type_name == "Mesh":
             new = bpy.data.objects.new(name, bpy.data.meshes.new(name + "_mesh"))
@@ -228,11 +257,35 @@ class BlenderAdapter(DCCAdapter):
                 LOG.warning("Failed to move %s to collection %s", obj.name, target_col.name)
         LOG.info("ensure_prim: parented '%s' under '%s'", obj.name, parent_obj.name)
 
-    # Prim types that don't need scene objects — handled by their
-    # dedicated event handlers (set_shader_input, set_material_binding).
-    _NON_SCENE_TYPES = {"Material", "Shader", "NodeGraph", "Scope"}
+    # Light types with no direct Blender object equivalent — they're skipped
+    # in ensure_prim. DomeLight should become a World environment (follow-up);
+    # CylinderLight has no Blender area-shape match; the remaining typed
+    # schemas (Geometry/Portal/Plugin) are non-physical or plugin-specific.
+    # The 4 supported lights (SphereLight, DistantLight, RectLight, DiskLight)
+    # flow through _create_blender_object via _USDLUX_TO_BLENDER_LIGHT.
+    _SKIPPED_LIGHT_TYPES = frozenset({
+        "DomeLight",
+        "CylinderLight", "GeometryLight", "PortalLight", "PluginLight",
+    })
 
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
+    # Prim types that don't need scene objects — handled by their dedicated
+    # event handlers (set_connectable_input, set_material_binding) or out of
+    # scope for the Blender adapter today.
+    _NON_SCENE_TYPES = (
+        frozenset({"Material", "Shader", "NodeGraph", "Scope"}) | _SKIPPED_LIGHT_TYPES
+    )
+
+    def ensure_prim(
+        self,
+        prim_path: str,
+        type_name: str = "Xform",
+        api_schemas: list[str] | None = None,
+    ) -> bool:
+        # api_schemas (ShapingAPI, ShadowAPI, etc.) are USD-stage-only state
+        # in the Blender adapter — there's no corresponding Blender object
+        # property. They're already applied to the mirror stage by the
+        # EventDispatcher; nothing to do on the Blender object itself.
+        del api_schemas
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.ensure_prim dry: %s", prim_path)
             return True
@@ -527,22 +580,84 @@ class BlenderAdapter(DCCAdapter):
             if not tagged_path or tagged_path == material_path:
                 bpy.data.materials.remove(mat)
 
-    def set_shader_input(
-        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    def set_connectable_input(
+        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
     ) -> bool:
         if not BPY_AVAILABLE:
             return True
-        mapper = self._shader_registry.get(shader_id)
+        # When ``info_id`` is non-empty, the prim is a UsdShade.Shader and
+        # the value is its Sdr identifier — look up a registered shader
+        # mapper. When empty, the prim is a NodeGraph/Material/UsdLux Light;
+        # route through the light-input handler (no-op for NodeGraph/Material
+        # since the prim has no LIGHT Blender object).
+        if not info_id:
+            return self._apply_light_input(prim_path, inputs, input_types)
+        mapper = self._shader_registry.get(info_id)
         if not mapper:
-            LOG.warning("set_shader_input: unsupported shader %s", shader_id)
+            LOG.warning("set_connectable_input: unsupported shader %s", info_id)
             return True
 
-        # Cache the shader_id for later use by set_shader_connection
-        self._registry.set_shader(prim_path, shader_id=shader_id)
+        # Cache the Sdr id for later use by set_connectable_connection.
+        # The PrimRegistry's `shader_id` kwarg is the registry's own field
+        # name; the value we pass is the connectable's info_id.
+        self._registry.set_shader(prim_path, shader_id=info_id)
 
         if mapper.is_multi_node:
             return self._apply_multi_node_shader(prim_path, mapper, inputs)
         return self._apply_single_node_shader(prim_path, mapper, inputs)
+
+    def _apply_light_input(self, prim_path: str, inputs: dict, input_types: dict) -> bool:
+        """Route UsdLux light inputs to the Blender light data block.
+
+        Conversion table (matches what Blender's own USD importer does for
+        the common cases — Cycles-flavored, no per-renderer divergence):
+
+        - ``intensity``        → ``light.data.energy``         (1:1; per-renderer
+          unit conversion is a follow-up — Cycles wants Watts, USD authors
+          in nits/lumens/Watts depending on schema)
+        - ``color``            → ``light.data.color``          (RGB, no alpha)
+        - ``radius`` on POINT  → ``light.data.shadow_soft_size`` (light radius)
+        - ``radius`` on AREA DISK → ``light.data.size``        (Blender uses diameter)
+        - ``width``  on AREA   → ``light.data.size``
+        - ``height`` on AREA   → ``light.data.size_y``
+        - ``angle``  on SUN    → ``light.data.angle``          (USD deg → Blender rad)
+
+        UsdLux inputs without a clean Blender equivalent on the current
+        light type (e.g. ``shaping:cone:angle`` on a POINT — would require
+        promoting the SphereLight to a SPOT, follow-up) are silently
+        skipped.
+        """
+        del input_types  # unused; reserved for type-aware dispatch follow-ups
+        obj = self._find_object_by_prim(prim_path)
+        if obj is None or obj.type != "LIGHT":
+            return True  # not a light we created; treat as no-op
+        light_data = obj.data
+        for usd_name, value in inputs.items():
+            self._apply_one_light_input(light_data, usd_name, value)
+        return True
+
+    @staticmethod
+    def _apply_one_light_input(light_data, usd_name: str, value) -> None:
+        """Write one USD light input onto a bpy.types.Light. See
+        ``_apply_light_input`` for the mapping table."""
+        import math
+
+        blender_type = light_data.type  # POINT, SUN, AREA, SPOT
+        if usd_name == "intensity":
+            light_data.energy = float(value)
+        elif usd_name == "color" and isinstance(value, (list, tuple)) and len(value) >= 3:
+            light_data.color = (float(value[0]), float(value[1]), float(value[2]))
+        elif usd_name == "radius":
+            if blender_type == "POINT":
+                light_data.shadow_soft_size = float(value)
+            elif blender_type == "AREA" and light_data.shape == "DISK":
+                light_data.size = float(value) * 2.0  # USD radius vs Blender diameter
+        elif usd_name == "width" and blender_type == "AREA":
+            light_data.size = float(value)
+        elif usd_name == "height" and blender_type == "AREA":
+            light_data.size_y = float(value)
+        elif usd_name == "angle" and blender_type == "SUN":
+            light_data.angle = math.radians(float(value))
 
     def _apply_single_node_shader(self, prim_path, mapper, inputs):
         """Apply shader inputs to a single Blender node."""
@@ -551,7 +666,7 @@ class BlenderAdapter(DCCAdapter):
             mapper.node_type,
         )
         if not mat or not node:
-            LOG.warning("set_shader_input: no mat/node for %s", prim_path)
+            LOG.warning("set_connectable_input: no mat/node for %s", prim_path)
             return False
 
         node["usd_shader_path"] = prim_path
@@ -566,7 +681,7 @@ class BlenderAdapter(DCCAdapter):
             )
         mapper.post_apply(node, inputs)
 
-        LOG.info("set_shader_input: %s on %s", list(inputs.keys()), node.name)
+        LOG.info("set_connectable_input: %s on %s", list(inputs.keys()), node.name)
         return True
 
     def _prepare_tree_for_network(self, tree):
@@ -654,7 +769,7 @@ class BlenderAdapter(DCCAdapter):
                 socket.default_value = value
 
         LOG.info(
-            "set_shader_input (multi-node): %s on %s",
+            "set_connectable_input (multi-node): %s on %s",
             list(inputs.keys()),
             prim_path,
         )
@@ -729,7 +844,7 @@ class BlenderAdapter(DCCAdapter):
         ("ShaderNodeUVMap", "result"): "UV",
     }
 
-    def set_shader_connection(
+    def set_connectable_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
         if not BPY_AVAILABLE:
@@ -737,7 +852,7 @@ class BlenderAdapter(DCCAdapter):
         mat = self._find_material_for_shader(prim_path)
         if not mat or not mat.use_nodes:
             LOG.warning(
-                "set_shader_connection: no material for %s",
+                "set_connectable_connection: no material for %s",
                 prim_path,
             )
             return False
@@ -756,7 +871,7 @@ class BlenderAdapter(DCCAdapter):
                 # Blender has no first-class node for either. Material's
                 # outputs:surface wiring is already synthesized by the
                 # ShaderMapper's _wire_surface_to_material_output path on
-                # set_shader_input.  NodeGraph output ports are flattened
+                # set_connectable_input.  NodeGraph output ports are flattened
                 # at asset-import time. Live skip is correct for both.
                 continue
 
@@ -817,7 +932,7 @@ class BlenderAdapter(DCCAdapter):
                     tree.links.remove(link)
 
         LOG.info(
-            "set_shader_connection: %s on %s",
+            "set_connectable_connection: %s on %s",
             list(connections.keys()),
             mat.name,
         )
@@ -1123,7 +1238,7 @@ class BlenderAdapter(DCCAdapter):
                                 )
                                 remapped_conns[local_attr] = {
                                     "source_prim": _remap(flat_path),
-                                    "source_attr": shader_output_attr(
+                                    "source_attr": output_attr(
                                         flat_base,
                                     ).qualified_name,
                                 }
@@ -1137,7 +1252,7 @@ class BlenderAdapter(DCCAdapter):
                         connection_events.append((scene_path, remapped_conns))
 
         # Bindings first so materials are tagged with usd_material_path
-        # before set_shader_input looks them up.
+        # before set_connectable_input looks them up.
         for scene_path, target in binding_events:
             self.set_material_binding(scene_path, target)
         # Blender's USD importer already handles UsdPreviewSurface shaders.
@@ -1158,9 +1273,9 @@ class BlenderAdapter(DCCAdapter):
                 mat_path = scene_path.rsplit("/", 1)[0]
                 if mat_path in surface_multi_node_mats:
                     continue
-            self.set_shader_input(scene_path, sid, inputs, itypes)
+            self.set_connectable_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:
-            self.set_shader_connection(scene_path, conns)
+            self.set_connectable_connection(scene_path, conns)
 
         # Fix missing textures — Blender's USD importer creates Image Texture
         # nodes but often fails to resolve relative texture paths. Walk the
