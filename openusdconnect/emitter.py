@@ -9,8 +9,17 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
+import logging
 
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade
+
+from .connectable_attrs import (
+    USDSHADE_INPUT_PREFIX,
+    USDSHADE_OUTPUT_PREFIX,
+    ConnectableAttr,
+    input_attr,
+    output_attr,
+)
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -18,12 +27,12 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -32,13 +41,8 @@ from .protocol_constants import (
     PRIMVAR_PREFIX,
     REL_MATERIAL_BINDING,
 )
-from .shader_attrs import (
-    SHADER_INPUT_PREFIX,
-    SHADER_OUTPUT_PREFIX,
-    ShaderAttr,
-    shader_input_attr,
-    shader_output_attr,
-)
+
+LOG = logging.getLogger(__name__)
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
 _C_TRS = "trs"
@@ -50,18 +54,78 @@ _C_PAYLOAD_LOADED = "payload_loaded"
 _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
 _C_MATERIAL_BINDING = "material_binding"
-_C_SHADER_INPUTS = "shader_inputs"
-_C_SHADER_CONNECTIONS = "shader_connections"
+_C_CONNECTABLE_INPUTS = "connectable_inputs"
+_C_CONNECTABLE_CONNECTIONS = "connectable_connections"
+_C_API_SCHEMAS = "api_schemas"
 
 # Attribute prefixes that have dedicated event channels or are not geometry.
-# UsdShade inputs/outputs are mirrored by dedicated shader interface events.
-_SKIP_ATTR_PREFIXES = ("xformOp:", SHADER_INPUT_PREFIX, SHADER_OUTPUT_PREFIX)
+# UsdShade inputs/outputs are mirrored by dedicated connectable-interface events.
+_SKIP_ATTR_PREFIXES = ("xformOp:", USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Replicated API schemas — emit-side filter
+# ---------------------------------------------------------------------------
+#
+# Decides which applied API schemas show up in the api_schemas field of
+# ensure_prim events. Default ships with UsdLux schemas that any DCC needs
+# in the viewport. DCC integrations register their own at import time;
+# tests pass an explicit set via the NoticeEmitter constructor.
+
+DEFAULT_REPLICATED_API_SCHEMAS = frozenset({
+    "ShapingAPI", "ShadowAPI",          # UsdLux user-applied
+    "MeshLightAPI", "VolumeLightAPI",   # UsdLux user-applied (light on Mesh/Volume)
+    # NOTE: LightAPI is built-in for typed UsdLux lights — replicating it
+    # would add a redundant authored opinion. Excluded by design.
+    # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.
+    # NOTE: MotionAPI (motion-blur sampling) is render-time, not viewport —
+    # users who need it call register_replicated_api_schema("MotionAPI").
+})
+
+_REPLICATED_API_SCHEMAS: set[str] = set(DEFAULT_REPLICATED_API_SCHEMAS)
+
+
+def _validate_replicated_schema_name(name: str) -> None:
+    """Hard-reject ':instance' wire form (whitelisting the bare name matches
+    all instances automatically). Soft-reject unregistered names so
+    plugin-loaded-later schemas still work; typos get a clear warning.
+    """
+    if ":" in name:
+        raise ValueError(
+            f"register_replicated_api_schema expects a bare schema name; "
+            f"got {name!r}. Whitelist 'CollectionAPI' to replicate all instances."
+        )
+    if not Usd.SchemaRegistry.IsAppliedAPISchema(name):
+        LOG.warning(
+            "Schema %r is not currently a registered applied API schema. "
+            "Adding to whitelist anyway (plugin may load later); if it never "
+            "resolves, the whitelist entry has no effect.",
+            name,
+        )
+
+
+def register_replicated_api_schema(name: str) -> None:
+    """Add an API schema to the global replicate-list for new NoticeEmitters.
+
+    DCC integrations call at import time to add their own schemas. Existing
+    NoticeEmitters that snapshotted the global already are unaffected — only
+    NoticeEmitters constructed AFTER the call pick up the addition.
+
+    Validated against Usd.SchemaRegistry.IsAppliedAPISchema(name).
+    """
+    _validate_replicated_schema_name(name)
+    _REPLICATED_API_SCHEMAS.add(name)
+
+
+def unregister_replicated_api_schema(name: str) -> None:
+    """Remove an API schema from the global replicate-list."""
+    _REPLICATED_API_SCHEMAS.discard(name)
 
 # Individual attributes to skip:
 #   visibility, xformOpOrder — have dedicated event channels
 #   extent     — bounding box, computed from geometry by USD
 #   proxyPrim  — relationship target, not a value attribute
-#   info:id    — shader type identifier, handled by set_shader_input
+#   info:id    — shader type identifier, handled by set_connectable_input
 _SKIP_ATTR_NAMES = frozenset(
     {
         "visibility",
@@ -294,7 +358,7 @@ def read_material_binding(stage, prim_path):
     return str(targets[0]) if targets else ""
 
 
-def _connected_source_attr(src) -> ShaderAttr:
+def _connected_source_attr(src) -> ConnectableAttr:
     """Return the protocol attribute reference for a UsdShade connection source.
 
     Uses `sourceType` to choose `inputs:` vs `outputs:` so we cover the
@@ -302,21 +366,22 @@ def _connected_source_attr(src) -> ShaderAttr:
     input.
     """
     if src.sourceType == UsdShade.AttributeType.Output:
-        return shader_output_attr(src.sourceName)
-    return shader_input_attr(src.sourceName)
+        return output_attr(src.sourceName)
+    return input_attr(src.sourceName)
 
 
 def read_usdshade_connectable(stage, prim_path):
     """Read interface data from a UsdShade.ConnectableAPI-bearing prim.
 
-    Polymorphic over Shader, NodeGraph, and Material (Material inherits
-    NodeGraph in UsdShade).  Reads authored input values, their USD types,
-    and any authored connections — on inputs AND outputs.
+    Polymorphic over Shader, NodeGraph, Material (Material inherits
+    NodeGraph in UsdShade), and UsdLux lights (LightAPI is a UsdShade
+    connectable container).  Reads authored input values, their USD
+    types, and any authored connections — on inputs AND outputs.
 
-    Returns (container_kind, shader_id, inputs, input_types, connections):
+    Returns (container_kind, info_id, inputs, input_types, connections):
       - container_kind: "" if the prim doesn't bear an interface, otherwise
-        "shader" or "nodegraph" (the latter also covers Material).
-      - shader_id: info:id for Shader prims, "" for NodeGraph/Material
+        "shader", "nodegraph" (covers Material), or "light".
+      - info_id: info:id for Shader prims, "" for NodeGraph/Material/Light
         which carry no info:id by design.
       - inputs/input_types: keyed by the input's base name (no namespace
         prefix), since these are direct values, not connection edges.
@@ -337,15 +402,21 @@ def read_usdshade_connectable(stage, prim_path):
     if prim.IsA(UsdShade.Shader):
         container_kind = "shader"
         shader = UsdShade.Shader(prim)
-        shader_id = shader.GetIdAttr().Get() or ""
-        if not shader_id:
+        info_id = shader.GetIdAttr().Get() or ""
+        if not info_id:
             return "", "", {}, {}, {}
         connectable = shader
     elif prim.IsA(UsdShade.NodeGraph):
         # NodeGraph covers Material — Material inherits from NodeGraph.
         container_kind = "nodegraph"
-        shader_id = ""
+        info_id = ""
         connectable = UsdShade.NodeGraph(prim)
+    elif prim.HasAPI(UsdLux.LightAPI):
+        # LightAPI is built-in on typed UsdLux lights (SphereLight, etc.) and
+        # user-applied via MeshLightAPI/VolumeLightAPI on Mesh/Volume prims.
+        container_kind = "light"
+        info_id = ""
+        connectable = UsdShade.ConnectableAPI(prim)
     else:
         return "", "", {}, {}, {}
 
@@ -359,7 +430,7 @@ def read_usdshade_connectable(stage, prim_path):
         name = inp.GetBaseName()
         sources, _ = inp.GetConnectedSources()
         if sources:
-            connections[shader_input_attr(name).qualified_name] = {
+            connections[input_attr(name).qualified_name] = {
                 "source_prim": str(sources[0].source.GetPath()),
                 "source_attr": _connected_source_attr(sources[0]).qualified_name,
             }
@@ -379,12 +450,12 @@ def read_usdshade_connectable(stage, prim_path):
         sources, _ = outp.GetConnectedSources()
         if not sources:
             continue
-        connections[shader_output_attr(outp.GetBaseName()).qualified_name] = {
+        connections[output_attr(outp.GetBaseName()).qualified_name] = {
             "source_prim": str(sources[0].source.GetPath()),
             "source_attr": _connected_source_attr(sources[0]).qualified_name,
         }
 
-    return container_kind, shader_id, inputs, input_types, connections
+    return container_kind, info_id, inputs, input_types, connections
 
 
 # ---------------------------------------------------------------------------
@@ -490,23 +561,23 @@ def _invalidate_set_material_binding(emitter, prim_path, _ev):
     )
 
 
-def _invalidate_set_shader_input(emitter, prim_path, _ev):
-    container_kind, shader_id, inputs, _, _ = read_usdshade_connectable(
+def _invalidate_set_connectable_input(emitter, prim_path, _ev):
+    container_kind, info_id, inputs, _, _ = read_usdshade_connectable(
         emitter.stage, prim_path,
     )
     if container_kind:
-        emitter._prim_cache.setdefault(prim_path, {})[_C_SHADER_INPUTS] = {
-            "shader_id": shader_id,
+        emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE_INPUTS] = {
+            "info_id": info_id,
             "inputs": inputs,
         }
 
 
-def _invalidate_set_shader_connection(emitter, prim_path, _ev):
+def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
     container_kind, _, _, _, connections = read_usdshade_connectable(
         emitter.stage, prim_path,
     )
     if container_kind:
-        emitter._prim_cache.setdefault(prim_path, {})[_C_SHADER_CONNECTIONS] = connections
+        emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE_CONNECTIONS] = connections
 
 
 _INVALIDATE_DISPATCH = {
@@ -520,8 +591,8 @@ _INVALIDATE_DISPATCH = {
     K_UNLOAD_PAYLOAD: _invalidate_unload_payload,
     K_SET_VARIANT_SELECTIONS: _invalidate_set_variant_selections,
     K_SET_MATERIAL_BINDING: _invalidate_set_material_binding,
-    K_SET_SHADER_INPUT: _invalidate_set_shader_input,
-    K_SET_SHADER_CONNECTION: _invalidate_set_shader_connection,
+    K_SET_CONNECTABLE_INPUT: _invalidate_set_connectable_input,
+    K_SET_CONNECTABLE_CONNECTION: _invalidate_set_connectable_connection,
 }
 
 
@@ -560,7 +631,13 @@ class NoticeEmitter:
         # events is a list of event dicts ready to wrap in a txn
     """
 
-    def __init__(self, stage: Usd.Stage, attr_filter=None):
+    def __init__(
+        self,
+        stage: Usd.Stage,
+        attr_filter=None,
+        *,
+        replicated_api_schemas: set[str] | None = None,
+    ):
         """
         Args:
             stage: The Usd.Stage to watch.
@@ -569,9 +646,22 @@ class NoticeEmitter:
                 Return True to track, False to skip. If None, uses the
                 default _should_track_attr which skips xformOps, visibility,
                 extent, etc. Primvars ARE tracked by default.
+            replicated_api_schemas: Optional explicit override of the API
+                schema names to replicate via the ensure_prim ``api_schemas``
+                field. Each name must be a bare schema name (no
+                ``":instance"``). If None, snapshots the module-level
+                ``_REPLICATED_API_SCHEMAS`` at construction (default behavior
+                — DCC integrations register their schemas at import time,
+                then any later-constructed emitter picks them up).
         """
         self._attr_filter = attr_filter or _should_track_attr
         self.stage = stage
+        if replicated_api_schemas is not None:
+            for n in replicated_api_schemas:
+                _validate_replicated_schema_name(n)
+            self._replicated_apis: frozenset[str] = frozenset(replicated_api_schemas)
+        else:
+            self._replicated_apis = frozenset(_REPLICATED_API_SCHEMAS)
         self.dirty: set[str] = set()
         self._known_prims: set[str] = set()
         self._deleted_prims: set[str] = set()
@@ -582,12 +672,26 @@ class NoticeEmitter:
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         # Per-prim diff cache. Each prim_path maps to a dict with keys:
         #   trs, mats, visibility, references, payloads, payload_loaded,
-        #   variant_selections, gprim_attrs
+        #   variant_selections, gprim_attrs, api_schemas
         # Adding a new cache key only requires updating the diff code —
         # _migrate_caches and _purge_caches handle all keys automatically.
         self._prim_cache: dict[str, dict] = {}
         self._dirty_attrs: dict[str, set[str]] = {}
         self._resynced_prims: set[str] = set()
+
+    def _filtered_api_schemas(self, prim: Usd.Prim) -> set[str]:
+        """Return prim's applied schemas filtered through the whitelist.
+
+        Schema names match USD's GetAppliedSchemas() format: bare ``"Name"``
+        for single-apply, ``"Name:instance"`` for multi-apply. Returned as a
+        set — api_schemas is logically unordered (composition reorderings
+        shouldn't trigger spurious re-emits). Callers materialize a list at
+        the wire boundary.
+        """
+        if not prim or not prim.IsValid():
+            return set()
+        apis = self._replicated_apis
+        return {n for n in prim.GetAppliedSchemas() if n.split(":", 1)[0] in apis}
 
     def cleanup(self):
         """Deregister notice listener and clear all caches.
@@ -638,14 +742,17 @@ class NoticeEmitter:
                         gprim_snapshot[name] = val
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
-            # Seed shader/nodegraph interface inputs and connections.
-            container_kind, shader_id, inputs, _types, connections = read_usdshade_connectable(
+            # Seed connectable interface inputs and connections.
+            container_kind, info_id, inputs, _types, connections = read_usdshade_connectable(
                 stage, cp
             )
             if container_kind:
-                pc[_C_SHADER_INPUTS] = {"shader_id": shader_id, "inputs": inputs}
+                pc[_C_CONNECTABLE_INPUTS] = {"info_id": info_id, "inputs": inputs}
                 if connections:
-                    pc[_C_SHADER_CONNECTIONS] = connections
+                    pc[_C_CONNECTABLE_CONNECTIONS] = connections
+            # Seed the api_schemas snapshot so a later diff cycle doesn't
+            # spuriously re-emit ensure_prim on first encounter.
+            pc[_C_API_SCHEMAS] = self._filtered_api_schemas(child)
 
     def suppress(self):
         """Suppress notice collection (feedback guard).
@@ -879,13 +986,34 @@ class NoticeEmitter:
             type_name = ""
             if prim and prim.IsValid():
                 type_name = str(prim.GetTypeName())
-            events.append({"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": type_name})
+            api_schemas = self._filtered_api_schemas(prim)
+            events.append({
+                "k": K_ENSURE_PRIM,
+                "prim": prim_path,
+                "typeName": type_name,
+                "api_schemas": list(api_schemas),
+            })
+            pc[_C_API_SCHEMAS] = api_schemas
             # Only emit xform ops for prims that have transforms —
             # Materials, Shaders, NodeGraphs, Scopes don't.
             xf = UsdGeom.Xformable(prim) if prim else None
             if xf and xf.GetXformOpOrderAttr().IsAuthored():
                 events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._known_prims.add(prim_path)
+        else:
+            # Re-emit ensure_prim when the applied api_schemas change (e.g.
+            # ShapingAPI applied to an existing SphereLight to make it a spot).
+            last_apis = pc.get(_C_API_SCHEMAS)
+            current_apis = self._filtered_api_schemas(prim)
+            if last_apis is not None and current_apis != last_apis:
+                type_name = str(prim.GetTypeName()) if prim and prim.IsValid() else ""
+                events.append({
+                    "k": K_ENSURE_PRIM,
+                    "prim": prim_path,
+                    "typeName": type_name,
+                    "api_schemas": list(current_apis),
+                })
+                pc[_C_API_SCHEMAS] = current_apis
 
         # Variant selection diff (V before R in LIVERPS)
         current_vsel = read_variant_selections(self.stage, prim_path)
@@ -950,54 +1078,56 @@ class NoticeEmitter:
             )
             pc[_C_MATERIAL_BINDING] = current_binding
 
-        # Shader/NodeGraph interface input + connection diff
-        container_kind, shader_id, current_inputs, current_types, current_conns = (
+        # UsdShade.ConnectableAPI interface input + connection diff
+        # (covers Shader, NodeGraph, Material, and UsdLux lights uniformly)
+        container_kind, info_id, current_inputs, current_types, current_conns = (
             read_usdshade_connectable(self.stage, prim_path)
         )
         if container_kind:
             # Value diff
-            last_shader = pc.get(_C_SHADER_INPUTS, {})
-            last_inputs = last_shader.get("inputs", {})
+            last_connectable = pc.get(_C_CONNECTABLE_INPUTS, {})
+            last_inputs = last_connectable.get("inputs", {})
             changed_inputs = {}
             changed_types = {}
             for name, val in current_inputs.items():
                 if not _values_equal(val, last_inputs.get(name)):
                     changed_inputs[name] = val
                     changed_types[name] = current_types[name]
-            # Also emit when the shader_id itself transitions (e.g. first
+            # Also emit when the info_id itself transitions (e.g. first
             # encounter of a Shader whose inputs are all connections — its
-            # info:id would otherwise never reach the receiver).
-            shader_id_changed = bool(shader_id) and shader_id != last_shader.get("shader_id")
-            if changed_inputs or shader_id_changed:
+            # info:id would otherwise never reach the receiver). Lights and
+            # nodegraphs carry empty info_id so this guard is False for them.
+            info_id_changed = bool(info_id) and info_id != last_connectable.get("info_id")
+            if changed_inputs or info_id_changed:
                 events.append(
                     {
-                        "k": K_SET_SHADER_INPUT,
+                        "k": K_SET_CONNECTABLE_INPUT,
                         "prim": prim_path,
-                        "shader_id": shader_id,
+                        "info_id": info_id,
                         "inputs": changed_inputs,
                         "input_types": changed_types,
                     }
                 )
-            pc[_C_SHADER_INPUTS] = {
-                "shader_id": shader_id,
+            pc[_C_CONNECTABLE_INPUTS] = {
+                "info_id": info_id,
                 "inputs": current_inputs,
             }
 
             # Connection diff
-            last_conns = pc.get(_C_SHADER_CONNECTIONS, {})
+            last_conns = pc.get(_C_CONNECTABLE_CONNECTIONS, {})
             if current_conns != last_conns:
                 new_conns = {k: v for k, v in current_conns.items() if v != last_conns.get(k)}
                 removed = [k for k in last_conns if k not in current_conns]
                 if new_conns or removed:
                     ev = {
-                        "k": K_SET_SHADER_CONNECTION,
+                        "k": K_SET_CONNECTABLE_CONNECTION,
                         "prim": prim_path,
                         "connections": new_conns,
                     }
                     if removed:
                         ev["disconnections"] = removed
                     events.append(ev)
-                pc[_C_SHADER_CONNECTIONS] = current_conns
+                pc[_C_CONNECTABLE_CONNECTIONS] = current_conns
 
         # TRS partial diff — skip for prims without authored xform ops
         xf = UsdGeom.Xformable(prim) if prim else None

@@ -40,8 +40,8 @@ class PrimvarMeta(TypedDict):
     interpolation: NotRequired[str]
 
 
-class ShaderConnSource(TypedDict):
-    """Upstream end of a shader connection edge.
+class ConnSource(TypedDict):
+    """Upstream end of a UsdShade connection edge.
 
     Both ``source_prim`` and ``source_attr`` are required; ``source_attr``
     is namespace-qualified (``"inputs:..."`` or ``"outputs:..."``).
@@ -59,9 +59,9 @@ class ShaderConnSource(TypedDict):
 # at encode time and dispatches to scalar / typed-array / JSON-fallback paths.
 AttrValue = bool | int | float | str | list | np.ndarray
 
-# Values acceptable in ``SetShaderInput.inputs``. Narrower than ``AttrValue``
+# Values acceptable in ``SetConnectableInput.inputs``. Narrower than ``AttrValue``
 # because UsdShade inputs are scalars or fixed-stride float vectors.
-ShaderInputValue = bool | int | float | str | list[float]
+ConnectableInputValue = bool | int | float | str | list[float]
 
 
 # ---------------------------------------------------------------------------
@@ -70,11 +70,17 @@ ShaderInputValue = bool | int | float | str | list[float]
 
 
 class EnsurePrim(TypedDict):
-    """Idempotent ``DefinePrim``. ``typeName`` may be ``""`` for untyped scopes."""
+    """Idempotent ``DefinePrim``. ``typeName`` may be ``""`` for untyped scopes.
+
+    ``api_schemas`` carries applied API schema names — bare ``"Name"`` for
+    single-apply, ``"Name:instance"`` for multi-apply. Additive only on the
+    receive side; never removes schemas.
+    """
 
     k: Literal["ensure_prim"]
     prim: str
     typeName: str
+    api_schemas: NotRequired[list[str]]
 
 
 class EnsureXformOps(TypedDict):
@@ -205,31 +211,34 @@ class SetMaterialBinding(TypedDict):
     material_path: str
 
 
-class SetShaderInput(TypedDict):
-    """Shader id + named input values on a UsdShade connectable.
+class SetConnectableInput(TypedDict):
+    """Named input values on a UsdShade.ConnectableAPI container.
 
+    Covers shaders, node graphs, materials, and UsdLux lights uniformly.
+    ``info_id`` is the UsdShade ``info:id`` (Sdr identifier) for
+    ``UsdShade.Shader`` prims; empty for nodegraphs, materials, and lights.
     ``input_types`` carries Sdf type names (e.g. ``"Color3f"``, ``"Float"``)
     keyed by the same input names as ``inputs``.
     """
 
-    k: Literal["set_shader_input"]
+    k: Literal["set_connectable_input"]
     prim: str
-    shader_id: str
-    inputs: dict[str, ShaderInputValue]
+    info_id: str
+    inputs: dict[str, ConnectableInputValue]
     input_types: NotRequired[dict[str, str]]
 
 
-class SetShaderConnection(TypedDict):
-    """Batch of shader/nodegraph connection edges.
+class SetConnectableConnection(TypedDict):
+    """Batch of UsdShade.ConnectableAPI connection edges.
 
     Keys in ``connections`` are namespace-qualified local attrs on the
     target prim (e.g. ``"inputs:diffuseColor"``, ``"outputs:surface"``);
     values point upstream. ``disconnections`` lists local attrs to clear.
     """
 
-    k: Literal["set_shader_connection"]
+    k: Literal["set_connectable_connection"]
     prim: str
-    connections: dict[str, ShaderConnSource]
+    connections: dict[str, ConnSource]
     disconnections: NotRequired[list[str]]
 
 
@@ -253,8 +262,8 @@ Event = (
     | UnloadPayload
     | SetVariantSelections
     | SetMaterialBinding
-    | SetShaderInput
-    | SetShaderConnection
+    | SetConnectableInput
+    | SetConnectableConnection
 )
 
 
@@ -358,9 +367,9 @@ def all_specs() -> list[EventSpec]:
 __all__ = [
     "ArcEntry",
     "PrimvarMeta",
-    "ShaderConnSource",
+    "ConnSource",
     "AttrValue",
-    "ShaderInputValue",
+    "ConnectableInputValue",
     "EnsurePrim",
     "EnsureXformOps",
     "SetXformTRS",
@@ -376,8 +385,8 @@ __all__ = [
     "UnloadPayload",
     "SetVariantSelections",
     "SetMaterialBinding",
-    "SetShaderInput",
-    "SetShaderConnection",
+    "SetConnectableInput",
+    "SetConnectableConnection",
     "Event",
     "EventSpec",
     "register_encoder",

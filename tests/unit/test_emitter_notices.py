@@ -13,12 +13,12 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
 )
@@ -1406,9 +1406,11 @@ class TestMaterialEmission:
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"
+        ]
         assert len(shader_evs) == 1
-        assert shader_evs[0]["shader_id"] == "UsdPreviewSurface"
+        assert shader_evs[0]["info_id"] == "UsdPreviewSurface"
         assert "diffuseColor" in shader_evs[0]["inputs"]
         assert "roughness" in shader_evs[0]["inputs"]
         assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
@@ -1431,16 +1433,18 @@ class TestMaterialEmission:
         tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/Tex"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/Tex"
+        ]
         assert len(shader_evs) == 1
         ev = shader_evs[0]
-        assert ev["shader_id"] == "UsdUVTexture"
+        assert ev["info_id"] == "UsdUVTexture"
         assert ev["inputs"].get("file") == "./r_normal_map.png"
         assert ev["input_types"].get("file") == "asset"
 
     def test_nodegraph_interface_input_emitted(self):
         """A NodeGraph with an authored interface input emits a
-        K_SET_SHADER_INPUT event with empty shader_id (NodeGraphs and
+        K_SET_CONNECTABLE_INPUT event with empty info_id (NodeGraphs and
         Materials carry no info:id).  Required for replicating MaterialX
         scenes that promote inputs onto a wrapping NodeGraph."""
         from pxr import Sdf, UsdShade
@@ -1454,17 +1458,17 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         ng_evs = [
-            e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/NG_Inner"
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/NG_Inner"
         ]
         assert len(ng_evs) == 1
         ev = ng_evs[0]
-        assert ev["shader_id"] == ""  # NodeGraph has no info:id
+        assert ev["info_id"] == ""  # NodeGraph has no info:id
         assert ev["inputs"].get("tint") == [1.0, 0.5, 0.25]
         assert ev["input_types"].get("tint") == "color3f"
 
     def test_material_output_connection_emitted(self):
         """A Material's outputs:surface.connect = <shader.outputs:surface>
-        edge emits a K_SET_SHADER_CONNECTION event with the qualified
+        edge emits a K_SET_CONNECTABLE_CONNECTION event with the qualified
         local_attr "outputs:surface" — same wire shape as input-side
         connections, just a different prefix."""
         from pxr import Sdf, UsdShade
@@ -1479,7 +1483,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         mat_conn_evs = [
-            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat"
+            e for e in events if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat"
         ]
         assert len(mat_conn_evs) == 1
         conns = mat_conn_evs[0]["connections"]
@@ -1504,7 +1508,7 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         ng_conn_evs = [
-            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG"
+            e for e in events if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat/NG"
         ]
         assert len(ng_conn_evs) == 1
         conns = ng_conn_evs[0]["connections"]
@@ -1529,7 +1533,8 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty(include_matrices=False)
         mul_conn_evs = [
-            e for e in events if e["k"] == K_SET_SHADER_CONNECTION and e["prim"] == "/Mat/NG/mul"
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat/NG/mul"
         ]
         assert len(mul_conn_evs) == 1
         conn = mul_conn_evs[0]["connections"]["inputs:in2"]
@@ -1560,7 +1565,9 @@ class TestMaterialEmission:
         # Change only roughness
         shader.GetInput("roughness").Set(0.9)
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT and e["prim"] == "/Mat/PBR"]
+        shader_evs = [
+            e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Mat/PBR"
+        ]
         assert len(shader_evs) == 1
         assert "roughness" in shader_evs[0]["inputs"]
         assert "diffuseColor" not in shader_evs[0]["inputs"]
@@ -1585,5 +1592,5 @@ class TestMaterialEmission:
         # Mark dirty but don't change anything
         emitter.mark_dirty("/Mat/PBR")
         events = emitter.build_events_for_dirty(include_matrices=False)
-        shader_evs = [e for e in events if e["k"] == K_SET_SHADER_INPUT]
+        shader_evs = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT]
         assert len(shader_evs) == 0

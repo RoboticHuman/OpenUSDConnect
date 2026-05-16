@@ -43,8 +43,8 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_XFORM_TRS,
 )
 from openusdconnect.server import UsdSyncServer
@@ -401,8 +401,8 @@ class TestMaterialXComposeParity:
             K_ENSURE_XFORM_OPS,
             K_SET_XFORM_TRS,
             K_SET_GPRIM_ATTRS,
-            K_SET_SHADER_INPUT,
-            K_SET_SHADER_CONNECTION,
+            K_SET_CONNECTABLE_INPUT,
+            K_SET_CONNECTABLE_CONNECTION,
             K_SET_MATERIAL_BINDING,
         }
         missing = expected - kinds

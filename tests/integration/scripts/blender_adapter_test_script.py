@@ -169,6 +169,391 @@ def test_ensure_prim_mesh(r):
     r.ok(name)
 
 
+def test_ensure_prim_supported_light_types_create_blender_lights(r):
+    """The 4 light types we translate (SphereLight→POINT, DistantLight→SUN,
+    RectLight→AREA RECTANGLE, DiskLight→AREA DISK) must create a Blender
+    LIGHT object with the right data type."""
+    name = "test_ensure_prim_supported_light_types_create_blender_lights"
+    cases = [
+        ("SphereLight", "POINT", None),
+        ("DistantLight", "SUN", None),
+        ("RectLight", "AREA", "RECTANGLE"),
+        ("DiskLight", "AREA", "DISK"),
+    ]
+    for usd_type, expected_blender_type, expected_shape in cases:
+        _clear_scene()
+        adapter = BlenderAdapter()
+        prim_path = f"/World/Test{usd_type}"
+        if not adapter.ensure_prim(prim_path, usd_type):
+            r.fail(name, f"{usd_type} ensure_prim returned False")
+            return
+        obj = _find_by_prim(adapter, prim_path)
+        if obj is None:
+            r.fail(name, f"{usd_type} did not create a Blender object")
+            return
+        if obj.type != "LIGHT":
+            r.fail(name, f"{usd_type} → expected LIGHT object, got {obj.type}")
+            return
+        if obj.data.type != expected_blender_type:
+            r.fail(
+                name,
+                f"{usd_type} → expected light.data.type={expected_blender_type}, "
+                f"got {obj.data.type}",
+            )
+            return
+        if expected_shape is not None and obj.data.shape != expected_shape:
+            r.fail(
+                name,
+                f"{usd_type} → expected light.data.shape={expected_shape}, "
+                f"got {obj.data.shape}",
+            )
+            return
+    r.ok(name)
+
+
+def test_ensure_prim_skipped_light_types_create_no_object(r):
+    """Lights without any Blender equivalent (CylinderLight, GeometryLight,
+    PortalLight, PluginLight) must NOT create a stray Empty object — they
+    should be skipped via _NON_SCENE_TYPES. DomeLight is handled separately
+    by test_ensure_prim_domelight_sets_up_world_network."""
+    name = "test_ensure_prim_skipped_light_types_create_no_object"
+    for light_type in ("CylinderLight", "GeometryLight", "PortalLight", "PluginLight"):
+        _clear_scene()
+        adapter = BlenderAdapter()
+        prim_path = f"/World/Test{light_type}"
+        if not adapter.ensure_prim(prim_path, light_type):
+            r.fail(name, f"{light_type} ensure_prim returned False")
+            return
+        obj = _find_by_prim(adapter, prim_path)
+        if obj is not None:
+            r.fail(name, f"{light_type} created a stray Blender object: {obj.name} ({obj.type})")
+            return
+        stray = [o for o in bpy.data.objects if o.get("usd_prim_path") == prim_path]
+        if stray:
+            r.fail(name, f"{light_type} left {len(stray)} stray object(s) in bpy.data")
+            return
+    r.ok(name)
+
+
+def test_ensure_prim_domelight_sets_up_world_network(r):
+    """DomeLight is not a scene object — it sets up the World shader network
+    (TexCoord → Mapping → EnvTex → VectorMath → Background → WorldOutput)
+    matching what Blender's own USD importer produces."""
+    name = "test_ensure_prim_domelight_sets_up_world_network"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    if not adapter.ensure_prim("/World/Dome", "DomeLight"):
+        r.fail(name, "DomeLight ensure_prim returned False")
+        return
+    # No scene object.
+    obj = _find_by_prim(adapter, "/World/Dome")
+    if obj is not None:
+        r.fail(name, f"DomeLight created a stray object: {obj.name}")
+        return
+    # World network exists.
+    world = bpy.context.scene.world
+    if world is None or not world.use_nodes:
+        r.fail(name, "World missing or use_nodes False after ensure_prim(DomeLight)")
+        return
+    tree = world.node_tree
+    expected = {
+        "USD Dome World Output":         "ShaderNodeOutputWorld",
+        "USD Dome Background":           "ShaderNodeBackground",
+        "USD Dome Color Multiply":       "ShaderNodeVectorMath",
+        "USD Dome Environment Texture":  "ShaderNodeTexEnvironment",
+        "USD Dome Mapping":              "ShaderNodeMapping",
+        "USD Dome Texture Coordinate":   "ShaderNodeTexCoord",
+    }
+    for node_name, bl_idname in expected.items():
+        node = tree.nodes.get(node_name)
+        if node is None:
+            r.fail(name, f"missing node {node_name!r}")
+            return
+        if node.bl_idname != bl_idname:
+            r.fail(name, f"{node_name}: expected {bl_idname}, got {node.bl_idname}")
+            return
+    # Verify the wiring chain ends at WorldOutput.Surface from Background.
+    out = tree.nodes["USD Dome World Output"]
+    surface_input = out.inputs["Surface"]
+    if not surface_input.is_linked:
+        r.fail(name, "WorldOutput.Surface is not linked")
+        return
+    from_node = surface_input.links[0].from_node.name
+    if from_node != "USD Dome Background":
+        r.fail(name, f"WorldOutput.Surface from={from_node}, expected USD Dome Background")
+        return
+    # Output node is tagged with the dome's prim path.
+    if out.get("usd_dome_path") != "/World/Dome":
+        r.fail(name, f"WorldOutput usd_dome_path={out.get('usd_dome_path')}, expected /World/Dome")
+        return
+    r.ok(name)
+
+
+def test_set_connectable_input_domelight_writes_world_shader(r):
+    """USD DomeLight inputs (intensity, color, texture:file) write to the
+    correct nodes on the World shader."""
+    import os
+    import tempfile
+
+    name = "test_set_connectable_input_domelight_writes_world_shader"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Dome", "DomeLight")
+
+    # intensity → Background.Strength; color → VectorMath factor.
+    adapter.set_connectable_input(
+        "/World/Dome",
+        "",
+        {"intensity": 2.5, "color": [1.0, 0.8, 0.5]},
+        {"intensity": "float", "color": "color3f"},
+    )
+    world = bpy.context.scene.world
+    tree = world.node_tree
+    bg = tree.nodes["USD Dome Background"]
+    vm = tree.nodes["USD Dome Color Multiply"]
+
+    if abs(bg.inputs["Strength"].default_value - 2.5) > 1e-4:
+        r.fail(name, f"Background.Strength={bg.inputs['Strength'].default_value}, expected 2.5")
+        return
+    factor = tuple(vm.inputs[1].default_value)[:3]
+    if tuple(round(c, 3) for c in factor) != (1.0, 0.8, 0.5):
+        r.fail(name, f"VectorMath factor={factor}, expected (1.0,0.8,0.5)")
+        return
+
+    # texture:file with a real loadable image. Use a tiny 1x1 EXR by writing
+    # a Blender-internal image to disk, then loading via the dome path.
+    tmpdir = tempfile.mkdtemp()
+    exr_path = os.path.join(tmpdir, "tiny.hdr")
+    src_img = bpy.data.images.new("__tmp_hdr", width=4, height=2, float_buffer=True)
+    src_img.pixels = [0.5] * (4 * 2 * 4)
+    src_img.filepath_raw = exr_path
+    src_img.file_format = "HDR"
+    src_img.save()
+
+    adapter.set_connectable_input(
+        "/World/Dome",
+        "",
+        {"texture:file": exr_path},
+        {"texture:file": "asset"},
+    )
+    env = tree.nodes["USD Dome Environment Texture"]
+    if env.image is None:
+        r.fail(name, f"EnvironmentTexture.image is None after texture:file={exr_path!r}")
+        return
+    if env.image.colorspace_settings.name != "Non-Color":
+        r.fail(
+            name,
+            f"EnvironmentTexture colorspace={env.image.colorspace_settings.name!r}, "
+            f"expected 'Non-Color'",
+        )
+        return
+    r.ok(name)
+
+
+def test_set_xform_trs_domelight_writes_mapping_rotation(r):
+    """DomeLight Xform rotation should land on the Mapping node, not raise
+    a 'no object' warning (DomeLight has no scene object)."""
+    import math
+
+    name = "test_set_xform_trs_domelight_writes_mapping_rotation"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Dome", "DomeLight")
+
+    # 90° rotation around Y axis: quat = (cos(45°), 0, sin(45°), 0)
+    s = math.sin(math.radians(45))
+    c = math.cos(math.radians(45))
+    adapter.set_xform_trs("/World/Dome", r=[c, 0.0, s, 0.0])
+
+    world = bpy.context.scene.world
+    mapping = world.node_tree.nodes["USD Dome Mapping"]
+    rot = mapping.inputs["Rotation"].default_value
+    # Y of 90° = π/2 rad, X and Z should be 0.
+    if abs(rot[1] - math.pi / 2) > 1e-3:
+        r.fail(name, f"Mapping rotation Y={rot[1]}, expected π/2 (~1.5708)")
+        return
+    if abs(rot[0]) > 1e-3 or abs(rot[2]) > 1e-3:
+        r.fail(name, f"Mapping rotation X={rot[0]}, Z={rot[2]}, expected ~0")
+        return
+    r.ok(name)
+
+
+def test_multi_domelight_last_wins(r):
+    """When two DomeLights are sequenced through ensure_prim, the most
+    recently-ensured one becomes the active dome and drives subsequent
+    inputs. The earlier dome's inputs are silently ignored."""
+    name = "test_multi_domelight_last_wins"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/DomeA", "DomeLight")
+    # First dome owns the World, set its intensity.
+    adapter.set_connectable_input(
+        "/World/DomeA", "",
+        {"intensity": 1.0}, {"intensity": "float"},
+    )
+    bg = bpy.context.scene.world.node_tree.nodes["USD Dome Background"]
+    if abs(bg.inputs["Strength"].default_value - 1.0) > 1e-4:
+        r.fail(name, "DomeA failed to set initial intensity")
+        return
+
+    # Second dome takes over.
+    adapter.ensure_prim("/World/DomeB", "DomeLight")
+    adapter.set_connectable_input(
+        "/World/DomeB", "",
+        {"intensity": 7.0}, {"intensity": "float"},
+    )
+    if abs(bg.inputs["Strength"].default_value - 7.0) > 1e-4:
+        r.fail(name, f"DomeB intensity not applied; got {bg.inputs['Strength'].default_value}")
+        return
+
+    # DomeA's later updates are silently ignored (last-wins).
+    adapter.set_connectable_input(
+        "/World/DomeA", "",
+        {"intensity": 99.0}, {"intensity": "float"},
+    )
+    if abs(bg.inputs["Strength"].default_value - 7.0) > 1e-4:
+        r.fail(name, f"DomeA stale update leaked; intensity={bg.inputs['Strength'].default_value}")
+        return
+    r.ok(name)
+
+
+def test_ensure_prim_light_with_api_schemas(r):
+    """Light ensure_prim must accept the api_schemas kwarg without error
+    (lights flow with api_schemas=['ShapingAPI'] etc. — the kwarg is
+    USD-stage-only on the Blender side, but it must not raise)."""
+    name = "test_ensure_prim_light_with_api_schemas"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    result = adapter.ensure_prim(
+        "/World/SpotLight", "SphereLight", api_schemas=["ShapingAPI"]
+    )
+    if not result:
+        r.fail(name, "ensure_prim with api_schemas returned False")
+        return
+    # The SpotLight should be a Blender LIGHT object even with api_schemas.
+    obj = _find_by_prim(adapter, "/World/SpotLight")
+    if obj is None or obj.type != "LIGHT":
+        r.fail(name, f"expected LIGHT, got {obj.type if obj else 'no object'}")
+        return
+    r.ok(name)
+
+
+def test_set_connectable_input_writes_light_attributes(r):
+    """USD light inputs (intensity, color, radius, etc.) must land on the
+    corresponding Blender light data attributes via set_connectable_input
+    with empty info_id (the wire form for non-Shader connectables)."""
+    import math
+
+    name = "test_set_connectable_input_writes_light_attributes"
+    _clear_scene()
+    adapter = BlenderAdapter()
+
+    # SphereLight: intensity → energy, color → color, radius → shadow_soft_size.
+    adapter.ensure_prim("/World/Sphere", "SphereLight")
+    adapter.set_connectable_input(
+        "/World/Sphere",
+        "",  # info_id empty for non-Shader connectables
+        {"intensity": 7.5, "color": [1.0, 0.5, 0.25], "radius": 0.4},
+        {"intensity": "float", "color": "color3f", "radius": "float"},
+    )
+    sphere = _find_by_prim(adapter, "/World/Sphere")
+    if sphere is None or sphere.type != "LIGHT":
+        r.fail(name, "SphereLight not created as LIGHT")
+        return
+    if abs(sphere.data.energy - 7.5) > 1e-4:
+        r.fail(name, f"SphereLight energy={sphere.data.energy}, expected 7.5")
+        return
+    if abs(sphere.data.shadow_soft_size - 0.4) > 1e-4:
+        r.fail(
+            name,
+            f"SphereLight shadow_soft_size={sphere.data.shadow_soft_size}, expected 0.4",
+        )
+        return
+    if tuple(round(c, 3) for c in sphere.data.color) != (1.0, 0.5, 0.25):
+        r.fail(name, f"SphereLight color={tuple(sphere.data.color)}, expected (1.0,0.5,0.25)")
+        return
+
+    # DistantLight: intensity + angle (USD degrees → Blender radians).
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Sun", "DistantLight")
+    adapter.set_connectable_input(
+        "/World/Sun",
+        "",
+        {"intensity": 3.0, "angle": 0.53},  # USD angle in degrees
+        {"intensity": "float", "angle": "float"},
+    )
+    sun = _find_by_prim(adapter, "/World/Sun")
+    if sun is None or sun.data.type != "SUN":
+        r.fail(name, "DistantLight not created as SUN")
+        return
+    if abs(sun.data.energy - 3.0) > 1e-4:
+        r.fail(name, f"DistantLight energy={sun.data.energy}, expected 3.0")
+        return
+    expected_rad = math.radians(0.53)
+    if abs(sun.data.angle - expected_rad) > 1e-5:
+        r.fail(name, f"DistantLight angle={sun.data.angle}, expected {expected_rad}")
+        return
+
+    # RectLight: width/height → size/size_y.
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Rect", "RectLight")
+    adapter.set_connectable_input(
+        "/World/Rect",
+        "",
+        {"intensity": 5.0, "width": 2.5, "height": 1.5},
+        {"intensity": "float", "width": "float", "height": "float"},
+    )
+    rect = _find_by_prim(adapter, "/World/Rect")
+    if rect is None or rect.data.type != "AREA" or rect.data.shape != "RECTANGLE":
+        r.fail(name, "RectLight not created as AREA/RECTANGLE")
+        return
+    if abs(rect.data.size - 2.5) > 1e-4 or abs(rect.data.size_y - 1.5) > 1e-4:
+        r.fail(name, f"RectLight size=({rect.data.size},{rect.data.size_y}), expected (2.5,1.5)")
+        return
+
+    # DiskLight: radius → size (Blender uses diameter for AREA DISK).
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Disk", "DiskLight")
+    adapter.set_connectable_input(
+        "/World/Disk",
+        "",
+        {"intensity": 4.0, "radius": 1.0},
+        {"intensity": "float", "radius": "float"},
+    )
+    disk = _find_by_prim(adapter, "/World/Disk")
+    if disk is None or disk.data.type != "AREA" or disk.data.shape != "DISK":
+        r.fail(name, "DiskLight not created as AREA/DISK")
+        return
+    # USD radius=1.0 → Blender size=2.0 (diameter).
+    if abs(disk.data.size - 2.0) > 1e-4:
+        r.fail(name, f"DiskLight size={disk.data.size}, expected 2.0")
+        return
+
+    r.ok(name)
+
+
+def test_set_connectable_input_on_non_light_is_noop(r):
+    """Empty info_id on a non-light prim should not raise — the light input
+    handler returns True silently when the prim isn't a Blender LIGHT."""
+    name = "test_set_connectable_input_on_non_light_is_noop"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    # Send a connectable input event for a path that has no Blender object.
+    result = adapter.set_connectable_input(
+        "/World/NotExistent",
+        "",
+        {"intensity": 1.0},
+        {"intensity": "float"},
+    )
+    if not result:
+        r.fail(name, "set_connectable_input on missing path returned False")
+        return
+    r.ok(name)
+
+
 def test_ensure_prim_idempotent(r):
     """Calling ensure_prim twice doesn't create duplicates."""
     name = "test_ensure_prim_idempotent"
@@ -631,6 +1016,15 @@ def main():
         test_ensure_prim_cylinder,
         test_ensure_prim_cone,
         test_ensure_prim_mesh,
+        test_ensure_prim_supported_light_types_create_blender_lights,
+        test_ensure_prim_skipped_light_types_create_no_object,
+        test_ensure_prim_light_with_api_schemas,
+        test_set_connectable_input_writes_light_attributes,
+        test_set_connectable_input_on_non_light_is_noop,
+        test_ensure_prim_domelight_sets_up_world_network,
+        test_set_connectable_input_domelight_writes_world_shader,
+        test_set_xform_trs_domelight_writes_mapping_rotation,
+        test_multi_domelight_last_wins,
         test_ensure_prim_idempotent,
         test_set_xform_trs,
         test_set_visibility,

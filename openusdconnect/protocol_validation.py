@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
+from .connectable_attrs import split_qualified_attr
 from .protocol_constants import (
     EVENT_KEYS,
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     TRS_FIELDS,
 )
-from .shader_attrs import split_qualified_attr
 
 
 def _is_arc_list_valid(arcs: list | None) -> bool:
@@ -67,8 +67,15 @@ def validate_event(ev: dict) -> bool:
         return False
     if "prim" not in ev:
         return False
-    if k == K_ENSURE_PRIM and not isinstance(ev.get("typeName"), str):
-        return False
+    if k == K_ENSURE_PRIM:
+        if not isinstance(ev.get("typeName"), str):
+            return False
+        api_schemas = ev.get("api_schemas")
+        if api_schemas is not None:
+            if not isinstance(api_schemas, list):
+                return False
+            if not all(isinstance(s, str) and s for s in api_schemas):
+                return False
     if k == K_SET_XFORM_TRS:
         fields = ev.get("fields", [])
         if not isinstance(fields, list):
@@ -120,12 +127,12 @@ def validate_event(ev: dict) -> bool:
             return False
         if material_path and not material_path.startswith("/"):
             return False
-    if k == K_SET_SHADER_INPUT:
-        # shader_id may be empty for container prims that carry interface
-        # inputs without an info:id (NodeGraph, Material). Apply skips
-        # CreateIdAttr when empty.
-        shader_id = ev.get("shader_id")
-        if not isinstance(shader_id, str):
+    if k == K_SET_CONNECTABLE_INPUT:
+        # info_id may be empty for container prims that carry interface
+        # inputs without an info:id (NodeGraph, Material, UsdLux lights).
+        # Apply skips CreateIdAttr when empty.
+        info_id = ev.get("info_id")
+        if not isinstance(info_id, str):
             return False
         inputs = ev.get("inputs")
         if not isinstance(inputs, dict):
@@ -135,7 +142,7 @@ def validate_event(ev: dict) -> bool:
         input_types = ev.get("input_types")
         if not isinstance(input_types, dict):
             return False
-    if k == K_SET_SHADER_CONNECTION:
+    if k == K_SET_CONNECTABLE_CONNECTION:
         connections = ev.get("connections", {})
         if not isinstance(connections, dict):
             return False

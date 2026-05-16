@@ -598,7 +598,7 @@ def test_adapter_brass_material(r):
     )
 
     # 2. set_shader_input for the Standard Surface shader (brass values)
-    adapter.set_shader_input(
+    adapter.set_connectable_input(
         "/MaterialX/Materials/Tiled_Brass/ND_standard_surface_surfaceshader",
         "ND_standard_surface_surfaceshader",
         {
@@ -620,7 +620,7 @@ def test_adapter_brass_material(r):
     )
 
     # 3. set_shader_input for the texture node
-    adapter.set_shader_input(
+    adapter.set_connectable_input(
         "/MaterialX/Materials/Tiled_Brass/NG_brass1/image_color",
         "ND_tiledimage_color3",
         {"file": "textures/brass_color.jpg"},
@@ -628,7 +628,7 @@ def test_adapter_brass_material(r):
     )
 
     # 4. set_shader_connection: wire texture → Standard Surface coat_color
-    adapter.set_shader_connection(
+    adapter.set_connectable_connection(
         "/MaterialX/Materials/Tiled_Brass/ND_standard_surface_surfaceshader",
         {
             "inputs:coat_color": {

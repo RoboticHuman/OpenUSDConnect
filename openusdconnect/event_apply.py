@@ -10,9 +10,12 @@ All functions require pxr (OpenUSD Python bindings).
 
 from __future__ import annotations
 
+import logging
+
 from pxr import Gf, Sdf, Sdr, Usd, UsdGeom, UsdShade, Vt
 
 from . import events as _events
+from .connectable_attrs import ConnectableAttr
 from .events import Event, register_applier
 from .protocol_constants import (
     EVENT_KIND_ORDER,
@@ -22,12 +25,12 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -36,9 +39,8 @@ from .protocol_constants import (
     REL_MATERIAL_BINDING,
     STRUCTURAL_EVENT_KINDS,
 )
-from .shader_attrs import (
-    ShaderAttr,
-)
+
+LOG = logging.getLogger(__name__)
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -426,13 +428,13 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
         binding_rel.AddTarget(Sdf.Path(material_path))
 
 
-def _set_shader_input_value(
+def _set_connectable_input_value(
     connectable: UsdShade.ConnectableAPI, name: str, value, type_name: str
 ) -> None:
     """Set a single input on a UsdShade connectable, creating it if needed.
 
-    Works on Shader, NodeGraph, and Material — all share GetInput / CreateInput
-    through ConnectableAPI.
+    Works on Shader, NodeGraph, Material, and UsdLux lights — all share
+    GetInput / CreateInput through ConnectableAPI.
     """
     sdf_type = Sdf.ValueTypeNames.Find(type_name)
     if not sdf_type:
@@ -440,6 +442,11 @@ def _set_shader_input_value(
     inp = connectable.GetInput(name)
     if not inp:
         inp = connectable.CreateInput(name, sdf_type)
+
+    if type_name == "asset" and isinstance(value, str):
+        # Empty string clears the asset path.
+        inp.Set(Sdf.AssetPath(value) if value else Sdf.AssetPath())
+        return
 
     if isinstance(value, list):
         if type_name in ("color3f", "float3", "normal3f"):
@@ -459,29 +466,38 @@ def _set_shader_input_value(
             inp.Set(value)
 
 
-@register_applier(K_SET_SHADER_INPUT)
-def _apply_set_shader_input(stage: Usd.Stage, ev: dict) -> None:
-    """Apply shader-id and authored input values to a UsdShade connectable.
+@register_applier(K_SET_CONNECTABLE_INPUT)
+def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
+    """Apply info_id + authored input values to a UsdShade connectable.
 
-    Existing Shader, NodeGraph, and Material prims all support interface
-    inputs through ConnectableAPI.  If the prim does not exist, this event
-    has no typeName field, so we define a Shader; new NodeGraph/Material
-    containers should arrive with a preceding ensure_prim event.
+    Shader, NodeGraph, Material, and UsdLux lights all expose interface
+    inputs through ConnectableAPI. When ``info_id`` is non-empty, the
+    target is treated as a Shader (creating one if absent for the legacy
+    Sdr-shader fallback path). When ``info_id`` is empty, the prim must
+    already exist — we never author a phantom ``def Shader`` opinion on
+    top of a real SphereLight/NodeGraph/Material spec on a weaker layer.
     """
-    prim = get_or_define_prim(stage, ev["prim"], "Shader")
-    shader_id = ev.get("shader_id", "")
-    if shader_id and prim.IsA(UsdShade.Shader):
-        UsdShade.Shader(prim).CreateIdAttr(shader_id)
+    info_id = ev.get("info_id", "")
+    if info_id:
+        prim = get_or_define_prim(stage, ev["prim"], "Shader")
+        if prim.IsA(UsdShade.Shader):
+            UsdShade.Shader(prim).CreateIdAttr(info_id)
+    else:
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if not prim or not prim.IsValid():
+            # Connectable input arrived before its ensure_prim; should not
+            # happen given _EVENT_KIND_SEQUENCE ordering. Skip safely.
+            return
 
     connectable = UsdShade.ConnectableAPI(prim)
     inputs = ev.get("inputs", {})
     input_types = ev.get("input_types", {})
     for name, value in inputs.items():
         type_name = input_types.get(name, "float")
-        _set_shader_input_value(connectable, name, value, type_name)
+        _set_connectable_input_value(connectable, name, value, type_name)
 
 
-def _resolve_shader_port_type(prim: Usd.Prim, shader_attr: ShaderAttr):
+def _resolve_shader_port_type(prim: Usd.Prim, attr: ConnectableAttr):
     """Resolve a Shader input/output type from its Sdr NodeDef.
 
     Returns None when the prim is not a registered Shader node; connection
@@ -497,9 +513,9 @@ def _resolve_shader_port_type(prim: Usd.Prim, shader_attr: ShaderAttr):
     if node is None:
         return None
     port = (
-        node.GetShaderInput(shader_attr.base_name)
-        if shader_attr.is_input
-        else node.GetShaderOutput(shader_attr.base_name)
+        node.GetShaderInput(attr.base_name)
+        if attr.is_input
+        else node.GetShaderOutput(attr.base_name)
     )
     if port is None:
         return None
@@ -508,7 +524,7 @@ def _resolve_shader_port_type(prim: Usd.Prim, shader_attr: ShaderAttr):
 
 def _get_or_create_connectable_port(
     connectable: UsdShade.ConnectableAPI,
-    shader_attr: ShaderAttr,
+    attr: ConnectableAttr,
     fallback_type,
 ):
     """Return the named input/output, creating it with the right type if absent.
@@ -517,52 +533,52 @@ def _get_or_create_connectable_port(
     info:id), then *fallback_type* (typically the type of the other end of
     the connection), then Token.
     """
-    if shader_attr.is_input:
-        port = connectable.GetInput(shader_attr.base_name)
+    if attr.is_input:
+        port = connectable.GetInput(attr.base_name)
         if port:
             return port
-        sdr_type = _resolve_shader_port_type(connectable.GetPrim(), shader_attr)
+        sdr_type = _resolve_shader_port_type(connectable.GetPrim(), attr)
         return connectable.CreateInput(
-            shader_attr.base_name,
+            attr.base_name,
             sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
         )
     # output
-    port = connectable.GetOutput(shader_attr.base_name)
+    port = connectable.GetOutput(attr.base_name)
     if port:
         return port
-    sdr_type = _resolve_shader_port_type(connectable.GetPrim(), shader_attr)
+    sdr_type = _resolve_shader_port_type(connectable.GetPrim(), attr)
     return connectable.CreateOutput(
-        shader_attr.base_name,
+        attr.base_name,
         sdr_type or fallback_type or Sdf.ValueTypeNames.Token,
     )
 
 
-def _parse_wire_shader_attr(attr_name: str) -> ShaderAttr:
-    """Parse a protocol shader attr name and fail fast on contract violations."""
-    shader_attr = ShaderAttr.from_qualified_name(attr_name)
-    if shader_attr is None:
+def _parse_connectable_attr(attr_name: str) -> ConnectableAttr:
+    """Parse a protocol connectable attr name and fail fast on contract violations."""
+    parsed = ConnectableAttr.from_qualified_name(attr_name)
+    if parsed is None:
         raise ValueError(
-            "Shader connection attributes must be qualified as "
+            "Connectable connection attributes must be qualified as "
             f"'inputs:<name>' or 'outputs:<name>', got {attr_name!r}"
         )
-    return shader_attr
+    return parsed
 
 
 def _get_connectable_port(
     connectable: UsdShade.ConnectableAPI,
-    shader_attr: ShaderAttr,
+    attr: ConnectableAttr,
 ):
     """Return an existing connectable input/output without creating it."""
     return (
-        connectable.GetInput(shader_attr.base_name)
-        if shader_attr.is_input
-        else connectable.GetOutput(shader_attr.base_name)
+        connectable.GetInput(attr.base_name)
+        if attr.is_input
+        else connectable.GetOutput(attr.base_name)
     )
 
 
-@register_applier(K_SET_SHADER_CONNECTION)
-def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
-    """Apply a batch of shader/nodegraph connection edges to the stage.
+@register_applier(K_SET_CONNECTABLE_CONNECTION)
+def _apply_set_connectable_connection(stage: Usd.Stage, ev: dict) -> None:
+    """Apply a batch of UsdShade.ConnectableAPI connection edges to the stage.
 
     Each entry in `connections` is keyed by a namespace-qualified attribute
     name on `ev["prim"]` (e.g. "inputs:diffuseColor", "outputs:surface") and
@@ -576,11 +592,11 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
     local_connectable = UsdShade.ConnectableAPI(prim)
 
     for local_attr, conn in ev.get("connections", {}).items():
-        local_shader_attr = _parse_wire_shader_attr(local_attr)
+        local_pa = _parse_connectable_attr(local_attr)
         source_attr = conn["source_attr"]
-        source_shader_attr = _parse_wire_shader_attr(source_attr)
+        source_pa = _parse_connectable_attr(source_attr)
 
-        # Source prim: define as Shader if missing (set_shader_input
+        # Source prim: define as Shader if missing (set_connectable_input
         # for the source will arrive later in the same txn or a
         # subsequent one).
         source_prim_path = conn["source_prim"]
@@ -593,26 +609,48 @@ def _apply_set_shader_connection(stage: Usd.Stage, ev: dict) -> None:
         # the local end when Sdr can't resolve the local side.
         source_port = _get_or_create_connectable_port(
             source_connectable,
-            source_shader_attr,
+            source_pa,
             fallback_type=None,
         )
         local_port = _get_or_create_connectable_port(
             local_connectable,
-            local_shader_attr,
+            local_pa,
             fallback_type=source_port.GetTypeName(),
         )
         local_port.ConnectToSource(source_port)
 
     for local_attr in ev.get("disconnections", []):
-        local_shader_attr = _parse_wire_shader_attr(local_attr)
-        port = _get_connectable_port(local_connectable, local_shader_attr)
+        local_pa = _parse_connectable_attr(local_attr)
+        port = _get_connectable_port(local_connectable, local_pa)
         if port:
             port.DisconnectSource()
 
 
+def _apply_api_schemas(prim: Usd.Prim, names: list[str]) -> None:
+    """Apply a list of API schema names (single- or multi-apply) to a prim.
+
+    Format mirrors prim.GetAppliedSchemas(): bare names for single-apply,
+    "Name:instance" for multi-apply. Unknown names log a warning and are
+    skipped — never authors a phantom apiSchemas entry. Additive only.
+    """
+    if not names:
+        return
+    for name in names:
+        schema_name, _, instance = name.partition(":")
+        tf_type = Usd.SchemaRegistry.GetTypeFromSchemaTypeName(schema_name)
+        if not tf_type:
+            LOG.warning("Unknown API schema %r — skipping", schema_name)
+            continue
+        if instance:
+            prim.ApplyAPI(tf_type, instance)
+        else:
+            prim.ApplyAPI(tf_type)
+
+
 @register_applier(K_ENSURE_PRIM)
 def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
-    get_or_define_prim(stage, ev["prim"], ev["typeName"])
+    prim = get_or_define_prim(stage, ev["prim"], ev["typeName"])
+    _apply_api_schemas(prim, ev.get("api_schemas", []))
 
 
 @register_applier(K_ENSURE_XFORM_OPS)
@@ -650,7 +688,7 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
 
     Ordering: callers may pass events in any order. The structural pass
     is sorted internally by ``EVENT_KIND_ORDER`` (stable), so dependency
-    ordering — ensure_prim before set_shader_connection, ensure_xform_ops
+    ordering — ensure_prim before set_connectable_connection, ensure_xform_ops
     before set_xform_trs, etc. — is guaranteed regardless of input order.
     This is enforced by ``test_apply_events_sorts_structural_pass_by_kind_order``
     and ``test_receiver_matches_sender_under_shuffled_event_order``; do
@@ -667,7 +705,7 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     if op_cache is None:
         op_cache = {}
 
-    # Primary sort: EVENT_KIND_ORDER so ensure_prim runs before set_shader_connection
+    # Primary sort: EVENT_KIND_ORDER so ensure_prim runs before set_connectable_connection
     # (otherwise a connection whose source_prim names a not-yet-ensured
     # NodeGraph/Material falls back to creating it as Shader).
     # Secondary sort: path depth so ancestor ensure_prim runs before descendant.

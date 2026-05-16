@@ -48,12 +48,12 @@ def _get_bsdf_value(mat_name_contains, input_name):
     return None
 
 
-def _send_shader_edit(prim_path, shader_id, inputs, input_types):
+def _send_shader_edit(prim_path, info_id, inputs, input_types):
     """Send a set_shader_input event via CLI."""
     harness._send([{
-        "k": "set_shader_input",
+        "k": "set_connectable_input",
         "prim": prim_path,
-        "shader_id": shader_id,
+        "info_id": info_id,
         "inputs": inputs,
         "input_types": input_types,
     }])

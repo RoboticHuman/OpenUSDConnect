@@ -26,11 +26,11 @@ from typing import TYPE_CHECKING
 from .codec import decode_messages
 from .protocol_constants import (
     K_LOAD_PAYLOAD,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
 )
@@ -45,7 +45,8 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 
-# Events that mutate the USD stage (composition arcs, materials, shaders).
+# Events that mutate the USD stage (composition arcs, materials, shaders,
+# lights, and other UsdShade connectables).
 # Transforms, visibility, and gprim attrs go through the adapter only —
 # they don't need a separate mirror commit because they target whatever the
 # adapter wraps (objects, components, etc.) rather than USD scene description.
@@ -57,8 +58,8 @@ STAGE_SYNC_KINDS = frozenset(
         K_UNLOAD_PAYLOAD,
         K_SET_VARIANT_SELECTIONS,
         K_SET_MATERIAL_BINDING,
-        K_SET_SHADER_INPUT,
-        K_SET_SHADER_CONNECTION,
+        K_SET_CONNECTABLE_INPUT,
+        K_SET_CONNECTABLE_CONNECTION,
     }
 )
 

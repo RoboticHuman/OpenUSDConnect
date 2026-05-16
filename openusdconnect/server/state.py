@@ -27,10 +27,10 @@ from ..protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
@@ -790,7 +790,7 @@ class UsdSyncServer:
                 latest[(prim, k)] = (prev, meta)
             else:
                 latest[(prim, k)] = (ev, meta)
-        elif k == K_SET_SHADER_INPUT:
+        elif k == K_SET_CONNECTABLE_INPUT:
             existing = latest.get((prim, k))
             if existing:
                 prev = existing[0]
@@ -798,8 +798,26 @@ class UsdSyncServer:
                 prev.setdefault("input_types", {}).update(
                     ev.get("input_types", {}),
                 )
-                if ev.get("shader_id"):
-                    prev["shader_id"] = ev["shader_id"]
+                if ev.get("info_id"):
+                    prev["info_id"] = ev["info_id"]
+                latest[(prim, k)] = (prev, meta)
+            else:
+                latest[(prim, k)] = (ev, meta)
+        elif k == K_ENSURE_PRIM:
+            # Union api_schemas across subsequent ensure_prim events for the
+            # same prim (latest typeName wins; api_schemas accumulates) so
+            # ShapingAPI added later doesn't clobber a previously-merged
+            # ShadowAPI. Multi-apply names (e.g. "CollectionAPI:render") are
+            # unique strings so set-union is correct for them too.
+            existing = latest.get((prim, k))
+            if existing:
+                prev = existing[0]
+                if "typeName" in ev:
+                    prev["typeName"] = ev["typeName"]
+                merged = set(prev.get("api_schemas") or [])
+                merged.update(ev.get("api_schemas") or [])
+                if merged:
+                    prev["api_schemas"] = list(merged)
                 latest[(prim, k)] = (prev, meta)
             else:
                 latest[(prim, k)] = (ev, meta)
@@ -1000,8 +1018,8 @@ class UsdSyncServer:
             K_SET_XFORM_TRS,
             K_SET_VISIBILITY,
             K_SET_MATERIAL_BINDING,
-            K_SET_SHADER_INPUT,
-            K_SET_SHADER_CONNECTION,
+            K_SET_CONNECTABLE_INPUT,
+            K_SET_CONNECTABLE_CONNECTION,
         }
 
         record_blobs = self.store.search_like_decoded(

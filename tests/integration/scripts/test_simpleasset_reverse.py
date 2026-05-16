@@ -129,7 +129,7 @@ def _test_step():
                 nodes_info = []
                 if m.node_tree:
                     for n in m.node_tree.nodes:
-                        sid = n.get("usd_shader_id", "")
+                        sid = n.get("usd_info_id", "")
                         if sid:
                             nodes_info.append(f"{n.name}:{sid}")
                 mats.append(f"{m.name} (path={mp}, shaders={nodes_info})")
@@ -143,7 +143,7 @@ def _test_step():
                 if "proxy" in m.name.lower() or "render" in m.name.lower():
                     if m.node_tree:
                         for n in m.node_tree.nodes:
-                            if n.get("usd_shader_id") == "ND_standard_surface_surfaceshader":
+                            if n.get("usd_info_id") == "ND_standard_surface_surfaceshader":
                                 found_mtlx = True
                                 break
                 if found_mtlx:
@@ -175,7 +175,7 @@ def _test_step():
                     if mat_names:
                         log(f"  {obj.name} has materials: {mat_names}")
 
-            _initial_event_count = len(query_db_events("set_shader_input"))
+            _initial_event_count = len(query_db_events("set_connectable_input"))
             log(f"  Initial set_shader_input events: {_initial_event_count}")
 
             _step = 4
@@ -200,7 +200,7 @@ def _test_step():
                 if m.name not in assigned_mats or not m.node_tree:
                     continue
                 for n in m.node_tree.nodes:
-                    if n.get("usd_shader_id") == "ND_standard_surface_surfaceshader" and n.type == "BSDF_PRINCIPLED":
+                    if n.get("usd_info_id") == "ND_standard_surface_surfaceshader" and n.type == "BSDF_PRINCIPLED":
                         target_mat = m
                         target_bsdf = n
                         break
@@ -232,7 +232,7 @@ def _test_step():
 
         elif _step == 5:
             log("Step 5: Checking for set_shader_input in DB...")
-            shader_events = query_db_events("set_shader_input")
+            shader_events = query_db_events("set_connectable_input")
             new_count = len(shader_events) - _initial_event_count
             log(f"  New set_shader_input events: {new_count}")
 

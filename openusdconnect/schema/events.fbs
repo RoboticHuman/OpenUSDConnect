@@ -61,7 +61,7 @@ table ArcEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Shader connection / disconnection
+// UsdShade connectable connection / disconnection
 // ---------------------------------------------------------------------------
 
 // A connection edge: an attribute on `prim` is connected to an
@@ -70,7 +70,7 @@ table ArcEntry {
 // .usda syntax. Direction is encoded in the prefix; no separate
 // discriminator field. Uniform for input-side and output-side
 // connections at any depth.
-table ShaderConnection {
+table Connection {
     local_attr:string;     // attribute on this event's prim
     source_prim:string;    // upstream prim path
     source_attr:string;    // attribute on the upstream prim
@@ -86,11 +86,11 @@ table StringPair {
 }
 
 // ---------------------------------------------------------------------------
-// Shader input value — typed to match USD shader input types
+// Connectable input value — typed to match UsdShade input types
 // ---------------------------------------------------------------------------
 
-// Which field of ShaderInputValue is populated.
-enum ShaderInputValueType : byte {
+// Which field of ConnectableInputValue is populated.
+enum ConnectableInputValueType : byte {
     None = 0,
     ScalarFloat,
     ScalarInt,
@@ -99,10 +99,10 @@ enum ShaderInputValueType : byte {
     FloatArray,
 }
 
-table ShaderInputValue {
+table ConnectableInputValue {
     name:string;
     type_name:string;       // USD type: "float", "color3f", "asset", etc.
-    value_type:ShaderInputValueType;
+    value_type:ConnectableInputValueType;
     scalar_float:float;
     scalar_int:int;
     scalar_bool:bool;
@@ -117,6 +117,7 @@ table ShaderInputValue {
 table EnsurePrim {
     prim:string;
     type_name:string;       // e.g. "Xform", "Mesh", "Scope"
+    api_schemas:[string];   // applied API schemas; multi-apply uses "Name:instance"
 }
 
 table EnsureXformOps {
@@ -192,15 +193,15 @@ table SetMaterialBinding {
     material_path:string;
 }
 
-table SetShaderInput {
+table SetConnectableInput {
     prim:string;
-    shader_id:string;
-    inputs:[ShaderInputValue];
+    info_id:string;         // UsdShade `info:id` (Sdr identifier) for Shader prims; empty for NodeGraph/Material/Light
+    inputs:[ConnectableInputValue];
 }
 
-table SetShaderConnection {
+table SetConnectableConnection {
     prim:string;
-    connections:[ShaderConnection];
+    connections:[Connection];
     disconnections:[string];
 }
 
@@ -224,8 +225,8 @@ union EventPayload {
     UnloadPayload,
     SetVariantSelections,
     SetMaterialBinding,
-    SetShaderInput,
-    SetShaderConnection,
+    SetConnectableInput,
+    SetConnectableConnection,
 }
 
 table EventWrapper {

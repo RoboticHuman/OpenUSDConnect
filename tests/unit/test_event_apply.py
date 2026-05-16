@@ -28,10 +28,10 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -641,7 +641,7 @@ class TestSetMaterialBinding:
 # ---------------------------------------------------------------------------
 
 
-class TestSetShaderInput:
+class TestSetConnectableInput:
     def test_set_preview_surface_inputs(self, stage):
         """Shader inputs are created with correct types and values."""
         from pxr import UsdShade
@@ -650,9 +650,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {
                     "diffuseColor": [0.8, 0.2, 0.2],
                     "metallic": 0.0,
@@ -684,9 +684,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {"roughness": 0.3},
                 "input_types": {"roughness": "float"},
             },
@@ -694,7 +694,7 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_connection",
+                "k": "set_connectable_connection",
                 "prim": "/Materials/Mat",
                 "connections": {
                     "outputs:surface": {
@@ -716,16 +716,16 @@ class TestSetShaderInput:
         Material output connections — the wire-driven design requires the
         emitter to author them via set_shader_connection.  Verifies the
         receiver stage matches the source-of-truth shape rather than
-        guessing at terminals from shader_id."""
+        guessing at terminals from info_id."""
         from pxr import UsdShade
 
         stage.DefinePrim("/Materials/Brass", "Material")
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Brass/SS",
-                "shader_id": "ND_standard_surface_surfaceshader",
+                "info_id": "ND_standard_surface_surfaceshader",
                 "inputs": {"metalness": 1.0},
                 "input_types": {"metalness": "float"},
             },
@@ -747,9 +747,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {"roughness": 0.3},
                 "input_types": {"roughness": "float"},
             },
@@ -757,9 +757,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {"roughness": 0.9},
                 "input_types": {"roughness": "float"},
             },
@@ -778,9 +778,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/Tex",
-                "shader_id": "UsdUVTexture",
+                "info_id": "UsdUVTexture",
                 "inputs": {"file": "./r_normal_map.png"},
                 "input_types": {"file": "asset"},
             },
@@ -802,9 +802,9 @@ class TestSetShaderInput:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Mat/Tex",
-                "shader_id": "UsdUVTexture",
+                "info_id": "UsdUVTexture",
                 "inputs": {
                     "bias": [-1.0, -1.0, -1.0, -1.0],
                     "scale": [2.0, 2.0, 2.0, 2.0],
@@ -840,9 +840,9 @@ class TestSetShaderInput:
             {"k": "ensure_prim", "prim": "/Materials", "typeName": "Scope"},
             {"k": "ensure_prim", "prim": "/Materials/Red", "typeName": "Material"},
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Materials/Red/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {
                     "diffuseColor": [1.0, 0.0, 0.0],
                     "roughness": 0.4,
@@ -853,7 +853,7 @@ class TestSetShaderInput:
                 },
             },
             {
-                "k": "set_shader_connection",
+                "k": "set_connectable_connection",
                 "prim": "/Materials/Red",
                 "connections": {
                     "outputs:surface": {
@@ -884,7 +884,7 @@ class TestSetShaderInput:
         assert abs(dc[1]) < 1e-6
 
 
-class TestSetShaderConnection:
+class TestSetConnectableConnection:
     """Connection events should produce correctly-typed attributes using Sdr."""
 
     def test_lazy_source_output_uses_sdr_type(self, stage):
@@ -899,9 +899,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/Tex",
-                "shader_id": "UsdUVTexture",
+                "info_id": "UsdUVTexture",
                 "inputs": {},
                 "input_types": {},
             },
@@ -909,9 +909,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {},
                 "input_types": {},
             },
@@ -919,7 +919,7 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_connection",
+                "k": "set_connectable_connection",
                 "prim": "/Mat/PBR",
                 "connections": {
                     "inputs:diffuseColor": {
@@ -946,9 +946,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {},
                 "input_types": {},
             },
@@ -956,9 +956,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/NormalMap",
-                "shader_id": "UsdUVTexture",
+                "info_id": "UsdUVTexture",
                 "inputs": {},
                 "input_types": {},
             },
@@ -966,7 +966,7 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_connection",
+                "k": "set_connectable_connection",
                 "prim": "/Mat/PBR",
                 "connections": {
                     "inputs:normal": {
@@ -992,9 +992,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/CustomSrc",
-                "shader_id": "MyStudio_UnregisteredNode",
+                "info_id": "MyStudio_UnregisteredNode",
                 "inputs": {},
                 "input_types": {},
             },
@@ -1002,9 +1002,9 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/CustomDst",
-                "shader_id": "MyStudio_AlsoUnregistered",
+                "info_id": "MyStudio_AlsoUnregistered",
                 "inputs": {},
                 "input_types": {},
             },
@@ -1012,7 +1012,7 @@ class TestSetShaderConnection:
         apply_event(
             stage,
             {
-                "k": "set_shader_connection",
+                "k": "set_connectable_connection",
                 "prim": "/Mat/CustomDst",
                 "connections": {
                     "inputs:foo": {
@@ -1198,7 +1198,7 @@ def test_apply_events_sorts_structural_pass_by_kind_order():
     ensure_prim runs before set_shader_connection.
 
     Without the sort, a set_shader_connection whose source_prim names a
-    not-yet-ensured NodeGraph would fall through _apply_set_shader_connection's
+    not-yet-ensured NodeGraph would fall through _apply_set_connectable_connection's
     Shader-default branch in get_or_define_prim, and the later ensure_prim
     would not be able to upgrade the typeName (get_or_define_prim only sets
     typeName when creating a fresh spec; it is a no-op when the prim already
@@ -1211,7 +1211,7 @@ def test_apply_events_sorts_structural_pass_by_kind_order():
     stage = Usd.Stage.CreateInMemory()
     events = [
         {
-            "k": K_SET_SHADER_CONNECTION,
+            "k": K_SET_CONNECTABLE_CONNECTION,
             "prim": "/Test/MX",
             "connections": {
                 "inputs:base_color": {

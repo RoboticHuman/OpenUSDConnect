@@ -1,5 +1,13 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
+from openusdconnect.connectable_attrs import (
+    SIDE_INPUT,
+    SIDE_OUTPUT,
+    ConnectableAttr,
+    input_attr,
+    output_attr,
+    split_qualified_attr,
+)
 from openusdconnect.protocol import (
     make_hello,
     make_quit,
@@ -27,14 +35,6 @@ from openusdconnect.protocol_validation import (
     is_quat_valid,
     is_vec3_valid,
     validate_event,
-)
-from openusdconnect.shader_attrs import (
-    SHADER_ATTR_SIDE_INPUT,
-    SHADER_ATTR_SIDE_OUTPUT,
-    ShaderAttr,
-    shader_input_attr,
-    shader_output_attr,
-    split_qualified_attr,
 )
 
 
@@ -70,23 +70,23 @@ class TestValidationHelpers:
         assert clamp_fields([]) == []
 
 
-class TestShaderAttrHelpers:
+class TestConnectableAttrHelpers:
     def test_builds_qualified_input_and_output_names(self):
-        assert shader_input_attr("diffuseColor").qualified_name == "inputs:diffuseColor"
-        assert shader_output_attr("surface").qualified_name == "outputs:surface"
+        assert input_attr("diffuseColor").qualified_name == "inputs:diffuseColor"
+        assert output_attr("surface").qualified_name == "outputs:surface"
 
     def test_parses_qualified_names(self):
-        inp = ShaderAttr.from_qualified_name("inputs:tint")
-        out = ShaderAttr.from_qualified_name("outputs:rgb")
+        inp = ConnectableAttr.from_qualified_name("inputs:tint")
+        out = ConnectableAttr.from_qualified_name("outputs:rgb")
 
-        assert inp == ShaderAttr(SHADER_ATTR_SIDE_INPUT, "tint")
-        assert out == ShaderAttr(SHADER_ATTR_SIDE_OUTPUT, "rgb")
+        assert inp == ConnectableAttr(SIDE_INPUT, "tint")
+        assert out == ConnectableAttr(SIDE_OUTPUT, "rgb")
         assert inp.is_input
         assert out.is_output
 
     def test_rejects_unqualified_or_empty_base_names(self):
-        assert ShaderAttr.from_qualified_name("diffuseColor") is None
-        assert ShaderAttr.from_qualified_name("inputs:") is None
+        assert ConnectableAttr.from_qualified_name("diffuseColor") is None
+        assert ConnectableAttr.from_qualified_name("inputs:") is None
         assert split_qualified_attr("outputs:") == ("", "")
 
 
@@ -417,43 +417,43 @@ class TestValidateEvent:
             {"k": "set_variant_selections", "prim": "/World/Car", "selections": {"wheels": 42}}
         )
 
-    def test_set_shader_input_with_shader_id_valid(self):
+    def test_set_shader_input_with_info_id_valid(self):
         assert validate_event(
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/PBR",
-                "shader_id": "UsdPreviewSurface",
+                "info_id": "UsdPreviewSurface",
                 "inputs": {"roughness": 0.5},
                 "input_types": {"roughness": "float"},
             }
         )
 
-    def test_set_shader_input_empty_shader_id_valid(self):
-        """Empty shader_id is permitted for NodeGraph/Material container
+    def test_set_shader_input_empty_info_id_valid(self):
+        """Empty info_id is permitted for NodeGraph/Material container
         prims that have no info:id but carry interface inputs."""
         assert validate_event(
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/NG_Inner",
-                "shader_id": "",
+                "info_id": "",
                 "inputs": {"tint": [1.0, 0.5, 0.25]},
                 "input_types": {"tint": "color3f"},
             }
         )
 
-    def test_set_shader_input_missing_shader_id_invalid(self):
-        """Missing shader_id (None) is still rejected — only an explicit
+    def test_set_shader_input_missing_info_id_invalid(self):
+        """Missing info_id (None) is still rejected — only an explicit
         empty string is the valid 'no info:id' signal."""
         assert not validate_event(
-            {"k": "set_shader_input", "prim": "/Mat/PBR", "inputs": {}, "input_types": {}}
+            {"k": "set_connectable_input", "prim": "/Mat/PBR", "inputs": {}, "input_types": {}}
         )
 
-    def test_set_shader_input_non_string_shader_id_invalid(self):
+    def test_set_shader_input_non_string_info_id_invalid(self):
         assert not validate_event(
             {
-                "k": "set_shader_input",
+                "k": "set_connectable_input",
                 "prim": "/Mat/PBR",
-                "shader_id": 42,
+                "info_id": 42,
                 "inputs": {},
                 "input_types": {},
             }

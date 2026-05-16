@@ -1010,9 +1010,9 @@ class TestStageToStageRoundtrip:
             read_usdshade_connectable,
         )
         from openusdconnect.protocol_constants import (
+            K_SET_CONNECTABLE_CONNECTION,
+            K_SET_CONNECTABLE_INPUT,
             K_SET_MATERIAL_BINDING,
-            K_SET_SHADER_CONNECTION,
-            K_SET_SHADER_INPUT,
         )
 
         asset_path = os.path.join(
@@ -1053,9 +1053,9 @@ class TestStageToStageRoundtrip:
             if kind:
                 events.append(
                     {
-                        "k": K_SET_SHADER_INPUT,
+                        "k": K_SET_CONNECTABLE_INPUT,
                         "prim": pp,
-                        "shader_id": sid,
+                        "info_id": sid,
                         "inputs": inputs,
                         "input_types": itypes,
                     }
@@ -1063,14 +1063,14 @@ class TestStageToStageRoundtrip:
                 if conns:
                     events.append(
                         {
-                            "k": K_SET_SHADER_CONNECTION,
+                            "k": K_SET_CONNECTABLE_CONNECTION,
                             "prim": pp,
                             "connections": conns,
                         }
                     )
 
-        shader_ids = {e["shader_id"] for e in events if e["k"] == K_SET_SHADER_INPUT}
-        assert "ND_open_pbr_surface_surfaceshader" in shader_ids
+        info_ids = {e["info_id"] for e in events if e["k"] == K_SET_CONNECTABLE_INPUT}
+        assert "ND_open_pbr_surface_surfaceshader" in info_ids
 
         wire = codec.encode_message(
             {"type": "txn", "client_id": "t", "events": events},

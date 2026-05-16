@@ -22,9 +22,6 @@ from .event_apply import (
 from .event_apply import (
     ensure_canonical_ops as _ensure_canonical_ops,
 )
-from .event_apply import (
-    get_or_define_prim as _get_or_define_prim,
-)
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -32,12 +29,12 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -60,7 +57,11 @@ def _trs_kwargs(ev: dict) -> dict:
 
 
 _DISPATCH: dict[str, Callable[[dict], dict]] = {
-    K_ENSURE_PRIM: lambda ev: {"prim_path": ev["prim"], "type_name": ev["typeName"]},
+    K_ENSURE_PRIM: lambda ev: {
+        "prim_path": ev["prim"],
+        "type_name": ev["typeName"],
+        "api_schemas": ev.get("api_schemas", []),
+    },
     K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
     K_SET_XFORM_TRS: lambda ev: {"prim_path": ev["prim"], **_trs_kwargs(ev)},
     K_SET_XFORM_MATRICES: lambda ev: {
@@ -85,13 +86,13 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "prim_path": ev["prim"],
         "material_path": ev["material_path"],
     },
-    K_SET_SHADER_INPUT: lambda ev: {
+    K_SET_CONNECTABLE_INPUT: lambda ev: {
         "prim_path": ev["prim"],
-        "shader_id": ev["shader_id"],
+        "info_id": ev["info_id"],
         "inputs": ev["inputs"],
         "input_types": ev.get("input_types", {}),
     },
-    K_SET_SHADER_CONNECTION: lambda ev: {
+    K_SET_CONNECTABLE_CONNECTION: lambda ev: {
         "prim_path": ev["prim"],
         "connections": ev["connections"],
         "disconnections": ev.get("disconnections", []),
@@ -117,7 +118,18 @@ class DCCAdapter(ABC):
         return len(events)
 
     @abstractmethod
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
+    def ensure_prim(
+        self,
+        prim_path: str,
+        type_name: str = "Xform",
+        api_schemas: list[str] | None = None,
+    ) -> bool:
+        """Idempotent prim definition.
+
+        ``api_schemas`` carries applied API schema names — bare ``"Name"``
+        for single-apply, ``"Name:instance"`` for multi-apply. Additive
+        only on the receive side; never removes schemas.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -236,14 +248,18 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_shader_input(
-        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    def set_connectable_input(
+        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
     ) -> bool:
-        """Set shader input values on a shader prim."""
+        """Set input values on a UsdShade connectable (Shader / NodeGraph / Material / Light).
+
+        ``info_id`` is the UsdShade ``info:id`` (Sdr identifier) for
+        ``UsdShade.Shader`` prims; empty string for non-shader connectables.
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def set_shader_connection(
+    def set_connectable_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
         """Apply UsdShade input/output connection and disconnection edges."""
@@ -394,8 +410,21 @@ class UsdStageAdapter(DCCAdapter):
         _apply_events_to_stage(self.stage, events)
         return len(events)
 
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
-        _get_or_define_prim(self.stage, prim_path, type_name)
+    def ensure_prim(
+        self,
+        prim_path: str,
+        type_name: str = "Xform",
+        api_schemas: list[str] | None = None,
+    ) -> bool:
+        _apply_event_to_stage(
+            self.stage,
+            {
+                "k": K_ENSURE_PRIM,
+                "prim": prim_path,
+                "typeName": type_name,
+                "api_schemas": list(api_schemas or []),
+            },
+        )
         return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
@@ -495,28 +524,28 @@ class UsdStageAdapter(DCCAdapter):
         )
         return True
 
-    def set_shader_input(
-        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    def set_connectable_input(
+        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
     ) -> bool:
         _apply_event_to_stage(
             self.stage,
             {
-                "k": K_SET_SHADER_INPUT,
+                "k": K_SET_CONNECTABLE_INPUT,
                 "prim": prim_path,
-                "shader_id": shader_id,
+                "info_id": info_id,
                 "inputs": inputs,
                 "input_types": input_types,
             },
         )
         return True
 
-    def set_shader_connection(
+    def set_connectable_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
         _apply_event_to_stage(
             self.stage,
             {
-                "k": K_SET_SHADER_CONNECTION,
+                "k": K_SET_CONNECTABLE_CONNECTION,
                 "prim": prim_path,
                 "connections": connections,
                 "disconnections": disconnections or [],
@@ -535,10 +564,26 @@ class MockAdapter(DCCAdapter):
         self._prims: dict[str, dict] = {}
         self.calls: list[tuple] = []
 
-    def ensure_prim(self, prim_path: str, type_name: str = "Xform") -> bool:
-        if prim_path in self._prims:
+    def ensure_prim(
+        self,
+        prim_path: str,
+        type_name: str = "Xform",
+        api_schemas: list[str] | None = None,
+    ) -> bool:
+        existing = self._prims.get(prim_path)
+        if existing is not None:
+            # Additive: union api_schemas onto existing prim.
+            if api_schemas:
+                merged = set(existing.get("api_schemas") or [])
+                merged.update(api_schemas)
+                existing["api_schemas"] = list(merged)
             return True
-        self._prims[prim_path] = {"typeName": type_name, "ops": set(), "trs": {}}
+        self._prims[prim_path] = {
+            "typeName": type_name,
+            "ops": set(),
+            "trs": {},
+            "api_schemas": list(api_schemas or []),
+        }
         LOG.info("MockAdapter: defined prim %s (%s)", prim_path, type_name)
         return True
 
@@ -672,31 +717,31 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set material binding %s -> %s", prim_path, material_path)
         return True
 
-    def set_shader_input(
-        self, prim_path: str, shader_id: str, inputs: dict, input_types: dict
+    def set_connectable_input(
+        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
-        p["shader_id"] = shader_id
-        p.setdefault("shader_inputs", {}).update(inputs)
-        p.setdefault("shader_input_types", {}).update(input_types)
-        LOG.info("MockAdapter: set shader input on %s", prim_path)
+        p["info_id"] = info_id
+        p.setdefault("connectable_inputs", {}).update(inputs)
+        p.setdefault("connectable_input_types", {}).update(input_types)
+        LOG.info("MockAdapter: set connectable input on %s", prim_path)
         return True
 
-    def set_shader_connection(
+    def set_connectable_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
-        conns = p.setdefault("shader_connections", {})
+        conns = p.setdefault("connectable_connections", {})
         conns.update(connections)
         for name in disconnections or []:
             conns.pop(name, None)
-        LOG.info("MockAdapter: set shader connection on %s", prim_path)
+        LOG.info("MockAdapter: set connectable connection on %s", prim_path)
         return True
 
     def get_prim(self, prim_path: str) -> dict:

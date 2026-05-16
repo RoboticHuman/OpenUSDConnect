@@ -45,12 +45,12 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SHADER_CONNECTION,
-    K_SET_SHADER_INPUT,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_MATRICES,
@@ -101,16 +101,16 @@ LoadPayload = _fb.LoadPayload
 UnloadPayload = _fb.UnloadPayload
 SetVariantSelections = _fb.SetVariantSelections
 SetMaterialBinding = _fb.SetMaterialBinding
-SetShaderInput = _fb.SetShaderInput
-SetShaderConnection = _fb.SetShaderConnection
+SetConnectableInput = _fb.SetConnectableInput
+SetConnectableConnection = _fb.SetConnectableConnection
 NamedAttr = _fb.NamedAttr
 AttrValue = _fb.AttrValue
 AttrValueType = _fb.AttrValueType
 PrimvarMeta = _fb.PrimvarMeta
 AttrInterp = _fb.AttrInterp
-ShaderInputValue = _fb.ShaderInputValue
-ShaderConnection = _fb.ShaderConnection
-ShaderInputValueType = _fb.ShaderInputValueType
+ConnectableInputValue = _fb.ConnectableInputValue
+Connection = _fb.Connection
+ConnectableInputValueType = _fb.ConnectableInputValueType
 ArcEntry = _fb.ArcEntry
 StringPair = _fb.StringPair
 PayloadType = _fb.Payload
@@ -410,9 +410,19 @@ def _create_int_vector(b, values):
 def _encode_ensure_prim(b, ev):
     prim = b.CreateString(ev["prim"])
     tn = b.CreateString(ev["typeName"])
+    api_schemas = ev.get("api_schemas") or []
+    api_offsets = [b.CreateString(s) for s in api_schemas]
+    api_vec = None
+    if api_offsets:
+        _fb.EnsurePrimStartApiSchemasVector(b, len(api_offsets))
+        for off in reversed(api_offsets):
+            b.PrependUOffsetTRelative(off)
+        api_vec = b.EndVector()
     _fb.EnsurePrimStart(b)
     _fb.EnsurePrimAddPrim(b, prim)
     _fb.EnsurePrimAddTypeName(b, tn)
+    if api_vec is not None:
+        _fb.EnsurePrimAddApiSchemas(b, api_vec)
     return _fb.EnsurePrimEnd(b)
 
 
@@ -805,17 +815,17 @@ def _encode_set_material_binding(b, ev):
 
 
 @register_encoder(
-    K_SET_SHADER_INPUT,
-    fb_tag=EventPayloadType.SetShaderInput,
-    fb_class=SetShaderInput,
+    K_SET_CONNECTABLE_INPUT,
+    fb_tag=EventPayloadType.SetConnectableInput,
+    fb_class=SetConnectableInput,
 )
-def _encode_set_shader_input(b, ev):
+def _encode_set_connectable_input(b, ev):
     prim = b.CreateString(ev["prim"])
-    shader_id = b.CreateString(ev["shader_id"])
+    info_id = b.CreateString(ev["info_id"])
     inputs = ev.get("inputs", {})
     input_types = ev.get("input_types", {})
 
-    si_offsets = []
+    civ_offsets = []
     for name, value in inputs.items():
         n = b.CreateString(name)
         tn = b.CreateString(input_types.get(name, ""))
@@ -826,44 +836,44 @@ def _encode_set_shader_input(b, ev):
         elif isinstance(value, list):
             float_vec = _create_float_vector(b, [float(v) for v in value])
 
-        _fb.ShaderInputValueStart(b)
-        _fb.ShaderInputValueAddName(b, n)
-        _fb.ShaderInputValueAddTypeName(b, tn)
+        _fb.ConnectableInputValueStart(b)
+        _fb.ConnectableInputValueAddName(b, n)
+        _fb.ConnectableInputValueAddTypeName(b, tn)
         if isinstance(value, bool):
-            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarBool)
-            _fb.ShaderInputValueAddScalarBool(b, value)
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarBool)
+            _fb.ConnectableInputValueAddScalarBool(b, value)
         elif isinstance(value, int) and not isinstance(value, bool):
-            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarInt)
-            _fb.ShaderInputValueAddScalarInt(b, value)
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarInt)
+            _fb.ConnectableInputValueAddScalarInt(b, value)
         elif isinstance(value, float):
-            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarFloat)
-            _fb.ShaderInputValueAddScalarFloat(b, value)
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarFloat)
+            _fb.ConnectableInputValueAddScalarFloat(b, value)
         elif str_off is not None:
-            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.ScalarString)
-            _fb.ShaderInputValueAddScalarString(b, str_off)
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarString)
+            _fb.ConnectableInputValueAddScalarString(b, str_off)
         elif float_vec is not None:
-            _fb.ShaderInputValueAddValueType(b, ShaderInputValueType.FloatArray)
-            _fb.ShaderInputValueAddFloatArray(b, float_vec)
-        si_offsets.append(_fb.ShaderInputValueEnd(b))
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.FloatArray)
+            _fb.ConnectableInputValueAddFloatArray(b, float_vec)
+        civ_offsets.append(_fb.ConnectableInputValueEnd(b))
 
-    _fb.SetShaderInputStartInputsVector(b, len(si_offsets))
-    for off in reversed(si_offsets):
+    _fb.SetConnectableInputStartInputsVector(b, len(civ_offsets))
+    for off in reversed(civ_offsets):
         b.PrependUOffsetTRelative(off)
     inputs_vec = b.EndVector()
 
-    _fb.SetShaderInputStart(b)
-    _fb.SetShaderInputAddPrim(b, prim)
-    _fb.SetShaderInputAddShaderId(b, shader_id)
-    _fb.SetShaderInputAddInputs(b, inputs_vec)
-    return _fb.SetShaderInputEnd(b)
+    _fb.SetConnectableInputStart(b)
+    _fb.SetConnectableInputAddPrim(b, prim)
+    _fb.SetConnectableInputAddInfoId(b, info_id)
+    _fb.SetConnectableInputAddInputs(b, inputs_vec)
+    return _fb.SetConnectableInputEnd(b)
 
 
 @register_encoder(
-    K_SET_SHADER_CONNECTION,
-    fb_tag=EventPayloadType.SetShaderConnection,
-    fb_class=SetShaderConnection,
+    K_SET_CONNECTABLE_CONNECTION,
+    fb_tag=EventPayloadType.SetConnectableConnection,
+    fb_class=SetConnectableConnection,
 )
-def _encode_set_shader_connection(b, ev):
+def _encode_set_connectable_connection(b, ev):
     prim = b.CreateString(ev["prim"])
     connections = ev.get("connections", {})
     disconnections = ev.get("disconnections", [])
@@ -873,28 +883,28 @@ def _encode_set_shader_connection(b, ev):
         la_off = b.CreateString(local_attr)
         sp_off = b.CreateString(conn["source_prim"])
         sa_off = b.CreateString(conn["source_attr"])
-        _fb.ShaderConnectionStart(b)
-        _fb.ShaderConnectionAddLocalAttr(b, la_off)
-        _fb.ShaderConnectionAddSourcePrim(b, sp_off)
-        _fb.ShaderConnectionAddSourceAttr(b, sa_off)
-        conn_offsets.append(_fb.ShaderConnectionEnd(b))
+        _fb.ConnectionStart(b)
+        _fb.ConnectionAddLocalAttr(b, la_off)
+        _fb.ConnectionAddSourcePrim(b, sp_off)
+        _fb.ConnectionAddSourceAttr(b, sa_off)
+        conn_offsets.append(_fb.ConnectionEnd(b))
 
-    _fb.SetShaderConnectionStartConnectionsVector(b, len(conn_offsets))
+    _fb.SetConnectableConnectionStartConnectionsVector(b, len(conn_offsets))
     for off in reversed(conn_offsets):
         b.PrependUOffsetTRelative(off)
     conn_vec = b.EndVector()
 
     disc_str_offsets = [b.CreateString(d) for d in disconnections]
-    _fb.SetShaderConnectionStartDisconnectionsVector(b, len(disc_str_offsets))
+    _fb.SetConnectableConnectionStartDisconnectionsVector(b, len(disc_str_offsets))
     for off in reversed(disc_str_offsets):
         b.PrependUOffsetTRelative(off)
     disc_vec = b.EndVector()
 
-    _fb.SetShaderConnectionStart(b)
-    _fb.SetShaderConnectionAddPrim(b, prim)
-    _fb.SetShaderConnectionAddConnections(b, conn_vec)
-    _fb.SetShaderConnectionAddDisconnections(b, disc_vec)
-    return _fb.SetShaderConnectionEnd(b)
+    _fb.SetConnectableConnectionStart(b)
+    _fb.SetConnectableConnectionAddPrim(b, prim)
+    _fb.SetConnectableConnectionAddConnections(b, conn_vec)
+    _fb.SetConnectableConnectionAddDisconnections(b, disc_vec)
+    return _fb.SetConnectableConnectionEnd(b)
 
 
 # ===================================================================
@@ -1103,6 +1113,9 @@ def _dict_ensure_prim(ep, kind):
     # missing-key legacy behavior which defaults to Xform at apply time).
     if tn is not None:
         ev["typeName"] = tn
+    api_len = ep.ApiSchemasLength()
+    if api_len:
+        ev["api_schemas"] = [_str(ep.ApiSchemas(i)) for i in range(api_len)]
     return ev
 
 
@@ -1292,45 +1305,45 @@ def _dict_set_material_binding(mb, kind):
     return {"k": kind, "prim": _str(mb.Prim()), "material_path": _str(mb.MaterialPath())}
 
 
-@register_decoder(K_SET_SHADER_INPUT)
-def _dict_set_shader_input(si, kind):
+@register_decoder(K_SET_CONNECTABLE_INPUT)
+def _dict_set_connectable_input(sci, kind):
     inputs = {}
     input_types = {}
-    for i in range(si.InputsLength()):
-        siv = si.Inputs(i)
-        name = _str(siv.Name())
-        input_types[name] = _str(siv.TypeName())
-        vt = siv.ValueType()
-        if vt == ShaderInputValueType.FloatArray:
-            inputs[name] = [siv.FloatArray(j) for j in range(siv.FloatArrayLength())]
-        elif vt == ShaderInputValueType.ScalarString:
-            inputs[name] = _str(siv.ScalarString())
-        elif vt == ShaderInputValueType.ScalarBool:
-            inputs[name] = siv.ScalarBool()
-        elif vt == ShaderInputValueType.ScalarInt:
-            inputs[name] = siv.ScalarInt()
+    for i in range(sci.InputsLength()):
+        civ = sci.Inputs(i)
+        name = _str(civ.Name())
+        input_types[name] = _str(civ.TypeName())
+        vt = civ.ValueType()
+        if vt == ConnectableInputValueType.FloatArray:
+            inputs[name] = [civ.FloatArray(j) for j in range(civ.FloatArrayLength())]
+        elif vt == ConnectableInputValueType.ScalarString:
+            inputs[name] = _str(civ.ScalarString())
+        elif vt == ConnectableInputValueType.ScalarBool:
+            inputs[name] = civ.ScalarBool()
+        elif vt == ConnectableInputValueType.ScalarInt:
+            inputs[name] = civ.ScalarInt()
         else:
-            inputs[name] = siv.ScalarFloat()
+            inputs[name] = civ.ScalarFloat()
     return {
         "k": kind,
-        "prim": _str(si.Prim()),
-        "shader_id": _str(si.ShaderId()),
+        "prim": _str(sci.Prim()),
+        "info_id": _str(sci.InfoId()),
         "inputs": inputs,
         "input_types": input_types,
     }
 
 
-@register_decoder(K_SET_SHADER_CONNECTION)
-def _dict_set_shader_connection(sc, kind):
+@register_decoder(K_SET_CONNECTABLE_CONNECTION)
+def _dict_set_connectable_connection(scc, kind):
     connections = {}
-    for i in range(sc.ConnectionsLength()):
-        c = sc.Connections(i)
+    for i in range(scc.ConnectionsLength()):
+        c = scc.Connections(i)
         connections[_str(c.LocalAttr())] = {
             "source_prim": _str(c.SourcePrim()),
             "source_attr": _str(c.SourceAttr()),
         }
-    disconnections = [_str(sc.Disconnections(i)) for i in range(sc.DisconnectionsLength())]
-    ev = {"k": kind, "prim": _str(sc.Prim()), "connections": connections}
+    disconnections = [_str(scc.Disconnections(i)) for i in range(scc.DisconnectionsLength())]
+    ev = {"k": kind, "prim": _str(scc.Prim()), "connections": connections}
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
