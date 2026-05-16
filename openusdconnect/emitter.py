@@ -65,37 +65,32 @@ _C_CAMERA_ATTRS = "camera_attrs"
 # key uniqueness check in NoticeEmitter.__init__.
 _INLINE_CACHE_KEYS = frozenset({_C_TRS, _C_MATS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
 
-# Attribute prefixes that have dedicated event channels or are not geometry.
-# UsdShade inputs/outputs are mirrored by dedicated connectable-interface events.
-_SKIP_ATTR_PREFIXES = ("xformOp:", USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+# Attribute names and prefixes the inline blocks own — TRS uses the
+# pre-computed snap; ``extent`` is computed by USD; ``proxyPrim`` is a
+# rendering hint relationship. No PrimChannel watches these, so the
+# default gprim attr filter starts with them and unions in every
+# channel's watched_attrs/watched_prefixes at NoticeEmitter init time.
+_INLINE_BLOCK_SKIP_ATTRS = frozenset({"xformOpOrder", "extent", "proxyPrim"})
+_INLINE_BLOCK_SKIP_PREFIXES = ("xformOp:",)
 
-# Individual attributes to skip:
-#   visibility, xformOpOrder — have dedicated event channels
-#   extent     — bounding box, computed from geometry by USD
-#   proxyPrim  — relationship target, not a value attribute
-#   info:id    — shader type identifier, handled by set_connectable_input
-_SKIP_ATTR_NAMES = frozenset(
-    {
-        "visibility",
-        "xformOpOrder",
-        "extent",
-        "proxyPrim",
-        "info:id",
-    }
-)
+# Snapshot of names/prefixes the built-in channels watch — used by the
+# module-level ``_schema_attrs`` helper, which runs at import time (before
+# any NoticeEmitter exists) to derive typed-schema attr name sets. Keep
+# in sync if a new built-in channel watches a new attr/prefix that should
+# be excluded from typed-schema aggregations.
+_BUILTIN_CHANNEL_WATCHED_ATTRS = frozenset({"visibility", "info:id"})
+_BUILTIN_CHANNEL_WATCHED_PREFIXES = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
 
 
 def _schema_attrs(schema_cls) -> frozenset[str]:
-    """Return attribute names defined directly by a typed USD schema.
-
-    Filters out the names already handled by other emitter channels
-    (xformOps, visibility, info:id, etc.) so the result is the set of
-    attrs the typed-schema channel is responsible for.
-    """
+    """Return attribute names defined directly by a typed USD schema,
+    minus names already handled by inline blocks or built-in channels."""
+    skip_attrs = _INLINE_BLOCK_SKIP_ATTRS | _BUILTIN_CHANNEL_WATCHED_ATTRS
+    skip_prefixes = _INLINE_BLOCK_SKIP_PREFIXES + _BUILTIN_CHANNEL_WATCHED_PREFIXES
     return frozenset(
         n for n in schema_cls.GetSchemaAttributeNames(False)
-        if n not in _SKIP_ATTR_NAMES
-        and not any(n.startswith(p) for p in _SKIP_ATTR_PREFIXES)
+        if n not in skip_attrs
+        and not any(n.startswith(p) for p in skip_prefixes)
     )
 
 
@@ -164,16 +159,28 @@ def unregister_replicated_api_schema(name: str) -> None:
     _REPLICATED_API_SCHEMAS.discard(name)
 
 
-def _should_track_attr(attr_name: str) -> bool:
-    """Return True if this attribute should be tracked as a gprim attr.
+def _make_attr_filter(channels):
+    """Build a gprim-attr filter from a channel set.
 
-    Excludes attributes handled by dedicated channels (xformOps, visibility),
-    computed attributes (extent), and rendering hints (purpose, proxyPrim).
-    Primvars (primvars:st, primvars:displayColor, etc.) ARE tracked.
+    The returned callable returns True for attrs the gprim scan should
+    track. Attrs owned by inline blocks or by any of the channels' watched_*
+    declarations are filtered out — so adding a new channel automatically
+    excludes its attrs from gprim scan without further edits.
     """
-    if attr_name in _SKIP_ATTR_NAMES:
-        return False
-    return all(not attr_name.startswith(prefix) for prefix in _SKIP_ATTR_PREFIXES)
+    skip_attrs = set(_INLINE_BLOCK_SKIP_ATTRS)
+    skip_prefixes = list(_INLINE_BLOCK_SKIP_PREFIXES)
+    for ch in channels:
+        skip_attrs.update(ch.watched_attrs)
+        skip_prefixes.extend(ch.watched_prefixes)
+    skip_attrs_fs = frozenset(skip_attrs)
+    skip_prefixes_t = tuple(skip_prefixes)
+
+    def _filter(attr_name: str) -> bool:
+        if attr_name in skip_attrs_fs:
+            return False
+        return not attr_name.startswith(skip_prefixes_t)
+
+    return _filter
 
 
 def _values_equal(a, b) -> bool:
@@ -1085,9 +1092,10 @@ class NoticeEmitter:
             stage: The Usd.Stage to watch.
             attr_filter: Optional callable(attr_name: str) -> bool.
                 Controls which attributes are tracked for gprim attr diffing.
-                Return True to track, False to skip. If None, uses the
-                default _should_track_attr which skips xformOps, visibility,
-                extent, etc. Primvars ARE tracked by default.
+                Return True to track, False to skip. Default is derived from
+                the channel set so any name a channel watches plus the
+                inline-block-owned names are skipped. Primvars and other
+                typed-schema attrs ARE tracked.
             replicated_api_schemas: Optional explicit override of the API
                 schema names to replicate via the ensure_prim ``api_schemas``
                 field. Each name must be a bare schema name (no
@@ -1104,7 +1112,6 @@ class NoticeEmitter:
                 losing core USD coverage. Each channel's ``cache_key`` must
                 be unique across the full set.
         """
-        self._attr_filter = attr_filter or _should_track_attr
         self.stage = stage
         if replicated_api_schemas is not None:
             for n in replicated_api_schemas:
@@ -1120,16 +1127,11 @@ class NoticeEmitter:
         self._suppress_depth: int = 0
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        # Per-prim diff cache. Each prim_path maps to a dict with keys:
-        #   trs, mats, visibility, references, payloads, payload_loaded,
-        #   variant_selections, gprim_attrs, api_schemas
-        # Adding a new cache key only requires updating the diff code —
-        # _migrate_caches and _purge_caches handle all keys automatically.
         self._prim_cache: dict[str, dict] = {}
         # Per-prim names of attributes the USD info-only notice handler
         # saw change. Populated unfiltered so channels can gate reads on
-        # specific names; the gprim attr scan re-applies _should_track_attr
-        # at iteration time to avoid leaking dedicated-channel attrs into
+        # specific names; the gprim attr scan re-applies _attr_filter
+        # at iteration time to avoid leaking channel-owned attrs into
         # set_gprim_attrs.
         self._dirty_attrs: dict[str, set[str]] = {}
         self._notice_resynced_prims: set[str] = set()
@@ -1163,6 +1165,10 @@ class NoticeEmitter:
                     f"for composition arcs, watched names for attributes/rels."
                 )
         self._channels: tuple[PrimChannel, ...] = _BUILTIN_PRIM_CHANNELS + extras
+        # Build the default gprim attr filter from the channel set so any
+        # name a channel watches is automatically excluded from gprim
+        # scan emit. User-provided ``attr_filter`` overrides this.
+        self._attr_filter = attr_filter or _make_attr_filter(self._channels)
 
     def _filtered_api_schemas(self, prim: Usd.Prim) -> set[str]:
         """Return prim's applied schemas filtered through the whitelist.
@@ -1223,20 +1229,19 @@ class NoticeEmitter:
                 if current is None:
                     continue
                 pc[channel.cache_key] = current
-            # The gprim attr block in _build_dirty_prim_events isn't a
-            # PrimChannel (it uses dirty-driven selective scan), so seed
-            # its cache slot here. Cameras' attrs are already covered by
-            # CameraAttrsChannel above, so skip the scan for them.
-            if not child.IsA(UsdGeom.Camera):
-                gprim_snapshot = {}
-                for attr in child.GetAttributes():
-                    name = attr.GetName()
-                    if attr.IsAuthored() and self._attr_filter(name):
-                        val = _usd_value_to_python(attr.Get())
-                        if val is not None:
-                            gprim_snapshot[name] = val
-                if gprim_snapshot:
-                    pc[_C_GPRIM_ATTRS] = gprim_snapshot
+            # Seed the gprim-attr cache too (not a PrimChannel — uses the
+            # dirty-driven selective scan in the diff loop). _attr_filter
+            # excludes anything a channel already handles, so prims whose
+            # state is fully channel-owned produce an empty snapshot here.
+            gprim_snapshot = {}
+            for attr in child.GetAttributes():
+                name = attr.GetName()
+                if attr.IsAuthored() and self._attr_filter(name):
+                    val = _usd_value_to_python(attr.Get())
+                    if val is not None:
+                        gprim_snapshot[name] = val
+            if gprim_snapshot:
+                pc[_C_GPRIM_ATTRS] = gprim_snapshot
             # Seed the api_schemas snapshot so a later diff cycle doesn't
             # spuriously re-emit ensure_prim on first encounter.
             pc[_C_API_SCHEMAS] = self._filtered_api_schemas(child)
@@ -1548,16 +1553,8 @@ class NoticeEmitter:
                 events.append(payload)
                 pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
-        # Cameras emit their attrs via CameraAttrsChannel above; the dirty
-        # attr names the notice handler logged for them aren't needed by
-        # the gprim attr scan that follows. Drop them so the gprim block
-        # doesn't re-process the same attrs.
-        is_camera = prim and prim.IsValid() and prim.IsA(UsdGeom.Camera)
-        if is_camera:
-            self._dirty_attrs.pop(prim_path, None)
-
         # Gprim attribute diff
-        if prim and prim.IsValid() and not is_camera:
+        if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
             last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
