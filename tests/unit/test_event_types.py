@@ -25,7 +25,6 @@ from openusdconnect.events import (
     SetReference,
     SetVariantSelections,
     SetVisibility,
-    SetXformMatrices,
     SetXformTRS,
     UnloadPayload,
 )
@@ -51,21 +50,6 @@ _CASES: list[tuple[str, Event]] = [
             t=[1.0, 2.0, 3.0],
             r=[1.0, 0.0, 0.0, 0.0],
             s=[1.0, 1.0, 1.0],
-        ),
-    ),
-    (
-        "set_xform_matrices",
-        SetXformMatrices(
-            k="set_xform_matrices",
-            prim="/World/Sphere",
-            local_m=[1.0, 0.0, 0.0, 0.0,
-                     0.0, 1.0, 0.0, 0.0,
-                     0.0, 0.0, 1.0, 0.0,
-                     0.0, 0.0, 0.0, 1.0],
-            world_m=[1.0, 0.0, 0.0, 0.0,
-                     0.0, 1.0, 0.0, 0.0,
-                     0.0, 0.0, 1.0, 0.0,
-                     0.0, 0.0, 0.0, 1.0],
         ),
     ),
     (

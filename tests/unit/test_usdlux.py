@@ -235,7 +235,7 @@ class TestEmitterLightDiff:
         p = stage.DefinePrim("/L", "SphereLight")
         UsdLux.SphereLight(p).CreateIntensityAttr(2.5)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/L"]
         assert ensure
@@ -248,11 +248,11 @@ class TestEmitterLightDiff:
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/L", "SphereLight")
         UsdLux.SphereLight(p).CreateIntensityAttr(1.0)
-        em.build_events_for_dirty(include_matrices=False)  # consume first cycle
+        em.build_events_for_dirty()  # consume first cycle
 
         # Now apply ShapingAPI.
         UsdLux.ShapingAPI.Apply(p).CreateShapingConeAngleAttr(45.0)
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         assert ensure
         assert "ShapingAPI" in ensure[0]["api_schemas"]
@@ -345,7 +345,7 @@ class TestRealAssetReplication:
         original_intensity = light.GetIntensityAttr().Get()
         light.GetIntensityAttr().Set(original_intensity + 6.0)  # 9 -> 15
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         ensure = [
             e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH
@@ -384,7 +384,7 @@ class TestRealAssetReplication:
         )
         op_attr.Set(new_mat)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         trs = [
             e for e in events
@@ -419,7 +419,7 @@ class TestRealAssetReplication:
         # NOT applied. Apply it and author a cone angle.
         UsdLux.ShapingAPI.Apply(light_prim).CreateShapingConeAngleAttr(30.0)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         # The ensure_prim event must carry ShapingAPI in api_schemas.
         ensure = [
@@ -462,7 +462,7 @@ class TestRealAssetReplication:
         light = UsdLux.RectLight(src.GetPrimAtPath(self.LIGHT_PATH))
         light.GetIntensityAttr().Set(20.0)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         dst = Usd.Stage.CreateInMemory()
         apply_events(dst, events)
 
@@ -535,7 +535,7 @@ class TestRealAssetShapingAPIReplication:
         original_intensity = light.GetIntensityAttr().Get()
         light.GetIntensityAttr().Set(original_intensity + 0.5)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         # The ensure_prim event for the spot must carry ShapingAPI.
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.SPOT_PATH]
@@ -578,7 +578,7 @@ class TestRealAssetShapingAPIReplication:
         # Tighten the cone from 180° to 45°.
         UsdLux.ShapingAPI(spot_prim).GetShapingConeAngleAttr().Set(45.0)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         sci = [
             e for e in events

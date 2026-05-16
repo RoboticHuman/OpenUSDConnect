@@ -169,7 +169,7 @@ def _on_tick(delta_seconds: float):
 
 def _flush_emitter():
     """Build events from dirty prims and send to server."""
-    events = _emitter.build_events_for_dirty(include_matrices=False)
+    events = _emitter.build_events_for_dirty()
     if not events:
         return
     if not _sender.send_events(events):

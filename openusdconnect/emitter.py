@@ -36,7 +36,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
@@ -47,7 +46,6 @@ LOG = logging.getLogger(__name__)
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
 _C_TRS = "trs"
-_C_MATS = "mats"
 _C_VISIBILITY = "visibility"
 _C_REFERENCES = "references"
 _C_PAYLOADS = "payloads"
@@ -62,27 +60,34 @@ _C_CAMERA_ATTRS = "camera_attrs"
 # Cache slots owned by specialized diff paths in _build_dirty_prim_events.
 # Channels must not reuse these keys; NoticeEmitter validates collisions at
 # construction.
-_INLINE_CACHE_KEYS = frozenset({_C_TRS, _C_MATS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
-
-# Attrs handled by specialized diff paths, or intentionally ignored. The
-# default gprim attr filter starts here, then adds every channel's watched
-# attrs/prefixes.
-_INLINE_BLOCK_SKIP_ATTRS = frozenset({"xformOpOrder", "extent", "proxyPrim"})
-_INLINE_BLOCK_SKIP_PREFIXES = ("xformOp:",)
+_SPECIALIZED_CACHE_KEYS = frozenset({_C_TRS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
 
 # Import-time snapshot used by _schema_attrs before any NoticeEmitter exists.
 # Keep this in sync with built-in channel declarations.
 _BUILTIN_CHANNEL_WATCHED_ATTRS = frozenset({"visibility", "info:id"})
 _BUILTIN_CHANNEL_WATCHED_PREFIXES = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+_IS_TRANSFORM_AFFECTED_BY_ATTR = getattr(
+    UsdGeom.Xformable,
+    "IsTransformationAffectedByAttrNamed",
+    None,
+)
+
+
+def _is_transform_attr(attr_name: str) -> bool:
+    """Return True for attrs that affect UsdGeomXformable transforms."""
+    if _IS_TRANSFORM_AFFECTED_BY_ATTR is not None:
+        return _IS_TRANSFORM_AFFECTED_BY_ATTR(attr_name)
+    return attr_name == "xformOpOrder" or attr_name.startswith("xformOp:")
 
 
 def _schema_attrs(schema_cls) -> frozenset[str]:
     """Return direct schema attrs not owned by specialized paths or channels."""
-    skip_attrs = _INLINE_BLOCK_SKIP_ATTRS | _BUILTIN_CHANNEL_WATCHED_ATTRS
-    skip_prefixes = _INLINE_BLOCK_SKIP_PREFIXES + _BUILTIN_CHANNEL_WATCHED_PREFIXES
+    skip_attrs = _BUILTIN_CHANNEL_WATCHED_ATTRS
+    skip_prefixes = _BUILTIN_CHANNEL_WATCHED_PREFIXES
     return frozenset(
         n for n in schema_cls.GetSchemaAttributeNames(False)
-        if n not in skip_attrs
+        if not _is_transform_attr(n)
+        and n not in skip_attrs
         and not any(n.startswith(p) for p in skip_prefixes)
     )
 
@@ -159,8 +164,8 @@ def _make_attr_filter(channels):
     are filtered out, so adding a channel automatically excludes its attrs
     from generic gprim emission.
     """
-    skip_attrs = set(_INLINE_BLOCK_SKIP_ATTRS)
-    skip_prefixes = list(_INLINE_BLOCK_SKIP_PREFIXES)
+    skip_attrs = set()
+    skip_prefixes = []
     for ch in channels:
         skip_attrs.update(ch.watched_attrs)
         skip_prefixes.extend(ch.watched_prefixes)
@@ -168,6 +173,8 @@ def _make_attr_filter(channels):
     skip_prefixes_t = tuple(skip_prefixes)
 
     def _filter(attr_name: str) -> bool:
+        if _is_transform_attr(attr_name):
+            return False
         if attr_name in skip_attrs_fs:
             return False
         return not attr_name.startswith(skip_prefixes_t)
@@ -247,15 +254,6 @@ try:
     _PrimResyncType = Usd.Notice.ObjectsChanged.PrimResyncType
 except AttributeError:
     _PrimResyncType = None
-
-
-def mat_to_16(m: Gf.Matrix4d) -> list[float]:
-    """Convert a Gf.Matrix4d to a flat 16-element row-major list."""
-    out = []
-    for r in range(4):
-        row = m.GetRow(r)
-        out.extend([float(row[0]), float(row[1]), float(row[2]), float(row[3])])
-    return out
 
 
 def as_matrix(ret):
@@ -511,7 +509,7 @@ def read_camera_attrs(stage, prim_path):
 #
 # Use a channel for prim state that is cheap or bounded enough to read as a
 # whole when its dirty gate fires. Keep specialized paths for state that uses
-# precomputed snapshots (TRS/matrices) or must be dirty-attr selective because
+# precomputed snapshots (TRS) or must be dirty-attr selective because
 # full reads can be expensive (generic gprim attrs, including mesh arrays).
 # The ensure_prim/api_schemas handshake is also specialized because it owns
 # first-encounter structure, not a normal value diff.
@@ -1071,7 +1069,6 @@ class NoticeEmitter:
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppress_depth: int = 0
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
-        self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         self._prim_cache: dict[str, dict] = {}
         # Unfiltered info-only attr names. Channels use this for read gating;
         # the gprim attr scan applies _attr_filter later.
@@ -1086,13 +1083,13 @@ class NoticeEmitter:
                 )
         # Silent cache-key collisions would make channels overwrite each
         # other's snapshots, so reject them before the emitter can run.
-        seen_keys: set[str] = set(_INLINE_CACHE_KEYS)
+        seen_keys: set[str] = set(_SPECIALIZED_CACHE_KEYS)
         for ch in (*_BUILTIN_PRIM_CHANNELS, *extras):
             if ch.cache_key in seen_keys:
                 raise ValueError(
                     f"Duplicate PrimChannel cache_key {ch.cache_key!r}; "
                     f"each channel must own a unique per-prim cache slot "
-                    f"(reserved specialized slots: {sorted(_INLINE_CACHE_KEYS)})."
+                    f"(reserved specialized slots: {sorted(_SPECIALIZED_CACHE_KEYS)})."
                 )
             seen_keys.add(ch.cache_key)
             # These modes describe different USD notice patterns; using both
@@ -1305,9 +1302,7 @@ class NoticeEmitter:
         for ev in events:
             self.invalidate_for_event(ev)
 
-    def snapshot_events(
-        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
-    ) -> list[dict]:
+    def snapshot_events(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for every prim on the stage as if newly authored.
 
         Marks every prim under the pseudo-root dirty and runs the normal
@@ -1322,12 +1317,10 @@ class NoticeEmitter:
             path = str(prim.GetPath())
             if path != "/":
                 self.mark_dirty(path)
-        return self.build_events_for_dirty(
-            eps_trs=eps_trs, eps_mat=eps_mat, include_matrices=include_matrices
-        )
+        return self.build_events_for_dirty(eps_trs=eps_trs)
 
     def snapshot_prim(self, prim_path: str) -> dict | None:
-        """Snapshot the current local transform of a prim as TRS + matrices."""
+        """Snapshot the current local transform of a prim as TRS."""
         prim = self.stage.GetPrimAtPath(prim_path)
         if not prim or not prim.IsValid():
             return None
@@ -1336,14 +1329,9 @@ class NoticeEmitter:
         local_ret = xf.GetLocalTransformation(Usd.TimeCode.Default())
         local_m = as_matrix(local_ret)
 
-        self.cache.SetTime(Usd.TimeCode.Default())
-        world_m = self.cache.GetLocalToWorldTransform(prim)
-
         t, r, s = decompose_trs_from_matrix(local_m)
 
         return {
-            "local_m16": mat_to_16(local_m),
-            "world_m16": mat_to_16(world_m),
             "t": t,
             "r": r,
             "s": s,
@@ -1394,10 +1382,8 @@ class NoticeEmitter:
         prim_path: str,
         snap: dict,
         eps_trs: float,
-        eps_mat: float,
-        include_matrices: bool,
     ) -> list[dict]:
-        """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
+        """Build events for a single dirty prim."""
         events: list[dict] = []
         pc = self._prim_cache.setdefault(prim_path, {})
         prim = self.stage.GetPrimAtPath(prim_path)
@@ -1459,7 +1445,7 @@ class NoticeEmitter:
 
         # TRS partial diff uses the precomputed snap from the outer loop.
         # A normal channel would need either a wider interface or duplicate
-        # transform/matrix reads.
+        # transform reads.
         xf = UsdGeom.Xformable(prim) if prim else None
         has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
@@ -1549,35 +1535,13 @@ class NoticeEmitter:
                 events.append(ev)
                 pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
-        # Optional matrices event (diagnostic)
-        if include_matrices:
-            last_mats = pc.get(_C_MATS, {})
-            if not near_list(snap["local_m16"], last_mats.get("local"), eps_mat) or not near_list(
-                snap["world_m16"], last_mats.get("world"), eps_mat
-            ):
-                events.append(
-                    {
-                        "k": K_SET_XFORM_MATRICES,
-                        "prim": prim_path,
-                        "local_m": snap["local_m16"],
-                        "world_m": snap["world_m16"],
-                    }
-                )
-                pc[_C_MATS] = {
-                    "local": snap["local_m16"],
-                    "world": snap["world_m16"],
-                }
-
         return events
 
-    def build_events_for_dirty(
-        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
-    ) -> list[dict]:
+    def build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for all dirty prims, diffing against last-sent state.
 
         Returns a list of event dicts (ensure_prim, ensure_xform_ops, set_xform_trs,
-        rename_prim, deactivate_prim, optionally set_xform_matrices) ready to wrap
-        in a transaction.
+        rename_prim, deactivate_prim) ready to wrap in a transaction.
 
         Processing order: renames first, then deactivations/deletions, then TRS.
         """
@@ -1595,8 +1559,6 @@ class NoticeEmitter:
             snap = self.snapshot_prim(prim_path)
             if snap is None:
                 continue
-            events.extend(
-                self._build_dirty_prim_events(prim_path, snap, eps_trs, eps_mat, include_matrices)
-            )
+            events.extend(self._build_dirty_prim_events(prim_path, snap, eps_trs))
 
         return events

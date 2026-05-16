@@ -226,7 +226,7 @@ class TestEmitterCameraDiff:
         p = stage.DefinePrim("/Cam", "Camera")
         UsdGeom.Camera(p).CreateFocalLengthAttr(50.0)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/Cam"]
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
         assert ensure
@@ -243,7 +243,7 @@ class TestEmitterCameraDiff:
         cam.CreateClippingRangeAttr(Gf.Vec2f(0.1, 1000.0))
         cam.CreateProjectionAttr("perspective")
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
         assert gprim
         attrs = gprim[0]["attrs"]
@@ -257,9 +257,9 @@ class TestEmitterCameraDiff:
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/Cam", "Camera")
         UsdGeom.Camera(p).CreateFocalLengthAttr(50.0)
-        em.build_events_for_dirty(include_matrices=False)  # consume first cycle
+        em.build_events_for_dirty()  # consume first cycle
         # No mutation between cycles → no events.
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
         assert not gprim
 
@@ -269,11 +269,11 @@ class TestEmitterCameraDiff:
         cam = UsdGeom.Camera(p)
         cam.CreateFocalLengthAttr(50.0)
         cam.CreateHorizontalApertureAttr(36.0)
-        em.build_events_for_dirty(include_matrices=False)  # consume first cycle
+        em.build_events_for_dirty()  # consume first cycle
 
         # Change only focal length.
         cam.GetFocalLengthAttr().Set(85.0)
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
         assert gprim
         attrs = gprim[0]["attrs"]
@@ -295,7 +295,7 @@ class TestRoundtripEmitterToApplier:
         cam.CreateFStopAttr(2.8)
         cam.CreateFocusDistanceAttr(3.5)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         dst = Usd.Stage.CreateInMemory()
         apply_events(dst, events)
@@ -353,7 +353,7 @@ class TestRealCameraAsset:
         cam = UsdGeom.Camera(src.GetPrimAtPath(self.CAM_PATH))
         cam.GetFocalLengthAttr().Set(85.0)
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
 
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.CAM_PATH]
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == self.CAM_PATH]

@@ -34,7 +34,6 @@ from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
@@ -154,18 +153,6 @@ class TestApplyEvent:
         # Scale should remain unchanged
         s_val = ops["xformOp:scale"].Get()
         assert abs(s_val[0] - 1.0) < 1e-6
-
-    def test_set_xform_matrices_ignored(self, stage):
-        # Should not raise
-        apply_event(
-            stage,
-            {
-                "k": K_SET_XFORM_MATRICES,
-                "prim": "/World/Sphere",
-                "local_m": [0.0] * 16,
-                "world_m": [0.0] * 16,
-            },
-        )
 
     def test_delete_prim(self, stage):
         stage.DefinePrim("/World/ToDelete", "Xform")

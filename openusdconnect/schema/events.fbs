@@ -133,12 +133,6 @@ table SetXformTrs {
     s:[float];              // 3 floats (scale)
 }
 
-table SetXformMatrices {
-    prim:string;
-    local_m:[float];        // 16 floats (row-major 4x4)
-    world_m:[float];        // 16 floats (row-major 4x4)
-}
-
 table DeletePrim {
     prim:string;
 }
@@ -213,7 +207,6 @@ union EventPayload {
     EnsurePrim,
     EnsureXformOps,
     SetXformTrs,
-    SetXformMatrices,
     DeletePrim,
     DeactivatePrim,
     RenamePrim,

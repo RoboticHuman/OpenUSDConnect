@@ -789,11 +789,11 @@ class _State:
 _state = _State()
 
 
-def _try_send_dirty_events(include_matrices: bool = False):
+def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
         return
-    events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
+    events = _state.notice_emitter.build_events_for_dirty()
     if events:
         from collections import Counter
 
@@ -899,7 +899,7 @@ def _depsgraph_handler(scene, depsgraph):
             coalesce = getattr(scene, "usd_connect_coalesce_seconds", DEFAULT_COALESCE_SECONDS)
             now = time.time()
             if coalesce <= 0 or (now - _state._last_send_time) >= coalesce:
-                _try_send_dirty_events(include_matrices=False)
+                _try_send_dirty_events()
                 _state._last_send_time = now
 
     except Exception:
@@ -912,7 +912,7 @@ def _timer_tick():
         if _state.author is None or not _state.author.enabled:
             return 0.25
         if _state.notice_emitter and _state.notice_emitter.dirty:
-            _try_send_dirty_events(include_matrices=False)
+            _try_send_dirty_events()
             _state._last_send_time = time.time()
         return 0.25
     except Exception:
@@ -1152,7 +1152,7 @@ class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
 
         if _state.author is not None:
             _state.author.send_rename(old_path, new_name)
-            _try_send_dirty_events(include_matrices=False)
+            _try_send_dirty_events()
 
         obj["usd_prim_path"] = new_path
         self.report({"INFO"}, f"Renamed: {old_path} → {new_path}")

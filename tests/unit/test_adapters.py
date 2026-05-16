@@ -58,22 +58,6 @@ class TestMockAdapterTRS:
         assert not a.set_xform_trs("/missing", t=[0, 0, 0])
 
 
-class TestMockAdapterMatrices:
-    def test_set_xform_matrices(self):
-        a = MockAdapter()
-        a.ensure_prim("/A")
-        local = list(range(16))
-        world = list(range(16, 32))
-        assert a.set_xform_matrices("/A", local_m=local, world_m=world)
-        p = a.get_prim("/A")
-        assert p["matrices"]["local"] == local
-        assert p["matrices"]["world"] == world
-
-    def test_missing_prim_returns_false(self):
-        a = MockAdapter()
-        assert not a.set_xform_matrices("/missing")
-
-
 class TestMockAdapterDelete:
     def test_delete_existing(self):
         a = MockAdapter()
@@ -241,10 +225,6 @@ class TestUsdStageAdapterDirectMethods:
         xf = UsdGeom.Xformable(stage.GetPrimAtPath("/A"))
         t_op = find_op(xf, "translate")
         assert list(t_op.Get()) == [5.0, 10.0, 0.0]
-
-    def test_set_xform_matrices_noop(self):
-        _, adapter = self._make_stage()
-        assert adapter.set_xform_matrices("/A")
 
     def test_delete_prim(self):
         stage, adapter = self._make_stage()

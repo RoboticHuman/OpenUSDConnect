@@ -105,19 +105,6 @@ class SetXformTRS(TypedDict):
     s: NotRequired[list[float]]  # length 3
 
 
-class SetXformMatrices(TypedDict):
-    """Diagnostic: full 4x4 local + world matrices (row-major, length 16).
-
-    Note: ``apply_event`` currently no-ops this kind — it travels on the
-    wire for inspection only.
-    """
-
-    k: Literal["set_xform_matrices"]
-    prim: str
-    local_m: list[float]
-    world_m: list[float]
-
-
 class DeletePrim(TypedDict):
     """Remove a prim from the stage."""
 
@@ -250,7 +237,6 @@ Event = (
     EnsurePrim
     | EnsureXformOps
     | SetXformTRS
-    | SetXformMatrices
     | DeletePrim
     | DeactivatePrim
     | RenamePrim
@@ -373,7 +359,6 @@ __all__ = [
     "EnsurePrim",
     "EnsureXformOps",
     "SetXformTRS",
-    "SetXformMatrices",
     "DeletePrim",
     "DeactivatePrim",
     "RenamePrim",

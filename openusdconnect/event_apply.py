@@ -33,7 +33,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     REL_MATERIAL_BINDING,
@@ -656,12 +655,6 @@ def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
 @register_applier(K_ENSURE_XFORM_OPS)
 def _apply_ensure_xform_ops(stage: Usd.Stage, ev: dict) -> None:
     ensure_canonical_ops(stage, ev["prim"])
-
-
-@register_applier(K_SET_XFORM_MATRICES)
-def _apply_set_xform_matrices(stage: Usd.Stage, ev: dict) -> None:
-    # Diagnostic payload — no stage mutation.
-    pass
 
 
 @register_applier(K_DELETE_PRIM)

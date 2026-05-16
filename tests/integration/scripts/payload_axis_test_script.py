@@ -85,7 +85,7 @@ def _pump(cycles=50, delay=0.05):
         if updates and cap_mod._state.author is not None and cap_mod._state.author.enabled:
             if not cap_mod._state.author._applying_remote:
                 cap_mod._state.author.on_depsgraph_update(updates)
-                cap_mod._try_send_dirty_events(include_matrices=False)
+                cap_mod._try_send_dirty_events()
 
         time.sleep(delay)
 

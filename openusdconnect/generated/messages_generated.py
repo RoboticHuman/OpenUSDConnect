@@ -32,20 +32,19 @@ class EventPayload(object):
     EnsurePrim = 1
     EnsureXformOps = 2
     SetXformTrs = 3
-    SetXformMatrices = 4
-    DeletePrim = 5
-    DeactivatePrim = 6
-    RenamePrim = 7
-    SetVisibility = 8
-    SetGprimAttrs = 9
-    SetReference = 10
-    SetPayload = 11
-    LoadPayload = 12
-    UnloadPayload = 13
-    SetVariantSelections = 14
-    SetMaterialBinding = 15
-    SetConnectableInput = 16
-    SetConnectableConnection = 17
+    DeletePrim = 4
+    DeactivatePrim = 5
+    RenamePrim = 6
+    SetVisibility = 7
+    SetGprimAttrs = 8
+    SetReference = 9
+    SetPayload = 10
+    LoadPayload = 11
+    UnloadPayload = 12
+    SetVariantSelections = 13
+    SetMaterialBinding = 14
+    SetConnectableInput = 15
+    SetConnectableConnection = 16
 
 
 class Payload(object):
@@ -903,108 +902,6 @@ def SetXformTrsStartSVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
 def SetXformTrsEnd(builder):
-    return builder.EndObject()
-
-
-
-class SetXformMatrices(object):
-    __slots__ = ['_tab']
-
-    @classmethod
-    def GetRootAs(cls, buf, offset=0):
-        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = SetXformMatrices()
-        x.Init(buf, n + offset)
-        return x
-
-    @classmethod
-    def GetRootAsSetXformMatrices(cls, buf, offset=0):
-        """This method is deprecated. Please switch to GetRootAs."""
-        return cls.GetRootAs(buf, offset)
-    # SetXformMatrices
-    def Init(self, buf, pos):
-        self._tab = flatbuffers.table.Table(buf, pos)
-
-    # SetXformMatrices
-    def Prim(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-    # SetXformMatrices
-    def LocalM(self, j):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            a = self._tab.Vector(o)
-            return self._tab.Get(flatbuffers.number_types.Float32Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
-        return 0
-
-    # SetXformMatrices
-    def LocalMAsNumpy(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Float32Flags, o)
-        return 0
-
-    # SetXformMatrices
-    def LocalMLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            return self._tab.VectorLen(o)
-        return 0
-
-    # SetXformMatrices
-    def LocalMIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        return o == 0
-
-    # SetXformMatrices
-    def WorldM(self, j):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            a = self._tab.Vector(o)
-            return self._tab.Get(flatbuffers.number_types.Float32Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
-        return 0
-
-    # SetXformMatrices
-    def WorldMAsNumpy(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Float32Flags, o)
-        return 0
-
-    # SetXformMatrices
-    def WorldMLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            return self._tab.VectorLen(o)
-        return 0
-
-    # SetXformMatrices
-    def WorldMIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        return o == 0
-
-def SetXformMatricesStart(builder):
-    builder.StartObject(3)
-
-def SetXformMatricesAddPrim(builder, prim):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
-
-def SetXformMatricesAddLocalM(builder, localM):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(localM), 0)
-
-def SetXformMatricesStartLocalMVector(builder, numElems):
-    return builder.StartVector(4, numElems, 4)
-
-def SetXformMatricesAddWorldM(builder, worldM):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(worldM), 0)
-
-def SetXformMatricesStartWorldMVector(builder, numElems):
-    return builder.StartVector(4, numElems, 4)
-
-def SetXformMatricesEnd(builder):
     return builder.EndObject()
 
 

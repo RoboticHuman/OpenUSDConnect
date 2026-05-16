@@ -138,7 +138,7 @@ class TestNoticeEmitterRoundtrip:
             o_op.Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
             s_op.Set(Gf.Vec3d(2.0, 2.0, 2.0))
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         # Apply events to MockAdapter
         adapter = MockAdapter()
@@ -160,7 +160,7 @@ class TestNoticeEmitterRoundtrip:
             t_op.Set(Gf.Vec3d(1.0, 2.0, 3.0))
             s_op.Set(Gf.Vec3d(0.5, 0.5, 0.5))
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         # Apply to a separate stage
         stage_b = Usd.Stage.CreateInMemory()
@@ -189,14 +189,14 @@ class TestNoticeEmitterRoundtrip:
         s_op.Set(Gf.Vec3d(1.0, 1.0, 1.0))
 
         # First flush
-        events1 = emitter.build_events_for_dirty(include_matrices=False)
+        events1 = emitter.build_events_for_dirty()
         trs1 = [e for e in events1 if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs1) == 1
         assert set(trs1[0]["fields"]) == {"t", "r", "s"}
 
         # Change only translation
         t_op.Set(Gf.Vec3d(2.0, 0.0, 0.0))
-        events2 = emitter.build_events_for_dirty(include_matrices=False)
+        events2 = emitter.build_events_for_dirty()
         trs2 = [e for e in events2 if e.get("k") == K_SET_XFORM_TRS]
         assert len(trs2) == 1
         assert trs2[0]["fields"] == ["t"]
@@ -209,20 +209,20 @@ class TestNoticeEmitterRoundtrip:
         # Set up xform ops so the prim shows up as dirty
         ensure_canonical_ops(stage, "/World/Sphere")
         # Drain initial dirty
-        emitter.build_events_for_dirty(include_matrices=False)
+        emitter.build_events_for_dirty()
 
         # Make invisible
         prim = stage.GetPrimAtPath("/World/Sphere")
         UsdGeom.Imageable(prim).GetVisibilityAttr().Set("invisible")
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
         vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events) == 1
         assert vis_events[0]["visible"] is False
 
         # Make visible again
         UsdGeom.Imageable(prim).GetVisibilityAttr().Set("inherited")
-        events2 = emitter.build_events_for_dirty(include_matrices=False)
+        events2 = emitter.build_events_for_dirty()
         vis_events2 = [e for e in events2 if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events2) == 1
         assert vis_events2[0]["visible"] is True
@@ -235,7 +235,7 @@ class TestNoticeEmitterRoundtrip:
         emitter = NoticeEmitter(stage)
 
         # First encounter — visibility is not authored on either prim
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
         vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events) == 0, f"Got spurious visibility events: {vis_events}"
 
@@ -348,7 +348,7 @@ class TestPayloadRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Thing")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         pay_evs = [e for e in events if e["k"] == K_SET_PAYLOAD]
         assert len(pay_evs) == 1
@@ -519,7 +519,7 @@ class TestPayloadRoundtrip:
 
         emitter = NoticeEmitter(src)
         emitter.mark_dirty("/World/Asset")
-        events1 = emitter.build_events_for_dirty(include_matrices=False)
+        events1 = emitter.build_events_for_dirty()
         # First encounter: should NOT emit load_payload (prim is unloaded)
         load_events = [e for e in events1 if e["k"] == K_LOAD_PAYLOAD]
         assert len(load_events) == 0
@@ -527,7 +527,7 @@ class TestPayloadRoundtrip:
         # Now load the payload
         src.Load(Sdf.Path("/World/Asset"))
         emitter.mark_dirty("/World/Asset")
-        events2 = emitter.build_events_for_dirty(include_matrices=False)
+        events2 = emitter.build_events_for_dirty()
         load_events = [e for e in events2 if e["k"] == K_LOAD_PAYLOAD]
         assert len(load_events) == 1
         assert load_events[0]["prim"] == "/World/Asset"
@@ -535,7 +535,7 @@ class TestPayloadRoundtrip:
         # Now unload
         src.Unload(Sdf.Path("/World/Asset"))
         emitter.mark_dirty("/World/Asset")
-        events3 = emitter.build_events_for_dirty(include_matrices=False)
+        events3 = emitter.build_events_for_dirty()
         unload_events = [e for e in events3 if e["k"] == K_UNLOAD_PAYLOAD]
         assert len(unload_events) == 1
         assert unload_events[0]["prim"] == "/World/Asset"
@@ -552,13 +552,13 @@ class TestStageToStageRoundtrip:
         emitter = NoticeEmitter(stage_a)
 
         # Drain initial dirty
-        emitter.build_events_for_dirty(include_matrices=False)
+        emitter.build_events_for_dirty()
 
         # Hide the sphere
         UsdGeom.Imageable(stage_a.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
             "invisible"
         )
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         # Apply to stage B
         stage_b = Usd.Stage.CreateInMemory()
@@ -580,7 +580,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Sphere")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         assert len(gprim_evs) == 1
@@ -607,11 +607,11 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Cone")
-        emitter.build_events_for_dirty(include_matrices=False)  # first flush
+        emitter.build_events_for_dirty()  # first flush
 
         # Change radius
         prim_a.GetAttribute("radius").Set(3.5)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         assert len(gprim_evs) == 1
@@ -649,7 +649,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Tri")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -680,7 +680,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/UVMesh")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -712,7 +712,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/ColorMesh")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -749,7 +749,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/NMesh")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -774,7 +774,7 @@ class TestStageToStageRoundtrip:
 
         emitter = NoticeEmitter(stage_a)
         emitter.mark_dirty("/World/Guide")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -816,7 +816,7 @@ class TestStageToStageRoundtrip:
         emitter = NoticeEmitter(stage_a)
         for p in ["/World", "/World/Sphere", "/Materials/Red", "/Materials/Red/PBR"]:
             emitter.mark_dirty(p)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         stage_b.DefinePrim("/World", "Xform")
@@ -878,7 +878,7 @@ class TestStageToStageRoundtrip:
         emitter = NoticeEmitter(stage_a)
         for p in ["/World", "/Mat", "/Mat/PBR", "/Mat/DiffuseTex", "/Mat/UVReader"]:
             emitter.mark_dirty(p)
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         stage_b = Usd.Stage.CreateInMemory()
         apply_events(stage_b, events)
@@ -935,7 +935,7 @@ class TestStageToStageRoundtrip:
             Sdf.ValueTypeNames.Token,
         ).Set("raw")
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         # Wrap events in a txn, encode to FlatBuffers, decode back.
         txn = {"type": "txn", "client_id": "test", "events": events}
@@ -977,7 +977,7 @@ class TestStageToStageRoundtrip:
             Sdf.ValueTypeNames.Float4,
         ).Set(Gf.Vec4f(2, 2, 2, 2))
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         wire = codec.encode_message(
             {"type": "txn", "client_id": "test", "events": events},
@@ -1122,7 +1122,7 @@ class TestStageToStageRoundtrip:
         ng_out = ng.CreateOutput("result", Sdf.ValueTypeNames.Color3f)
         ng_out.ConnectToSource(rgb)
 
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         wire = codec.encode_message(
             {"type": "txn", "client_id": "t", "events": events},
@@ -1294,13 +1294,13 @@ class TestVariantSelectionRoundtrip:
 
         # First flush — captures initial "small" selection
         emitter.mark_dirty("/World/Sphere")
-        emitter.build_events_for_dirty(include_matrices=False)
+        emitter.build_events_for_dirty()
 
         # Change to "medium"
         stage_a.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSet(
             "size"
         ).SetVariantSelection("medium")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
         assert len(vsel) == 1
@@ -1402,7 +1402,7 @@ class TestLIVERPS:
         emitter = NoticeEmitter(stage)
 
         emitter.mark_dirty("/World/Sphere")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         gprim_evs = [
             e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
@@ -1420,12 +1420,12 @@ class TestLIVERPS:
 
         # First flush — local radius=1 wins over variant "big" radius=10
         emitter.mark_dirty("/World/Sphere")
-        emitter.build_events_for_dirty(include_matrices=False)
+        emitter.build_events_for_dirty()
 
         # Switch to "small" (radius=0.5) — but local=1 still wins
         prim = stage.GetPrimAtPath("/World/Sphere")
         prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("small")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         # Variant selection event fires
         vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
@@ -1489,7 +1489,7 @@ class TestSublayerOwnership:
         stage.SetEditTarget(Usd.EditTarget(session))
         emitter = NoticeEmitter(stage)
         emitter.mark_dirty("/World/FromSub")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/FromSub"]
         assert len(ref_evs) == 0, (
@@ -1521,7 +1521,7 @@ class TestSublayerOwnership:
 
         emitter = NoticeEmitter(stage)
         emitter.mark_dirty("/World/Chair")
-        events = emitter.build_events_for_dirty(include_matrices=False)
+        events = emitter.build_events_for_dirty()
 
         ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Chair"]
         assert len(ref_evs) == 1

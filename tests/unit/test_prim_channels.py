@@ -74,7 +74,7 @@ class TestGprimScanFilters:
         UsdGeom.Xformable(mesh).AddTranslateOp().Set((0, 0, 0))
         em = NoticeEmitter(stage)
         mesh.GetAttribute("xformOp:translate").Set((1.0, 2.0, 3.0))
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         for e in gprim:
             assert "xformOp:translate" not in e.get("attrs", {})
@@ -84,7 +84,7 @@ class TestGprimScanFilters:
         UsdLux.SphereLight(p).CreateIntensityAttr(1.0)
         em = NoticeEmitter(stage)
         UsdLux.SphereLight(p).GetIntensityAttr().Set(2.0)
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         for e in gprim:
             assert "inputs:intensity" not in e.get("attrs", {})
@@ -138,7 +138,7 @@ class TestMixedChangesPreserveEmissions:
         UsdGeom.Imageable(mesh).GetVisibilityAttr().Set("invisible")
         mesh.GetAttribute("primvars:foo").Set([3.0, 4.0])
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         vis = [e for e in events if e["k"] == K_SET_VISIBILITY]
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         assert vis, "visibility event missing alongside primvar change"
@@ -159,7 +159,7 @@ class TestMixedChangesPreserveEmissions:
         intensity.Set(2.0)
         primvar.Set([2.0])
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         sci = [e for e in events if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/MeshLight"]
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/MeshLight"]
         assert sci, "connectable input event missing alongside primvar change"
@@ -180,7 +180,7 @@ class TestFirstEncounterReadsAllChannels:
         em = NoticeEmitter(stage)
         p.GetAttribute("xformOp:translate").Set((1, 0, 0))
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
         assert gprim
         assert gprim[0]["attrs"]["focalLength"] == pytest.approx(35.0)
@@ -193,7 +193,7 @@ class TestFirstEncounterReadsAllChannels:
         em = NoticeEmitter(stage)
         p.GetAttribute("xformOp:translate").Set((1, 0, 0))
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         inputs = [
             e for e in events
             if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Light"
@@ -217,12 +217,12 @@ class TestMaterialBindingRebind:
         UsdShade.MaterialBindingAPI.Apply(mesh).Bind(UsdShade.Material(mat_a))
 
         em = NoticeEmitter(stage)
-        em.build_events_for_dirty(include_matrices=False)  # consume initial
+        em.build_events_for_dirty()  # consume initial
 
         # Rebind to a different material — fires info-only only.
         UsdShade.MaterialBindingAPI(mesh).Bind(UsdShade.Material(mat_b))
 
-        events = em.build_events_for_dirty(include_matrices=False)
+        events = em.build_events_for_dirty()
         binding_events = [
             e for e in events
             if e["k"] == "set_material_binding" and e["prim"] == "/Mesh"

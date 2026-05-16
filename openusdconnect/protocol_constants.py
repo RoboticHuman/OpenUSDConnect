@@ -22,7 +22,6 @@ MSG_RATE_LIMITED = "rate_limited"
 K_ENSURE_PRIM = "ensure_prim"
 K_ENSURE_XFORM_OPS = "ensure_xform_ops"
 K_SET_XFORM_TRS = "set_xform_trs"
-K_SET_XFORM_MATRICES = "set_xform_matrices"
 K_DELETE_PRIM = "delete_prim"
 K_DEACTIVATE_PRIM = "deactivate_prim"
 K_RENAME_PRIM = "rename_prim"
@@ -45,7 +44,6 @@ EVENT_KEYS = frozenset(
         K_ENSURE_PRIM,
         K_ENSURE_XFORM_OPS,
         K_SET_XFORM_TRS,
-        K_SET_XFORM_MATRICES,
         K_DELETE_PRIM,
         K_DEACTIVATE_PRIM,
         K_RENAME_PRIM,
@@ -80,7 +78,6 @@ _EVENT_KIND_SEQUENCE = [
     K_SET_GPRIM_ATTRS,
     K_SET_CONNECTABLE_INPUT,
     K_SET_CONNECTABLE_CONNECTION,
-    K_SET_XFORM_MATRICES,
     K_SET_MATERIAL_BINDING,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
