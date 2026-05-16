@@ -212,13 +212,12 @@ def test_ensure_prim_supported_light_types_create_blender_lights(r):
 
 
 def test_ensure_prim_skipped_light_types_create_no_object(r):
-    """DomeLight (→ World env, follow-up) and other lights without a Blender
-    equivalent must NOT create a stray Empty object — they should be
-    skipped via _NON_SCENE_TYPES."""
+    """Lights without any Blender equivalent (CylinderLight, GeometryLight,
+    PortalLight, PluginLight) must NOT create a stray Empty object — they
+    should be skipped via _NON_SCENE_TYPES. DomeLight is handled separately
+    by test_ensure_prim_domelight_sets_up_world_network."""
     name = "test_ensure_prim_skipped_light_types_create_no_object"
-    # DomeLight is the most common skipped case; CylinderLight has no direct
-    # Blender equivalent either.
-    for light_type in ("DomeLight", "CylinderLight"):
+    for light_type in ("CylinderLight", "GeometryLight", "PortalLight", "PluginLight"):
         _clear_scene()
         adapter = BlenderAdapter()
         prim_path = f"/World/Test{light_type}"
@@ -233,6 +232,188 @@ def test_ensure_prim_skipped_light_types_create_no_object(r):
         if stray:
             r.fail(name, f"{light_type} left {len(stray)} stray object(s) in bpy.data")
             return
+    r.ok(name)
+
+
+def test_ensure_prim_domelight_sets_up_world_network(r):
+    """DomeLight is not a scene object — it sets up the World shader network
+    (TexCoord → Mapping → EnvTex → VectorMath → Background → WorldOutput)
+    matching what Blender's own USD importer produces."""
+    name = "test_ensure_prim_domelight_sets_up_world_network"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    if not adapter.ensure_prim("/World/Dome", "DomeLight"):
+        r.fail(name, "DomeLight ensure_prim returned False")
+        return
+    # No scene object.
+    obj = _find_by_prim(adapter, "/World/Dome")
+    if obj is not None:
+        r.fail(name, f"DomeLight created a stray object: {obj.name}")
+        return
+    # World network exists.
+    world = bpy.context.scene.world
+    if world is None or not world.use_nodes:
+        r.fail(name, "World missing or use_nodes False after ensure_prim(DomeLight)")
+        return
+    tree = world.node_tree
+    expected = {
+        "USD Dome World Output":         "ShaderNodeOutputWorld",
+        "USD Dome Background":           "ShaderNodeBackground",
+        "USD Dome Color Multiply":       "ShaderNodeVectorMath",
+        "USD Dome Environment Texture":  "ShaderNodeTexEnvironment",
+        "USD Dome Mapping":              "ShaderNodeMapping",
+        "USD Dome Texture Coordinate":   "ShaderNodeTexCoord",
+    }
+    for node_name, bl_idname in expected.items():
+        node = tree.nodes.get(node_name)
+        if node is None:
+            r.fail(name, f"missing node {node_name!r}")
+            return
+        if node.bl_idname != bl_idname:
+            r.fail(name, f"{node_name}: expected {bl_idname}, got {node.bl_idname}")
+            return
+    # Verify the wiring chain ends at WorldOutput.Surface from Background.
+    out = tree.nodes["USD Dome World Output"]
+    surface_input = out.inputs["Surface"]
+    if not surface_input.is_linked:
+        r.fail(name, "WorldOutput.Surface is not linked")
+        return
+    from_node = surface_input.links[0].from_node.name
+    if from_node != "USD Dome Background":
+        r.fail(name, f"WorldOutput.Surface from={from_node}, expected USD Dome Background")
+        return
+    # Output node is tagged with the dome's prim path.
+    if out.get("usd_dome_path") != "/World/Dome":
+        r.fail(name, f"WorldOutput usd_dome_path={out.get('usd_dome_path')}, expected /World/Dome")
+        return
+    r.ok(name)
+
+
+def test_set_connectable_input_domelight_writes_world_shader(r):
+    """USD DomeLight inputs (intensity, color, texture:file) write to the
+    correct nodes on the World shader."""
+    import os
+    import tempfile
+
+    name = "test_set_connectable_input_domelight_writes_world_shader"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Dome", "DomeLight")
+
+    # intensity → Background.Strength; color → VectorMath factor.
+    adapter.set_connectable_input(
+        "/World/Dome",
+        "",
+        {"intensity": 2.5, "color": [1.0, 0.8, 0.5]},
+        {"intensity": "float", "color": "color3f"},
+    )
+    world = bpy.context.scene.world
+    tree = world.node_tree
+    bg = tree.nodes["USD Dome Background"]
+    vm = tree.nodes["USD Dome Color Multiply"]
+
+    if abs(bg.inputs["Strength"].default_value - 2.5) > 1e-4:
+        r.fail(name, f"Background.Strength={bg.inputs['Strength'].default_value}, expected 2.5")
+        return
+    factor = tuple(vm.inputs[1].default_value)[:3]
+    if tuple(round(c, 3) for c in factor) != (1.0, 0.8, 0.5):
+        r.fail(name, f"VectorMath factor={factor}, expected (1.0,0.8,0.5)")
+        return
+
+    # texture:file with a real loadable image. Use a tiny 1x1 EXR by writing
+    # a Blender-internal image to disk, then loading via the dome path.
+    tmpdir = tempfile.mkdtemp()
+    exr_path = os.path.join(tmpdir, "tiny.hdr")
+    src_img = bpy.data.images.new("__tmp_hdr", width=4, height=2, float_buffer=True)
+    src_img.pixels = [0.5] * (4 * 2 * 4)
+    src_img.filepath_raw = exr_path
+    src_img.file_format = "HDR"
+    src_img.save()
+
+    adapter.set_connectable_input(
+        "/World/Dome",
+        "",
+        {"texture:file": exr_path},
+        {"texture:file": "asset"},
+    )
+    env = tree.nodes["USD Dome Environment Texture"]
+    if env.image is None:
+        r.fail(name, f"EnvironmentTexture.image is None after texture:file={exr_path!r}")
+        return
+    if env.image.colorspace_settings.name != "Non-Color":
+        r.fail(
+            name,
+            f"EnvironmentTexture colorspace={env.image.colorspace_settings.name!r}, "
+            f"expected 'Non-Color'",
+        )
+        return
+    r.ok(name)
+
+
+def test_set_xform_trs_domelight_writes_mapping_rotation(r):
+    """DomeLight Xform rotation should land on the Mapping node, not raise
+    a 'no object' warning (DomeLight has no scene object)."""
+    import math
+
+    name = "test_set_xform_trs_domelight_writes_mapping_rotation"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Dome", "DomeLight")
+
+    # 90° rotation around Y axis: quat = (cos(45°), 0, sin(45°), 0)
+    s = math.sin(math.radians(45))
+    c = math.cos(math.radians(45))
+    adapter.set_xform_trs("/World/Dome", r=[c, 0.0, s, 0.0])
+
+    world = bpy.context.scene.world
+    mapping = world.node_tree.nodes["USD Dome Mapping"]
+    rot = mapping.inputs["Rotation"].default_value
+    # Y of 90° = π/2 rad, X and Z should be 0.
+    if abs(rot[1] - math.pi / 2) > 1e-3:
+        r.fail(name, f"Mapping rotation Y={rot[1]}, expected π/2 (~1.5708)")
+        return
+    if abs(rot[0]) > 1e-3 or abs(rot[2]) > 1e-3:
+        r.fail(name, f"Mapping rotation X={rot[0]}, Z={rot[2]}, expected ~0")
+        return
+    r.ok(name)
+
+
+def test_multi_domelight_last_wins(r):
+    """When two DomeLights are sequenced through ensure_prim, the most
+    recently-ensured one becomes the active dome and drives subsequent
+    inputs. The earlier dome's inputs are silently ignored."""
+    name = "test_multi_domelight_last_wins"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/DomeA", "DomeLight")
+    # First dome owns the World, set its intensity.
+    adapter.set_connectable_input(
+        "/World/DomeA", "",
+        {"intensity": 1.0}, {"intensity": "float"},
+    )
+    bg = bpy.context.scene.world.node_tree.nodes["USD Dome Background"]
+    if abs(bg.inputs["Strength"].default_value - 1.0) > 1e-4:
+        r.fail(name, "DomeA failed to set initial intensity")
+        return
+
+    # Second dome takes over.
+    adapter.ensure_prim("/World/DomeB", "DomeLight")
+    adapter.set_connectable_input(
+        "/World/DomeB", "",
+        {"intensity": 7.0}, {"intensity": "float"},
+    )
+    if abs(bg.inputs["Strength"].default_value - 7.0) > 1e-4:
+        r.fail(name, f"DomeB intensity not applied; got {bg.inputs['Strength'].default_value}")
+        return
+
+    # DomeA's later updates are silently ignored (last-wins).
+    adapter.set_connectable_input(
+        "/World/DomeA", "",
+        {"intensity": 99.0}, {"intensity": "float"},
+    )
+    if abs(bg.inputs["Strength"].default_value - 7.0) > 1e-4:
+        r.fail(name, f"DomeA stale update leaked; intensity={bg.inputs['Strength'].default_value}")
+        return
     r.ok(name)
 
 
@@ -840,6 +1021,10 @@ def main():
         test_ensure_prim_light_with_api_schemas,
         test_set_connectable_input_writes_light_attributes,
         test_set_connectable_input_on_non_light_is_noop,
+        test_ensure_prim_domelight_sets_up_world_network,
+        test_set_connectable_input_domelight_writes_world_shader,
+        test_set_xform_trs_domelight_writes_mapping_rotation,
+        test_multi_domelight_last_wins,
         test_ensure_prim_idempotent,
         test_set_xform_trs,
         test_set_visibility,

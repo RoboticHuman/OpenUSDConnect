@@ -69,6 +69,14 @@ class BlenderAdapter(DCCAdapter):
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
         self._needs_axis_conv: bool = needs_conversion(scene_up_axis)
         self._shader_registry = create_default_registry()
+        # DomeLight bookkeeping. Blender has exactly one World per scene, so
+        # multiple USD DomeLights map to a last-wins policy: the most recent
+        # ensure_prim / set_connectable_input wins; earlier domes' events are
+        # silently ignored. _dome_light_paths tracks every dome we've seen
+        # (so we can re-recognize their events as dome-bound); _active_dome
+        # is the path currently driving the World shader.
+        self._dome_light_paths: set[str] = set()
+        self._active_dome: str | None = None
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -257,14 +265,13 @@ class BlenderAdapter(DCCAdapter):
                 LOG.warning("Failed to move %s to collection %s", obj.name, target_col.name)
         LOG.info("ensure_prim: parented '%s' under '%s'", obj.name, parent_obj.name)
 
-    # Light types with no direct Blender object equivalent — they're skipped
-    # in ensure_prim. DomeLight should become a World environment (follow-up);
-    # CylinderLight has no Blender area-shape match; the remaining typed
-    # schemas (Geometry/Portal/Plugin) are non-physical or plugin-specific.
-    # The 4 supported lights (SphereLight, DistantLight, RectLight, DiskLight)
-    # flow through _create_blender_object via _USDLUX_TO_BLENDER_LIGHT.
+    # Light types with no direct Blender object equivalent. CylinderLight
+    # has no Blender area-shape match; Geometry/Portal/Plugin are non-physical
+    # or plugin-specific. The 4 supported lights (SphereLight, DistantLight,
+    # RectLight, DiskLight) flow through _create_blender_object via
+    # _USDLUX_TO_BLENDER_LIGHT. DomeLight is handled separately as a World
+    # shader network rather than a light object — see _ensure_dome_light.
     _SKIPPED_LIGHT_TYPES = frozenset({
-        "DomeLight",
         "CylinderLight", "GeometryLight", "PortalLight", "PluginLight",
     })
 
@@ -289,6 +296,8 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.ensure_prim dry: %s", prim_path)
             return True
+        if type_name == "DomeLight":
+            return self._ensure_dome_light(prim_path)
         if type_name in self._NON_SCENE_TYPES:
             LOG.info("ensure_prim: skipping non-scene type %s for %s", type_name, prim_path)
             return True
@@ -335,6 +344,13 @@ class BlenderAdapter(DCCAdapter):
         r: list[float] | None = None,
         s: list[float] | None = None,
     ) -> bool:
+        # DomeLight has no scene object — its Xform drives the World's
+        # Mapping node rotation instead. Translation/scale are conventionally
+        # meaningless on a dome (it's at infinity) and silently ignored.
+        if prim_path in self._dome_light_paths:
+            if r is not None:
+                self._apply_dome_light_rotation(prim_path, r)
+            return True
         obj = self._find_object_by_prim(prim_path)
         if obj is None:
             LOG.warning("BlenderAdapter: object not found for prim %s", prim_path)
@@ -626,8 +642,12 @@ class BlenderAdapter(DCCAdapter):
         light type (e.g. ``shaping:cone:angle`` on a POINT — would require
         promoting the SphereLight to a SPOT, follow-up) are silently
         skipped.
+
+        DomeLight prims are routed separately to the World shader handler.
         """
         del input_types  # unused; reserved for type-aware dispatch follow-ups
+        if prim_path in self._dome_light_paths:
+            return self._apply_dome_light_input(prim_path, inputs)
         obj = self._find_object_by_prim(prim_path)
         if obj is None or obj.type != "LIGHT":
             return True  # not a light we created; treat as no-op
@@ -658,6 +678,195 @@ class BlenderAdapter(DCCAdapter):
             light_data.size_y = float(value)
         elif usd_name == "angle" and blender_type == "SUN":
             light_data.angle = math.radians(float(value))
+
+    # ------------------------------------------------------------------
+    # DomeLight (UsdLux) → Blender World shader
+    # ------------------------------------------------------------------
+    # USD DomeLight is a 360° image-based light. Blender models this as
+    # the World shader, not a scene object — so DomeLight maps to a node
+    # network on bpy.context.scene.world.node_tree:
+    #
+    #   Texture Coordinate → Mapping → Environment Texture
+    #                                       ↓
+    #             Vector Math (multiply by color tint)
+    #                                       ↓
+    #                              Background (Strength = intensity)
+    #                                       ↓
+    #                              World Output (Surface)
+    #
+    # USD inputs map to:
+    #   inputs:intensity     → Background.Strength
+    #   inputs:color         → Vector Math second factor (RGB tint of the env)
+    #   inputs:texture:file  → Environment Texture.image (Non-Color colorspace)
+    #   DomeLight.Xform      → Mapping.Rotation (quat → Euler)
+    #
+    # Blender has exactly one World per scene; multiple USD DomeLights map
+    # to "last-DomeLight-wins" — the most recent ensure_prim drives the
+    # World, earlier domes' events are silently ignored.
+
+    _DOME_NODE_NAMES = {
+        "output":     "USD Dome World Output",
+        "background": "USD Dome Background",
+        "vec_math":   "USD Dome Color Multiply",
+        "env_tex":    "USD Dome Environment Texture",
+        "mapping":    "USD Dome Mapping",
+        "tex_coord":  "USD Dome Texture Coordinate",
+    }
+
+    def _ensure_dome_light(self, prim_path: str) -> bool:
+        """Register a DomeLight prim and (re-)build the World node network.
+
+        Last-wins: the prim that ensures most recently becomes the active
+        dome and drives subsequent input/transform writes. Earlier domes
+        remain in _dome_light_paths (so their events are recognized as
+        dome-bound and routed here) but are silently ignored when applied.
+        """
+        if self._active_dome is not None and self._active_dome != prim_path:
+            LOG.info(
+                "DomeLight: %s now drives World (was %s)",
+                prim_path, self._active_dome,
+            )
+        self._dome_light_paths.add(prim_path)
+        self._active_dome = prim_path
+
+        world = bpy.context.scene.world
+        if world is None:
+            world = bpy.data.worlds.new("World")
+            bpy.context.scene.world = world
+        # World.use_nodes is deprecated in Blender 6.0 but enabling here is
+        # still required in 5.x; the node_tree only exists after enable.
+        if not world.use_nodes:
+            world.use_nodes = True
+        self._build_dome_network(world.node_tree, prim_path)
+        return True
+
+    @classmethod
+    def _build_dome_network(cls, tree, prim_path: str) -> None:
+        """Idempotently build the dome IBL network on a World node tree.
+
+        Nodes are looked up / created by stable name (``_DOME_NODE_NAMES``)
+        so re-entering this function for the same World is a no-op past the
+        initial build. Links are recreated unconditionally; tree.links.new
+        is idempotent on identical (from, to) pairs.
+        """
+        names = cls._DOME_NODE_NAMES
+        # Remove any default Background+Output that Blender created on
+        # use_nodes=True so they don't compete with our network.
+        for n in list(tree.nodes):
+            if n.name in names.values():
+                continue
+            if n.bl_idname in ("ShaderNodeOutputWorld", "ShaderNodeBackground"):
+                tree.nodes.remove(n)
+
+        out = cls._find_or_create_dome_node(tree, "ShaderNodeOutputWorld", names["output"])
+        bg = cls._find_or_create_dome_node(tree, "ShaderNodeBackground", names["background"])
+        vm = cls._find_or_create_dome_node(tree, "ShaderNodeVectorMath", names["vec_math"])
+        vm.operation = "MULTIPLY"
+        env = cls._find_or_create_dome_node(tree, "ShaderNodeTexEnvironment", names["env_tex"])
+        mapping = cls._find_or_create_dome_node(tree, "ShaderNodeMapping", names["mapping"])
+        tex_coord = cls._find_or_create_dome_node(tree, "ShaderNodeTexCoord", names["tex_coord"])
+
+        # Tag the output node with the active dome's prim path so callers
+        # can verify which dome is currently driving the World.
+        out["usd_dome_path"] = prim_path
+
+        # Wire: TexCoord.Generated → Mapping.Vector → Env.Vector
+        #       Env.Color → VectorMath.Vector → Background.Color
+        #       Background.Background → WorldOutput.Surface
+        tree.links.new(tex_coord.outputs["Generated"], mapping.inputs["Vector"])
+        tree.links.new(mapping.outputs["Vector"], env.inputs["Vector"])
+        tree.links.new(env.outputs["Color"], vm.inputs[0])
+        tree.links.new(vm.outputs["Vector"], bg.inputs["Color"])
+        tree.links.new(bg.outputs["Background"], out.inputs["Surface"])
+
+        # Default color-tint factor = white so an unset inputs:color leaves
+        # the env texture unchanged.
+        if not vm.inputs[1].is_linked:
+            vm.inputs[1].default_value = (1.0, 1.0, 1.0)
+
+    @staticmethod
+    def _find_or_create_dome_node(tree, bl_idname: str, node_name: str):
+        existing = tree.nodes.get(node_name)
+        if existing is not None and existing.bl_idname == bl_idname:
+            return existing
+        node = tree.nodes.new(type=bl_idname)
+        node.name = node_name
+        return node
+
+    def _apply_dome_light_input(self, prim_path: str, inputs: dict) -> bool:
+        """Write USD DomeLight inputs to the World shader. Last-wins: only
+        the active dome's events take effect; older domes' events log at
+        debug level and return True (silently ignored)."""
+        if prim_path != self._active_dome:
+            LOG.debug(
+                "DomeLight: ignoring inputs from %s (active dome is %s)",
+                prim_path, self._active_dome,
+            )
+            return True
+        world = bpy.context.scene.world
+        if world is None or not world.node_tree:
+            LOG.warning("DomeLight input arrived but World has no node tree")
+            return True
+        tree = world.node_tree
+        names = self._DOME_NODE_NAMES
+        bg = tree.nodes.get(names["background"])
+        env = tree.nodes.get(names["env_tex"])
+        vm = tree.nodes.get(names["vec_math"])
+        if bg is None or env is None or vm is None:
+            LOG.warning(
+                "DomeLight input arrived but World network missing (bg=%s env=%s vm=%s)",
+                bool(bg), bool(env), bool(vm),
+            )
+            return True
+
+        for usd_name, value in inputs.items():
+            if usd_name == "intensity":
+                bg.inputs["Strength"].default_value = float(value)
+            elif usd_name == "color" and isinstance(value, (list, tuple)) and len(value) >= 3:
+                # Color tint multiplies the env-texture output via the
+                # Vector Math node (matches Blender's importer pattern).
+                vm.inputs[1].default_value = (
+                    float(value[0]), float(value[1]), float(value[2]),
+                )
+            elif usd_name == "texture:file":
+                self._load_dome_texture(env, value)
+        return True
+
+    def _load_dome_texture(self, env_node, asset_path: str) -> None:
+        """Resolve a USD asset path and load it into the Environment Texture
+        node. Empty string clears the image."""
+        if not asset_path:
+            env_node.image = None
+            return
+        resolved = self._resolve_asset_path(asset_path)
+        if not resolved:
+            LOG.warning("DomeLight texture path unresolved: %s", asset_path)
+            return
+        try:
+            img = bpy.data.images.load(resolved, check_existing=True)
+        except RuntimeError as e:
+            LOG.warning("DomeLight texture load failed (%s): %s", resolved, e)
+            return
+        # HDR/EXR env maps are linear data, not sRGB.
+        img.colorspace_settings.name = "Non-Color"
+        env_node.image = img
+
+    def _apply_dome_light_rotation(self, prim_path: str, r) -> bool:
+        """Write a USD quaternion rotation to the dome's Mapping node Euler
+        rotation. Last-wins: ignores rotations for non-active domes."""
+        if prim_path != self._active_dome:
+            return True
+        world = bpy.context.scene.world
+        if world is None or not world.node_tree:
+            return True
+        mapping = world.node_tree.nodes.get(self._DOME_NODE_NAMES["mapping"])
+        if mapping is None:
+            return True
+        # USD quat is [w, x, y, z]; mathutils.Quaternion takes (w, x, y, z) too.
+        w, x, y, z = (float(v) for v in r)
+        euler = mathutils.Quaternion((w, x, y, z)).to_euler()
+        mapping.inputs["Rotation"].default_value = (euler.x, euler.y, euler.z)
+        return True
 
     def _apply_single_node_shader(self, prim_path, mapper, inputs):
         """Apply shader inputs to a single Blender node."""
