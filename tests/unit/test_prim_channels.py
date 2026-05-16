@@ -167,6 +167,41 @@ class TestMixedChangesPreserveEmissions:
         assert gprim, "gprim event missing"
 
 
+class TestFirstEncounterReadsAllChannels:
+    """First encounter is a full-state sync, even if the triggering notice
+    only names an unrelated attr such as xformOp:translate."""
+
+    def test_camera_attrs_emit_when_first_notice_is_transform_only(self, stage):
+        p = stage.DefinePrim("/Cam", "Camera")
+        cam = UsdGeom.Camera(p)
+        cam.CreateFocalLengthAttr(35.0)
+        UsdGeom.Xformable(p).AddTranslateOp().Set((0, 0, 0))
+
+        em = NoticeEmitter(stage)
+        p.GetAttribute("xformOp:translate").Set((1, 0, 0))
+
+        events = em.build_events_for_dirty(include_matrices=False)
+        gprim = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/Cam"]
+        assert gprim
+        assert gprim[0]["attrs"]["focalLength"] == pytest.approx(35.0)
+
+    def test_connectable_inputs_emit_when_first_notice_is_transform_only(self, stage):
+        p = stage.DefinePrim("/Light", "SphereLight")
+        UsdLux.SphereLight(p).CreateIntensityAttr(42.0)
+        UsdGeom.Xformable(p).AddTranslateOp().Set((0, 0, 0))
+
+        em = NoticeEmitter(stage)
+        p.GetAttribute("xformOp:translate").Set((1, 0, 0))
+
+        events = em.build_events_for_dirty(include_matrices=False)
+        inputs = [
+            e for e in events
+            if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == "/Light"
+        ]
+        assert inputs
+        assert inputs[0]["inputs"]["intensity"] == pytest.approx(42.0)
+
+
 class TestMaterialBindingRebind:
     """Subsequent material rebinds fire info-only on ``material:binding``
     only, not resyncs. MaterialBindingChannel must catch them via its

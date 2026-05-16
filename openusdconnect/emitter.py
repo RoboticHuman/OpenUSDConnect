@@ -59,32 +59,25 @@ _C_CONNECTABLE = "connectable"
 _C_API_SCHEMAS = "api_schemas"
 _C_CAMERA_ATTRS = "camera_attrs"
 
-# Per-prim cache slots reserved by inline blocks in _build_dirty_prim_events
-# (TRS uses a shared snap; gprim attrs use a dirty-driven scan; matrices is
-# diagnostic). Extra channels must not collide with these — see the cache-
-# key uniqueness check in NoticeEmitter.__init__.
+# Cache slots owned by specialized diff paths in _build_dirty_prim_events.
+# Channels must not reuse these keys; NoticeEmitter validates collisions at
+# construction.
 _INLINE_CACHE_KEYS = frozenset({_C_TRS, _C_MATS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
 
-# Attribute names and prefixes the inline blocks own — TRS uses the
-# pre-computed snap; ``extent`` is computed by USD; ``proxyPrim`` is a
-# rendering hint relationship. No PrimChannel watches these, so the
-# default gprim attr filter starts with them and unions in every
-# channel's watched_attrs/watched_prefixes at NoticeEmitter init time.
+# Attrs handled by specialized diff paths, or intentionally ignored. The
+# default gprim attr filter starts here, then adds every channel's watched
+# attrs/prefixes.
 _INLINE_BLOCK_SKIP_ATTRS = frozenset({"xformOpOrder", "extent", "proxyPrim"})
 _INLINE_BLOCK_SKIP_PREFIXES = ("xformOp:",)
 
-# Snapshot of names/prefixes the built-in channels watch — used by the
-# module-level ``_schema_attrs`` helper, which runs at import time (before
-# any NoticeEmitter exists) to derive typed-schema attr name sets. Keep
-# in sync if a new built-in channel watches a new attr/prefix that should
-# be excluded from typed-schema aggregations.
+# Import-time snapshot used by _schema_attrs before any NoticeEmitter exists.
+# Keep this in sync with built-in channel declarations.
 _BUILTIN_CHANNEL_WATCHED_ATTRS = frozenset({"visibility", "info:id"})
 _BUILTIN_CHANNEL_WATCHED_PREFIXES = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
 
 
 def _schema_attrs(schema_cls) -> frozenset[str]:
-    """Return attribute names defined directly by a typed USD schema,
-    minus names already handled by inline blocks or built-in channels."""
+    """Return direct schema attrs not owned by specialized paths or channels."""
     skip_attrs = _INLINE_BLOCK_SKIP_ATTRS | _BUILTIN_CHANNEL_WATCHED_ATTRS
     skip_prefixes = _INLINE_BLOCK_SKIP_PREFIXES + _BUILTIN_CHANNEL_WATCHED_PREFIXES
     return frozenset(
@@ -94,9 +87,8 @@ def _schema_attrs(schema_cls) -> frozenset[str]:
     )
 
 
-# UsdGeomCamera typed-schema attribute names. Derived from USD's schema
-# registry so future schema additions (new exposure sub-attrs etc.) are
-# picked up automatically without a code change here.
+# Camera attrs come from USD's schema registry so new schema fields are picked
+# up without touching this list.
 _CAMERA_ATTR_NAMES = _schema_attrs(UsdGeom.Camera)
 
 
@@ -162,10 +154,10 @@ def unregister_replicated_api_schema(name: str) -> None:
 def _make_attr_filter(channels):
     """Build a gprim-attr filter from a channel set.
 
-    The returned callable returns True for attrs the gprim scan should
-    track. Attrs owned by inline blocks or by any of the channels' watched_*
-    declarations are filtered out — so adding a new channel automatically
-    excludes its attrs from gprim scan without further edits.
+    The returned callable returns True for attrs the gprim scan should track.
+    Attrs owned by specialized paths or by any channel's watched_* declarations
+    are filtered out, so adding a channel automatically excludes its attrs
+    from generic gprim emission.
     """
     skip_attrs = set(_INLINE_BLOCK_SKIP_ATTRS)
     skip_prefixes = list(_INLINE_BLOCK_SKIP_PREFIXES)
@@ -496,10 +488,9 @@ def read_camera_attrs(stage, prim_path):
     """Read authored UsdGeomCamera attributes from a prim.
 
     Returns a ``{name: python_value}`` dict for every authored camera attr,
-    or ``None`` if the prim isn't a ``UsdGeom.Camera``. Mirrors the full-read
-    pattern of ``read_usdshade_connectable`` so the diff loop emits the
-    complete authored set on first encounter rather than just the attr that
-    triggered the notice.
+    or ``None`` if the prim is not a ``UsdGeom.Camera``. CameraAttrsChannel
+    intentionally reads the full authored set when it runs, so first encounter
+    and resync cycles send complete camera state.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
@@ -515,68 +506,41 @@ def read_camera_attrs(stage, prim_path):
 
 
 # ---------------------------------------------------------------------------
-# PrimChannel — uniform snapshot/diff/emit pipeline per per-prim state slice
+# PrimChannel - snapshot/diff/emit pipeline for one prim state slice
 # ---------------------------------------------------------------------------
 #
-# Each PrimChannel watches one slice of a prim's state (its camera attrs,
-# its connectable interface, its references, etc.). On every diff cycle the
-# channel reads the current state, diffs against the cached snapshot, and
-# emits an event when the diff is non-empty.
-#
-# Adding support for a new typed schema is: subclass PrimChannel, hand the
-# instance to NoticeEmitter via the ``extra_channels=`` constructor kwarg.
-# The built-in set always runs; extras append after. Both the diff loop
-# and ``seed_prim_cache`` iterate the same channel set, so no other code
-# needs to know about the new channel.
-#
-# Channels with richer behavior live inline in _build_dirty_prim_events:
-# TRS (uses a pre-computed snapshot shared with matrices), gprim attrs
-# (dirty-driven selective scan with primvar metadata), matrices
-# (diagnostic, opt-in via include_matrices), and the ensure_prim /
-# api_schemas first-encounter handshake.
+# Use a channel for prim state that is cheap or bounded enough to read as a
+# whole when its dirty gate fires. Keep specialized paths for state that uses
+# precomputed snapshots (TRS/matrices) or must be dirty-attr selective because
+# full reads can be expensive (generic gprim attrs, including mesh arrays).
+# The ensure_prim/api_schemas handshake is also specialized because it owns
+# first-encounter structure, not a normal value diff.
 
 
 class PrimChannel:
     """One slice of per-prim state with a uniform read/diff/emit lifecycle.
 
-    A channel watches its slice (camera attrs, connectable interface,
-    references, …), reads the current state per cycle, diffs it against
-    the per-prim cache, and emits wire events when something changed.
-
     Subclasses must set ``cache_key`` and implement ``read`` + ``to_event``.
-    They typically also declare ``watched_attrs`` / ``watched_prefixes``
-    (so the base ``needs_read`` knows when to skip a cycle), plus optionally
-    override ``cache_default`` and ``diff`` for non-equality comparisons.
-    ``to_event`` may return a single dict, a list of dicts (for channels
-    that fan out into multiple wire events), or ``None`` to suppress.
+    Declare ``watched_attrs`` / ``watched_prefixes`` when USD can tell us
+    exactly which properties changed; otherwise the channel reads on every
+    dirty cycle. Override ``diff`` for partial-event behavior.
     """
 
     cache_key: str = ""
 
-    # Baseline ``diff`` compares against when the per-prim cache has no
-    # entry yet. Set to the type-appropriate empty value (``{}`` / ``[]``
-    # / ``""``) so a first-encounter prim with no authored state produces
-    # no event. Leave as None when first-encounter should emit on any
-    # non-None read (channels whose read returns a bool, for instance).
+    # Cache-miss baseline for the default diff. Empty containers prevent
+    # spurious first-encounter events for channels with no authored state.
     cache_default = None
 
-    # Opt into attr-level gating: ``needs_read`` looks for these names in
-    # the dirty_attrs set and reads iff any match. For channels that
-    # watch named USD properties — attributes (visibility, focalLength,
-    # ...) or relationships (material:binding, ...).
+    # Attr-level gates for channels whose state changes through named USD
+    # attributes or relationships.
     watched_attrs: tuple[str, ...] = ()
 
-    # Same as ``watched_attrs`` but matched as ``str.startswith`` prefixes,
-    # for channels watching a namespace (``inputs:*``, ``outputs:*``, ...)
-    # rather than enumerating concrete names.
+    # Prefix gates for property namespaces such as inputs:* and outputs:*.
     watched_prefixes: tuple[str, ...] = ()
 
-    # Opt into resync-only gating: skip the read whenever dirty_attrs has
-    # any attr name (those can't be ours). For channels watching
-    # composition arcs or stage-level state, where USD signals every
-    # change as a resync notice rather than info-only. Mutually exclusive
-    # with ``watched_attrs`` / ``watched_prefixes`` — NoticeEmitter
-    # rejects channels that set both.
+    # Composition arcs and load state arrive as resync notices, not ordinary
+    # info-only attr changes. Such channels can skip pure attr-only cycles.
     reads_on_resync_only: bool = False
 
     def applies_to(self, prim) -> bool:
@@ -587,21 +551,11 @@ class PrimChannel:
         """Should this channel actually read on this cycle?
 
         ``dirty_attrs`` is the set of attr names the USD notice handler
-        recorded as changed on this prim, or ``None`` when no per-attr
-        info is available (resync notice / first encounter). Channels
-        opt into one of two gating styles via class attributes:
+        recorded as changed on this prim, or ``None`` when a full-state read
+        is required (first encounter / resync / manual dirty).
 
-        - ``reads_on_resync_only = True``: skip when dirty_attrs has any
-          attr name (those can't be ours; our state changes via resync).
-        - ``watched_attrs`` / ``watched_prefixes`` declared: read iff at
-          least one name in dirty_attrs matches.
-
-        Channels that declare neither default to always-read — the safe
-        and slowest option.
-
-        Reads are the expensive part of the diff loop (~hundreds of µs
-        for connectables), so opting into a gate when correct is a big
-        win at idle.
+        Channels with no gate default to always-read, which is slower but
+        safe for integrations that do not know their USD notice pattern yet.
         """
         if not dirty_attrs:
             return True
@@ -623,9 +577,8 @@ class PrimChannel:
     def diff(self, current, cached):
         """Return the diff to emit (any truthy value), or ``None`` if unchanged.
 
-        Default uses ``cache_default`` as the cache-miss baseline so a
-        first-encounter prim with no authored state doesn't produce a
-        spurious empty event.
+        The default compares full current state against ``cache_default`` on
+        cache miss.
         """
         if cached is None:
             cached = self.cache_default
@@ -690,11 +643,10 @@ class PayloadsChannel(PrimChannel):
 
 
 class MaterialBindingChannel(PrimChannel):
-    """``material:binding`` is a USD relationship — a named property on
-    the prim, not a composition arc. Subsequent rebinds and clears fire
-    info-only notices on the relationship name (resyncs only for the
-    initial Apply), so this channel watches the property name like the
-    other attribute/relationship channels.
+    """``material:binding`` is a relationship property, not a composition arc.
+
+    Rebinds and clears arrive as info-only notices on the relationship name,
+    so this channel watches the property directly.
     """
 
     cache_key = _C_MATERIAL_BINDING
@@ -713,7 +665,7 @@ class ConnectableChannel(PrimChannel):
 
     Reads the connectable interface once per cycle and fans out into
     both wire events (``set_connectable_input``, ``set_connectable_connection``)
-    so we don't pay the ~800 µs ``read_usdshade_connectable`` cost twice.
+    so the expensive UsdShade traversal is not repeated.
     """
 
     cache_key = _C_CONNECTABLE
@@ -741,8 +693,8 @@ class ConnectableChannel(PrimChannel):
             if not _values_equal(v, last_inputs.get(n))
         }
         info_id = current["info_id"]
-        # Bool guard: info_id transitions only matter for Shaders (non-empty
-        # info:id). Lights and node graphs always carry empty info_id.
+        # Only shaders carry a meaningful info:id. Lights and node graphs
+        # use the same connectable path with an empty id.
         info_id_changed = bool(info_id) and info_id != cached.get("info_id")
 
         new_conns: dict = {}
@@ -794,9 +746,8 @@ class ConnectableChannel(PrimChannel):
 class CameraAttrsChannel(PrimChannel):
     """UsdGeomCamera typed-schema attribute replication.
 
-    Reads every authored camera attr per cycle and emits them via the
-    generic ``set_gprim_attrs`` wire event so the same applier path
-    handles cameras alongside other typed-schema attrs.
+    Camera attrs use the generic ``set_gprim_attrs`` wire event so receivers
+    do not need a camera-specific event kind.
     """
 
     cache_key = _C_CAMERA_ATTRS
@@ -841,9 +792,7 @@ class PayloadLoadStateChannel(PrimChannel):
     """Payload load/unload toggle. Emits ``load_payload`` or ``unload_payload``
     depending on ``IsLoaded()``.
 
-    Load state changes via ``stage.Load()`` / ``stage.Unload()`` and
-    payload-arc edits arrive as USD resync notices on the prim, not as
-    info-only edits.
+    USD reports load/unload and payload arc edits as resyncs on the prim.
     """
 
     cache_key = _C_PAYLOAD_LOADED
@@ -862,11 +811,8 @@ class PayloadLoadStateChannel(PrimChannel):
         }
 
 
-# Framework-owned channels — always active. Order is emit order: V before
-# R per LIVERPS, then composition arcs, material/connectable, transform-
-# adjacent state. Receive-side event_kind_order re-sorts, but consistent
-# emit order keeps logs readable. Users append via ``extra_channels=``;
-# this set is not replaceable so core USD types always replicate.
+# Framework-owned channels. Receive-side ordering still sorts events before
+# apply, but this order keeps raw emitter logs stable and readable.
 _BUILTIN_PRIM_CHANNELS: tuple[PrimChannel, ...] = (
     VariantSelectionsChannel(),
     ReferencesChannel(),
@@ -1092,10 +1038,9 @@ class NoticeEmitter:
             stage: The Usd.Stage to watch.
             attr_filter: Optional callable(attr_name: str) -> bool.
                 Controls which attributes are tracked for gprim attr diffing.
-                Return True to track, False to skip. Default is derived from
-                the channel set so any name a channel watches plus the
-                inline-block-owned names are skipped. Primvars and other
-                typed-schema attrs ARE tracked.
+                Return True to track, False to skip. By default, attrs owned
+                by specialized paths or channels are excluded; primvars and
+                other generic attrs are tracked.
             replicated_api_schemas: Optional explicit override of the API
                 schema names to replicate via the ensure_prim ``api_schemas``
                 field. Each name must be a bare schema name (no
@@ -1128,11 +1073,8 @@ class NoticeEmitter:
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         self._prim_cache: dict[str, dict] = {}
-        # Per-prim names of attributes the USD info-only notice handler
-        # saw change. Populated unfiltered so channels can gate reads on
-        # specific names; the gprim attr scan re-applies _attr_filter
-        # at iteration time to avoid leaking channel-owned attrs into
-        # set_gprim_attrs.
+        # Unfiltered info-only attr names. Channels use this for read gating;
+        # the gprim attr scan applies _attr_filter later.
         self._dirty_attrs: dict[str, set[str]] = {}
         self._notice_resynced_prims: set[str] = set()
         extras = tuple(extra_channels) if extra_channels else ()
@@ -1142,22 +1084,19 @@ class NoticeEmitter:
                     f"extra_channels must contain PrimChannel instances; "
                     f"got {type(ch).__name__}"
                 )
-        # Cache-key uniqueness: silent collisions would have one channel
-        # overwrite another's cache, or stomp on an inline-block slot
-        # (TRS / matrices / gprim attrs / api_schemas). Surface either
-        # collision loudly at construction.
+        # Silent cache-key collisions would make channels overwrite each
+        # other's snapshots, so reject them before the emitter can run.
         seen_keys: set[str] = set(_INLINE_CACHE_KEYS)
         for ch in (*_BUILTIN_PRIM_CHANNELS, *extras):
             if ch.cache_key in seen_keys:
                 raise ValueError(
                     f"Duplicate PrimChannel cache_key {ch.cache_key!r}; "
                     f"each channel must own a unique per-prim cache slot "
-                    f"(reserved inline slots: {sorted(_INLINE_CACHE_KEYS)})."
+                    f"(reserved specialized slots: {sorted(_INLINE_CACHE_KEYS)})."
                 )
             seen_keys.add(ch.cache_key)
-            # The two gating modes are mutually exclusive — they describe
-            # different USD notice signaling patterns. Picking both is a
-            # contradiction, not a stronger gate.
+            # These modes describe different USD notice patterns; using both
+            # would make channel reads ambiguous.
             if ch.reads_on_resync_only and (ch.watched_attrs or ch.watched_prefixes):
                 raise ValueError(
                     f"{type(ch).__name__} declares both reads_on_resync_only "
@@ -1165,9 +1104,8 @@ class NoticeEmitter:
                     f"for composition arcs, watched names for attributes/rels."
                 )
         self._channels: tuple[PrimChannel, ...] = _BUILTIN_PRIM_CHANNELS + extras
-        # Build the default gprim attr filter from the channel set so any
-        # name a channel watches is automatically excluded from gprim
-        # scan emit. User-provided ``attr_filter`` overrides this.
+        # User-provided attr_filter wins; otherwise derive it from the active
+        # channel set.
         self._attr_filter = attr_filter or _make_attr_filter(self._channels)
 
     def _filtered_api_schemas(self, prim: Usd.Prim) -> set[str]:
@@ -1204,7 +1142,7 @@ class NoticeEmitter:
         """Seed the per-prim diff cache for a prim and its composed children.
 
         Snapshots the current state of every applicable channel (plus the
-        inline gprim-attrs and api_schemas slots) into the cache, so the
+        specialized gprim-attrs and api_schemas slots) into the cache, so the
         next emit cycle diffs against authored state instead of treating
         everything as a first-encounter delta.
 
@@ -1218,10 +1156,6 @@ class NoticeEmitter:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            # Snapshot every applicable channel's current state into its
-            # cache slot. Same channel set the diff loop iterates. A
-            # channel whose read() returns None contributes nothing —
-            # either applies_to was False or there's no authored state.
             for channel in self._channels:
                 if not channel.applies_to(child):
                     continue
@@ -1229,10 +1163,8 @@ class NoticeEmitter:
                 if current is None:
                     continue
                 pc[channel.cache_key] = current
-            # Seed the gprim-attr cache too (not a PrimChannel — uses the
-            # dirty-driven selective scan in the diff loop). _attr_filter
-            # excludes anything a channel already handles, so prims whose
-            # state is fully channel-owned produce an empty snapshot here.
+            # Generic gprim attrs use a specialized path so info-only notices
+            # can read only named dirty attrs, not every heavy mesh array.
             gprim_snapshot = {}
             for attr in child.GetAttributes():
                 name = attr.GetName()
@@ -1339,12 +1271,8 @@ class NoticeEmitter:
             prim_path = _prim_path_from_notice_path(path_str)
             if prim_path:
                 self.dirty.add(prim_path)
-                # Track every changed attr name — channels consult this set
-                # to gate their reads on whether anything they care about
-                # changed (e.g. ConnectableChannel skips when no inputs:*
-                # appears). The gprim attr scan applies its own filter at
-                # iteration time, so this set staying unfiltered doesn't
-                # leak xformOp/inputs/visibility into gprim emit.
+                # Keep this unfiltered: channel gating needs names that the
+                # generic gprim attr path will later ignore.
                 if "." in path_str:
                     attr_name = path_str.split(".", 1)[1]
                     self._dirty_attrs.setdefault(prim_path, set()).add(attr_name)
@@ -1475,7 +1403,8 @@ class NoticeEmitter:
         prim = self.stage.GetPrimAtPath(prim_path)
 
         # Structural events on first encounter
-        if prim_path not in self._known_prims:
+        first_encounter = prim_path not in self._known_prims
+        if first_encounter:
             # Preserve untyped prims (empty typeName) — Materials/Shaders
             # scopes are commonly authored as `def "Materials"` with no type.
             # Fall back to Xform only when the prim itself is invalid.
@@ -1511,13 +1440,12 @@ class NoticeEmitter:
                 })
                 pc[_C_API_SCHEMAS] = current_apis
 
-        # Pass dirty_attrs=None when a resync notice fired, so channels treat
-        # the cycle as first-encounter and read unconditionally — resyncs
-        # carry no per-attr info but signal "anything could have changed."
-        # The gprim attr block downstream consumes the resync entry; we
-        # only peek here.
+        # First encounter and resync both require a full channel read. The
+        # dirty attr that woke the prim might be unrelated to already-authored
+        # channel state, and resyncs do not provide reliable per-attr detail.
+        # The gprim attr block below consumes the resync marker.
         dirty_attrs = self._dirty_attrs.get(prim_path)
-        if prim_path in self._notice_resynced_prims:
+        if first_encounter or prim_path in self._notice_resynced_prims:
             dirty_attrs = None
         for channel in self._channels:
             if not channel.applies_to(prim):
@@ -1529,8 +1457,9 @@ class NoticeEmitter:
                 continue
             _emit_channel_events(channel, prim_path, current, pc, events)
 
-        # TRS partial diff — uses the pre-computed snap from the outer loop,
-        # so it stays inline rather than going through a channel.
+        # TRS partial diff uses the precomputed snap from the outer loop.
+        # A normal channel would need either a wider interface or duplicate
+        # transform/matrix reads.
         xf = UsdGeom.Xformable(prim) if prim else None
         has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
@@ -1576,10 +1505,8 @@ class NoticeEmitter:
             attr_interp = {}
             pvapi = None  # lazy — only created if a primvar actually changed
             for attr_name in dirty_attr_names:
-                # _dirty_attrs is unfiltered (channels need every changed name
-                # for gating); the gprim-specific filter runs here so dedicated-
-                # channel attrs (xformOps, visibility, inputs:*, info:id, ...)
-                # don't leak into set_gprim_attrs.
+                # _dirty_attrs is unfiltered for channel gating; filter again
+                # here before emitting generic gprim attrs.
                 if not self._attr_filter(attr_name):
                     continue
                 attr = prim.GetAttribute(attr_name)

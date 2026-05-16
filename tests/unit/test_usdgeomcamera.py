@@ -219,7 +219,7 @@ class TestCameraXform:
 
 
 class TestEmitterCameraDiff:
-    """Authoring camera attrs must produce set_gprim_attrs events via the generic scan."""
+    """Authoring camera attrs must produce set_gprim_attrs events via the camera channel."""
 
     def test_emits_focal_length_change(self, stage):
         em = NoticeEmitter(stage)
