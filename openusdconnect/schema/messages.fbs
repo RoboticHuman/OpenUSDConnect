@@ -21,6 +21,7 @@ table Hello {
 
 table HelloOk {
     token:string;             // issued token (if newly registered)
+    stage_metadata:SetStageMetadata;  // snapshot of stage-level metadata (units + timeline)
 }
 
 table AuthRejected {
@@ -63,6 +64,45 @@ table RateLimited {
 }
 
 // ---------------------------------------------------------------------------
+// Playback synchronization — single-leader, server-arbitrated
+// ---------------------------------------------------------------------------
+
+// Client → server: request the playback-leader role. Server grants if no
+// leader is currently set, otherwise rejects. The optional ``time`` is
+// the claimer's current timecode — applied as the shared playhead
+// atomically with the grant so followers don't snap to a stale value.
+table ClaimPlayback {
+    client_id:string;
+    time:double = null;
+}
+
+// Server → claimer: leader role granted. Also broadcast in PlaybackState.
+table PlaybackClaimed {
+    leader_client_id:string;
+}
+
+// Server → claimer (or to a non-leader that tried to drive playback).
+table PlaybackRejected {
+    reason:string;
+    current_leader_client_id:string;
+}
+
+// Leader → server: drive the shared playhead. action ∈ {"play","pause","stop","set_time","set_rate"}.
+table PlaybackControl {
+    action:string;
+    time:double = 0;
+    rate:double = 1.0;
+}
+
+// Server → all clients: authoritative playback state snapshot.
+table PlaybackState {
+    time:double;
+    playing:bool;
+    rate:double;
+    leader_client_id:string;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level envelope
 // ---------------------------------------------------------------------------
 
@@ -79,6 +119,11 @@ union Payload {
     CreateProposal,
     ProposalCreated,
     RateLimited,
+    ClaimPlayback,
+    PlaybackClaimed,
+    PlaybackRejected,
+    PlaybackControl,
+    PlaybackState,
 }
 
 table Envelope {

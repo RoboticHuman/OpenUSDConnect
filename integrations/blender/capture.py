@@ -837,13 +837,19 @@ class _State:
     author -> notice_emitter -> sender.
     """
 
-    __slots__ = ("author", "notice_emitter", "sender", "_last_send_time")
+    __slots__ = (
+        "author", "notice_emitter", "sender", "_last_send_time", "_last_seen_frame",
+    )
 
     def __init__(self):
         self.author: BlenderStageAuthor | None = None
         self.notice_emitter = None  # Optional[NoticeEmitter]
         self.sender: EventSender | None = None
         self._last_send_time: float = 0.0
+        # Tracks scene.frame_current across depsgraph ticks so we can tell a
+        # frame-driven eval (F-curve evaluation during playback or scrub)
+        # apart from a real user edit.
+        self._last_seen_frame: int | None = None
 
 
 _state = _State()
@@ -935,6 +941,18 @@ def _get_stage_author(context) -> BlenderStageAuthor:
 # Depsgraph handler / Timer
 # ---------------------------------------------------------------------------
 def _depsgraph_handler(scene, depsgraph):
+    # Distinguish F-curve-driven evals (playback / scrub) from user edits.
+    # A frame change before this depsgraph eval means the property mutations
+    # come from F-curve evaluation; the playback leader broadcasts
+    # PlaybackControl(set_time, ...) separately, so capture should not also
+    # emit default-time SetXformTrs/etc. overwrites that would corrupt the
+    # mirror stage and flood the wire.
+    current_frame = scene.frame_current
+    last_frame = _state._last_seen_frame
+    _state._last_seen_frame = current_frame
+    if last_frame is not None and current_frame != last_frame:
+        return
+
     try:
         updates = list(depsgraph.updates)
 

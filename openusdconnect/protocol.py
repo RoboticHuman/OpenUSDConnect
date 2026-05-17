@@ -13,9 +13,22 @@ dict <-> FlatBuffers conversion.
 from __future__ import annotations
 
 from .events import Event
-from .protocol_constants import MSG_HELLO, MSG_QUIT, MSG_TXN, PROTOCOL_VERSION
+from .protocol_constants import (
+    MSG_CLAIM_PLAYBACK,
+    MSG_HELLO,
+    MSG_PLAYBACK_CONTROL,
+    MSG_QUIT,
+    MSG_TXN,
+    PROTOCOL_VERSION,
+)
 
-__all__ = ["make_hello", "make_quit", "make_txn"]
+__all__ = [
+    "make_hello",
+    "make_quit",
+    "make_txn",
+    "make_claim_playback",
+    "make_playback_control",
+]
 
 
 def make_hello(
@@ -62,3 +75,33 @@ def make_txn(client_id: str, events: list[Event]) -> dict:
 def make_quit() -> dict:
     """Build a quit message."""
     return {"type": MSG_QUIT}
+
+
+def make_claim_playback(client_id: str, time: float | None = None) -> dict:
+    """Build a ClaimPlayback message requesting the playback-leader role.
+
+    ``time`` (optional) is the claimer's current timecode; the server sets the
+    shared playhead atomically with the grant so followers don't snap to a
+    stale value.
+    """
+    msg: dict = {"type": MSG_CLAIM_PLAYBACK, "client_id": client_id}
+    if time is not None:
+        msg["time"] = float(time)
+    return msg
+
+
+def make_playback_control(
+    action: str, *, time: float | None = None, rate: float | None = None
+) -> dict:
+    """Build a PlaybackControl message.
+
+    ``action`` is one of ``"play"``, ``"pause"``, ``"stop"``, ``"set_time"``,
+    ``"set_rate"``. ``time`` carries the new timecode for ``set_time``;
+    ``rate`` the playback rate for ``set_rate``.
+    """
+    msg: dict = {"type": MSG_PLAYBACK_CONTROL, "action": action}
+    if time is not None:
+        msg["time"] = float(time)
+    if rate is not None:
+        msg["rate"] = float(rate)
+    return msg

@@ -23,6 +23,7 @@ from openusdconnect.events import (
     SetMaterialBinding,
     SetPayload,
     SetReference,
+    SetStageMetadata,
     SetVariantSelections,
     SetVisibility,
     SetXformTRS,
@@ -144,6 +145,18 @@ _CASES: list[tuple[str, Event]] = [
             disconnections=["inputs:roughness"],
         ),
     ),
+    (
+        "set_stage_metadata",
+        SetStageMetadata(
+            k="set_stage_metadata",
+            timeCodesPerSecond=24.0,
+            framesPerSecond=30.0,
+            startTimeCode=0.0,
+            endTimeCode=240.0,
+            metersPerUnit=0.01,
+            upAxis="Y",
+        ),
+    ),
 ]
 
 
@@ -174,6 +187,9 @@ class TestRoundtrip:
 
     def test_prim_preserved(self):
         for kind, ev in _CASES:
+            # Stage-level events have no ``prim`` field by design.
+            if "prim" not in ev:
+                continue
             out = _roundtrip(ev)
             assert out["prim"] == ev["prim"], f"{kind}: prim path mangled"
 

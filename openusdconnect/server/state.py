@@ -16,7 +16,7 @@ import time
 from pxr import Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
-from ..emitter import as_matrix, decompose_trs_from_matrix
+from ..emitter import as_matrix, decompose_trs_from_matrix, read_stage_metadata
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
@@ -36,6 +36,7 @@ from ..protocol_constants import (
     K_UNLOAD_PAYLOAD,
     MSG_EVENT,
     MSG_PING,
+    MSG_PLAYBACK_STATE,
     MSG_RESYNC,
 )
 from ._txn_barrier import _TxnBarrier
@@ -123,6 +124,16 @@ class UsdSyncServer:
         self._prim_count: int = 0
         self._prim_count_dirty: bool = True
 
+        # Playback synchronization — a single leader drives the shared
+        # playhead. apply_playback_control rejects writes from non-leaders.
+        self.playback_lock = threading.Lock()
+        self.playback: dict = {
+            "time": 0.0,
+            "playing": False,
+            "rate": 1.0,
+            "leader_client_id": None,
+        }
+
         # Async broadcast — emitter threads push to the queue, a dedicated
         # thread handles the actual network sends so emitters are never
         # blocked by slow receivers.
@@ -177,6 +188,98 @@ class UsdSyncServer:
             self._persist_thread.join(timeout=10.0)
         self._broadcast_queue.put(None)
         self._broadcast_thread.join(timeout=10.0)
+
+    # ------------------------------------------------------------------
+    # Playback synchronization
+    # ------------------------------------------------------------------
+
+    def get_stage_metadata_payload(self) -> dict:
+        """Return the stage's authored metadata snapshot for hello_ok."""
+        return read_stage_metadata(self.stage)
+
+    def get_playback_state(self) -> dict:
+        """Return a wire-shaped snapshot of the current playback state."""
+        with self.playback_lock:
+            return {
+                "time": self.playback["time"],
+                "playing": self.playback["playing"],
+                "rate": self.playback["rate"],
+                "leader_client_id": self.playback["leader_client_id"] or "",
+            }
+
+    def claim_playback(
+        self, client_id: str, initial_time: float | None = None,
+    ) -> tuple[bool, str]:
+        """Grant the playback-leader role if vacant.
+
+        Returns ``(granted, current_leader)``; on rejection the second value
+        is the existing leader's client id so the caller can include it in
+        a PlaybackRejected message. ``initial_time`` (optional) sets the
+        shared playback timecode atomically with the grant so followers
+        sync to the new leader's current playhead instead of the stale
+        server-side value.
+        """
+        if not client_id:
+            return False, self.playback["leader_client_id"] or ""
+        with self.playback_lock:
+            current = self.playback["leader_client_id"]
+            if current and current != client_id:
+                return False, current
+            self.playback["leader_client_id"] = client_id
+            if initial_time is not None:
+                self.playback["time"] = float(initial_time)
+            return True, client_id
+
+    def apply_playback_control(
+        self,
+        client_id: str,
+        action: str,
+        time_value: float = 0.0,
+        rate: float = 1.0,
+    ) -> tuple[bool, dict | str]:
+        """Apply a control command from the playback leader.
+
+        Returns ``(True, new_state_dict)`` on success or ``(False, reason)``
+        when the requesting client is not the current leader, where the
+        ``reason`` payload is suitable for PlaybackRejected.
+        """
+        with self.playback_lock:
+            leader = self.playback["leader_client_id"]
+            if leader != client_id:
+                return False, f"not the playback leader (current: {leader or ''})"
+            if action == "play":
+                self.playback["playing"] = True
+            elif action == "pause":
+                self.playback["playing"] = False
+            elif action == "stop":
+                self.playback["playing"] = False
+                self.playback["time"] = 0.0
+            elif action == "set_time":
+                self.playback["time"] = float(time_value)
+            elif action == "set_rate":
+                self.playback["rate"] = float(rate)
+            else:
+                return False, f"unknown playback action {action!r}"
+            return True, {
+                "time": self.playback["time"],
+                "playing": self.playback["playing"],
+                "rate": self.playback["rate"],
+                "leader_client_id": self.playback["leader_client_id"] or "",
+            }
+
+    def release_playback(self, client_id: str) -> bool:
+        """Release the leader role when a leader disconnects.
+
+        Returns True if the role was actually released (so the caller knows
+        to broadcast a PlaybackState with an empty leader_client_id).
+        """
+        if not client_id:
+            return False
+        with self.playback_lock:
+            if self.playback["leader_client_id"] == client_id:
+                self.playback["leader_client_id"] = None
+                return True
+            return False
 
     def _create_edit_layer(self, label: str = "server-edits") -> Sdf.Layer:
         """Create an override sublayer on the session layer and set it as the edit target.
@@ -1146,6 +1249,16 @@ class UsdSyncServer:
         payload = frame_batch([encode_message(rec)])
         self._broadcast_queue.put((payload, None, origin))
 
+    def broadcast_message(self, msg: dict, exclude_origin: str | None = None):
+        """Enqueue a one-off non-event message (PlaybackState, etc.) for broadcast.
+
+        Bypasses the event listener path — playback messages are control-plane
+        signals, not USD scene events, so they shouldn't appear in the
+        dashboard event log.
+        """
+        payload = frame_batch([encode_message(msg)])
+        self._broadcast_queue.put((payload, exclude_origin, None))
+
     def _broadcast_loop(self):
         """Dedicated thread: drain the broadcast queue and send to receivers.
 
@@ -1200,7 +1313,13 @@ class UsdSyncServer:
         exclude_origin: str | None = None,
         target_origin: str | None = None,
     ):
-        """Send payload to matching receivers, removing dead ones."""
+        """Send payload to matching receivers, removing dead ones.
+
+        A failed send is the earliest reliable signal that a client is
+        gone — releases the playback-leader role here too so other
+        clients don't wait a full keepalive cycle to reclaim it. The
+        dead handler's recv loop exits separately once keepalive expires.
+        """
         with self.clients_lock:
             targets = list(self.receivers)
         dead = []
@@ -1216,10 +1335,20 @@ class UsdSyncServer:
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead", h.client_address)
                 dead.append(h)
-        if dead:
-            with self.clients_lock:
-                for h in dead:
-                    self.receivers.discard(h)
+        if not dead:
+            return
+        with self.clients_lock:
+            for h in dead:
+                self.receivers.discard(h)
+        released_any = False
+        for h in dead:
+            client_id = getattr(h, "_client_id", "") or ""
+            if client_id and self.release_playback(client_id):
+                released_any = True
+        if released_any:
+            self.broadcast_message(
+                {"type": MSG_PLAYBACK_STATE, **self.get_playback_state()},
+            )
 
     def _persist_loop(self):
         """Dedicated thread for realtime durability: drain persistence queue

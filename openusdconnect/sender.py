@@ -28,7 +28,13 @@ from .codec import (
     resolve_payload,
 )
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
-from .protocol import make_hello, make_quit, make_txn
+from .protocol import (
+    make_claim_playback,
+    make_hello,
+    make_playback_control,
+    make_quit,
+    make_txn,
+)
 from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
@@ -51,6 +57,7 @@ class EventSender:
         token: str | None = None,
         handshake_timeout: float = _HANDSHAKE_TIMEOUT_S,
         on_token_issued: Callable[[str], None] | None = None,
+        on_stage_metadata: Callable[[dict], None] | None = None,
     ):
         self.host = host
         self.port = port
@@ -61,8 +68,10 @@ class EventSender:
         self.token = token
         self.handshake_timeout = handshake_timeout
         self._on_token_issued = on_token_issued
+        self._on_stage_metadata = on_stage_metadata
         self.sock: socket.socket | None = None
         self.auth_rejected: bool = False
+        self.stage_metadata: dict = {}
 
     @property
     def is_connected(self) -> bool:
@@ -134,6 +143,16 @@ class EventSender:
                 self._on_token_issued(issued)
             LOG.info("EventSender: token issued by server")
 
+        from .codec import _decode_stage_metadata_table
+
+        sm = ho.StageMetadata()
+        if sm is not None:
+            meta = _decode_stage_metadata_table(sm)
+            if meta:
+                self.stage_metadata = meta
+                if self._on_stage_metadata:
+                    self._on_stage_metadata(meta)
+
         # Handshake complete — clear the timeout so subsequent sends use
         # the OS default (blocking).  Without this the timeout would apply
         # to every send and short-circuit slow networks.
@@ -181,6 +200,24 @@ class EventSender:
             LOG.exception("EventSender: failed to send message")
             self._close()
             return False
+
+    def claim_playback(self, time: float | None = None) -> bool:
+        """Request the playback-leader role from the server.
+
+        ``time`` (optional) is the claimer's current timecode; the server
+        applies it as the shared playhead atomically with the grant.
+        """
+        return self.send_message(make_claim_playback(self.client_id, time=time))
+
+    def send_playback_control(
+        self,
+        action: str,
+        *,
+        time: float | None = None,
+        rate: float | None = None,
+    ) -> bool:
+        """Send a playback control command. Server rejects if not the leader."""
+        return self.send_message(make_playback_control(action, time=time, rate=rate))
 
     def _close(self) -> None:
         if self.sock is None:

@@ -51,17 +51,23 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
+    MSG_CLAIM_PLAYBACK,
     MSG_COMPACT,
     MSG_CREATE_PROPOSAL,
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
     MSG_PING,
+    MSG_PLAYBACK_CLAIMED,
+    MSG_PLAYBACK_CONTROL,
+    MSG_PLAYBACK_REJECTED,
+    MSG_PLAYBACK_STATE,
     MSG_PROPOSAL_CREATED,
     MSG_QUIT,
     MSG_RATE_LIMITED,
@@ -101,6 +107,12 @@ SetVariantSelections = _fb.SetVariantSelections
 SetMaterialBinding = _fb.SetMaterialBinding
 SetConnectableInput = _fb.SetConnectableInput
 SetConnectableConnection = _fb.SetConnectableConnection
+SetStageMetadata = _fb.SetStageMetadata
+ClaimPlayback = _fb.ClaimPlayback
+PlaybackClaimed = _fb.PlaybackClaimed
+PlaybackRejected = _fb.PlaybackRejected
+PlaybackControl = _fb.PlaybackControl
+PlaybackState = _fb.PlaybackState
 NamedAttr = _fb.NamedAttr
 AttrValue = _fb.AttrValue
 AttrValueType = _fb.AttrValueType
@@ -133,6 +145,11 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_CREATE_PROPOSAL: PayloadType.CreateProposal,
     MSG_PROPOSAL_CREATED: PayloadType.ProposalCreated,
     MSG_RATE_LIMITED: PayloadType.RateLimited,
+    MSG_CLAIM_PLAYBACK: PayloadType.ClaimPlayback,
+    MSG_PLAYBACK_CLAIMED: PayloadType.PlaybackClaimed,
+    MSG_PLAYBACK_REJECTED: PayloadType.PlaybackRejected,
+    MSG_PLAYBACK_CONTROL: PayloadType.PlaybackControl,
+    MSG_PLAYBACK_STATE: PayloadType.PlaybackState,
 }
 
 _PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
@@ -150,6 +167,21 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.CreateProposal: CreateProposal,
     PayloadType.ProposalCreated: ProposalCreated,
     PayloadType.RateLimited: RateLimited,
+    PayloadType.ClaimPlayback: ClaimPlayback,
+    PayloadType.PlaybackClaimed: PlaybackClaimed,
+    PayloadType.PlaybackRejected: PlaybackRejected,
+    PayloadType.PlaybackControl: PlaybackControl,
+    PayloadType.PlaybackState: PlaybackState,
+}
+
+# Stage metadata bitmask bits — order must match SetStageMetadata in events.fbs.
+_STAGE_META_BITS = {
+    "timeCodesPerSecond": 1,
+    "framesPerSecond": 2,
+    "startTimeCode": 4,
+    "endTimeCode": 8,
+    "metersPerUnit": 16,
+    "upAxis": 32,
 }
 
 _TRS_BITS = {"t": 1, "r": 2, "s": 4}
@@ -263,11 +295,69 @@ def _encode_hello(b, msg):
     return _fb.HelloEnd(b)
 
 
+def _encode_stage_metadata_table(b, meta: dict | None, *, force: bool = False) -> int | None:
+    """Build a SetStageMetadata table from a sparse dict.
+
+    Returns ``None`` when ``meta`` is empty and ``force`` is False — caller
+    omits the optional field rather than writing an empty table.
+    """
+    if not meta and not force:
+        return None
+    meta = meta or {}
+    bitmask = 0
+    up_axis_off = None
+    if meta.get("upAxis"):
+        up_axis_off = b.CreateString(meta["upAxis"])
+    _fb.SetStageMetadataStart(b)
+    for key, bit in _STAGE_META_BITS.items():
+        if key == "upAxis":
+            if up_axis_off is not None:
+                bitmask |= bit
+                _fb.SetStageMetadataAddUpAxis(b, up_axis_off)
+        elif key in meta:
+            bitmask |= bit
+            value = float(meta[key])
+            if key == "timeCodesPerSecond":
+                _fb.SetStageMetadataAddTimeCodesPerSecond(b, value)
+            elif key == "framesPerSecond":
+                _fb.SetStageMetadataAddFramesPerSecond(b, value)
+            elif key == "startTimeCode":
+                _fb.SetStageMetadataAddStartTimeCode(b, value)
+            elif key == "endTimeCode":
+                _fb.SetStageMetadataAddEndTimeCode(b, value)
+            elif key == "metersPerUnit":
+                _fb.SetStageMetadataAddMetersPerUnit(b, value)
+    _fb.SetStageMetadataAddFields(b, bitmask)
+    return _fb.SetStageMetadataEnd(b)
+
+
+def _decode_stage_metadata_table(sm) -> dict:
+    """Read a SetStageMetadata FB table into a sparse dict (only flagged fields)."""
+    out: dict = {}
+    fields = sm.Fields()
+    if fields & _STAGE_META_BITS["timeCodesPerSecond"]:
+        out["timeCodesPerSecond"] = sm.TimeCodesPerSecond()
+    if fields & _STAGE_META_BITS["framesPerSecond"]:
+        out["framesPerSecond"] = sm.FramesPerSecond()
+    if fields & _STAGE_META_BITS["startTimeCode"]:
+        out["startTimeCode"] = sm.StartTimeCode()
+    if fields & _STAGE_META_BITS["endTimeCode"]:
+        out["endTimeCode"] = sm.EndTimeCode()
+    if fields & _STAGE_META_BITS["metersPerUnit"]:
+        out["metersPerUnit"] = sm.MetersPerUnit()
+    if fields & _STAGE_META_BITS["upAxis"]:
+        out["upAxis"] = _str(sm.UpAxis()) or ""
+    return out
+
+
 def _encode_hello_ok(b, msg):
     token = b.CreateString(msg["token"]) if msg.get("token") else None
+    sm_off = _encode_stage_metadata_table(b, msg.get("stage_metadata"))
     _fb.HelloOkStart(b)
     if token:
         _fb.HelloOkAddToken(b, token)
+    if sm_off is not None:
+        _fb.HelloOkAddStageMetadata(b, sm_off)
     return _fb.HelloOkEnd(b)
 
 
@@ -360,6 +450,52 @@ def _encode_rate_limited(b, msg):
     return _fb.RateLimitedEnd(b)
 
 
+def _encode_claim_playback(b, msg):
+    client_id = b.CreateString(msg.get("client_id", ""))
+    _fb.ClaimPlaybackStart(b)
+    _fb.ClaimPlaybackAddClientId(b, client_id)
+    if msg.get("time") is not None:
+        _fb.ClaimPlaybackAddTime(b, float(msg["time"]))
+    return _fb.ClaimPlaybackEnd(b)
+
+
+def _encode_playback_claimed(b, msg):
+    leader = b.CreateString(msg.get("leader_client_id", ""))
+    _fb.PlaybackClaimedStart(b)
+    _fb.PlaybackClaimedAddLeaderClientId(b, leader)
+    return _fb.PlaybackClaimedEnd(b)
+
+
+def _encode_playback_rejected(b, msg):
+    reason = b.CreateString(msg.get("reason", ""))
+    current = b.CreateString(msg.get("current_leader_client_id", ""))
+    _fb.PlaybackRejectedStart(b)
+    _fb.PlaybackRejectedAddReason(b, reason)
+    _fb.PlaybackRejectedAddCurrentLeaderClientId(b, current)
+    return _fb.PlaybackRejectedEnd(b)
+
+
+def _encode_playback_control(b, msg):
+    action = b.CreateString(msg.get("action", ""))
+    _fb.PlaybackControlStart(b)
+    _fb.PlaybackControlAddAction(b, action)
+    if "time" in msg:
+        _fb.PlaybackControlAddTime(b, float(msg["time"]))
+    if "rate" in msg:
+        _fb.PlaybackControlAddRate(b, float(msg["rate"]))
+    return _fb.PlaybackControlEnd(b)
+
+
+def _encode_playback_state(b, msg):
+    leader = b.CreateString(msg.get("leader_client_id", ""))
+    _fb.PlaybackStateStart(b)
+    _fb.PlaybackStateAddTime(b, float(msg.get("time", 0.0)))
+    _fb.PlaybackStateAddPlaying(b, bool(msg.get("playing", False)))
+    _fb.PlaybackStateAddRate(b, float(msg.get("rate", 1.0)))
+    _fb.PlaybackStateAddLeaderClientId(b, leader)
+    return _fb.PlaybackStateEnd(b)
+
+
 _ENCODE_DISPATCH = {
     MSG_HELLO: _encode_hello,
     MSG_HELLO_OK: _encode_hello_ok,
@@ -373,6 +509,11 @@ _ENCODE_DISPATCH = {
     MSG_CREATE_PROPOSAL: _encode_create_proposal,
     MSG_PROPOSAL_CREATED: _encode_proposal_created,
     MSG_RATE_LIMITED: _encode_rate_limited,
+    MSG_CLAIM_PLAYBACK: _encode_claim_playback,
+    MSG_PLAYBACK_CLAIMED: _encode_playback_claimed,
+    MSG_PLAYBACK_REJECTED: _encode_playback_rejected,
+    MSG_PLAYBACK_CONTROL: _encode_playback_control,
+    MSG_PLAYBACK_STATE: _encode_playback_state,
 }
 
 
@@ -457,6 +598,8 @@ def _encode_set_xform_trs(b, ev):
         _fb.SetXformTrsAddR(b, r_vec)
     if s_vec is not None:
         _fb.SetXformTrsAddS(b, s_vec)
+    if ev.get("time") is not None:
+        _fb.SetXformTrsAddTime(b, float(ev["time"]))
     return _fb.SetXformTrsEnd(b)
 
 
@@ -497,6 +640,8 @@ def _encode_set_visibility(b, ev):
     _fb.SetVisibilityStart(b)
     _fb.SetVisibilityAddPrim(b, prim)
     _fb.SetVisibilityAddVisible(b, ev["visible"])
+    if ev.get("time") is not None:
+        _fb.SetVisibilityAddTime(b, float(ev["time"]))
     return _fb.SetVisibilityEnd(b)
 
 
@@ -696,6 +841,8 @@ def _encode_set_gprim_attrs(b, ev):
         _fb.SetGprimAttrsAddPrimvarMeta(b, pvm_vec)
     if ai_vec is not None:
         _fb.SetGprimAttrsAddAttrInterp(b, ai_vec)
+    if ev.get("time") is not None:
+        _fb.SetGprimAttrsAddTime(b, float(ev["time"]))
     return _fb.SetGprimAttrsEnd(b)
 
 
@@ -847,6 +994,8 @@ def _encode_set_connectable_input(b, ev):
     _fb.SetConnectableInputAddPrim(b, prim)
     _fb.SetConnectableInputAddInfoId(b, info_id)
     _fb.SetConnectableInputAddInputs(b, inputs_vec)
+    if ev.get("time") is not None:
+        _fb.SetConnectableInputAddTime(b, float(ev["time"]))
     return _fb.SetConnectableInputEnd(b)
 
 
@@ -887,6 +1036,15 @@ def _encode_set_connectable_connection(b, ev):
     _fb.SetConnectableConnectionAddConnections(b, conn_vec)
     _fb.SetConnectableConnectionAddDisconnections(b, disc_vec)
     return _fb.SetConnectableConnectionEnd(b)
+
+
+@register_encoder(
+    K_SET_STAGE_METADATA,
+    fb_tag=EventPayloadType.SetStageMetadata,
+    fb_class=SetStageMetadata,
+)
+def _encode_set_stage_metadata(b, ev):
+    return _encode_stage_metadata_table(b, {k: v for k, v in ev.items() if k != "k"}, force=True)
 
 
 # ===================================================================
@@ -1019,7 +1177,51 @@ def _dict_hello_ok(h, msg_type):
     token = _str(h.Token())
     if token:
         msg["token"] = token
+    sm = h.StageMetadata()
+    if sm is not None:
+        meta = _decode_stage_metadata_table(sm)
+        if meta:
+            msg["stage_metadata"] = meta
     return msg
+
+
+def _dict_claim_playback(cp, msg_type):
+    msg = {"type": msg_type, "client_id": _str(cp.ClientId()) or ""}
+    t = cp.Time()
+    if t is not None:
+        msg["time"] = t
+    return msg
+
+
+def _dict_playback_claimed(pc, msg_type):
+    return {"type": msg_type, "leader_client_id": _str(pc.LeaderClientId()) or ""}
+
+
+def _dict_playback_rejected(pr, msg_type):
+    return {
+        "type": msg_type,
+        "reason": _str(pr.Reason()) or "",
+        "current_leader_client_id": _str(pr.CurrentLeaderClientId()) or "",
+    }
+
+
+def _dict_playback_control(pc, msg_type):
+    return {
+        "type": msg_type,
+        "action": _str(pc.Action()) or "",
+        "time": pc.Time(),
+        "rate": pc.Rate(),
+    }
+
+
+def _dict_playback_state(ps, msg_type):
+    return {
+        "type": msg_type,
+        "time": ps.Time(),
+        "playing": ps.Playing(),
+        "rate": ps.Rate(),
+        "leader_client_id": _str(ps.LeaderClientId()) or "",
+    }
 
 
 def _dict_auth_rejected(h, msg_type):
@@ -1081,6 +1283,11 @@ _DICT_DECODE_DISPATCH = {
     MSG_CREATE_PROPOSAL: _dict_create_proposal,
     MSG_PROPOSAL_CREATED: _dict_proposal_created,
     MSG_RATE_LIMITED: _dict_rate_limited,
+    MSG_CLAIM_PLAYBACK: _dict_claim_playback,
+    MSG_PLAYBACK_CLAIMED: _dict_playback_claimed,
+    MSG_PLAYBACK_REJECTED: _dict_playback_rejected,
+    MSG_PLAYBACK_CONTROL: _dict_playback_control,
+    MSG_PLAYBACK_STATE: _dict_playback_state,
 }
 
 
@@ -1121,6 +1328,9 @@ def _dict_set_xform_trs(trs, kind):
         fields.append("s")
         ev["s"] = [trs.S(i) for i in range(trs.SLength())]
     ev["fields"] = fields
+    t = trs.Time()
+    if t is not None:
+        ev["time"] = t
     return ev
 
 
@@ -1141,7 +1351,11 @@ def _dict_rename_prim(rp, kind):
 
 @register_decoder(K_SET_VISIBILITY)
 def _dict_set_visibility(sv, kind):
-    return {"k": kind, "prim": _str(sv.Prim()), "visible": sv.Visible()}
+    ev = {"k": kind, "prim": _str(sv.Prim()), "visible": sv.Visible()}
+    t = sv.Time()
+    if t is not None:
+        ev["time"] = t
+    return ev
 
 
 def _attr_value_to_python(av, numpy_arrays: bool = False):
@@ -1218,6 +1432,9 @@ def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
             attr_interp[_str(ai.AttrName())] = _str(ai.Interpolation())
         ev["attr_interp"] = attr_interp
 
+    t = sg.Time()
+    if t is not None:
+        ev["time"] = t
     return ev
 
 
@@ -1296,13 +1513,24 @@ def _dict_set_connectable_input(sci, kind):
             inputs[name] = civ.ScalarInt()
         else:
             inputs[name] = civ.ScalarFloat()
-    return {
+    ev = {
         "k": kind,
         "prim": _str(sci.Prim()),
         "info_id": _str(sci.InfoId()),
         "inputs": inputs,
         "input_types": input_types,
     }
+    t = sci.Time()
+    if t is not None:
+        ev["time"] = t
+    return ev
+
+
+@register_decoder(K_SET_STAGE_METADATA)
+def _dict_set_stage_metadata(sm, kind):
+    ev = {"k": kind}
+    ev.update(_decode_stage_metadata_table(sm))
+    return ev
 
 
 @register_decoder(K_SET_CONNECTABLE_CONNECTION)

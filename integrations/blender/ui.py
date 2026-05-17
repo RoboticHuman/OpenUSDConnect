@@ -96,6 +96,28 @@ def _draw_receiver_section(layout, scene):
             box.operator("usd_connect.reset_receiver_seq", icon="LOOP_BACK")
 
 
+def _draw_playback_section(layout, scene):
+    box = layout.box()
+    box.label(text="Playback Sync", icon="PLAY")
+    leader = getattr(scene, "usd_connect_playback_leader_id", "")
+    is_leader = getattr(scene, "usd_connect_playback_is_leader", False)
+    if leader:
+        box.label(text=f"Leader: {leader}", icon="USER")
+    else:
+        box.label(text="No leader", icon="QUESTION")
+    if is_leader:
+        row = box.row(align=True)
+        row.operator("usd_connect.playback_play", icon="PLAY")
+        row.operator("usd_connect.playback_pause", icon="PAUSE")
+        row.operator("usd_connect.playback_set_time", text="Push Frame", icon="TIME")
+        box.operator("usd_connect.release_playback", icon="X")
+    else:
+        box.operator("usd_connect.claim_playback", icon="REC")
+    sub = box.column(align=True)
+    sub.label(text=f"Time: {scene.usd_connect_playback_time:.2f}")
+    sub.label(text=f"Playing: {scene.usd_connect_playback_playing}")
+
+
 class USD_CONNECT_PT_main_panel(bpy.types.Panel):
     bl_label = "USD Connect"
     bl_idname = "USD_CONNECT_PT_main_panel"
@@ -115,6 +137,7 @@ class USD_CONNECT_PT_main_panel(bpy.types.Panel):
         _draw_capture_section(layout, scene)
         _draw_emitter_section(layout, scene)
         _draw_receiver_section(layout, scene)
+        _draw_playback_section(layout, scene)
 
 
 _UI_CLASSES = (USD_CONNECT_PT_main_panel,)

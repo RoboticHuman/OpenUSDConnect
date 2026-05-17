@@ -95,6 +95,7 @@ class SetXformTRS(TypedDict):
 
     ``fields`` lists which of ``"t"``, ``"r"``, ``"s"`` are present in this
     payload. Rotation ``r`` is a quaternion ``[w, x, y, z]`` — not euler.
+    ``time`` is an optional USD time sample; absent = ``Usd.TimeCode.Default()``.
     """
 
     k: Literal["set_xform_trs"]
@@ -103,6 +104,7 @@ class SetXformTRS(TypedDict):
     t: NotRequired[list[float]]  # length 3
     r: NotRequired[list[float]]  # length 4, quaternion [w, x, y, z]
     s: NotRequired[list[float]]  # length 3
+    time: NotRequired[float]
 
 
 class DeletePrim(TypedDict):
@@ -129,11 +131,15 @@ class RenamePrim(TypedDict):
 
 
 class SetVisibility(TypedDict):
-    """``UsdGeom.Imageable`` visibility (``False`` → ``"invisible"``)."""
+    """``UsdGeom.Imageable`` visibility (``False`` → ``"invisible"``).
+
+    ``time`` is an optional USD time sample; absent = ``Usd.TimeCode.Default()``.
+    """
 
     k: Literal["set_visibility"]
     prim: str
     visible: bool
+    time: NotRequired[float]
 
 
 class SetGprimAttrs(TypedDict):
@@ -150,6 +156,7 @@ class SetGprimAttrs(TypedDict):
     attrs: dict[str, AttrValue]
     primvar_meta: NotRequired[dict[str, PrimvarMeta]]
     attr_interp: NotRequired[dict[str, str]]
+    time: NotRequired[float]
 
 
 class SetReference(TypedDict):
@@ -213,6 +220,7 @@ class SetConnectableInput(TypedDict):
     info_id: str
     inputs: dict[str, ConnectableInputValue]
     input_types: NotRequired[dict[str, str]]
+    time: NotRequired[float]
 
 
 class SetConnectableConnection(TypedDict):
@@ -227,6 +235,24 @@ class SetConnectableConnection(TypedDict):
     prim: str
     connections: dict[str, ConnSource]
     disconnections: NotRequired[list[str]]
+
+
+class SetStageMetadata(TypedDict):
+    """Stage-level metadata snapshot — only present fields are applied.
+
+    Carries units (``metersPerUnit``, ``upAxis``) and timeline metadata
+    (``timeCodesPerSecond``, ``framesPerSecond``, ``startTimeCode``,
+    ``endTimeCode``). The applier writes only the keys actually present;
+    missing keys leave the stage's current opinion untouched.
+    """
+
+    k: Literal["set_stage_metadata"]
+    timeCodesPerSecond: NotRequired[float]
+    framesPerSecond: NotRequired[float]
+    startTimeCode: NotRequired[float]
+    endTimeCode: NotRequired[float]
+    metersPerUnit: NotRequired[float]
+    upAxis: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +276,7 @@ Event = (
     | SetMaterialBinding
     | SetConnectableInput
     | SetConnectableConnection
+    | SetStageMetadata
 )
 
 
@@ -372,6 +399,7 @@ __all__ = [
     "SetMaterialBinding",
     "SetConnectableInput",
     "SetConnectableConnection",
+    "SetStageMetadata",
     "Event",
     "EventSpec",
     "register_encoder",

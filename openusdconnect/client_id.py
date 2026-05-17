@@ -1,15 +1,19 @@
 """Stable client ID generation for DCC integrations."""
 
 import getpass
+import os
 import platform
 
 
 def make_stable_client_id(dcc_name: str) -> str:
     """Generate a stable client ID from username, hostname, and DCC name.
 
-    Format: ``{user}-{hostname}-{dcc}``
-
-    Persists across sessions so the server can map reconnections to the
-    same per-client layer.
+    Format ``{user}-{hostname}-{dcc}`` — persists across sessions so the
+    server maps reconnections to the same per-client layer. The
+    ``USD_CONNECT_CLIENT_ID`` environment variable overrides the computed
+    value when two DCC sessions on one machine need distinct client IDs.
     """
+    override = os.environ.get("USD_CONNECT_CLIENT_ID", "").strip()
+    if override:
+        return override
     return f"{getpass.getuser()}-{platform.node()}-{dcc_name}"

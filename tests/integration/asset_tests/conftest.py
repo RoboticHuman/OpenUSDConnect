@@ -9,7 +9,10 @@ import pytest
 # Only collect the pytest wrapper (test_assets.py), not the Blender scripts
 # (test_bishop.py, etc.) which import bpy and can't run under pytest directly.
 collect_ignore_glob = ["test_bishop.py", "test_teapot_*.py", "test_two_*.py",
-                       "test_vehicles.py", "test_camera_scene.py", "diag_*.py"]
+                       "test_vehicles.py", "test_camera_scene.py",
+                       "test_playback_*.py",
+                       "test_headless_time_samples_to_blender.py",
+                       "diag_*.py"]
 
 
 def pytest_addoption(parser):

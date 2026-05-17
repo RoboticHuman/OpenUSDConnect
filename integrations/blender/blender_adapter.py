@@ -398,6 +398,7 @@ class BlenderAdapter(DCCAdapter):
         t: list[float] | None = None,
         r: list[float] | None = None,
         s: list[float] | None = None,
+        time: float | None = None,
     ) -> bool:
         # DomeLight has no scene object — its Xform drives the World's
         # Mapping node rotation instead. Translation/scale are conventionally
@@ -499,7 +500,9 @@ class BlenderAdapter(DCCAdapter):
         )
         return True
 
-    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+    def set_visibility(
+        self, prim_path: str, visible: bool, time: float | None = None,
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
         obj = self._find_object_by_prim(prim_path)
@@ -514,7 +517,9 @@ class BlenderAdapter(DCCAdapter):
             LOG.exception("Failed to set visibility for prim %s", prim_path)
             return False
 
-    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
+    def set_gprim_attrs(
+        self, prim_path: str, attrs: dict, time: float | None = None,
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
         obj = self._find_object_by_prim(prim_path)
@@ -663,7 +668,12 @@ class BlenderAdapter(DCCAdapter):
                 bpy.data.materials.remove(mat)
 
     def set_connectable_input(
-        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
+        self,
+        prim_path: str,
+        info_id: str,
+        inputs: dict,
+        input_types: dict,
+        time: float | None = None,
     ) -> bool:
         if not BPY_AVAILABLE:
             return True
