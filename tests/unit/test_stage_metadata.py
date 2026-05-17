@@ -13,6 +13,7 @@ import pytest
 
 try:
     from pxr import Usd, UsdGeom  # noqa: F401
+
     from openusdconnect import codec
     from openusdconnect.emitter import NoticeEmitter
     from openusdconnect.event_apply import apply_events
@@ -124,3 +125,19 @@ def test_emitter_detects_stage_metadata_change():
 
     # Second cycle with no changes → no new event.
     assert emitter.build_events_for_dirty() == []
+
+
+def test_emitter_ignores_unrelated_pseudo_root_edits():
+    """Comment / customLayerData edits fire info-only notices on '/', but
+    only the 6 watched metadata fields should flag _stage_metadata_dirty.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+    # Comments do fire a pseudo-root info notice — but on the "comment" field,
+    # not any of our watched metadata fields.
+    stage.GetRootLayer().comment = "hello"
+    # No metadata-watched field was changed → no event should be produced.
+    events = emitter.build_events_for_dirty()
+    meta_events = [e for e in events if e.get("k") == K_SET_STAGE_METADATA]
+    assert meta_events == []
+    assert emitter._stage_metadata_dirty is False

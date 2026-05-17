@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 from .codec import (
     PayloadType,
+    _decode_stage_metadata_table,
     decode_envelope,
     resolve_payload,
 )
@@ -142,8 +143,6 @@ class EventSender:
             if self._on_token_issued:
                 self._on_token_issued(issued)
             LOG.info("EventSender: token issued by server")
-
-        from .codec import _decode_stage_metadata_table
 
         sm = ho.StageMetadata()
         if sm is not None:

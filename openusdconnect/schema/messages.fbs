@@ -88,10 +88,12 @@ table PlaybackRejected {
 }
 
 // Leader → server: drive the shared playhead. action ∈ {"play","pause","stop","set_time","set_rate"}.
+// time / rate are nullable so the decoded dict omits them when the sender
+// didn't author one (set_time carries time, set_rate carries rate).
 table PlaybackControl {
     action:string;
-    time:double = 0;
-    rate:double = 1.0;
+    time:double = null;
+    rate:double = null;
 }
 
 // Server → all clients: authoritative playback state snapshot.

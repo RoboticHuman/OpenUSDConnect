@@ -42,6 +42,17 @@ K_SET_CONNECTABLE_INPUT = "set_connectable_input"
 K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
 K_SET_STAGE_METADATA = "set_stage_metadata"
 
+# Fields carried by a SetStageMetadata event. Authoritative list — used by
+# the codec, adapter dispatch, and emitter diff path.
+STAGE_METADATA_KEYS = (
+    "timeCodesPerSecond",
+    "framesPerSecond",
+    "startTimeCode",
+    "endTimeCode",
+    "metersPerUnit",
+    "upAxis",
+)
+
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
 
@@ -67,11 +78,13 @@ EVENT_KEYS = frozenset(
     }
 )
 
-# Event application order - structural first, then composition arcs
-# (V before R before P per LIVERPS), then local value opinions (L),
-# destructive last.  This is dependency order (prim must exist before
-# values can be set), not strength order.  LIVERPS strength (L strongest,
-# S weakest) is handled by USD's composition engine, not by event ordering.
+# Event application order - stage-level settings (units, timeline) first
+# since downstream value opinions are interpreted under those units, then
+# structural prim ops, then composition arcs (V before R before P per
+# LIVERPS), then local value opinions (L), destructive last.  This is
+# dependency order (prim must exist before values can be set), not
+# strength order.  LIVERPS strength (L strongest, S weakest) is handled
+# by USD's composition engine, not by event ordering.
 # fmt: off
 _EVENT_KIND_SEQUENCE = [
     K_SET_STAGE_METADATA,      # units + timeline before any prim ops

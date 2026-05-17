@@ -236,17 +236,19 @@ class UsdSyncServer:
         action: str,
         time_value: float = 0.0,
         rate: float = 1.0,
-    ) -> tuple[bool, dict | str]:
+    ) -> tuple[bool, dict | str, str]:
         """Apply a control command from the playback leader.
 
-        Returns ``(True, new_state_dict)`` on success or ``(False, reason)``
-        when the requesting client is not the current leader, where the
-        ``reason`` payload is suitable for PlaybackRejected.
+        Returns ``(True, new_state_dict, leader)`` on success or
+        ``(False, reason, current_leader)`` when the requesting client is
+        not the current leader. Always returns the current leader as the
+        third element so callers don't have to re-read ``self.playback``
+        outside the lock.
         """
         with self.playback_lock:
-            leader = self.playback["leader_client_id"]
+            leader = self.playback["leader_client_id"] or ""
             if leader != client_id:
-                return False, f"not the playback leader (current: {leader or ''})"
+                return False, f"not the playback leader (current: {leader})", leader
             if action == "play":
                 self.playback["playing"] = True
             elif action == "pause":
@@ -259,13 +261,17 @@ class UsdSyncServer:
             elif action == "set_rate":
                 self.playback["rate"] = float(rate)
             else:
-                return False, f"unknown playback action {action!r}"
-            return True, {
-                "time": self.playback["time"],
-                "playing": self.playback["playing"],
-                "rate": self.playback["rate"],
-                "leader_client_id": self.playback["leader_client_id"] or "",
-            }
+                return False, f"unknown playback action {action!r}", leader
+            return (
+                True,
+                {
+                    "time": self.playback["time"],
+                    "playing": self.playback["playing"],
+                    "rate": self.playback["rate"],
+                    "leader_client_id": self.playback["leader_client_id"] or "",
+                },
+                leader,
+            )
 
     def release_playback(self, client_id: str) -> bool:
         """Release the leader role when a leader disconnects.

@@ -42,12 +42,17 @@ from .protocol_constants import (
 
 LOG = logging.getLogger(__name__)
 
+# Module-level singleton — `Usd.TimeCode.Default()` is immutable, so the
+# usual mutable-default-arg footgun doesn't apply, but ruff's B008 still
+# flags the call. One shared instance keeps signatures clean.
+_TIME_DEFAULT = Usd.TimeCode.Default()
+
 
 def _timecode(ev: dict) -> Usd.TimeCode:
     """Return ``Usd.TimeCode(ev["time"])`` or ``Usd.TimeCode.Default()`` when absent."""
     t = ev.get("time")
     if t is None:
-        return Usd.TimeCode.Default()
+        return _TIME_DEFAULT
     return Usd.TimeCode(float(t))
 
 
@@ -213,7 +218,7 @@ def _ensure_primvar_attr(
 
 
 def _set_gprim_attr(
-    prim: Usd.Prim, name: str, value, time: Usd.TimeCode = Usd.TimeCode.Default()
+    prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME_DEFAULT
 ) -> None:
     """Set a single attribute on a typed gprim, coercing to the schema-defined type.
 
@@ -461,7 +466,7 @@ def _set_connectable_input_value(
     name: str,
     value,
     type_name: str,
-    time: Usd.TimeCode = Usd.TimeCode.Default(),
+    time: Usd.TimeCode = _TIME_DEFAULT,
 ) -> None:
     """Set a single input on a UsdShade connectable, creating it if needed.
 

@@ -40,15 +40,7 @@ from .protocol_constants import (
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
-)
-
-_STAGE_META_KEYS = (
-    "timeCodesPerSecond",
-    "framesPerSecond",
-    "startTimeCode",
-    "endTimeCode",
-    "metersPerUnit",
-    "upAxis",
+    STAGE_METADATA_KEYS,
 )
 
 LOG = logging.getLogger(__name__)
@@ -64,6 +56,17 @@ def _trs_kwargs(ev: dict) -> dict:
     return {f: ev[f] for f in ("t", "r", "s") if f in fields}
 
 
+def _time_kwarg(ev: dict) -> dict:
+    """``{"time": v}`` when ``ev`` has a non-None ``time``, ``{}`` otherwise.
+
+    Lets adapters that don't model time samples omit the ``time=`` parameter
+    entirely — they receive the kwarg only when there's an actual sample
+    to write, never a spurious ``time=None``.
+    """
+    t = ev.get("time")
+    return {"time": t} if t is not None else {}
+
+
 _DISPATCH: dict[str, Callable[[dict], dict]] = {
     K_ENSURE_PRIM: lambda ev: {
         "prim_path": ev["prim"],
@@ -72,16 +75,16 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     },
     K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
     K_SET_XFORM_TRS: lambda ev: {
-        "prim_path": ev["prim"], "time": ev.get("time"), **_trs_kwargs(ev),
+        "prim_path": ev["prim"], **_time_kwarg(ev), **_trs_kwargs(ev),
     },
     K_DELETE_PRIM: lambda ev: {"prim_path": ev["prim"]},
     K_DEACTIVATE_PRIM: lambda ev: {"prim_path": ev["prim"], "active": ev["active"]},
     K_RENAME_PRIM: lambda ev: {"prim_path": ev["prim"], "new_name": ev["new_name"]},
     K_SET_VISIBILITY: lambda ev: {
-        "prim_path": ev["prim"], "visible": ev["visible"], "time": ev.get("time"),
+        "prim_path": ev["prim"], "visible": ev["visible"], **_time_kwarg(ev),
     },
     K_SET_GPRIM_ATTRS: lambda ev: {
-        "prim_path": ev["prim"], "attrs": ev["attrs"], "time": ev.get("time"),
+        "prim_path": ev["prim"], "attrs": ev["attrs"], **_time_kwarg(ev),
     },
     K_SET_REFERENCE: lambda ev: {"prim_path": ev["prim"], "refs": ev["refs"]},
     K_SET_VARIANT_SELECTIONS: lambda ev: {
@@ -100,14 +103,14 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "info_id": ev["info_id"],
         "inputs": ev["inputs"],
         "input_types": ev.get("input_types", {}),
-        "time": ev.get("time"),
+        **_time_kwarg(ev),
     },
     K_SET_CONNECTABLE_CONNECTION: lambda ev: {
         "prim_path": ev["prim"],
         "connections": ev["connections"],
         "disconnections": ev.get("disconnections", []),
     },
-    K_SET_STAGE_METADATA: lambda ev: {k: ev[k] for k in _STAGE_META_KEYS if k in ev},
+    K_SET_STAGE_METADATA: lambda ev: {k: ev[k] for k in STAGE_METADATA_KEYS if k in ev},
 }
 
 
@@ -128,7 +131,7 @@ class DCCAdapter(ABC):
             self.apply_event(event)
         return len(events)
 
-    def targets_stage(self) -> "Usd.Stage | None":
+    def targets_stage(self) -> Usd.Stage | None:
         """Return the ``Usd.Stage`` this adapter writes to, or ``None``.
 
         Stage-backed adapters override this; DCC-backed adapters return
@@ -280,14 +283,24 @@ class DCCAdapter(ABC):
         """Apply UsdShade input/output connection and disconnection edges."""
         raise NotImplementedError
 
-    def set_stage_metadata(self, **kwargs) -> bool:
+    @abstractmethod
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
         """Apply stage-level metadata (units + timeline).
 
-        Non-abstract: DCC integrations typically read units/fps from their
-        own scene settings. ``UsdStageAdapter`` overrides to write into the
-        mirror stage so the emitter sees authored opinions.
+        Only fields the caller passes as non-``None`` are applied — the
+        emitter ships partial updates to keep wire cost down. DCCs map
+        these to their own scene units / fps / timeline settings.
         """
-        return True
+        raise NotImplementedError
 
 
 class ShaderMapper(ABC):
@@ -577,11 +590,27 @@ class UsdStageAdapter(DCCAdapter):
         _apply_event_to_stage(self.stage, ev)
         return True
 
-    def set_stage_metadata(self, **kwargs) -> bool:
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
         ev: dict = {"k": K_SET_STAGE_METADATA}
-        for key in _STAGE_META_KEYS:
-            if key in kwargs:
-                ev[key] = kwargs[key]
+        for key, val in (
+            ("timeCodesPerSecond", timeCodesPerSecond),
+            ("framesPerSecond", framesPerSecond),
+            ("startTimeCode", startTimeCode),
+            ("endTimeCode", endTimeCode),
+            ("metersPerUnit", metersPerUnit),
+            ("upAxis", upAxis),
+        ):
+            if val is not None:
+                ev[key] = val
         _apply_event_to_stage(self.stage, ev)
         return True
 
@@ -609,6 +638,7 @@ class MockAdapter(DCCAdapter):
     def __init__(self):
         self._prims: dict[str, dict] = {}
         self.calls: list[tuple] = []
+        self.stage_metadata: dict = {}
 
     def ensure_prim(
         self,
@@ -801,10 +831,28 @@ class MockAdapter(DCCAdapter):
         )
         return True
 
-    def set_stage_metadata(self, **kwargs) -> bool:
-        meta = self._prims.setdefault("__stage__", {})
-        meta.update(kwargs)
-        LOG.info("MockAdapter: stage metadata %s", kwargs)
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
+        meta = {
+            "timeCodesPerSecond": timeCodesPerSecond,
+            "framesPerSecond": framesPerSecond,
+            "startTimeCode": startTimeCode,
+            "endTimeCode": endTimeCode,
+            "metersPerUnit": metersPerUnit,
+            "upAxis": upAxis,
+        }
+        for k, v in meta.items():
+            if v is not None:
+                self.stage_metadata[k] = v
+        LOG.info("MockAdapter: stage metadata %s", {k: v for k, v in meta.items() if v is not None})
         return True
 
     def set_connectable_connection(

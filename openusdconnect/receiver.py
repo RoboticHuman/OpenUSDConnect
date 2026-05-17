@@ -22,8 +22,10 @@ from collections.abc import Callable
 
 from .codec import (
     PayloadType,
+    _decode_stage_metadata_table,
     decode_envelope,
     is_ping,
+    message_to_dict,
     resolve_payload,
 )
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
@@ -233,8 +235,6 @@ class ReceiverThread(threading.Thread):
                         if self._on_token_issued:
                             self._on_token_issued(issued)
                         LOG.info("ReceiverThread: token issued by server")
-                    from .codec import _decode_stage_metadata_table
-
                     sm = ho.StageMetadata()
                     if sm is not None:
                         meta = _decode_stage_metadata_table(sm)
@@ -264,8 +264,6 @@ class ReceiverThread(threading.Thread):
                 PayloadType.PlaybackClaimed,
                 PayloadType.PlaybackRejected,
             ):
-                from .codec import message_to_dict
-
                 msg = message_to_dict(buf)
                 cb = None
                 if pt == PayloadType.PlaybackState:

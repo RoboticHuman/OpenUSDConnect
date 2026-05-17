@@ -1755,77 +1755,67 @@ class SetStageMetadata(object):
         self._tab = flatbuffers.table.Table(buf, pos)
 
     # SetStageMetadata
-    def Fields(self):
+    def TimeCodesPerSecond(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
-            return self._tab.Get(flatbuffers.number_types.Uint32Flags, o + self._tab.Pos)
-        return 0
-
-    # SetStageMetadata
-    def TimeCodesPerSecond(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # SetStageMetadata
     def FramesPerSecond(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # SetStageMetadata
     def StartTimeCode(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # SetStageMetadata
     def EndTimeCode(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # SetStageMetadata
     def MetersPerUnit(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # SetStageMetadata
     def UpAxis(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
 def SetStageMetadataStart(builder):
-    builder.StartObject(7)
-
-def SetStageMetadataAddFields(builder, fields):
-    builder.PrependUint32Slot(0, fields, 0)
+    builder.StartObject(6)
 
 def SetStageMetadataAddTimeCodesPerSecond(builder, timeCodesPerSecond):
-    builder.PrependFloat64Slot(1, timeCodesPerSecond, 0.0)
+    builder.PrependFloat64Slot(0, timeCodesPerSecond, None)
 
 def SetStageMetadataAddFramesPerSecond(builder, framesPerSecond):
-    builder.PrependFloat64Slot(2, framesPerSecond, 0.0)
+    builder.PrependFloat64Slot(1, framesPerSecond, None)
 
 def SetStageMetadataAddStartTimeCode(builder, startTimeCode):
-    builder.PrependFloat64Slot(3, startTimeCode, 0.0)
+    builder.PrependFloat64Slot(2, startTimeCode, None)
 
 def SetStageMetadataAddEndTimeCode(builder, endTimeCode):
-    builder.PrependFloat64Slot(4, endTimeCode, 0.0)
+    builder.PrependFloat64Slot(3, endTimeCode, None)
 
 def SetStageMetadataAddMetersPerUnit(builder, metersPerUnit):
-    builder.PrependFloat64Slot(5, metersPerUnit, 0.0)
+    builder.PrependFloat64Slot(4, metersPerUnit, None)
 
 def SetStageMetadataAddUpAxis(builder, upAxis):
-    builder.PrependUOffsetTRelativeSlot(6, flatbuffers.number_types.UOffsetTFlags.py_type(upAxis), 0)
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(upAxis), 0)
 
 def SetStageMetadataEnd(builder):
     return builder.EndObject()
@@ -2617,14 +2607,14 @@ class PlaybackControl(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 0.0
+        return None
 
     # PlaybackControl
     def Rate(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
-        return 1.0
+        return None
 
 def PlaybackControlStart(builder):
     builder.StartObject(3)
@@ -2633,10 +2623,10 @@ def PlaybackControlAddAction(builder, action):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(action), 0)
 
 def PlaybackControlAddTime(builder, time):
-    builder.PrependFloat64Slot(1, time, 0.0)
+    builder.PrependFloat64Slot(1, time, None)
 
 def PlaybackControlAddRate(builder, rate):
-    builder.PrependFloat64Slot(2, rate, 1.0)
+    builder.PrependFloat64Slot(2, rate, None)
 
 def PlaybackControlEnd(builder):
     return builder.EndObject()

@@ -204,15 +204,15 @@ table SetConnectableConnection {
 }
 
 // Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
-// metersPerUnit, upAxis). `fields` bitmask names which slots are populated;
-// unflagged slots are ignored on apply. upAxis is empty when unset.
+// metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional —
+// absent = "field not authored", present = "apply this value". upAxis is a
+// nullable string (None == empty when no opinion).
 table SetStageMetadata {
-    fields:uint;                          // 1=tcps, 2=fps, 4=startTC, 8=endTC, 16=mpu, 32=upAxis
-    timeCodesPerSecond:double = 0;
-    framesPerSecond:double = 0;
-    startTimeCode:double = 0;
-    endTimeCode:double = 0;
-    metersPerUnit:double = 0;
+    timeCodesPerSecond:double = null;
+    framesPerSecond:double = null;
+    startTimeCode:double = null;
+    endTimeCode:double = null;
+    metersPerUnit:double = null;
     upAxis:string;
 }
 

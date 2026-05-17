@@ -40,6 +40,44 @@ from .shader_mapper import create_default_registry
 _PROP_USD_IMPORTED = "_usd_imported"
 
 
+def apply_stage_metadata_to_scene(
+    scene,
+    *,
+    timeCodesPerSecond: float | None = None,
+    framesPerSecond: float | None = None,
+    startTimeCode: float | None = None,
+    endTimeCode: float | None = None,
+    metersPerUnit: float | None = None,
+    upAxis: str | None = None,
+) -> None:
+    """Apply a (partial) stage-metadata snapshot to a Blender ``Scene``.
+
+    Shared by ``BlenderAdapter.set_stage_metadata`` (live event apply) and
+    the addon's hello_ok callback. Only non-``None`` fields are written.
+    ``scene.usd_connect_tcps`` is always (re)written so playback-frame
+    conversion has a deterministic value.
+    """
+    if scene is None:
+        return
+    if framesPerSecond is not None:
+        scene.render.fps = int(round(framesPerSecond))
+    if metersPerUnit is not None:
+        scene.unit_settings.scale_length = metersPerUnit
+    # Stage TCPS drives the timecode↔frame conversion used by the playback
+    # handler.  Write it unconditionally so the property always exists.
+    scene.usd_connect_tcps = (
+        timeCodesPerSecond if timeCodesPerSecond is not None else 24.0
+    )
+    fps = max(1.0, framesPerSecond or scene.render.fps or 24.0)
+    tcps = max(1.0, scene.usd_connect_tcps)
+    if startTimeCode is not None:
+        scene.frame_start = int(round(startTimeCode / tcps * fps))
+    if endTimeCode is not None:
+        scene.frame_end = int(round(endTimeCode / tcps * fps))
+    # upAxis is informational on the Blender side — axis_conversion module
+    # owns the rotation logic; no scene property to write.
+
+
 def _has_axis_rotation(obj) -> bool:
     """Return True if obj's world transform includes non-identity rotation.
 
@@ -1946,4 +1984,32 @@ class BlenderAdapter(DCCAdapter):
                 prim_path,
                 selections,
             )
+        return True
+
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
+        """Apply a live SetStageMetadata event to the active Blender scene.
+
+        Mirrors the handshake-time snapshot path so a leader's mid-session
+        units/timeline change reaches followers immediately.
+        """
+        if not BPY_AVAILABLE:
+            return True
+        apply_stage_metadata_to_scene(
+            bpy.context.scene,
+            timeCodesPerSecond=timeCodesPerSecond,
+            framesPerSecond=framesPerSecond,
+            startTimeCode=startTimeCode,
+            endTimeCode=endTimeCode,
+            metersPerUnit=metersPerUnit,
+            upAxis=upAxis,
+        )
         return True

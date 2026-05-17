@@ -14,10 +14,11 @@ from __future__ import annotations
 import pytest
 
 try:
-    from pxr import Gf, Usd, UsdGeom, UsdLux, UsdShade  # noqa: F401
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade  # noqa: F401
+
     from openusdconnect import codec
-    from openusdconnect.event_apply import apply_events
     from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.event_apply import apply_events
 
     PXR_AVAILABLE = True
 except ImportError:
@@ -132,9 +133,12 @@ def _fresh_stage_with_cube():
 def test_apply_time_sampled_trs():
     stage = _fresh_stage_with_cube()
     apply_events(stage, [
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [0.0, 0.0, 0.0]},
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [10.0, 0.0, 0.0], "time": 24.0},
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [20.0, 0.0, 0.0], "time": 48.0},
+        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
+         "fields": ["t"], "t": [0.0, 0.0, 0.0]},
+        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
+         "fields": ["t"], "t": [10.0, 0.0, 0.0], "time": 24.0},
+        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
+         "fields": ["t"], "t": [20.0, 0.0, 0.0], "time": 48.0},
     ])
     cube = stage.GetPrimAtPath("/World/Cube")
     xf = UsdGeom.Xformable(cube)
@@ -240,6 +244,124 @@ def test_emitter_first_encounter_includes_all_existing_samples():
         if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None
     ]
     assert {e["time"] for e in sampled} == {0.0, 10.0}
+
+
+def test_emitter_emits_orient_quaternion_samples():
+    """Regression: orient (Gf.Quatf) time samples used to be silently dropped
+    because _usd_value_to_python returned None for quaternions. Now it
+    returns [w, x, y, z] and the emit path produces one SetXformTRS event
+    per (orient sample) carrying the quat in the wire form.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    xf = UsdGeom.Xformable(cube)
+    o_op = xf.AddOrientOp(precision=UsdGeom.XformOp.PrecisionFloat)
+    # 90-degree rotation around X at frame 24.
+    import math
+    half = math.sin(math.radians(45.0))
+    o_op.Set(Gf.Quatf(math.cos(math.radians(45.0)), Gf.Vec3f(half, 0.0, 0.0)),
+             Usd.TimeCode(24.0))
+    o_op.Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)), Usd.TimeCode(48.0))
+
+    events = emitter.build_events_for_dirty()
+    sampled = [
+        e for e in events
+        if e.get("k") == K_SET_XFORM_TRS
+        and e.get("time") is not None
+        and e.get("fields") == ["r"]
+    ]
+    assert len(sampled) == 2
+    by_time = {e["time"]: e["r"] for e in sampled}
+    assert set(by_time.keys()) == {24.0, 48.0}
+    # Wire form is [w, x, y, z], not None / 4x4 matrix.
+    assert len(by_time[24.0]) == 4
+    assert by_time[24.0][0] == pytest.approx(math.cos(math.radians(45.0)))
+    assert by_time[24.0][1] == pytest.approx(half)
+    assert by_time[48.0] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+
+    # Round-trip through codec to confirm the wire format survives.
+    raw = codec.encode_message({
+        "type": MSG_TXN, "client_id": "c", "events": [sampled[0]],
+    })
+    decoded = codec.message_to_dict(raw)["events"][0]
+    assert decoded["fields"] == ["r"]
+    assert decoded["r"] == pytest.approx(sampled[0]["r"])
+
+
+def test_invalidate_set_gprim_attrs_refreshes_default_time_cache():
+    """After a remote default-time gprim_attrs apply, the per-attr cache
+    must reflect the new value so a local edit back to it produces a diff
+    against the right baseline (not the stale pre-remote value).
+    """
+    stage = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    cube.GetSizeAttr().Set(1.0)
+    emitter = NoticeEmitter(stage)
+    # Initial cycle to seed the cache with the authored size=1.0.
+    emitter.build_events_for_dirty()
+
+    # Simulate a remote default-time edit: server changed size to 5.0.
+    ev = {"k": K_SET_GPRIM_ATTRS, "prim": "/Cube", "attrs": {"size": 5.0}}
+    with emitter.suppressed():
+        apply_events(stage, [ev])
+    emitter.invalidate_for_event(ev)
+
+    # The cache should now reflect 5.0. A subsequent local edit BACK to
+    # the value the cache held before the remote apply (1.0) is genuinely
+    # a change vs the server's 5.0, so it must emit.
+    cube.GetSizeAttr().Set(1.0)
+    out = emitter.build_events_for_dirty()
+    gprim_events = [
+        e for e in out
+        if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is None
+    ]
+    assert any(e["attrs"].get("size") == 1.0 for e in gprim_events)
+
+
+def test_emitter_layer_scoped_time_samples():
+    """Per-client-layer mode: emit only samples authored on the stage's
+    edit target, never samples from a stronger sibling layer (another
+    client). The composed view falls afoul of USD's "strongest layer with
+    samples wins the time domain" rule — both shadowing the weaker
+    client's own samples AND leaking the stronger client's into the
+    weaker emitter.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+
+    # Stack two anonymous layers as session sublayers — layer_a is stronger.
+    layer_b = Sdf.Layer.CreateAnonymous("clientB")
+    layer_a = Sdf.Layer.CreateAnonymous("clientA")
+    stage.GetSessionLayer().subLayerPaths.insert(0, layer_b.identifier)
+    stage.GetSessionLayer().subLayerPaths.insert(0, layer_a.identifier)
+
+    # Client A authors samples on the stronger layer.
+    stage.SetEditTarget(Usd.EditTarget(layer_a))
+    cube.GetSizeAttr().Set(1.0, Usd.TimeCode(0.0))
+    cube.GetSizeAttr().Set(2.0, Usd.TimeCode(10.0))
+
+    # Client B's emitter starts up with layer_b as edit target.
+    stage.SetEditTarget(Usd.EditTarget(layer_b))
+    emitter = NoticeEmitter(stage)
+    # Consume any initial structural events so the next cycle is clean.
+    emitter.build_events_for_dirty()
+
+    # Client B authors a sample of its own.
+    cube.GetSizeAttr().Set(3.0, Usd.TimeCode(20.0))
+
+    events = emitter.build_events_for_dirty()
+    sampled = [
+        e for e in events
+        if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None
+    ]
+    sample_times = {e["time"] for e in sampled}
+    # Must include B's actual keyframe (would be shadowed in the composed
+    # view since A's layer has samples and is stronger).
+    assert 20.0 in sample_times
+    # Must NOT include A's samples (leaked from composed view in the bug).
+    assert 0.0 not in sample_times
+    assert 10.0 not in sample_times
 
 
 def test_emitter_invalidate_suppresses_reemit_after_remote_apply():

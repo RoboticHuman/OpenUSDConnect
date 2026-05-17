@@ -23,7 +23,7 @@ from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
 
 from . import SESSION_ORIGIN as _ORIGIN
-from .blender_adapter import BlenderAdapter
+from .blender_adapter import BlenderAdapter, apply_stage_metadata_to_scene
 
 LOG = logging.getLogger(__name__)
 
@@ -174,37 +174,16 @@ def _on_playback_state(state: dict) -> None:
 
 
 def _on_stage_metadata(meta: dict) -> None:
-    """Receive a stage_metadata snapshot from hello_ok or live broadcast."""
+    """Receive a stage_metadata snapshot from hello_ok or live broadcast.
+
+    Off-main-thread safe: schedules the actual scene mutation through
+    bpy.app.timers so we never touch Blender state from the network thread.
+    """
     if not BPY_AVAILABLE:
         return
 
     def _apply():
-        scene = bpy.context.scene
-        if scene is None:
-            return None
-        if "framesPerSecond" in meta:
-            try:
-                scene.render.fps = int(round(float(meta["framesPerSecond"])))
-            except (TypeError, ValueError):
-                pass
-        if "metersPerUnit" in meta:
-            try:
-                scene.unit_settings.scale_length = float(meta["metersPerUnit"])
-            except (TypeError, ValueError):
-                pass
-        # Stage TCPS drives the timecode↔frame conversion used by the
-        # playback handler. Always write it (even when absent in meta)
-        # so we record a deterministic default.
-        try:
-            scene.usd_connect_tcps = float(meta.get("timeCodesPerSecond", 24.0))
-        except (TypeError, ValueError):
-            scene.usd_connect_tcps = 24.0
-        fps = max(1.0, float(meta.get("framesPerSecond", scene.render.fps or 24.0)))
-        tcps = max(1.0, float(scene.usd_connect_tcps))
-        if "startTimeCode" in meta:
-            scene.frame_start = int(round(float(meta["startTimeCode"]) / tcps * fps))
-        if "endTimeCode" in meta:
-            scene.frame_end = int(round(float(meta["endTimeCode"]) / tcps * fps))
+        apply_stage_metadata_to_scene(bpy.context.scene, **meta)
         return None
 
     try:

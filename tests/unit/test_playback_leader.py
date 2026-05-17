@@ -6,6 +6,7 @@ import pytest
 
 try:
     from pxr import Usd  # noqa: F401
+
     from openusdconnect import codec
 
     PXR_AVAILABLE = True
@@ -64,25 +65,39 @@ def test_same_client_reclaim_is_idempotent(server):
 
 def test_non_leader_control_rejected(server):
     server.claim_playback("c1")
-    ok, reason = server.apply_playback_control("c2", "play")
+    ok, reason, current_leader = server.apply_playback_control("c2", "play")
     assert ok is False
     assert "not the playback leader" in reason
+    assert current_leader == "c1"
 
 
 def test_leader_set_time(server):
     server.claim_playback("c1")
-    ok, payload = server.apply_playback_control("c1", "set_time", time_value=12.5)
+    ok, payload, leader = server.apply_playback_control(
+        "c1", "set_time", time_value=12.5,
+    )
     assert ok is True
     assert payload["time"] == 12.5
     assert payload["leader_client_id"] == "c1"
+    assert leader == "c1"
 
 
 def test_leader_play_pause(server):
     server.claim_playback("c1")
-    ok, payload = server.apply_playback_control("c1", "play")
+    ok, payload, _ = server.apply_playback_control("c1", "play")
     assert ok and payload["playing"] is True
-    ok, payload = server.apply_playback_control("c1", "pause")
+    ok, payload, _ = server.apply_playback_control("c1", "pause")
     assert ok and payload["playing"] is False
+
+
+def test_unknown_action_returns_leader(server):
+    """Rejection for unknown action still returns the current leader so the
+    handler doesn't have to peek at server.playback outside the lock."""
+    server.claim_playback("c1")
+    ok, reason, leader = server.apply_playback_control("c1", "bogus")
+    assert ok is False
+    assert "unknown" in reason
+    assert leader == "c1"
 
 
 def test_release_clears_leader(server):
@@ -110,6 +125,27 @@ def test_protocol_builders_round_trip():
     assert out["type"] == MSG_PLAYBACK_CONTROL
     assert out["action"] == "set_time"
     assert out["time"] == pytest.approx(4.5)
+
+
+def test_playback_control_omits_time_when_unset():
+    """make_playback_control("play") must round-trip without `time`/`rate` keys.
+
+    Earlier the FB scalars defaulted to 0/1.0, so decoded dicts always
+    carried `time: 0.0, rate: 1.0` — masking whether the sender authored
+    a value. Nullable scalars + conditional encode/decode fix that.
+    """
+    raw = codec.encode_message(make_playback_control("play"))
+    out = codec.message_to_dict(raw)
+    assert out["action"] == "play"
+    assert "time" not in out
+    assert "rate" not in out
+
+
+def test_playback_control_carries_only_authored_fields():
+    raw = codec.encode_message(make_playback_control("set_rate", rate=2.5))
+    out = codec.message_to_dict(raw)
+    assert out["rate"] == pytest.approx(2.5)
+    assert "time" not in out
 
 
 def test_playback_state_message_round_trip():

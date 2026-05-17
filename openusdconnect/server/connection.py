@@ -348,7 +348,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._broadcast_playback_state(sync_server)
 
     def _handle_playback_control(self, sync_server: UsdSyncServer, msg: dict):
-        ok, payload = sync_server.apply_playback_control(
+        ok, payload, current_leader = sync_server.apply_playback_control(
             self._client_id or "",
             msg.get("action", ""),
             float(msg.get("time", 0.0)),
@@ -360,9 +360,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 {
                     "type": MSG_PLAYBACK_REJECTED,
                     "reason": str(payload),
-                    "current_leader_client_id": (
-                        sync_server.playback["leader_client_id"] or ""
-                    ),
+                    "current_leader_client_id": current_leader,
                 },
             )
             return

@@ -174,15 +174,15 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.PlaybackState: PlaybackState,
 }
 
-# Stage metadata bitmask bits — order must match SetStageMetadata in events.fbs.
-_STAGE_META_BITS = {
-    "timeCodesPerSecond": 1,
-    "framesPerSecond": 2,
-    "startTimeCode": 4,
-    "endTimeCode": 8,
-    "metersPerUnit": 16,
-    "upAxis": 32,
-}
+# Stage metadata numeric fields paired with their FB Add* setters.
+# upAxis is a string and handled separately.
+_STAGE_META_FB_NUMERIC = (
+    ("timeCodesPerSecond", _fb.SetStageMetadataAddTimeCodesPerSecond),
+    ("framesPerSecond", _fb.SetStageMetadataAddFramesPerSecond),
+    ("startTimeCode", _fb.SetStageMetadataAddStartTimeCode),
+    ("endTimeCode", _fb.SetStageMetadataAddEndTimeCode),
+    ("metersPerUnit", _fb.SetStageMetadataAddMetersPerUnit),
+)
 
 _TRS_BITS = {"t": 1, "r": 2, "s": 4}
 
@@ -304,49 +304,27 @@ def _encode_stage_metadata_table(b, meta: dict | None, *, force: bool = False) -
     if not meta and not force:
         return None
     meta = meta or {}
-    bitmask = 0
-    up_axis_off = None
-    if meta.get("upAxis"):
-        up_axis_off = b.CreateString(meta["upAxis"])
+    up_axis_off = b.CreateString(meta["upAxis"]) if meta.get("upAxis") else None
     _fb.SetStageMetadataStart(b)
-    for key, bit in _STAGE_META_BITS.items():
-        if key == "upAxis":
-            if up_axis_off is not None:
-                bitmask |= bit
-                _fb.SetStageMetadataAddUpAxis(b, up_axis_off)
-        elif key in meta:
-            bitmask |= bit
-            value = float(meta[key])
-            if key == "timeCodesPerSecond":
-                _fb.SetStageMetadataAddTimeCodesPerSecond(b, value)
-            elif key == "framesPerSecond":
-                _fb.SetStageMetadataAddFramesPerSecond(b, value)
-            elif key == "startTimeCode":
-                _fb.SetStageMetadataAddStartTimeCode(b, value)
-            elif key == "endTimeCode":
-                _fb.SetStageMetadataAddEndTimeCode(b, value)
-            elif key == "metersPerUnit":
-                _fb.SetStageMetadataAddMetersPerUnit(b, value)
-    _fb.SetStageMetadataAddFields(b, bitmask)
+    for key, add_fn in _STAGE_META_FB_NUMERIC:
+        if key in meta:
+            add_fn(b, float(meta[key]))
+    if up_axis_off is not None:
+        _fb.SetStageMetadataAddUpAxis(b, up_axis_off)
     return _fb.SetStageMetadataEnd(b)
 
 
 def _decode_stage_metadata_table(sm) -> dict:
-    """Read a SetStageMetadata FB table into a sparse dict (only flagged fields)."""
+    """Read a SetStageMetadata FB table into a sparse dict (only authored fields)."""
     out: dict = {}
-    fields = sm.Fields()
-    if fields & _STAGE_META_BITS["timeCodesPerSecond"]:
-        out["timeCodesPerSecond"] = sm.TimeCodesPerSecond()
-    if fields & _STAGE_META_BITS["framesPerSecond"]:
-        out["framesPerSecond"] = sm.FramesPerSecond()
-    if fields & _STAGE_META_BITS["startTimeCode"]:
-        out["startTimeCode"] = sm.StartTimeCode()
-    if fields & _STAGE_META_BITS["endTimeCode"]:
-        out["endTimeCode"] = sm.EndTimeCode()
-    if fields & _STAGE_META_BITS["metersPerUnit"]:
-        out["metersPerUnit"] = sm.MetersPerUnit()
-    if fields & _STAGE_META_BITS["upAxis"]:
-        out["upAxis"] = _str(sm.UpAxis()) or ""
+    for key, _add_fn in _STAGE_META_FB_NUMERIC:
+        # Each numeric getter returns None when the FB optional is unset.
+        val = getattr(sm, key[0].upper() + key[1:])()
+        if val is not None:
+            out[key] = val
+    up_axis = _str(sm.UpAxis())
+    if up_axis:
+        out["upAxis"] = up_axis
     return out
 
 
@@ -479,9 +457,9 @@ def _encode_playback_control(b, msg):
     action = b.CreateString(msg.get("action", ""))
     _fb.PlaybackControlStart(b)
     _fb.PlaybackControlAddAction(b, action)
-    if "time" in msg:
+    if msg.get("time") is not None:
         _fb.PlaybackControlAddTime(b, float(msg["time"]))
-    if "rate" in msg:
+    if msg.get("rate") is not None:
         _fb.PlaybackControlAddRate(b, float(msg["rate"]))
     return _fb.PlaybackControlEnd(b)
 
@@ -1206,12 +1184,16 @@ def _dict_playback_rejected(pr, msg_type):
 
 
 def _dict_playback_control(pc, msg_type):
-    return {
-        "type": msg_type,
-        "action": _str(pc.Action()) or "",
-        "time": pc.Time(),
-        "rate": pc.Rate(),
-    }
+    msg = {"type": msg_type, "action": _str(pc.Action()) or ""}
+    # Time / rate are FB-nullable; absent fields stay absent in the dict so
+    # callers can distinguish "no opinion" from "explicit zero".
+    t = pc.Time()
+    if t is not None:
+        msg["time"] = t
+    r = pc.Rate()
+    if r is not None:
+        msg["rate"] = r
+    return msg
 
 
 def _dict_playback_state(ps, msg_type):
