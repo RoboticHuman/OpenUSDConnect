@@ -102,7 +102,7 @@ In the emitter Blender:
 | `ensure_xform_ops` | First encounter of an object | Establishes translate/orient/scale ops |
 | `set_xform_trs` | Object moved/rotated/scaled | Applies the transform delta |
 | `set_visibility` | Visibility toggled | Shows/hides the object |
-| `set_gprim_attrs` | Attribute change | Updates parametric attrs, mesh topology, primvars (UVs, vertex colors), normals, purpose |
+| `set_gprim_attrs` | Attribute change | Updates parametric attrs (sphere radius, etc.), mesh topology, primvars (UVs, vertex colors), normals, purpose, and `UsdGeomCamera` typed attrs (focal length, aperture, clipping, projection, DoF) |
 | `set_reference` | USD reference set on a prim | Imports the referenced asset |
 | `set_payload` | USD payload arc set on a prim | Stores payload info (unloaded by default) |
 | `load_payload` | Payload load requested | Imports the payload asset |
@@ -126,6 +126,22 @@ primvar attributes and `attr_interp` for non-primvar attributes with interpolati
 Light prims (`DistantLight`, `SphereLight`, `RectLight`, `DiskLight`, `DomeLight`) replicate through the same machinery as shaders and materials — they're `UsdShade.ConnectableAPI` containers and their parameters (`intensity`, `color`, `radius`, `shaping:cone:angle`, `texture:file`, etc.) ride on `set_connectable_input` events with empty `info_id`. Applied API schemas (`ShapingAPI` for spot/cone lights, `ShadowAPI` for shadow controls, `MeshLightAPI`/`VolumeLightAPI` for mesh-as-light) flow via the optional `api_schemas` field on `ensure_prim` (additive only — removing an API schema is out of scope for v1).
 
 The Blender adapter's UsdLux→Blender light translation (intensity↔energy conversion, mapping ShapingAPI to Blender's spot data) is not yet wired up — the receive path lands the schema on the mirror USD stage but doesn't currently create a Blender light object.
+
+### UsdGeomCamera
+
+Camera prims (`UsdGeomCamera`) replicate through `ensure_prim` (typeName=`"Camera"`) plus `set_gprim_attrs` carrying the typed camera attrs. The Blender adapter routes those attrs onto a `bpy.types.Camera` data block. Conversion follows Blender's own USD importer:
+
+| USD attr | Blender field | Note |
+|---|---|---|
+| `focalLength` | `camera.lens` | scaled by `100 * stage_meters_per_unit` (USD's tenths-of-unit → mm) |
+| `horizontalAperture` / `verticalAperture` | `camera.sensor_width` / `sensor_height` | same scaling, drives `sensor_fit` |
+| `horizontalApertureOffset` / `verticalApertureOffset` | `camera.shift_x` / `shift_y` | normalised by sensor size |
+| `clippingRange` | `camera.clip_start` / `clip_end` | scaled by `scene_scale` |
+| `focusDistance` | `camera.dof.focus_distance` | scaled by `scene_scale` |
+| `fStop` | `camera.dof.aperture_fstop` + `use_dof` | `use_dof` = (fStop > 0) |
+| `projection` | `camera.type` | `"perspective"` → `PERSP`, `"orthographic"` → `ORTHO` |
+
+Static-pose sync only. Camera animation (F-curves on the camera data block) waits on time-sample support.
 
 ## Auto-track Mode
 
