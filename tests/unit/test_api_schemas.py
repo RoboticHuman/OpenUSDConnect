@@ -241,7 +241,7 @@ class TestEmitterFilter:
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/L", "SphereLight")
         UsdLux.ShapingAPI.Apply(p)
-        evs = em.build_events_for_dirty(include_matrices=False)
+        evs = em.build_events_for_dirty()
         ensure = [e for e in evs if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         assert ensure
         assert "ShapingAPI" in ensure[0]["api_schemas"]
@@ -252,7 +252,7 @@ class TestEmitterFilter:
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/Sphere", "Sphere")
         UsdGeom.MotionAPI.Apply(p)
-        evs = em.build_events_for_dirty(include_matrices=False)
+        evs = em.build_events_for_dirty()
         ensure = [e for e in evs if e["k"] == K_ENSURE_PRIM and e["prim"] == "/Sphere"]
         assert ensure
         assert "MotionAPI" not in ensure[0].get("api_schemas", [])
@@ -262,7 +262,7 @@ class TestEmitterFilter:
         em = NoticeEmitter(stage, replicated_api_schemas={"MotionAPI"})
         p = stage.DefinePrim("/Sphere", "Sphere")
         UsdGeom.MotionAPI.Apply(p)
-        evs = em.build_events_for_dirty(include_matrices=False)
+        evs = em.build_events_for_dirty()
         ensure = [e for e in evs if e["k"] == K_ENSURE_PRIM and e["prim"] == "/Sphere"]
         assert ensure
         assert ensure[0]["api_schemas"] == ["MotionAPI"]
@@ -275,7 +275,7 @@ class TestEmitterFilter:
         em = NoticeEmitter(stage, replicated_api_schemas={"MotionAPI"})
         p = stage.DefinePrim("/L", "SphereLight")
         UsdLux.ShapingAPI.Apply(p)
-        evs = em.build_events_for_dirty(include_matrices=False)
+        evs = em.build_events_for_dirty()
         ensure = [e for e in evs if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         assert ensure
         assert "ShapingAPI" not in ensure[0].get("api_schemas", [])
@@ -296,7 +296,7 @@ class TestRegisterReplicatedApiSchema:
             em = NoticeEmitter(stage)
             p = stage.DefinePrim("/Sphere", "Sphere")
             UsdGeom.MotionAPI.Apply(p)
-            evs = em.build_events_for_dirty(include_matrices=False)
+            evs = em.build_events_for_dirty()
             ensure = [e for e in evs if e["k"] == K_ENSURE_PRIM and e["prim"] == "/Sphere"]
             assert ensure
             assert "MotionAPI" in ensure[0]["api_schemas"]
@@ -369,14 +369,14 @@ class TestEmitterReEmitOnSchemaChange:
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/L", "SphereLight")
         # First cycle: just the SphereLight + (built-in LightAPI not in whitelist).
-        first = em.build_events_for_dirty(include_matrices=False)
+        first = em.build_events_for_dirty()
         first_ensure = [e for e in first if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         assert first_ensure
         assert first_ensure[0]["api_schemas"] == []
 
         # Second cycle after applying ShapingAPI.
         UsdLux.ShapingAPI.Apply(p)
-        second = em.build_events_for_dirty(include_matrices=False)
+        second = em.build_events_for_dirty()
         second_ensure = [e for e in second if e["k"] == K_ENSURE_PRIM and e["prim"] == "/L"]
         assert second_ensure
         assert "ShapingAPI" in second_ensure[0]["api_schemas"]

@@ -16,7 +16,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     TRS_FIELDS,
 )
@@ -48,11 +47,6 @@ def is_quat_valid(q: list[float]) -> bool:
 def is_vec3_valid(v: list[float]) -> bool:
     """Check that v is a 3-element list of numbers [x, y, z]."""
     return isinstance(v, list) and len(v) == 3 and all(isinstance(x, (int, float)) for x in v)
-
-
-def is_mat16_valid(m: list[float]) -> bool:
-    """Check that m is a 16-element list of numbers (row-major 4x4 matrix)."""
-    return isinstance(m, list) and len(m) == 16 and all(isinstance(x, (int, float)) for x in m)
 
 
 def clamp_fields(fields: list[str]) -> list[str]:
@@ -89,11 +83,6 @@ def validate_event(ev: dict) -> bool:
                 return False
             if f == "s" and not is_vec3_valid(ev.get("s", [])):
                 return False
-    if k == K_SET_XFORM_MATRICES:
-        if not is_mat16_valid(ev.get("local_m", [])):
-            return False
-        if not is_mat16_valid(ev.get("world_m", [])):
-            return False
     if k == K_DEACTIVATE_PRIM and not isinstance(ev.get("active"), bool):
         return False
     if k == K_RENAME_PRIM:

@@ -155,9 +155,11 @@ def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
         if author is not None:
             mirror_stage = author.stage
             emitter = cap._state.notice_emitter
+    adapter = _ensure_adapter()
+    adapter.mirror_stage = mirror_stage
     return EventDispatcher(
         receiver=receiver,
-        adapter=_ensure_adapter(),
+        adapter=adapter,
         mirror_stage=mirror_stage,
         emitter=emitter,
         on_imported=_on_imported,
@@ -192,6 +194,7 @@ def _drain_and_process() -> int:
     else:
         _DISPATCHER.mirror_stage = None
         _DISPATCHER.emitter = None
+    _DISPATCHER.adapter.mirror_stage = _DISPATCHER.mirror_stage
 
     _DISPATCHER.last_seq = _LAST_SEQ
     applied = _DISPATCHER.drain_and_apply()

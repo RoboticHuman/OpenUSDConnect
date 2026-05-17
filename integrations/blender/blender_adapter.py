@@ -21,6 +21,8 @@ except Exception:
     _IDENTITY_4X4 = None
     _IDENTITY_QUAT = None
 
+from pxr import UsdGeom
+
 from openusdconnect.adapters import DCCAdapter
 from openusdconnect.axis_conversion import (
     compose_axis_rotation,
@@ -49,6 +51,52 @@ def _has_axis_rotation(obj) -> bool:
     return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
 
 
+def _apply_camera_attrs(camera_data, attrs: dict, meters_per_unit: float) -> None:
+    """Apply UsdGeomCamera attrs onto a bpy.types.Camera data block."""
+    # USD lens/aperture are in tenths of a stage unit; Blender wants mm.
+    # Clipping/focus are in stage units; Blender wants its own world units
+    # (metres at the default scene scale_length=1.0). Same conversion factor
+    # both reach back to, just with different output units.
+    scene_scale = meters_per_unit
+    tenth_unit_to_mm = 100.0 * scene_scale
+
+    if "focalLength" in attrs:
+        camera_data.lens = float(attrs["focalLength"]) * tenth_unit_to_mm
+
+    if "horizontalAperture" in attrs:
+        camera_data.sensor_width = float(attrs["horizontalAperture"]) * tenth_unit_to_mm
+    if "verticalAperture" in attrs:
+        camera_data.sensor_height = float(attrs["verticalAperture"]) * tenth_unit_to_mm
+
+    sensor_size = max(camera_data.sensor_width, camera_data.sensor_height)
+    if sensor_size > 0:
+        if "horizontalApertureOffset" in attrs:
+            camera_data.shift_x = (
+                float(attrs["horizontalApertureOffset"]) * tenth_unit_to_mm / sensor_size
+            )
+        if "verticalApertureOffset" in attrs:
+            camera_data.shift_y = (
+                float(attrs["verticalApertureOffset"]) * tenth_unit_to_mm / sensor_size
+            )
+
+    if "clippingRange" in attrs:
+        near, far = attrs["clippingRange"]
+        # Blender clamps clip_start to a small positive minimum.
+        camera_data.clip_start = max(1e-6, float(near) * scene_scale)
+        camera_data.clip_end = float(far) * scene_scale
+
+    if "focusDistance" in attrs:
+        camera_data.dof.focus_distance = float(attrs["focusDistance"]) * scene_scale
+
+    if "fStop" in attrs:
+        fstop = float(attrs["fStop"])
+        camera_data.dof.aperture_fstop = fstop
+        camera_data.dof.use_dof = fstop > 0.0
+
+    if "projection" in attrs:
+        camera_data.type = "PERSP" if str(attrs["projection"]) == "perspective" else "ORTHO"
+
+
 LOG = logging.getLogger(__name__)
 
 
@@ -59,7 +107,7 @@ class BlenderAdapter(DCCAdapter):
     Rotation payload is quaternion [w,x,y,z]; converts to object's rotation_mode.
     """
 
-    def __init__(self, scene_up_axis: str = "Y"):
+    def __init__(self, scene_up_axis: str = "Y", mirror_stage=None):
         from openusdconnect.prim_registry import PrimRegistry
 
         self._registry = PrimRegistry(
@@ -69,6 +117,11 @@ class BlenderAdapter(DCCAdapter):
         self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
         self._needs_axis_conv: bool = needs_conversion(scene_up_axis)
         self._shader_registry = create_default_registry()
+        # The dispatcher's mirror stage; needed for unit-aware camera attr
+        # conversion (metersPerUnit). Re-bound by the receiver glue whenever
+        # the dispatcher's mirror_stage changes. Defaults to None — without
+        # a stage, _stage_meters_per_unit falls back to USD's 0.01 default.
+        self.mirror_stage = mirror_stage
         # DomeLight bookkeeping. Blender has exactly one World per scene, so
         # multiple USD DomeLights map to a last-wins policy: the most recent
         # ensure_prim / set_connectable_input wins; earlier domes' events are
@@ -223,6 +276,8 @@ class BlenderAdapter(DCCAdapter):
         new = None
         if type_name in self._USDLUX_TO_BLENDER_LIGHT:
             new = self._create_blender_light(name, type_name)
+        if new is None and type_name == "Camera":
+            new = bpy.data.objects.new(name, bpy.data.cameras.new(name + "_data"))
         if new is None and type_name in ("Sphere", "Cube", "Cylinder", "Cone"):
             new = self._create_mesh_primitive(name, type_name)
         if new is None and type_name == "Mesh":
@@ -467,6 +522,11 @@ class BlenderAdapter(DCCAdapter):
             LOG.warning("BlenderAdapter.set_gprim_attrs: object not found for %s", prim_path)
             return False
 
+        if obj.type == "CAMERA" and obj.data is not None:
+            _apply_camera_attrs(obj.data, attrs, self._stage_meters_per_unit())
+            LOG.info("BlenderAdapter: set camera attrs %s on %s", sorted(attrs), prim_path)
+            return True
+
         # Raw mesh topology: points + faceVertexCounts + faceVertexIndices
         if "points" in attrs and "faceVertexCounts" in attrs and "faceVertexIndices" in attrs:
             self._apply_mesh_topology(obj, attrs)
@@ -497,6 +557,12 @@ class BlenderAdapter(DCCAdapter):
                 obj.scale = (obj.scale[0], obj.scale[1], h)
         LOG.info("BlenderAdapter: set gprim attrs %s on %s", attrs, prim_path)
         return True
+
+    def _stage_meters_per_unit(self) -> float:
+        """Stage metersPerUnit; USD default (0.01) when no mirror stage is bound."""
+        if self.mirror_stage is None:
+            return 0.01
+        return float(UsdGeom.GetStageMetersPerUnit(self.mirror_stage))
 
     def _apply_mesh_topology(self, obj, attrs: dict) -> None:
         """Build Blender mesh geometry from USD mesh topology attributes."""

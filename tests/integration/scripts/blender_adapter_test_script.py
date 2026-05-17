@@ -29,6 +29,20 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
 from integrations.blender.blender_adapter import BlenderAdapter
 
 
+def _make_stage_with_mpu(mpu=1.0):
+    """Return an in-memory Usd.Stage with the given metersPerUnit.
+
+    Camera attr conversion reads metersPerUnit off the adapter's mirror_stage;
+    tests bind one explicitly so the conversion math is deterministic.
+    """
+    from pxr import Sdf, Usd, UsdGeom
+
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageMetersPerUnit(stage, mpu)
+    stage.DefinePrim(Sdf.Path("/World"), "Xform")
+    return stage
+
+
 def _clear_scene():
     """Remove all objects from the scene."""
     bpy.ops.object.select_all(action="SELECT")
@@ -984,6 +998,333 @@ def test_set_reference_reimport_after_delete(r):
     r.ok(name)
 
 
+def test_ensure_prim_camera_creates_camera_object(r):
+    """ensure_prim with typeName=Camera creates a Blender CAMERA object."""
+    name = "test_ensure_prim_camera_creates_camera_object"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    if not adapter.ensure_prim("/World/Cam", "Camera"):
+        r.fail(name, "ensure_prim returned False")
+        return
+    obj = _find_by_prim(adapter, "/World/Cam")
+    if obj is None or obj.type != "CAMERA":
+        r.fail(name, f"expected CAMERA, got {obj.type if obj else 'no object'}")
+        return
+    if obj.get("usd_type_name") != "Camera":
+        r.fail(name, f"usd_type_name={obj.get('usd_type_name')}")
+        return
+    r.ok(name)
+
+
+def test_set_gprim_attrs_camera_full_roundtrip(r):
+    """Every UsdGeomCamera attr lands on the right Blender camera field.
+
+    Author stage at metersPerUnit=1.0 → tenth_unit_to_mm=100, scene_scale=1.0.
+    Inputs are written in USD-native units (e.g. focalLength=0.85 stage-tenths
+    of a metre = 85 mm); outputs check the Blender mm/metre values that
+    result from the documented conversion.
+    """
+    name = "test_set_gprim_attrs_camera_full_roundtrip"
+    _clear_scene()
+    adapter = BlenderAdapter(mirror_stage=_make_stage_with_mpu(1.0))
+    adapter.ensure_prim("/World/Cam", "Camera")
+    adapter.set_gprim_attrs(
+        "/World/Cam",
+        {
+            "focalLength": 0.85,
+            "horizontalAperture": 0.36,
+            "verticalAperture": 0.24,
+            "horizontalApertureOffset": 0.018,
+            "verticalApertureOffset": -0.006,
+            "clippingRange": [0.1, 1000.0],
+            "focusDistance": 3.5,
+            "fStop": 2.8,
+            "projection": "perspective",
+        },
+    )
+    obj = _find_by_prim(adapter, "/World/Cam")
+    cam = obj.data
+    cases = [
+        ("lens", cam.lens, 85.0),
+        ("sensor_width", cam.sensor_width, 36.0),
+        ("sensor_height", cam.sensor_height, 24.0),
+        ("clip_start", cam.clip_start, 0.1),
+        ("clip_end", cam.clip_end, 1000.0),
+        ("dof.focus_distance", cam.dof.focus_distance, 3.5),
+        ("dof.aperture_fstop", cam.dof.aperture_fstop, 2.8),
+    ]
+    for field, got, want in cases:
+        if abs(got - want) > 1e-3:
+            r.fail(name, f"{field}={got}, expected {want}")
+            return
+    # shift normalised by sensor_size: shift_x = (offset*tenth_unit_to_mm) / 36
+    if abs(cam.shift_x - (0.018 * 100 / 36.0)) > 1e-4:
+        r.fail(name, f"shift_x={cam.shift_x}, expected {0.018 * 100 / 36.0}")
+        return
+    if abs(cam.shift_y - (-0.006 * 100 / 36.0)) > 1e-4:
+        r.fail(name, f"shift_y={cam.shift_y}, expected {-0.006 * 100 / 36.0}")
+        return
+    if not cam.dof.use_dof:
+        r.fail(name, "use_dof should be True when fStop > 0")
+        return
+    if cam.type != "PERSP":
+        r.fail(name, f"camera type={cam.type}, expected PERSP")
+        return
+    r.ok(name)
+
+
+def test_set_gprim_attrs_camera_orthographic(r):
+    """projection=orthographic sets Blender camera.type to ORTHO."""
+    name = "test_set_gprim_attrs_camera_orthographic"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/OrthoCam", "Camera")
+    adapter.set_gprim_attrs("/World/OrthoCam", {"projection": "orthographic"})
+    obj = _find_by_prim(adapter, "/World/OrthoCam")
+    if obj.data.type != "ORTHO":
+        r.fail(name, f"camera type={obj.data.type}, expected ORTHO")
+        return
+    r.ok(name)
+
+
+def test_set_gprim_attrs_camera_fstop_zero_disables_dof(r):
+    """fStop=0 turns off use_dof; non-zero turns it on."""
+    name = "test_set_gprim_attrs_camera_fstop_zero_disables_dof"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/Cam", "Camera")
+    adapter.set_gprim_attrs("/World/Cam", {"fStop": 1.4})
+    obj = _find_by_prim(adapter, "/World/Cam")
+    if not obj.data.dof.use_dof:
+        r.fail(name, "use_dof should be True for fStop=1.4")
+        return
+    adapter.set_gprim_attrs("/World/Cam", {"fStop": 0.0})
+    if obj.data.dof.use_dof:
+        r.fail(name, "use_dof should be False for fStop=0.0")
+        return
+    r.ok(name)
+
+
+def test_capture_authors_camera_attrs_to_stage(r):
+    """BlenderStageAuthor mirrors a Blender camera's fields onto the USD stage,
+    and NoticeEmitter picks them up as a set_gprim_attrs event."""
+    import tempfile
+
+    from integrations.blender.capture import BlenderStageAuthor
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.protocol_constants import K_ENSURE_PRIM, K_SET_GPRIM_ATTRS
+
+    name = "test_capture_authors_camera_attrs_to_stage"
+    _clear_scene()
+
+    base_path = os.path.join(
+        tempfile.gettempdir(), "openusdconnect_test_camera_base.usda"
+    )
+    with open(base_path, "w") as f:
+        f.write('#usda 1.0\n(\n    metersPerUnit = 1\n)\ndef Xform "World" {}\n')
+
+    author = BlenderStageAuthor(base_usd_path=base_path)
+    author.enabled = True
+    emitter = NoticeEmitter(author.stage)
+
+    # Create a Blender camera with non-default fields.
+    cam_data = bpy.data.cameras.new("TestCam_data")
+    cam_data.lens = 85.0
+    cam_data.sensor_width = 36.0
+    cam_data.sensor_height = 24.0
+    cam_data.shift_x = 0.05
+    cam_data.shift_y = -0.02
+    cam_data.clip_start = 0.1
+    cam_data.clip_end = 1000.0
+    cam_data.type = "PERSP"
+    cam_data.dof.use_dof = True
+    cam_data.dof.aperture_fstop = 2.8
+    cam_data.dof.focus_distance = 3.5
+
+    cam_obj = bpy.data.objects.new("TestCam", cam_data)
+    cam_obj["usd_prim_path"] = "/World/TestCam"
+    cam_obj["usd_type_name"] = "Camera"
+    bpy.context.scene.collection.objects.link(cam_obj)
+    # Parent under /World so _resolve_prim_path works.
+    world = bpy.data.objects.new("World", None)
+    world["usd_prim_path"] = "/World"
+    bpy.context.scene.collection.objects.link(world)
+    cam_obj.parent = world
+
+    # Simulate a depsgraph update.
+    class _Update:
+        def __init__(self, obj):
+            self.id = obj
+
+    author.on_depsgraph_update([_Update(cam_obj)])
+
+    events = emitter.build_events_for_dirty()
+    ensure_evs = [
+        e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/TestCam"
+    ]
+    gprim_evs = [
+        e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/TestCam"
+    ]
+    if not ensure_evs or ensure_evs[0].get("typeName") != "Camera":
+        r.fail(name, f"missing ensure_prim Camera; got {ensure_evs}")
+        return
+    if not gprim_evs:
+        r.fail(name, "no set_gprim_attrs event for camera")
+        return
+    attrs = gprim_evs[0]["attrs"]
+    # Temp stage has metersPerUnit=1.0 → scene_scale=1.0, tenth_unit_to_mm=100.
+    # Blender mm → USD tenths-of-metre = value / 100.
+    expected = {
+        "focalLength": 0.85,                       # 85 mm / 100
+        "horizontalAperture": 0.36,                # 36 mm / 100
+        "verticalAperture": 0.24,                  # 24 mm / 100
+        "horizontalApertureOffset": 0.05 * 36 / 100,
+        "verticalApertureOffset": -0.02 * 36 / 100,
+        "focusDistance": 3.5,                      # metres pass through
+        "fStop": 2.8,
+        "projection": "perspective",
+    }
+    for k, want in expected.items():
+        got = attrs.get(k)
+        if got is None:
+            r.fail(name, f"missing attr {k}")
+            return
+        if isinstance(want, str):
+            if got != want:
+                r.fail(name, f"{k}={got!r}, expected {want!r}")
+                return
+        else:
+            if abs(float(got) - want) > 1e-3:
+                r.fail(name, f"{k}={got}, expected {want}")
+                return
+    clip = attrs.get("clippingRange")
+    if clip is None or abs(clip[0] - 0.1) > 1e-3 or abs(clip[1] - 1000.0) > 1e-2:
+        r.fail(name, f"clippingRange={clip}, expected ~[0.1, 1000.0]")
+        return
+    r.ok(name)
+
+
+def test_capture_camera_move_emits_trs_only(r):
+    """After first encounter, moving the camera emits set_xform_trs but no
+    camera attrs event (params unchanged → CameraAttrsChannel.diff is empty)."""
+    import tempfile
+
+    from integrations.blender.capture import BlenderStageAuthor
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.protocol_constants import K_SET_GPRIM_ATTRS, K_SET_XFORM_TRS
+
+    name = "test_capture_camera_move_emits_trs_only"
+    _clear_scene()
+
+    base_path = os.path.join(
+        tempfile.gettempdir(), "openusdconnect_test_cam_move_base.usda"
+    )
+    with open(base_path, "w") as f:
+        f.write('#usda 1.0\n(\n    metersPerUnit = 1\n)\ndef Xform "World" {}\n')
+
+    author = BlenderStageAuthor(base_usd_path=base_path)
+    author.enabled = True
+    emitter = NoticeEmitter(author.stage)
+
+    cam_data = bpy.data.cameras.new("MoveCam_data")
+    cam_obj = bpy.data.objects.new("MoveCam", cam_data)
+    cam_obj["usd_prim_path"] = "/World/MoveCam"
+    cam_obj["usd_type_name"] = "Camera"
+    bpy.context.scene.collection.objects.link(cam_obj)
+    world = bpy.data.objects.new("World", None)
+    world["usd_prim_path"] = "/World"
+    bpy.context.scene.collection.objects.link(world)
+    cam_obj.parent = world
+
+    class _Update:
+        def __init__(self, obj, *, transform=True, geometry=False):
+            self.id = obj
+            self.is_updated_transform = transform
+            self.is_updated_geometry = geometry
+
+    # First encounter — drain initial events.
+    author.on_depsgraph_update([_Update(cam_obj, transform=True, geometry=True)])
+    emitter.build_events_for_dirty()
+
+    # Move only — change location, leave camera data alone.
+    cam_obj.location = (3.0, 4.0, 5.0)
+    bpy.context.view_layer.update()
+    author.on_depsgraph_update([_Update(cam_obj, transform=True, geometry=False)])
+
+    events = emitter.build_events_for_dirty()
+    trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/MoveCam"]
+    cam_attrs = [
+        e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/MoveCam"
+    ]
+    if not trs:
+        r.fail(name, "expected set_xform_trs after moving camera, got none")
+        return
+    if cam_attrs:
+        r.fail(name, f"unexpected set_gprim_attrs on pure move: {cam_attrs[0]['attrs']}")
+        return
+    r.ok(name)
+
+
+def test_capture_camera_lens_only_emits_attrs(r):
+    """Changing only the lens (no transform change) must still emit a
+    set_gprim_attrs event with the new focalLength."""
+    import tempfile
+
+    from integrations.blender.capture import BlenderStageAuthor
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.protocol_constants import K_SET_GPRIM_ATTRS
+
+    name = "test_capture_camera_lens_only_emits_attrs"
+    _clear_scene()
+
+    base_path = os.path.join(
+        tempfile.gettempdir(), "openusdconnect_test_cam_lens_base.usda"
+    )
+    with open(base_path, "w") as f:
+        f.write('#usda 1.0\n(\n    metersPerUnit = 1\n)\ndef Xform "World" {}\n')
+
+    author = BlenderStageAuthor(base_usd_path=base_path)
+    author.enabled = True
+    emitter = NoticeEmitter(author.stage)
+
+    cam_data = bpy.data.cameras.new("LensCam_data")
+    cam_data.lens = 50.0
+    cam_obj = bpy.data.objects.new("LensCam", cam_data)
+    cam_obj["usd_prim_path"] = "/World/LensCam"
+    cam_obj["usd_type_name"] = "Camera"
+    bpy.context.scene.collection.objects.link(cam_obj)
+    world = bpy.data.objects.new("World", None)
+    world["usd_prim_path"] = "/World"
+    bpy.context.scene.collection.objects.link(world)
+    cam_obj.parent = world
+
+    class _Update:
+        def __init__(self, obj, *, transform=True, geometry=False):
+            self.id = obj
+            self.is_updated_transform = transform
+            self.is_updated_geometry = geometry
+
+    author.on_depsgraph_update([_Update(cam_obj, transform=True, geometry=True)])
+    emitter.build_events_for_dirty()
+
+    # Change only the lens.
+    cam_data.lens = 85.0
+    author.on_depsgraph_update([_Update(cam_obj, transform=False, geometry=True)])
+    events = emitter.build_events_for_dirty()
+    cam_attrs = [
+        e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/LensCam"
+    ]
+    if not cam_attrs:
+        r.fail(name, "expected set_gprim_attrs after lens change, got none")
+        return
+    attrs = cam_attrs[0]["attrs"]
+    # mpu=1.0 → tenth_unit_to_mm=100; Blender lens=85 mm → focalLength=0.85.
+    if abs(float(attrs.get("focalLength", 0.0)) - 0.85) > 1e-3:
+        r.fail(name, f"focalLength={attrs.get('focalLength')}, expected 0.85")
+        return
+    r.ok(name)
+
+
 def test_set_reference_missing_file(r):
     """set_reference with non-existent file returns False gracefully."""
     name = "test_set_reference_missing_file"
@@ -1040,6 +1381,13 @@ def main():
         test_set_reference_imports_usd,
         test_set_reference_reimport_after_delete,
         test_set_reference_missing_file,
+        test_ensure_prim_camera_creates_camera_object,
+        test_set_gprim_attrs_camera_full_roundtrip,
+        test_set_gprim_attrs_camera_orthographic,
+        test_set_gprim_attrs_camera_fstop_zero_disables_dof,
+        test_capture_authors_camera_attrs_to_stage,
+        test_capture_camera_move_emits_trs_only,
+        test_capture_camera_lens_only_emits_attrs,
     ]
 
     for t in tests:

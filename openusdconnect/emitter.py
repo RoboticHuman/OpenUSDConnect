@@ -10,6 +10,7 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade
 
@@ -35,7 +36,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
@@ -46,7 +46,6 @@ LOG = logging.getLogger(__name__)
 
 # Per-prim cache keys — use these instead of raw strings to catch typos.
 _C_TRS = "trs"
-_C_MATS = "mats"
 _C_VISIBILITY = "visibility"
 _C_REFERENCES = "references"
 _C_PAYLOADS = "payloads"
@@ -54,13 +53,19 @@ _C_PAYLOAD_LOADED = "payload_loaded"
 _C_VARIANT_SELECTIONS = "variant_selections"
 _C_GPRIM_ATTRS = "gprim_attrs"
 _C_MATERIAL_BINDING = "material_binding"
-_C_CONNECTABLE_INPUTS = "connectable_inputs"
-_C_CONNECTABLE_CONNECTIONS = "connectable_connections"
+_C_CONNECTABLE = "connectable"
 _C_API_SCHEMAS = "api_schemas"
+_C_CAMERA_ATTRS = "camera_attrs"
 
-# Attribute prefixes that have dedicated event channels or are not geometry.
-# UsdShade inputs/outputs are mirrored by dedicated connectable-interface events.
-_SKIP_ATTR_PREFIXES = ("xformOp:", USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+# Cache slots owned by specialized diff paths in _build_dirty_prim_events.
+# Channels must not reuse these keys; NoticeEmitter validates collisions at
+# construction.
+_SPECIALIZED_CACHE_KEYS = frozenset({_C_TRS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
+
+
+def _is_transform_attr(attr_name: str) -> bool:
+    """Return True for attrs that affect UsdGeomXformable transforms."""
+    return UsdGeom.Xformable.IsTransformationAffectedByAttrNamed(attr_name)
 
 
 # ---------------------------------------------------------------------------
@@ -121,32 +126,31 @@ def unregister_replicated_api_schema(name: str) -> None:
     """Remove an API schema from the global replicate-list."""
     _REPLICATED_API_SCHEMAS.discard(name)
 
-# Individual attributes to skip:
-#   visibility, xformOpOrder — have dedicated event channels
-#   extent     — bounding box, computed from geometry by USD
-#   proxyPrim  — relationship target, not a value attribute
-#   info:id    — shader type identifier, handled by set_connectable_input
-_SKIP_ATTR_NAMES = frozenset(
-    {
-        "visibility",
-        "xformOpOrder",
-        "extent",
-        "proxyPrim",
-        "info:id",
-    }
-)
 
+def _make_attr_filter(channels):
+    """Build a gprim-attr filter from a channel set.
 
-def _should_track_attr(attr_name: str) -> bool:
-    """Return True if this attribute should be tracked as a gprim attr.
-
-    Excludes attributes handled by dedicated channels (xformOps, visibility),
-    computed attributes (extent), and rendering hints (purpose, proxyPrim).
-    Primvars (primvars:st, primvars:displayColor, etc.) ARE tracked.
+    The returned callable returns True for attrs the gprim scan should track.
+    Attrs owned by specialized paths or by any channel's watched_* declarations
+    are filtered out, so adding a channel automatically excludes its attrs
+    from generic gprim emission.
     """
-    if attr_name in _SKIP_ATTR_NAMES:
-        return False
-    return all(not attr_name.startswith(prefix) for prefix in _SKIP_ATTR_PREFIXES)
+    skip_attrs = set()
+    skip_prefixes = []
+    for ch in channels:
+        skip_attrs.update(ch.watched_attrs)
+        skip_prefixes.extend(ch.watched_prefixes)
+    skip_attrs_fs = frozenset(skip_attrs)
+    skip_prefixes_t = tuple(skip_prefixes)
+
+    def _filter(attr_name: str) -> bool:
+        if _is_transform_attr(attr_name):
+            return False
+        if attr_name in skip_attrs_fs:
+            return False
+        return not attr_name.startswith(skip_prefixes_t)
+
+    return _filter
 
 
 def _values_equal(a, b) -> bool:
@@ -221,15 +225,6 @@ try:
     _PrimResyncType = Usd.Notice.ObjectsChanged.PrimResyncType
 except AttributeError:
     _PrimResyncType = None
-
-
-def mat_to_16(m: Gf.Matrix4d) -> list[float]:
-    """Convert a Gf.Matrix4d to a flat 16-element row-major list."""
-    out = []
-    for r in range(4):
-        row = m.GetRow(r)
-        out.extend([float(row[0]), float(row[1]), float(row[2]), float(row[3])])
-    return out
 
 
 def as_matrix(ret):
@@ -459,6 +454,398 @@ def read_usdshade_connectable(stage, prim_path):
 
 
 # ---------------------------------------------------------------------------
+# PrimChannel - snapshot/diff/emit pipeline for one prim state slice
+# ---------------------------------------------------------------------------
+#
+# Use a channel for prim state that is cheap or bounded enough to read as a
+# whole when its dirty gate fires. Keep specialized paths for state that uses
+# precomputed snapshots (TRS) or must be dirty-attr selective because
+# full reads can be expensive (generic gprim attrs, including mesh arrays).
+# The ensure_prim/api_schemas handshake is also specialized because it owns
+# first-encounter structure, not a normal value diff.
+
+
+class PrimChannel:
+    """One slice of per-prim state with a uniform read/diff/emit lifecycle.
+
+    Subclasses must set ``cache_key`` and implement ``read`` + ``to_event``.
+    Declare ``watched_attrs`` / ``watched_prefixes`` when USD can tell us
+    exactly which properties changed; otherwise the channel reads on every
+    dirty cycle. Override ``diff`` for partial-event behavior.
+    """
+
+    cache_key: str = ""
+
+    # Cache-miss baseline for the default diff. Empty containers prevent
+    # spurious first-encounter events for channels with no authored state.
+    cache_default = None
+
+    # Attr-level gates for channels whose state changes through named USD
+    # attributes or relationships.
+    watched_attrs: tuple[str, ...] = ()
+
+    # Prefix gates for property namespaces such as inputs:* and outputs:*.
+    watched_prefixes: tuple[str, ...] = ()
+
+    # Composition arcs and load state arrive as resync notices, not ordinary
+    # info-only attr changes. Such channels can skip pure attr-only cycles.
+    reads_on_resync_only: bool = False
+
+    def applies_to(self, prim) -> bool:
+        """Does this channel apply to this prim at all? Cheap predicate."""
+        return bool(prim and prim.IsValid())
+
+    def needs_read(self, dirty_attrs: set[str] | None) -> bool:
+        """Should this channel actually read on this cycle?
+
+        ``dirty_attrs`` is the set of attr names the USD notice handler
+        recorded as changed on this prim, or ``None`` when a full-state read
+        is required (first encounter / resync / manual dirty).
+
+        Channels with no gate default to always-read, which is slower but
+        safe for integrations that do not know their USD notice pattern yet.
+        """
+        if not dirty_attrs:
+            return True
+        if self.reads_on_resync_only:
+            return False
+        if not self.watched_attrs and not self.watched_prefixes:
+            return True
+        for a in dirty_attrs:
+            if a in self.watched_attrs:
+                return True
+            if self.watched_prefixes and a.startswith(self.watched_prefixes):
+                return True
+        return False
+
+    def read(self, stage, prim_path):
+        """Return current state, or ``None`` to skip the cache write."""
+        raise NotImplementedError
+
+    def diff(self, current, cached):
+        """Return the diff to emit (any truthy value), or ``None`` if unchanged.
+
+        The default compares full current state against ``cache_default`` on
+        cache miss.
+        """
+        if cached is None:
+            cached = self.cache_default
+        return current if current != cached else None
+
+    def to_event(self, prim_path, diff):
+        """Build the wire event(s) for the diff.
+
+        Return a ``dict`` for one event, ``list[dict]`` for multiple
+        (channels that produce more than one event kind from a single
+        read), or ``None`` to suppress.
+        """
+        raise NotImplementedError
+
+
+class VariantSelectionsChannel(PrimChannel):
+    cache_key = _C_VARIANT_SELECTIONS
+    cache_default = {}
+    reads_on_resync_only = True
+
+    def read(self, stage, prim_path):
+        return dict(read_variant_selections(stage, prim_path))
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_VARIANT_SELECTIONS, "prim": prim_path, "selections": diff}
+
+
+class ReferencesChannel(PrimChannel):
+    cache_key = _C_REFERENCES
+    cache_default = []
+    reads_on_resync_only = True
+
+    def read(self, stage, prim_path):
+        return read_references(stage, prim_path)
+
+    def to_event(self, prim_path, diff):
+        refs = []
+        for asset_path, ref_prim_path in diff:
+            entry: dict = {"asset_path": asset_path}
+            if ref_prim_path:
+                entry["prim_path"] = ref_prim_path
+            refs.append(entry)
+        return {"k": K_SET_REFERENCE, "prim": prim_path, "refs": refs}
+
+
+class PayloadsChannel(PrimChannel):
+    cache_key = _C_PAYLOADS
+    cache_default = []
+    reads_on_resync_only = True
+
+    def read(self, stage, prim_path):
+        return read_payloads(stage, prim_path)
+
+    def to_event(self, prim_path, diff):
+        payloads = []
+        for asset_path, pay_prim_path in diff:
+            entry: dict = {"asset_path": asset_path}
+            if pay_prim_path:
+                entry["prim_path"] = pay_prim_path
+            payloads.append(entry)
+        return {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads}
+
+
+class MaterialBindingChannel(PrimChannel):
+    """``material:binding`` is a relationship property, not a composition arc.
+
+    Rebinds and clears arrive as info-only notices on the relationship name,
+    so this channel watches the property directly.
+    """
+
+    cache_key = _C_MATERIAL_BINDING
+    cache_default = ""
+    watched_attrs = ("material:binding",)
+
+    def read(self, stage, prim_path):
+        return read_material_binding(stage, prim_path)
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_MATERIAL_BINDING, "prim": prim_path, "material_path": diff}
+
+
+class ConnectableChannel(PrimChannel):
+    """UsdShade.ConnectableAPI inputs + connections in one channel.
+
+    Reads the connectable interface once per cycle and fans out into
+    both wire events (``set_connectable_input``, ``set_connectable_connection``)
+    so the expensive UsdShade traversal is not repeated.
+    """
+
+    cache_key = _C_CONNECTABLE
+    watched_attrs = ("info:id",)
+    watched_prefixes = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+
+    def read(self, stage, prim_path):
+        kind, info_id, inputs, types, conns = read_usdshade_connectable(stage, prim_path)
+        if not kind:
+            return None
+        return {
+            "info_id": info_id,
+            "inputs": inputs,
+            "types": types,
+            "connections": conns,
+        }
+
+    def diff(self, current, cached):
+        cached = cached or {}
+        last_inputs = cached.get("inputs", {})
+        last_conns = cached.get("connections", {})
+
+        changed_inputs = {
+            n: v for n, v in current["inputs"].items()
+            if not _values_equal(v, last_inputs.get(n))
+        }
+        info_id = current["info_id"]
+        # Only shaders carry a meaningful info:id. Lights and node graphs
+        # use the same connectable path with an empty id.
+        info_id_changed = bool(info_id) and info_id != cached.get("info_id")
+
+        new_conns: dict = {}
+        removed_conns: list = []
+        if current["connections"] != last_conns:
+            new_conns = {
+                k: v for k, v in current["connections"].items()
+                if v != last_conns.get(k)
+            }
+            removed_conns = [k for k in last_conns if k not in current["connections"]]
+
+        inputs_emit = changed_inputs or info_id_changed
+        conns_emit = new_conns or removed_conns
+        if not inputs_emit and not conns_emit:
+            return None
+        return {
+            "info_id": info_id,
+            "inputs": changed_inputs if inputs_emit else None,
+            "input_types": (
+                {n: current["types"][n] for n in changed_inputs}
+                if inputs_emit else None
+            ),
+            "new_conns": new_conns if conns_emit else None,
+            "removed_conns": removed_conns if conns_emit else None,
+        }
+
+    def to_event(self, prim_path, diff):
+        events: list[dict] = []
+        if diff["inputs"] is not None:
+            events.append({
+                "k": K_SET_CONNECTABLE_INPUT,
+                "prim": prim_path,
+                "info_id": diff["info_id"],
+                "inputs": diff["inputs"],
+                "input_types": diff["input_types"],
+            })
+        if diff["new_conns"] is not None or diff["removed_conns"]:
+            ev: dict = {
+                "k": K_SET_CONNECTABLE_CONNECTION,
+                "prim": prim_path,
+                "connections": diff["new_conns"] or {},
+            }
+            if diff["removed_conns"]:
+                ev["disconnections"] = diff["removed_conns"]
+            events.append(ev)
+        return events
+
+
+class VisibilityChannel(PrimChannel):
+    cache_key = _C_VISIBILITY
+    watched_attrs = ("visibility",)
+
+    def read(self, stage, prim_path):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return None
+        vis_attr = UsdGeom.Imageable(prim).GetVisibilityAttr()
+        if not vis_attr or not vis_attr.IsValid() or not vis_attr.IsAuthored():
+            return None
+        return vis_attr.Get() or "inherited"
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": diff != "invisible"}
+
+
+class PayloadLoadStateChannel(PrimChannel):
+    """Payload load/unload toggle. Emits ``load_payload`` or ``unload_payload``
+    depending on ``IsLoaded()``.
+
+    USD reports load/unload and payload arc edits as resyncs on the prim.
+    """
+
+    cache_key = _C_PAYLOAD_LOADED
+    reads_on_resync_only = True
+
+    def read(self, stage, prim_path):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid() or not prim.HasAuthoredPayloads():
+            return None
+        return prim.IsLoaded()
+
+    def to_event(self, prim_path, diff):
+        return {
+            "k": K_LOAD_PAYLOAD if diff else K_UNLOAD_PAYLOAD,
+            "prim": prim_path,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Typed-schema channels
+# ---------------------------------------------------------------------------
+#
+# Channels that adopt a typed USD schema emit every authored attr of that
+# schema through the generic set_gprim_attrs wire event. _typed_schema_attrs()
+# drops attrs already owned by a peer channel (visibility, info:id, inputs:*,
+# material:binding, ...) so the same property never emits twice from one prim.
+
+_TYPED_SCHEMA_PEER_CHANNELS: tuple[type[PrimChannel], ...] = (
+    VariantSelectionsChannel,
+    ReferencesChannel,
+    PayloadsChannel,
+    PayloadLoadStateChannel,
+    MaterialBindingChannel,
+    ConnectableChannel,
+    VisibilityChannel,
+)
+
+
+def _typed_schema_attrs(schema_cls) -> frozenset[str]:
+    """Return direct typed-schema attrs that no peer channel already handles."""
+    skip_attrs: set[str] = set()
+    skip_prefixes: list[str] = []
+    for cls in _TYPED_SCHEMA_PEER_CHANNELS:
+        skip_attrs.update(cls.watched_attrs)
+        skip_prefixes.extend(cls.watched_prefixes)
+    skip_prefixes_t = tuple(skip_prefixes)
+    return frozenset(
+        n for n in schema_cls.GetSchemaAttributeNames(False)
+        if not _is_transform_attr(n)
+        and n not in skip_attrs
+        and not n.startswith(skip_prefixes_t)
+    )
+
+
+_CAMERA_ATTR_NAMES = _typed_schema_attrs(UsdGeom.Camera)
+
+
+def read_camera_attrs(stage, prim_path):
+    """Read authored UsdGeomCamera attributes from a prim.
+
+    Returns ``{name: python_value}`` for every authored camera attr, or
+    ``None`` if the prim is not a ``UsdGeom.Camera``.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
+        return None
+    attrs = {}
+    for name in _CAMERA_ATTR_NAMES:
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsValid() and attr.IsAuthored():
+            val = _usd_value_to_python(attr.Get())
+            if val is not None:
+                attrs[name] = val
+    return attrs
+
+
+class CameraAttrsChannel(PrimChannel):
+    """UsdGeomCamera typed-schema attribute replication.
+
+    Camera attrs use the generic ``set_gprim_attrs`` wire event so receivers
+    do not need a camera-specific event kind.
+    """
+
+    cache_key = _C_CAMERA_ATTRS
+    watched_attrs = tuple(_CAMERA_ATTR_NAMES)
+
+    def applies_to(self, prim):
+        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.Camera))
+
+    def read(self, stage, prim_path):
+        return read_camera_attrs(stage, prim_path) or {}
+
+    def diff(self, current, cached):
+        cached = cached or {}
+        changed = {
+            n: v for n, v in current.items()
+            if not _values_equal(v, cached.get(n))
+        }
+        return changed if changed else None
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": diff}
+
+
+# Framework-owned channels. Receive-side ordering still sorts events before
+# apply, but this order keeps raw emitter logs stable and readable.
+_BUILTIN_PRIM_CHANNELS: tuple[PrimChannel, ...] = (
+    VariantSelectionsChannel(),
+    ReferencesChannel(),
+    PayloadsChannel(),
+    PayloadLoadStateChannel(),
+    MaterialBindingChannel(),
+    ConnectableChannel(),
+    VisibilityChannel(),
+    CameraAttrsChannel(),
+)
+
+
+def _emit_channel_events(channel, prim_path, current, pc, events_out):
+    """Run the channel's diff, append any events, refresh the cache."""
+    cached = pc.get(channel.cache_key)
+    d = channel.diff(current, cached)
+    if d is not None:
+        ev = channel.to_event(prim_path, d)
+        if ev is not None:
+            if isinstance(ev, list):
+                events_out.extend(ev)
+            else:
+                events_out.append(ev)
+    pc[channel.cache_key] = current
+
+
+# ---------------------------------------------------------------------------
 # Cache invalidation — for receivers applying remote events
 # ---------------------------------------------------------------------------
 #
@@ -561,23 +948,35 @@ def _invalidate_set_material_binding(emitter, prim_path, _ev):
     )
 
 
-def _invalidate_set_connectable_input(emitter, prim_path, _ev):
-    container_kind, info_id, inputs, _, _ = read_usdshade_connectable(
+def _resync_connectable_cache(emitter, prim_path):
+    """Re-read the full connectable interface into the combined cache slot.
+    Used by both connectable input and connection invalidators since they
+    share one read and one cache entry now.
+    """
+    kind, info_id, inputs, types, connections = read_usdshade_connectable(
         emitter.stage, prim_path,
     )
-    if container_kind:
-        emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE_INPUTS] = {
+    if kind:
+        emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE] = {
             "info_id": info_id,
             "inputs": inputs,
+            "types": types,
+            "connections": connections,
         }
 
 
+def _invalidate_set_connectable_input(emitter, prim_path, _ev):
+    _resync_connectable_cache(emitter, prim_path)
+
+
+def _invalidate_set_gprim_attrs(emitter, prim_path, _ev):
+    cam_attrs = read_camera_attrs(emitter.stage, prim_path)
+    if cam_attrs is not None:
+        emitter._prim_cache.setdefault(prim_path, {})[_C_CAMERA_ATTRS] = cam_attrs
+
+
 def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
-    container_kind, _, _, _, connections = read_usdshade_connectable(
-        emitter.stage, prim_path,
-    )
-    if container_kind:
-        emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE_CONNECTIONS] = connections
+    _resync_connectable_cache(emitter, prim_path)
 
 
 _INVALIDATE_DISPATCH = {
@@ -593,6 +992,7 @@ _INVALIDATE_DISPATCH = {
     K_SET_MATERIAL_BINDING: _invalidate_set_material_binding,
     K_SET_CONNECTABLE_INPUT: _invalidate_set_connectable_input,
     K_SET_CONNECTABLE_CONNECTION: _invalidate_set_connectable_connection,
+    K_SET_GPRIM_ATTRS: _invalidate_set_gprim_attrs,
 }
 
 
@@ -637,15 +1037,16 @@ class NoticeEmitter:
         attr_filter=None,
         *,
         replicated_api_schemas: set[str] | None = None,
+        extra_channels: Sequence[PrimChannel] | None = None,
     ):
         """
         Args:
             stage: The Usd.Stage to watch.
             attr_filter: Optional callable(attr_name: str) -> bool.
                 Controls which attributes are tracked for gprim attr diffing.
-                Return True to track, False to skip. If None, uses the
-                default _should_track_attr which skips xformOps, visibility,
-                extent, etc. Primvars ARE tracked by default.
+                Return True to track, False to skip. By default, attrs owned
+                by specialized paths or channels are excluded; primvars and
+                other generic attrs are tracked.
             replicated_api_schemas: Optional explicit override of the API
                 schema names to replicate via the ensure_prim ``api_schemas``
                 field. Each name must be a bare schema name (no
@@ -653,8 +1054,15 @@ class NoticeEmitter:
                 ``_REPLICATED_API_SCHEMAS`` at construction (default behavior
                 — DCC integrations register their schemas at import time,
                 then any later-constructed emitter picks them up).
+            extra_channels: Optional additional ``PrimChannel`` instances to
+                run alongside the built-in set. The framework-owned channels
+                (variants, refs, payloads, material binding, connectable
+                inputs/connections, visibility, camera attrs) are always
+                active and run first; ``extra_channels`` are appended in
+                order. Use this to replicate custom typed schemas without
+                losing core USD coverage. Each channel's ``cache_key`` must
+                be unique across the full set.
         """
-        self._attr_filter = attr_filter or _should_track_attr
         self.stage = stage
         if replicated_api_schemas is not None:
             for n in replicated_api_schemas:
@@ -669,15 +1077,41 @@ class NoticeEmitter:
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppress_depth: int = 0
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
-        self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        # Per-prim diff cache. Each prim_path maps to a dict with keys:
-        #   trs, mats, visibility, references, payloads, payload_loaded,
-        #   variant_selections, gprim_attrs, api_schemas
-        # Adding a new cache key only requires updating the diff code —
-        # _migrate_caches and _purge_caches handle all keys automatically.
         self._prim_cache: dict[str, dict] = {}
+        # Unfiltered info-only attr names. Channels use this for read gating;
+        # the gprim attr scan applies _attr_filter later.
         self._dirty_attrs: dict[str, set[str]] = {}
-        self._resynced_prims: set[str] = set()
+        self._notice_resynced_prims: set[str] = set()
+        extras = tuple(extra_channels) if extra_channels else ()
+        for ch in extras:
+            if not isinstance(ch, PrimChannel):
+                raise TypeError(
+                    f"extra_channels must contain PrimChannel instances; "
+                    f"got {type(ch).__name__}"
+                )
+        # Silent cache-key collisions would make channels overwrite each
+        # other's snapshots, so reject them before the emitter can run.
+        seen_keys: set[str] = set(_SPECIALIZED_CACHE_KEYS)
+        for ch in (*_BUILTIN_PRIM_CHANNELS, *extras):
+            if ch.cache_key in seen_keys:
+                raise ValueError(
+                    f"Duplicate PrimChannel cache_key {ch.cache_key!r}; "
+                    f"each channel must own a unique per-prim cache slot "
+                    f"(reserved specialized slots: {sorted(_SPECIALIZED_CACHE_KEYS)})."
+                )
+            seen_keys.add(ch.cache_key)
+            # These modes describe different USD notice patterns; using both
+            # would make channel reads ambiguous.
+            if ch.reads_on_resync_only and (ch.watched_attrs or ch.watched_prefixes):
+                raise ValueError(
+                    f"{type(ch).__name__} declares both reads_on_resync_only "
+                    f"and watched_attrs/watched_prefixes; pick one — resync-only "
+                    f"for composition arcs, watched names for attributes/rels."
+                )
+        self._channels: tuple[PrimChannel, ...] = _BUILTIN_PRIM_CHANNELS + extras
+        # User-provided attr_filter wins; otherwise derive it from the active
+        # channel set.
+        self._attr_filter = attr_filter or _make_attr_filter(self._channels)
 
     def _filtered_api_schemas(self, prim: Usd.Prim) -> set[str]:
         """Return prim's applied schemas filtered through the whitelist.
@@ -705,17 +1139,17 @@ class NoticeEmitter:
         self._prim_cache.clear()
         self._known_prims.clear()
         self._dirty_attrs.clear()
-        self._resynced_prims.clear()
+        self._notice_resynced_prims.clear()
         self.dirty.clear()
         self._suppress_depth = 0
 
     def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
         """Seed the per-prim diff cache for a prim and its composed children.
 
-        Populates ``_prim_cache`` with the current composed state (material
-        bindings, variant selections, payloads, references, gprim attrs) so
-        the emitter treats the hierarchy as already-tracked.  Prevents a
-        full state dump on first encounter.
+        Snapshots the current state of every applicable channel (plus the
+        specialized gprim-attrs and api_schemas slots) into the cache, so the
+        next emit cycle diffs against authored state instead of treating
+        everything as a first-encounter delta.
 
         Does NOT add to ``_known_prims`` — the emitter should still send
         structural events (ensure_prim, ensure_xform_ops) on first
@@ -727,12 +1161,15 @@ class NoticeEmitter:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            pc[_C_REFERENCES] = read_references(stage, cp)
-            pc[_C_PAYLOADS] = read_payloads(stage, cp)
-            pc[_C_VARIANT_SELECTIONS] = read_variant_selections(stage, cp)
-            pc[_C_MATERIAL_BINDING] = read_material_binding(stage, cp)
-            if child.HasAuthoredPayloads():
-                pc[_C_PAYLOAD_LOADED] = child.IsLoaded()
+            for channel in self._channels:
+                if not channel.applies_to(child):
+                    continue
+                current = channel.read(stage, cp)
+                if current is None:
+                    continue
+                pc[channel.cache_key] = current
+            # Generic gprim attrs use a specialized path so info-only notices
+            # can read only named dirty attrs, not every heavy mesh array.
             gprim_snapshot = {}
             for attr in child.GetAttributes():
                 name = attr.GetName()
@@ -742,14 +1179,6 @@ class NoticeEmitter:
                         gprim_snapshot[name] = val
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
-            # Seed connectable interface inputs and connections.
-            container_kind, info_id, inputs, _types, connections = read_usdshade_connectable(
-                stage, cp
-            )
-            if container_kind:
-                pc[_C_CONNECTABLE_INPUTS] = {"info_id": info_id, "inputs": inputs}
-                if connections:
-                    pc[_C_CONNECTABLE_CONNECTIONS] = connections
             # Seed the api_schemas snapshot so a later diff cycle doesn't
             # spuriously re-emit ensure_prim on first encounter.
             pc[_C_API_SCHEMAS] = self._filtered_api_schemas(child)
@@ -792,7 +1221,7 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
         self._dirty_attrs.clear()
-        self._resynced_prims.clear()
+        self._notice_resynced_prims.clear()
 
     def _classify_resync(self, notice, prim_path: str) -> str | None:
         """Classify a resync path into an action.
@@ -840,18 +1269,18 @@ class NoticeEmitter:
                 self._deactivated_prims.add(prim_path)
             elif action == "dirty":
                 self.dirty.add(prim_path)
-                self._resynced_prims.add(prim_path)
+                self._notice_resynced_prims.add(prim_path)
 
         for p in notice.GetChangedInfoOnlyPaths():
             path_str = str(p)
             prim_path = _prim_path_from_notice_path(path_str)
             if prim_path:
                 self.dirty.add(prim_path)
-                # Track specific attribute names for gprim attr diffing
+                # Keep this unfiltered: channel gating needs names that the
+                # generic gprim attr path will later ignore.
                 if "." in path_str:
                     attr_name = path_str.split(".", 1)[1]
-                    if self._attr_filter(attr_name):
-                        self._dirty_attrs.setdefault(prim_path, set()).add(attr_name)
+                    self._dirty_attrs.setdefault(prim_path, set()).add(attr_name)
 
     def mark_dirty(self, prim_path: str):
         """Manually mark a prim as dirty (useful for DCC integrations)."""
@@ -881,9 +1310,7 @@ class NoticeEmitter:
         for ev in events:
             self.invalidate_for_event(ev)
 
-    def snapshot_events(
-        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
-    ) -> list[dict]:
+    def snapshot_events(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for every prim on the stage as if newly authored.
 
         Marks every prim under the pseudo-root dirty and runs the normal
@@ -898,12 +1325,10 @@ class NoticeEmitter:
             path = str(prim.GetPath())
             if path != "/":
                 self.mark_dirty(path)
-        return self.build_events_for_dirty(
-            eps_trs=eps_trs, eps_mat=eps_mat, include_matrices=include_matrices
-        )
+        return self.build_events_for_dirty(eps_trs=eps_trs)
 
     def snapshot_prim(self, prim_path: str) -> dict | None:
-        """Snapshot the current local transform of a prim as TRS + matrices."""
+        """Snapshot the current local transform of a prim as TRS."""
         prim = self.stage.GetPrimAtPath(prim_path)
         if not prim or not prim.IsValid():
             return None
@@ -912,14 +1337,9 @@ class NoticeEmitter:
         local_ret = xf.GetLocalTransformation(Usd.TimeCode.Default())
         local_m = as_matrix(local_ret)
 
-        self.cache.SetTime(Usd.TimeCode.Default())
-        world_m = self.cache.GetLocalToWorldTransform(prim)
-
         t, r, s = decompose_trs_from_matrix(local_m)
 
         return {
-            "local_m16": mat_to_16(local_m),
-            "world_m16": mat_to_16(world_m),
             "t": t,
             "r": r,
             "s": s,
@@ -970,16 +1390,15 @@ class NoticeEmitter:
         prim_path: str,
         snap: dict,
         eps_trs: float,
-        eps_mat: float,
-        include_matrices: bool,
     ) -> list[dict]:
-        """Build events for a single dirty prim: structural, ref, TRS, visibility, matrices."""
+        """Build events for a single dirty prim."""
         events: list[dict] = []
         pc = self._prim_cache.setdefault(prim_path, {})
         prim = self.stage.GetPrimAtPath(prim_path)
 
         # Structural events on first encounter
-        if prim_path not in self._known_prims:
+        first_encounter = prim_path not in self._known_prims
+        if first_encounter:
             # Preserve untyped prims (empty typeName) — Materials/Shaders
             # scopes are commonly authored as `def "Materials"` with no type.
             # Fall back to Xform only when the prim itself is invalid.
@@ -1015,121 +1434,26 @@ class NoticeEmitter:
                 })
                 pc[_C_API_SCHEMAS] = current_apis
 
-        # Variant selection diff (V before R in LIVERPS)
-        current_vsel = read_variant_selections(self.stage, prim_path)
-        last_vsel = pc.get(_C_VARIANT_SELECTIONS, {})
-        if current_vsel != last_vsel:
-            events.append(
-                {
-                    "k": K_SET_VARIANT_SELECTIONS,
-                    "prim": prim_path,
-                    "selections": dict(current_vsel),
-                }
-            )
-            pc[_C_VARIANT_SELECTIONS] = current_vsel
+        # First encounter and resync both require a full channel read. The
+        # dirty attr that woke the prim might be unrelated to already-authored
+        # channel state, and resyncs do not provide reliable per-attr detail.
+        # The gprim attr block below consumes the resync marker.
+        dirty_attrs = self._dirty_attrs.get(prim_path)
+        if first_encounter or prim_path in self._notice_resynced_prims:
+            dirty_attrs = None
+        for channel in self._channels:
+            if not channel.applies_to(prim):
+                continue
+            if not channel.needs_read(dirty_attrs):
+                continue
+            current = channel.read(self.stage, prim_path)
+            if current is None:
+                continue
+            _emit_channel_events(channel, prim_path, current, pc, events)
 
-        # Reference diff
-        current_refs = read_references(self.stage, prim_path)
-        last_refs = pc.get(_C_REFERENCES, [])
-        if current_refs != last_refs:
-            ref_ev = {"k": K_SET_REFERENCE, "prim": prim_path, "refs": []}
-            for asset_path, ref_prim_path in current_refs:
-                entry: dict = {"asset_path": asset_path}
-                if ref_prim_path:
-                    entry["prim_path"] = ref_prim_path
-                ref_ev["refs"].append(entry)
-            events.append(ref_ev)
-            pc[_C_REFERENCES] = current_refs
-
-        # Payload diff
-        current_payloads = read_payloads(self.stage, prim_path)
-        last_payloads = pc.get(_C_PAYLOADS, [])
-        if current_payloads != last_payloads:
-            pay_ev: dict = {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": []}
-            for asset_path, pay_prim_path in current_payloads:
-                entry: dict = {"asset_path": asset_path}
-                if pay_prim_path:
-                    entry["prim_path"] = pay_prim_path
-                pay_ev["payloads"].append(entry)
-            events.append(pay_ev)
-            pc[_C_PAYLOADS] = current_payloads
-
-        # Payload load-state diff
-        if prim and prim.IsValid() and prim.HasAuthoredPayloads():
-            is_loaded = prim.IsLoaded()
-            was_loaded = pc.get(_C_PAYLOAD_LOADED)
-            if is_loaded != was_loaded:
-                if is_loaded:
-                    events.append({"k": K_LOAD_PAYLOAD, "prim": prim_path})
-                else:
-                    events.append({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
-                pc[_C_PAYLOAD_LOADED] = is_loaded
-
-        # Material binding diff
-        current_binding = read_material_binding(self.stage, prim_path)
-        last_binding = pc.get(_C_MATERIAL_BINDING, "")
-        if current_binding != last_binding:
-            events.append(
-                {
-                    "k": K_SET_MATERIAL_BINDING,
-                    "prim": prim_path,
-                    "material_path": current_binding,
-                }
-            )
-            pc[_C_MATERIAL_BINDING] = current_binding
-
-        # UsdShade.ConnectableAPI interface input + connection diff
-        # (covers Shader, NodeGraph, Material, and UsdLux lights uniformly)
-        container_kind, info_id, current_inputs, current_types, current_conns = (
-            read_usdshade_connectable(self.stage, prim_path)
-        )
-        if container_kind:
-            # Value diff
-            last_connectable = pc.get(_C_CONNECTABLE_INPUTS, {})
-            last_inputs = last_connectable.get("inputs", {})
-            changed_inputs = {}
-            changed_types = {}
-            for name, val in current_inputs.items():
-                if not _values_equal(val, last_inputs.get(name)):
-                    changed_inputs[name] = val
-                    changed_types[name] = current_types[name]
-            # Also emit when the info_id itself transitions (e.g. first
-            # encounter of a Shader whose inputs are all connections — its
-            # info:id would otherwise never reach the receiver). Lights and
-            # nodegraphs carry empty info_id so this guard is False for them.
-            info_id_changed = bool(info_id) and info_id != last_connectable.get("info_id")
-            if changed_inputs or info_id_changed:
-                events.append(
-                    {
-                        "k": K_SET_CONNECTABLE_INPUT,
-                        "prim": prim_path,
-                        "info_id": info_id,
-                        "inputs": changed_inputs,
-                        "input_types": changed_types,
-                    }
-                )
-            pc[_C_CONNECTABLE_INPUTS] = {
-                "info_id": info_id,
-                "inputs": current_inputs,
-            }
-
-            # Connection diff
-            last_conns = pc.get(_C_CONNECTABLE_CONNECTIONS, {})
-            if current_conns != last_conns:
-                new_conns = {k: v for k, v in current_conns.items() if v != last_conns.get(k)}
-                removed = [k for k in last_conns if k not in current_conns]
-                if new_conns or removed:
-                    ev = {
-                        "k": K_SET_CONNECTABLE_CONNECTION,
-                        "prim": prim_path,
-                        "connections": new_conns,
-                    }
-                    if removed:
-                        ev["disconnections"] = removed
-                    events.append(ev)
-                pc[_C_CONNECTABLE_CONNECTIONS] = current_conns
-
-        # TRS partial diff — skip for prims without authored xform ops
+        # TRS partial diff uses the precomputed snap from the outer loop.
+        # A normal channel would need either a wider interface or duplicate
+        # transform reads.
         xf = UsdGeom.Xformable(prim) if prim else None
         has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
@@ -1152,23 +1476,6 @@ class NoticeEmitter:
                 events.append(payload)
                 pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
-        # Visibility diff — only emit if the attr is explicitly authored
-        if prim and prim.IsValid():
-            imageable = UsdGeom.Imageable(prim)
-            vis_attr = imageable.GetVisibilityAttr()
-            if vis_attr and vis_attr.IsValid() and vis_attr.IsAuthored():
-                vis_val = vis_attr.Get() or "inherited"
-                last_vis = pc.get(_C_VISIBILITY)
-                if vis_val != last_vis:
-                    events.append(
-                        {
-                            "k": K_SET_VISIBILITY,
-                            "prim": prim_path,
-                            "visible": vis_val != "invisible",
-                        }
-                    )
-                    pc[_C_VISIBILITY] = vis_val
-
         # Gprim attribute diff
         if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
@@ -1179,8 +1486,8 @@ class NoticeEmitter:
             # Skipped for plain info-only changes (e.g., only xformOp values
             # changed) where the cache is already populated — avoids reading
             # thousands of mesh vertices every frame.
-            is_resync = prim_path in self._resynced_prims
-            self._resynced_prims.discard(prim_path)
+            is_resync = prim_path in self._notice_resynced_prims
+            self._notice_resynced_prims.discard(prim_path)
             if not dirty_attr_names and (not last_attrs or is_resync):
                 for attr in prim.GetAttributes():
                     name = attr.GetName()
@@ -1192,6 +1499,10 @@ class NoticeEmitter:
             attr_interp = {}
             pvapi = None  # lazy — only created if a primvar actually changed
             for attr_name in dirty_attr_names:
+                # _dirty_attrs is unfiltered for channel gating; filter again
+                # here before emitting generic gprim attrs.
+                if not self._attr_filter(attr_name):
+                    continue
                 attr = prim.GetAttribute(attr_name)
                 if not attr or not attr.IsValid():
                     continue
@@ -1232,35 +1543,13 @@ class NoticeEmitter:
                 events.append(ev)
                 pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
-        # Optional matrices event (diagnostic)
-        if include_matrices:
-            last_mats = pc.get(_C_MATS, {})
-            if not near_list(snap["local_m16"], last_mats.get("local"), eps_mat) or not near_list(
-                snap["world_m16"], last_mats.get("world"), eps_mat
-            ):
-                events.append(
-                    {
-                        "k": K_SET_XFORM_MATRICES,
-                        "prim": prim_path,
-                        "local_m": snap["local_m16"],
-                        "world_m": snap["world_m16"],
-                    }
-                )
-                pc[_C_MATS] = {
-                    "local": snap["local_m16"],
-                    "world": snap["world_m16"],
-                }
-
         return events
 
-    def build_events_for_dirty(
-        self, eps_trs: float = 1e-9, eps_mat: float = 1e-12, include_matrices: bool = False
-    ) -> list[dict]:
+    def build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for all dirty prims, diffing against last-sent state.
 
         Returns a list of event dicts (ensure_prim, ensure_xform_ops, set_xform_trs,
-        rename_prim, deactivate_prim, optionally set_xform_matrices) ready to wrap
-        in a transaction.
+        rename_prim, deactivate_prim) ready to wrap in a transaction.
 
         Processing order: renames first, then deactivations/deletions, then TRS.
         """
@@ -1278,8 +1567,6 @@ class NoticeEmitter:
             snap = self.snapshot_prim(prim_path)
             if snap is None:
                 continue
-            events.extend(
-                self._build_dirty_prim_events(prim_path, snap, eps_trs, eps_mat, include_matrices)
-            )
+            events.extend(self._build_dirty_prim_events(prim_path, snap, eps_trs))
 
         return events

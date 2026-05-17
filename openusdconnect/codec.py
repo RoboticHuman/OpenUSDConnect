@@ -53,7 +53,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
@@ -89,7 +88,6 @@ EventWrapper = _fb.EventWrapper
 EnsurePrim = _fb.EnsurePrim
 EnsureXformOps = _fb.EnsureXformOps
 SetXformTrs = _fb.SetXformTrs
-SetXformMatrices = _fb.SetXformMatrices
 DeletePrim = _fb.DeletePrim
 DeactivatePrim = _fb.DeactivatePrim
 RenamePrim = _fb.RenamePrim
@@ -460,22 +458,6 @@ def _encode_set_xform_trs(b, ev):
     if s_vec is not None:
         _fb.SetXformTrsAddS(b, s_vec)
     return _fb.SetXformTrsEnd(b)
-
-
-@register_encoder(
-    K_SET_XFORM_MATRICES,
-    fb_tag=EventPayloadType.SetXformMatrices,
-    fb_class=SetXformMatrices,
-)
-def _encode_set_xform_matrices(b, ev):
-    prim = b.CreateString(ev["prim"])
-    local_vec = _create_float_vector(b, ev["local_m"])
-    world_vec = _create_float_vector(b, ev["world_m"])
-    _fb.SetXformMatricesStart(b)
-    _fb.SetXformMatricesAddPrim(b, prim)
-    _fb.SetXformMatricesAddLocalM(b, local_vec)
-    _fb.SetXformMatricesAddWorldM(b, world_vec)
-    return _fb.SetXformMatricesEnd(b)
 
 
 @register_encoder(K_DELETE_PRIM, fb_tag=EventPayloadType.DeletePrim, fb_class=DeletePrim)
@@ -1140,16 +1122,6 @@ def _dict_set_xform_trs(trs, kind):
         ev["s"] = [trs.S(i) for i in range(trs.SLength())]
     ev["fields"] = fields
     return ev
-
-
-@register_decoder(K_SET_XFORM_MATRICES)
-def _dict_set_xform_matrices(m, kind):
-    return {
-        "k": kind,
-        "prim": _str(m.Prim()),
-        "local_m": [m.LocalM(i) for i in range(m.LocalMLength())],
-        "world_m": [m.WorldM(i) for i in range(m.WorldMLength())],
-    }
 
 
 @register_decoder(K_DELETE_PRIM)

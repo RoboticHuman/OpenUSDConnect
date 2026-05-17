@@ -22,7 +22,6 @@ from openusdconnect.protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     MSG_HELLO,
     MSG_QUIT,
@@ -31,7 +30,6 @@ from openusdconnect.protocol_constants import (
 )
 from openusdconnect.protocol_validation import (
     clamp_fields,
-    is_mat16_valid,
     is_quat_valid,
     is_vec3_valid,
     validate_event,
@@ -56,13 +54,6 @@ class TestValidationHelpers:
     def test_is_vec3_valid_bad(self):
         assert not is_vec3_valid([1.0, 2.0])
         assert not is_vec3_valid(None)
-
-    def test_is_mat16_valid_good(self):
-        assert is_mat16_valid([float(i) for i in range(16)])
-
-    def test_is_mat16_valid_bad(self):
-        assert not is_mat16_valid([1.0] * 15)
-        assert not is_mat16_valid([1.0] * 17)
 
     def test_clamp_fields(self):
         assert clamp_fields(["t", "r", "s"]) == ["t", "r", "s"]
@@ -161,24 +152,6 @@ class TestValidateEvent:
             "k": K_SET_XFORM_TRS,
             "prim": "/World/Sphere",
             "fields": ["x"],  # invalid
-        }
-        assert not validate_event(ev)
-
-    def test_set_xform_matrices_valid(self):
-        ev = {
-            "k": K_SET_XFORM_MATRICES,
-            "prim": "/World/Sphere",
-            "local_m": [float(i) for i in range(16)],
-            "world_m": [float(i) for i in range(16)],
-        }
-        assert validate_event(ev)
-
-    def test_set_xform_matrices_bad(self):
-        ev = {
-            "k": K_SET_XFORM_MATRICES,
-            "prim": "/World/Sphere",
-            "local_m": [1.0] * 15,
-            "world_m": [1.0] * 16,
         }
         assert not validate_event(ev)
 

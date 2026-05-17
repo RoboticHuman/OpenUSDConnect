@@ -72,6 +72,12 @@ def test_vehicles_multi_binding(blender_exe, tmp_path):
     _run_asset_test(blender_exe, tmp_path, "test_vehicles.py", 7213)
 
 
+def test_camera_scene(blender_exe, tmp_path):
+    """Camera scene: UsdGeomCamera replicates as a Blender CAMERA object
+    and can be promoted to the active scene camera."""
+    _run_asset_test(blender_exe, tmp_path, "test_camera_scene.py", 7214)
+
+
 
 
 

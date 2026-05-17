@@ -32,7 +32,6 @@ from ..protocol_constants import (
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     MSG_EVENT,
@@ -1265,7 +1264,6 @@ class UsdSyncServer:
             "xformOp:orient",
             "xformOp:scale",
         ],
-        K_SET_XFORM_MATRICES: [],
         K_SET_VISIBILITY: ["visibility"],
         K_DEACTIVATE_PRIM: ["meta:active"],
         K_DELETE_PRIM: [],  # structural

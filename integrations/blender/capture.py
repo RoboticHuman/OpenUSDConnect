@@ -68,6 +68,8 @@ def _infer_usd_type(obj) -> str:
     (Sphere, Cube, etc.). Falls back to 'Mesh' for mesh objects or
     'Xform' for non-mesh.
     """
+    if obj.type == "CAMERA":
+        return "Camera"
     if obj.type != "MESH" or obj.data is None:
         return "Xform"
     # Check mesh data name as a hint (works for freshly-created primitives)
@@ -516,6 +518,58 @@ class BlenderStageAuthor:
         if s_op:
             s_op.Set(Gf.Vec3d(sx, sy, sz))
 
+    def _author_camera_attrs(self, prim_path: str, obj):
+        """Author bpy.types.Camera fields onto the USD camera prim.
+
+        Inverse of BlenderAdapter._apply_camera_attrs: Blender mm/metres →
+        USD tenths-of-stage-unit / stage units. The emitter's CameraAttrsChannel
+        picks up the changed attrs and emits a ``set_gprim_attrs`` event.
+        """
+        if obj.type != "CAMERA" or obj.data is None:
+            return
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        cam = UsdGeom.Camera(prim)
+        if not cam:
+            return
+
+        cam_data = obj.data
+        meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(self.stage))
+        scene_scale = meters_per_unit
+        tenth_unit_to_mm = 100.0 * scene_scale
+
+        cam.CreateProjectionAttr().Set(
+            "perspective" if cam_data.type == "PERSP" else "orthographic"
+        )
+        cam.CreateFocalLengthAttr().Set(float(cam_data.lens) / tenth_unit_to_mm)
+        cam.CreateHorizontalApertureAttr().Set(float(cam_data.sensor_width) / tenth_unit_to_mm)
+        cam.CreateVerticalApertureAttr().Set(float(cam_data.sensor_height) / tenth_unit_to_mm)
+
+        sensor_size = max(cam_data.sensor_width, cam_data.sensor_height)
+        if sensor_size > 0:
+            cam.CreateHorizontalApertureOffsetAttr().Set(
+                float(cam_data.shift_x) * sensor_size / tenth_unit_to_mm
+            )
+            cam.CreateVerticalApertureOffsetAttr().Set(
+                float(cam_data.shift_y) * sensor_size / tenth_unit_to_mm
+            )
+
+        cam.CreateClippingRangeAttr().Set(
+            Gf.Vec2f(
+                float(cam_data.clip_start) / scene_scale,
+                float(cam_data.clip_end) / scene_scale,
+            )
+        )
+
+        if getattr(cam_data.dof, "use_dof", False):
+            cam.CreateFStopAttr().Set(float(cam_data.dof.aperture_fstop))
+            cam.CreateFocusDistanceAttr().Set(
+                float(cam_data.dof.focus_distance) / scene_scale
+            )
+        else:
+            cam.CreateFStopAttr().Set(0.0)
+
     # Blender node type → USD shader ID for reverse lookup
     _NODE_TYPE_TO_SHADER_ID = {
         "BSDF_PRINCIPLED": "UsdPreviewSurface",
@@ -710,7 +764,10 @@ class BlenderStageAuthor:
             src = getattr(obj, "matrix_basis", obj.matrix_world)
             m = tuple(v for row in src for v in row)
             last = self._last_matrix.get(obj.name)
-            if last == m and self.stage.GetPrimAtPath(prim_path):
+            # Cameras carry typed-schema attrs (lens, aperture, ...) on their
+            # data block; the matrix gate alone misses pure data edits.
+            data_dirty = obj.type == "CAMERA" and getattr(update, "is_updated_geometry", False)
+            if last == m and self.stage.GetPrimAtPath(prim_path) and not data_dirty:
                 continue
             self._last_matrix[obj.name] = m
 
@@ -735,6 +792,9 @@ class BlenderStageAuthor:
 
             # Author TRS
             self._author_xform(prim_path, obj)
+
+            if obj.type == "CAMERA":
+                self._author_camera_attrs(prim_path, obj)
 
     def send_rename(self, old_path: str, new_name: str):
         """Rename prim on local stage via NamespaceEditor.
@@ -789,11 +849,11 @@ class _State:
 _state = _State()
 
 
-def _try_send_dirty_events(include_matrices: bool = False):
+def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
         return
-    events = _state.notice_emitter.build_events_for_dirty(include_matrices=include_matrices)
+    events = _state.notice_emitter.build_events_for_dirty()
     if events:
         from collections import Counter
 
@@ -899,7 +959,7 @@ def _depsgraph_handler(scene, depsgraph):
             coalesce = getattr(scene, "usd_connect_coalesce_seconds", DEFAULT_COALESCE_SECONDS)
             now = time.time()
             if coalesce <= 0 or (now - _state._last_send_time) >= coalesce:
-                _try_send_dirty_events(include_matrices=False)
+                _try_send_dirty_events()
                 _state._last_send_time = now
 
     except Exception:
@@ -912,7 +972,7 @@ def _timer_tick():
         if _state.author is None or not _state.author.enabled:
             return 0.25
         if _state.notice_emitter and _state.notice_emitter.dirty:
-            _try_send_dirty_events(include_matrices=False)
+            _try_send_dirty_events()
             _state._last_send_time = time.time()
         return 0.25
     except Exception:
@@ -1152,7 +1212,7 @@ class USD_CONNECT_OT_rename_prim(bpy.types.Operator):
 
         if _state.author is not None:
             _state.author.send_rename(old_path, new_name)
-            _try_send_dirty_events(include_matrices=False)
+            _try_send_dirty_events()
 
         obj["usd_prim_path"] = new_path
         self.report({"INFO"}, f"Renamed: {old_path} → {new_path}")

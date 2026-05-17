@@ -236,6 +236,7 @@ The addon is automatically rebuilt before running. Each test starts its own serv
 | `test_teapot_variants` | Teapot | Payload loading, default variant material (Ceramic with primvar Base Color), variant switch Utah↔Fancy with material rebinding, interleaved live editing with value retention across variant round-trips |
 | `test_two_teapots_identity` | Teapot ×2 | Path-based material identity — two references get separate Ceramic materials with different `usd_material_path` tags, node tree integrity, parent-context object naming |
 | `test_vehicles_multi_binding` | Vehicles 4WD | 6 material bindings across mesh parts from external material file references |
+| `test_camera_scene` | intent-vfx teapotScene_camera | UsdGeomCamera replicates as a `bpy.types.Camera` object with correct `lens`/`clip_start`/`clip_end`/`type` after the metersPerUnit-aware unit conversion, then is promoted to the active scene camera |
 
 ### Adding new asset tests
 

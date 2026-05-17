@@ -531,7 +531,7 @@ class TestAssetReproduce:
             if path != "/":
                 emitter.mark_dirty(path)
         replayed = _server_process_and_replay(
-            srv, emitter.build_events_for_dirty(include_matrices=False)
+            srv, emitter.build_events_for_dirty()
         )
         receiver_stage = Usd.Stage.CreateInMemory()
         apply_events(receiver_stage, replayed)

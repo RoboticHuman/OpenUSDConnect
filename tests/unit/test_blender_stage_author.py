@@ -239,7 +239,7 @@ def _make_author_and_emitter(auto_track=False):
 def _get_events(author, emitter, updates):
     """Run depsgraph update and collect events."""
     author.on_depsgraph_update(updates)
-    return emitter.build_events_for_dirty(include_matrices=False)
+    return emitter.build_events_for_dirty()
 
 
 # ---------------------------------------------------------------------------

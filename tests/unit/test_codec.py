@@ -220,19 +220,6 @@ class TestSetXformTrs:
         assert list(np_t) == pytest.approx([1, 2, 3])
 
 
-class TestSetXformMatrices:
-    def test_roundtrip(self):
-        identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
-        ev = {
-            "k": "set_xform_matrices",
-            "prim": "/World/X",
-            "local_m": [float(x) for x in identity],
-            "world_m": [float(x) for x in identity],
-        }
-        d = _txn_roundtrip(ev)
-        assert d["local_m"] == pytest.approx(identity)
-
-
 class TestDeletePrim:
     def test_roundtrip(self):
         ev = {"k": "delete_prim", "prim": "/World/Gone"}

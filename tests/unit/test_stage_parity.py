@@ -244,7 +244,7 @@ class TestStageParity:
             "invisible"
         )
 
-        update_events = emitter.build_events_for_dirty(include_matrices=False)
+        update_events = emitter.build_events_for_dirty()
         replayed = _server_process_and_replay(srv, update_events)
 
         # Receiver gets full log replay (initial + update)
@@ -262,7 +262,7 @@ class TestStageParity:
         _server_process_and_replay(srv, initial_events)
 
         emitter_stage.GetPrimAtPath("/World/Cone").SetActive(False)
-        deact_events = emitter.build_events_for_dirty(include_matrices=False)
+        deact_events = emitter.build_events_for_dirty()
         replayed = _server_process_and_replay(srv, deact_events)
 
         receiver_stage = Usd.Stage.CreateInMemory()
@@ -285,7 +285,7 @@ class TestStageParity:
         editor.RenamePrim(prim, "BigCube")
         editor.ApplyEdits()
 
-        rename_events = emitter.build_events_for_dirty(include_matrices=False)
+        rename_events = emitter.build_events_for_dirty()
         replayed = _server_process_and_replay(srv, rename_events)
 
         receiver_stage = Usd.Stage.CreateInMemory()
@@ -352,14 +352,14 @@ class TestStageParity:
             emitter = NoticeEmitter(emitter_stage)
 
             emitter.mark_dirty("/World/Sphere")
-            initial_events = emitter.build_events_for_dirty(include_matrices=False)
+            initial_events = emitter.build_events_for_dirty()
             _server_process_and_replay(variant_srv, initial_events)
 
             # Switch to "large"
             emitter_stage.GetPrimAtPath("/World/Sphere").GetVariantSets().GetVariantSet(
                 "size"
             ).SetVariantSelection("large")
-            switch_events = emitter.build_events_for_dirty(include_matrices=False)
+            switch_events = emitter.build_events_for_dirty()
             replayed = _server_process_and_replay(variant_srv, switch_events)
 
             # Receiver opens the same fixture
@@ -388,12 +388,12 @@ class TestStageParity:
         # Several incremental updates
         xf = UsdGeom.Xformable(emitter_stage.GetPrimAtPath("/World/Sphere"))
         find_op(xf, "translate").Set(Gf.Vec3d(10.0, 0.0, 0.0))
-        events1 = emitter.build_events_for_dirty(include_matrices=False)
+        events1 = emitter.build_events_for_dirty()
         _server_process_and_replay(srv, events1)
 
         find_op(xf, "translate").Set(Gf.Vec3d(20.0, 0.0, 0.0))
         emitter_stage.GetPrimAtPath("/World/Sphere").GetAttribute("radius").Set(9.0)
-        events2 = emitter.build_events_for_dirty(include_matrices=False)
+        events2 = emitter.build_events_for_dirty()
         _server_process_and_replay(srv, events2)
 
         # Compact
@@ -484,7 +484,7 @@ class TestStageParity:
         # Incremental: change metallic only
         shader.GetInput("metallic").Set(0.9)
         emitter.mark_dirty("/World/Mat/Surface")
-        update = emitter.build_events_for_dirty(include_matrices=False)
+        update = emitter.build_events_for_dirty()
 
         shader_updates = [e for e in update if e.get("k") == "set_connectable_input"]
         assert len(shader_updates) == 1

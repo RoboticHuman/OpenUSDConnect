@@ -37,7 +37,6 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
-    K_SET_XFORM_MATRICES,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
@@ -64,11 +63,6 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     },
     K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
     K_SET_XFORM_TRS: lambda ev: {"prim_path": ev["prim"], **_trs_kwargs(ev)},
-    K_SET_XFORM_MATRICES: lambda ev: {
-        "prim_path": ev["prim"],
-        "local_m": ev.get("local_m"),
-        "world_m": ev.get("world_m"),
-    },
     K_DELETE_PRIM: lambda ev: {"prim_path": ev["prim"]},
     K_DEACTIVATE_PRIM: lambda ev: {"prim_path": ev["prim"], "active": ev["active"]},
     K_RENAME_PRIM: lambda ev: {"prim_path": ev["prim"], "new_name": ev["new_name"]},
@@ -170,21 +164,6 @@ class DCCAdapter(ABC):
         ``[w, x, y, z]``.
         """
         raise NotImplementedError
-
-    def set_xform_matrices(
-        self,
-        prim_path: str,
-        local_m: list[float] | None = None,
-        world_m: list[float] | None = None,
-    ) -> bool:
-        """Diagnostic: full local + world 4x4 matrices (row-major, length 16).
-
-        Default no-op — ``apply_events`` does not require this for stage
-        replication (TRS is the canonical channel).  Override only if the
-        adapter has a use for the redundant matrix payload (e.g. test
-        introspection or external diagnostics).
-        """
-        return True
 
     def has_imported_children(self, prim_path: str) -> bool:
         """Return True when this adapter has already imported the children
@@ -618,18 +597,6 @@ class MockAdapter(DCCAdapter):
             p["trs"]["s"] = s
             fields_set.append("s")
         LOG.info("MockAdapter: applied TRS to %s fields=%s", prim_path, fields_set)
-        return True
-
-    def set_xform_matrices(
-        self,
-        prim_path: str,
-        local_m: list[float] | None = None,
-        world_m: list[float] | None = None,
-    ) -> bool:
-        p = self._prims.get(prim_path)
-        if p is None:
-            return False
-        p["matrices"] = {"local": local_m, "world": world_m}
         return True
 
     def delete_prim(self, prim_path: str) -> bool:

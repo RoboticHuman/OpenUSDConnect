@@ -99,7 +99,7 @@ def main():
     for prim in stage.Traverse():
         emitter.mark_dirty(str(prim.GetPath()))
 
-    phase1_events = emitter.build_events_for_dirty(include_matrices=False)
+    phase1_events = emitter.build_events_for_dirty()
 
     print(f"\n=== Phase 1 events ({len(phase1_events)}) ===")
     for ev in phase1_events:
@@ -129,7 +129,7 @@ def main():
                 op.Set(op.Get())
                 break
 
-    phase2_events = emitter.build_events_for_dirty(include_matrices=False)
+    phase2_events = emitter.build_events_for_dirty()
 
     print(f"\n=== Phase 2 events ({len(phase2_events)}) ===")
     for ev in phase2_events:
