@@ -78,6 +78,148 @@ def test_camera_scene(blender_exe, tmp_path):
     _run_asset_test(blender_exe, tmp_path, "test_camera_scene.py", 7214)
 
 
+def test_headless_time_samples_to_blender(blender_exe, tmp_path):
+    """Headless EventSender emits time-sampled SetXformTrs events; Blender
+    receives them via the addon. Verifies the protocol layer is animation-
+    aware end-to-end (events round-trip via the server's event log, the
+    receiver-side mirror USD stage gets the time samples) and documents
+    the Q1 gap (BlenderAdapter ignores the ``time`` field and the sphere
+    ends at the latest-sample's static pose with no F-curves).
+    """
+    port = 7216
+    observer_script = os.path.join(
+        SCRIPTS_DIR, "test_headless_time_samples_to_blender.py",
+    )
+    server = start_server(tmp_path, port)
+    try:
+        # 1) Send time-sampled events BEFORE Blender connects.
+        #    They land in the event log; Blender's receiver replays
+        #    them from seq=1 on connect — no startup race.
+        from openusdconnect.protocol_constants import (
+            K_ENSURE_PRIM,
+            K_ENSURE_XFORM_OPS,
+            K_SET_XFORM_TRS,
+        )
+        from openusdconnect.sender import EventSender
+
+        sender = EventSender(
+            host="127.0.0.1",
+            port=port,
+            client_id="headless-emit",
+            role="emitter",
+            origin="headless-origin",
+        )
+        assert sender.connect(), "Headless EventSender failed to connect"
+        try:
+            events = [
+                {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/AnimSphere",
+                 "typeName": "Sphere"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/AnimSphere"},
+                # Time-sampled translate keyframes — these go to USD as
+                # xformOp:translate.Set(value, Usd.TimeCode(t))
+                {"k": K_SET_XFORM_TRS, "prim": "/World/AnimSphere",
+                 "fields": ["t"], "t": [0.0, 0.0, 0.0], "time": 1.0},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/AnimSphere",
+                 "fields": ["t"], "t": [10.0, 0.0, 0.0], "time": 12.0},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/AnimSphere",
+                 "fields": ["t"], "t": [20.0, 0.0, 0.0], "time": 24.0},
+            ]
+            ok = sender.send_events(events)
+            assert ok, "send_events returned False"
+        finally:
+            sender.disconnect()
+
+        # 2) Now start Blender — it replays the log on receiver connect.
+        r = run_blender(
+            blender_exe, observer_script, port, timeout=120, background=False,
+        )
+        print("\n=== Observer Blender stdout ===")
+        print(r.stdout[-3000:] if len(r.stdout) > 3000 else r.stdout)
+        if r.stderr:
+            print("=== stderr ===")
+            print(r.stderr[-500:])
+        assert "SUCCESS" in r.stdout, (
+            f"Observer Blender did not print SUCCESS.\n"
+            f"Last output: {r.stdout[-1000:]}"
+        )
+    finally:
+        stop_server(server)
+
+
+def test_two_blender_playback(blender_exe, tmp_path):
+    """Two Blender processes share a server; one claims playback and
+    scrubs through frames, the other follows. Asserts SUCCESS in both.
+
+    Exercises Fix 1 (leader's frame_change → PlaybackControl) and the
+    receive-side path (PlaybackState → scene.frame_set on the follower).
+    Fix 2's wire-traffic-cleanliness effect is observable via the
+    server log but isn't asserted directly here.
+    """
+    port = 7215
+    leader_script = os.path.join(SCRIPTS_DIR, "test_playback_leader.py")
+    follower_script = os.path.join(SCRIPTS_DIR, "test_playback_follower.py")
+    server = start_server(tmp_path, port)
+    try:
+        env = os.environ.copy()
+        env["BLENDER_USER_RESOURCES"] = os.path.join(
+            PROJECT_ROOT, ".blender", "user_data",
+        )
+
+        def _spawn(script, client_id):
+            # Same as the other asset tests: run with UI (not --background)
+            # so bpy.app.timers fire reliably. Blender quits itself via
+            # bpy.ops.wm.quit_blender() in TestHarness.done().
+            # USD_CONNECT_CLIENT_ID forces a distinct client_id per
+            # process — same-machine STABLE_CLIENT_IDs would otherwise
+            # collide and the follower would think it's the leader.
+            proc_env = dict(env)
+            proc_env["USD_CONNECT_CLIENT_ID"] = client_id
+            return subprocess.Popen(
+                [
+                    blender_exe,
+                    "--python", script,
+                    "--", "--port", str(port),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=proc_env,
+            )
+
+        leader = _spawn(leader_script, "test-playback-leader")
+        # Stagger to give the leader a head start on addon install /
+        # connect — same-port concurrent connects on Windows are flaky
+        # otherwise. The leader's _run() sleeps 4 s before it claims
+        # playback, well after the follower has connected.
+        import time as _time
+        _time.sleep(2.0)
+        follower = _spawn(follower_script, "test-playback-follower")
+
+        leader_out, leader_err = leader.communicate(timeout=120)
+        follower_out, follower_err = follower.communicate(timeout=120)
+
+        print("\n=== Leader stdout ===")
+        print(leader_out[-2000:] if len(leader_out) > 2000 else leader_out)
+        if leader_err:
+            print("=== Leader stderr ===")
+            print(leader_err[-500:])
+        print("\n=== Follower stdout ===")
+        print(follower_out[-2000:] if len(follower_out) > 2000 else follower_out)
+        if follower_err:
+            print("=== Follower stderr ===")
+            print(follower_err[-500:])
+
+        assert "SUCCESS" in leader_out, (
+            f"Leader did not print SUCCESS.\nLast output: {leader_out[-500:]}"
+        )
+        assert "SUCCESS" in follower_out, (
+            f"Follower did not print SUCCESS.\nLast output: {follower_out[-500:]}"
+        )
+    finally:
+        stop_server(server)
+
+
 
 
 

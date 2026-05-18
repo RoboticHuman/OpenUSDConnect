@@ -35,24 +35,36 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    STAGE_METADATA_KEYS,
 )
 
 LOG = logging.getLogger(__name__)
 
 
-# Per-kind kwargs extractor.  The dispatch key (a K_* constant) is also the
-# adapter method name, so apply_event uses ``getattr(self, event["k"])`` —
-# no method-name strings duplicated in this table.  Each lambda returns the
-# kwargs to splat into the adapter method, so signatures stay semantic
-# (no raw event dicts leaking into adapter implementations).
+# Per-kind kwargs extractor. The dispatch key (a K_* constant) is also the
+# adapter method name, so apply_event uses ``getattr(self, event["k"])``.
+# Each lambda returns the kwargs to splat into the adapter method, so
+# signatures stay semantic and raw event dicts don't leak into adapters.
 def _trs_kwargs(ev: dict) -> dict:
     """Extract t/r/s kwargs from a SetXformTRS event (only fields present)."""
     fields = ev.get("fields", [])
     return {f: ev[f] for f in ("t", "r", "s") if f in fields}
+
+
+def _time_kwarg(ev: dict) -> dict:
+    """``{"time": v}`` when ``ev`` has a non-None ``time``, ``{}`` otherwise.
+
+    Lets adapters that don't model time samples omit the ``time=`` parameter
+    entirely — they receive the kwarg only when there's an actual sample
+    to write, never a spurious ``time=None``.
+    """
+    t = ev.get("time")
+    return {"time": t} if t is not None else {}
 
 
 _DISPATCH: dict[str, Callable[[dict], dict]] = {
@@ -62,12 +74,18 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "api_schemas": ev.get("api_schemas", []),
     },
     K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
-    K_SET_XFORM_TRS: lambda ev: {"prim_path": ev["prim"], **_trs_kwargs(ev)},
+    K_SET_XFORM_TRS: lambda ev: {
+        "prim_path": ev["prim"], **_time_kwarg(ev), **_trs_kwargs(ev),
+    },
     K_DELETE_PRIM: lambda ev: {"prim_path": ev["prim"]},
     K_DEACTIVATE_PRIM: lambda ev: {"prim_path": ev["prim"], "active": ev["active"]},
     K_RENAME_PRIM: lambda ev: {"prim_path": ev["prim"], "new_name": ev["new_name"]},
-    K_SET_VISIBILITY: lambda ev: {"prim_path": ev["prim"], "visible": ev["visible"]},
-    K_SET_GPRIM_ATTRS: lambda ev: {"prim_path": ev["prim"], "attrs": ev["attrs"]},
+    K_SET_VISIBILITY: lambda ev: {
+        "prim_path": ev["prim"], "visible": ev["visible"], **_time_kwarg(ev),
+    },
+    K_SET_GPRIM_ATTRS: lambda ev: {
+        "prim_path": ev["prim"], "attrs": ev["attrs"], **_time_kwarg(ev),
+    },
     K_SET_REFERENCE: lambda ev: {"prim_path": ev["prim"], "refs": ev["refs"]},
     K_SET_VARIANT_SELECTIONS: lambda ev: {
         "prim_path": ev["prim"],
@@ -85,12 +103,14 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "info_id": ev["info_id"],
         "inputs": ev["inputs"],
         "input_types": ev.get("input_types", {}),
+        **_time_kwarg(ev),
     },
     K_SET_CONNECTABLE_CONNECTION: lambda ev: {
         "prim_path": ev["prim"],
         "connections": ev["connections"],
         "disconnections": ev.get("disconnections", []),
     },
+    K_SET_STAGE_METADATA: lambda ev: {k: ev[k] for k in STAGE_METADATA_KEYS if k in ev},
 }
 
 
@@ -110,6 +130,15 @@ class DCCAdapter(ABC):
         for event in events:
             self.apply_event(event)
         return len(events)
+
+    def targets_stage(self) -> Usd.Stage | None:
+        """Return the ``Usd.Stage`` this adapter writes to, or ``None``.
+
+        Stage-backed adapters override this; DCC-backed adapters return
+        ``None``. The dispatcher uses it to detect when its ``mirror_stage``
+        is the same instance and skip the otherwise-redundant mirror commit.
+        """
+        return None
 
     @abstractmethod
     def ensure_prim(
@@ -156,12 +185,14 @@ class DCCAdapter(ABC):
         t: list[float] | None = None,
         r: list[float] | None = None,
         s: list[float] | None = None,
+        time: float | None = None,
     ) -> bool:
         """Apply local translation, quaternion rotation, and/or scale.
 
         Only the components passed (non-``None``) are written; absent
         components are unchanged.  Rotation ``r`` is a quaternion
-        ``[w, x, y, z]``.
+        ``[w, x, y, z]``.  ``time`` selects a USD time sample; ``None``
+        writes the static (default) opinion.
         """
         raise NotImplementedError
 
@@ -191,11 +222,13 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+    def set_visibility(self, prim_path: str, visible: bool, time: float | None = None) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
+    def set_gprim_attrs(
+        self, prim_path: str, attrs: dict, time: float | None = None,
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -228,12 +261,18 @@ class DCCAdapter(ABC):
 
     @abstractmethod
     def set_connectable_input(
-        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
+        self,
+        prim_path: str,
+        info_id: str,
+        inputs: dict,
+        input_types: dict,
+        time: float | None = None,
     ) -> bool:
         """Set input values on a UsdShade connectable (Shader / NodeGraph / Material / Light).
 
         ``info_id`` is the UsdShade ``info:id`` (Sdr identifier) for
         ``UsdShade.Shader`` prims; empty string for non-shader connectables.
+        ``time`` selects a USD time sample; ``None`` writes the static opinion.
         """
         raise NotImplementedError
 
@@ -242,6 +281,25 @@ class DCCAdapter(ABC):
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
         """Apply UsdShade input/output connection and disconnection edges."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
+        """Apply stage-level metadata (units + timeline).
+
+        Only fields the caller passes as non-``None`` are applied — the
+        emitter ships partial updates to keep wire cost down. DCCs map
+        these to their own scene units / fps / timeline settings.
+        """
         raise NotImplementedError
 
 
@@ -381,6 +439,9 @@ class UsdStageAdapter(DCCAdapter):
             raise TypeError("UsdStageAdapter requires a Usd.Stage")
         self.stage = stage
 
+    def targets_stage(self):
+        return self.stage
+
     def apply_event(self, event: dict):
         _apply_event_to_stage(self.stage, event)
         return True
@@ -417,6 +478,7 @@ class UsdStageAdapter(DCCAdapter):
         t: list[float] | None = None,
         r: list[float] | None = None,
         s: list[float] | None = None,
+        time: float | None = None,
     ) -> bool:
         fields: list[str] = []
         payload: dict = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
@@ -429,6 +491,8 @@ class UsdStageAdapter(DCCAdapter):
         if s is not None:
             fields.append("s")
             payload["s"] = s
+        if time is not None:
+            payload["time"] = time
         _apply_event_to_stage(self.stage, payload)
         return True
 
@@ -450,18 +514,22 @@ class UsdStageAdapter(DCCAdapter):
         )
         return True
 
-    def set_visibility(self, prim_path: str, visible: bool) -> bool:
-        _apply_event_to_stage(
-            self.stage,
-            {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible},
-        )
+    def set_visibility(
+        self, prim_path: str, visible: bool, time: float | None = None,
+    ) -> bool:
+        ev: dict = {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible}
+        if time is not None:
+            ev["time"] = time
+        _apply_event_to_stage(self.stage, ev)
         return True
 
-    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
-        _apply_event_to_stage(
-            self.stage,
-            {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs},
-        )
+    def set_gprim_attrs(
+        self, prim_path: str, attrs: dict, time: float | None = None,
+    ) -> bool:
+        ev: dict = {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs}
+        if time is not None:
+            ev["time"] = time
+        _apply_event_to_stage(self.stage, ev)
         return True
 
     def set_reference(self, prim_path: str, refs: list) -> bool:
@@ -476,7 +544,6 @@ class UsdStageAdapter(DCCAdapter):
             self.stage,
             {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads},
         )
-        # Payloads are unloaded by default — users opt-in to load.
         if payloads:
             self.stage.Unload(prim_path)
         return True
@@ -504,18 +571,47 @@ class UsdStageAdapter(DCCAdapter):
         return True
 
     def set_connectable_input(
-        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
+        self,
+        prim_path: str,
+        info_id: str,
+        inputs: dict,
+        input_types: dict,
+        time: float | None = None,
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
-            {
-                "k": K_SET_CONNECTABLE_INPUT,
-                "prim": prim_path,
-                "info_id": info_id,
-                "inputs": inputs,
-                "input_types": input_types,
-            },
-        )
+        ev: dict = {
+            "k": K_SET_CONNECTABLE_INPUT,
+            "prim": prim_path,
+            "info_id": info_id,
+            "inputs": inputs,
+            "input_types": input_types,
+        }
+        if time is not None:
+            ev["time"] = time
+        _apply_event_to_stage(self.stage, ev)
+        return True
+
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
+        ev: dict = {"k": K_SET_STAGE_METADATA}
+        for key, val in (
+            ("timeCodesPerSecond", timeCodesPerSecond),
+            ("framesPerSecond", framesPerSecond),
+            ("startTimeCode", startTimeCode),
+            ("endTimeCode", endTimeCode),
+            ("metersPerUnit", metersPerUnit),
+            ("upAxis", upAxis),
+        ):
+            if val is not None:
+                ev[key] = val
+        _apply_event_to_stage(self.stage, ev)
         return True
 
     def set_connectable_connection(
@@ -542,6 +638,7 @@ class MockAdapter(DCCAdapter):
     def __init__(self):
         self._prims: dict[str, dict] = {}
         self.calls: list[tuple] = []
+        self.stage_metadata: dict = {}
 
     def ensure_prim(
         self,
@@ -551,7 +648,6 @@ class MockAdapter(DCCAdapter):
     ) -> bool:
         existing = self._prims.get(prim_path)
         if existing is not None:
-            # Additive: union api_schemas onto existing prim.
             if api_schemas:
                 merged = set(existing.get("api_schemas") or [])
                 merged.update(api_schemas)
@@ -581,22 +677,30 @@ class MockAdapter(DCCAdapter):
         t: list[float] | None = None,
         r: list[float] | None = None,
         s: list[float] | None = None,
+        time: float | None = None,
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             LOG.warning("MockAdapter: set_xform_trs prim missing %s", prim_path)
             return False
         fields_set = []
+        if time is None:
+            store = p["trs"]
+        else:
+            store = p.setdefault("trs_samples", {}).setdefault(time, {})
         if t is not None:
-            p["trs"]["t"] = t
+            store["t"] = t
             fields_set.append("t")
         if r is not None:
-            p["trs"]["r"] = r
+            store["r"] = r
             fields_set.append("r")
         if s is not None:
-            p["trs"]["s"] = s
+            store["s"] = s
             fields_set.append("s")
-        LOG.info("MockAdapter: applied TRS to %s fields=%s", prim_path, fields_set)
+        LOG.info(
+            "MockAdapter: applied TRS to %s fields=%s time=%s",
+            prim_path, fields_set, time,
+        )
         return True
 
     def delete_prim(self, prim_path: str) -> bool:
@@ -624,20 +728,36 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: renamed %s -> %s", prim_path, new_path)
         return True
 
-    def set_visibility(self, prim_path: str, visible: bool) -> bool:
+    def set_visibility(
+        self, prim_path: str, visible: bool, time: float | None = None,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             return False
-        p["visible"] = visible
-        LOG.info("MockAdapter: set visible=%s on prim %s", visible, prim_path)
+        if time is None:
+            p["visible"] = visible
+        else:
+            p.setdefault("visibility_samples", {})[time] = visible
+        LOG.info(
+            "MockAdapter: set visible=%s on prim %s time=%s",
+            visible, prim_path, time,
+        )
         return True
 
-    def set_gprim_attrs(self, prim_path: str, attrs: dict) -> bool:
+    def set_gprim_attrs(
+        self, prim_path: str, attrs: dict, time: float | None = None,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             return False
-        p.setdefault("gprim_attrs", {}).update(attrs)
-        LOG.info("MockAdapter: set gprim attrs %s on prim %s", attrs, prim_path)
+        if time is None:
+            p.setdefault("gprim_attrs", {}).update(attrs)
+        else:
+            p.setdefault("gprim_attr_samples", {}).setdefault(time, {}).update(attrs)
+        LOG.info(
+            "MockAdapter: set gprim attrs %s on prim %s time=%s",
+            attrs, prim_path, time,
+        )
         return True
 
     def set_reference(self, prim_path: str, refs: list) -> bool:
@@ -685,16 +805,54 @@ class MockAdapter(DCCAdapter):
         return True
 
     def set_connectable_input(
-        self, prim_path: str, info_id: str, inputs: dict, input_types: dict
+        self,
+        prim_path: str,
+        info_id: str,
+        inputs: dict,
+        input_types: dict,
+        time: float | None = None,
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Shader", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
         p["info_id"] = info_id
-        p.setdefault("connectable_inputs", {}).update(inputs)
-        p.setdefault("connectable_input_types", {}).update(input_types)
-        LOG.info("MockAdapter: set connectable input on %s", prim_path)
+        if time is None:
+            p.setdefault("connectable_inputs", {}).update(inputs)
+            p.setdefault("connectable_input_types", {}).update(input_types)
+        else:
+            (
+                p.setdefault("connectable_input_samples", {})
+                .setdefault(time, {})
+                .update(inputs)
+            )
+        LOG.info(
+            "MockAdapter: set connectable input on %s time=%s", prim_path, time,
+        )
+        return True
+
+    def set_stage_metadata(
+        self,
+        *,
+        timeCodesPerSecond: float | None = None,
+        framesPerSecond: float | None = None,
+        startTimeCode: float | None = None,
+        endTimeCode: float | None = None,
+        metersPerUnit: float | None = None,
+        upAxis: str | None = None,
+    ) -> bool:
+        meta = {
+            "timeCodesPerSecond": timeCodesPerSecond,
+            "framesPerSecond": framesPerSecond,
+            "startTimeCode": startTimeCode,
+            "endTimeCode": endTimeCode,
+            "metersPerUnit": metersPerUnit,
+            "upAxis": upAxis,
+        }
+        for k, v in meta.items():
+            if v is not None:
+                self.stage_metadata[k] = v
+        LOG.info("MockAdapter: stage metadata %s", {k: v for k, v in meta.items() if v is not None})
         return True
 
     def set_connectable_connection(

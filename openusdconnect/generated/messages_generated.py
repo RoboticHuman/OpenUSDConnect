@@ -45,6 +45,7 @@ class EventPayload(object):
     SetMaterialBinding = 14
     SetConnectableInput = 15
     SetConnectableConnection = 16
+    SetStageMetadata = 17
 
 
 class Payload(object):
@@ -61,6 +62,11 @@ class Payload(object):
     CreateProposal = 10
     ProposalCreated = 11
     RateLimited = 12
+    ClaimPlayback = 13
+    PlaybackClaimed = 14
+    PlaybackRejected = 15
+    PlaybackControl = 16
+    PlaybackState = 17
 
 
 class AttrValue(object):
@@ -874,8 +880,15 @@ class SetXformTrs(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
         return o == 0
 
+    # SetXformTrs
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
 def SetXformTrsStart(builder):
-    builder.StartObject(5)
+    builder.StartObject(6)
 
 def SetXformTrsAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
@@ -900,6 +913,9 @@ def SetXformTrsAddS(builder, s):
 
 def SetXformTrsStartSVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SetXformTrsAddTime(builder, time):
+    builder.PrependFloat64Slot(5, time, None)
 
 def SetXformTrsEnd(builder):
     return builder.EndObject()
@@ -1066,14 +1082,24 @@ class SetVisibility(object):
             return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
         return False
 
+    # SetVisibility
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
 def SetVisibilityStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def SetVisibilityAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
 def SetVisibilityAddVisible(builder, visible):
     builder.PrependBoolSlot(1, visible, 0)
+
+def SetVisibilityAddTime(builder, time):
+    builder.PrependFloat64Slot(2, time, None)
 
 def SetVisibilityEnd(builder):
     return builder.EndObject()
@@ -1177,8 +1203,15 @@ class SetGprimAttrs(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         return o == 0
 
+    # SetGprimAttrs
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
 def SetGprimAttrsStart(builder):
-    builder.StartObject(4)
+    builder.StartObject(5)
 
 def SetGprimAttrsAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
@@ -1200,6 +1233,9 @@ def SetGprimAttrsAddAttrInterp(builder, attrInterp):
 
 def SetGprimAttrsStartAttrInterpVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SetGprimAttrsAddTime(builder, time):
+    builder.PrependFloat64Slot(4, time, None)
 
 def SetGprimAttrsEnd(builder):
     return builder.EndObject()
@@ -1578,8 +1614,15 @@ class SetConnectableInput(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         return o == 0
 
+    # SetConnectableInput
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
 def SetConnectableInputStart(builder):
-    builder.StartObject(3)
+    builder.StartObject(4)
 
 def SetConnectableInputAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
@@ -1592,6 +1635,9 @@ def SetConnectableInputAddInputs(builder, inputs):
 
 def SetConnectableInputStartInputsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SetConnectableInputAddTime(builder, time):
+    builder.PrependFloat64Slot(3, time, None)
 
 def SetConnectableInputEnd(builder):
     return builder.EndObject()
@@ -1686,6 +1732,92 @@ def SetConnectableConnectionStartDisconnectionsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
 def SetConnectableConnectionEnd(builder):
+    return builder.EndObject()
+
+
+
+class SetStageMetadata(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = SetStageMetadata()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsSetStageMetadata(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # SetStageMetadata
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # SetStageMetadata
+    def TimeCodesPerSecond(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # SetStageMetadata
+    def FramesPerSecond(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # SetStageMetadata
+    def StartTimeCode(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # SetStageMetadata
+    def EndTimeCode(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # SetStageMetadata
+    def MetersPerUnit(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # SetStageMetadata
+    def UpAxis(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def SetStageMetadataStart(builder):
+    builder.StartObject(6)
+
+def SetStageMetadataAddTimeCodesPerSecond(builder, timeCodesPerSecond):
+    builder.PrependFloat64Slot(0, timeCodesPerSecond, None)
+
+def SetStageMetadataAddFramesPerSecond(builder, framesPerSecond):
+    builder.PrependFloat64Slot(1, framesPerSecond, None)
+
+def SetStageMetadataAddStartTimeCode(builder, startTimeCode):
+    builder.PrependFloat64Slot(2, startTimeCode, None)
+
+def SetStageMetadataAddEndTimeCode(builder, endTimeCode):
+    builder.PrependFloat64Slot(3, endTimeCode, None)
+
+def SetStageMetadataAddMetersPerUnit(builder, metersPerUnit):
+    builder.PrependFloat64Slot(4, metersPerUnit, None)
+
+def SetStageMetadataAddUpAxis(builder, upAxis):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(upAxis), 0)
+
+def SetStageMetadataEnd(builder):
     return builder.EndObject()
 
 
@@ -1860,11 +1992,24 @@ class HelloOk(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # HelloOk
+    def StageMetadata(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = SetStageMetadata()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
 def HelloOkStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def HelloOkAddToken(builder, token):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(token), 0)
+
+def HelloOkAddStageMetadata(builder, stageMetadata):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(stageMetadata), 0)
 
 def HelloOkEnd(builder):
     return builder.EndObject()
@@ -2300,6 +2445,256 @@ def RateLimitedAddRetryAfter(builder, retryAfter):
     builder.PrependFloat32Slot(0, retryAfter, 0.0)
 
 def RateLimitedEnd(builder):
+    return builder.EndObject()
+
+
+
+class ClaimPlayback(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ClaimPlayback()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsClaimPlayback(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ClaimPlayback
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ClaimPlayback
+    def ClientId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # ClaimPlayback
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+def ClaimPlaybackStart(builder):
+    builder.StartObject(2)
+
+def ClaimPlaybackAddClientId(builder, clientId):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(clientId), 0)
+
+def ClaimPlaybackAddTime(builder, time):
+    builder.PrependFloat64Slot(1, time, None)
+
+def ClaimPlaybackEnd(builder):
+    return builder.EndObject()
+
+
+
+class PlaybackClaimed(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = PlaybackClaimed()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsPlaybackClaimed(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # PlaybackClaimed
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # PlaybackClaimed
+    def LeaderClientId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def PlaybackClaimedStart(builder):
+    builder.StartObject(1)
+
+def PlaybackClaimedAddLeaderClientId(builder, leaderClientId):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(leaderClientId), 0)
+
+def PlaybackClaimedEnd(builder):
+    return builder.EndObject()
+
+
+
+class PlaybackRejected(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = PlaybackRejected()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsPlaybackRejected(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # PlaybackRejected
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # PlaybackRejected
+    def Reason(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # PlaybackRejected
+    def CurrentLeaderClientId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def PlaybackRejectedStart(builder):
+    builder.StartObject(2)
+
+def PlaybackRejectedAddReason(builder, reason):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
+
+def PlaybackRejectedAddCurrentLeaderClientId(builder, currentLeaderClientId):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(currentLeaderClientId), 0)
+
+def PlaybackRejectedEnd(builder):
+    return builder.EndObject()
+
+
+
+class PlaybackControl(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = PlaybackControl()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsPlaybackControl(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # PlaybackControl
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # PlaybackControl
+    def Action(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # PlaybackControl
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+    # PlaybackControl
+    def Rate(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return None
+
+def PlaybackControlStart(builder):
+    builder.StartObject(3)
+
+def PlaybackControlAddAction(builder, action):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(action), 0)
+
+def PlaybackControlAddTime(builder, time):
+    builder.PrependFloat64Slot(1, time, None)
+
+def PlaybackControlAddRate(builder, rate):
+    builder.PrependFloat64Slot(2, rate, None)
+
+def PlaybackControlEnd(builder):
+    return builder.EndObject()
+
+
+
+class PlaybackState(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = PlaybackState()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsPlaybackState(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # PlaybackState
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # PlaybackState
+    def Time(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return 0.0
+
+    # PlaybackState
+    def Playing(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+    # PlaybackState
+    def Rate(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return 0.0
+
+    # PlaybackState
+    def LeaderClientId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def PlaybackStateStart(builder):
+    builder.StartObject(4)
+
+def PlaybackStateAddTime(builder, time):
+    builder.PrependFloat64Slot(0, time, 0.0)
+
+def PlaybackStateAddPlaying(builder, playing):
+    builder.PrependBoolSlot(1, playing, 0)
+
+def PlaybackStateAddRate(builder, rate):
+    builder.PrependFloat64Slot(2, rate, 0.0)
+
+def PlaybackStateAddLeaderClientId(builder, leaderClientId):
+    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(leaderClientId), 0)
+
+def PlaybackStateEnd(builder):
     return builder.EndObject()
 
 

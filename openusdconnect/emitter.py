@@ -34,13 +34,39 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     PRIMVAR_PREFIX,
     REL_MATERIAL_BINDING,
+    STAGE_METADATA_KEYS,
 )
+
+# Notice field tokens the stage-metadata watcher cares about. Anything outside
+# this set on the pseudo-root (comments, customLayerData, etc.) is ignored
+# without triggering a snapshot diff.
+_WATCHED_STAGE_METADATA_FIELDS = frozenset(STAGE_METADATA_KEYS)
+
+# Wire-event TRS field → xformOp name. Used by the targeted time-sample
+# invalidator so it can update the right cache slot without re-reading
+# the stage.
+_TRS_FIELD_TO_OP_NAME = {
+    "t": "xformOp:translate",
+    "r": "xformOp:orient",
+    "s": "xformOp:scale",
+}
+
+# Canonical xform-op type → wire-event TRS field. Other op types
+# (RotateXYZ, Transform, pivots) aren't replicated as samples — the
+# default-time path folds them via matrix decompose; for sample
+# replication we trust the canonical op stack contract.
+_XFORM_OP_TYPE_TO_TRS_FIELD = {
+    UsdGeom.XformOp.TypeTranslate: "t",
+    UsdGeom.XformOp.TypeOrient: "r",
+    UsdGeom.XformOp.TypeScale: "s",
+}
 
 LOG = logging.getLogger(__name__)
 
@@ -56,11 +82,13 @@ _C_MATERIAL_BINDING = "material_binding"
 _C_CONNECTABLE = "connectable"
 _C_API_SCHEMAS = "api_schemas"
 _C_CAMERA_ATTRS = "camera_attrs"
+# Per-attribute time-sample hashes: {attr_name: {time_float: hash}}
+_C_TIME_SAMPLES = "time_samples"
 
 # Cache slots owned by specialized diff paths in _build_dirty_prim_events.
 # Channels must not reuse these keys; NoticeEmitter validates collisions at
 # construction.
-_SPECIALIZED_CACHE_KEYS = frozenset({_C_TRS, _C_GPRIM_ATTRS, _C_API_SCHEMAS})
+_SPECIALIZED_CACHE_KEYS = frozenset({_C_TRS, _C_GPRIM_ATTRS, _C_API_SCHEMAS, _C_TIME_SAMPLES})
 
 
 def _is_transform_attr(attr_name: str) -> bool:
@@ -190,6 +218,11 @@ def _usd_value_to_python(val):
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
         if isinstance(val, vec_type):
             return [float(v) for v in val]
+    # Quaternion → [w, x, y, z]; matches the wire format for xformOp:orient.
+    for quat_type in (Gf.Quatf, Gf.Quatd, Gf.Quath):
+        if isinstance(val, quat_type):
+            im = val.GetImaginary()
+            return [float(val.GetReal()), float(im[0]), float(im[1]), float(im[2])]
     # VtArray types (Vec3fArray, IntArray, FloatArray, etc.)
     # Detected by type name ending in "Array" — no shared base class in pxr.
     # Convert to numpy directly — pxr VtArrays support the buffer protocol.
@@ -280,6 +313,82 @@ def _prim_path_from_notice_path(path_str: str) -> str | None:
     return path_str
 
 
+def _value_hash(val) -> int:
+    """Stable per-sample fingerprint. Caller must pass values already converted
+    via ``_usd_value_to_python`` — exotic pxr types aren't supported here.
+    """
+    import numpy as np
+
+    if isinstance(val, np.ndarray):
+        return hash((val.shape, val.dtype.str, val.tobytes()))
+    if isinstance(val, list):
+        return hash(tuple(_value_hash(v) for v in val))
+    if isinstance(val, dict):
+        return hash(tuple(sorted((k, _value_hash(v)) for k, v in val.items())))
+    return hash(val)
+
+
+def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None):
+    """Return ``(new_cache, dirty)`` for an attribute's time-sample table.
+
+    ``cached`` is a previous ``{time: value_hash}`` snapshot, or ``None``
+    on first encounter (every authored sample is reported dirty).
+    ``dirty`` lists ``(time, python_value)`` pairs that were added or
+    whose hashed value changed.
+
+    When ``layer`` is given, the times and values come from that layer
+    directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
+    — only samples this layer authored, ignoring opinions on other layers.
+    Required for per-client-layer setups where the composed view shadows
+    weaker clients' samples and would otherwise leak the stronger
+    client's keyframes back to its peers' emitters.
+    """
+    if not attr or not attr.IsValid():
+        return {}, []
+    if layer is not None:
+        path = attr.GetPath()
+        times = sorted(layer.ListTimeSamplesForPath(path))
+    else:
+        times = attr.GetTimeSamples()
+    if not times:
+        return {}, []
+    new_cache: dict[float, int] = {}
+    dirty: list[tuple[float, object]] = []
+    is_first = cached is None
+    cached = cached or {}
+    for t in times:
+        if layer is not None:
+            val = _usd_value_to_python(layer.QueryTimeSample(path, t))
+        else:
+            val = _usd_value_to_python(attr.Get(Usd.TimeCode(t)))
+        if val is None:
+            continue
+        h = _value_hash(val)
+        new_cache[t] = h
+        if is_first or cached.get(t) != h:
+            dirty.append((t, val))
+    return new_cache, dirty
+
+
+def read_stage_metadata(stage: Usd.Stage) -> dict:
+    """Snapshot stage-level units + timeline metadata, returning only
+    authored opinions (empty dict for a stage with no authored metadata).
+    """
+    out: dict = {}
+    if stage.HasAuthoredMetadata("timeCodesPerSecond"):
+        out["timeCodesPerSecond"] = stage.GetTimeCodesPerSecond()
+    if stage.HasAuthoredMetadata("framesPerSecond"):
+        out["framesPerSecond"] = stage.GetFramesPerSecond()
+    if stage.HasAuthoredTimeCodeRange():
+        out["startTimeCode"] = stage.GetStartTimeCode()
+        out["endTimeCode"] = stage.GetEndTimeCode()
+    if stage.HasAuthoredMetadata("metersPerUnit"):
+        out["metersPerUnit"] = UsdGeom.GetStageMetersPerUnit(stage)
+    if stage.HasAuthoredMetadata("upAxis"):
+        out["upAxis"] = str(UsdGeom.GetStageUpAxis(stage))
+    return out
+
+
 def _read_composition_arcs(stage, prim_path, arc_attr):
     """Read composition arcs authored on this stage's own layers.
 
@@ -353,6 +462,58 @@ def read_material_binding(stage, prim_path):
     return str(targets[0]) if targets else ""
 
 
+def _attr_event_metadata(prim, attr_name: str, attr) -> tuple[dict, dict]:
+    """Return ``(primvar_meta, attr_interp)`` entries for one attribute.
+
+    Each dict either holds one ``{attr_name: ...}`` entry or is empty.
+    Callers merge per-attr results into the wire event's bundled
+    ``primvar_meta`` / ``attr_interp`` dicts.
+    """
+    primvar_meta: dict = {}
+    attr_interp: dict = {}
+    if attr_name.startswith(PRIMVAR_PREFIX):
+        pv = UsdGeom.PrimvarsAPI(prim).GetPrimvar(attr_name[len(PRIMVAR_PREFIX):])
+        if pv:
+            meta: dict = {"typeName": str(attr.GetTypeName())}
+            if pv.HasAuthoredInterpolation():
+                meta["interpolation"] = str(pv.GetInterpolation())
+            primvar_meta[attr_name] = meta
+    else:
+        interp = attr.GetMetadata("interpolation")
+        if interp:
+            attr_interp[attr_name] = str(interp)
+    return primvar_meta, attr_interp
+
+
+def _connectable_kind(prim) -> str:
+    """Return the wire-protocol ``container_kind`` label for ``prim``.
+
+    Three buckets, checked in priority order:
+
+      - ``"shader"`` — prim ``IsA`` ``UsdShade.Shader`` (typed schema).
+      - ``"nodegraph"`` — prim ``IsA`` ``UsdShade.NodeGraph``. ``UsdShade.Material``
+        derives from ``NodeGraph``, so Materials land here too.
+      - ``"light"`` — prim ``HasAPI`` ``UsdLux.LightAPI``. Typed UsdLux lights
+        (``SphereLight``, ``RectLight``, ``DomeLight``, …) carry it built-in;
+        ``MeshLightAPI`` / ``VolumeLightAPI`` pull a ``Mesh``/``Volume`` prim
+        into this bucket too.
+
+    Returns ``""`` for prims that don't match any of the three checks.
+    Other USD prims can still expose ``UsdShade.ConnectableAPI`` (anything
+    with a registered ``UsdShadeConnectableAPIBehavior``) — those aren't
+    replicated and intentionally return ``""``.
+    """
+    if not prim or not prim.IsValid():
+        return ""
+    if prim.IsA(UsdShade.Shader):
+        return "shader"
+    if prim.IsA(UsdShade.NodeGraph):
+        return "nodegraph"
+    if prim.HasAPI(UsdLux.LightAPI):
+        return "light"
+    return ""
+
+
 def _connected_source_attr(src) -> ConnectableAttr:
     """Return the protocol attribute reference for a UsdShade connection source.
 
@@ -391,29 +552,21 @@ def read_usdshade_connectable(stage, prim_path):
     from "interface present but nothing authored yet".
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    container_kind = _connectable_kind(prim)
+    if not container_kind:
         return "", "", {}, {}, {}
 
-    if prim.IsA(UsdShade.Shader):
-        container_kind = "shader"
+    if container_kind == "shader":
         shader = UsdShade.Shader(prim)
         info_id = shader.GetIdAttr().Get() or ""
         if not info_id:
             return "", "", {}, {}, {}
         connectable = shader
-    elif prim.IsA(UsdShade.NodeGraph):
-        # NodeGraph covers Material — Material inherits from NodeGraph.
-        container_kind = "nodegraph"
-        info_id = ""
-        connectable = UsdShade.NodeGraph(prim)
-    elif prim.HasAPI(UsdLux.LightAPI):
-        # LightAPI is built-in on typed UsdLux lights (SphereLight, etc.) and
-        # user-applied via MeshLightAPI/VolumeLightAPI on Mesh/Volume prims.
-        container_kind = "light"
+    else:
+        # NodeGraph (covers Material) and Light containers share
+        # ConnectableAPI for input/output enumeration.
         info_id = ""
         connectable = UsdShade.ConnectableAPI(prim)
-    else:
-        return "", "", {}, {}, {}
 
     inputs = {}
     input_types = {}
@@ -965,18 +1118,96 @@ def _resync_connectable_cache(emitter, prim_path):
         }
 
 
-def _invalidate_set_connectable_input(emitter, prim_path, _ev):
+def _set_time_sample_cache(emitter, prim_path: str, cache_key: str, time: float, value):
+    """Write a single ``(time, value)`` entry into ``_C_TIME_SAMPLES``.
+
+    Cheap regardless of how many other samples the attribute has — we
+    fingerprint just the value the event carries instead of re-reading
+    every authored sample from the composed stage.
+    """
+    if value is None:
+        return
+    ts = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_TIME_SAMPLES, {})
+    ts.setdefault(cache_key, {})[time] = _value_hash(value)
+
+
+def _invalidate_set_connectable_input(emitter, prim_path, ev):
     _resync_connectable_cache(emitter, prim_path)
+    if ev.get("time") is not None:
+        time = float(ev["time"])
+        for name, value in ev.get("inputs", {}).items():
+            _set_time_sample_cache(emitter, prim_path, "inputs:" + name, time, value)
 
 
-def _invalidate_set_gprim_attrs(emitter, prim_path, _ev):
+def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
     cam_attrs = read_camera_attrs(emitter.stage, prim_path)
     if cam_attrs is not None:
         emitter._prim_cache.setdefault(prim_path, {})[_C_CAMERA_ATTRS] = cam_attrs
 
+    if ev.get("time") is not None:
+        time = float(ev["time"])
+        for name, value in ev.get("attrs", {}).items():
+            _set_time_sample_cache(emitter, prim_path, name, time, value)
+        return
+
+    # Default-time path: refresh just the attrs this event mutated so a
+    # local edit back to the server's value doesn't re-emit. Bounded by
+    # the size of ev["attrs"]; no full prim scan.
+    prim = emitter.stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
+    last_attrs = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_GPRIM_ATTRS, {})
+    for name in ev.get("attrs", {}):
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsValid():
+            val = _usd_value_to_python(attr.Get())
+            if val is not None:
+                last_attrs[name] = val
+
 
 def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
     _resync_connectable_cache(emitter, prim_path)
+
+
+def _invalidate_set_xform_trs(emitter, prim_path, ev):
+    if ev.get("time") is not None:
+        time = float(ev["time"])
+        for field, op_name in _TRS_FIELD_TO_OP_NAME.items():
+            if field in ev:
+                _set_time_sample_cache(emitter, prim_path, op_name, time, ev[field])
+        return
+
+    # Refresh the default-time TRS cache so a subsequent user edit
+    # against a stale "last-sent" value still produces a correct diff.
+    snap = emitter.snapshot_prim(prim_path)
+    if snap is not None:
+        emitter._prim_cache.setdefault(prim_path, {})[_C_TRS] = snap
+
+
+def _invalidate_set_visibility(emitter, prim_path, ev):
+    if ev.get("time") is not None:
+        # Cache stores the USD string form ("inherited"/"invisible") via the
+        # build path, so hash the matching string from the event's bool.
+        vis_str = "inherited" if ev.get("visible", True) else "invisible"
+        _set_time_sample_cache(
+            emitter, prim_path, "visibility", float(ev["time"]), vis_str,
+        )
+        return
+
+    prim = emitter.stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
+    vis_attr = UsdGeom.Imageable(prim).GetVisibilityAttr()
+    if vis_attr and vis_attr.IsValid() and vis_attr.IsAuthored():
+        value = vis_attr.Get() or "inherited"
+        emitter._prim_cache.setdefault(prim_path, {})[_C_VISIBILITY] = value
+
+
+def _invalidate_set_stage_metadata(emitter, _prim_path, _ev):
+    # Refresh the cached snapshot so the next dirty cycle doesn't re-emit
+    # a value the server already knows about. The dirty flag is owned by
+    # _build_stage_metadata_events.
+    emitter._stage_metadata_cache = read_stage_metadata(emitter.stage)
 
 
 _INVALIDATE_DISPATCH = {
@@ -993,6 +1224,9 @@ _INVALIDATE_DISPATCH = {
     K_SET_CONNECTABLE_INPUT: _invalidate_set_connectable_input,
     K_SET_CONNECTABLE_CONNECTION: _invalidate_set_connectable_connection,
     K_SET_GPRIM_ATTRS: _invalidate_set_gprim_attrs,
+    K_SET_XFORM_TRS: _invalidate_set_xform_trs,
+    K_SET_VISIBILITY: _invalidate_set_visibility,
+    K_SET_STAGE_METADATA: _invalidate_set_stage_metadata,
 }
 
 
@@ -1082,6 +1316,9 @@ class NoticeEmitter:
         # the gprim attr scan applies _attr_filter later.
         self._dirty_attrs: dict[str, set[str]] = {}
         self._notice_resynced_prims: set[str] = set()
+        # Stage-level metadata replication state.
+        self._stage_metadata_dirty: bool = False
+        self._stage_metadata_cache: dict = read_stage_metadata(stage)
         extras = tuple(extra_channels) if extra_channels else ()
         for ch in extras:
             if not isinstance(ch, PrimChannel):
@@ -1182,6 +1419,22 @@ class NoticeEmitter:
             # Seed the api_schemas snapshot so a later diff cycle doesn't
             # spuriously re-emit ensure_prim on first encounter.
             pc[_C_API_SCHEMAS] = self._filtered_api_schemas(child)
+            # Seed time-sample hashes so first emit cycle doesn't replay every
+            # authored sample on an already-keyframed prim.
+            ts_seed: dict = {}
+            for attr in child.GetAttributes():
+                if not attr.IsAuthored():
+                    continue
+                name = attr.GetName()
+                times = attr.GetTimeSamples()
+                if not times:
+                    continue
+                ts_seed[name] = {
+                    t: _value_hash(_usd_value_to_python(attr.Get(Usd.TimeCode(t))))
+                    for t in times
+                }
+            if ts_seed:
+                pc[_C_TIME_SAMPLES] = ts_seed
 
     def suppress(self):
         """Suppress notice collection (feedback guard).
@@ -1273,6 +1526,14 @@ class NoticeEmitter:
 
         for p in notice.GetChangedInfoOnlyPaths():
             path_str = str(p)
+            # Stage-level metadata fires on the pseudo-root path. Inspect
+            # the field tokens directly so unrelated edits (comments,
+            # customLayerData) don't trigger a full snapshot diff.
+            if path_str == "/":
+                fields = {str(f) for f in notice.GetChangedFields(p)}
+                if fields & _WATCHED_STAGE_METADATA_FIELDS:
+                    self._stage_metadata_dirty = True
+                continue
             prim_path = _prim_path_from_notice_path(path_str)
             if prim_path:
                 self.dirty.add(prim_path)
@@ -1298,12 +1559,14 @@ class NoticeEmitter:
         Unknown event kinds are no-ops.
         """
         k = ev.get("k")
-        prim_path = ev.get("prim", "")
-        if not k or not prim_path:
+        if not k:
             return
         fn = _INVALIDATE_DISPATCH.get(k)
-        if fn is not None:
-            fn(self, prim_path, ev)
+        if fn is None:
+            return
+        # Stage-level events (no ``prim``) still dispatch — handlers ignore
+        # the empty path arg.
+        fn(self, ev.get("prim", ""), ev)
 
     def invalidate_for_events(self, events: list[dict]) -> None:
         """Batch version of :meth:`invalidate_for_event`."""
@@ -1476,18 +1739,19 @@ class NoticeEmitter:
                 events.append(payload)
                 pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
-        # Gprim attribute diff
+        # Gprim attribute diff + time-sample emission share the dirty-attr set.
+        # Compute it once here, then hand the same set to both blocks.
+        dirty_attr_names: set[str] = set()
+        is_resync = prim_path in self._notice_resynced_prims
         if prim and prim.IsValid():
             dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
+            self._notice_resynced_prims.discard(prim_path)
             last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
             # Full attr scan: needed on first encounter (cache empty) or
             # after a resync notice (variant switch, structural change).
-            # Skipped for plain info-only changes (e.g., only xformOp values
-            # changed) where the cache is already populated — avoids reading
-            # thousands of mesh vertices every frame.
-            is_resync = prim_path in self._notice_resynced_prims
-            self._notice_resynced_prims.discard(prim_path)
+            # Skipped for plain info-only changes — avoids reading thousands
+            # of mesh vertices every frame.
             if not dirty_attr_names and (not last_attrs or is_resync):
                 for attr in prim.GetAttributes():
                     name = attr.GetName()
@@ -1495,9 +1759,8 @@ class NoticeEmitter:
                         dirty_attr_names.add(name)
 
             changed_attrs = {}
-            primvar_meta = {}
-            attr_interp = {}
-            pvapi = None  # lazy — only created if a primvar actually changed
+            primvar_meta: dict = {}
+            attr_interp: dict = {}
             for attr_name in dirty_attr_names:
                 # _dirty_attrs is unfiltered for channel gating; filter again
                 # here before emitting generic gprim attrs.
@@ -1511,24 +1774,9 @@ class NoticeEmitter:
                     continue
                 if not _values_equal(val, last_attrs.get(attr_name)):
                     changed_attrs[attr_name] = val
-                    if attr_name.startswith(PRIMVAR_PREFIX):
-                        # Primvar: include USD type name and interpolation so
-                        # the receiver can create non-schema primvars with the
-                        # exact type.
-                        if pvapi is None:
-                            pvapi = UsdGeom.PrimvarsAPI(prim)
-                        pv = pvapi.GetPrimvar(attr_name[len(PRIMVAR_PREFIX) :])
-                        if pv:
-                            meta = {"typeName": str(attr.GetTypeName())}
-                            if pv.HasAuthoredInterpolation():
-                                meta["interpolation"] = str(pv.GetInterpolation())
-                            primvar_meta[attr_name] = meta
-                    else:
-                        # Non-primvar: capture authored interpolation metadata
-                        # (e.g. normals has per-attr interpolation).
-                        interp = attr.GetMetadata("interpolation")
-                        if interp:
-                            attr_interp[attr_name] = str(interp)
+                    pvm, ai = _attr_event_metadata(prim, attr_name, attr)
+                    primvar_meta.update(pvm)
+                    attr_interp.update(ai)
 
             if changed_attrs:
                 ev = {
@@ -1543,7 +1791,190 @@ class NoticeEmitter:
                 events.append(ev)
                 pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
+        events.extend(
+            self._build_time_sample_events(prim_path, prim, pc, dirty_attr_names),
+        )
+
         return events
+
+    def _build_time_sample_events(
+        self,
+        prim_path: str,
+        prim,
+        pc: dict,
+        dirty_attr_names: set[str],
+    ) -> list[dict]:
+        """One event per ``(attr, time)`` for the time-sampleable attrs on a
+        prim — xformOps, visibility, watched gprim attrs, and UsdShade
+        input attrs.
+
+        ``dirty_attr_names`` restricts re-reads to the attrs USD told us
+        changed. An empty set means full-scan (first encounter, resync, or
+        no per-attr detail in the notice) — matches the default-time gprim
+        block's expansion rule.
+
+        We can't gate by ``notice.GetChangedFields(path)`` here: USD treats
+        time-sample edits as a bit-flag on ``SdfChangeList::Entry`` rather
+        than an entry in the per-path ``infoChanged`` vector, so the
+        Python-side ``GetChangedFields`` comes back empty for them by design
+        (see ``pxr/usd/sdf/changeList.h`` and ``wrapNotice.cpp``).
+        """
+        if not prim or not prim.IsValid():
+            return []
+        events: list[dict] = []
+        ts_cache: dict = pc.setdefault(_C_TIME_SAMPLES, {})
+        full_scan = not dirty_attr_names
+        # Per-client / stacked-layer setups: emit only samples authored on
+        # the stage's current edit target. The composed view would let a
+        # stronger client's samples leak into a weaker client's emit cycle
+        # (USD's "strongest layer with samples wins the time domain" rule
+        # also shadows the weaker layer's own samples — both fail modes
+        # disappear once we read from the layer directly).
+        edit_layer = self.stage.GetEditTarget().GetLayer()
+
+        events.extend(self._xform_op_sample_events(
+            prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+        ))
+        events.extend(self._visibility_sample_events(
+            prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+        ))
+        events.extend(self._gprim_attr_sample_events(
+            prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+        ))
+        events.extend(self._connectable_input_sample_events(
+            prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+        ))
+        return events
+
+    def _xform_op_sample_events(
+        self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        xf = UsdGeom.Xformable(prim)
+        if not xf or not xf.GetXformOpOrderAttr().IsAuthored():
+            return []
+        # Cheap short-circuit: skip every op if no transform attr varies.
+        if not xf.TransformMightBeTimeVarying():
+            return []
+        events: list[dict] = []
+        for op in xf.GetOrderedXformOps():
+            field = _XFORM_OP_TYPE_TO_TRS_FIELD.get(op.GetOpType())
+            if field is None:
+                continue
+            op_name = op.GetName()
+            if not full_scan and op_name not in dirty_attr_names:
+                continue
+            attr = op.GetAttr()
+            if not attr.ValueMightBeTimeVarying():
+                continue
+            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(op_name), layer)
+            for t, val in dirty:
+                events.append({
+                    "k": K_SET_XFORM_TRS, "prim": prim_path,
+                    "fields": [field], field: val, "time": float(t),
+                })
+            ts_cache[op_name] = new_cache
+        return events
+
+    def _visibility_sample_events(
+        self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        if not full_scan and "visibility" not in dirty_attr_names:
+            return []
+        imageable = UsdGeom.Imageable(prim)
+        vis_attr = imageable.GetVisibilityAttr() if imageable else None
+        if not vis_attr or not vis_attr.IsValid() or not vis_attr.ValueMightBeTimeVarying():
+            return []
+        new_cache, dirty = _diff_time_samples(vis_attr, ts_cache.get("visibility"), layer)
+        events = [
+            {
+                "k": K_SET_VISIBILITY, "prim": prim_path,
+                "visible": val != "invisible", "time": float(t),
+            }
+            for t, val in dirty
+        ]
+        ts_cache["visibility"] = new_cache
+        return events
+
+    def _gprim_attr_sample_events(
+        self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        if full_scan:
+            attr_names = [
+                a.GetName()
+                for a in prim.GetAttributes()
+                if a.IsAuthored() and self._attr_filter(a.GetName())
+            ]
+        else:
+            attr_names = [n for n in dirty_attr_names if self._attr_filter(n)]
+        events: list[dict] = []
+        for name in attr_names:
+            attr = prim.GetAttribute(name)
+            if not attr or not attr.IsValid() or not attr.ValueMightBeTimeVarying():
+                continue
+            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(name), layer)
+            if dirty:
+                primvar_meta, attr_interp = _attr_event_metadata(prim, name, attr)
+                for t, val in dirty:
+                    ev_out: dict = {
+                        "k": K_SET_GPRIM_ATTRS, "prim": prim_path,
+                        "attrs": {name: val}, "time": float(t),
+                    }
+                    if primvar_meta:
+                        ev_out["primvar_meta"] = primvar_meta
+                    if attr_interp:
+                        ev_out["attr_interp"] = attr_interp
+                    events.append(ev_out)
+            ts_cache[name] = new_cache
+        return events
+
+    def _connectable_input_sample_events(
+        self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        kind = _connectable_kind(prim)
+        if not kind:
+            return []
+        info_id = (
+            UsdShade.Shader(prim).GetIdAttr().Get() or "" if kind == "shader" else ""
+        )
+        events: list[dict] = []
+        for inp in UsdShade.ConnectableAPI(prim).GetInputs():
+            attr = inp.GetAttr()
+            if not attr.IsAuthored() or inp.HasConnectedSource():
+                continue
+            if not attr.ValueMightBeTimeVarying():
+                continue
+            name = inp.GetBaseName()
+            cache_key = "inputs:" + name
+            if not full_scan and cache_key not in dirty_attr_names:
+                continue
+            type_name = str(attr.GetTypeName())
+            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(cache_key), layer)
+            for t, val in dirty:
+                events.append({
+                    "k": K_SET_CONNECTABLE_INPUT, "prim": prim_path,
+                    "info_id": info_id,
+                    "inputs": {name: val},
+                    "input_types": {name: type_name},
+                    "time": float(t),
+                })
+            ts_cache[cache_key] = new_cache
+        return events
+
+    def _build_stage_metadata_events(self) -> list[dict]:
+        """Emit a SetStageMetadata event when the stage's units/timeline change."""
+        if not self._stage_metadata_dirty:
+            return []
+        self._stage_metadata_dirty = False
+        current = read_stage_metadata(self.stage)
+        changed = {
+            key: val
+            for key, val in current.items()
+            if self._stage_metadata_cache.get(key) != val
+        }
+        self._stage_metadata_cache = current
+        if not changed:
+            return []
+        return [{"k": K_SET_STAGE_METADATA, **changed}]
 
     def build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for all dirty prims, diffing against last-sent state.
@@ -1551,10 +1982,12 @@ class NoticeEmitter:
         Returns a list of event dicts (ensure_prim, ensure_xform_ops, set_xform_trs,
         rename_prim, deactivate_prim) ready to wrap in a transaction.
 
-        Processing order: renames first, then deactivations/deletions, then TRS.
+        Processing order: stage metadata first, then renames, then deactivations/
+        deletions, then per-prim work.
         """
         events: list[dict] = []
 
+        events.extend(self._build_stage_metadata_events())
         events.extend(self._build_rename_events())
         events.extend(self._build_deactivation_events())
 

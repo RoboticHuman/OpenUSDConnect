@@ -141,7 +141,18 @@ Camera prims (`UsdGeomCamera`) replicate through `ensure_prim` (typeName=`"Camer
 | `fStop` | `camera.dof.aperture_fstop` + `use_dof` | `use_dof` = (fStop > 0) |
 | `projection` | `camera.type` | `"perspective"` → `PERSP`, `"orthographic"` → `ORTHO` |
 
-Static-pose sync only. Camera animation (F-curves on the camera data block) waits on time-sample support.
+Camera attributes participate in the time-sample flow: when a value is authored at a USD time sample, it replicates with the `time` field set on `set_gprim_attrs`. Blender-side F-curve authoring (cameras + transforms) is a follow-up — current capture writes the static opinion. Time samples authored on the mirror stage from any source (manual scripting, scrubbing in another DCC) are picked up automatically by the emitter.
+
+## Playback synchronization
+
+A single client at a time drives the shared playhead. The flow is:
+
+1. **Claim** — that client clicks **Claim Playback** in the panel. The server grants the leader role if no one currently holds it; otherwise the request is rejected with the current leader's id.
+2. **Drive** — the leader uses **Play / Pause / Push Frame** to advance the playhead. Each command updates the server's playback state and broadcasts `PlaybackState` to every other client.
+3. **Follow** — non-leader clients receive `PlaybackState` and the addon calls `scene.frame_set(...)` on the next idle tick, mapping `time` (USD timecode) to a Blender frame via the scene FPS. The same feedback guard that suppresses incoming-event re-emission also wraps the `frame_set` call so the depsgraph evaluation doesn't bounce back to the server.
+4. **Release** — on leader disconnect, the server clears the role and broadcasts a vacant-leader `PlaybackState`. Another client can then claim.
+
+Stage metadata (`timeCodesPerSecond`, `framesPerSecond`, `startTimeCode`, `endTimeCode`, `metersPerUnit`, `upAxis`) is delivered in `hello_ok` for new clients and broadcast as a `set_stage_metadata` event when it changes mid-session. The Blender receiver maps `framesPerSecond` to `scene.render.fps`, `metersPerUnit` to `scene.unit_settings.scale_length`, and the start/end timecodes to `scene.frame_start` / `scene.frame_end`.
 
 ## Auto-track Mode
 

@@ -17,6 +17,11 @@ MSG_QUIT = "quit"
 MSG_CREATE_PROPOSAL = "create_proposal"
 MSG_PROPOSAL_CREATED = "proposal_created"
 MSG_RATE_LIMITED = "rate_limited"
+MSG_CLAIM_PLAYBACK = "claim_playback"
+MSG_PLAYBACK_CLAIMED = "playback_claimed"
+MSG_PLAYBACK_REJECTED = "playback_rejected"
+MSG_PLAYBACK_CONTROL = "playback_control"
+MSG_PLAYBACK_STATE = "playback_state"
 
 # Event kind constants - use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -35,6 +40,18 @@ K_SET_VARIANT_SELECTIONS = "set_variant_selections"
 K_SET_MATERIAL_BINDING = "set_material_binding"
 K_SET_CONNECTABLE_INPUT = "set_connectable_input"
 K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
+K_SET_STAGE_METADATA = "set_stage_metadata"
+
+# Fields carried by a SetStageMetadata event. Authoritative list — used by
+# the codec, adapter dispatch, and emitter diff path.
+STAGE_METADATA_KEYS = (
+    "timeCodesPerSecond",
+    "framesPerSecond",
+    "startTimeCode",
+    "endTimeCode",
+    "metersPerUnit",
+    "upAxis",
+)
 
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
@@ -57,16 +74,20 @@ EVENT_KEYS = frozenset(
         K_SET_MATERIAL_BINDING,
         K_SET_CONNECTABLE_INPUT,
         K_SET_CONNECTABLE_CONNECTION,
+        K_SET_STAGE_METADATA,
     }
 )
 
-# Event application order - structural first, then composition arcs
-# (V before R before P per LIVERPS), then local value opinions (L),
-# destructive last.  This is dependency order (prim must exist before
-# values can be set), not strength order.  LIVERPS strength (L strongest,
-# S weakest) is handled by USD's composition engine, not by event ordering.
+# Event application order - stage-level settings (units, timeline) first
+# since downstream value opinions are interpreted under those units, then
+# structural prim ops, then composition arcs (V before R before P per
+# LIVERPS), then local value opinions (L), destructive last.  This is
+# dependency order (prim must exist before values can be set), not
+# strength order.  LIVERPS strength (L strongest, S weakest) is handled
+# by USD's composition engine, not by event ordering.
 # fmt: off
 _EVENT_KIND_SEQUENCE = [
+    K_SET_STAGE_METADATA,      # units + timeline before any prim ops
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_VARIANT_SELECTIONS,  # V in LIVERPS - before R
@@ -94,6 +115,7 @@ EVENT_KIND_ORDER: dict[str, int] = {k: i for i, k in enumerate(_EVENT_KIND_SEQUE
 # value-setting ChangeBlock because they create specs or affect composition.
 STRUCTURAL_EVENT_KINDS = frozenset(
     {
+        K_SET_STAGE_METADATA,
         K_ENSURE_PRIM,
         K_ENSURE_XFORM_OPS,
         K_SET_VARIANT_SELECTIONS,

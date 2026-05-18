@@ -131,6 +131,7 @@ table SetXformTrs {
     t:[float];              // 3 floats (translate)
     r:[float];              // 4 floats (quaternion wxyz)
     s:[float];              // 3 floats (scale)
+    time:double = null;     // optional time sample; null = default-time
 }
 
 table DeletePrim {
@@ -150,6 +151,7 @@ table RenamePrim {
 table SetVisibility {
     prim:string;
     visible:bool;
+    time:double = null;     // optional time sample; null = default-time
 }
 
 table SetGprimAttrs {
@@ -157,6 +159,7 @@ table SetGprimAttrs {
     attrs:[NamedAttr];
     primvar_meta:[PrimvarMeta];
     attr_interp:[AttrInterp];
+    time:double = null;     // optional time sample; null = default-time
 }
 
 table SetReference {
@@ -191,12 +194,26 @@ table SetConnectableInput {
     prim:string;
     info_id:string;         // UsdShade `info:id` (Sdr identifier) for Shader prims; empty for NodeGraph/Material/Light
     inputs:[ConnectableInputValue];
+    time:double = null;     // optional time sample; null = default-time
 }
 
 table SetConnectableConnection {
     prim:string;
     connections:[Connection];
     disconnections:[string];
+}
+
+// Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
+// metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional —
+// absent = "field not authored", present = "apply this value". upAxis is a
+// nullable string (None == empty when no opinion).
+table SetStageMetadata {
+    timeCodesPerSecond:double = null;
+    framesPerSecond:double = null;
+    startTimeCode:double = null;
+    endTimeCode:double = null;
+    metersPerUnit:double = null;
+    upAxis:string;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +237,7 @@ union EventPayload {
     SetMaterialBinding,
     SetConnectableInput,
     SetConnectableConnection,
+    SetStageMetadata,
 }
 
 table EventWrapper {

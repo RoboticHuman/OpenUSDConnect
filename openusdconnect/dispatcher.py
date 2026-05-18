@@ -31,6 +31,7 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
 )
@@ -46,10 +47,11 @@ LOG = logging.getLogger(__name__)
 
 
 # Events that mutate the USD stage (composition arcs, materials, shaders,
-# lights, and other UsdShade connectables).
-# Transforms, visibility, and gprim attrs go through the adapter only —
-# they don't need a separate mirror commit because they target whatever the
-# adapter wraps (objects, components, etc.) rather than USD scene description.
+# lights, and other UsdShade connectables) plus stage-level metadata.
+# Transforms, visibility, gprim attrs, and structural prim events go
+# through the adapter only — they target whatever the adapter wraps
+# (DCC-native objects, or a Usd.Stage via UsdStageAdapter) rather than
+# USD scene description the mirror needs to track on its own.
 STAGE_SYNC_KINDS = frozenset(
     {
         K_SET_REFERENCE,
@@ -60,6 +62,7 @@ STAGE_SYNC_KINDS = frozenset(
         K_SET_MATERIAL_BINDING,
         K_SET_CONNECTABLE_INPUT,
         K_SET_CONNECTABLE_CONNECTION,
+        K_SET_STAGE_METADATA,
     }
 )
 
@@ -175,11 +178,17 @@ class EventDispatcher:
             stage_skip = self._compute_stage_skip(events)
             adapter_skip = self._compute_adapter_skip(events, stage_skip)
 
-            # 1. Mirror commit — atomic batch into a separate USD stage.
-            #    Only stage-affecting kinds (composition arcs, materials,
-            #    shaders) need to be reflected on the mirror; transforms
-            #    and gprim attrs travel through the adapter only.
-            if self.mirror_stage is not None:
+            # Stage-backed adapters that share their Usd.Stage with the
+            # mirror don't need the separate commit — apply_events on
+            # the adapter already covers the same stage.
+            adapter_handles_mirror = (
+                self.mirror_stage is not None
+                and self.adapter.targets_stage() is self.mirror_stage
+            )
+
+            # 1. Mirror commit — atomic batch into the dispatcher's
+            #    separate USD stage.
+            if self.mirror_stage is not None and not adapter_handles_mirror:
                 stage_events = [
                     ev for i, ev in enumerate(events)
                     if i not in stage_skip and ev.get("k") in STAGE_SYNC_KINDS
@@ -188,13 +197,14 @@ class EventDispatcher:
                     with atomic_apply(self.mirror_stage):
                         apply_events(self.mirror_stage, stage_events)
 
-            # 2. Adapter dispatch — every non-skipped event.  Reached
-            #    only after the mirror commit succeeded, so adapters can
-            #    rely on the mirror reflecting the events about to apply.
-            for i, ev in enumerate(events):
-                if i in adapter_skip:
-                    continue
-                self.adapter.apply_event(ev)
+            # 2. Adapter dispatch — every non-skipped event. Reached
+            #    after the mirror commit so adapters can rely on the
+            #    mirror reflecting the events about to apply.
+            non_skipped = [
+                ev for i, ev in enumerate(events) if i not in adapter_skip
+            ]
+            if non_skipped:
+                self.adapter.apply_events(non_skipped)
 
             # 3. Emitter cache invalidation — re-syncs the per-prim diff
             #    cache with the just-mutated stage.  Without this the

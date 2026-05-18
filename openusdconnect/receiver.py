@@ -22,8 +22,10 @@ from collections.abc import Callable
 
 from .codec import (
     PayloadType,
+    _decode_stage_metadata_table,
     decode_envelope,
     is_ping,
+    message_to_dict,
     resolve_payload,
 )
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
@@ -76,6 +78,10 @@ class ReceiverThread(threading.Thread):
         origin: str | None = None,
         token: str | None = None,
         on_token_issued: Callable | None = None,
+        on_stage_metadata: Callable[[dict], None] | None = None,
+        on_playback_state: Callable[[dict], None] | None = None,
+        on_playback_claimed: Callable[[dict], None] | None = None,
+        on_playback_rejected: Callable[[dict], None] | None = None,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -88,6 +94,10 @@ class ReceiverThread(threading.Thread):
         self.origin = origin
         self.token = token
         self._on_token_issued = on_token_issued
+        self._on_stage_metadata = on_stage_metadata
+        self._on_playback_state = on_playback_state
+        self._on_playback_claimed = on_playback_claimed
+        self._on_playback_rejected = on_playback_rejected
         self._reconnect_base_delay = reconnect_base_delay
         self._reconnect_max_delay = reconnect_max_delay
         self._stop_event = threading.Event()
@@ -98,6 +108,7 @@ class ReceiverThread(threading.Thread):
         self.last_seq: int = 0
         self._queue_overflow = False
         self.auth_rejected = False
+        self.stage_metadata: dict = {}
 
     @property
     def connected(self) -> bool:
@@ -224,6 +235,18 @@ class ReceiverThread(threading.Thread):
                         if self._on_token_issued:
                             self._on_token_issued(issued)
                         LOG.info("ReceiverThread: token issued by server")
+                    sm = ho.StageMetadata()
+                    if sm is not None:
+                        meta = _decode_stage_metadata_table(sm)
+                        if meta:
+                            self.stage_metadata = meta
+                            if self._on_stage_metadata:
+                                try:
+                                    self._on_stage_metadata(meta)
+                                except Exception:
+                                    LOG.exception(
+                                        "ReceiverThread: on_stage_metadata callback failed",
+                                    )
                     self.connected = True
                     LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                 continue
@@ -232,10 +255,33 @@ class ReceiverThread(threading.Thread):
             if is_ping(buf):
                 continue
 
+            # Playback messages are control-plane signals: fire callbacks and
+            # do not enqueue (the queue is reserved for stage-event bytes).
+            env = decode_envelope(buf)
+            pt = env.PayloadType()
+            if pt in (
+                PayloadType.PlaybackState,
+                PayloadType.PlaybackClaimed,
+                PayloadType.PlaybackRejected,
+            ):
+                msg = message_to_dict(buf)
+                cb = None
+                if pt == PayloadType.PlaybackState:
+                    cb = self._on_playback_state
+                elif pt == PayloadType.PlaybackClaimed:
+                    cb = self._on_playback_claimed
+                else:
+                    cb = self._on_playback_rejected
+                if cb is not None:
+                    try:
+                        cb(msg)
+                    except Exception:
+                        LOG.exception("ReceiverThread: playback callback failed")
+                continue
+
             # Extract seq for tracking (read from BroadcastEvent without
             # full dict conversion)
-            env = decode_envelope(buf)
-            if env.PayloadType() == PayloadType.BroadcastEvent:
+            if pt == PayloadType.BroadcastEvent:
                 _, be = resolve_payload(env)
                 seq = be.Seq()
                 if seq > self.last_seq:

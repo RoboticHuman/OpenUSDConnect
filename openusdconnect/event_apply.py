@@ -31,6 +31,7 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -40,6 +41,19 @@ from .protocol_constants import (
 )
 
 LOG = logging.getLogger(__name__)
+
+# Module-level singleton — `Usd.TimeCode.Default()` is immutable, so the
+# usual mutable-default-arg footgun doesn't apply, but ruff's B008 still
+# flags the call. One shared instance keeps signatures clean.
+_TIME_DEFAULT = Usd.TimeCode.Default()
+
+
+def _timecode(ev: dict) -> Usd.TimeCode:
+    """Return ``Usd.TimeCode(ev["time"])`` or ``Usd.TimeCode.Default()`` when absent."""
+    t = ev.get("time")
+    if t is None:
+        return _TIME_DEFAULT
+    return Usd.TimeCode(float(t))
 
 
 def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
@@ -203,12 +217,13 @@ def _ensure_primvar_attr(
     return pv.GetAttr()
 
 
-def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
+def _set_gprim_attr(
+    prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME_DEFAULT
+) -> None:
     """Set a single attribute on a typed gprim, coercing to the schema-defined type.
 
-    Accepts Python lists (legacy/dict path) and numpy arrays (zero-copy path).
-    When value is a numpy array, uses Vt.*Array.FromNumpy() for bulk conversion
-    without per-element Python iteration.
+    Numpy arrays take a zero-copy ``Vt.*Array.FromNumpy`` path; Python lists are
+    converted via ``Gf``/``Vt`` constructors. ``time`` selects the time sample.
     """
     import numpy as np
 
@@ -221,51 +236,51 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value) -> None:
     if isinstance(value, np.ndarray):
         if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
             arr = value.reshape(-1, 3).astype(np.float32, copy=False)
-            attr.Set(Vt.Vec3fArray.FromNumpy(arr))
+            attr.Set(Vt.Vec3fArray.FromNumpy(arr), time)
         elif type_name in ("float2[]", "texCoord2f[]"):
             arr = value.reshape(-1, 2).astype(np.float32, copy=False)
-            attr.Set(Vt.Vec2fArray.FromNumpy(arr))
+            attr.Set(Vt.Vec2fArray.FromNumpy(arr), time)
         elif type_name == "int[]":
-            attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)))
+            attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)), time)
         elif type_name == "float[]":
-            attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)))
+            attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)), time)
         elif (
             type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
             and value.size == 3
         ):
-            attr.Set(Gf.Vec3f(*value.flat))
+            attr.Set(Gf.Vec3f(*value.flat), time)
         elif type_name in ("float2", "texCoord2f") and value.size == 2:
-            attr.Set(Gf.Vec2f(*value.flat))
+            attr.Set(Gf.Vec2f(*value.flat), time)
         elif type_name == "double3" and value.size == 3:
-            attr.Set(Gf.Vec3d(*value.flat))
+            attr.Set(Gf.Vec3d(*value.flat), time)
         else:
-            attr.Set(value.tolist())
+            attr.Set(value.tolist(), time)
         return
 
     if isinstance(value, list):
         if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
             arr = Vt.Vec3fArray([Gf.Vec3f(*v) for v in value])
-            attr.Set(arr)
+            attr.Set(arr, time)
         elif type_name in ("float2[]", "texCoord2f[]"):
             arr = Vt.Vec2fArray([Gf.Vec2f(*v) for v in value])
-            attr.Set(arr)
+            attr.Set(arr, time)
         elif type_name == "int[]":
-            attr.Set(Vt.IntArray(value))
+            attr.Set(Vt.IntArray(value), time)
         elif type_name == "float[]":
-            attr.Set(Vt.FloatArray(value))
+            attr.Set(Vt.FloatArray(value), time)
         elif (
             type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
             and len(value) == 3
         ):
-            attr.Set(Gf.Vec3f(*value))
+            attr.Set(Gf.Vec3f(*value), time)
         elif type_name in ("float2", "texCoord2f") and len(value) == 2:
-            attr.Set(Gf.Vec2f(*value))
+            attr.Set(Gf.Vec2f(*value), time)
         elif type_name == "double3" and len(value) == 3:
-            attr.Set(Gf.Vec3d(*value))
+            attr.Set(Gf.Vec3d(*value), time)
         else:
-            attr.Set(value)
+            attr.Set(value, time)
     else:
-        attr.Set(value)
+        attr.Set(value, time)
 
 
 @register_applier(K_SET_XFORM_TRS)
@@ -286,14 +301,15 @@ def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
             op_cache[prim_path] = (t_op, o_op, s_op)
 
     fields = ev.get("fields", [])
+    tc = _timecode(ev)
     if "t" in fields and t_op:
         x, y, z = ev["t"]
-        t_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
+        t_op.Set(Gf.Vec3d(float(x), float(y), float(z)), tc)
     if "r" in fields and o_op:
-        o_op.Set(quatf_from_wxyz(ev["r"]))
+        o_op.Set(quatf_from_wxyz(ev["r"]), tc)
     if "s" in fields and s_op:
         x, y, z = ev["s"]
-        s_op.Set(Gf.Vec3d(float(x), float(y), float(z)))
+        s_op.Set(Gf.Vec3d(float(x), float(y), float(z)), tc)
 
 
 @register_applier(K_RENAME_PRIM)
@@ -311,7 +327,7 @@ def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
     if prim and prim.IsValid():
         imageable = UsdGeom.Imageable(prim)
         vis_value = "inherited" if ev.get("visible", True) else "invisible"
-        imageable.GetVisibilityAttr().Set(vis_value)
+        imageable.GetVisibilityAttr().Set(vis_value, _timecode(ev))
 
 
 @register_applier(K_SET_GPRIM_ATTRS)
@@ -321,13 +337,14 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
         return
     primvar_meta = ev.get("primvar_meta", {})
     pvapi = UsdGeom.PrimvarsAPI(prim) if primvar_meta else None
+    tc = _timecode(ev)
 
     for attr_name, attr_value in ev.get("attrs", {}).items():
         meta = primvar_meta.get(attr_name)
         # Create non-schema primvar attributes that don't exist yet
         if meta and not prim.GetAttribute(attr_name).IsValid():
             _ensure_primvar_attr(prim, attr_name, meta, pvapi)
-        _set_gprim_attr(prim, attr_name, attr_value)
+        _set_gprim_attr(prim, attr_name, attr_value, tc)
 
     # Set interpolation on primvars — needed for schema-defined primvars
     # (e.g. displayColor) where the default interpolation differs from
@@ -347,6 +364,23 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
         attr = prim.GetAttribute(attr_name)
         if attr and attr.IsValid():
             attr.SetMetadata("interpolation", interp)
+
+
+@register_applier(K_SET_STAGE_METADATA)
+def _apply_set_stage_metadata(stage: Usd.Stage, ev: dict) -> None:
+    """Write stage-level metadata. Only keys present in ``ev`` are touched."""
+    if "timeCodesPerSecond" in ev:
+        stage.SetTimeCodesPerSecond(float(ev["timeCodesPerSecond"]))
+    if "framesPerSecond" in ev:
+        stage.SetFramesPerSecond(float(ev["framesPerSecond"]))
+    if "startTimeCode" in ev:
+        stage.SetStartTimeCode(float(ev["startTimeCode"]))
+    if "endTimeCode" in ev:
+        stage.SetEndTimeCode(float(ev["endTimeCode"]))
+    if "metersPerUnit" in ev:
+        UsdGeom.SetStageMetersPerUnit(stage, float(ev["metersPerUnit"]))
+    if "upAxis" in ev and ev["upAxis"]:
+        UsdGeom.SetStageUpAxis(stage, ev["upAxis"])
 
 
 @register_applier(K_SET_VARIANT_SELECTIONS)
@@ -428,12 +462,17 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
 
 
 def _set_connectable_input_value(
-    connectable: UsdShade.ConnectableAPI, name: str, value, type_name: str
+    connectable: UsdShade.ConnectableAPI,
+    name: str,
+    value,
+    type_name: str,
+    time: Usd.TimeCode = _TIME_DEFAULT,
 ) -> None:
     """Set a single input on a UsdShade connectable, creating it if needed.
 
     Works on Shader, NodeGraph, Material, and UsdLux lights — all share
-    GetInput / CreateInput through ConnectableAPI.
+    GetInput / CreateInput through ConnectableAPI. ``time`` selects the USD
+    time sample; default writes the static opinion.
     """
     sdf_type = Sdf.ValueTypeNames.Find(type_name)
     if not sdf_type:
@@ -444,25 +483,25 @@ def _set_connectable_input_value(
 
     if type_name == "asset" and isinstance(value, str):
         # Empty string clears the asset path.
-        inp.Set(Sdf.AssetPath(value) if value else Sdf.AssetPath())
+        inp.Set(Sdf.AssetPath(value) if value else Sdf.AssetPath(), time)
         return
 
     if isinstance(value, list):
         if type_name in ("color3f", "float3", "normal3f"):
-            inp.Set(Gf.Vec3f(*value))
+            inp.Set(Gf.Vec3f(*value), time)
         elif type_name in ("float2", "texCoord2f"):
-            inp.Set(Gf.Vec2f(*value))
+            inp.Set(Gf.Vec2f(*value), time)
         elif type_name in ("float4", "color4f"):
-            inp.Set(Gf.Vec4f(*value))
+            inp.Set(Gf.Vec4f(*value), time)
         else:
-            inp.Set(value)
+            inp.Set(value, time)
     else:
         if type_name == "float":
-            inp.Set(float(value))
+            inp.Set(float(value), time)
         elif type_name == "int":
-            inp.Set(int(value))
+            inp.Set(int(value), time)
         else:
-            inp.Set(value)
+            inp.Set(value, time)
 
 
 @register_applier(K_SET_CONNECTABLE_INPUT)
@@ -491,9 +530,10 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
     connectable = UsdShade.ConnectableAPI(prim)
     inputs = ev.get("inputs", {})
     input_types = ev.get("input_types", {})
+    tc = _timecode(ev)
     for name, value in inputs.items():
         type_name = input_types.get(name, "float")
-        _set_connectable_input_value(connectable, name, value, type_name)
+        _set_connectable_input_value(connectable, name, value, type_name, tc)
 
 
 def _resolve_shader_port_type(prim: Usd.Prim, attr: ConnectableAttr):

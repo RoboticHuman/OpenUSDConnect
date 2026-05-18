@@ -31,12 +31,15 @@ from ..protocol_constants import (
     MSG_AUTH_REJECTED,
     MSG_EVENT,
     MSG_HELLO_OK,
+    MSG_PLAYBACK_CLAIMED,
+    MSG_PLAYBACK_REJECTED,
+    MSG_PLAYBACK_STATE,
     MSG_PROPOSAL_CREATED,
     MSG_RATE_LIMITED,
     MSG_RESYNC,
 )
 from ..transport import send_msg
-from ._sock_utils import _set_send_timeout
+from ._sock_utils import _set_keepalive, _set_send_timeout
 from .rate_limit import TokenBucket
 
 if TYPE_CHECKING:
@@ -56,12 +59,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         sync_server = self.server.sync_server
 
         # Socket hardening: disable Nagle (small JSON messages benefit from
-        # immediate sends), enable keepalive (detect dead peers), and set a
+        # immediate sends), enable aggressive keepalive (silent-disconnect
+        # detection capped at ~60 s — see _set_keepalive), and set a
         # handshake timeout so misbehaving clients don't block handler threads.
         # The timeout is cleared before _read_loop since receivers legitimately
-        # sit idle (only consuming broadcasts); SO_KEEPALIVE detects dead peers.
+        # sit idle (only consuming broadcasts); keepalive surfaces dead peers
+        # as a socket error on the next recv.
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        _set_keepalive(self.request)
         self.request.settimeout(60.0)
 
         # Per-receiver send lock: serializes replay and broadcast sends on
@@ -124,7 +129,18 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         hello_ok = {"type": MSG_HELLO_OK}
         if issued_token:
             hello_ok["token"] = issued_token
+        stage_meta = sync_server.get_stage_metadata_payload()
+        if stage_meta:
+            hello_ok["stage_metadata"] = stage_meta
         send_msg(self.request, hello_ok)
+
+        # Receivers get a PlaybackState snapshot post-handshake so fresh
+        # clients see the current leader + timecode without waiting for
+        # the next control. Emitters skip it — they don't read past
+        # hello_ok and would just fill their socket buffer.
+        if role == "receiver":
+            snapshot = sync_server.get_playback_state()
+            send_msg(self.request, {"type": MSG_PLAYBACK_STATE, **snapshot})
 
         LOG.info(
             "Client connected: role=%s origin=%s dept=%s from %s",
@@ -185,7 +201,15 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             with sync_server.clients_lock:
                 sync_server.receivers.discard(self)
             sync_server.unregister_client(self.client_address)
+            # Release the playback-leader role and broadcast a vacant-leader
+            # PlaybackState so other clients can claim it.
+            if sync_server.release_playback(self._client_id or ""):
+                self._broadcast_playback_state(sync_server)
             LOG.info("Client disconnected: %s", self.client_address)
+
+    def _broadcast_playback_state(self, sync_server: UsdSyncServer):
+        state = sync_server.get_playback_state()
+        sync_server.broadcast_message({"type": MSG_PLAYBACK_STATE, **state})
 
     def _read_loop(self, sync_server: UsdSyncServer):
         while True:
@@ -212,6 +236,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if pt == PayloadType.CreateProposal:
                 msg = message_to_dict(buf)
                 self._handle_create_proposal(sync_server, msg)
+                continue
+
+            if pt == PayloadType.ClaimPlayback:
+                msg = message_to_dict(buf)
+                self._handle_claim_playback(sync_server, msg)
+                continue
+
+            if pt == PayloadType.PlaybackControl:
+                msg = message_to_dict(buf)
+                self._handle_playback_control(sync_server, msg)
                 continue
 
             if pt != PayloadType.Txn:
@@ -290,6 +324,47 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             for ev in events:
                 if ev.get("k") == K_LOAD_PAYLOAD:
                     sync_server.replay_children_after_load(ev["prim"])
+
+    def _handle_claim_playback(self, sync_server: UsdSyncServer, msg: dict):
+        initial_time = msg.get("time")
+        granted, current_leader = sync_server.claim_playback(
+            self._client_id or "",
+            initial_time=initial_time,
+        )
+        if not granted:
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_PLAYBACK_REJECTED,
+                    "reason": "another client holds the playback leader role",
+                    "current_leader_client_id": current_leader,
+                },
+            )
+            return
+        send_msg(
+            self.request,
+            {"type": MSG_PLAYBACK_CLAIMED, "leader_client_id": current_leader},
+        )
+        self._broadcast_playback_state(sync_server)
+
+    def _handle_playback_control(self, sync_server: UsdSyncServer, msg: dict):
+        ok, payload, current_leader = sync_server.apply_playback_control(
+            self._client_id or "",
+            msg.get("action", ""),
+            float(msg.get("time", 0.0)),
+            float(msg.get("rate", 1.0)),
+        )
+        if not ok:
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_PLAYBACK_REJECTED,
+                    "reason": str(payload),
+                    "current_leader_client_id": current_leader,
+                },
+            )
+            return
+        sync_server.broadcast_message({"type": MSG_PLAYBACK_STATE, **payload})
 
     def _handle_create_proposal(self, sync_server: UsdSyncServer, msg: dict):
         """Handle a create_proposal message from an emitter."""

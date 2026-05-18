@@ -88,6 +88,9 @@ select = [
 "tests/unit/test_usdlux.py" = ["E402"]
 "tests/unit/test_usdgeomcamera.py" = ["E402"]
 "tests/unit/test_prim_channels.py" = ["E402"]
+"tests/unit/test_time_samples.py" = ["E402"]
+"tests/unit/test_stage_metadata.py" = ["E402"]
+"tests/unit/test_playback_leader.py" = ["E402"]
 "scripts/*.py" = ["E402", "E501"]
 "integrations/unreal/connect.py" = ["E402"]
 

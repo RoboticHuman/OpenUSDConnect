@@ -7,21 +7,23 @@ on the main thread via bpy.app.timers.
 from __future__ import annotations
 
 import logging
+import threading
 
 try:
     import bpy
-    from bpy.props import BoolProperty, IntProperty, StringProperty
+    from bpy.props import BoolProperty, FloatProperty, IntProperty, StringProperty
 
     BPY_AVAILABLE = True
 except Exception:
     BPY_AVAILABLE = False
+    BoolProperty = FloatProperty = IntProperty = StringProperty = None  # type: ignore[assignment]
 
 from openusdconnect.codec import decode_messages
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
 
 from . import SESSION_ORIGIN as _ORIGIN
-from .blender_adapter import BlenderAdapter
+from .blender_adapter import BlenderAdapter, apply_stage_metadata_to_scene
 
 LOG = logging.getLogger(__name__)
 
@@ -63,6 +65,29 @@ def _ensure_scene_props():
         S.usd_connect_recv_running = BoolProperty(name="Receiver Running", default=False)
     if not hasattr(S, "usd_connect_recv_last_seq"):
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
+    # Playback synchronization state — populated from server messages.
+    if not hasattr(S, "usd_connect_playback_is_leader"):
+        S.usd_connect_playback_is_leader = BoolProperty(
+            name="Local Is Playback Leader", default=False,
+        )
+    if not hasattr(S, "usd_connect_playback_leader_id"):
+        S.usd_connect_playback_leader_id = StringProperty(
+            name="Playback Leader", default="",
+        )
+    if not hasattr(S, "usd_connect_playback_time"):
+        S.usd_connect_playback_time = FloatProperty(
+            name="Playback Time (timecode)", default=0.0,
+        )
+    if not hasattr(S, "usd_connect_playback_playing"):
+        S.usd_connect_playback_playing = BoolProperty(
+            name="Playback Playing", default=False,
+        )
+    # USD's timeCodesPerSecond from the server stage; needed for the
+    # timecode↔frame conversion. Defaults to 24 — the USD spec default.
+    if not hasattr(S, "usd_connect_tcps"):
+        S.usd_connect_tcps = FloatProperty(
+            name="Stage timeCodesPerSecond", default=24.0,
+        )
 
 
 def _ensure_adapter():
@@ -123,6 +148,121 @@ def _seed_multi_node_shader_maps(cap, prim_path: str):
                     shader_path,
                     len(values),
                 )
+
+
+# Latest-wins PlaybackState handoff: written by the receiver thread,
+# read-and-cleared by Blender's main-thread timer. The lock keeps the
+# read-then-clear pair atomic so an update arriving in between can't be
+# silently wiped — under the GIL this is rare in practice, under
+# free-threaded Python it's frequent (see scripts/bench_playback_state_sync.py).
+# Python's free-threading HOWTO explicitly recommends threading.Lock
+# over relying on built-in containers' internal locks.
+_PLAYBACK_LOCK = threading.Lock()
+_LATEST_PLAYBACK_STATE: dict | None = None
+
+
+def _on_playback_state(state: dict) -> None:
+    """Receive an authoritative PlaybackState broadcast.
+
+    Stashes the payload for the next timer tick to apply on the Blender
+    main thread (callbacks run on the receiver thread).
+    """
+    global _LATEST_PLAYBACK_STATE
+    snapshot = dict(state)
+    with _PLAYBACK_LOCK:
+        _LATEST_PLAYBACK_STATE = snapshot
+
+
+def _on_stage_metadata(meta: dict) -> None:
+    """Receive a stage_metadata snapshot from hello_ok or live broadcast.
+
+    Off-main-thread safe: schedules the actual scene mutation through
+    bpy.app.timers so we never touch Blender state from the network thread.
+    """
+    if not BPY_AVAILABLE:
+        return
+
+    def _apply():
+        apply_stage_metadata_to_scene(bpy.context.scene, **meta)
+        return None
+
+    try:
+        bpy.app.timers.register(_apply, first_interval=0.0)
+    except RuntimeError:
+        LOG.exception("Failed to schedule stage_metadata apply")
+
+
+def _on_playback_claimed(msg: dict) -> None:
+    """We just got granted the playback-leader role."""
+    if not BPY_AVAILABLE:
+        return
+
+    def _apply():
+        scene = bpy.context.scene
+        if scene is not None:
+            scene.usd_connect_playback_is_leader = True
+            scene.usd_connect_playback_leader_id = msg.get("leader_client_id", "")
+        return None
+
+    try:
+        bpy.app.timers.register(_apply, first_interval=0.0)
+    except RuntimeError:
+        pass
+
+
+def _on_playback_rejected(msg: dict) -> None:
+    LOG.info(
+        "Playback control rejected: %s (current leader: %s)",
+        msg.get("reason", ""),
+        msg.get("current_leader_client_id", ""),
+    )
+
+
+def _apply_pending_playback_state() -> None:
+    """Drain the latest PlaybackState onto the Blender timeline.
+
+    Called from the queue timer (main thread) under the
+    ``_set_applying_remote`` guard so the resulting depsgraph_update_post
+    callbacks don't echo the frame change back to the server.
+    """
+    global _LATEST_PLAYBACK_STATE
+    with _PLAYBACK_LOCK:
+        state = _LATEST_PLAYBACK_STATE
+        _LATEST_PLAYBACK_STATE = None
+    if state is None or not BPY_AVAILABLE:
+        return
+    scene = bpy.context.scene
+    if scene is None:
+        return
+    leader = state.get("leader_client_id", "") or ""
+    scene.usd_connect_playback_leader_id = leader
+    try:
+        from . import STABLE_CLIENT_ID
+    except ImportError:
+        STABLE_CLIENT_ID = ""
+    scene.usd_connect_playback_is_leader = bool(leader) and leader == STABLE_CLIENT_ID
+    scene.usd_connect_playback_time = float(state.get("time", 0.0))
+    scene.usd_connect_playback_playing = bool(state.get("playing", False))
+    # Vacant-leader broadcast (server clears the seat on disconnect): the
+    # message is a UI notification only, not a drive command. Followers
+    # shouldn't be yanked back to time=0 just because the leader left.
+    if not leader:
+        return
+    # The leader's own client mustn't echo its own state back into frame_set —
+    # the user's local scrub already moved the playhead.
+    if scene.usd_connect_playback_is_leader:
+        return
+    fps = max(1.0, float(scene.render.fps or 24.0))
+    tcps = max(1.0, float(getattr(scene, "usd_connect_tcps", 24.0)))
+    target_frame = int(round(float(state.get("time", 0.0)) / tcps * fps))
+    # Skip the (expensive) depsgraph eval when we'd land on the same frame
+    # — the leader resending the same timecode shouldn't burn cycles.
+    if target_frame == scene.frame_current:
+        return
+    try:
+        scene.frame_set(target_frame)
+    except RuntimeError:
+        LOG.exception("frame_set failed for playback state")
 
 
 def _on_imported(prim_paths: list[str]) -> None:
@@ -236,6 +376,9 @@ def _process_queue_timer():
     _set_applying_remote(True)
     try:
         applied = _drain_and_process()
+        # Apply the latest PlaybackState (if any) under the same guard so
+        # frame_set's recursive depsgraph eval stays suppressed.
+        _apply_pending_playback_state()
 
         if applied > 0:
             # Refresh viewport once after processing all events (not per-event)
@@ -308,6 +451,10 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
                 sync_from=sync_from,
                 client_id=STABLE_CLIENT_ID,
                 origin=_ORIGIN,
+                on_stage_metadata=_on_stage_metadata,
+                on_playback_state=_on_playback_state,
+                on_playback_claimed=_on_playback_claimed,
+                on_playback_rejected=_on_playback_rejected,
             )
             _RECEIVER.start()
             _DISPATCHER = _build_dispatcher(_RECEIVER)
@@ -366,6 +513,125 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _get_active_sender():
+    """Locate the EventSender owned by the capture module, if any."""
+    cap = _get_capture_mod()
+    if cap is None:
+        return None
+    state = getattr(cap, "_state", None)
+    if state is None:
+        return None
+    return getattr(state, "sender", None)
+
+
+def _frame_change_to_playback_control(scene):
+    """Leader broadcasts its current frame as a PlaybackControl.
+
+    Bound to ``bpy.app.handlers.frame_change_post`` — fires once per
+    timeline frame change, covering both autonomous playback (Spacebar)
+    and manual scrubs. Only the local playback leader emits; followers
+    skip. ``_APPLYING_REMOTE`` short-circuits the case where a frame
+    change is itself the consequence of a received ``PlaybackState``
+    (the receiver path calls ``scene.frame_set``, which fires this
+    handler — without the guard we'd echo our own snapshot back to
+    the server).
+    """
+    if _APPLYING_REMOTE:
+        return
+    if not getattr(scene, "usd_connect_playback_is_leader", False):
+        return
+    sender = _get_active_sender()
+    if sender is None or not sender.connected:
+        return
+    fps = max(1.0, float(scene.render.fps or 24.0))
+    tcps = max(1.0, float(getattr(scene, "usd_connect_tcps", 24.0)))
+    timecode = float(scene.frame_current) / fps * tcps
+    sender.send_playback_control("set_time", time=timecode)
+
+
+class USD_CONNECT_OT_claim_playback(bpy.types.Operator):
+    bl_idname = "usd_connect.claim_playback"
+    bl_label = "Claim Playback"
+    bl_description = "Take the playback-leader role on the server"
+
+    def execute(self, context):
+        sender = _get_active_sender()
+        if sender is None or not sender.connected:
+            self.report({"WARNING"}, "Emitter must be connected to claim playback")
+            return {"CANCELLED"}
+        # Include our current frame as the initial timecode so the server
+        # sets the shared playhead to our position atomically with the
+        # grant — avoids followers snapping to the server's stale value
+        # (typically 0) on a fresh claim.
+        scene = context.scene
+        fps = max(1.0, float(scene.render.fps or 24.0))
+        tcps = max(1.0, float(getattr(scene, "usd_connect_tcps", 24.0)))
+        timecode = float(scene.frame_current) / fps * tcps
+        if not sender.claim_playback(time=timecode):
+            self.report({"ERROR"}, "Failed to send claim_playback")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Playback claim sent")
+        return {"FINISHED"}
+
+
+class USD_CONNECT_OT_release_playback(bpy.types.Operator):
+    bl_idname = "usd_connect.release_playback"
+    bl_label = "Release Playback"
+    bl_description = "Release the playback-leader role (server clears it on disconnect)"
+
+    def execute(self, context):
+        # The protocol doesn't ship an explicit Release message: the server
+        # releases when the client disconnects or another client claims.
+        # For now we just flip the local UI flag; full release is implicit.
+        context.scene.usd_connect_playback_is_leader = False
+        self.report({"INFO"}, "Local leader flag cleared (server still tracks on disconnect)")
+        return {"FINISHED"}
+
+
+class USD_CONNECT_OT_playback_play(bpy.types.Operator):
+    bl_idname = "usd_connect.playback_play"
+    bl_label = "Play"
+
+    def execute(self, context):
+        sender = _get_active_sender()
+        if sender is None or not sender.connected:
+            self.report({"WARNING"}, "Not connected")
+            return {"CANCELLED"}
+        sender.send_playback_control("play")
+        return {"FINISHED"}
+
+
+class USD_CONNECT_OT_playback_pause(bpy.types.Operator):
+    bl_idname = "usd_connect.playback_pause"
+    bl_label = "Pause"
+
+    def execute(self, context):
+        sender = _get_active_sender()
+        if sender is None or not sender.connected:
+            self.report({"WARNING"}, "Not connected")
+            return {"CANCELLED"}
+        sender.send_playback_control("pause")
+        return {"FINISHED"}
+
+
+class USD_CONNECT_OT_playback_set_time(bpy.types.Operator):
+    bl_idname = "usd_connect.playback_set_time"
+    bl_label = "Scrub Playhead"
+    bl_description = "Push the current Blender frame to the server as a timecode"
+
+    def execute(self, context):
+        sender = _get_active_sender()
+        if sender is None or not sender.connected:
+            self.report({"WARNING"}, "Not connected")
+            return {"CANCELLED"}
+        scene = context.scene
+        fps = max(1.0, float(scene.render.fps or 24.0))
+        tcps = max(1.0, float(getattr(scene, "usd_connect_tcps", 24.0)))
+        timecode = float(scene.frame_current) / fps * tcps
+        sender.send_playback_control("set_time", time=timecode)
+        return {"FINISHED"}
+
+
 class USD_CONNECT_OT_reset_receiver_seq(bpy.types.Operator):
     bl_idname = "usd_connect.reset_receiver_seq"
     bl_label = "Reset Seq"
@@ -390,6 +656,11 @@ _RECEIVER_CLASSES = (
     USD_CONNECT_OT_start_receiver,
     USD_CONNECT_OT_stop_receiver,
     USD_CONNECT_OT_reset_receiver_seq,
+    USD_CONNECT_OT_claim_playback,
+    USD_CONNECT_OT_release_playback,
+    USD_CONNECT_OT_playback_play,
+    USD_CONNECT_OT_playback_pause,
+    USD_CONNECT_OT_playback_set_time,
 )
 
 
@@ -398,6 +669,8 @@ def register():
     if BPY_AVAILABLE:
         for c in _RECEIVER_CLASSES:
             bpy.utils.register_class(c)
+        if _frame_change_to_playback_control not in bpy.app.handlers.frame_change_post:
+            bpy.app.handlers.frame_change_post.append(_frame_change_to_playback_control)
 
 
 def unregister():
@@ -408,6 +681,8 @@ def unregister():
     _DISPATCHER = None
     _QUEUE_TIMER_REGISTERED = False
     if BPY_AVAILABLE:
+        if _frame_change_to_playback_control in bpy.app.handlers.frame_change_post:
+            bpy.app.handlers.frame_change_post.remove(_frame_change_to_playback_control)
         for c in reversed(_RECEIVER_CLASSES):
             bpy.utils.unregister_class(c)
     recv_props = (
@@ -415,6 +690,11 @@ def unregister():
         "usd_connect_recv_port",
         "usd_connect_recv_running",
         "usd_connect_recv_last_seq",
+        "usd_connect_playback_is_leader",
+        "usd_connect_playback_leader_id",
+        "usd_connect_playback_time",
+        "usd_connect_playback_playing",
+        "usd_connect_tcps",
     )
     for prop_name in recv_props:
         if hasattr(bpy.types.Scene, prop_name):

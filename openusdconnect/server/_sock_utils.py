@@ -1,10 +1,13 @@
-"""Platform-aware socket helpers (send-only timeout)."""
+"""Platform-aware socket helpers (send-only timeout, keepalive tuning)."""
 
 from __future__ import annotations
 
+import logging
 import socket
 import struct
 import sys
+
+LOG = logging.getLogger(__name__)
 
 
 def _set_send_timeout(sock: socket.socket, timeout_s: float):
@@ -36,3 +39,44 @@ def _set_send_timeout(sock: socket.socket, timeout_s: float):
         socket.SO_SNDTIMEO,
         struct.pack(fmt, secs, usecs),
     )
+
+
+def _set_keepalive(
+    sock: socket.socket,
+    *,
+    idle_s: int = 30,
+    interval_s: int = 10,
+    count: int = 3,
+) -> None:
+    """Enable aggressive TCP keepalive on a socket. Defaults give silent-
+    disconnect detection in ~60 s instead of the OS default of ~2 hours.
+
+    Per-option setsockopt failures are logged but don't raise — SO_KEEPALIVE
+    is the minimum guarantee, the per-platform tuning is best-effort.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        LOG.debug("SO_KEEPALIVE unsupported on this socket", exc_info=True)
+        return
+
+    # macOS uses TCP_KEEPALIVE for the idle threshold; Linux + Windows
+    # 3.13+ use TCP_KEEPIDLE. Both expose TCP_KEEPINTVL / TCP_KEEPCNT.
+    idle_opt = getattr(socket, "TCP_KEEPIDLE", None) or getattr(
+        socket, "TCP_KEEPALIVE", None,
+    )
+    if idle_opt is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, idle_opt, idle_s)
+        except OSError:
+            LOG.debug("TCP_KEEPIDLE/KEEPALIVE unsupported", exc_info=True)
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval_s)
+        except OSError:
+            LOG.debug("TCP_KEEPINTVL unsupported", exc_info=True)
+    if hasattr(socket, "TCP_KEEPCNT"):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count)
+        except OSError:
+            LOG.debug("TCP_KEEPCNT unsupported", exc_info=True)
