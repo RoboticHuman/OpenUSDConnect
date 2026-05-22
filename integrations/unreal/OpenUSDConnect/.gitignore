@@ -1,0 +1,13 @@
+# Unreal build artefacts — never commit
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# Visual Studio user files (in case someone runs GenerateProjectFiles from this dir)
+*.suo
+*.user
+*.vcxproj
+*.vcxproj.filters
+*.sln
+.vs/
