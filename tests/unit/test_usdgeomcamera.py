@@ -311,6 +311,34 @@ class TestRoundtripEmitterToApplier:
         assert dst_cam.GetFocusDistanceAttr().Get() == pytest.approx(3.5)
 
 
+class TestNumpyArraysWireDecode:
+    """Server-side wire decode uses numpy_arrays=True for the FloatArray fast
+    path. Scalar Gf vector constructors (Vec2f/Vec3f/Vec3d) refuse numpy
+    scalar dtypes, so the apply pipeline must convert before constructing.
+    """
+
+    def _round_trip(self, ev):
+        from openusdconnect.codec import encode_message, message_to_dict
+
+        raw = encode_message({"type": "event", "seq": 1, "event": ev})
+        return message_to_dict(raw, numpy_arrays=True)["event"]
+
+    def test_clipping_range_via_numpy_decode(self, stage):
+        from openusdconnect.protocol_constants import K_ENSURE_PRIM, K_SET_GPRIM_ATTRS
+
+        ev_create = {"k": K_ENSURE_PRIM, "prim": "/Cam", "typeName": "Camera"}
+        ev_attrs = {
+            "k": K_SET_GPRIM_ATTRS,
+            "prim": "/Cam",
+            "attrs": {"clippingRange": [0.1, 1000.0]},
+        }
+        apply_events(stage, [self._round_trip(ev_create), self._round_trip(ev_attrs)])
+        cr = UsdGeom.Camera(stage.GetPrimAtPath("/Cam")).GetClippingRangeAttr().Get()
+        assert isinstance(cr, Gf.Vec2f)
+        assert cr[0] == pytest.approx(0.1)
+        assert cr[1] == pytest.approx(1000.0)
+
+
 class TestMockAdapterCamera:
     def test_records_camera_ensure_and_attrs(self):
         adapter = MockAdapter()

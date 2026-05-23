@@ -244,15 +244,22 @@ def _set_gprim_attr(
             attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)), time)
         elif type_name == "float[]":
             attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)), time)
+        # Gf vector constructors reject numpy scalar dtypes through their
+        # Boost.Python bindings even though `value.flat` would otherwise be
+        # a lazy iterator — destructure and cast to Python float, same
+        # shape as _apply_set_xform_trs.
         elif (
             type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
             and value.size == 3
         ):
-            attr.Set(Gf.Vec3f(*value.flat), time)
+            x, y, z = value.flat
+            attr.Set(Gf.Vec3f(float(x), float(y), float(z)), time)
         elif type_name in ("float2", "texCoord2f") and value.size == 2:
-            attr.Set(Gf.Vec2f(*value.flat), time)
+            x, y = value.flat
+            attr.Set(Gf.Vec2f(float(x), float(y)), time)
         elif type_name == "double3" and value.size == 3:
-            attr.Set(Gf.Vec3d(*value.flat), time)
+            x, y, z = value.flat
+            attr.Set(Gf.Vec3d(float(x), float(y), float(z)), time)
         else:
             attr.Set(value.tolist(), time)
         return
