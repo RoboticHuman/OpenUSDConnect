@@ -22,6 +22,8 @@ LOG = logging.getLogger("openusdconnect.usdview")
 _receiver = None
 _dispatcher = None
 _qtimer = None
+_usdview_api = None
+_stage = None
 _running: bool = False
 _host: str = ""
 _port: int = 0
@@ -44,7 +46,7 @@ def start(
 
     Returns True on success, False if already running or the stage is missing.
     """
-    global _receiver, _dispatcher, _qtimer, _running
+    global _receiver, _dispatcher, _qtimer, _usdview_api, _stage, _running
     global _host, _port, _client_id, _origin
 
     if _running:
@@ -56,11 +58,12 @@ def start(
         LOG.error("usdview has no active stage; cannot start receiver")
         return False
 
+    from pxr.Usdviewq.qt import QtCore
+
     from openusdconnect.adapters import UsdStageAdapter
     from openusdconnect.client_id import make_stable_client_id
     from openusdconnect.dispatcher import EventDispatcher
     from openusdconnect.receiver import ReceiverThread
-    from pxr.Usdviewq.qt import QtCore
 
     _host = host
     _port = port
@@ -81,9 +84,13 @@ def start(
         receiver=_receiver,
         adapter=UsdStageAdapter(stage),
     )
+    _usdview_api = usdviewApi
+    _stage = stage
+
+    usdviewApi.dataModel.signalStageReplaced.connect(_on_stage_replaced)
 
     _qtimer = QtCore.QTimer(usdviewApi.qMainWindow)
-    _qtimer.timeout.connect(_dispatcher.drain_and_apply)
+    _qtimer.timeout.connect(_tick)
     _qtimer.start(_TICK_INTERVAL_MS)
 
     _running = True
@@ -91,9 +98,31 @@ def start(
     return True
 
 
+def _on_stage_replaced() -> None:
+    """Follow a usdview stage swap; a None stage parks the binding until one returns."""
+    global _stage
+
+    if _dispatcher is None or _usdview_api is None:
+        return
+
+    _stage = _usdview_api.dataModel.stage
+    if _stage is not None:
+        from openusdconnect.adapters import UsdStageAdapter
+
+        _dispatcher.adapter = UsdStageAdapter(_stage)
+        LOG.info("Stage replaced — rebound receiver to the live stage")
+
+
+def _tick() -> None:
+    """Drain the receive queue each frame; idle while no stage is bound."""
+    if _dispatcher is None or _stage is None:
+        return
+    _dispatcher.drain_and_apply()
+
+
 def stop() -> None:
     """Stop the receive pipeline and release all state."""
-    global _receiver, _dispatcher, _qtimer, _running
+    global _receiver, _dispatcher, _qtimer, _usdview_api, _stage, _running
 
     if not _running:
         return
@@ -102,11 +131,16 @@ def stop() -> None:
         _qtimer.stop()
         _qtimer = None
 
+    if _usdview_api is not None:
+        _usdview_api.dataModel.signalStageReplaced.disconnect(_on_stage_replaced)
+
     if _receiver is not None:
         _receiver.stop()
         _receiver = None
 
     _dispatcher = None
+    _usdview_api = None
+    _stage = None
     _running = False
     LOG.info("OpenUSDConnect receiver stopped")
 

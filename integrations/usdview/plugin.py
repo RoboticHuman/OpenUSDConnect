@@ -1,8 +1,8 @@
 """PluginContainer entry point for usdview's libplug loader.
 
 Pulls in PySide6 transitively via ``pxr.Usdviewq`` — only safe to import
-inside usdview's interpreter. The package ``__init__.py`` is empty so
-non-Qt callers (launcher, tests) can import siblings without Qt.
+inside usdview's interpreter. The package ``__init__.py`` carries no Qt
+imports so non-Qt callers (launcher, tests) can import siblings without Qt.
 """
 
 from __future__ import annotations

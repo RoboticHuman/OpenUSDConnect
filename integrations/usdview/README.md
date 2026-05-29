@@ -68,7 +68,7 @@ enter the host/port.
 |---|---|
 | `OPENUSDCONNECT_HOST` | Auto-connect target host (skips the dialog) |
 | `OPENUSDCONNECT_PORT` | Auto-connect target port (default 7200) |
-| `OPENUSDCONNECT_TOKEN` | TOFU token override (otherwise read from `~/.openusdconnect/tokens.json`) |
+| `OPENUSDCONNECT_TOKEN` | TOFU token to present on connect. Must be set explicitly — the integration does not yet read the cached `~/.openusdconnect/tokens.json`. |
 | `USDVIEW_PATH` | Explicit path to `usdview` executable for the launcher |
 | `PXR_PLUGINPATH_NAME` | Directory containing this `plugInfo.json` |
 | `PYTHONPATH` | Must include the OpenUSDConnect repo root so `integrations.usdview` and `openusdconnect` resolve |
