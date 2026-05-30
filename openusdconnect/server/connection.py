@@ -10,8 +10,6 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from pxr import Usd
-
 from ..codec import (
     PayloadType,
     decode_envelope,
@@ -19,7 +17,6 @@ from ..codec import (
     message_to_dict,
     resolve_payload,
 )
-from ..event_apply import apply_events
 from ..framing import (
     IncompleteRead,
     MessageTooLarge,
@@ -261,6 +258,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if not events:
                 continue
 
+            proposal_id = txn_fb.ProposalId()
+            if proposal_id:
+                sync_server.apply_proposal_txn(proposal_id.decode(), events)
+                continue
+
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
                 if wait > 0:
@@ -384,30 +386,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 "proposal_id": pid,
             },
         )
-
-    def _handle_proposal_txn(
-        self,
-        sync_server: UsdSyncServer,
-        proposal_id: str,
-        events: list[dict],
-    ):
-        """Apply a txn to a proposal's muted layer (no broadcast).
-
-        Muted layers can't be SetEditTarget — temporarily unmute during
-        the write, then re-mute so opinions stay invisible to composition.
-        Events are accumulated on the proposal for log persistence on approval.
-        """
-        p = sync_server.proposals.get(proposal_id)
-        if not p or p.status != "pending":
-            return
-
-        with sync_server.stage_lock:
-            sync_server.stage.UnmuteLayer(p.layer.identifier)
-            sync_server.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(sync_server.stage, events, op_cache=sync_server.op_cache)
-            sync_server.stage.MuteLayer(p.layer.identifier)
-        p.events.extend(events)
-        LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
 
 
 class ThreadedTCPServer(socketserver.TCPServer):

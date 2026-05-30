@@ -108,6 +108,58 @@ class TestApplyTxn:
 
 
 # ---------------------------------------------------------------------------
+# get_prim_detail (dashboard inspector)
+# ---------------------------------------------------------------------------
+
+
+class TestPrimDetail:
+    def test_missing_prim_marked_absent(self, srv):
+        assert srv.get_prim_detail("/Nope") == {"path": "/Nope", "exists": False}
+
+    def test_composed_fields(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Cube"},
+                {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+                {"k": "set_xform_trs", "prim": "/World/Cube",
+                 "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+                {"k": "set_visibility", "prim": "/World/Cube", "visible": False},
+                {"k": "set_gprim_attrs", "prim": "/World/Cube", "attrs": {"size": 2.0}},
+            ]
+        )
+        d = srv.get_prim_detail("/World/Cube")
+        assert d["exists"] is True
+        assert d["typeName"] == "Cube"
+        assert d["active"] is True
+        assert d["visibility"] == "invisible"
+        assert d["xform"]["t"] == [1.0, 2.0, 3.0]
+        names = {a["name"] for a in d["attributes"]}
+        assert {"xformOp:translate", "size"} <= names
+
+    def test_array_attrs_reported_by_type_not_materialized(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/M", "typeName": "Mesh"},
+                {
+                    "k": "set_gprim_attrs",
+                    "prim": "/World/M",
+                    "attrs": {"primvars:st": [[0, 0], [1, 0], [1, 1]]},
+                    "primvar_meta": {
+                        "primvars:st": {
+                            "typeName": "texCoord2f[]",
+                            "interpolation": "faceVarying",
+                        }
+                    },
+                },
+            ]
+        )
+        d = srv.get_prim_detail("/World/M")
+        st = next(a for a in d["attributes"] if a["name"] == "primvars:st")
+        assert st["type"].endswith("[]")
+        assert st["value"] == "[array]"
+
+
+# ---------------------------------------------------------------------------
 # Compaction
 # ---------------------------------------------------------------------------
 

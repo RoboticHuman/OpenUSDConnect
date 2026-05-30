@@ -22,7 +22,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import bpy  # noqa: E402
-
 from helpers import TestHarness  # noqa: E402
 
 harness = TestHarness("PLAYBACK_LEADER")

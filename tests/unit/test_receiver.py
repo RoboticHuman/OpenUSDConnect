@@ -49,6 +49,20 @@ def _send_event(conn, seq, event=None):
     send_framed(conn, encode_message(msg))
 
 
+def _flood_events(conn, seqs):
+    """Send events, tolerating the receiver closing the socket mid-flood.
+
+    Overflowing the bounded queue makes the receiver disconnect by design, so
+    pushing past that point legitimately races with an RST from the peer — the
+    sender just stops. The test's real assertion is the receiver's reaction.
+    """
+    for i in seqs:
+        try:
+            _send_event(conn, i)
+        except ConnectionError:
+            return
+
+
 def _send_ping(conn):
     """Send a ping message."""
     send_framed(conn, encode_message({"type": "ping"}))
@@ -277,9 +291,9 @@ class TestBoundedQueue:
         # First connection
         conn1 = _accept_and_hello(srv)
 
-        # Send 5 events into a queue with max depth 3
-        for i in range(1, 6):
-            _send_event(conn1, i)
+        # Send 5 events into a queue with max depth 3 — overflow disconnects
+        # the receiver mid-flood, so tolerate the RST from its closed socket.
+        _flood_events(conn1, range(1, 6))
 
         # Wait for overflow to trigger disconnect
         _poll_until(lambda: not rt.connected, timeout=5)
@@ -311,8 +325,7 @@ class TestBoundedQueue:
         rt.start()
         conn = _accept_and_hello(srv)
         try:
-            for i in range(1, 6):
-                _send_event(conn, i)
+            _flood_events(conn, range(1, 6))
 
             rt.join(timeout=5)
             assert not rt.is_alive()

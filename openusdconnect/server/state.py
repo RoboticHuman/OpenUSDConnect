@@ -16,7 +16,15 @@ import time
 from pxr import Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
-from ..emitter import as_matrix, decompose_trs_from_matrix, read_stage_metadata
+from ..emitter import (
+    as_matrix,
+    decompose_trs_from_matrix,
+    read_material_binding,
+    read_payloads,
+    read_references,
+    read_stage_metadata,
+    read_variant_selections,
+)
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
@@ -49,6 +57,56 @@ LOG = logging.getLogger(__name__)
 _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
 _PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
+
+
+def _prim_xform_trs(prim) -> dict | None:
+    """Composed translate/orient/scale of a prim."""
+    xf = UsdGeom.Xformable(prim)
+    if not xf:
+        return None
+    trs: dict = {}
+    for op in xf.GetOrderedXformOps():
+        name = op.GetAttr().GetName()
+        val = op.Get()
+        if val is None:
+            continue
+        if name == "xformOp:translate":
+            trs["t"] = [round(float(x), 5) for x in val]
+        elif name == "xformOp:orient":
+            trs["r"] = [round(float(val.GetReal()), 5)] + [
+                round(float(x), 5) for x in val.GetImaginary()
+            ]
+        elif name == "xformOp:scale":
+            trs["s"] = [round(float(x), 5) for x in val]
+    return trs or None
+
+
+def _abbrev_scalar(value) -> str:
+    if value is None:
+        return "—"
+    s = str(value)
+    return s if len(s) <= 120 else s[:117] + "…"
+
+
+def _authored_attr_rows(prim) -> list[dict]:
+    """Authored attributes as ``{name, type, value, numTimeSamples}`` rows.
+
+    Array-typed values are reported by type only — never materialized — so
+    inspecting a heavy prim (e.g. a million-point mesh) copies no buffers
+    while stage_lock is held.
+    """
+    rows = []
+    for attr in sorted(prim.GetAuthoredAttributes(), key=lambda a: a.GetName()):
+        tn = attr.GetTypeName()
+        rows.append(
+            {
+                "name": attr.GetName(),
+                "type": str(tn),
+                "value": "[array]" if tn.isArray else _abbrev_scalar(attr.Get()),
+                "numTimeSamples": attr.GetNumTimeSamples(),
+            }
+        )
+    return rows
 
 
 class UsdSyncServer:
@@ -584,6 +642,28 @@ class UsdSyncServer:
             return p.layer
         return None
 
+    def apply_proposal_txn(self, proposal_id: str, events: list[dict]) -> bool:
+        """Apply a txn to a pending proposal's muted layer (no broadcast).
+
+        Muted layers can't be an edit target, so unmute for the write and
+        re-mute after — the opinions stay out of composition. Events also
+        accumulate on the proposal for the merge + log replay on approval.
+        """
+        from ..event_apply import apply_events
+
+        with self.proposals_lock:
+            p = self.proposals.get(proposal_id)
+        if not p or p.status != "pending":
+            return False
+        with self.stage_lock:
+            self.stage.UnmuteLayer(p.layer.identifier)
+            self.stage.SetEditTarget(Usd.EditTarget(p.layer))
+            apply_events(self.stage, events, op_cache=self.op_cache)
+            self.stage.MuteLayer(p.layer.identifier)
+        p.events.extend(events)
+        LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
+        return True
+
     # -- Per-client layer management ------------------------------------
 
     def get_or_create_client_layer(
@@ -643,8 +723,17 @@ class UsdSyncServer:
         for p in ordered_ids:
             session.subLayerPaths.append(p)
 
+        # Re-attach pending proposal layers (weakest, still muted). Without
+        # this a reorder mid-proposal detaches them, so approve/reject can't
+        # find them by identifier and proposal edits have no layer to land in.
+        with self.proposals_lock:
+            for prop in self.proposals.values():
+                if prop.status == "pending":
+                    session.subLayerPaths.append(prop.layer.identifier)
+
         # Cache for _is_first_layer_with_spec — avoids Sdf.Layer.Find()
-        # on every strength check.
+        # on every strength check. Proposal layers are excluded — they are
+        # muted and never win a strength check.
         self._ordered_session_layers = ordered_layers
 
     def resolve_layer(self, key: str) -> Sdf.Layer | None:
@@ -1684,6 +1773,33 @@ class UsdSyncServer:
                 }
             )
         return result
+
+    def get_prim_detail(self, path: str) -> dict:
+        """Composed snapshot of one prim for the dashboard inspector.
+
+        Reads are bounded (array buffers are never materialized, no flatten)
+        so stage_lock is held only briefly — safe on the realtime path.
+        """
+        with self.stage_lock:
+            prim = self.stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                return {"path": path, "exists": False}
+            img = UsdGeom.Imageable(prim)
+            vis = img.GetVisibilityAttr().Get() if img else None
+            return {
+                "path": path,
+                "exists": True,
+                "typeName": str(prim.GetTypeName()),
+                "active": prim.IsActive(),
+                "visibility": str(vis) if vis is not None else None,
+                "apiSchemas": [str(s) for s in prim.GetAppliedSchemas()],
+                "xform": _prim_xform_trs(prim),
+                "references": [a or p for a, p in read_references(self.stage, path)],
+                "payloads": [a or p for a, p in read_payloads(self.stage, path)],
+                "variantSelections": dict(read_variant_selections(self.stage, path)),
+                "materialBinding": read_material_binding(self.stage, path) or None,
+                "attributes": _authored_attr_rows(prim),
+            }
 
     def export_edit_layer(self, file_path: str | None = None) -> str:
         """Export the server's edit layer as a USDA string (thread-safe).
