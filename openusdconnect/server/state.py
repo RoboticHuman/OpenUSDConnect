@@ -1801,6 +1801,20 @@ class UsdSyncServer:
                 "attributes": _authored_attr_rows(prim),
             }
 
+    def get_transforms_snapshot(self) -> list[dict]:
+        """Composed translate/orient/scale for every Xformable prim with ops.
+
+        Bounded scalar reads only, so stage_lock is held briefly. Returns raw
+        TRS rows (path plus t/r/s); the caller formats for display.
+        """
+        rows = []
+        with self.stage_lock:
+            for prim in self.stage.Traverse():
+                trs = _prim_xform_trs(prim)
+                if trs:
+                    rows.append({"path": str(prim.GetPath()), **trs})
+        return rows
+
     def export_edit_layer(self, file_path: str | None = None) -> str:
         """Export the server's edit layer as a USDA string (thread-safe).
 
@@ -1817,6 +1831,16 @@ class UsdSyncServer:
             layer.Export(file_path)
             LOG.info("Exported edit layer to %s", file_path)
         return usda
+
+    def export_layer(self, key: str) -> str:
+        """Export one client/department layer as USDA (thread-safe).
+
+        Resolves the layer ref under stage_lock, serializes outside it, the
+        same discipline as export_edit_layer.
+        """
+        with self.stage_lock:
+            layer = self.resolve_layer(key)
+        return layer.ExportToString() if layer else "# layer not found"
 
     def export_flattened(self, file_path: str) -> None:
         """Export the fully composed stage as a single flattened USD file.

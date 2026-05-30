@@ -487,54 +487,21 @@ def _build_operations(srv: UsdSyncServer):
 
 def _build_transforms_view(srv: UsdSyncServer):
     """Show composed transforms for all Xform prims on the stage."""
-    from pxr import UsdGeom
+    def _fmt(vals, places):
+        return "(" + ", ".join(f"{v:.{places}f}" for v in vals) + ")"
 
-    # Snapshot all data under the lock — Traverse() returns a lazy iterator
-    # that can crash if the stage is mutated concurrently by the server thread.
-    rows = []
-    with srv.stage_lock:
-        prims = list(srv.stage.Traverse())
-        for prim in prims:
-            xf = UsdGeom.Xformable(prim)
-            ops = xf.GetOrderedXformOps() if xf else []
-            if not ops:
-                continue
-
-            path = str(prim.GetPath())
-            t_val = r_val = s_val = None
-            for op in ops:
-                name = op.GetAttr().GetName()
-                val = op.Get()
-                if val is None:
-                    continue
-                if name == "xformOp:translate":
-                    v = list(val)
-                    t_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
-                elif name == "xformOp:orient":
-                    q = val
-                    r_val = (
-                        f"({q.GetReal():.3f}, "
-                        f"{q.GetImaginary()[0]:.3f}, "
-                        f"{q.GetImaginary()[1]:.3f}, "
-                        f"{q.GetImaginary()[2]:.3f})"
-                    )
-                elif name == "xformOp:scale":
-                    v = list(val)
-                    s_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
-            rows.append((path, t_val, r_val, s_val))
-
-    # Build UI outside the lock
-    for path, t_val, r_val, s_val in rows:
+    for row in srv.get_transforms_snapshot():
+        t, r, s = row.get("t"), row.get("r"), row.get("s")
         with ui.row().classes(
             "items-baseline gap-2 w-full font-mono text-xs py-1"
         ).style("border-bottom: 1px solid rgba(128,128,128,0.15)"):
-            ui.label(path).classes("dash-prim w-48 truncate")
-            if t_val:
-                ui.label(f"T {t_val}").classes("dash-accent")
-            if r_val:
-                ui.label(f"R {r_val}").classes("dash-kind")
-            if s_val:
-                ui.label(f"S {s_val}").classes("dash-muted")
+            ui.label(row["path"]).classes("dash-prim w-48 truncate")
+            if t:
+                ui.label(f"T {_fmt(t, 2)}").classes("dash-accent")
+            if r:
+                ui.label(f"R {_fmt(r, 3)}").classes("dash-kind")
+            if s:
+                ui.label(f"S {_fmt(s, 2)}").classes("dash-muted")
 
 
 def _build_per_layer_view(srv: UsdSyncServer):
@@ -544,25 +511,16 @@ def _build_per_layer_view(srv: UsdSyncServer):
         ui.label("No layers").classes("dash-muted text-sm")
         return
 
-    # Batch all layer exports in a single lock acquisition
-    layer_usda: list[tuple[str, str, bool, str]] = []
-    with srv.stage_lock:
-        for i, info in enumerate(layers):
-            dept = info.get("department")
-            clients = info.get("clients", [])
-            muted = info.get("muted", False)
-            name = dept or (clients[0] if clients else info.get("identifier", ""))
-            layer = srv.resolve_layer(name)
-            usda = layer.ExportToString() if layer else "# layer not found"
-            badge = "  [MUTED]" if muted else ""
-            header = f"#{i + 1}  {name}{badge}"
-            icon = "layers" if dept else "person"
-            layer_usda.append((header, usda, bool(dept), icon))
-
-    # Build UI outside the lock
-    for header, usda, _is_dept, icon in layer_usda:
-        lines = usda.strip().split("\n")
-        has_opinions = len(lines) > 1
+    for i, info in enumerate(layers):
+        dept = info.get("department")
+        clients = info.get("clients", [])
+        muted = info.get("muted", False)
+        name = dept or (clients[0] if clients else info.get("identifier", ""))
+        usda = srv.export_layer(name)
+        badge = "  [MUTED]" if muted else ""
+        header = f"#{i + 1}  {name}{badge}"
+        icon = "layers" if dept else "person"
+        has_opinions = len(usda.strip().split("\n")) > 1
         with ui.expansion(
             header, icon=icon,
         ).classes("w-full").props(

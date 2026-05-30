@@ -160,6 +160,44 @@ class TestPrimDetail:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard snapshot helpers (get_transforms_snapshot, export_layer)
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardSnapshots:
+    def test_transforms_snapshot_reports_trs(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Cube"},
+                {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+                {"k": "set_xform_trs", "prim": "/World/Cube",
+                 "fields": ["t", "s"], "t": [1.0, 2.0, 3.0], "s": [2.0, 2.0, 2.0]},
+            ]
+        )
+        row = next(
+            r for r in srv.get_transforms_snapshot() if r["path"] == "/World/Cube"
+        )
+        assert row["t"] == [1.0, 2.0, 3.0]
+        assert row["s"] == [2.0, 2.0, 2.0]
+
+    def test_transforms_snapshot_skips_prims_without_ops(self, srv):
+        srv.apply_txn(
+            [{"k": "ensure_prim", "prim": "/World/Plain", "typeName": "Xform"}]
+        )
+        paths = {r["path"] for r in srv.get_transforms_snapshot()}
+        assert "/World/Plain" not in paths
+
+    def test_export_layer_not_found(self, srv):
+        assert srv.export_layer("nonexistent") == "# layer not found"
+
+    def test_export_layer_resolves_dept_layer(self, srv):
+        srv.get_or_create_client_layer("alice", department="anim")
+        usda = srv.export_layer("anim")
+        assert usda != "# layer not found"
+        assert "#usda" in usda
+
+
+# ---------------------------------------------------------------------------
 # Compaction
 # ---------------------------------------------------------------------------
 
