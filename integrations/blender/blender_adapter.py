@@ -565,6 +565,12 @@ class BlenderAdapter(DCCAdapter):
             LOG.warning("BlenderAdapter.set_gprim_attrs: object not found for %s", prim_path)
             return False
 
+        # Array attrs arrive as numpy on the receive path; this adapter is
+        # written against plain Python sequences (from_pydata, `if st:`), so
+        # normalize at the boundary. Cheap bulk .tolist() — the costly
+        # per-element decode was already avoided upstream.
+        attrs = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in attrs.items()}
+
         if obj.type == "CAMERA" and obj.data is not None:
             _apply_camera_attrs(obj.data, attrs, self._stage_meters_per_unit())
             LOG.info("BlenderAdapter: set camera attrs %s on %s", sorted(attrs), prim_path)
@@ -1791,7 +1797,7 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             return
         to_remove = self._registry.pop_children(prim_path)
-        # Single O(N) scan — cached refs may be stale if objects were
+        # Single O(N) scan - cached refs may be stale if objects were
         # deleted by undo, user action, or merge.
         path_to_obj = {
             o.get("usd_prim_path"): o

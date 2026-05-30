@@ -311,6 +311,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         changed_records,
                         exclude_origin=self._origin,
                     )
+
+                # After load_payload, re-broadcast latest child state so
+                # receivers re-apply authoritative TRS after re-import. Kept
+                # inside the shared txn barrier so its extra seq/append_log/
+                # broadcast can't interleave with a concurrent compaction/purge.
+                for ev in events:
+                    if ev.get("k") == K_LOAD_PAYLOAD:
+                        sync_server.replay_children_after_load(ev["prim"])
             finally:
                 sync_server.txn_barrier.release_shared()
 
@@ -320,12 +328,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 if info:
                     info.last_activity = time.time()
                     info.event_count += len(events)
-
-            # After load_payload, re-broadcast latest child state so
-            # receivers re-apply authoritative TRS after re-import.
-            for ev in events:
-                if ev.get("k") == K_LOAD_PAYLOAD:
-                    sync_server.replay_children_after_load(ev["prim"])
 
     def _handle_claim_playback(self, sync_server: UsdSyncServer, msg: dict):
         initial_time = msg.get("time")

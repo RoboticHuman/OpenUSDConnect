@@ -1180,20 +1180,20 @@ class TestReceiverStageFirstFlow:
         assert adapter.get_trs("/World/Existing").get("t") == [100.0, 200.0, 300.0]
 
 
-def test_apply_events_sorts_structural_pass_by_kind_order():
-    """apply_events must sort structural events by EVENT_KIND_ORDER so
-    ensure_prim runs before set_shader_connection.
+def test_apply_events_orders_create_before_connect():
+    """apply_events must apply prim-creating kinds before connections so
+    ensure_prim runs before set_connectable_connection.
 
-    Without the sort, a set_shader_connection whose source_prim names a
-    not-yet-ensured NodeGraph would fall through _apply_set_connectable_connection's
-    Shader-default branch in get_or_define_prim, and the later ensure_prim
-    would not be able to upgrade the typeName (get_or_define_prim only sets
-    typeName when creating a fresh spec; it is a no-op when the prim already
-    exists). The sort closes that gap by guaranteeing ensure_prim for the
-    source lands first.
+    Otherwise a connection whose source_prim names a not-yet-ensured NodeGraph
+    falls through _apply_set_connectable_connection's Shader-default branch in
+    get_or_define_prim, and the later ensure_prim cannot upgrade the typeName
+    (get_or_define_prim only sets typeName when creating a fresh spec). The
+    CREATE-before-MODIFY partition closes that gap by applying ensure_prim for
+    the source first.
 
-    This test pins the invariant: anyone tempted to remove the sort in
-    apply_events should hit this test failing and read why the sort exists.
+    Pins the invariant: removing the create-before-modify ordering in
+    apply_events should fail here. Paired with
+    test_receiver_matches_sender_under_shuffled_event_order.
     """
     stage = Usd.Stage.CreateInMemory()
     events = [

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from nicegui import ui
 
-from openusdconnect.protocol_constants import EVENT_KIND_ORDER
+from openusdconnect.protocol_constants import EVENT_KEYS
 
 if TYPE_CHECKING:
     from openusdconnect.server import UsdSyncServer
@@ -968,7 +968,7 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
         "text-xs font-semibold dash-muted uppercase mb-1"
     )
 
-    kind_opts = {"": "All kinds", **{k: k for k in EVENT_KIND_ORDER}}
+    kind_opts = {"": "All kinds", **{k: k for k in sorted(EVENT_KEYS)}}
     page_sizes = {25: "25", 50: "50", 100: "100", 200: "200"}
     current_page = {"value": 0}
 

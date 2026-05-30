@@ -28,7 +28,6 @@ from ..emitter import (
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
-    EVENT_KIND_ORDER,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -46,6 +45,7 @@ from ..protocol_constants import (
     MSG_PING,
     MSG_PLAYBACK_STATE,
     MSG_RESYNC,
+    event_apply_tier,
 )
 from ._txn_barrier import _TxnBarrier
 from .types import ClientInfo, Proposal
@@ -1051,7 +1051,7 @@ class UsdSyncServer:
             key=lambda entry: (
                 entry[0]["prim"].count("/"),
                 entry[0]["prim"],
-                EVENT_KIND_ORDER[entry[0]["k"]],
+                event_apply_tier(entry[0]["k"]),
             ),
         )
 
@@ -1241,7 +1241,7 @@ class UsdSyncServer:
         # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
         sorted_events = sorted(
             latest.values(),
-            key=lambda e: (e[0]["prim"], EVENT_KIND_ORDER[e[0]["k"]]),
+            key=lambda e: (e[0]["prim"], event_apply_tier(e[0]["k"])),
         )
 
         for ev, origin in sorted_events:

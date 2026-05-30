@@ -65,7 +65,7 @@ class TestHarness:
 
         scene = bpy.context.scene
         scene.usd_connect_base_usd_path = self.base_usd
-        scene.usd_connect_auto_track = True
+        scene.usd_connect_auto_track = False
         scene.usd_connect_emit_host = self.host
         scene.usd_connect_emit_port = self.port
         try:
@@ -253,11 +253,22 @@ class TestHarness:
         from openusdconnect.transport import send_line
         s = _socket.create_connection((self.host, self.port), timeout=5)
         send_line(s, make_hello("emitter", client_id="asset_test"))
-        # Read hello_ok before sending txn — server won't process
+        # Read hello_ok before sending txn: the server won't process
         # further messages until hello_ok is sent.
         s.settimeout(5)
         s.recv(4096)
         send_line(s, {"type": "txn", "client_id": "asset_test", "events": events})
+        # Ensure the server fully reads and processes the txn before this
+        # connection tears down. A bare close() can RST the socket and drop
+        # the unprocessed txn; half-closing then draining to EOF waits for the
+        # server to consume it and close its end, which also serializes
+        # teardown so the next same-client_id connect does not race this one.
+        s.shutdown(_socket.SHUT_WR)
+        try:
+            while s.recv(4096):
+                pass
+        except OSError:
+            pass
         s.close()
 
     def _find_material(self, name_contains):
