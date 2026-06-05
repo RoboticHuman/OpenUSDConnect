@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from nicegui import ui
 
+from openusdconnect.protocol_constants import EVENT_KEYS
+
 if TYPE_CHECKING:
     from openusdconnect.server import UsdSyncServer
 
@@ -139,14 +141,22 @@ def setup_pages(srv: UsdSyncServer):
                 on_click=lambda: dark.set_value(not dark.value),
             ).props("flat round dense size=sm")
 
+        feed_api: dict = {}
+
+        def _focus_prim(path):
+            focus = feed_api.get("focus")
+            if focus:
+                focus(path)
+
         _build_server_info(srv)
+        _build_stage_metadata(srv, register_refresh)
         _build_status_cards(srv, register_refresh)
         _build_operations(srv)
         _build_layer_stack(srv, register_refresh)
         _build_proposals_panel(srv, register_refresh)
         _build_clients_table(srv, register_refresh)
-        _build_prim_tree(srv)
-        _build_event_feed(srv, register_refresh)
+        _build_prim_tree(srv, on_focus=_focus_prim)
+        _build_event_feed(srv, register_refresh, feed_api=feed_api)
 
     _register_api_routes(srv)
 
@@ -162,16 +172,169 @@ def _build_server_info(srv: UsdSyncServer):
             ui.badge("TOFU AUTH", color="positive").props("dense")
 
 
-def _build_prim_tree(srv: UsdSyncServer):
-    """Stage prim tree reconstructed from the event log."""
-    ui.label("STAGE PRIMS").classes(
-        "text-xs font-semibold dash-muted uppercase mb-1"
-    )
+def _build_stage_metadata(srv: UsdSyncServer, register_refresh=None):
+    """Compact strip of authored stage units + timeline metadata."""
+    UNIT_NAMES = {1.0: "m", 0.01: "cm", 0.001: "mm", 0.0254: "in", 0.3048: "ft"}
+    row = ui.row().classes("gap-4 items-center mb-3 text-xs flex-wrap")
 
-    tree_container = ui.column().classes("w-full")
+    def _chip(icon, text):
+        with ui.row().classes("items-center gap-1"):
+            ui.icon(icon, size="xs").classes("dash-muted")
+            ui.label(text).classes("dash-muted font-mono")
+
+    def refresh():
+        meta = srv.get_stage_metadata_payload()
+        row.clear()
+        with row:
+            if not meta:
+                ui.label("No authored stage metadata").classes("dash-muted")
+                return
+            if meta.get("upAxis"):
+                _chip("height", f"Up: {meta['upAxis']}")
+            mpu = meta.get("metersPerUnit")
+            if mpu is not None:
+                unit = UNIT_NAMES.get(round(float(mpu), 6))
+                _chip("straighten", f"Units: {unit}" if unit else f"metersPerUnit: {mpu:g}")
+            fps = meta.get("framesPerSecond")
+            tcps = meta.get("timeCodesPerSecond")
+            if fps is not None:
+                label = f"FPS: {fps:g}"
+                if tcps is not None and abs(float(tcps) - float(fps)) > 1e-6:
+                    label += f"  (tcps {tcps:g})"
+                _chip("movie", label)
+            elif tcps is not None:
+                _chip("movie", f"tcps: {tcps:g}")
+            start = meta.get("startTimeCode")
+            end = meta.get("endTimeCode")
+            if start is not None and end is not None:
+                _chip("schedule", f"Frames: {start:g}–{end:g}")
+
+    if register_refresh:
+        register_refresh(refresh)
+    refresh()
+
+
+def _fmt_vec(v) -> str:
+    return "(" + ", ".join(f"{x:g}" for x in v) + ")"
+
+
+def _render_prim_detail(detail: dict):
+    """Render a get_prim_detail() dict into the current container."""
+    if not detail.get("exists"):
+        ui.label("Prim not on stage").classes("dash-muted text-sm")
+        return
+
+    with ui.row().classes("items-center gap-2 w-full"):
+        active = detail.get("active", True)
+        ui.icon("circle", size="xs").classes(
+            "text-positive" if active else "text-grey-6"
+        ).tooltip("active" if active else "inactive")
+        ui.label(detail["path"]).classes(
+            "dash-prim font-mono text-sm font-semibold flex-1 truncate"
+        )
+        if detail.get("typeName"):
+            ui.badge(detail["typeName"]).props("dense")
+
+    if detail.get("visibility") or detail.get("apiSchemas"):
+        with ui.row().classes("gap-2 items-center text-xs flex-wrap"):
+            if detail.get("visibility"):
+                ui.icon("visibility", size="xs").classes("dash-muted")
+                ui.label(detail["visibility"]).classes("dash-muted font-mono")
+            for s in detail.get("apiSchemas", []):
+                ui.badge(s, color="primary").props("dense outline")
+
+    xf = detail.get("xform")
+    if xf:
+        with ui.row().classes("gap-3 items-baseline font-mono text-xs"):
+            if xf.get("t"):
+                ui.label(f"T {_fmt_vec(xf['t'])}").classes("dash-accent")
+            if xf.get("r"):
+                ui.label(f"R {_fmt_vec(xf['r'])}").classes("dash-kind")
+            if xf.get("s"):
+                ui.label(f"S {_fmt_vec(xf['s'])}").classes("dash-muted")
+
+    def _arc_line(icon, label, items):
+        if not items:
+            return
+        with ui.row().classes("items-baseline gap-2 text-xs font-mono w-full"):
+            ui.icon(icon, size="xs").classes("dash-muted")
+            ui.label(label).classes("dash-muted")
+            ui.label(", ".join(items)).classes("dash-prim flex-1 truncate")
+
+    _arc_line("link", "refs", detail.get("references", []))
+    _arc_line("download", "payloads", detail.get("payloads", []))
+    vsel = detail.get("variantSelections") or {}
+    if vsel:
+        _arc_line("tune", "variants", [f"{k}={v}" for k, v in vsel.items()])
+    if detail.get("materialBinding"):
+        _arc_line("palette", "material", [detail["materialBinding"]])
+
+    attrs = detail.get("attributes", [])
+    ui.separator().classes("my-1")
+    with ui.row().classes("items-center gap-2"):
+        ui.label("AUTHORED ATTRIBUTES").classes(
+            "text-xs font-semibold dash-muted uppercase"
+        )
+        ui.label(str(len(attrs))).classes("text-xs dash-muted")
+        ui.icon("info", size="xs").classes("dash-muted").tooltip(
+            "Attributes with an authored opinion — schema defaults not shown"
+        )
+    if not attrs:
+        ui.label("No authored attributes").classes("dash-muted text-xs")
+    for a in attrs:
+        with ui.row().classes(
+            "items-baseline gap-2 w-full font-mono text-xs py-0.5"
+        ).style("border-bottom: 1px solid rgba(128,128,128,0.12)"):
+            ui.label(a["name"]).classes("dash-prim").style("min-width: 9rem")
+            ui.label(a["type"]).classes("dash-muted").style("min-width: 6rem")
+            ui.label(a["value"]).classes("dash-kind flex-1 truncate")
+            if a.get("numTimeSamples"):
+                with ui.row().classes("items-center gap-0.5").tooltip(
+                    f"{a['numTimeSamples']} time samples"
+                ):
+                    ui.icon("schedule", size="xs").classes("dash-muted")
+                    ui.label(str(a["numTimeSamples"])).classes("dash-muted")
+
+
+def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
+    """Stage prim tree with a composed-state inspector.
+
+    Selecting a prim renders its composed detail and (via on_focus) filters
+    the event log to that path.
+    """
+    selected = {"path": None}
+
+    with ui.row().classes("w-full gap-4 mb-4 items-start"):
+        with ui.column().classes("flex-1"):
+            with ui.row().classes("items-center gap-2 mb-1"):
+                ui.label("STAGE PRIMS").classes(
+                    "text-xs font-semibold dash-muted uppercase"
+                )
+                ui.button(
+                    icon="refresh", on_click=lambda: _refresh_tree(),
+                ).props("flat round dense size=sm").tooltip("Refresh")
+            tree_container = ui.column().classes("w-full")
+        with ui.column().classes("flex-1"):
+            with ui.row().classes("items-center gap-2 mb-1 w-full"):
+                ui.label("PRIM INSPECTOR").classes(
+                    "text-xs font-semibold dash-muted uppercase"
+                )
+                ui.space()
+                ui.button(
+                    icon="refresh", on_click=lambda: _refresh_inspector(),
+                ).props("flat round dense size=sm").tooltip("Refresh inspector")
+                ui.button(
+                    "Clear", icon="close", on_click=lambda: _clear(),
+                ).props("flat dense no-caps size=sm").tooltip(
+                    "Clear inspector and event-log filter"
+                )
+            inspector_scroll = ui.scroll_area().classes("w-full").style(
+                "height: 360px"
+            )
+            inspector_container = ui.column().classes("w-full gap-1")
+            inspector_container.move(inspector_scroll)
 
     def _build_tree_nodes(prims: list[dict]) -> list[dict]:
-        """Convert flat prim list to NiceGUI ui.tree node format."""
         nodes_by_path: dict[str, dict] = {}
         for p in prims:
             nodes_by_path[p["path"]] = {
@@ -189,7 +352,36 @@ def _build_prim_tree(srv: UsdSyncServer):
                 roots.append(node)
         return roots
 
-    def refresh():
+    def _render_inspector(path):
+        inspector_container.clear()
+        with inspector_container:
+            _render_prim_detail(srv.get_prim_detail(path))
+
+    def _refresh_inspector():
+        if selected["path"]:
+            _render_inspector(selected["path"])
+
+    def _show_placeholder():
+        inspector_container.clear()
+        with inspector_container:
+            ui.label("Select a prim to inspect").classes("dash-muted text-sm")
+
+    def _clear():
+        selected["path"] = None
+        _show_placeholder()
+        if on_focus:
+            on_focus("")
+
+    def _on_select(path):
+        if not path:
+            _clear()
+            return
+        selected["path"] = path
+        _render_inspector(path)
+        if on_focus:
+            on_focus(path)
+
+    def _refresh_tree():
         tree_container.clear()
         prims = srv.get_prim_tree()
         if not prims:
@@ -200,16 +392,13 @@ def _build_prim_tree(srv: UsdSyncServer):
         with tree_container:
             ui.tree(
                 nodes, node_key="id", label_key="label",
+                on_select=lambda e: _on_select(getattr(e, "value", None)),
             ).props("dense default-expand-all").classes(
                 "w-full text-xs font-mono"
             )
 
-    with ui.row().classes("mb-2"):
-        ui.button(
-            "Refresh", icon="refresh", on_click=refresh,
-        ).props("outline dense no-caps size=sm")
-
-    refresh()
+    _show_placeholder()
+    _refresh_tree()
 
 
 def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
@@ -298,54 +487,21 @@ def _build_operations(srv: UsdSyncServer):
 
 def _build_transforms_view(srv: UsdSyncServer):
     """Show composed transforms for all Xform prims on the stage."""
-    from pxr import UsdGeom
+    def _fmt(vals, places):
+        return "(" + ", ".join(f"{v:.{places}f}" for v in vals) + ")"
 
-    # Snapshot all data under the lock — Traverse() returns a lazy iterator
-    # that can crash if the stage is mutated concurrently by the server thread.
-    rows = []
-    with srv.stage_lock:
-        prims = list(srv.stage.Traverse())
-        for prim in prims:
-            xf = UsdGeom.Xformable(prim)
-            ops = xf.GetOrderedXformOps() if xf else []
-            if not ops:
-                continue
-
-            path = str(prim.GetPath())
-            t_val = r_val = s_val = None
-            for op in ops:
-                name = op.GetAttr().GetName()
-                val = op.Get()
-                if val is None:
-                    continue
-                if name == "xformOp:translate":
-                    v = list(val)
-                    t_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
-                elif name == "xformOp:orient":
-                    q = val
-                    r_val = (
-                        f"({q.GetReal():.3f}, "
-                        f"{q.GetImaginary()[0]:.3f}, "
-                        f"{q.GetImaginary()[1]:.3f}, "
-                        f"{q.GetImaginary()[2]:.3f})"
-                    )
-                elif name == "xformOp:scale":
-                    v = list(val)
-                    s_val = f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})"
-            rows.append((path, t_val, r_val, s_val))
-
-    # Build UI outside the lock
-    for path, t_val, r_val, s_val in rows:
+    for row in srv.get_transforms_snapshot():
+        t, r, s = row.get("t"), row.get("r"), row.get("s")
         with ui.row().classes(
             "items-baseline gap-2 w-full font-mono text-xs py-1"
         ).style("border-bottom: 1px solid rgba(128,128,128,0.15)"):
-            ui.label(path).classes("dash-prim w-48 truncate")
-            if t_val:
-                ui.label(f"T {t_val}").classes("dash-accent")
-            if r_val:
-                ui.label(f"R {r_val}").classes("dash-kind")
-            if s_val:
-                ui.label(f"S {s_val}").classes("dash-muted")
+            ui.label(row["path"]).classes("dash-prim w-48 truncate")
+            if t:
+                ui.label(f"T {_fmt(t, 2)}").classes("dash-accent")
+            if r:
+                ui.label(f"R {_fmt(r, 3)}").classes("dash-kind")
+            if s:
+                ui.label(f"S {_fmt(s, 2)}").classes("dash-muted")
 
 
 def _build_per_layer_view(srv: UsdSyncServer):
@@ -355,25 +511,16 @@ def _build_per_layer_view(srv: UsdSyncServer):
         ui.label("No layers").classes("dash-muted text-sm")
         return
 
-    # Batch all layer exports in a single lock acquisition
-    layer_usda: list[tuple[str, str, bool, str]] = []
-    with srv.stage_lock:
-        for i, info in enumerate(layers):
-            dept = info.get("department")
-            clients = info.get("clients", [])
-            muted = info.get("muted", False)
-            name = dept or (clients[0] if clients else info.get("identifier", ""))
-            layer = srv.resolve_layer(name)
-            usda = layer.ExportToString() if layer else "# layer not found"
-            badge = "  [MUTED]" if muted else ""
-            header = f"#{i + 1}  {name}{badge}"
-            icon = "layers" if dept else "person"
-            layer_usda.append((header, usda, bool(dept), icon))
-
-    # Build UI outside the lock
-    for header, usda, _is_dept, icon in layer_usda:
-        lines = usda.strip().split("\n")
-        has_opinions = len(lines) > 1
+    for i, info in enumerate(layers):
+        dept = info.get("department")
+        clients = info.get("clients", [])
+        muted = info.get("muted", False)
+        name = dept or (clients[0] if clients else info.get("identifier", ""))
+        usda = srv.export_layer(name)
+        badge = "  [MUTED]" if muted else ""
+        header = f"#{i + 1}  {name}{badge}"
+        icon = "layers" if dept else "person"
+        has_opinions = len(usda.strip().split("\n")) > 1
         with ui.expansion(
             header, icon=icon,
         ).classes("w-full").props(
@@ -769,20 +916,17 @@ def _build_token_panel(srv: UsdSyncServer):
     _refresh_tokens()
 
 
-def _build_event_feed(srv: UsdSyncServer, register_refresh=None):
-    """Paginated event feed with inline JSON detail."""
+def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
+    """Paginated event feed with inline JSON detail.
+
+    If *feed_api* is provided, publishes a ``focus`` callback into it so the
+    prim tree can filter the log to a selected prim path.
+    """
     ui.label("EVENT LOG").classes(
         "text-xs font-semibold dash-muted uppercase mb-1"
     )
 
-    ALL_KINDS = [
-        "ensure_prim", "ensure_xform_ops", "set_xform_trs",
-        "set_visibility", "set_gprim_attrs", "set_reference",
-        "set_payload", "load_payload", "unload_payload",
-        "set_variant_selections", "delete_prim", "deactivate_prim",
-        "rename_prim",
-    ]
-    kind_opts = {"": "All kinds", **{k: k for k in ALL_KINDS}}
+    kind_opts = {"": "All kinds", **{k: k for k in sorted(EVENT_KEYS)}}
     page_sizes = {25: "25", 50: "50", 100: "100", 200: "200"}
     current_page = {"value": 0}
 
@@ -876,6 +1020,14 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None):
         current_page["value"] = 0
         _rebuild()
 
+    def focus_prim(path):
+        prim_filter.value = path or ""
+        kind_filter.value = ""
+        _reset()
+
+    if feed_api is not None:
+        feed_api["focus"] = focus_prim
+
     kind_filter.on_value_change(_reset)
     prim_filter.on("keydown.enter", _reset)
     page_size_sel.on_value_change(_reset)
@@ -940,6 +1092,10 @@ def _register_api_routes(srv: UsdSyncServer):
     @app.get("/api/prim-tree")
     def api_prim_tree():
         return srv.get_prim_tree()
+
+    @app.get("/api/prim-detail")
+    def api_prim_detail(path: str):
+        return srv.get_prim_detail(path)
 
     # -- Layer management endpoints ----------------------------------------
 

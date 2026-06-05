@@ -348,6 +348,7 @@ def _encode_auth_rejected(b, msg):
 
 def _encode_txn(b, msg):
     client_id = b.CreateString(msg["client_id"])
+    proposal_id = b.CreateString(msg["proposal_id"]) if msg.get("proposal_id") else None
     event_offsets = [_encode_event_wrapper(b, ev) for ev in msg["events"]]
     _fb.TxnStartEventsVector(b, len(event_offsets))
     for off in reversed(event_offsets):
@@ -356,6 +357,8 @@ def _encode_txn(b, msg):
     _fb.TxnStart(b)
     _fb.TxnAddClientId(b, client_id)
     _fb.TxnAddEvents(b, events_vec)
+    if proposal_id is not None:
+        _fb.TxnAddProposalId(b, proposal_id)
     return _fb.TxnEnd(b)
 
 
@@ -1214,7 +1217,11 @@ def _dict_txn(t, msg_type, numpy_arrays=False):
     events = [
         event_to_dict(t.Events(i), numpy_arrays=numpy_arrays) for i in range(t.EventsLength())
     ]
-    return {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
+    msg = {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
+    pid = _str(t.ProposalId())
+    if pid:
+        msg["proposal_id"] = pid
+    return msg
 
 
 def _dict_broadcast_event(be, msg_type, numpy_arrays=False):

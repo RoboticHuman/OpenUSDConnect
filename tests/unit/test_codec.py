@@ -134,6 +134,25 @@ class TestProposalCreated:
         assert d["proposal_id"] == "p-123"
 
 
+class TestTxnProposalId:
+    def test_roundtrip_with_proposal_id(self):
+        msg = {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-abc"}
+        d, _ = _roundtrip(msg)
+        assert d["proposal_id"] == "prop-abc"
+
+    def test_absent_when_not_set(self):
+        d, _ = _roundtrip({"type": "txn", "client_id": "c1", "events": []})
+        assert "proposal_id" not in d
+
+    def test_zero_copy_accessor(self):
+        # The connection handler reads txn.ProposalId() to route proposal edits.
+        buf = encode_message(
+            {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-xyz"}
+        )
+        _, txn = resolve_payload(decode_envelope(buf))
+        assert txn.ProposalId() in (b"prop-xyz", "prop-xyz")
+
+
 # ===================================================================
 # Event-level tests — all 17 kinds
 # ===================================================================

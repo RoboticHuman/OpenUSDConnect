@@ -350,7 +350,7 @@ class TestMaterialXComposeParity:
     def test_receiver_matches_sender_under_shuffled_event_order(self, srv):
         """apply_events must be order-invariant within a transaction.
 
-        The structural pass in apply_events sorts by EVENT_KIND_ORDER, so
+        The structural pass in apply_events applies prim-creating kinds first, so
         arbitrary caller-provided order must yield the same receiver stage
         as the natural emitted order. Shuffles deterministically so any
         failure is reproducible from the seed.

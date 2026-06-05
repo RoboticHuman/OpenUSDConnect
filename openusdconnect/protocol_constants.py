@@ -78,36 +78,6 @@ EVENT_KEYS = frozenset(
     }
 )
 
-# Event application order - stage-level settings (units, timeline) first
-# since downstream value opinions are interpreted under those units, then
-# structural prim ops, then composition arcs (V before R before P per
-# LIVERPS), then local value opinions (L), destructive last.  This is
-# dependency order (prim must exist before values can be set), not
-# strength order.  LIVERPS strength (L strongest, S weakest) is handled
-# by USD's composition engine, not by event ordering.
-# fmt: off
-_EVENT_KIND_SEQUENCE = [
-    K_SET_STAGE_METADATA,      # units + timeline before any prim ops
-    K_ENSURE_PRIM,
-    K_ENSURE_XFORM_OPS,
-    K_SET_VARIANT_SELECTIONS,  # V in LIVERPS - before R
-    K_SET_REFERENCE,
-    K_SET_PAYLOAD,
-    K_LOAD_PAYLOAD,
-    K_SET_XFORM_TRS,
-    K_SET_VISIBILITY,
-    K_SET_GPRIM_ATTRS,
-    K_SET_CONNECTABLE_INPUT,
-    K_SET_CONNECTABLE_CONNECTION,
-    K_SET_MATERIAL_BINDING,
-    K_DEACTIVATE_PRIM,
-    K_DELETE_PRIM,
-    K_RENAME_PRIM,
-    K_UNLOAD_PAYLOAD,
-]
-# fmt: on
-EVENT_KIND_ORDER: dict[str, int] = {k: i for i, k in enumerate(_EVENT_KIND_SEQUENCE)}
-
 # Events that must be applied outside a ChangeBlock.
 #
 # The historical name is kept for API compatibility. Some entries are not
@@ -128,5 +98,23 @@ STRUCTURAL_EVENT_KINDS = frozenset(
         K_SET_CONNECTABLE_CONNECTION,
     }
 )
+
+# Prim-creating kinds. The one hard apply-ordering requirement is that a prim
+# exists before anything authors on it, so these are applied first (ancestors
+# before descendants). Beyond that, USD composition + dangling connection /
+# relationship targets make event order irrelevant; there is deliberately no
+# fine-grained per-kind ordering table to maintain.
+CREATE_KINDS = frozenset({K_SET_STAGE_METADATA, K_ENSURE_PRIM})
+
+
+def event_apply_tier(kind: str) -> int:
+    """Coarse apply tier for deterministic ordering: 0 = create (prims first),
+    1 = structural modify (arcs/connections on existing prims), 2 = value +
+    destructive. Replaces the old fine-grained per-kind sequence."""
+    if kind in CREATE_KINDS:
+        return 0
+    if kind in STRUCTURAL_EVENT_KINDS:
+        return 1
+    return 2
 
 TRS_FIELDS = frozenset({"t", "r", "s"})

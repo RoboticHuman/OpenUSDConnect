@@ -100,8 +100,6 @@ class TestProposalApproval:
              "fields": ["t"], "t": [10.0, 8.0, -5.0]},
         ]
         _apply_to_proposal(srv_with_layers, pid, events)
-        # Accumulate events as _handle_proposal_txn would
-        srv_with_layers.proposals[pid].events.extend(events)
 
         # Approve
         assert srv_with_layers.approve_proposal(pid)
@@ -133,18 +131,9 @@ class TestProposalApproval:
 
 
 def _apply_to_proposal(srv, proposal_id, events):
-    """Helper: apply events to a proposal layer (unmute/write/remute)."""
-    from pxr import Usd
-
-    from openusdconnect.event_apply import apply_events
-
-    layer = srv.get_proposal_layer(proposal_id)
-    with srv.stage_lock:
-        srv.stage.UnmuteLayer(layer.identifier)
-        srv.stage.SetEditTarget(Usd.EditTarget(layer))
-        apply_events(srv.stage, events, op_cache=srv.op_cache)
-        srv.stage.MuteLayer(layer.identifier)
-    return layer
+    """Helper: route events through the real apply_proposal_txn path."""
+    assert srv.apply_proposal_txn(proposal_id, events)
+    return srv.get_proposal_layer(proposal_id)
 
 
 class TestProposalTxnRouting:
@@ -170,4 +159,29 @@ class TestProposalTxnRouting:
         assert layer.GetPrimAtPath("/World/HiddenPrim") is not None
         prim = srv_with_layers.stage.GetPrimAtPath("/World/HiddenPrim")
         assert not prim or not prim.IsValid()
+
+    def test_apply_proposal_txn_unknown_returns_false(self, srv_with_layers):
+        assert not srv_with_layers.apply_proposal_txn("nonexistent", [
+            {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"},
+        ])
+
+    def test_proposal_survives_session_reorder(self, srv_with_layers):
+        """A reorder mid-proposal must keep the proposal layer attached —
+        else approve/reject raise and proposal edits have no layer to land in.
+        """
+        pid = srv_with_layers.create_proposal("alice", "lighting", "rim")
+        _apply_to_proposal(srv_with_layers, pid, [
+            {"k": "ensure_prim", "prim": "/World/RimLight", "typeName": "Xform"},
+        ])
+        # A new department's first client triggers _reorder_session_sublayers.
+        srv_with_layers.get_or_create_client_layer("carol", "lighting")
+
+        layer = srv_with_layers.proposals[pid].layer
+        session = srv_with_layers.stage.GetSessionLayer()
+        assert layer.identifier in list(session.subLayerPaths)
+        # Still muted → not composed.
+        prim = srv_with_layers.stage.GetPrimAtPath("/World/RimLight")
+        assert not prim or not prim.IsValid()
+        # And resolving it no longer raises ValueError.
+        assert srv_with_layers.reject_proposal(pid)
 

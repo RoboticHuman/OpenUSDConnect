@@ -67,9 +67,16 @@ def make_hello(
     return msg
 
 
-def make_txn(client_id: str, events: list[Event]) -> dict:
-    """Build a transaction message."""
-    return {"type": MSG_TXN, "client_id": client_id, "events": events}
+def make_txn(client_id: str, events: list[Event], proposal_id: str = "") -> dict:
+    """Build a transaction message.
+
+    With *proposal_id*, the server routes the edits to that proposal's muted
+    layer instead of the client's live layer.
+    """
+    msg = {"type": MSG_TXN, "client_id": client_id, "events": events}
+    if proposal_id:
+        msg["proposal_id"] = proposal_id
+    return msg
 
 
 def make_quit() -> dict:

@@ -108,6 +108,96 @@ class TestApplyTxn:
 
 
 # ---------------------------------------------------------------------------
+# get_prim_detail (dashboard inspector)
+# ---------------------------------------------------------------------------
+
+
+class TestPrimDetail:
+    def test_missing_prim_marked_absent(self, srv):
+        assert srv.get_prim_detail("/Nope") == {"path": "/Nope", "exists": False}
+
+    def test_composed_fields(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Cube"},
+                {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+                {"k": "set_xform_trs", "prim": "/World/Cube",
+                 "fields": ["t"], "t": [1.0, 2.0, 3.0]},
+                {"k": "set_visibility", "prim": "/World/Cube", "visible": False},
+                {"k": "set_gprim_attrs", "prim": "/World/Cube", "attrs": {"size": 2.0}},
+            ]
+        )
+        d = srv.get_prim_detail("/World/Cube")
+        assert d["exists"] is True
+        assert d["typeName"] == "Cube"
+        assert d["active"] is True
+        assert d["visibility"] == "invisible"
+        assert d["xform"]["t"] == [1.0, 2.0, 3.0]
+        names = {a["name"] for a in d["attributes"]}
+        assert {"xformOp:translate", "size"} <= names
+
+    def test_array_attrs_reported_by_type_not_materialized(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/M", "typeName": "Mesh"},
+                {
+                    "k": "set_gprim_attrs",
+                    "prim": "/World/M",
+                    "attrs": {"primvars:st": [[0, 0], [1, 0], [1, 1]]},
+                    "primvar_meta": {
+                        "primvars:st": {
+                            "typeName": "texCoord2f[]",
+                            "interpolation": "faceVarying",
+                        }
+                    },
+                },
+            ]
+        )
+        d = srv.get_prim_detail("/World/M")
+        st = next(a for a in d["attributes"] if a["name"] == "primvars:st")
+        assert st["type"].endswith("[]")
+        assert st["value"] == "[array]"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard snapshot helpers (get_transforms_snapshot, export_layer)
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardSnapshots:
+    def test_transforms_snapshot_reports_trs(self, srv):
+        srv.apply_txn(
+            [
+                {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Cube"},
+                {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+                {"k": "set_xform_trs", "prim": "/World/Cube",
+                 "fields": ["t", "s"], "t": [1.0, 2.0, 3.0], "s": [2.0, 2.0, 2.0]},
+            ]
+        )
+        row = next(
+            r for r in srv.get_transforms_snapshot() if r["path"] == "/World/Cube"
+        )
+        assert row["t"] == [1.0, 2.0, 3.0]
+        assert row["s"] == [2.0, 2.0, 2.0]
+
+    def test_transforms_snapshot_skips_prims_without_ops(self, srv):
+        srv.apply_txn(
+            [{"k": "ensure_prim", "prim": "/World/Plain", "typeName": "Xform"}]
+        )
+        paths = {r["path"] for r in srv.get_transforms_snapshot()}
+        assert "/World/Plain" not in paths
+
+    def test_export_layer_not_found(self, srv):
+        assert srv.export_layer("nonexistent") == "# layer not found"
+
+    def test_export_layer_resolves_dept_layer(self, srv):
+        srv.get_or_create_client_layer("alice", department="anim")
+        usda = srv.export_layer("anim")
+        assert usda != "# layer not found"
+        assert "#usda" in usda
+
+
+# ---------------------------------------------------------------------------
 # Compaction
 # ---------------------------------------------------------------------------
 

@@ -144,7 +144,13 @@ class EventDispatcher:
         if not bufs:
             return 0
 
-        result = decode_messages(bufs, last_seq=self._last_seq, clear_on_resync=True)
+        # Decode geometry to numpy (zero-copy bulk) rather than per-element
+        # Python lists — the list path is ~100x slower to decode+apply for
+        # heavy meshes. Adapters that need plain sequences normalize at their
+        # own boundary.
+        result = decode_messages(
+            bufs, last_seq=self._last_seq, numpy_arrays=True, clear_on_resync=True
+        )
         if result.resync_requested and self.on_resync is not None:
             self.on_resync()
         for exc in result.errors:

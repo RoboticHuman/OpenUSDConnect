@@ -1,0 +1,16 @@
+{
+    "Plugins": [
+        {
+            "Type": "python",
+            "Name": "integrations.usdview.plugin",
+            "Info": {
+                "Types": {
+                    "integrations.usdview.plugin.UsdConnectContainer": {
+                        "bases": ["pxr.Usdviewq.plugin.PluginContainer"],
+                        "displayName": "OpenUSDConnect receiver"
+                    }
+                }
+            }
+        }
+    ]
+}
