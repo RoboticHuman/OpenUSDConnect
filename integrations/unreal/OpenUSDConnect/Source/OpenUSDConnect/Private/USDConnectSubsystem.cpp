@@ -357,9 +357,20 @@ void UUSDConnectSubsystem::DrainAndApply()
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
 	{
-		// Discard stale events
+		// Don't discard: the queue holds the HELLO replay that arrived before
+		// the user imported their stage. Cap the buffer at a generous limit
+		// so we don't accumulate without bound if a stage never appears.
+		constexpr int32 MaxBufferedFrames = 5000;
 		FScopeLock Lock(&EventQueueCS);
-		EventQueue.Reset();
+		if (EventQueue.Num() > MaxBufferedFrames)
+		{
+			const int32 ToDrop = EventQueue.Num() - MaxBufferedFrames;
+			EventQueue.RemoveAt(0, ToDrop, EAllowShrinking::No);
+			UE_LOG(LogUSDConnectSubsystem, Warning,
+				TEXT("Stage actor not attached — dropped %d oldest queued event(s); "
+				     "buffer capped at %d to prevent memory blowup"),
+				ToDrop, MaxBufferedFrames);
+		}
 		return;
 	}
 
