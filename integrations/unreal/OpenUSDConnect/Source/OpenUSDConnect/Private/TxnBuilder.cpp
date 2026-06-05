@@ -49,16 +49,16 @@ TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXfor
 		auto SOff    = Builder.CreateVector(X.S, 3);
 
 		const flatbuffers::uoffset_t TrsStart = Builder.StartTable();
-		Builder.AddOffset(VT::Trs_Prim,             PrimStr);
-		Builder.AddElement<uint8_t>(VT::Trs_Fields, X.Fields, 0);
-		Builder.AddOffset(VT::Trs_T,                TOff);
-		Builder.AddOffset(VT::Trs_R,                ROff);
-		Builder.AddOffset(VT::Trs_S,                SOff);
+		Builder.AddOffset(VT::SetXformTrs_Prim,             PrimStr);
+		Builder.AddElement<uint8_t>(VT::SetXformTrs_Fields, X.Fields, 0);
+		Builder.AddOffset(VT::SetXformTrs_T,                TOff);
+		Builder.AddOffset(VT::SetXformTrs_R,                ROff);
+		Builder.AddOffset(VT::SetXformTrs_S,                SOff);
 		const flatbuffers::uoffset_t TrsOff = Builder.EndTable(TrsStart);
 
 		const flatbuffers::uoffset_t EwStart = Builder.StartTable();
-		Builder.AddElement<uint8_t>(VT::EwType, kEvSetXformTrs, 0);
-		Builder.AddOffset(VT::EwEvent, flatbuffers::Offset<void>(TrsOff));
+		Builder.AddElement<uint8_t>(VT::EventWrapper_EventType, kEvSetXformTrs, 0);
+		Builder.AddOffset(VT::EventWrapper_Event, flatbuffers::Offset<void>(TrsOff));
 		const flatbuffers::uoffset_t EwOff = Builder.EndTable(EwStart);
 
 		EwOffsets.Add(flatbuffers::Offset<void>(EwOff));
@@ -70,13 +70,13 @@ TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXfor
 
 	auto ClientIdStr = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
 	const flatbuffers::uoffset_t TxnStart = Builder.StartTable();
-	Builder.AddOffset(VT::TxnClientId, ClientIdStr);
-	Builder.AddOffset(VT::TxnEvents,   EventsVec);
+	Builder.AddOffset(VT::Txn_ClientId, ClientIdStr);
+	Builder.AddOffset(VT::Txn_Events,   EventsVec);
 	const flatbuffers::uoffset_t TxnOff = Builder.EndTable(TxnStart);
 
 	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::EnvPayloadType, kPayloadTxn, 0);
-	Builder.AddOffset(VT::EnvPayload, flatbuffers::Offset<void>(TxnOff));
+	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadTxn, 0);
+	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(TxnOff));
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
 
@@ -100,13 +100,13 @@ TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmi
 		auto PrimStr = Builder.CreateString(TCHAR_TO_UTF8(*V.PrimPath));
 
 		const flatbuffers::uoffset_t VisStart = Builder.StartTable();
-		Builder.AddOffset(VT::Vis_Prim, PrimStr);
-		Builder.AddElement<uint8_t>(VT::Vis_Visible, V.bVisible ? 1 : 0, 0);
+		Builder.AddOffset(VT::SetVisibility_Prim, PrimStr);
+		Builder.AddElement<uint8_t>(VT::SetVisibility_Visible, V.bVisible ? 1 : 0, 0);
 		const flatbuffers::uoffset_t VisOff = Builder.EndTable(VisStart);
 
 		const flatbuffers::uoffset_t EwStart = Builder.StartTable();
-		Builder.AddElement<uint8_t>(VT::EwType, kEvSetVisibility, 0);
-		Builder.AddOffset(VT::EwEvent, flatbuffers::Offset<void>(VisOff));
+		Builder.AddElement<uint8_t>(VT::EventWrapper_EventType, kEvSetVisibility, 0);
+		Builder.AddOffset(VT::EventWrapper_Event, flatbuffers::Offset<void>(VisOff));
 		const flatbuffers::uoffset_t EwOff = Builder.EndTable(EwStart);
 
 		EwOffsets.Add(flatbuffers::Offset<void>(EwOff));
@@ -116,13 +116,13 @@ TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmi
 
 	auto ClientIdStr = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
 	const flatbuffers::uoffset_t TxnStart = Builder.StartTable();
-	Builder.AddOffset(VT::TxnClientId, ClientIdStr);
-	Builder.AddOffset(VT::TxnEvents,   EventsVec);
+	Builder.AddOffset(VT::Txn_ClientId, ClientIdStr);
+	Builder.AddOffset(VT::Txn_Events,   EventsVec);
 	const flatbuffers::uoffset_t TxnOff = Builder.EndTable(TxnStart);
 
 	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::EnvPayloadType, kPayloadTxn, 0);
-	Builder.AddOffset(VT::EnvPayload, flatbuffers::Offset<void>(TxnOff));
+	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadTxn, 0);
+	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(TxnOff));
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
 

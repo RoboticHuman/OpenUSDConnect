@@ -83,7 +83,7 @@ void ApplyEnsurePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- EnsureXformOps -------------------------------------------------------
 void ApplyEnsureXformOps(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::SingleField_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::EnsureXformOps_Prim);
 	if (PrimPath.IsEmpty()) return;
 
 	const pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
@@ -103,7 +103,7 @@ void ApplyEnsureXformOps(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetXformTrs ----------------------------------------------------------
 void ApplySetXformTrs(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Trs_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::SetXformTrs_Prim);
 	if (PrimPath.IsEmpty()) return;
 
 	const pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
@@ -127,15 +127,15 @@ void ApplySetXformTrs(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 		}
 	}
 
-	const pxr::UsdTimeCode Time = FB::HasField(Ev, VT::Trs_Time)
-		? pxr::UsdTimeCode(FB::GetField<double>(Ev, VT::Trs_Time, 0.0))
+	const pxr::UsdTimeCode Time = FB::HasField(Ev, VT::SetXformTrs_Time)
+		? pxr::UsdTimeCode(FB::GetField<double>(Ev, VT::SetXformTrs_Time, 0.0))
 		: pxr::UsdTimeCode::Default();
 
-	const uint8 Fields = FB::GetField<uint8>(Ev, VT::Trs_Fields, 0);
+	const uint8 Fields = FB::GetField<uint8>(Ev, VT::SetXformTrs_Fields, 0);
 
 	if (Fields & 1)  // Translate
 	{
-		const TArray<float> T = FB::GetFloatVec(Ev, VT::Trs_T);
+		const TArray<float> T = FB::GetFloatVec(Ev, VT::SetXformTrs_T);
 		if (T.Num() >= 3)
 		{
 			if (!TranslateOp) TranslateOp = Xformable.AddTranslateOp();
@@ -144,7 +144,7 @@ void ApplySetXformTrs(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 	}
 	if (Fields & 2)  // Rotate (quaternion [w,x,y,z])
 	{
-		const TArray<float> R = FB::GetFloatVec(Ev, VT::Trs_R);
+		const TArray<float> R = FB::GetFloatVec(Ev, VT::SetXformTrs_R);
 		if (R.Num() >= 4)
 		{
 			if (!RotateOp) RotateOp = Xformable.AddOrientOp();
@@ -153,7 +153,7 @@ void ApplySetXformTrs(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 	}
 	if (Fields & 4)  // Scale
 	{
-		const TArray<float> S = FB::GetFloatVec(Ev, VT::Trs_S);
+		const TArray<float> S = FB::GetFloatVec(Ev, VT::SetXformTrs_S);
 		if (S.Num() >= 3)
 		{
 			if (!ScaleOp) ScaleOp = Xformable.AddScaleOp();
@@ -165,7 +165,7 @@ void ApplySetXformTrs(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- DeletePrim -----------------------------------------------------------
 void ApplyDeletePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::SingleField_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::DeletePrim_Prim);
 	if (!PrimPath.IsEmpty())
 	{
 		Stage->RemovePrim(ToSdfPath(PrimPath));
@@ -175,19 +175,19 @@ void ApplyDeletePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- DeactivatePrim -------------------------------------------------------
 void ApplyDeactivatePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Da_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::DeactivatePrim_Prim);
 	if (PrimPath.IsEmpty()) return;
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
 	if (!Prim) return;
-	const bool bActive = FB::GetField<uint8>(Ev, VT::Da_Active, 1) != 0;
+	const bool bActive = FB::GetField<uint8>(Ev, VT::DeactivatePrim_Active, 1) != 0;
 	Prim.SetActive(bActive);
 }
 
 // ---- RenamePrim (stub) ----------------------------------------------------
 void ApplyRenamePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Rn_Prim);
-	const FString NewName  = FB::GetStr(Ev, VT::Rn_NewName);
+	const FString PrimPath = FB::GetStr(Ev, VT::RenamePrim_Prim);
+	const FString NewName  = FB::GetStr(Ev, VT::RenamePrim_NewName);
 	UE_LOG(LogUSDEventApplier, Warning,
 		TEXT("RenamePrim is not implemented (prim=%s newName=%s) — needs SdfCopySpec"),
 		*PrimPath, *NewName);
@@ -196,7 +196,7 @@ void ApplyRenamePrim(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetVisibility --------------------------------------------------------
 void ApplySetVisibility(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Vis_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::SetVisibility_Prim);
 	if (PrimPath.IsEmpty()) return;
 
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
@@ -205,11 +205,11 @@ void ApplySetVisibility(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 	pxr::UsdGeomImageable Imageable(Prim);
 	if (!Imageable) return;
 
-	const pxr::UsdTimeCode Time = FB::HasField(Ev, VT::Vis_Time)
-		? pxr::UsdTimeCode(FB::GetField<double>(Ev, VT::Vis_Time, 0.0))
+	const pxr::UsdTimeCode Time = FB::HasField(Ev, VT::SetVisibility_Time)
+		? pxr::UsdTimeCode(FB::GetField<double>(Ev, VT::SetVisibility_Time, 0.0))
 		: pxr::UsdTimeCode::Default();
 
-	if (FB::GetField<uint8>(Ev, VT::Vis_Visible, 1))
+	if (FB::GetField<uint8>(Ev, VT::SetVisibility_Visible, 1))
 	{
 		Imageable.MakeVisible(Time);
 	}
@@ -222,25 +222,25 @@ void ApplySetVisibility(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetStageMetadata -----------------------------------------------------
 void ApplySetStageMetadata(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	if (FB::HasField(Ev, VT::Sm_TCPS))
+	if (FB::HasField(Ev, VT::SetStageMetadata_TimeCodesPerSecond))
 	{
-		Stage->SetTimeCodesPerSecond(FB::GetField<double>(Ev, VT::Sm_TCPS, 24.0));
+		Stage->SetTimeCodesPerSecond(FB::GetField<double>(Ev, VT::SetStageMetadata_TimeCodesPerSecond, 24.0));
 	}
-	if (FB::HasField(Ev, VT::Sm_FPS))
+	if (FB::HasField(Ev, VT::SetStageMetadata_FramesPerSecond))
 	{
-		Stage->SetFramesPerSecond(FB::GetField<double>(Ev, VT::Sm_FPS, 24.0));
+		Stage->SetFramesPerSecond(FB::GetField<double>(Ev, VT::SetStageMetadata_FramesPerSecond, 24.0));
 	}
-	if (FB::HasField(Ev, VT::Sm_Start))
+	if (FB::HasField(Ev, VT::SetStageMetadata_StartTimeCode))
 	{
-		Stage->SetStartTimeCode(FB::GetField<double>(Ev, VT::Sm_Start, 1.0));
+		Stage->SetStartTimeCode(FB::GetField<double>(Ev, VT::SetStageMetadata_StartTimeCode, 1.0));
 	}
-	if (FB::HasField(Ev, VT::Sm_End))
+	if (FB::HasField(Ev, VT::SetStageMetadata_EndTimeCode))
 	{
-		Stage->SetEndTimeCode(FB::GetField<double>(Ev, VT::Sm_End, 1.0));
+		Stage->SetEndTimeCode(FB::GetField<double>(Ev, VT::SetStageMetadata_EndTimeCode, 1.0));
 	}
-	if (FB::HasField(Ev, VT::Sm_MPU))
+	if (FB::HasField(Ev, VT::SetStageMetadata_MetersPerUnit))
 	{
-		const double Mpu = FB::GetField<double>(Ev, VT::Sm_MPU, 0.01);
+		const double Mpu = FB::GetField<double>(Ev, VT::SetStageMetadata_MetersPerUnit, 0.01);
 		Stage->SetMetadata(pxr::TfToken("metersPerUnit"), Mpu);
 	}
 	// upAxis: USDImporter reads this separately on stage open — skip for now
@@ -249,21 +249,21 @@ void ApplySetStageMetadata(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetReference ---------------------------------------------------------
 void ApplySetReference(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Ref_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::SetReference_Prim);
 	if (PrimPath.IsEmpty()) return;
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
 	if (!Prim) return;
 
-	const uint32 Count = FB::GetVecSize(Ev, VT::Ref_Refs);
+	const uint32 Count = FB::GetVecSize(Ev, VT::SetReference_Refs);
 	pxr::UsdReferences Refs = Prim.GetReferences();
 	Refs.ClearReferences();
 
 	for (uint32 i = 0; i < Count; ++i)
 	{
-		const uint8* Arc = FB::GetVecElem(Ev, VT::Ref_Refs, i);
+		const uint8* Arc = FB::GetVecElem(Ev, VT::SetReference_Refs, i);
 		if (!Arc) continue;
-		const FString AssetPath   = FB::GetStr(Arc, VT::Arc_AssetPath);
-		const FString ArcPrimPath = FB::GetStr(Arc, VT::Arc_PrimPath);
+		const FString AssetPath   = FB::GetStr(Arc, VT::ArcEntry_AssetPath);
+		const FString ArcPrimPath = FB::GetStr(Arc, VT::ArcEntry_PrimPath);
 		Refs.AddReference(pxr::SdfReference(
 			TCHAR_TO_UTF8(*AssetPath),
 			ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath)));
@@ -273,21 +273,21 @@ void ApplySetReference(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetPayload -----------------------------------------------------------
 void ApplySetPayload(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Ref_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::SetPayload_Prim);
 	if (PrimPath.IsEmpty()) return;
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
 	if (!Prim) return;
 
-	const uint32 Count = FB::GetVecSize(Ev, VT::Ref_Refs);
+	const uint32 Count = FB::GetVecSize(Ev, VT::SetPayload_Payloads);
 	pxr::UsdPayloads Payloads = Prim.GetPayloads();
 	Payloads.ClearPayloads();
 
 	for (uint32 i = 0; i < Count; ++i)
 	{
-		const uint8* Arc = FB::GetVecElem(Ev, VT::Ref_Refs, i);
+		const uint8* Arc = FB::GetVecElem(Ev, VT::SetPayload_Payloads, i);
 		if (!Arc) continue;
-		const FString AssetPath   = FB::GetStr(Arc, VT::Arc_AssetPath);
-		const FString ArcPrimPath = FB::GetStr(Arc, VT::Arc_PrimPath);
+		const FString AssetPath   = FB::GetStr(Arc, VT::ArcEntry_AssetPath);
+		const FString ArcPrimPath = FB::GetStr(Arc, VT::ArcEntry_PrimPath);
 		Payloads.AddPayload(pxr::SdfPayload(
 			TCHAR_TO_UTF8(*AssetPath),
 			ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath)));
@@ -297,32 +297,32 @@ void ApplySetPayload(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- LoadPayload / UnloadPayload ------------------------------------------
 void ApplyLoadPayload(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::SingleField_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::LoadPayload_Prim);
 	if (!PrimPath.IsEmpty()) Stage->Load(ToSdfPath(PrimPath));
 }
 
 void ApplyUnloadPayload(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::SingleField_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::UnloadPayload_Prim);
 	if (!PrimPath.IsEmpty()) Stage->Unload(ToSdfPath(PrimPath));
 }
 
 // ---- SetVariantSelections -------------------------------------------------
 void ApplySetVariantSelections(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath = FB::GetStr(Ev, VT::Vs_Prim);
+	const FString PrimPath = FB::GetStr(Ev, VT::SetVariantSelections_Prim);
 	if (PrimPath.IsEmpty()) return;
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
 	if (!Prim) return;
 
 	pxr::UsdVariantSets VarSets = Prim.GetVariantSets();
-	const uint32 Count = FB::GetVecSize(Ev, VT::Vs_Selections);
+	const uint32 Count = FB::GetVecSize(Ev, VT::SetVariantSelections_Selections);
 	for (uint32 i = 0; i < Count; ++i)
 	{
-		const uint8* Pair = FB::GetVecElem(Ev, VT::Vs_Selections, i);
+		const uint8* Pair = FB::GetVecElem(Ev, VT::SetVariantSelections_Selections, i);
 		if (!Pair) continue;
-		const FString Key   = FB::GetStr(Pair, VT::Sp_Key);
-		const FString Value = FB::GetStr(Pair, VT::Sp_Value);
+		const FString Key   = FB::GetStr(Pair, VT::StringPair_Key);
+		const FString Value = FB::GetStr(Pair, VT::StringPair_Value);
 		if (Key.IsEmpty()) continue;
 		pxr::UsdVariantSet VSet = VarSets.GetVariantSet(TCHAR_TO_UTF8(*Key));
 		VSet.SetVariantSelection(TCHAR_TO_UTF8(*Value));
@@ -332,8 +332,8 @@ void ApplySetVariantSelections(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 // ---- SetMaterialBinding ---------------------------------------------------
 void ApplySetMaterialBinding(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
-	const FString PrimPath     = FB::GetStr(Ev, VT::Mb_Prim);
-	const FString MaterialPath = FB::GetStr(Ev, VT::Mb_MaterialPath);
+	const FString PrimPath     = FB::GetStr(Ev, VT::SetMaterialBinding_Prim);
+	const FString MaterialPath = FB::GetStr(Ev, VT::SetMaterialBinding_MaterialPath);
 	if (PrimPath.IsEmpty() || MaterialPath.IsEmpty()) return;
 
 	pxr::UsdPrim Prim    = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
@@ -372,7 +372,7 @@ void DispatchEvent(pxr::UsdStageRefPtr& Stage, uint8 EventKind, const uint8* Ev)
 	case kEvSetVariantSelections: ApplySetVariantSelections(Stage, Ev); break;
 	case kEvSetMaterialBinding:   ApplySetMaterialBinding(Stage, Ev);   break;
 	case kEvSetConnectableInput:
-	case kEvSetConnectableConn:
+	case kEvSetConnectableConnection:
 		UE_LOG(LogUSDEventApplier, Verbose,
 			TEXT("SetConnectable*: skipped (not implemented in MVP)"));
 		break;
@@ -406,14 +406,14 @@ void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	const uint8* Env = FB::GetRoot(RawFrame);
 	if (!Env) return;
 
-	const uint8* BcEvent = FB::GetPtr(Env, VT::EnvPayload);
+	const uint8* BcEvent = FB::GetPtr(Env, VT::Envelope_Payload);
 	if (!BcEvent) return;
 
-	const uint8* EventWrapper = FB::GetPtr(BcEvent, VT::BcEvent);
+	const uint8* EventWrapper = FB::GetPtr(BcEvent, VT::BroadcastEvent_Event);
 	if (!EventWrapper) return;
 
-	const uint8  EventKind  = FB::GetField<uint8>(EventWrapper, VT::EwType, 0);
-	const uint8* EventTable = FB::GetPtr(EventWrapper, VT::EwEvent);
+	const uint8  EventKind  = FB::GetField<uint8>(EventWrapper, VT::EventWrapper_EventType, 0);
+	const uint8* EventTable = FB::GetPtr(EventWrapper, VT::EventWrapper_Event);
 
 	// SdfChangeBlock batches all SDF mutations done within its scope into a single
 	// consolidated ObjectsChanged notice dispatched on destruction.  The stage

@@ -263,7 +263,7 @@ uint8 FSyncClient::GetPayloadType(const TArray<uint8>& Bytes) const
 	if (Bytes.Num() < 8) return 0;
 	const uint8* Root = FB::GetRoot(Bytes);
 	if (!Root) return 0;
-	return FB::GetField<uint8>(Root, VT::EnvPayloadType, 0);
+	return FB::GetField<uint8>(Root, VT::Envelope_PayloadType, 0);
 }
 
 void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
@@ -273,14 +273,14 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	if (PType == kPayloadBroadcastEvent)
 	{
 		const uint8* Env     = FB::GetRoot(Frame);
-		const uint8* BcEvent = Env ? FB::GetPtr(Env, VT::EnvPayload) : nullptr;
+		const uint8* BcEvent = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
 		if (BcEvent)
 		{
-			const int32 Seq = FB::GetField<int32>(BcEvent, VT::BcSeq, 0);
+			const int32 Seq = FB::GetField<int32>(BcEvent, VT::BroadcastEvent_Seq, 0);
 			if (Seq > LastSeq) LastSeq = Seq;
 
 			// Echo suppression: skip events we originated (server broadcasts them back).
-			const FString Origin = FB::GetStr(BcEvent, VT::BcOrigin);
+			const FString Origin = FB::GetStr(BcEvent, VT::BroadcastEvent_Origin);
 			if (!Origin.IsEmpty() && Origin == SessionOrigin)
 			{
 				return;
@@ -303,8 +303,8 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	else if (PType == kPayloadRateLimited)
 	{
 		const uint8* Env = FB::GetRoot(Frame);
-		const uint8* RL  = Env ? FB::GetPtr(Env, VT::EnvPayload) : nullptr;
-		const float Retry = RL ? FB::GetField<float>(RL, VT::RLRetryAfter, 1.0f) : 1.0f;
+		const uint8* RL  = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
+		const float Retry = RL ? FB::GetField<float>(RL, VT::RateLimited_RetryAfter, 1.0f) : 1.0f;
 		UE_LOG(LogUSDConnect, Warning,
 			TEXT("Rate limited — sleeping %.1fs"), Retry);
 		FPlatformProcess::Sleep(Retry);
@@ -336,19 +336,19 @@ TArray<uint8> FSyncClient::BuildHelloFrame() const
 
 	// Hello table
 	const flatbuffers::uoffset_t HelloStart = Builder.StartTable();
-	Builder.AddOffset(VT::HelloRole,        RoleOff);
-	Builder.AddElement<int32_t>(VT::HelloProtoVer, 1,        0);
-	Builder.AddElement<int32_t>(VT::HelloSyncFrom, LastSeq,  0);
-	Builder.AddOffset(VT::HelloClientId,    ClientIdOff);
-	Builder.AddOffset(VT::HelloOrigin,      OriginOff);
-	Builder.AddOffset(VT::HelloDepartment,  DepartmentOff);
-	Builder.AddOffset(VT::HelloToken,       TokenOff);
+	Builder.AddOffset(VT::Hello_Role,        RoleOff);
+	Builder.AddElement<int32_t>(VT::Hello_ProtocolVersion, 1,        0);
+	Builder.AddElement<int32_t>(VT::Hello_SyncFrom, LastSeq,  0);
+	Builder.AddOffset(VT::Hello_ClientId,    ClientIdOff);
+	Builder.AddOffset(VT::Hello_Origin,      OriginOff);
+	Builder.AddOffset(VT::Hello_Department,  DepartmentOff);
+	Builder.AddOffset(VT::Hello_Token,       TokenOff);
 	const flatbuffers::uoffset_t HelloOff = Builder.EndTable(HelloStart);
 
 	// Envelope table (schema_version defaults to 1 — omit to use default)
 	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::EnvPayloadType, kPayloadHello, 0);
-	Builder.AddOffset(VT::EnvPayload, flatbuffers::Offset<void>(HelloOff));
+	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadHello, 0);
+	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(HelloOff));
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));

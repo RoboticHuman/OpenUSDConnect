@@ -62,7 +62,7 @@ clients to the server.
 |------|----------------|------|
 | `Public/USDConnectSettings.h` | `UUSDConnectSettings` | UDeveloperSettings exposed at *Edit → Project Settings → Plugins → OpenUSD Connect*. |
 | `Public/USDConnectSubsystem.h` | `UUSDConnectSubsystem` | UTickableWorldSubsystem that owns both clients, the event queue, and the stage-actor attachment. |
-| `Private/USDConnectProtocol.h` | `namespace OUC` | **Single source of truth** for VT offsets, payload-union constants, and FlatBuffers raw-read helpers. `inline constexpr` / inline functions keep it safe under Unreal's Unity Build. |
+| `Private/USDConnectProtocol.h` | `namespace OUC` | **Auto-generated** from `openusdconnect/schema/*.fbs` by `scripts/generate_unreal_protocol.py`. Holds VT offsets, payload-union constants, and FlatBuffers raw-read helpers. `inline constexpr` / inline functions keep it safe under Unreal's Unity Build. Do not edit by hand — regenerate. |
 | `Private/SyncClient.h/.cpp` | `FSyncClient` | Receiver TCP thread. Handles HELLO, framed reads, echo suppression, ping/rate-limit/resync. |
 | `Private/EmitClient.h/.cpp` | `FEmitClient` | Emitter TCP thread. Drains a SPSC SendQueue, peeks for inbound corrections via `HasPendingData`. |
 | `Private/TxnBuilder.h/.cpp` | `BuildXformTxnFrame`, `BuildVisibilityTxnFrame` | FlatBuffers Txn frame builders for the supported emitter event kinds. |
@@ -95,16 +95,22 @@ Frame: [4-byte big-endian uint32 length][N bytes FlatBuffers Envelope]
 `event_type` values are listed at the top of `USDConnectProtocol.h`. The handful currently implemented in
 either direction is summarised in [`README.md`](README.md#supported-events).
 
-### FlatBuffers without generated code
+### FlatBuffers without generated FlatBuffers code
 
-The plugin does **not** invoke `flatc` and ship generated headers. Reading is done in
-`OUC::FB::*` via raw vtable arithmetic; writing uses the `FlatBufferBuilder` directly,
-adding fields at hard-coded VT offsets defined in `OUC::VT::*`.
+The plugin does **not** invoke `flatc --cpp` and ship its full generated readers/writers
+(allocator override + Unity-build + `dynamic_cast` macro conflicts make that painful in UE).
+Instead, reading is done in `OUC::FB::*` via raw vtable arithmetic, and writing uses the
+`FlatBufferBuilder` directly with fields placed at hard-coded VT offsets defined in
+`OUC::VT::*`.
 
 Vtable offset rule: the *N*th declared field of a table has VT offset `4 + 2*N`. Union
 fields take two slots — the type-discriminant byte (lower VT) and the offset to the
-referenced table (next VT). All offsets in `USDConnectProtocol.h` are authored to
-mirror the `.fbs` schemas in `openusdconnect/schema/`.
+referenced table (next VT). All offsets and discriminant constants in `USDConnectProtocol.h`
+are **auto-generated** from `openusdconnect/schema/{messages,events}.fbs` by
+`scripts/generate_unreal_protocol.py` (also invoked from `scripts/generate_flatbuffers.sh`).
+Regenerate and re-commit the header after any schema change — the C++ call sites use
+`TableName_FieldName` constants and will fail to compile if a field is renamed/removed,
+which is the point.
 
 ### Threading & framing rules learned the hard way
 

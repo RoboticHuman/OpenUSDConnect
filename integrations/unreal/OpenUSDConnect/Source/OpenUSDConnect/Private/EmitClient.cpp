@@ -146,8 +146,8 @@ uint32 FEmitClient::Run()
 				if (PType == kPayloadRateLimited)
 				{
 					const uint8* Env = FB::GetRoot(InFrame);
-					const uint8* RL  = Env ? FB::GetPtr(Env, VT::EnvPayload) : nullptr;
-					const float Retry = RL ? FB::GetField<float>(RL, VT::RLRetryAfter, 1.0f) : 1.0f;
+					const uint8* RL  = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
+					const float Retry = RL ? FB::GetField<float>(RL, VT::RateLimited_RetryAfter, 1.0f) : 1.0f;
 					UE_LOG(LogUSDEmit, Warning,
 						TEXT("Emitter rate limited — sleeping %.1fs"), Retry);
 					FPlatformProcess::Sleep(Retry);
@@ -253,7 +253,7 @@ uint8 FEmitClient::GetPayloadType(const TArray<uint8>& Bytes) const
 {
 	if (Bytes.Num() < 8) return 0;
 	const uint8* Root = FB::GetRoot(Bytes);
-	return Root ? FB::GetField<uint8>(Root, VT::EnvPayloadType, 0) : 0;
+	return Root ? FB::GetField<uint8>(Root, VT::Envelope_PayloadType, 0) : 0;
 }
 
 TArray<uint8> FEmitClient::BuildHelloFrame() const
@@ -267,18 +267,18 @@ TArray<uint8> FEmitClient::BuildHelloFrame() const
 	auto TokenOff      = Builder.CreateString("");
 
 	const flatbuffers::uoffset_t HelloStart = Builder.StartTable();
-	Builder.AddOffset(VT::HelloRole,        RoleOff);
-	Builder.AddElement<int32_t>(VT::HelloProtoVer, 1, 0);
-	Builder.AddElement<int32_t>(VT::HelloSyncFrom, 0, 0);
-	Builder.AddOffset(VT::HelloClientId,    ClientIdOff);
-	Builder.AddOffset(VT::HelloOrigin,      OriginOff);
-	Builder.AddOffset(VT::HelloDepartment,  DepartmentOff);
-	Builder.AddOffset(VT::HelloToken,       TokenOff);
+	Builder.AddOffset(VT::Hello_Role,        RoleOff);
+	Builder.AddElement<int32_t>(VT::Hello_ProtocolVersion, 1, 0);
+	Builder.AddElement<int32_t>(VT::Hello_SyncFrom, 0, 0);
+	Builder.AddOffset(VT::Hello_ClientId,    ClientIdOff);
+	Builder.AddOffset(VT::Hello_Origin,      OriginOff);
+	Builder.AddOffset(VT::Hello_Department,  DepartmentOff);
+	Builder.AddOffset(VT::Hello_Token,       TokenOff);
 	const flatbuffers::uoffset_t HelloOff = Builder.EndTable(HelloStart);
 
 	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::EnvPayloadType, kPayloadHello, 0);
-	Builder.AddOffset(VT::EnvPayload, flatbuffers::Offset<void>(HelloOff));
+	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadHello, 0);
+	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(HelloOff));
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
 
