@@ -3,6 +3,8 @@
 
 #include "Subsystems/WorldSubsystem.h"
 #include "HAL/CriticalSection.h"
+#include "Containers/Set.h"
+#include "Delegates/IDelegateInstance.h"
 #include <atomic>
 #include "USDConnectSubsystem.generated.h"
 
@@ -75,12 +77,8 @@ private:
 
 	void DrainAndApply();
 
-	/**
-	 * Called by AUsdStageActor::OnPrimChanged when any prim changes.
-	 * Not a UFUNCTION — FOnPrimChanged is a plain FEvent multicast delegate (not dynamic),
-	 * so AddUObject works directly without Blueprint reflection.
-	 */
-	void OnPrimChanged(const FString& PrimPath, bool bIsResync);
+	/** Drain accumulated SdfPaths from the stage listener and emit one frame per unique path */
+	void DrainAndEmit();
 
 	/** Build and send a Txn event for a changed prim (emitter side) */
 	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
@@ -115,6 +113,19 @@ private:
 	/** Cached weak reference to the currently attached stage actor */
 	TWeakObjectPtr<AUsdStageActor> CachedStageActor;
 
-	/** Delegate handle for AUsdStageActor::OnPrimChanged */
-	FDelegateHandle PrimChangedHandle;
+	/**
+	 * Delegate handle for the engine FUsdListener::OnObjectsChanged subscription.
+	 * We use the engine's wrapper instead of registering our own pxr::TfNotice
+	 * because the wrapper avoids a `dynamic_cast` macro collision between UE's
+	 * CoreUObject and pxr's notice templates.
+	 *
+	 * The delegate gives us actual SdfPaths of changed prims (the engine's
+	 * OnPrimChanged delegate rolls sub-prim paths up to the nearest
+	 * KindsToCollapse ancestor, which is useless for emitting).
+	 */
+	FDelegateHandle ObjectsChangedHandle;
+
+	/** Prim paths accumulated by the OnObjectsChanged callback, drained each tick. */
+	FCriticalSection PendingEmitPathsCS;
+	TSet<FString> PendingEmitPaths;
 };
