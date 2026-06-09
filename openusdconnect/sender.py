@@ -100,6 +100,9 @@ class EventSender:
                 (self.host, self.port),
                 timeout=self.handshake_timeout,
             )
+            # Interactive txns are small; Nagle would hold them back waiting
+            # for ACKs. The server sets this on its side too.
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             send_msg(
                 self.sock,
                 make_hello(

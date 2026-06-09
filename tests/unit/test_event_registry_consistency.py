@@ -14,7 +14,14 @@ from __future__ import annotations
 
 from openusdconnect import events
 from openusdconnect.adapters import _DISPATCH
-from openusdconnect.protocol_constants import EVENT_KEYS
+from openusdconnect.protocol_constants import (
+    ARC_KINDS,
+    CREATE_KINDS,
+    EVENT_KEYS,
+    IMPORT_KINDS,
+    STAGE_SYNC_KINDS,
+    STRUCTURAL_EVENT_KINDS,
+)
 
 
 def test_every_event_kind_has_encoder_decoder_applier():
@@ -38,3 +45,35 @@ def test_no_orphan_registrations_outside_event_keys():
         assert spec.kind in EVENT_KEYS, f"{spec.kind}: registered but not in EVENT_KEYS"
     for kind in _DISPATCH:
         assert kind in EVENT_KEYS, f"{kind}: in _DISPATCH but not in EVENT_KEYS"
+
+
+def test_derived_kind_sets_pin():
+    """Pin the sets derived from EVENT_KIND_INFO. A diff here means a flag
+    was flipped in the declaration table; update deliberately."""
+    assert CREATE_KINDS == {"ensure_prim", "set_stage_metadata"}
+    assert STRUCTURAL_EVENT_KINDS == {
+        "ensure_prim",
+        "ensure_xform_ops",
+        "load_payload",
+        "set_connectable_connection",
+        "set_connectable_input",
+        "set_material_binding",
+        "set_payload",
+        "set_reference",
+        "set_stage_metadata",
+        "set_variant_selections",
+        "unload_payload",
+    }
+    assert STAGE_SYNC_KINDS == {
+        "load_payload",
+        "set_connectable_connection",
+        "set_connectable_input",
+        "set_material_binding",
+        "set_payload",
+        "set_reference",
+        "set_stage_metadata",
+        "set_variant_selections",
+        "unload_payload",
+    }
+    assert ARC_KINDS == {"set_payload", "set_reference", "set_variant_selections"}
+    assert IMPORT_KINDS == {"load_payload", "set_reference"}

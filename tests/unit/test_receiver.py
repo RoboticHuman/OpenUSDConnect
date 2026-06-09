@@ -102,6 +102,19 @@ class TestReceiverThread:
         finally:
             _teardown(rt, conn, srv)
 
+    def test_socket_has_nodelay(self):
+        """Small control frames must not sit in Nagle's buffer."""
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            _poll_until(lambda: rt.connected)
+            assert rt.connected
+            assert rt.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+        finally:
+            _teardown(rt, conn, srv)
+
     def test_receives_and_drains(self):
         """ReceiverThread queues incoming FB messages for drain_queue."""
         srv, port = _make_server()

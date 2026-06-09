@@ -25,15 +25,14 @@ from typing import TYPE_CHECKING
 
 from .codec import decode_messages
 from .protocol_constants import (
-    K_LOAD_PAYLOAD,
+    ARC_KINDS,
+    IMPORT_KINDS,
     K_SET_CONNECTABLE_CONNECTION,
-    K_SET_CONNECTABLE_INPUT,
-    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
-    K_UNLOAD_PAYLOAD,
+    STAGE_SYNC_KINDS,
 )
 
 if TYPE_CHECKING:
@@ -46,38 +45,31 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 
-# Events that mutate the USD stage (composition arcs, materials, shaders,
-# lights, and other UsdShade connectables) plus stage-level metadata.
-# Transforms, visibility, gprim attrs, and structural prim events go
-# through the adapter only — they target whatever the adapter wraps
-# (DCC-native objects, or a Usd.Stage via UsdStageAdapter) rather than
-# USD scene description the mirror needs to track on its own.
-STAGE_SYNC_KINDS = frozenset(
-    {
-        K_SET_REFERENCE,
-        K_SET_PAYLOAD,
-        K_LOAD_PAYLOAD,
-        K_UNLOAD_PAYLOAD,
-        K_SET_VARIANT_SELECTIONS,
-        K_SET_MATERIAL_BINDING,
-        K_SET_CONNECTABLE_INPUT,
-        K_SET_CONNECTABLE_CONNECTION,
-        K_SET_STAGE_METADATA,
-    }
-)
+# STAGE_SYNC_KINDS / IMPORT_KINDS / ARC_KINDS are derived from the
+# EVENT_KIND_INFO table in protocol_constants and re-exported here for
+# integrations that import them from the dispatcher. Their semantics are
+# documented on EventKindInfo (stage_sync / imports / arc).
 
-# Event kinds whose application imports new content into the consumer.
-# Used to trigger post-import work (cache warmup, viewport refresh) via the
-# ``on_imported`` callback.
-IMPORT_KINDS = frozenset({K_LOAD_PAYLOAD, K_SET_REFERENCE})
 
-# Event kinds where the apply path (``ClearReferences()`` + re-add, or
-# variant set + select) triggers spurious recomposition even when the
-# final state is identical to the incoming event.  Skipping them when
-# the arc on the stage already matches avoids unnecessary re-imports
-# and composition churn.  The skip check reads pre-commit state — see
-# ``_compute_stage_skip`` and ``_arc_changed``.
-ARC_KINDS = frozenset({K_SET_REFERENCE, K_SET_PAYLOAD, K_SET_VARIANT_SELECTIONS})
+def _stage_sync_scope(events: list[dict]) -> list[str] | None:
+    """Every prim path a stage-sync batch may author on, for the scoped
+    atomic_apply backup. Returns None when the batch writes outside prim
+    scopes (stage metadata), forcing the full-layer snapshot.
+    """
+    paths: list[str] = []
+    for ev in events:
+        if ev.get("k") == K_SET_STAGE_METADATA:
+            return None
+        prim = ev.get("prim")
+        if not prim:
+            return None
+        paths.append(prim)
+        if ev.get("k") == K_SET_CONNECTABLE_CONNECTION:
+            for conn in ev.get("connections", {}).values():
+                source = conn.get("source_prim")
+                if source:
+                    paths.append(source)
+    return paths
 
 
 class EventDispatcher:
@@ -200,7 +192,8 @@ class EventDispatcher:
                     if i not in stage_skip and ev.get("k") in STAGE_SYNC_KINDS
                 ]
                 if stage_events:
-                    with atomic_apply(self.mirror_stage):
+                    scope = _stage_sync_scope(stage_events)
+                    with atomic_apply(self.mirror_stage, prim_paths=scope):
                         apply_events(self.mirror_stage, stage_events)
 
             # 2. Adapter dispatch — every non-skipped event. Reached

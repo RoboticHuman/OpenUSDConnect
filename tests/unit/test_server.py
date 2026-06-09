@@ -1504,3 +1504,92 @@ class TestRateLimitedServer:
         assert s.txn_rate == 0
         assert s.txn_burst == 0
         s.store.close()
+
+
+# ---------------------------------------------------------------------------
+# Event store prim-prefix query
+# ---------------------------------------------------------------------------
+
+
+class TestGetByPrimPrefix:
+    def _append(self, srv, seq, kind, prim):
+        ev = {"k": kind, "prim": prim}
+        if kind == "ensure_prim":
+            ev["typeName"] = "Xform"
+        elif kind == "set_visibility":
+            ev["visible"] = True
+        srv.append_log({"type": "event", "seq": seq, "event": ev})
+
+    def test_filters_by_prefix_and_kind(self, srv):
+        self._append(srv, 1, "ensure_prim", "/World/Asset/A")
+        self._append(srv, 2, "ensure_prim", "/World/Asset/B")
+        self._append(srv, 3, "ensure_prim", "/World/Other")
+        self._append(srv, 4, "set_visibility", "/World/Asset/A")
+        self._append(srv, 5, "delete_prim", "/World/Asset/A")
+
+        blobs = srv.store.get_by_prim_prefix(
+            "/World/Asset/", {"ensure_prim", "set_visibility"}
+        )
+        decoded = [message_to_dict(b)["event"] for b in blobs]
+        assert [(e["k"], e["prim"]) for e in decoded] == [
+            ("ensure_prim", "/World/Asset/A"),
+            ("ensure_prim", "/World/Asset/B"),
+            ("set_visibility", "/World/Asset/A"),
+        ]
+
+    def test_prefix_does_not_match_siblings(self, srv):
+        self._append(srv, 1, "ensure_prim", "/World/Asset/Child")
+        self._append(srv, 2, "ensure_prim", "/World/AssetB")
+
+        blobs = srv.store.get_by_prim_prefix("/World/Asset/", {"ensure_prim"})
+        decoded = [message_to_dict(b)["event"]["prim"] for b in blobs]
+        assert decoded == ["/World/Asset/Child"]
+
+    def test_empty_kinds_returns_nothing(self, srv):
+        self._append(srv, 1, "ensure_prim", "/World/Asset/A")
+        assert srv.store.get_by_prim_prefix("/World/Asset/", set()) == []
+
+
+# ---------------------------------------------------------------------------
+# apply_txn single-layer fast path
+# ---------------------------------------------------------------------------
+
+
+class TestApplyTxnSingleLayerFastPath:
+    def test_skips_strength_checks(self, srv, monkeypatch):
+        """With only the edit layer in the session stack, apply_txn must not
+        run per-event strength checks at all."""
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("_is_layer_winning called on single-layer fast path")
+
+        monkeypatch.setattr(srv, "_is_layer_winning", _boom)
+        events = [
+            {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"},
+            {"k": "set_visibility", "prim": "/World/X", "visible": False},
+        ]
+        changed = srv.apply_txn(events)
+        assert changed == [0, 1]
+        assert "/World/X" in srv._prim_paths
+
+    def test_department_layers_still_check_strength(self, tmp_path, monkeypatch):
+        """With department layers in the stack, strength checks still run."""
+        db = str(tmp_path / "dept.db")
+        s = UsdSyncServer(log_path=db, department_priority=["anim", "layout"])
+        try:
+            layer = s.get_or_create_client_layer("alice", department="anim")
+            calls = []
+            real = s._is_layer_winning
+
+            def _spy(prim, target, ev):
+                calls.append(ev.get("k"))
+                return real(prim, target, ev)
+
+            monkeypatch.setattr(s, "_is_layer_winning", _spy)
+            s.apply_txn(
+                [{"k": "ensure_prim", "prim": "/World/Y", "typeName": "Xform"}],
+                layer=layer,
+            )
+            assert calls == ["ensure_prim"]
+        finally:
+            s.store.close()

@@ -33,10 +33,21 @@ class IncompleteRead(Exception):
 # Socket-based send / recv
 # ---------------------------------------------------------------------------
 
+# Writing the header and payload separately is the write-write-read pattern
+# that triggers Nagle + delayed-ACK stalls (tens of ms) on small messages.
+# Coalescing into one sendall keeps a small message in a single segment;
+# above the limit the concat copy costs more than the second syscall.
+_COALESCE_LIMIT = 64 * 1024
+
+
 def send_framed(sock, payload: bytes) -> None:
     """Send a length-prefixed message over a socket."""
-    sock.sendall(_HEADER.pack(len(payload)))
-    sock.sendall(payload)
+    header = _HEADER.pack(len(payload))
+    if len(payload) <= _COALESCE_LIMIT:
+        sock.sendall(header + payload)
+    else:
+        sock.sendall(header)
+        sock.sendall(payload)
 
 
 def recv_framed(sock, *, max_size: int = MAX_MESSAGE_SIZE) -> bytes:

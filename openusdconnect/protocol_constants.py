@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 PROTOCOL_VERSION = 1
 
 # Message type constants
@@ -56,55 +58,79 @@ STAGE_METADATA_KEYS = (
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
 
-EVENT_KEYS = frozenset(
-    {
-        K_ENSURE_PRIM,
-        K_ENSURE_XFORM_OPS,
-        K_SET_XFORM_TRS,
-        K_DELETE_PRIM,
-        K_DEACTIVATE_PRIM,
-        K_RENAME_PRIM,
-        K_SET_VISIBILITY,
-        K_SET_GPRIM_ATTRS,
-        K_SET_REFERENCE,
-        K_SET_PAYLOAD,
-        K_LOAD_PAYLOAD,
-        K_UNLOAD_PAYLOAD,
-        K_SET_VARIANT_SELECTIONS,
-        K_SET_MATERIAL_BINDING,
-        K_SET_CONNECTABLE_INPUT,
-        K_SET_CONNECTABLE_CONNECTION,
-        K_SET_STAGE_METADATA,
-    }
-)
+@dataclass(frozen=True)
+class EventKindInfo:
+    """Classification flags for one event kind.
 
-# Events that must be applied outside a ChangeBlock.
-#
-# The historical name is kept for API compatibility. Some entries are not
-# structural in the USD schema sense, but must still run before the batched
-# value-setting ChangeBlock because they create specs or affect composition.
+    The single declaration site for everything that is a property of the
+    kind itself: apply ordering, receive-side categorization, and the
+    server's layer-strength checks all derive from this table. Behavior
+    (encoder, decoder, applier, adapter method, emitter invalidator) is
+    registered at the function definition sites.
+
+    create: a prim must exist before anything can author on it; applied
+        first, ancestors before descendants.
+    structural: creates specs or affects composition, so it must run
+        outside the batched value-setting ChangeBlock.
+    stage_sync: mutates USD scene description that a receive-side mirror
+        stage must track on its own (composition arcs, materials,
+        shaders, stage metadata).
+    arc: re-applying identical state would still trigger recomposition
+        (ClearReferences plus re-add, variant re-select), so receivers
+        skip-detect it against the mirror's composed state.
+    imports: application brings new content into the consumer; fires the
+        dispatcher's on_imported callback.
+    strength_attrs: what the server inspects for the per-client layer
+        strength check. None means not checked (always broadcast), an
+        empty tuple means strongest-spec check (structural ops), names
+        mean a per-attribute check ("meta:X" is a prim metadata field,
+        "rel:X" a relationship).
+    """
+
+    create: bool = False
+    structural: bool = False
+    stage_sync: bool = False
+    arc: bool = False
+    imports: bool = False
+    strength_attrs: tuple[str, ...] | None = None
+
+
+EVENT_KIND_INFO: dict[str, EventKindInfo] = {
+    K_ENSURE_PRIM: EventKindInfo(create=True, structural=True, strength_attrs=()),
+    K_ENSURE_XFORM_OPS: EventKindInfo(structural=True, strength_attrs=()),
+    K_SET_XFORM_TRS: EventKindInfo(
+        strength_attrs=("xformOp:translate", "xformOp:orient", "xformOp:scale"),
+    ),
+    K_DELETE_PRIM: EventKindInfo(strength_attrs=()),
+    K_DEACTIVATE_PRIM: EventKindInfo(strength_attrs=("meta:active",)),
+    K_RENAME_PRIM: EventKindInfo(strength_attrs=()),
+    K_SET_VISIBILITY: EventKindInfo(strength_attrs=("visibility",)),
+    K_SET_GPRIM_ATTRS: EventKindInfo(),
+    K_SET_REFERENCE: EventKindInfo(
+        structural=True, stage_sync=True, arc=True, imports=True,
+    ),
+    K_SET_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, arc=True),
+    K_LOAD_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, imports=True),
+    K_UNLOAD_PAYLOAD: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_VARIANT_SELECTIONS: EventKindInfo(
+        structural=True, stage_sync=True, arc=True,
+    ),
+    K_SET_MATERIAL_BINDING: EventKindInfo(
+        structural=True, stage_sync=True, strength_attrs=("rel:material:binding",),
+    ),
+    K_SET_CONNECTABLE_INPUT: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_CONNECTABLE_CONNECTION: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_STAGE_METADATA: EventKindInfo(create=True, structural=True, stage_sync=True),
+}
+
+EVENT_KEYS = frozenset(EVENT_KIND_INFO)
 STRUCTURAL_EVENT_KINDS = frozenset(
-    {
-        K_SET_STAGE_METADATA,
-        K_ENSURE_PRIM,
-        K_ENSURE_XFORM_OPS,
-        K_SET_VARIANT_SELECTIONS,
-        K_SET_REFERENCE,
-        K_SET_PAYLOAD,
-        K_LOAD_PAYLOAD,
-        K_UNLOAD_PAYLOAD,
-        K_SET_MATERIAL_BINDING,
-        K_SET_CONNECTABLE_INPUT,
-        K_SET_CONNECTABLE_CONNECTION,
-    }
+    k for k, i in EVENT_KIND_INFO.items() if i.structural
 )
-
-# Prim-creating kinds. The one hard apply-ordering requirement is that a prim
-# exists before anything authors on it, so these are applied first (ancestors
-# before descendants). Beyond that, USD composition + dangling connection /
-# relationship targets make event order irrelevant; there is deliberately no
-# fine-grained per-kind ordering table to maintain.
-CREATE_KINDS = frozenset({K_SET_STAGE_METADATA, K_ENSURE_PRIM})
+CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
+STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
+ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
+IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
 
 
 def event_apply_tier(kind: str) -> int:

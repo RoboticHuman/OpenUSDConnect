@@ -364,6 +364,49 @@ def test_emitter_layer_scoped_time_samples():
     assert 10.0 not in sample_times
 
 
+def test_default_edit_does_not_reread_sample_tables(monkeypatch):
+    """A default-time edit on a keyframed attr must not re-read the attr's
+    sample table; the per-attr notice classifies it as default-only.
+    """
+    from openusdconnect import emitter as emitter_mod
+
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    xf = UsdGeom.Xformable(cube)
+    t_op = xf.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble)
+    t_op.Set(Gf.Vec3d(10, 0, 0), Usd.TimeCode(24.0))
+    t_op.Set(Gf.Vec3d(20, 0, 0), Usd.TimeCode(48.0))
+    emitter.build_events_for_dirty()
+
+    calls: list[str] = []
+    real = emitter_mod._diff_time_samples
+
+    def _spy(attr, cached, layer=None):
+        calls.append(attr.GetName())
+        return real(attr, cached, layer)
+
+    monkeypatch.setattr(emitter_mod, "_diff_time_samples", _spy)
+
+    # Default-time write: emits a TRS diff but reads no sample tables.
+    t_op.Set(Gf.Vec3d(1, 2, 3))
+    events = emitter.build_events_for_dirty()
+    assert calls == []
+    default_trs = [
+        e for e in events
+        if e.get("k") == K_SET_XFORM_TRS and e.get("time") is None
+    ]
+    assert len(default_trs) == 1
+
+    # Sample write: the table is re-read and only the changed key emits.
+    t_op.Set(Gf.Vec3d(30, 0, 0), Usd.TimeCode(48.0))
+    events = emitter.build_events_for_dirty()
+    assert "xformOp:translate" in calls
+    sampled = [e for e in events if e.get("time") == 48.0]
+    assert len(sampled) == 1
+    assert sampled[0]["t"] == pytest.approx([30.0, 0.0, 0.0])
+
+
 def test_emitter_invalidate_suppresses_reemit_after_remote_apply():
     """A locally-applied remote time-sample event must not be re-emitted."""
     stage = Usd.Stage.CreateInMemory()

@@ -734,8 +734,10 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     ``test_apply_events_orders_create_before_connect`` and
     ``test_receiver_matches_sender_under_shuffled_event_order``.
 
-    Structural events are applied outside a ChangeBlock; value-setting events run inside one for
-    atomicity.
+    Structural events are applied outside a ChangeBlock; value-setting events
+    run inside one for atomicity. Namespace edits (delete_prim, rename_prim)
+    also apply outside, splitting the value run at their position, so each
+    sees the composed result of every event before it.
 
     *op_cache* is an optional dict-like mapping prim_path to
     (translate_op, orient_op, scale_op).  Pass a persistent cache
@@ -766,19 +768,35 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
         else:
             apply_event(stage, ev)
 
-    # Value-setting ops inside ChangeBlock.
-    with Sdf.ChangeBlock():
-        for ev in events:
-            k = ev.get("k")
-            if k in STRUCTURAL_EVENT_KINDS:
-                continue
-            if k == K_SET_XFORM_TRS:
-                _apply_set_xform_trs(stage, ev, op_cache)
-            elif k in (K_DELETE_PRIM, K_RENAME_PRIM):
-                op_cache.pop(ev.get("prim"), None)
-                apply_event(stage, ev)
-            else:
-                apply_event(stage, ev)
+    # Value-setting ops inside a ChangeBlock. Namespace edits (delete,
+    # rename) flush the pending run and apply outside any block:
+    # Usd.NamespaceEditor and later events validate against the composed
+    # stage, which does not refresh until a ChangeBlock closes. Without
+    # the flush, a rename chain (A->B, B->C) in one batch silently drops
+    # the second rename.
+    def _apply_value_run(run: list) -> None:
+        with Sdf.ChangeBlock():
+            for run_ev in run:
+                if run_ev.get("k") == K_SET_XFORM_TRS:
+                    _apply_set_xform_trs(stage, run_ev, op_cache)
+                else:
+                    apply_event(stage, run_ev)
+
+    run: list = []
+    for ev in events:
+        k = ev.get("k")
+        if k in STRUCTURAL_EVENT_KINDS:
+            continue
+        if k in (K_DELETE_PRIM, K_RENAME_PRIM):
+            if run:
+                _apply_value_run(run)
+                run = []
+            op_cache.pop(ev.get("prim"), None)
+            apply_event(stage, ev)
+        else:
+            run.append(ev)
+    if run:
+        _apply_value_run(run)
 
 
 class _AtomicApply:
@@ -807,7 +825,72 @@ class _AtomicApply:
         return False
 
 
-def atomic_apply(stage: Usd.Stage):
+class _ScopedAtomicApply:
+    """Rollback scoped to the prim specs a batch may author on.
+
+    TransferContent copies the whole edit layer, which costs O(layer)
+    per batch; this variant copies only the touched prim subtrees, so
+    the snapshot stays O(touched prims). The caller must pass every
+    prim path the events can author on. Specs that did not exist before
+    the block are removed on rollback (tracked by their highest
+    pre-block-missing ancestor, so created ancestor chains go too).
+    """
+
+    __slots__ = ("_layer", "_paths", "_backup", "_saved", "_created_roots")
+
+    def __init__(self, stage: Usd.Stage, prim_paths):
+        self._layer = stage.GetEditTarget().GetLayer()
+        self._paths = [Sdf.Path(p) for p in prim_paths if p]
+        self._backup = None
+        self._saved: list = []
+        self._created_roots: list = []
+
+    def _covered(self, path: Sdf.Path) -> bool:
+        return any(
+            path.HasPrefix(p) for p in (*self._saved, *self._created_roots)
+        )
+
+    def __enter__(self):
+        self._backup = Sdf.Layer.CreateAnonymous("txn-backup")
+        self._saved = []
+        self._created_roots = []
+        for path in self._paths:
+            if self._covered(path):
+                continue
+            if self._layer.GetPrimAtPath(path):
+                parent = path.GetParentPath()
+                if parent != Sdf.Path.absoluteRootPath:
+                    Sdf.CreatePrimInLayer(self._backup, parent)
+                Sdf.CopySpec(self._layer, path, self._backup, path)
+                self._saved.append(path)
+            else:
+                root = path
+                while True:
+                    parent = root.GetParentPath()
+                    if parent == Sdf.Path.absoluteRootPath or self._layer.GetPrimAtPath(parent):
+                        break
+                    root = parent
+                self._created_roots.append(root)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            with Sdf.ChangeBlock():
+                for root in self._created_roots:
+                    spec = self._layer.GetPrimAtPath(root)
+                    if spec:
+                        parent = root.GetParentPath()
+                        if parent == Sdf.Path.absoluteRootPath:
+                            del self._layer.rootPrims[root.name]
+                        else:
+                            del self._layer.GetPrimAtPath(parent).nameChildren[root.name]
+                for path in self._saved:
+                    Sdf.CopySpec(self._backup, path, self._layer, path)
+        self._backup = None
+        return False
+
+
+def atomic_apply(stage: Usd.Stage, prim_paths=None):
     """Return a context manager for atomic event application.
 
     Usage::
@@ -817,7 +900,14 @@ def atomic_apply(stage: Usd.Stage):
 
     On success, changes persist. On failure, the edit target layer
     is restored to its state before the block — partial applies
-    are rolled back. Uses ``Sdf.Layer.TransferContent()`` for the
-    snapshot/restore.
+    are rolled back.
+
+    With *prim_paths* (an iterable of every prim path the events can
+    author on), only those prim specs are backed up — O(touched prims)
+    instead of an O(layer) ``TransferContent`` snapshot. Pass ``None``
+    when the batch can write outside prim scopes (stage metadata) or
+    the touched set is unknown.
     """
+    if prim_paths is not None:
+        return _ScopedAtomicApply(stage, prim_paths)
     return _AtomicApply(stage)

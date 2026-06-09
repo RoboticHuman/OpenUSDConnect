@@ -1220,3 +1220,114 @@ def test_apply_events_orders_create_before_connect():
     mx = stage.GetPrimAtPath("/Test/MX")
     assert mx.IsValid()
     assert str(mx.GetTypeName()) == "Shader"
+
+
+class TestNamespaceEditsInBatch:
+    """delete_prim / rename_prim apply outside the value ChangeBlock so each
+    sees the composed result of every event before it in the batch."""
+
+    def _stage_with(self, *prims):
+        stage = Usd.Stage.CreateInMemory()
+        apply_events(stage, [
+            {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+            *({"k": K_ENSURE_PRIM, "prim": p, "typeName": "Xform"} for p in prims),
+        ])
+        return stage
+
+    def test_chained_renames_in_one_batch(self):
+        stage = self._stage_with("/World/A")
+        apply_events(stage, [
+            {"k": K_RENAME_PRIM, "prim": "/World/A", "new_name": "B"},
+            {"k": K_RENAME_PRIM, "prim": "/World/B", "new_name": "C"},
+        ])
+        assert stage.GetPrimAtPath("/World/C")
+        assert not stage.GetPrimAtPath("/World/A")
+        assert not stage.GetPrimAtPath("/World/B")
+
+    def test_rename_then_write_at_new_path(self):
+        stage = self._stage_with("/World/X")
+        apply_events(stage, [
+            {"k": K_RENAME_PRIM, "prim": "/World/X", "new_name": "Y"},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Y", "visible": False},
+        ])
+        prim = stage.GetPrimAtPath("/World/Y")
+        assert prim
+        assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
+
+    def test_write_then_delete_same_prim(self):
+        stage = self._stage_with("/World/E")
+        apply_events(stage, [
+            {"k": K_SET_VISIBILITY, "prim": "/World/E", "visible": False},
+            {"k": K_DELETE_PRIM, "prim": "/World/E"},
+        ])
+        assert not stage.GetPrimAtPath("/World/E")
+
+    def test_delete_then_write_is_dropped(self):
+        """A value write after a delete in the same batch lands nowhere."""
+        stage = self._stage_with("/World/F")
+        apply_events(stage, [
+            {"k": K_DELETE_PRIM, "prim": "/World/F"},
+            {"k": K_SET_VISIBILITY, "prim": "/World/F", "visible": False},
+        ])
+        assert not stage.GetPrimAtPath("/World/F")
+
+
+class TestScopedAtomicApply:
+    """atomic_apply(stage, prim_paths=...) backs up only the touched specs."""
+
+    def _stage(self):
+        stage = Usd.Stage.CreateInMemory()
+        apply_events(stage, [
+            {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Keep", "typeName": "Xform"},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Keep", "visible": False},
+        ])
+        return stage
+
+    def test_rollback_restores_modified_spec(self):
+        stage = self._stage()
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage, prim_paths=["/World/Keep"]):
+                apply_events(stage, [
+                    {"k": K_SET_VISIBILITY, "prim": "/World/Keep", "visible": True},
+                ])
+                raise RuntimeError("boom")
+        prim = stage.GetPrimAtPath("/World/Keep")
+        assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
+
+    def test_rollback_removes_created_prims_and_ancestors(self):
+        stage = self._stage()
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage, prim_paths=["/World/New/Deep/Child"]):
+                apply_events(stage, [
+                    {"k": K_ENSURE_PRIM, "prim": "/World/New/Deep/Child", "typeName": "Xform"},
+                ])
+                raise RuntimeError("boom")
+        assert not stage.GetPrimAtPath("/World/New")
+        assert stage.GetPrimAtPath("/World/Keep")
+
+    def test_success_persists(self):
+        stage = self._stage()
+        with atomic_apply(stage, prim_paths=["/World/Keep"]):
+            apply_events(stage, [
+                {"k": K_SET_VISIBILITY, "prim": "/World/Keep", "visible": True},
+            ])
+        prim = stage.GetPrimAtPath("/World/Keep")
+        assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "inherited"
+
+    def test_rollback_with_mixed_existing_and_created(self):
+        stage = self._stage()
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage, prim_paths=["/World/Keep", "/World/Mat/Shader"]):
+                apply_events(stage, [
+                    {"k": K_SET_VISIBILITY, "prim": "/World/Keep", "visible": True},
+                    {
+                        "k": K_SET_CONNECTABLE_CONNECTION,
+                        "prim": "/World/Mat/Shader",
+                        "connections": {},
+                    },
+                ])
+                raise RuntimeError("boom")
+        prim = stage.GetPrimAtPath("/World/Keep")
+        assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
+        assert not stage.GetPrimAtPath("/World/Mat")

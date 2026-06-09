@@ -84,11 +84,9 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def search_like_decoded(self, match_fn) -> list[bytes]:
-        """Return record blobs where match_fn(decoded_dict) is True.
-
-        Each blob is decoded via codec.message_to_dict() and tested.
-        """
+    def get_by_prim_prefix(self, prefix: str, kinds: set[str]) -> list[bytes]:
+        """Return record blobs whose prim starts with *prefix* and whose
+        kind is in *kinds*, ordered by seq ascending."""
         raise NotImplementedError
 
     @abstractmethod
@@ -220,15 +218,22 @@ class SqliteEventStore(EventStore):
 
         return [r[0] for r in rows], total
 
-    def search_like_decoded(self, match_fn) -> list[bytes]:
-        from .codec import message_to_dict
-
+    def get_by_prim_prefix(self, prefix: str, kinds: set[str]) -> list[bytes]:
+        if not kinds:
+            return []
+        placeholders = ",".join("?" for _ in kinds)
+        # Range scan on the indexed prim column. Prim paths are ASCII, so
+        # appending U+FFFF gives a tight exclusive upper bound without the
+        # collation caveats of LIKE.
+        upper = prefix + "\uffff"
         with self._lock:
-            all_rows = self._conn.execute(
-                "SELECT event_bin FROM events ORDER BY seq"
+            rows = self._conn.execute(
+                "SELECT event_bin FROM events"
+                f" WHERE prim >= ? AND prim < ? AND kind IN ({placeholders})"
+                " ORDER BY seq",
+                [prefix, upper, *kinds],
             ).fetchall()
-
-        return [blob for (blob,) in all_rows if match_fn(message_to_dict(blob))]
+        return [r[0] for r in rows]
 
     def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]]) -> None:

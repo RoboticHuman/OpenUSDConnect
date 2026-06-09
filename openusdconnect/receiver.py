@@ -169,6 +169,9 @@ class ReceiverThread(threading.Thread):
             timeout=self.socket_timeout,
         )
         self.sock.settimeout(self.socket_timeout)
+        # Hello/acks are small; Nagle would delay them. Matches the server's
+        # accepted-socket setting.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         # Send hello as receiver — use last_seq + 1 for replay on reconnect
         sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from

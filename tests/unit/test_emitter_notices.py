@@ -665,6 +665,33 @@ class TestSnapshotPrim:
         assert "t" in snap and "r" in snap and "s" in snap
 
 
+class TestSnapshotLaziness:
+    """Matrix decompose runs only for prims with authored xform ops."""
+
+    def test_non_xformable_dirty_prim_skips_decompose(self, monkeypatch):
+        from openusdconnect import emitter as emitter_mod
+        from openusdconnect.event_apply import ensure_canonical_ops
+
+        stage, emitter = _make_stage_and_emitter()
+        calls = []
+        real = emitter_mod.decompose_trs_from_matrix
+
+        def _spy(m):
+            calls.append(m)
+            return real(m)
+
+        monkeypatch.setattr(emitter_mod, "decompose_trs_from_matrix", _spy)
+
+        stage.DefinePrim("/World/Materials", "Scope")
+        emitter.build_events_for_dirty()
+        assert calls == []
+
+        stage.DefinePrim("/World/Obj", "Xform")
+        ensure_canonical_ops(stage, "/World/Obj")
+        emitter.build_events_for_dirty()
+        assert len(calls) >= 1
+
+
 class TestMarkDirty:
     def test_mark_dirty_adds_to_dirty_set(self):
         stage, emitter = _make_stage_and_emitter()

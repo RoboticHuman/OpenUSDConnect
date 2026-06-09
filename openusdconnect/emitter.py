@@ -9,6 +9,7 @@ DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections.abc import Sequence
 
@@ -1015,24 +1016,18 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out):
 
 
 def _invalidate_ensure_prim(emitter, prim_path, _ev):
-    emitter._known_prims.add(prim_path)
+    emitter._know_prim(prim_path)
 
 
 def _invalidate_delete_prim(emitter, prim_path, _ev):
-    emitter._purge_caches(prim_path)
-    prefix = prim_path + "/"
-    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
-        emitter._purge_caches(p)
+    emitter._purge_subtree(prim_path)
 
 
 def _invalidate_deactivate_prim(emitter, prim_path, ev):
     # Active=False removes the subtree from the composed view; on the next
     # reactivation the child set re-composes, so child caches become stale.
     if not ev.get("active", True):
-        emitter._purge_caches(prim_path)
-        prefix = prim_path + "/"
-        for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
-            emitter._purge_caches(p)
+        emitter._purge_subtree(prim_path)
 
 
 def _invalidate_rename_prim(emitter, prim_path, ev):
@@ -1076,9 +1071,7 @@ def _invalidate_load_payload(emitter, prim_path, _ev):
 def _invalidate_unload_payload(emitter, prim_path, _ev):
     # Children have left the composed stage — drop their caches so they're
     # rediscovered on the next load_payload.
-    prefix = prim_path + "/"
-    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
-        emitter._purge_caches(p)
+    emitter._purge_subtree(prim_path, include_root=False)
     prim = emitter.stage.GetPrimAtPath(prim_path)
     if prim and prim.IsValid():
         emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOAD_LOADED] = prim.IsLoaded()
@@ -1090,9 +1083,7 @@ def _invalidate_set_variant_selections(emitter, prim_path, _ev):
     )
     # Variant change rewrites the child set — purge caches under this prim
     # so they're rebuilt from the new composition.
-    prefix = prim_path + "/"
-    for p in [k for k in list(emitter._known_prims) if k.startswith(prefix)]:
-        emitter._purge_caches(p)
+    emitter._purge_subtree(prim_path, include_root=False)
 
 
 def _invalidate_set_material_binding(emitter, prim_path, _ev):
@@ -1306,6 +1297,9 @@ class NoticeEmitter:
             self._replicated_apis = frozenset(_REPLICATED_API_SCHEMAS)
         self.dirty: set[str] = set()
         self._known_prims: set[str] = set()
+        # Sorted mirror of _known_prims for O(log N) subtree range queries.
+        # Mutate both only through _know_prim / _forget_prim.
+        self._known_index: list[str] = []
         self._deleted_prims: set[str] = set()
         self._deactivated_prims: set[str] = set()
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
@@ -1315,6 +1309,10 @@ class NoticeEmitter:
         # Unfiltered info-only attr names. Channels use this for read gating;
         # the gprim attr scan applies _attr_filter later.
         self._dirty_attrs: dict[str, set[str]] = {}
+        # Subset of _dirty_attrs whose time-sample tables changed (classified
+        # in _on_changed). Gates the sample diff path so a default-time edit
+        # on a keyframed attr doesn't re-read every authored sample.
+        self._sample_dirty_attrs: dict[str, set[str]] = {}
         self._notice_resynced_prims: set[str] = set()
         # Stage-level metadata replication state.
         self._stage_metadata_dirty: bool = False
@@ -1375,7 +1373,9 @@ class NoticeEmitter:
             self.listener = None
         self._prim_cache.clear()
         self._known_prims.clear()
+        self._known_index.clear()
         self._dirty_attrs.clear()
+        self._sample_dirty_attrs.clear()
         self._notice_resynced_prims.clear()
         self.dirty.clear()
         self._suppress_depth = 0
@@ -1474,6 +1474,7 @@ class NoticeEmitter:
         self._deactivated_prims.clear()
         self._renamed_prims.clear()
         self._dirty_attrs.clear()
+        self._sample_dirty_attrs.clear()
         self._notice_resynced_prims.clear()
 
     def _classify_resync(self, notice, prim_path: str) -> str | None:
@@ -1542,6 +1543,16 @@ class NoticeEmitter:
                 if "." in path_str:
                     attr_name = path_str.split(".", 1)[1]
                     self._dirty_attrs.setdefault(prim_path, set()).add(attr_name)
+                    # Time-sample edits set a bit-flag on the Sdf change
+                    # entry rather than a per-path infoChanged field
+                    # (pxr/usd/sdf/changeList.h). USD builds that don't
+                    # translate the flag report an empty GetChangedFields
+                    # for them; newer USD appends SdfFieldKeys->TimeSamples
+                    # explicitly (pxr/usd/usd/notice.cpp). Accept both
+                    # signatures when classifying sample-dirty attrs.
+                    fields = notice.GetChangedFields(p)
+                    if not fields or any(str(f) == "timeSamples" for f in fields):
+                        self._sample_dirty_attrs.setdefault(prim_path, set()).add(attr_name)
 
     def mark_dirty(self, prim_path: str):
         """Manually mark a prim as dirty (useful for DCC integrations)."""
@@ -1608,19 +1619,53 @@ class NoticeEmitter:
             "s": s,
         }
 
+    def _know_prim(self, prim_path: str) -> None:
+        if prim_path not in self._known_prims:
+            self._known_prims.add(prim_path)
+            bisect.insort(self._known_index, prim_path)
+
+    def _forget_prim(self, prim_path: str) -> None:
+        if prim_path in self._known_prims:
+            self._known_prims.discard(prim_path)
+            del self._known_index[bisect.bisect_left(self._known_index, prim_path)]
+
+    def _purge_subtree(self, prim_path: str, *, include_root: bool = True) -> None:
+        """Purge caches for every known descendant of prim_path, plus the
+        prim itself unless include_root is False.
+
+        Bisect range on the sorted index (prim paths are ASCII so
+        prefix + U+FFFF is a tight exclusive upper bound) with one bulk
+        slice deletion, instead of an O(N) startswith scan per event and
+        an O(N) index memmove per purged prim.
+        """
+        prefix = prim_path + "/"
+        lo = bisect.bisect_left(self._known_index, prefix)
+        hi = bisect.bisect_left(self._known_index, prefix + "\uffff")
+        descendants = self._known_index[lo:hi]
+        del self._known_index[lo:hi]
+        self._known_prims.difference_update(descendants)
+        for p in descendants:
+            self._prim_cache.pop(p, None)
+            self._dirty_attrs.pop(p, None)
+            self._sample_dirty_attrs.pop(p, None)
+            self.dirty.discard(p)
+        if include_root:
+            self._purge_caches(prim_path)
+
     def _migrate_caches(self, old_path: str, new_path: str):
         """Migrate all per-prim caches from old_path to new_path."""
         if old_path in self._known_prims:
-            self._known_prims.discard(old_path)
-            self._known_prims.add(new_path)
+            self._forget_prim(old_path)
+            self._know_prim(new_path)
         if old_path in self._prim_cache:
             self._prim_cache[new_path] = self._prim_cache.pop(old_path)
 
     def _purge_caches(self, prim_path: str):
         """Remove all per-prim caches for a deactivated/deleted prim."""
-        self._known_prims.discard(prim_path)
+        self._forget_prim(prim_path)
         self._prim_cache.pop(prim_path, None)
         self._dirty_attrs.pop(prim_path, None)
+        self._sample_dirty_attrs.pop(prim_path, None)
         self.dirty.discard(prim_path)
 
     def _build_rename_events(self) -> list[dict]:
@@ -1651,13 +1696,12 @@ class NoticeEmitter:
     def _build_dirty_prim_events(
         self,
         prim_path: str,
-        snap: dict,
+        prim,
         eps_trs: float,
     ) -> list[dict]:
-        """Build events for a single dirty prim."""
+        """Build events for a single dirty prim. ``prim`` must be valid."""
         events: list[dict] = []
         pc = self._prim_cache.setdefault(prim_path, {})
-        prim = self.stage.GetPrimAtPath(prim_path)
 
         # Structural events on first encounter
         first_encounter = prim_path not in self._known_prims
@@ -1681,7 +1725,7 @@ class NoticeEmitter:
             xf = UsdGeom.Xformable(prim) if prim else None
             if xf and xf.GetXformOpOrderAttr().IsAuthored():
                 events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
-            self._known_prims.add(prim_path)
+            self._know_prim(prim_path)
         else:
             # Re-emit ensure_prim when the applied api_schemas change (e.g.
             # ShapingAPI applied to an existing SphereLight to make it a spot).
@@ -1714,13 +1758,14 @@ class NoticeEmitter:
                 continue
             _emit_channel_events(channel, prim_path, current, pc, events)
 
-        # TRS partial diff uses the precomputed snap from the outer loop.
-        # A normal channel would need either a wider interface or duplicate
-        # transform reads.
-        xf = UsdGeom.Xformable(prim) if prim else None
+        # TRS keeps a specialized path (not a PrimChannel): the diff needs a
+        # matrix decompose snapshot, which is only worth computing for prims
+        # with authored xform ops. Materials/Shaders/Scopes skip it.
+        xf = UsdGeom.Xformable(prim)
         has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
 
         if has_xform:
+            snap = self.snapshot_prim(prim_path)
             last_trs = pc.get(_C_TRS, {})
             fields = []
             payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
@@ -1739,60 +1784,70 @@ class NoticeEmitter:
                 events.append(payload)
                 pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
 
-        # Gprim attribute diff + time-sample emission share the dirty-attr set.
-        # Compute it once here, then hand the same set to both blocks.
-        dirty_attr_names: set[str] = set()
+        # Gprim attribute diff + time-sample emission share the dirty-attr
+        # bookkeeping. had_notice_detail records whether the names came from
+        # real per-attr notices (reliable sample classification) or from the
+        # full-scan expansion below (no per-attr detail available).
+        dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
+        sample_dirty = self._sample_dirty_attrs.pop(prim_path, set())
+        had_notice_detail = bool(dirty_attr_names)
         is_resync = prim_path in self._notice_resynced_prims
-        if prim and prim.IsValid():
-            dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
-            self._notice_resynced_prims.discard(prim_path)
-            last_attrs = pc.get(_C_GPRIM_ATTRS, {})
+        self._notice_resynced_prims.discard(prim_path)
+        last_attrs = pc.get(_C_GPRIM_ATTRS, {})
 
-            # Full attr scan: needed on first encounter (cache empty) or
-            # after a resync notice (variant switch, structural change).
-            # Skipped for plain info-only changes — avoids reading thousands
-            # of mesh vertices every frame.
-            if not dirty_attr_names and (not last_attrs or is_resync):
-                for attr in prim.GetAttributes():
-                    name = attr.GetName()
-                    if attr.IsAuthored() and self._attr_filter(name):
-                        dirty_attr_names.add(name)
+        # Full attr scan: needed on first encounter (cache empty) or
+        # after a resync notice (variant switch, structural change).
+        # Skipped for plain info-only changes to avoid reading thousands
+        # of mesh vertices every frame.
+        if not dirty_attr_names and (not last_attrs or is_resync):
+            for attr in prim.GetAttributes():
+                name = attr.GetName()
+                if attr.IsAuthored() and self._attr_filter(name):
+                    dirty_attr_names.add(name)
 
-            changed_attrs = {}
-            primvar_meta: dict = {}
-            attr_interp: dict = {}
-            for attr_name in dirty_attr_names:
-                # _dirty_attrs is unfiltered for channel gating; filter again
-                # here before emitting generic gprim attrs.
-                if not self._attr_filter(attr_name):
-                    continue
-                attr = prim.GetAttribute(attr_name)
-                if not attr or not attr.IsValid():
-                    continue
-                val = _usd_value_to_python(attr.Get())
-                if val is None:
-                    continue
-                if not _values_equal(val, last_attrs.get(attr_name)):
-                    changed_attrs[attr_name] = val
-                    pvm, ai = _attr_event_metadata(prim, attr_name, attr)
-                    primvar_meta.update(pvm)
-                    attr_interp.update(ai)
+        changed_attrs = {}
+        primvar_meta: dict = {}
+        attr_interp: dict = {}
+        for attr_name in dirty_attr_names:
+            # _dirty_attrs is unfiltered for channel gating; filter again
+            # here before emitting generic gprim attrs.
+            if not self._attr_filter(attr_name):
+                continue
+            attr = prim.GetAttribute(attr_name)
+            if not attr or not attr.IsValid():
+                continue
+            val = _usd_value_to_python(attr.Get())
+            if val is None:
+                continue
+            if not _values_equal(val, last_attrs.get(attr_name)):
+                changed_attrs[attr_name] = val
+                pvm, ai = _attr_event_metadata(prim, attr_name, attr)
+                primvar_meta.update(pvm)
+                attr_interp.update(ai)
 
-            if changed_attrs:
-                ev = {
-                    "k": K_SET_GPRIM_ATTRS,
-                    "prim": prim_path,
-                    "attrs": changed_attrs,
-                }
-                if primvar_meta:
-                    ev["primvar_meta"] = primvar_meta
-                if attr_interp:
-                    ev["attr_interp"] = attr_interp
-                events.append(ev)
-                pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
+        if changed_attrs:
+            ev = {
+                "k": K_SET_GPRIM_ATTRS,
+                "prim": prim_path,
+                "attrs": changed_attrs,
+            }
+            if primvar_meta:
+                ev["primvar_meta"] = primvar_meta
+            if attr_interp:
+                ev["attr_interp"] = attr_interp
+            events.append(ev)
+            pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
 
+        # With per-attr notice detail, only attrs classified sample-dirty
+        # need their sample tables re-read; a default-time drag on a
+        # keyframed prim then skips sample diffing entirely. Without
+        # detail, fall back to the expanded set (or full scan when empty).
+        if had_notice_detail:
+            sample_attrs = sample_dirty
+        else:
+            sample_attrs = dirty_attr_names if dirty_attr_names else None
         events.extend(
-            self._build_time_sample_events(prim_path, prim, pc, dirty_attr_names),
+            self._build_time_sample_events(prim_path, prim, pc, sample_attrs),
         )
 
         return events
@@ -1802,28 +1857,27 @@ class NoticeEmitter:
         prim_path: str,
         prim,
         pc: dict,
-        dirty_attr_names: set[str],
+        sample_attrs: set[str] | None,
     ) -> list[dict]:
         """One event per ``(attr, time)`` for the time-sampleable attrs on a
-        prim — xformOps, visibility, watched gprim attrs, and UsdShade
+        prim: xformOps, visibility, watched gprim attrs, and UsdShade
         input attrs.
 
-        ``dirty_attr_names`` restricts re-reads to the attrs USD told us
-        changed. An empty set means full-scan (first encounter, resync, or
-        no per-attr detail in the notice) — matches the default-time gprim
-        block's expansion rule.
-
-        We can't gate by ``notice.GetChangedFields(path)`` here: USD treats
-        time-sample edits as a bit-flag on ``SdfChangeList::Entry`` rather
-        than an entry in the per-path ``infoChanged`` vector, so the
-        Python-side ``GetChangedFields`` comes back empty for them by design
-        (see ``pxr/usd/sdf/changeList.h`` and ``wrapNotice.cpp``).
+        ``sample_attrs`` restricts re-reads to attrs whose sample tables
+        changed this cycle, classified in ``_on_changed`` from the
+        time-sample signature of ``GetChangedFields`` (empty list or an
+        explicit ``timeSamples`` field, depending on USD version).
+        ``None`` means full-scan (first encounter, resync, or no per-attr
+        notice detail); an empty set skips sample diffing entirely.
         """
         if not prim or not prim.IsValid():
             return []
+        full_scan = sample_attrs is None
+        if not full_scan and not sample_attrs:
+            return []
+        dirty_attr_names = sample_attrs or set()
         events: list[dict] = []
         ts_cache: dict = pc.setdefault(_C_TIME_SAMPLES, {})
-        full_scan = not dirty_attr_names
         # Per-client / stacked-layer setups: emit only samples authored on
         # the stage's current edit target. The composed view would let a
         # stronger client's samples leak into a weaker client's emit cycle
@@ -1997,9 +2051,14 @@ class NoticeEmitter:
         self.dirty.clear()
 
         for prim_path in dirty_now:
-            snap = self.snapshot_prim(prim_path)
-            if snap is None:
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                # Prim vanished between notice and build; drop its pending
+                # per-attr state so the dicts don't accumulate dead paths.
+                self._dirty_attrs.pop(prim_path, None)
+                self._sample_dirty_attrs.pop(prim_path, None)
+                self._notice_resynced_prims.discard(prim_path)
                 continue
-            events.extend(self._build_dirty_prim_events(prim_path, snap, eps_trs))
+            events.extend(self._build_dirty_prim_events(prim_path, prim, eps_trs))
 
         return events

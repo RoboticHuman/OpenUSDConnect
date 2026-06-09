@@ -1,18 +1,80 @@
 """Tests for length-prefixed binary framing."""
 
 import io
+import socket
 import struct
+import threading
 
 import pytest
 
 from openusdconnect.framing import (
+    _COALESCE_LIMIT,
     MAX_MESSAGE_SIZE,
     IncompleteRead,
     MessageTooLarge,
     frame_batch,
+    recv_framed,
     recv_framed_rfile,
+    send_framed,
     send_framed_wfile,
 )
+
+
+class _RecordingSock:
+    """Captures sendall calls without a real socket."""
+
+    def __init__(self):
+        self.calls: list[bytes] = []
+
+    def sendall(self, data):
+        self.calls.append(bytes(data))
+
+
+class TestSendFramedSocket:
+    def test_small_payload_is_one_sendall(self):
+        """Header + small payload must leave in a single sendall — splitting
+        them recreates the Nagle/delayed-ACK write-write-read stall."""
+        sock = _RecordingSock()
+        send_framed(sock, b"abc")
+        assert sock.calls == [struct.pack(">I", 3) + b"abc"]
+
+    def test_large_payload_skips_concat(self):
+        sock = _RecordingSock()
+        payload = b"x" * (_COALESCE_LIMIT + 1)
+        send_framed(sock, payload)
+        assert sock.calls == [struct.pack(">I", len(payload)), payload]
+
+    def test_small_roundtrip_over_socket(self):
+        a, b = socket.socketpair()
+        try:
+            send_framed(a, b"hello flatbuffers")
+            assert recv_framed(b) == b"hello flatbuffers"
+        finally:
+            a.close()
+            b.close()
+
+    def test_large_roundtrip_over_socket(self):
+        a, b = socket.socketpair()
+        payload = bytes(range(256)) * 1024  # 256 KiB — above _COALESCE_LIMIT
+        received = []
+        try:
+            reader = threading.Thread(target=lambda: received.append(recv_framed(b)))
+            reader.start()
+            send_framed(a, payload)
+            reader.join(timeout=5)
+            assert received == [payload]
+        finally:
+            a.close()
+            b.close()
+
+    def test_empty_payload_roundtrip(self):
+        a, b = socket.socketpair()
+        try:
+            send_framed(a, b"")
+            assert recv_framed(b) == b""
+        finally:
+            a.close()
+            b.close()
 
 
 class TestSendRecvRfile:

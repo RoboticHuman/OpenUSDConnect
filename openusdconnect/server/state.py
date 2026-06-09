@@ -28,6 +28,7 @@ from ..emitter import (
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
+    EVENT_KIND_INFO,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -1219,9 +1220,7 @@ class UsdSyncServer:
             K_SET_CONNECTABLE_CONNECTION,
         }
 
-        record_blobs = self.store.search_like_decoded(
-            lambda d: d.get("event", d).get("prim", "").startswith(prefix)
-        )
+        record_blobs = self.store.get_by_prim_prefix(prefix, replay_kinds)
 
         # Collect the latest event of each relevant kind per child prim.
         # Store (ev, origin) tuples so replayed broadcasts can suppress
@@ -1476,23 +1475,13 @@ class UsdSyncServer:
             finally:
                 self._persist_queue.task_done()
 
-    # Maps event kind -> list of attribute names (or 'meta:active' for
-    # prim metadata) that the event writes.  Used by apply_txn to check
-    # per-attribute whether the target layer's opinion is the winner.
-    # Events not in this map are always broadcast (conservative default).
+    # Derived from the EVENT_KIND_INFO declaration table; semantics are
+    # documented on EventKindInfo.strength_attrs. Kinds with no entry are
+    # always broadcast (conservative default).
     _EVENT_ATTR_MAP: dict[str, list[str]] = {
-        K_ENSURE_PRIM: [],  # structural — check prim definer
-        K_ENSURE_XFORM_OPS: [],
-        K_SET_XFORM_TRS: [
-            "xformOp:translate",
-            "xformOp:orient",
-            "xformOp:scale",
-        ],
-        K_SET_VISIBILITY: ["visibility"],
-        K_DEACTIVATE_PRIM: ["meta:active"],
-        K_DELETE_PRIM: [],  # structural
-        K_RENAME_PRIM: [],  # structural
-        K_SET_MATERIAL_BINDING: ["rel:material:binding"],
+        k: list(info.strength_attrs)
+        for k, info in EVENT_KIND_INFO.items()
+        if info.strength_attrs is not None
     }
 
     def _is_layer_winning(self, prim, target, ev) -> bool:
@@ -1585,6 +1574,8 @@ class UsdSyncServer:
 
         Uses per-attribute strength checking via ``GetPropertyStack`` and
         ``PrimSpec.HasInfo`` — works for all event types without snapshotting.
+        When the edit layer is the only unmuted session sublayer (no
+        department layers), every event wins and the checks are skipped.
 
         Winning checks are cached per (prim_path, event_kind) for the
         duration of the txn.  The layer stack is frozen while we hold
@@ -1599,6 +1590,18 @@ class UsdSyncServer:
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
             apply_events(self.stage, events, op_cache=self.op_cache)
+
+            # Single-layer mode: the edit layer is the only unmuted session
+            # sublayer, and local session opinions are strongest in LIVRPS
+            # order, so every event's opinion is composed-visible. Skips
+            # the per-event GetPropertyStack/HasSpec strength checks.
+            if target is self.edit_layer and len(self._ordered_session_layers) == 1:
+                for i, ev in enumerate(events):
+                    if ev.get("k") in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                        self._prim_count_dirty = True
+                        self._track_prim_event(ev)
+                    changed_indices.append(i)
+                return changed_indices
 
             # Cache winning results per (prim_path, event_kind) — the
             # layer stack is frozen for the duration of this txn so the
