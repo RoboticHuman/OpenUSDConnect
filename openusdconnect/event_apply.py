@@ -164,22 +164,29 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
     else:
         # Ops missing from edit target — author attribute specs and
         # xformOpOrder directly via Sdf so each layer is self-contained.
+        # The ChangeBlock batches the spec authoring into one
+        # change-processing round; authored individually, every spec
+        # creation and field write pays its own stage recomposition.
+        # OverridePrim is Usd-level and must stay outside the block.
         stage.OverridePrim(prim_path)
         layer_spec = layer.GetPrimAtPath(prim_path)
-        for attr_name, type_name in _XFORM_OP_SPECS:
-            if not layer_spec.GetAttributeAtPath(Sdf.Path(prim_path).AppendProperty(attr_name)):
-                Sdf.AttributeSpec(layer_spec, attr_name, type_name)
+        with Sdf.ChangeBlock():
+            for attr_name, type_name in _XFORM_OP_SPECS:
+                if not layer_spec.GetAttributeAtPath(
+                    Sdf.Path(prim_path).AppendProperty(attr_name)
+                ):
+                    Sdf.AttributeSpec(layer_spec, attr_name, type_name)
 
-        if not layer_spec.GetAttributeAtPath(path_order):
-            order_attr = Sdf.AttributeSpec(
-                layer_spec,
-                "xformOpOrder",
-                Sdf.ValueTypeNames.TokenArray,
-            )
-            order_attr.SetInfo("variability", Sdf.VariabilityUniform)
-        else:
-            order_attr = layer_spec.GetAttributeAtPath(path_order)
-        order_attr.default = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+            if not layer_spec.GetAttributeAtPath(path_order):
+                order_attr = Sdf.AttributeSpec(
+                    layer_spec,
+                    "xformOpOrder",
+                    Sdf.ValueTypeNames.TokenArray,
+                )
+                order_attr.SetInfo("variability", Sdf.VariabilityUniform)
+            else:
+                order_attr = layer_spec.GetAttributeAtPath(path_order)
+            order_attr.default = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
 
     # Single iteration over ops instead of 3× find_op.
     t = o = s = None
