@@ -371,6 +371,19 @@ def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None):
     return new_cache, dirty
 
 
+def _has_layer_samples(layer, attr) -> bool:
+    """True if *attr* has time samples authored on *layer*.
+
+    Exact check, deliberately not ``Usd.Attribute.ValueMightBeTimeVarying``:
+    that is certain-False for a single-sample attr (one sample cannot
+    "vary"), yet such an attr has no default opinion and resolves to the
+    held sample at every numeric time — it must still emit. The layer
+    query is also ~6x cheaper and layer-scoped, matching what
+    ``_diff_time_samples`` reads.
+    """
+    return layer.GetNumTimeSamplesForPath(attr.GetPath()) > 0
+
+
 def read_stage_metadata(stage: Usd.Stage) -> dict:
     """Snapshot stage-level units + timeline metadata, returning only
     authored opinions (empty dict for a stage with no authored metadata).
@@ -1906,9 +1919,6 @@ class NoticeEmitter:
         xf = UsdGeom.Xformable(prim)
         if not xf or not xf.GetXformOpOrderAttr().IsAuthored():
             return []
-        # Cheap short-circuit: skip every op if no transform attr varies.
-        if not xf.TransformMightBeTimeVarying():
-            return []
         events: list[dict] = []
         for op in xf.GetOrderedXformOps():
             field = _XFORM_OP_TYPE_TO_TRS_FIELD.get(op.GetOpType())
@@ -1918,7 +1928,7 @@ class NoticeEmitter:
             if not full_scan and op_name not in dirty_attr_names:
                 continue
             attr = op.GetAttr()
-            if not attr.ValueMightBeTimeVarying():
+            if not _has_layer_samples(layer, attr):
                 continue
             new_cache, dirty = _diff_time_samples(attr, ts_cache.get(op_name), layer)
             for t, val in dirty:
@@ -1936,7 +1946,7 @@ class NoticeEmitter:
             return []
         imageable = UsdGeom.Imageable(prim)
         vis_attr = imageable.GetVisibilityAttr() if imageable else None
-        if not vis_attr or not vis_attr.IsValid() or not vis_attr.ValueMightBeTimeVarying():
+        if not vis_attr or not vis_attr.IsValid() or not _has_layer_samples(layer, vis_attr):
             return []
         new_cache, dirty = _diff_time_samples(vis_attr, ts_cache.get("visibility"), layer)
         events = [
@@ -1963,7 +1973,7 @@ class NoticeEmitter:
         events: list[dict] = []
         for name in attr_names:
             attr = prim.GetAttribute(name)
-            if not attr or not attr.IsValid() or not attr.ValueMightBeTimeVarying():
+            if not attr or not attr.IsValid() or not _has_layer_samples(layer, attr):
                 continue
             new_cache, dirty = _diff_time_samples(attr, ts_cache.get(name), layer)
             if dirty:
@@ -1995,7 +2005,7 @@ class NoticeEmitter:
             attr = inp.GetAttr()
             if not attr.IsAuthored() or inp.HasConnectedSource():
                 continue
-            if not attr.ValueMightBeTimeVarying():
+            if not _has_layer_samples(layer, attr):
                 continue
             name = inp.GetBaseName()
             cache_key = "inputs:" + name

@@ -246,6 +246,40 @@ def test_emitter_first_encounter_includes_all_existing_samples():
     assert {e["time"] for e in sampled} == {0.0, 10.0}
 
 
+def test_emitter_emits_single_sample_attrs():
+    """An attr with exactly ONE time sample and no default opinion must
+    still replicate. Usd value resolution returns the held sample at every
+    numeric time, but ``Get(Default())`` is None and
+    ``ValueMightBeTimeVarying()`` is certain-False below two samples — a
+    gate based on either drops the attr entirely. Covers all four
+    time-aware kinds.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    xf = UsdGeom.Xformable(cube)
+    t_op = xf.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble)
+    t_op.Set(Gf.Vec3d(10, 0, 0), Usd.TimeCode(24.0))
+    cube.GetSizeAttr().Set(2.0, Usd.TimeCode(24.0))
+    cube.GetVisibilityAttr().Set("invisible", Usd.TimeCode(24.0))
+    light = UsdLux.SphereLight.Define(stage, "/Lamp")
+    light.GetIntensityAttr().Set(500.0, Usd.TimeCode(24.0))
+
+    events = emitter.build_events_for_dirty()
+    by_kind = {
+        e["k"]: e for e in events if e.get("time") is not None
+    }
+    assert by_kind[K_SET_XFORM_TRS]["t"] == pytest.approx([10.0, 0.0, 0.0])
+    assert by_kind[K_SET_GPRIM_ATTRS]["attrs"]["size"] == pytest.approx(2.0)
+    assert by_kind[K_SET_VISIBILITY]["visible"] is False
+    assert by_kind[K_SET_CONNECTABLE_INPUT]["inputs"]["intensity"] == pytest.approx(500.0)
+    assert all(e["time"] == 24.0 for e in by_kind.values())
+
+    # Second cycle: nothing changed, zero events.
+    assert emitter.build_events_for_dirty() == []
+
+
 def test_emitter_emits_orient_quaternion_samples():
     """Regression: orient (Gf.Quatf) time samples used to be silently dropped
     because _usd_value_to_python returned None for quaternions. Now it
