@@ -4,11 +4,11 @@
 
 #include "USDConnectProtocol.h"
 #include "USDConnectSubsystem.h"
+#include "USDWireFraming.h"
 
 #include "Logging/LogMacros.h"
 #include "Sockets.h"
 #include "SocketSubsystem.h"
-#include "Interfaces/IPv4/IPv4Address.h"
 #include "HAL/PlatformProcess.h"
 
 // FlatBuffers builder for HELLO encoding (read-only side uses OUC::FB::*)
@@ -75,6 +75,12 @@ bool FSyncClient::Init()
 
 uint32 FSyncClient::Run()
 {
+	// Only log connection failures on state transitions to avoid spamming the
+	// log every ReconnectDelaySecs when the server is down. The first attempt
+	// after construction logs at Log; subsequent retries log at Verbose until
+	// we succeed once.
+	bool bHasAnnouncedFailure = false;
+
 	while (!bShouldStop.load(std::memory_order_relaxed))
 	{
 		// --- Create socket and connect ---
@@ -106,18 +112,30 @@ uint32 FSyncClient::Run()
 
 		if (!Socket->Connect(*Addr))
 		{
-			UE_LOG(LogUSDConnect, Log,
-				TEXT("Could not connect to %s:%d — retrying in %.1fs"),
-				*Host, Port, ReconnectDelaySecs);
+			if (bHasAnnouncedFailure)
+			{
+				UE_LOG(LogUSDConnect, Verbose,
+					TEXT("Could not connect to %s:%d — retrying in %.1fs"),
+					*Host, Port, ReconnectDelaySecs);
+			}
+			else
+			{
+				UE_LOG(LogUSDConnect, Log,
+					TEXT("Could not connect to %s:%d — retrying in %.1fs"),
+					*Host, Port, ReconnectDelaySecs);
+				bHasAnnouncedFailure = true;
+			}
 			CloseSocket();
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
 		}
+		bHasAnnouncedFailure = false;
 		UE_LOG(LogUSDConnect, Log,
 			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver)"), *Host, Port);
 
 		// --- Send HELLO ---
-		TArray<uint8> HelloFrame = BuildHelloFrame();
+		TArray<uint8> HelloFrame =
+			OUC::BuildHelloFrame(TEXT("receiver"), LastSeq, ClientId, SessionOrigin, Department);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to send HELLO"));
@@ -136,7 +154,7 @@ uint32 FSyncClient::Run()
 				continue;
 			}
 
-			const uint8 PType = GetPayloadType(Frame);
+			const uint8 PType = GetEnvelopePayloadType(Frame);
 			if (PType == kPayloadAuthRejected)
 			{
 				UE_LOG(LogUSDConnect, Error, TEXT("OpenUSDConnect: auth rejected by server"));
@@ -258,17 +276,9 @@ bool FSyncClient::SendAll(const uint8* Data, int32 Len)
 	return true;
 }
 
-uint8 FSyncClient::GetPayloadType(const TArray<uint8>& Bytes) const
-{
-	if (Bytes.Num() < 8) return 0;
-	const uint8* Root = FB::GetRoot(Bytes);
-	if (!Root) return 0;
-	return FB::GetField<uint8>(Root, VT::Envelope_PayloadType, 0);
-}
-
 void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 {
-	const uint8 PType = GetPayloadType(Frame);
+	const uint8 PType = GetEnvelopePayloadType(Frame);
 
 	if (PType == kPayloadBroadcastEvent)
 	{
@@ -317,52 +327,3 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	// Other types (HelloOk, AuthRejected) only appear during handshake, not in the loop.
 }
 
-// ---------------------------------------------------------------------------
-// HELLO message builder
-//
-// Wire layout produced:
-//   Envelope { payload_type=1 (Hello); payload=Hello{...} }
-// ---------------------------------------------------------------------------
-TArray<uint8> FSyncClient::BuildHelloFrame() const
-{
-	flatbuffers::FlatBufferBuilder Builder(512);
-
-	// Strings (built bottom-up before the tables that reference them)
-	auto RoleOff       = Builder.CreateString("receiver");
-	auto ClientIdOff   = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
-	auto OriginOff     = Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin));
-	auto DepartmentOff = Builder.CreateString(TCHAR_TO_UTF8(*Department));
-	auto TokenOff      = Builder.CreateString("");  // empty = first-connect TOFU
-
-	// Hello table
-	const flatbuffers::uoffset_t HelloStart = Builder.StartTable();
-	Builder.AddOffset(VT::Hello_Role,        RoleOff);
-	Builder.AddElement<int32_t>(VT::Hello_ProtocolVersion, 1,        0);
-	Builder.AddElement<int32_t>(VT::Hello_SyncFrom, LastSeq,  0);
-	Builder.AddOffset(VT::Hello_ClientId,    ClientIdOff);
-	Builder.AddOffset(VT::Hello_Origin,      OriginOff);
-	Builder.AddOffset(VT::Hello_Department,  DepartmentOff);
-	Builder.AddOffset(VT::Hello_Token,       TokenOff);
-	const flatbuffers::uoffset_t HelloOff = Builder.EndTable(HelloStart);
-
-	// Envelope table (schema_version defaults to 1 — omit to use default)
-	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadHello, 0);
-	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(HelloOff));
-	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
-
-	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
-
-	const uint8_t* FBData = Builder.GetBufferPointer();
-	const size_t   FBSize = Builder.GetSize();
-
-	// Prepend 4-byte big-endian length prefix (matches Python server.framing)
-	TArray<uint8> Frame;
-	Frame.SetNumUninitialized(4 + static_cast<int32>(FBSize));
-	Frame[0] = static_cast<uint8>((FBSize >> 24) & 0xFF);
-	Frame[1] = static_cast<uint8>((FBSize >> 16) & 0xFF);
-	Frame[2] = static_cast<uint8>((FBSize >>  8) & 0xFF);
-	Frame[3] = static_cast<uint8>( FBSize        & 0xFF);
-	FMemory::Memcpy(Frame.GetData() + 4, FBData, FBSize);
-	return Frame;
-}

@@ -49,12 +49,10 @@ public:
 	bool IsConnected() const { return bConnected.load(std::memory_order_relaxed); }
 
 private:
-	TArray<uint8> BuildHelloFrame() const;
 	bool RecvExact(uint8* Buf, int32 Needed);
 	bool RecvFrame(TArray<uint8>& OutFrame);
 	bool SendAll(const uint8* Data, int32 Len);
 	void HandleFrame(const TArray<uint8>& Frame);
-	uint8 GetPayloadType(const TArray<uint8>& Bytes) const;
 	void CloseSocket();
 
 	UUSDConnectSubsystem* Owner;
@@ -65,7 +63,7 @@ private:
 	FString ClientId;       // shared with FEmitClient
 	FString SessionOrigin;  // shared with FEmitClient — used for echo suppression
 	float   ReconnectDelaySecs;
-	int32   LastSeq;
+	int32   LastSeq;        // recv-thread only — no synchronization needed
 
 	FSocket*         Socket;
 	FRunnableThread* Thread;

@@ -12,7 +12,7 @@ Unreal's USD Stage editor → Blender sees it.
 
 | Requirement | Why |
 |-------------|-----|
-| **Unreal Engine 5 source build** | The plugin uses the pxr USD C++ SDK behind the `USDImporter` plugin's wrappers. Launcher builds do not link the USD SDK. |
+| **Unreal Engine 5.5+ source build** | The plugin uses the pxr USD C++ SDK behind the `USDImporter` plugin's wrappers. Launcher builds do not link the USD SDK. Tested against 5.7. |
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
 | **`USDCore` plugin enabled** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). |
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
@@ -130,10 +130,10 @@ Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
 | Symptom | Cause / Fix |
 |---------|-------------|
 | `Could not connect to 127.0.0.1:7200 — retrying` | Server isn't running, or port mismatch. Start the server. |
-| `LogPluginManager: ... incompatible with engine version` | The `.uplugin` declares an old engine version (`"EngineVersion": "5.0.0"`). Click *Yes* to load it anyway — it's source-compatible across UE5 versions. |
+| `LogPluginManager: ... incompatible with engine version` | The `.uplugin` declares `5.7.0` and the plugin uses 5.5+ APIs (e.g. `EAllowShrinking`). If you're on an older UE, source-port those call sites first. |
 | Connection works but edits don't reflect in Unreal viewport | The stage actor's `Stage State` is `Opened` instead of `OpenedAndLoaded`. Change it in the Details panel. |
 | Edits in Unreal don't reach Blender | Confirm the **Emitter HELLO_OK** line appears in the log; if not, the emitter socket failed. Check the dashboard's *Clients* tab. |
-| `Plugin requires engine version '5.0.0'` warning | Edit `OpenUSDConnect.uplugin` and bump `EngineVersion` to match your UE — or accept the prompt to load anyway. |
+| `Plugin requires engine version '5.7.0'` warning on UE 5.5/5.6 | Source-compatible if you replace `EAllowShrinking::No` with `false` in `USDConnectSubsystem.cpp`. |
 
 For deeper diagnostics, enable verbose logging in the editor console:
 ```

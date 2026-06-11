@@ -107,6 +107,11 @@ private:
 	/**
 	 * Set to true while DrainAndApply() is applying received events.
 	 * Prevents OnPrimChanged from echoing those changes back to the server.
+	 *
+	 * Uses default seq_cst ordering. The other socket-thread atomics in this
+	 * module use relaxed because they only flag a state for polling; this one
+	 * fences a code region around stage mutation, so the stronger barrier is
+	 * the safer default and not on a hot path.
 	 */
 	std::atomic<bool> bSuppressEmit;
 

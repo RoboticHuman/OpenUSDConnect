@@ -276,6 +276,9 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 
 AUsdStageActor* UUSDConnectSubsystem::FindStageActor() const
 {
+	// Picks the first AUsdStageActor in the world. With multiple stage actors
+	// (e.g. one per layer file), only the first one is live-synced. See the
+	// "Single stage actor" entry in PLUGIN_DEV.md.
 	UWorld* World = GetWorld();
 	if (!World) return nullptr;
 	for (TActorIterator<AUsdStageActor> It(World); It; ++It)

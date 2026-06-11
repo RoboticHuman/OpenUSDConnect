@@ -2,31 +2,11 @@
 
 #include "TxnBuilder.h"
 #include "USDConnectProtocol.h"
+#include "USDWireFraming.h"
 
 #include "flatbuffers/flatbuffer_builder.h"
 
 using namespace OUC;
-
-// ---------------------------------------------------------------------------
-// Internal helper: prepend 4-byte big-endian length to a finished FB buffer.
-// ---------------------------------------------------------------------------
-namespace
-{
-	TArray<uint8> FrameBuilder(flatbuffers::FlatBufferBuilder& Builder)
-	{
-		const uint8_t* FBData = Builder.GetBufferPointer();
-		const size_t   FBSize = Builder.GetSize();
-
-		TArray<uint8> Result;
-		Result.SetNumUninitialized(4 + static_cast<int32>(FBSize));
-		Result[0] = static_cast<uint8>((FBSize >> 24) & 0xFF);
-		Result[1] = static_cast<uint8>((FBSize >> 16) & 0xFF);
-		Result[2] = static_cast<uint8>((FBSize >>  8) & 0xFF);
-		Result[3] = static_cast<uint8>( FBSize        & 0xFF);
-		FMemory::Memcpy(Result.GetData() + 4, FBData, FBSize);
-		return Result;
-	}
-} // namespace
 
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetXformTrs}, ...] } }
@@ -80,7 +60,7 @@ TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXfor
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
 
-	return FrameBuilder(Builder);
+	return FrameWithLengthPrefix(Builder);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,5 +106,5 @@ TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmi
 	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
 	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
 
-	return FrameBuilder(Builder);
+	return FrameWithLengthPrefix(Builder);
 }

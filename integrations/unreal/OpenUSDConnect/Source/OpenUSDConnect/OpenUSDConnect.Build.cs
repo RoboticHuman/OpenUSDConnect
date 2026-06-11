@@ -22,10 +22,7 @@ public class OpenUSDConnect : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"USDStage",         // AUsdStageActor
-			"UnrealUSDWrapper", // UE::FUsdStage + pxr SDK propagation
-			"USDClasses",       // UE::FSdfPath, etc.
-			"USDUtilities",     // Type conversion helpers
-			"USDSchemas",       // FUsdSchemaTranslationContext
+			"UnrealUSDWrapper", // FUsdListener + pxr SDK propagation
 		});
 
 		// Call the engine helper that configures USD SDK linkage, RTTI, exceptions,

@@ -3,6 +3,7 @@
 #include "EmitClient.h"
 
 #include "USDConnectProtocol.h"
+#include "USDWireFraming.h"
 
 #include "Logging/LogMacros.h"
 #include "Sockets.h"
@@ -76,7 +77,8 @@ uint32 FEmitClient::Run()
 		UE_LOG(LogUSDEmit, Log, TEXT("Emitter connected to %s:%d"), *Host, Port);
 
 		// --- Send HELLO as emitter ---
-		TArray<uint8> HelloFrame = BuildHelloFrame();
+		TArray<uint8> HelloFrame =
+			OUC::BuildHelloFrame(TEXT("emitter"), 0, ClientId, SessionOrigin, Department);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			CloseSocket();
@@ -94,7 +96,7 @@ uint32 FEmitClient::Run()
 				continue;
 			}
 
-			const uint8 PType = GetPayloadType(Frame);
+			const uint8 PType = GetEnvelopePayloadType(Frame);
 			if (PType == kPayloadAuthRejected)
 			{
 				UE_LOG(LogUSDEmit, Error, TEXT("Emitter auth rejected"));
@@ -142,7 +144,7 @@ uint32 FEmitClient::Run()
 					bShouldDisconnect = true;
 					break;
 				}
-				const uint8 PType = GetPayloadType(InFrame);
+				const uint8 PType = GetEnvelopePayloadType(InFrame);
 				if (PType == kPayloadRateLimited)
 				{
 					const uint8* Env = FB::GetRoot(InFrame);
@@ -249,48 +251,3 @@ bool FEmitClient::SendAll(const uint8* Data, int32 Len)
 	return true;
 }
 
-uint8 FEmitClient::GetPayloadType(const TArray<uint8>& Bytes) const
-{
-	if (Bytes.Num() < 8) return 0;
-	const uint8* Root = FB::GetRoot(Bytes);
-	return Root ? FB::GetField<uint8>(Root, VT::Envelope_PayloadType, 0) : 0;
-}
-
-TArray<uint8> FEmitClient::BuildHelloFrame() const
-{
-	flatbuffers::FlatBufferBuilder Builder(512);
-
-	auto RoleOff       = Builder.CreateString("emitter");
-	auto ClientIdOff   = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
-	auto OriginOff     = Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin));
-	auto DepartmentOff = Builder.CreateString(TCHAR_TO_UTF8(*Department));
-	auto TokenOff      = Builder.CreateString("");
-
-	const flatbuffers::uoffset_t HelloStart = Builder.StartTable();
-	Builder.AddOffset(VT::Hello_Role,        RoleOff);
-	Builder.AddElement<int32_t>(VT::Hello_ProtocolVersion, 1, 0);
-	Builder.AddElement<int32_t>(VT::Hello_SyncFrom, 0, 0);
-	Builder.AddOffset(VT::Hello_ClientId,    ClientIdOff);
-	Builder.AddOffset(VT::Hello_Origin,      OriginOff);
-	Builder.AddOffset(VT::Hello_Department,  DepartmentOff);
-	Builder.AddOffset(VT::Hello_Token,       TokenOff);
-	const flatbuffers::uoffset_t HelloOff = Builder.EndTable(HelloStart);
-
-	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadHello, 0);
-	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(HelloOff));
-	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
-	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
-
-	const uint8_t* FBData = Builder.GetBufferPointer();
-	const size_t   FBSize = Builder.GetSize();
-
-	TArray<uint8> Frame;
-	Frame.SetNumUninitialized(4 + static_cast<int32>(FBSize));
-	Frame[0] = static_cast<uint8>((FBSize >> 24) & 0xFF);
-	Frame[1] = static_cast<uint8>((FBSize >> 16) & 0xFF);
-	Frame[2] = static_cast<uint8>((FBSize >>  8) & 0xFF);
-	Frame[3] = static_cast<uint8>( FBSize        & 0xFF);
-	FMemory::Memcpy(Frame.GetData() + 4, FBData, FBSize);
-	return Frame;
-}

@@ -51,12 +51,10 @@ public:
 	void EnqueueFrame(TArray<uint8>&& Frame);
 
 private:
-	TArray<uint8> BuildHelloFrame() const;
 	bool RecvExact(uint8* Buf, int32 Needed);
 	bool RecvFrame(TArray<uint8>& OutFrame);
 	bool SendAll(const uint8* Data, int32 Len);
 	void CloseSocket();
-	uint8 GetPayloadType(const TArray<uint8>& Bytes) const;
 
 	FString Host;
 	int32   Port;

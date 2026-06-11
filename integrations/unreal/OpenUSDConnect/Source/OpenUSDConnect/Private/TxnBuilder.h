@@ -9,14 +9,6 @@
  * then encoded into a FlatBuffers Txn frame by BuildTxnFrame().
  */
 
-enum class EEmitEventKind : uint8
-{
-	SetXformTrs,
-	SetVisibility,
-	EnsurePrim,
-	DeletePrim,
-};
-
 struct FEmitXformTrs
 {
 	FString PrimPath;
@@ -30,17 +22,6 @@ struct FEmitVisibility
 {
 	FString PrimPath;
 	bool bVisible = true;
-};
-
-struct FEmitEnsurePrim
-{
-	FString PrimPath;
-	FString TypeName;
-};
-
-struct FEmitDeletePrim
-{
-	FString PrimPath;
 };
 
 /**
