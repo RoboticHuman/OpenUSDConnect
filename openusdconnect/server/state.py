@@ -17,8 +17,6 @@ from pxr import Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
-    as_matrix,
-    decompose_trs_from_matrix,
     read_material_binding,
     read_payloads,
     read_references,
@@ -48,6 +46,7 @@ from ..protocol_constants import (
     MSG_RESYNC,
     event_apply_tier,
 )
+from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
 from .types import ClientInfo, Proposal
 
