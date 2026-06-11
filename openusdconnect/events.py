@@ -255,6 +255,50 @@ class SetStageMetadata(TypedDict):
     upAxis: NotRequired[str]
 
 
+class SetInstanceable(TypedDict):
+    """Native scenegraph-instancing flag on a prim.
+
+    Replicates the ``instanceable`` metadata bit only. Prototype paths
+    (``/__Prototype_N``) are implementation-defined and unstable across
+    sessions, so each receiver's composition engine rebuilds the instance
+    from the flag plus the prim's composition arcs.
+    """
+
+    k: Literal["set_instanceable"]
+    prim: str
+    instanceable: bool
+
+
+class SetPointInstancer(TypedDict):
+    """UsdGeomPointInstancer state: prototypes relationship + per-instance arrays.
+
+    ``fields`` lists which of the ``POINT_INSTANCER_FIELDS`` keys are
+    present (distinguishes "absent" from "explicitly empty").
+    ``orientations`` is float32 quaternion ``[w, x, y, z]`` rows on the
+    wire regardless of whether the source authored quath ``orientations``
+    or quatf ``orientationsf``. ``prototypes`` is uniform (relationships
+    cannot be time-sampled) and only rides default-time events; the
+    arrays may ride per-``time`` events. Array fields accept numpy arrays
+    or nested lists.
+    """
+
+    k: Literal["set_point_instancer"]
+    prim: str
+    fields: list[str]
+    prototypes: NotRequired[list[str]]
+    proto_indices: NotRequired[list[int]]
+    positions: NotRequired[list[list[float]]]  # (N, 3)
+    orientations: NotRequired[list[list[float]]]  # (N, 4) [w, x, y, z]
+    scales: NotRequired[list[list[float]]]  # (N, 3)
+    velocities: NotRequired[list[list[float]]]  # (N, 3)
+    accelerations: NotRequired[list[list[float]]]  # (N, 3)
+    angular_velocities: NotRequired[list[list[float]]]  # (N, 3)
+    ids: NotRequired[list[int]]  # int64
+    invisible_ids: NotRequired[list[int]]  # int64
+    inactive_ids: NotRequired[list[int]]  # int64; resolved prim metadata, uniform
+    time: NotRequired[float]
+
+
 # ---------------------------------------------------------------------------
 # Discriminated union — accept any event kind
 # ---------------------------------------------------------------------------
@@ -277,6 +321,8 @@ Event = (
     | SetConnectableInput
     | SetConnectableConnection
     | SetStageMetadata
+    | SetInstanceable
+    | SetPointInstancer
 )
 
 
@@ -400,6 +446,8 @@ __all__ = [
     "SetConnectableInput",
     "SetConnectableConnection",
     "SetStageMetadata",
+    "SetInstanceable",
+    "SetPointInstancer",
     "Event",
     "EventSpec",
     "register_encoder",

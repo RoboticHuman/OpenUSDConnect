@@ -43,6 +43,25 @@ K_SET_MATERIAL_BINDING = "set_material_binding"
 K_SET_CONNECTABLE_INPUT = "set_connectable_input"
 K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
 K_SET_STAGE_METADATA = "set_stage_metadata"
+K_SET_INSTANCEABLE = "set_instanceable"
+K_SET_POINT_INSTANCER = "set_point_instancer"
+
+# Array/relationship fields carried by a SetPointInstancer event, in wire
+# bitmask order. Authoritative list: the codec, adapter dispatch, and
+# emitter diff path all derive from it.
+POINT_INSTANCER_FIELDS = (
+    "prototypes",
+    "proto_indices",
+    "positions",
+    "orientations",
+    "scales",
+    "velocities",
+    "accelerations",
+    "angular_velocities",
+    "ids",
+    "invisible_ids",
+    "inactive_ids",
+)
 
 # Fields carried by a SetStageMetadata event. Authoritative list — used by
 # the codec, adapter dispatch, and emitter diff path.
@@ -121,6 +140,8 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_CONNECTABLE_INPUT: EventKindInfo(structural=True, stage_sync=True),
     K_SET_CONNECTABLE_CONNECTION: EventKindInfo(structural=True, stage_sync=True),
     K_SET_STAGE_METADATA: EventKindInfo(create=True, structural=True, stage_sync=True),
+    K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_POINT_INSTANCER: EventKindInfo(),
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)

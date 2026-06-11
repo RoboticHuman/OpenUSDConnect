@@ -66,6 +66,8 @@ namespace OUC
 	inline constexpr uint8 kEvSetConnectableInput           = 15;
 	inline constexpr uint8 kEvSetConnectableConnection      = 16;
 	inline constexpr uint8 kEvSetStageMetadata              = 17;
+	inline constexpr uint8 kEvSetInstanceable               = 18;
+	inline constexpr uint8 kEvSetPointInstancer             = 19;
 
 	// ---------------------------------------------------------------------------
 	// Vtable offsets per table
@@ -190,6 +192,26 @@ namespace OUC
 		inline constexpr uint16 SetConnectableConnection_Prim           = 4;
 		inline constexpr uint16 SetConnectableConnection_Connections    = 6;
 		inline constexpr uint16 SetConnectableConnection_Disconnections = 8;
+
+		// SetInstanceable { prim:string; instanceable:bool }
+		inline constexpr uint16 SetInstanceable_Prim         = 4;
+		inline constexpr uint16 SetInstanceable_Instanceable = 6;
+
+		// SetPointInstancer { prim:string; fields:uint; prototypes:[string]; proto_indices:[int]; positions:[float]; orientations:[float]; scales:[float]; velocities:[float]; accelerations:[float]; angular_velocities:[float]; ids:[long]; invisible_ids:[long]; time:double; inactive_ids:[long] }
+		inline constexpr uint16 SetPointInstancer_Prim              = 4;
+		inline constexpr uint16 SetPointInstancer_Fields            = 6;
+		inline constexpr uint16 SetPointInstancer_Prototypes        = 8;
+		inline constexpr uint16 SetPointInstancer_ProtoIndices      = 10;
+		inline constexpr uint16 SetPointInstancer_Positions         = 12;
+		inline constexpr uint16 SetPointInstancer_Orientations      = 14;
+		inline constexpr uint16 SetPointInstancer_Scales            = 16;
+		inline constexpr uint16 SetPointInstancer_Velocities        = 18;
+		inline constexpr uint16 SetPointInstancer_Accelerations     = 20;
+		inline constexpr uint16 SetPointInstancer_AngularVelocities = 22;
+		inline constexpr uint16 SetPointInstancer_Ids               = 24;
+		inline constexpr uint16 SetPointInstancer_InvisibleIds      = 26;
+		inline constexpr uint16 SetPointInstancer_Time              = 28;
+		inline constexpr uint16 SetPointInstancer_InactiveIds       = 30;
 
 		// SetStageMetadata { timeCodesPerSecond:double; framesPerSecond:double; startTimeCode:double; endTimeCode:double; metersPerUnit:double; upAxis:string }
 		inline constexpr uint16 SetStageMetadata_TimeCodesPerSecond = 4;

@@ -272,3 +272,87 @@ class TestCompaction:
         assert by_time[2.0] == [21.0, 0.0, 0.0]
         # Default sorts before samples for replay.
         assert [e.get("time") for e in trs] == [None, 1.0, 2.0]
+
+    def test_point_instancer_partial_fields_merge(self, tmp_path):
+        """A later partial set_point_instancer must not drop earlier fields."""
+        from openusdconnect.protocol_constants import K_SET_POINT_INSTANCER
+
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/PI", "typeName": "PointInstancer"},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["prototypes", "proto_indices", "positions"],
+                 "prototypes": ["/Protos/A"],
+                 "proto_indices": [0, 0],
+                 "positions": [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["positions"],
+                 "positions": [[5.0, 5.0, 5.0], [6.0, 6.0, 6.0]]},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        pi = [e for e in events if e["k"] == K_SET_POINT_INSTANCER]
+        assert len(pi) == 1
+        assert set(pi[0]["fields"]) == {"prototypes", "proto_indices", "positions"}
+        assert pi[0]["prototypes"] == ["/Protos/A"]
+        assert pi[0]["positions"] == [[5.0, 5.0, 5.0], [6.0, 6.0, 6.0]]
+
+    def test_point_instancer_animated_samples_survive(self, tmp_path):
+        """Animated PI arrays keep one merged event per time sample."""
+        from openusdconnect.protocol_constants import K_SET_POINT_INSTANCER
+
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/PI", "typeName": "PointInstancer"},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["prototypes", "positions"],
+                 "prototypes": ["/Protos/A"],
+                 "positions": [[0.0, 0.0, 0.0]]},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["positions"], "positions": [[1.0, 0.0, 0.0]], "time": 1.0},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["positions"], "positions": [[2.0, 0.0, 0.0]], "time": 2.0},
+                {"k": K_SET_POINT_INSTANCER, "prim": "/World/PI",
+                 "fields": ["scales"], "scales": [[2.0, 2.0, 2.0]], "time": 2.0},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        pi = [e for e in events if e["k"] == K_SET_POINT_INSTANCER]
+        assert len(pi) == 3
+        by_time = {e.get("time"): e for e in pi}
+        assert by_time[None]["prototypes"] == ["/Protos/A"]
+        assert by_time[1.0]["fields"] == ["positions"]
+        # Same-time events for different arrays merge into one.
+        assert set(by_time[2.0]["fields"]) == {"positions", "scales"}
+
+    def test_instanceable_latest_wins(self, tmp_path):
+        """Multiple set_instanceable for same prim keeps only the last."""
+        from openusdconnect.protocol_constants import K_SET_INSTANCEABLE
+
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_INSTANCEABLE, "prim": "/World/A", "instanceable": True},
+                {"k": K_SET_INSTANCEABLE, "prim": "/World/A", "instanceable": False},
+                {"k": K_SET_INSTANCEABLE, "prim": "/World/A", "instanceable": True},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        inst = [e for e in events if e["k"] == K_SET_INSTANCEABLE]
+        assert len(inst) == 1
+        assert inst[0]["instanceable"] is True

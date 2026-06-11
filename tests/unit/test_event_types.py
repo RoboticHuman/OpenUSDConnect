@@ -20,8 +20,10 @@ from openusdconnect.events import (
     SetConnectableConnection,
     SetConnectableInput,
     SetGprimAttrs,
+    SetInstanceable,
     SetMaterialBinding,
     SetPayload,
+    SetPointInstancer,
     SetReference,
     SetStageMetadata,
     SetVariantSelections,
@@ -143,6 +145,27 @@ _CASES: list[tuple[str, Event]] = [
                 },
             },
             disconnections=["inputs:roughness"],
+        ),
+    ),
+    (
+        "set_instanceable",
+        SetInstanceable(k="set_instanceable", prim="/World/Tree_01", instanceable=True),
+    ),
+    (
+        "set_point_instancer",
+        SetPointInstancer(
+            k="set_point_instancer",
+            prim="/World/Forest",
+            fields=["prototypes", "proto_indices", "positions", "orientations", "ids"],
+            prototypes=["/World/Protos/Pine", "/World/Protos/Oak"],
+            proto_indices=[0, 1, 0],
+            positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            orientations=[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.5, 0.5, 0.5, 0.5],
+                [1.0, 0.0, 0.0, 0.0],
+            ],
+            ids=[1099511627776, 1099511627777, 1099511627778],
         ),
     ),
     (

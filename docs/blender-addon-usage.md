@@ -111,6 +111,8 @@ In the emitter Blender:
 | `set_material_binding` | Material bound/unbound | Updates the material:binding relationship |
 | `set_connectable_input` | Shader, NodeGraph, Material, or UsdLux light input value changed | Writes the typed input via `UsdShade.ConnectableAPI` |
 | `set_connectable_connection` | Shader/NodeGraph/Material/light input or output connection authored or cleared | Updates the connection edge |
+| `set_instanceable` | Native scenegraph instancing toggled on a prim that has a reference/payload arc | Sets the `instanceable` flag; composition rebuilds the instance locally. The Blender adapter toggles collection-instance Empties best-effort |
+| `set_point_instancer` | UsdGeomPointInstancer prototypes or per-instance arrays changed (including animated samples) | Authors the prototypes relationship and typed arrays at the event's time code. The Blender adapter records paths only |
 | `deactivate_prim` | Object deleted | Deactivates the prim |
 | `delete_prim` | Prim removed from stage | Removes the prim |
 | `rename_prim` | Object renamed | Renames the prim path |

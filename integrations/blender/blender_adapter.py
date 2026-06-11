@@ -168,6 +168,11 @@ class BlenderAdapter(DCCAdapter):
         # is the path currently driving the World shader.
         self._dome_light_paths: set[str] = set()
         self._active_dome: str | None = None
+        # PointInstancer prims seen via set_point_instancer; events are
+        # recorded but not mapped to Blender objects (a full mapping is a
+        # point cloud + geometry-nodes Instance on Points setup, the
+        # structure Blender's own USD importer builds).
+        self.point_instancer_paths: set[str] = set()
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -1990,6 +1995,54 @@ class BlenderAdapter(DCCAdapter):
                 prim_path,
                 selections,
             )
+        return True
+
+    def set_instanceable(self, prim_path: str, instanceable: bool) -> bool:
+        """Best-effort native-instancing toggle.
+
+        Blender's equivalent of a USD instance is an Empty with a
+        collection instance, so the toggle only acts when the prim already
+        maps to one; other prims record the flag without a scene change.
+        """
+        if not BPY_AVAILABLE:
+            return True
+        obj = self._find_object_by_prim(prim_path)
+        if obj is None:
+            LOG.info("set_instanceable: no object for %s", prim_path)
+            return False
+        if obj.type == "EMPTY" and obj.instance_collection is not None:
+            obj.instance_type = "COLLECTION" if instanceable else "NONE"
+            return True
+        LOG.info(
+            "set_instanceable: %s is not a collection instance; flag=%s recorded only",
+            prim_path,
+            instanceable,
+        )
+        return True
+
+    def set_point_instancer(
+        self,
+        prim_path: str,
+        *,
+        prototypes: list[str] | None = None,
+        proto_indices=None,
+        positions=None,
+        orientations=None,
+        scales=None,
+        velocities=None,
+        accelerations=None,
+        angular_velocities=None,
+        ids=None,
+        invisible_ids=None,
+        inactive_ids=None,
+        time: float | None = None,
+    ) -> bool:
+        self.point_instancer_paths.add(prim_path)
+        LOG.info(
+            "set_point_instancer: recorded %s (no Blender mapping; see "
+            "point_instancer_paths)",
+            prim_path,
+        )
         return True
 
     def set_stage_metadata(

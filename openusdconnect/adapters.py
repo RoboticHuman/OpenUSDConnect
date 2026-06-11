@@ -32,14 +32,17 @@ from .protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    POINT_INSTANCER_FIELDS,
     STAGE_METADATA_KEYS,
 )
 
@@ -111,6 +114,14 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "disconnections": ev.get("disconnections", []),
     },
     K_SET_STAGE_METADATA: lambda ev: {k: ev[k] for k in STAGE_METADATA_KEYS if k in ev},
+    K_SET_INSTANCEABLE: lambda ev: {
+        "prim_path": ev["prim"], "instanceable": ev["instanceable"],
+    },
+    K_SET_POINT_INSTANCER: lambda ev: {
+        "prim_path": ev["prim"],
+        **{f: ev[f] for f in ev.get("fields", []) if f in POINT_INSTANCER_FIELDS},
+        **_time_kwarg(ev),
+    },
 }
 
 
@@ -299,6 +310,45 @@ class DCCAdapter(ABC):
         Only fields the caller passes as non-``None`` are applied — the
         emitter ships partial updates to keep wire cost down. DCCs map
         these to their own scene units / fps / timeline settings.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_instanceable(self, prim_path: str, instanceable: bool) -> bool:
+        """Toggle native scenegraph instancing on a prim.
+
+        Receivers rebuild the instance from this flag plus the prim's
+        composition arcs; prototype paths never cross the wire (they are
+        implementation-defined and unstable across sessions).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_point_instancer(
+        self,
+        prim_path: str,
+        *,
+        prototypes: list[str] | None = None,
+        proto_indices=None,
+        positions=None,
+        orientations=None,
+        scales=None,
+        velocities=None,
+        accelerations=None,
+        angular_velocities=None,
+        ids=None,
+        invisible_ids=None,
+        inactive_ids=None,
+        time: float | None = None,
+    ) -> bool:
+        """Apply UsdGeomPointInstancer state.
+
+        Only fields present on the event arrive as non-None kwargs. On the
+        receive path array values are numpy views: (N, 3) float32 for the
+        vec3 arrays, (N, 4) float32 wxyz rows for ``orientations``, int64
+        for ``ids`` / ``invisible_ids``. ``prototypes`` is the ordered
+        prototype prim-path list and only accompanies default-time events;
+        ``time`` selects a USD time sample for the arrays.
         """
         raise NotImplementedError
 
@@ -628,6 +678,55 @@ class UsdStageAdapter(DCCAdapter):
         )
         return True
 
+    def set_instanceable(self, prim_path: str, instanceable: bool) -> bool:
+        _apply_event_to_stage(
+            self.stage,
+            {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": instanceable},
+        )
+        return True
+
+    def set_point_instancer(
+        self,
+        prim_path: str,
+        *,
+        prototypes: list[str] | None = None,
+        proto_indices=None,
+        positions=None,
+        orientations=None,
+        scales=None,
+        velocities=None,
+        accelerations=None,
+        angular_velocities=None,
+        ids=None,
+        invisible_ids=None,
+        inactive_ids=None,
+        time: float | None = None,
+    ) -> bool:
+        values = {
+            "prototypes": prototypes,
+            "proto_indices": proto_indices,
+            "positions": positions,
+            "orientations": orientations,
+            "scales": scales,
+            "velocities": velocities,
+            "accelerations": accelerations,
+            "angular_velocities": angular_velocities,
+            "ids": ids,
+            "invisible_ids": invisible_ids,
+            "inactive_ids": inactive_ids,
+        }
+        present = {k: v for k, v in values.items() if v is not None}
+        ev: dict = {
+            "k": K_SET_POINT_INSTANCER,
+            "prim": prim_path,
+            "fields": list(present),
+            **present,
+        }
+        if time is not None:
+            ev["time"] = time
+        _apply_event_to_stage(self.stage, ev)
+        return True
+
 
 class MockAdapter(DCCAdapter):
     """Pure-Python mock adapter for testing without pxr.
@@ -867,6 +966,58 @@ class MockAdapter(DCCAdapter):
         for name in disconnections or []:
             conns.pop(name, None)
         LOG.info("MockAdapter: set connectable connection on %s", prim_path)
+        return True
+
+    def set_instanceable(self, prim_path: str, instanceable: bool) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            return False
+        p["instanceable"] = instanceable
+        LOG.info("MockAdapter: set instanceable=%s on %s", instanceable, prim_path)
+        return True
+
+    def set_point_instancer(
+        self,
+        prim_path: str,
+        *,
+        prototypes: list[str] | None = None,
+        proto_indices=None,
+        positions=None,
+        orientations=None,
+        scales=None,
+        velocities=None,
+        accelerations=None,
+        angular_velocities=None,
+        ids=None,
+        invisible_ids=None,
+        inactive_ids=None,
+        time: float | None = None,
+    ) -> bool:
+        p = self._prims.get(prim_path)
+        if p is None:
+            return False
+        values = {
+            "prototypes": prototypes,
+            "proto_indices": proto_indices,
+            "positions": positions,
+            "orientations": orientations,
+            "scales": scales,
+            "velocities": velocities,
+            "accelerations": accelerations,
+            "angular_velocities": angular_velocities,
+            "ids": ids,
+            "invisible_ids": invisible_ids,
+            "inactive_ids": inactive_ids,
+        }
+        present = {k: v for k, v in values.items() if v is not None}
+        if time is None:
+            p.setdefault("point_instancer", {}).update(present)
+        else:
+            p.setdefault("point_instancer_samples", {}).setdefault(time, {}).update(present)
+        LOG.info(
+            "MockAdapter: point instancer %s fields=%s time=%s",
+            prim_path, sorted(present), time,
+        )
         return True
 
     def get_prim(self, prim_path: str) -> dict:

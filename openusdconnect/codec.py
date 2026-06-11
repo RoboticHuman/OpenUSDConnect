@@ -48,8 +48,10 @@ from .protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
@@ -73,6 +75,7 @@ from .protocol_constants import (
     MSG_RATE_LIMITED,
     MSG_RESYNC,
     MSG_TXN,
+    POINT_INSTANCER_FIELDS,
 )
 
 # Re-export generated classes so consumers import from codec, not generated path.
@@ -108,6 +111,8 @@ SetMaterialBinding = _fb.SetMaterialBinding
 SetConnectableInput = _fb.SetConnectableInput
 SetConnectableConnection = _fb.SetConnectableConnection
 SetStageMetadata = _fb.SetStageMetadata
+SetInstanceable = _fb.SetInstanceable
+SetPointInstancer = _fb.SetPointInstancer
 ClaimPlayback = _fb.ClaimPlayback
 PlaybackClaimed = _fb.PlaybackClaimed
 PlaybackRejected = _fb.PlaybackRejected
@@ -185,6 +190,23 @@ _STAGE_META_FB_NUMERIC = (
 )
 
 _TRS_BITS = {"t": 1, "r": 2, "s": 4}
+
+_PI_BITS = {name: 1 << i for i, name in enumerate(POINT_INSTANCER_FIELDS)}
+
+# field -> (FB add fn, FB accessor base, element stride, numpy dtype).
+# None stride = flat scalar vector; others reshape to (N, stride) on decode.
+_PI_ARRAYS = {
+    "proto_indices": (_fb.SetPointInstancerAddProtoIndices, "ProtoIndices", None, np.int32),
+    "positions": (_fb.SetPointInstancerAddPositions, "Positions", 3, np.float32),
+    "orientations": (_fb.SetPointInstancerAddOrientations, "Orientations", 4, np.float32),
+    "scales": (_fb.SetPointInstancerAddScales, "Scales", 3, np.float32),
+    "velocities": (_fb.SetPointInstancerAddVelocities, "Velocities", 3, np.float32),
+    "accelerations": (_fb.SetPointInstancerAddAccelerations, "Accelerations", 3, np.float32),
+    "angular_velocities": (_fb.SetPointInstancerAddAngularVelocities, "AngularVelocities", 3, np.float32),
+    "ids": (_fb.SetPointInstancerAddIds, "Ids", None, np.int64),
+    "invisible_ids": (_fb.SetPointInstancerAddInvisibleIds, "InvisibleIds", None, np.int64),
+    "inactive_ids": (_fb.SetPointInstancerAddInactiveIds, "InactiveIds", None, np.int64),
+}
 
 _BUILDER_SIZE_HINT: dict[str, int] = {
     MSG_EVENT: 4096,
@@ -1028,6 +1050,56 @@ def _encode_set_stage_metadata(b, ev):
     return _encode_stage_metadata_table(b, {k: v for k, v in ev.items() if k != "k"}, force=True)
 
 
+@register_encoder(
+    K_SET_INSTANCEABLE,
+    fb_tag=EventPayloadType.SetInstanceable,
+    fb_class=SetInstanceable,
+)
+def _encode_set_instanceable(b, ev):
+    prim = b.CreateString(ev["prim"])
+    _fb.SetInstanceableStart(b)
+    _fb.SetInstanceableAddPrim(b, prim)
+    _fb.SetInstanceableAddInstanceable(b, bool(ev["instanceable"]))
+    return _fb.SetInstanceableEnd(b)
+
+
+@register_encoder(
+    K_SET_POINT_INSTANCER,
+    fb_tag=EventPayloadType.SetPointInstancer,
+    fb_class=SetPointInstancer,
+)
+def _encode_set_point_instancer(b, ev):
+    prim = b.CreateString(ev["prim"])
+    fields = ev.get("fields", [])
+    bitmask = 0
+    for f in fields:
+        bitmask |= _PI_BITS.get(f, 0)
+
+    proto_vec = None
+    if "prototypes" in fields:
+        offsets = [b.CreateString(p) for p in ev["prototypes"]]
+        _fb.SetPointInstancerStartPrototypesVector(b, len(offsets))
+        for off in reversed(offsets):
+            b.PrependUOffsetTRelative(off)
+        proto_vec = b.EndVector()
+
+    array_vecs: dict[str, int] = {}
+    for name, (_add, _base, _stride, dtype) in _PI_ARRAYS.items():
+        if name in fields:
+            array_vecs[name] = b.CreateNumpyVector(np.asarray(ev[name], dtype=dtype).ravel())
+
+    _fb.SetPointInstancerStart(b)
+    _fb.SetPointInstancerAddPrim(b, prim)
+    _fb.SetPointInstancerAddFields(b, bitmask)
+    if proto_vec is not None:
+        _fb.SetPointInstancerAddPrototypes(b, proto_vec)
+    for name, vec in array_vecs.items():
+        _PI_ARRAYS[name][0](b, vec)
+    if ev.get("time") is not None:
+        _fb.SetPointInstancerAddTime(b, float(ev["time"]))
+    return _fb.SetPointInstancerEnd(b)
+
+
 # ===================================================================
 # DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
 # ===================================================================
@@ -1056,6 +1128,8 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
     kind, obj = resolve_event(ew)
     if kind == K_SET_GPRIM_ATTRS:
         return _dict_set_gprim_attrs(obj, kind, numpy_arrays=numpy_arrays)
+    if kind == K_SET_POINT_INSTANCER:
+        return _dict_set_point_instancer(obj, kind, numpy_arrays=numpy_arrays)
     spec = _events.get(kind)
     if spec is None or spec.decode is None:
         raise KeyError(f"no registered decoder for event kind {kind!r}")
@@ -1519,6 +1593,46 @@ def _dict_set_connectable_input(sci, kind):
 def _dict_set_stage_metadata(sm, kind):
     ev = {"k": kind}
     ev.update(_decode_stage_metadata_table(sm))
+    return ev
+
+
+@register_decoder(K_SET_INSTANCEABLE)
+def _dict_set_instanceable(si, kind):
+    return {
+        "k": kind,
+        "prim": _str(si.Prim()),
+        "instanceable": bool(si.Instanceable()),
+    }
+
+
+@register_decoder(K_SET_POINT_INSTANCER)
+def _dict_set_point_instancer(spi, kind, numpy_arrays=False):
+    bitmask = spi.Fields()
+    ev: dict = {"k": kind, "prim": _str(spi.Prim())}
+    fields: list[str] = []
+    if bitmask & _PI_BITS["prototypes"]:
+        fields.append("prototypes")
+        ev["prototypes"] = [_str(spi.Prototypes(i)) for i in range(spi.PrototypesLength())]
+    for name, (_add, base, stride, _dtype) in _PI_ARRAYS.items():
+        if not bitmask & _PI_BITS[name]:
+            continue
+        fields.append(name)
+        if numpy_arrays:
+            arr = getattr(spi, base + "AsNumpy")()
+            if stride is not None:
+                arr = arr.reshape(-1, stride)
+            ev[name] = arr
+        else:
+            n = getattr(spi, base + "Length")()
+            get = getattr(spi, base)
+            flat = [get(i) for i in range(n)]
+            if stride is not None:
+                flat = [flat[i : i + stride] for i in range(0, n, stride)]
+            ev[name] = flat
+    ev["fields"] = fields
+    t = spi.Time()
+    if t is not None:
+        ev["time"] = t
     return ev
 
 

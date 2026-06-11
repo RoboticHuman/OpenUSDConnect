@@ -1,5 +1,5 @@
 // OpenUSDConnect event schema — FlatBuffers IDL
-// Covers all 17 event kinds for USD scene synchronization.
+// Covers all 19 event kinds for USD scene synchronization.
 
 namespace OpenUSDConnect;
 
@@ -203,6 +203,33 @@ table SetConnectableConnection {
     disconnections:[string];
 }
 
+table SetInstanceable {
+    prim:string;
+    instanceable:bool = true;
+}
+
+// PointInstancer fields bitmask (which arrays are present; distinguishes
+// "absent" from "explicitly empty", which FB vectors cannot):
+// 1=prototypes, 2=proto_indices, 4=positions, 8=orientations, 16=scales,
+// 32=velocities, 64=accelerations, 128=angular_velocities, 256=ids,
+// 512=invisible_ids, 1024=inactive_ids
+table SetPointInstancer {
+    prim:string;
+    fields:uint;
+    prototypes:[string];            // ordered prototype prim paths (rel targets)
+    proto_indices:[int];
+    positions:[float];              // flattened (N,3)
+    orientations:[float];           // flattened (N,4) quaternion wxyz, float32
+    scales:[float];                 // flattened (N,3)
+    velocities:[float];             // flattened (N,3)
+    accelerations:[float];          // flattened (N,3)
+    angular_velocities:[float];     // flattened (N,3)
+    ids:[long];                     // int64; int32 would truncate sim ids
+    invisible_ids:[long];
+    time:double = null;             // optional time sample; null = default-time
+    inactive_ids:[long];            // resolved inactiveIds prim metadata (uniform)
+}
+
 // Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
 // metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional —
 // absent = "field not authored", present = "apply this value". upAxis is a
@@ -238,6 +265,8 @@ union EventPayload {
     SetConnectableInput,
     SetConnectableConnection,
     SetStageMetadata,
+    SetInstanceable,
+    SetPointInstancer,
 }
 
 table EventWrapper {

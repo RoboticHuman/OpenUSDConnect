@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 from pxr import Gf, Sdf, Sdr, Usd, UsdGeom, UsdShade, Vt
 
 from . import events as _events
@@ -28,8 +29,10 @@ from .protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
@@ -380,6 +383,76 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
             attr.SetMetadata("interpolation", interp)
 
 
+@register_applier(K_SET_INSTANCEABLE)
+def _apply_set_instanceable(stage: Usd.Stage, ev: dict) -> None:
+    prim = get_or_define_prim(stage, ev["prim"])
+    prim.SetInstanceable(bool(ev["instanceable"]))
+
+
+def _vec3f_array(value) -> Vt.Vec3fArray:
+    return Vt.Vec3fArray.FromNumpy(np.asarray(value, dtype=np.float32).reshape(-1, 3))
+
+
+@register_applier(K_SET_POINT_INSTANCER)
+def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
+    """Author PointInstancer state on an existing prim.
+
+    Requires the prim to exist (the emitter pairs first-encounter events
+    with an ensure_prim, which the create pass applies first): prim
+    creation cannot happen here because value events run inside an
+    Sdf.ChangeBlock, where Usd.Stage.DefinePrim fails. Relationship and
+    attribute writes on an existing prim are ChangeBlock-safe.
+
+    Orientations arrive as float32 wxyz rows and are authored to
+    orientationsf (lossless for the wire format, wins value resolution
+    over quath orientations).
+    """
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if not prim or not prim.IsValid():
+        return
+    pi = UsdGeom.PointInstancer(prim)
+    if not pi:
+        return
+    fields = ev.get("fields", [])
+    tc = _timecode(ev)
+    if "prototypes" in fields:
+        pi.CreatePrototypesRel().SetTargets([Sdf.Path(p) for p in ev["prototypes"]])
+    if "proto_indices" in fields:
+        pi.CreateProtoIndicesAttr().Set(
+            Vt.IntArray.FromNumpy(np.asarray(ev["proto_indices"], dtype=np.int32).ravel()), tc
+        )
+    if "positions" in fields:
+        pi.CreatePositionsAttr().Set(_vec3f_array(ev["positions"]), tc)
+    if "orientations" in fields:
+        wire = np.asarray(ev["orientations"], dtype=np.float32).reshape(-1, 4)
+        pi.CreateOrientationsfAttr().Set(
+            Vt.QuatfArray.FromNumpy(wire[:, [1, 2, 3, 0]]), tc
+        )
+    if "scales" in fields:
+        pi.CreateScalesAttr().Set(_vec3f_array(ev["scales"]), tc)
+    if "velocities" in fields:
+        pi.CreateVelocitiesAttr().Set(_vec3f_array(ev["velocities"]), tc)
+    if "accelerations" in fields:
+        pi.CreateAccelerationsAttr().Set(_vec3f_array(ev["accelerations"]), tc)
+    if "angular_velocities" in fields:
+        pi.CreateAngularVelocitiesAttr().Set(_vec3f_array(ev["angular_velocities"]), tc)
+    if "ids" in fields:
+        pi.CreateIdsAttr().Set(
+            Vt.Int64Array.FromNumpy(np.asarray(ev["ids"], dtype=np.int64).ravel()), tc
+        )
+    if "invisible_ids" in fields:
+        pi.CreateInvisibleIdsAttr().Set(
+            Vt.Int64Array.FromNumpy(np.asarray(ev["invisible_ids"], dtype=np.int64).ravel()), tc
+        )
+    if "inactive_ids" in fields:
+        # Prim metadata, not an attribute: uniform over time, authored as an
+        # explicit list op so the receiver mirrors the sender's resolved set.
+        prim.SetMetadata(
+            "inactiveIds",
+            Sdf.Int64ListOp.CreateExplicit([int(i) for i in ev["inactive_ids"]]),
+        )
+
+
 @register_applier(K_SET_STAGE_METADATA)
 def _apply_set_stage_metadata(stage: Usd.Stage, ev: dict) -> None:
     """Write stage-level metadata. Only keys present in ``ev`` are touched."""
@@ -725,10 +798,47 @@ def _apply_deactivate_prim(stage: Usd.Stage, ev: dict) -> None:
         prim.SetActive(ev.get("active", False))
 
 
+def _is_instance_proxy_target(stage: Usd.Stage, ev: dict) -> bool:
+    """True when the event targets a prim beneath a scenegraph instance.
+
+    The spec forbids overrides on instance descendants, so such events are
+    dropped. Reachable via a cross-client race: one client toggles
+    instanceable while another client's edits to the children are still
+    in flight.
+    """
+    path = ev.get("prim")
+    if not path:
+        return False
+    # No prototypes means no instances and no proxies anywhere; skip the
+    # far costlier per-prim resolution.
+    if not stage.GetPrototypes():
+        return False
+    prim = stage.GetPrimAtPath(path)
+    if prim and prim.IsValid():
+        if prim.IsInstanceProxy():
+            LOG.debug("dropping %s for instance proxy %s", ev.get("k"), path)
+            return True
+        return False
+    # The path does not compose; prims cannot be created beneath an
+    # instance either, so check the nearest existing ancestor.
+    parent = Sdf.Path(path).GetParentPath()
+    while parent and parent != Sdf.Path.absoluteRootPath:
+        p = stage.GetPrimAtPath(parent)
+        if p and p.IsValid():
+            if p.IsInstance() or p.IsInstanceProxy():
+                LOG.debug("dropping %s under instance %s", ev.get("k"), parent)
+                return True
+            return False
+        parent = parent.GetParentPath()
+    return False
+
+
 def apply_event(stage: Usd.Stage, ev: Event) -> None:
     """Apply a single event dict to a USD stage."""
     spec = _events.get(ev.get("k"))
     if spec is not None and spec.apply is not None:
+        if _is_instance_proxy_target(stage, ev):
+            return
         spec.apply(stage, ev)
 
 
@@ -768,6 +878,8 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     for ev in create + modify:
         k = ev.get("k")
         if k == K_ENSURE_XFORM_OPS:
+            if _is_instance_proxy_target(stage, ev):
+                continue
             _prim, _xf, t, o, s = ensure_canonical_ops(
                 stage,
                 ev["prim"],
@@ -787,7 +899,8 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
         with Sdf.ChangeBlock():
             for run_ev in run:
                 if run_ev.get("k") == K_SET_XFORM_TRS:
-                    _apply_set_xform_trs(stage, run_ev, op_cache)
+                    if not _is_instance_proxy_target(stage, run_ev):
+                        _apply_set_xform_trs(stage, run_ev, op_cache)
                 else:
                     apply_event(stage, run_ev)
 

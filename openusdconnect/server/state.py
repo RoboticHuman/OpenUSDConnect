@@ -37,6 +37,7 @@ from ..protocol_constants import (
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
+    K_SET_POINT_INSTANCER,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
@@ -1003,6 +1004,17 @@ class UsdSyncServer:
                 )
                 if ev.get("info_id"):
                     prev["info_id"] = ev["info_id"]
+                latest[key] = (prev, meta)
+            else:
+                latest[key] = (ev, meta)
+        elif k == K_SET_POINT_INSTANCER:
+            existing = latest.get(key)
+            if existing:
+                prev = existing[0]
+                for f in ev.get("fields", []):
+                    prev[f] = ev[f]
+                    if f not in prev["fields"]:
+                        prev["fields"].append(f)
                 latest[key] = (prev, meta)
             else:
                 latest[key] = (ev, meta)

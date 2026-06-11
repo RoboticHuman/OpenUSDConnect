@@ -32,8 +32,10 @@ from .protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
@@ -59,15 +61,31 @@ _TRS_FIELD_TO_OP_NAME = {
     "s": "xformOp:scale",
 }
 
-# Canonical xform-op type → wire-event TRS field. Other op types
-# (RotateXYZ, Transform, pivots) aren't replicated as samples — the
-# default-time path folds them via matrix decompose; for sample
-# replication we trust the canonical op stack contract.
+# Canonical xform-op type → wire-event TRS field. Non-canonical op types
+# (RotateXYZ, Transform, pivots) replicate through the decomposed sample
+# path instead, which folds the whole stack via matrix decompose.
 _XFORM_OP_TYPE_TO_TRS_FIELD = {
     UsdGeom.XformOp.TypeTranslate: "t",
     UsdGeom.XformOp.TypeOrient: "r",
     UsdGeom.XformOp.TypeScale: "s",
 }
+
+
+def _canonical_trs_field(op) -> str | None:
+    """Return the wire field for an unsuffixed, non-inverted canonical op.
+
+    Pivots and inverse pairs share canonical op TYPES with the real
+    translate/orient/scale ops, but their semantics differ; emitting their
+    samples through the per-op TRS slots would author the wrong transform
+    on the receiver. Anything other than the bare canonical attr name
+    routes through the decomposed sample path instead.
+    """
+    field = _XFORM_OP_TYPE_TO_TRS_FIELD.get(op.GetOpType())
+    if field is None or op.IsInverseOp():
+        return None
+    if op.GetAttr().GetName() != _TRS_FIELD_TO_OP_NAME[field]:
+        return None
+    return field
 
 LOG = logging.getLogger(__name__)
 
@@ -83,6 +101,8 @@ _C_MATERIAL_BINDING = "material_binding"
 _C_CONNECTABLE = "connectable"
 _C_API_SCHEMAS = "api_schemas"
 _C_CAMERA_ATTRS = "camera_attrs"
+_C_INSTANCEABLE = "instanceable_flag"
+_C_POINT_INSTANCER = "point_instancer"
 # Per-attribute time-sample hashes: {attr_name: {time_float: hash}}
 _C_TIME_SAMPLES = "time_samples"
 
@@ -167,7 +187,9 @@ def _make_attr_filter(channels):
     skip_attrs = set()
     skip_prefixes = []
     for ch in channels:
-        skip_attrs.update(ch.watched_attrs)
+        skip_attrs.update(
+            ch.filter_attrs if ch.filter_attrs is not None else ch.watched_attrs
+        )
         skip_prefixes.extend(ch.watched_prefixes)
     skip_attrs_fs = frozenset(skip_attrs)
     skip_prefixes_t = tuple(skip_prefixes)
@@ -261,7 +283,12 @@ except AttributeError:
     _PrimResyncType = None
 
 
-from .xform_decompose import as_matrix, decompose_trs_from_matrix
+from .xform_decompose import (
+    as_matrix,
+    decompose_trs_batch,
+    decompose_trs_from_matrix,
+    xform_sample_value,
+)
 
 
 def near_list(a: list[float] | None, b: list[float] | None, eps: float) -> bool:
@@ -299,13 +326,14 @@ def _value_hash(val) -> int:
     return hash(val)
 
 
-def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None):
+def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None, convert=None):
     """Return ``(new_cache, dirty)`` for an attribute's time-sample table.
 
     ``cached`` is a previous ``{time: value_hash}`` snapshot, or ``None``
     on first encounter (every authored sample is reported dirty).
     ``dirty`` lists ``(time, python_value)`` pairs that were added or
-    whose hashed value changed.
+    whose hashed value changed. ``convert`` overrides the value converter
+    (default ``_usd_value_to_python``).
 
     When ``layer`` is given, the times and values come from that layer
     directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
@@ -323,15 +351,17 @@ def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None):
         times = attr.GetTimeSamples()
     if not times:
         return {}, []
+    if convert is None:
+        convert = _usd_value_to_python
     new_cache: dict[float, int] = {}
     dirty: list[tuple[float, object]] = []
     is_first = cached is None
     cached = cached or {}
     for t in times:
         if layer is not None:
-            val = _usd_value_to_python(layer.QueryTimeSample(path, t))
+            val = convert(layer.QueryTimeSample(path, t))
         else:
-            val = _usd_value_to_python(attr.Get(Usd.TimeCode(t)))
+            val = convert(attr.Get(Usd.TimeCode(t)))
         if val is None:
             continue
         h = _value_hash(val)
@@ -629,6 +659,12 @@ class PrimChannel:
     # Prefix gates for property namespaces such as inputs:* and outputs:*.
     watched_prefixes: tuple[str, ...] = ()
 
+    # Attrs the generic gprim scan skips globally (None = watched_attrs).
+    # Channels whose watched names also exist on unrelated schemas (e.g.
+    # velocities on both PointInstancer and UsdGeomPoints) declare () and
+    # rely on the build cycle's per-prim owned-attr exclusion instead.
+    filter_attrs: tuple[str, ...] | None = None
+
     # Composition arcs and load state arrive as resync notices, not ordinary
     # info-only attr changes. Such channels can skip pure attr-only cycles.
     reads_on_resync_only: bool = False
@@ -663,6 +699,16 @@ class PrimChannel:
     def read(self, stage, prim_path):
         """Return current state, or ``None`` to skip the cache write."""
         raise NotImplementedError
+
+    def read_scoped(self, stage, prim_path, dirty_attrs):
+        """Read only the state slice named by ``dirty_attrs``.
+
+        Returns a partial dict that is diffed key-wise and merged into the
+        cache, or ``None`` to fall back to a full ``read``. Worth
+        implementing for channels whose full state is expensive to read
+        (bulk arrays) and whose dirty gate names exact attrs.
+        """
+        return None
 
     def diff(self, current, cached):
         """Return the diff to emit (any truthy value), or ``None`` if unchanged.
@@ -959,6 +1005,137 @@ class CameraAttrsChannel(PrimChannel):
         return {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": diff}
 
 
+class InstanceableChannel(PrimChannel):
+    """Native scenegraph-instancing flag replication.
+
+    Emits the authored ``instanceable`` bit only; prototype paths are
+    implementation-defined and never cross the wire. Flag edits arrive
+    as resync notices on the instance prim.
+    """
+
+    cache_key = _C_INSTANCEABLE
+    cache_default = False
+    reads_on_resync_only = True
+
+    def read(self, stage, prim_path):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid() or not prim.HasAuthoredInstanceable():
+            return None
+        return prim.IsInstanceable()
+
+    def to_event(self, prim_path, diff):
+        return {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": diff}
+
+
+# UsdGeomPointInstancer attr name -> wire field name. orientationsf is read
+# in preference to orientations when authored; both map to the same wire
+# field (float32 wxyz rows).
+_PI_USD_TO_WIRE = {
+    "protoIndices": "proto_indices",
+    "positions": "positions",
+    "orientations": "orientations",
+    "orientationsf": "orientations",
+    "scales": "scales",
+    "velocities": "velocities",
+    "accelerations": "accelerations",
+    "angularVelocities": "angular_velocities",
+    "ids": "ids",
+    "invisibleIds": "invisible_ids",
+}
+
+_PI_QUAT_ATTRS = frozenset({"orientations", "orientationsf"})
+
+
+def _quat_array_to_wire(value):
+    """VtQuat*Array (numpy xyzw rows) to float32 wxyz rows."""
+    import numpy as np
+
+    return np.asarray(value)[:, [3, 0, 1, 2]].astype(np.float32, copy=False)
+
+
+def read_point_instancer(stage, prim_path, only=None):
+    """Read prototypes rel targets + default-time arrays from a PointInstancer.
+
+    Returns ``{wire_field: value}`` with orientations as float32 wxyz rows,
+    or ``None`` if the prim is not a ``UsdGeom.PointInstancer``. Arrays
+    authored only as time samples have no default opinion and are omitted;
+    the per-time sample path carries those. ``only`` restricts the read to
+    a set of USD property names (plus ``"prototypes"``) so a single-array
+    edit does not pay for re-reading every other bulk array.
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.PointInstancer):
+        return None
+    pi = UsdGeom.PointInstancer(prim)
+    state: dict = {}
+    if only is None or "prototypes" in only:
+        targets = pi.GetPrototypesRel().GetTargets()
+        if targets:
+            state["prototypes"] = [str(t) for t in targets]
+    if (only is None or "inactiveIds" in only) and prim.HasAuthoredMetadata("inactiveIds"):
+        list_op = prim.GetMetadata("inactiveIds")
+        state["inactive_ids"] = [int(i) for i in list_op.ApplyOperations([])]
+
+    orient_f = pi.GetOrientationsfAttr()
+    quat_attr = "orientationsf" if orient_f and orient_f.IsAuthored() else "orientations"
+    if only is not None and only & _PI_QUAT_ATTRS:
+        # A dirty mark on either quat attr reads the resolved one.
+        only = set(only) | {quat_attr}
+    for usd_name, wire_name in _PI_USD_TO_WIRE.items():
+        if usd_name in _PI_QUAT_ATTRS and usd_name != quat_attr:
+            continue
+        if only is not None and usd_name not in only:
+            continue
+        attr = prim.GetAttribute(usd_name)
+        if not attr or not attr.IsValid() or not attr.IsAuthored():
+            continue
+        val = attr.Get()
+        if val is None:
+            continue
+        if usd_name in _PI_QUAT_ATTRS:
+            wire = _quat_array_to_wire(val)
+        else:
+            wire = _usd_value_to_python(val)
+        if wire is not None:
+            state[wire_name] = wire
+    return state
+
+
+class PointInstancerChannel(PrimChannel):
+    """UsdGeomPointInstancer prototypes + per-instance array replication."""
+
+    cache_key = _C_POINT_INSTANCER
+    watched_attrs = tuple(_PI_USD_TO_WIRE) + ("prototypes", "inactiveIds")
+    # velocities/accelerations/ids also exist on UsdGeomPoints; per-prim
+    # exclusion keeps them flowing generically for non-PointInstancer prims.
+    filter_attrs = ()
+
+    def applies_to(self, prim):
+        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.PointInstancer))
+
+    def read(self, stage, prim_path):
+        return read_point_instancer(stage, prim_path) or {}
+
+    def read_scoped(self, stage, prim_path, dirty_attrs):
+        return read_point_instancer(stage, prim_path, only=dirty_attrs) or {}
+
+    def diff(self, current, cached):
+        cached = cached or {}
+        changed = {
+            n: v for n, v in current.items()
+            if not _values_equal(v, cached.get(n))
+        }
+        return changed if changed else None
+
+    def to_event(self, prim_path, diff):
+        return {
+            "k": K_SET_POINT_INSTANCER,
+            "prim": prim_path,
+            "fields": list(diff),
+            **diff,
+        }
+
+
 # Framework-owned channels. Receive-side ordering still sorts events before
 # apply, but this order keeps raw emitter logs stable and readable.
 _BUILTIN_PRIM_CHANNELS: tuple[PrimChannel, ...] = (
@@ -970,11 +1147,17 @@ _BUILTIN_PRIM_CHANNELS: tuple[PrimChannel, ...] = (
     ConnectableChannel(),
     VisibilityChannel(),
     CameraAttrsChannel(),
+    InstanceableChannel(),
+    PointInstancerChannel(),
 )
 
 
-def _emit_channel_events(channel, prim_path, current, pc, events_out):
-    """Run the channel's diff, append any events, refresh the cache."""
+def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=False):
+    """Run the channel's diff, append any events, refresh the cache.
+
+    ``partial`` marks a scoped read: ``current`` covers only the dirty
+    slice, so it merges into the cached state instead of replacing it.
+    """
     cached = pc.get(channel.cache_key)
     d = channel.diff(current, cached)
     if d is not None:
@@ -984,7 +1167,12 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out):
                 events_out.extend(ev)
             else:
                 events_out.append(ev)
-    pc[channel.cache_key] = current
+    if partial:
+        merged = dict(cached or {})
+        merged.update(current)
+        pc[channel.cache_key] = merged
+    else:
+        pc[channel.cache_key] = current
 
 
 # ---------------------------------------------------------------------------
@@ -1182,6 +1370,52 @@ def _invalidate_set_visibility(emitter, prim_path, ev):
         emitter._prim_cache.setdefault(prim_path, {})[_C_VISIBILITY] = value
 
 
+def _invalidate_set_instanceable(emitter, prim_path, ev):
+    emitter._prim_cache.setdefault(prim_path, {})[_C_INSTANCEABLE] = bool(
+        ev["instanceable"]
+    )
+
+
+# Wire field -> USD attr name the applier authors. The sample cache is keyed
+# by USD attr names, so orientations maps to orientationsf here.
+_PI_WIRE_TO_USD = {
+    "proto_indices": "protoIndices",
+    "positions": "positions",
+    "orientations": "orientationsf",
+    "scales": "scales",
+    "velocities": "velocities",
+    "accelerations": "accelerations",
+    "angular_velocities": "angularVelocities",
+    "ids": "ids",
+    "invisible_ids": "invisibleIds",
+}
+
+
+def _invalidate_set_point_instancer(emitter, prim_path, ev):
+    """Write the event's own values into the cache.
+
+    The applied state equals the event payload, so caching it directly is
+    exact and avoids re-reading every per-instance array from the stage.
+    """
+    import numpy as np
+
+    fields = ev.get("fields", [])
+    if ev.get("time") is not None:
+        time = float(ev["time"])
+        for f in fields:
+            if f in ("prototypes", "inactive_ids"):
+                continue
+            value = ev[f]
+            if f == "orientations":
+                # The sample diff hashes the layer's xyzw quat layout.
+                value = np.asarray(value, dtype=np.float32).reshape(-1, 4)[:, [1, 2, 3, 0]]
+            _set_time_sample_cache(emitter, prim_path, _PI_WIRE_TO_USD[f], time, value)
+        return
+    state = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_POINT_INSTANCER, {})
+    for f in fields:
+        state[f] = ev[f]
+
+
 def _invalidate_set_stage_metadata(emitter, _prim_path, _ev):
     # Refresh the cached snapshot so the next dirty cycle doesn't re-emit
     # a value the server already knows about. The dirty flag is owned by
@@ -1206,6 +1440,8 @@ _INVALIDATE_DISPATCH = {
     K_SET_XFORM_TRS: _invalidate_set_xform_trs,
     K_SET_VISIBILITY: _invalidate_set_visibility,
     K_SET_STAGE_METADATA: _invalidate_set_stage_metadata,
+    K_SET_INSTANCEABLE: _invalidate_set_instanceable,
+    K_SET_POINT_INSTANCER: _invalidate_set_point_instancer,
 }
 
 
@@ -1418,7 +1654,7 @@ class NoticeEmitter:
                 if not times:
                     continue
                 ts_seed[name] = {
-                    t: _value_hash(_usd_value_to_python(attr.Get(Usd.TimeCode(t))))
+                    t: _value_hash(xform_sample_value(attr.Get(Usd.TimeCode(t))))
                     for t in times
                 }
             if ts_seed:
@@ -1502,7 +1738,10 @@ class NoticeEmitter:
 
         for p in notice.GetResyncedPaths():
             prim_path = _prim_path_from_notice_path(str(p))
-            if not prim_path:
+            # Prototype prims are stage-local composition artifacts with
+            # unstable names; toggling instanceable resyncs them alongside
+            # the instance prim. Their paths must never reach the wire.
+            if not prim_path or prim_path.startswith("/__Prototype"):
                 continue
             action = self._classify_resync(notice, prim_path)
             if action == "delete":
@@ -1524,7 +1763,7 @@ class NoticeEmitter:
                     self._stage_metadata_dirty = True
                 continue
             prim_path = _prim_path_from_notice_path(path_str)
-            if prim_path:
+            if prim_path and not prim_path.startswith("/__Prototype"):
                 self.dirty.add(prim_path)
                 # Keep this unfiltered: channel gating needs names that the
                 # generic gprim attr path will later ignore.
@@ -1541,6 +1780,10 @@ class NoticeEmitter:
                     fields = notice.GetChangedFields(p)
                     if not fields or any(str(f) == "timeSamples" for f in fields):
                         self._sample_dirty_attrs.setdefault(prim_path, set()).add(attr_name)
+                elif any(str(f) == "inactiveIds" for f in notice.GetChangedFields(p)):
+                    # Prim-path metadata change; record the field name so a
+                    # same-cycle property edit's scoped read doesn't skip it.
+                    self._dirty_attrs.setdefault(prim_path, set()).add("inactiveIds")
 
     def mark_dirty(self, prim_path: str):
         """Manually mark a prim as dirty (useful for DCC integrations)."""
@@ -1736,15 +1979,27 @@ class NoticeEmitter:
         dirty_attrs = self._dirty_attrs.get(prim_path)
         if first_encounter or prim_path in self._notice_resynced_prims:
             dirty_attrs = None
+        # Attrs owned by a channel that applies to this prim. The global
+        # _attr_filter only excludes filter_attrs; the gprim scan and
+        # sample paths below additionally skip this per-prim set, which
+        # covers channels whose names collide with other schemas.
+        owned_attrs: set[str] = set()
         for channel in self._channels:
             if not channel.applies_to(prim):
                 continue
+            owned_attrs.update(channel.watched_attrs)
             if not channel.needs_read(dirty_attrs):
                 continue
-            current = channel.read(self.stage, prim_path)
+            partial = False
+            current = None
+            if dirty_attrs:
+                current = channel.read_scoped(self.stage, prim_path, dirty_attrs)
+                partial = current is not None
+            if current is None:
+                current = channel.read(self.stage, prim_path)
             if current is None:
                 continue
-            _emit_channel_events(channel, prim_path, current, pc, events)
+            _emit_channel_events(channel, prim_path, current, pc, events, partial)
 
         # TRS keeps a specialized path (not a PrimChannel): the diff needs a
         # matrix decompose snapshot, which is only worth computing for prims
@@ -1790,7 +2045,7 @@ class NoticeEmitter:
         if not dirty_attr_names and (not last_attrs or is_resync):
             for attr in prim.GetAttributes():
                 name = attr.GetName()
-                if attr.IsAuthored() and self._attr_filter(name):
+                if attr.IsAuthored() and self._attr_filter(name) and name not in owned_attrs:
                     dirty_attr_names.add(name)
 
         changed_attrs = {}
@@ -1799,7 +2054,7 @@ class NoticeEmitter:
         for attr_name in dirty_attr_names:
             # _dirty_attrs is unfiltered for channel gating; filter again
             # here before emitting generic gprim attrs.
-            if not self._attr_filter(attr_name):
+            if not self._attr_filter(attr_name) or attr_name in owned_attrs:
                 continue
             attr = prim.GetAttribute(attr_name)
             if not attr or not attr.IsValid():
@@ -1834,7 +2089,7 @@ class NoticeEmitter:
         # transform ops and connectable inputs from the sample paths.
         sample_attrs = sample_dirty if had_notice_detail else None
         events.extend(
-            self._build_time_sample_events(prim_path, prim, pc, sample_attrs),
+            self._build_time_sample_events(prim_path, prim, pc, sample_attrs, owned_attrs),
         )
 
         return events
@@ -1845,6 +2100,7 @@ class NoticeEmitter:
         prim,
         pc: dict,
         sample_attrs: set[str] | None,
+        owned_attrs: set[str] = frozenset(),
     ) -> list[dict]:
         """One event per ``(attr, time)`` for the time-sampleable attrs on a
         prim: xformOps, visibility, watched gprim attrs, and UsdShade
@@ -1881,8 +2137,12 @@ class NoticeEmitter:
         ))
         events.extend(self._gprim_attr_sample_events(
             prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+            owned_attrs,
         ))
         events.extend(self._connectable_input_sample_events(
+            prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
+        ))
+        events.extend(self._point_instancer_sample_events(
             prim_path, prim, ts_cache, dirty_attr_names, full_scan, edit_layer,
         ))
         return events
@@ -1893,15 +2153,26 @@ class NoticeEmitter:
         xf = UsdGeom.Xformable(prim)
         if not xf or not xf.GetXformOpOrderAttr().IsAuthored():
             return []
+        ops = list(xf.GetOrderedXformOps())
+        fields = [_canonical_trs_field(op) for op in ops]
+        # A sampled non-canonical op (matrix transform, euler, pivot,
+        # inverse) cannot ride a per-op TRS field; the whole stack folds
+        # through the matrix decompose the default-time path uses.
+        # Canonical-only stacks short-circuit before any layer query.
+        for op, field in zip(ops, fields, strict=True):
+            if field is None and _has_layer_samples(layer, op.GetAttr()):
+                return self._decomposed_xform_sample_events(
+                    prim_path, xf, ops, ts_cache, dirty_attr_names, full_scan, layer,
+                )
+
         events: list[dict] = []
-        for op in xf.GetOrderedXformOps():
-            field = _XFORM_OP_TYPE_TO_TRS_FIELD.get(op.GetOpType())
+        for op, field in zip(ops, fields, strict=True):
             if field is None:
                 continue
-            op_name = op.GetName()
+            attr = op.GetAttr()
+            op_name = attr.GetName()
             if not full_scan and op_name not in dirty_attr_names:
                 continue
-            attr = op.GetAttr()
             if not _has_layer_samples(layer, attr):
                 continue
             new_cache, dirty = _diff_time_samples(attr, ts_cache.get(op_name), layer)
@@ -1912,6 +2183,82 @@ class NoticeEmitter:
                 })
             ts_cache[op_name] = new_cache
         return events
+
+    def _decomposed_xform_sample_events(
+        self, prim_path, xf, ops, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        """One full TRS event per dirty sample time, via matrix decompose.
+
+        The composed local transformation folds every op in the stack at
+        that time regardless of op type. Decompose cannot represent shear;
+        the default-time path shares that limit. Reads compose across the
+        whole layer stack, unlike the per-op path's edit-layer scoping.
+        """
+        import numpy as np
+
+        dirty_times: set[float] = set()
+        sampled_indices: list[int] = []
+        matrix_dirty: dict[str, dict[float, object]] = {}
+        for i, op in enumerate(ops):
+            attr = op.GetAttr()
+            if not _has_layer_samples(layer, attr):
+                continue
+            sampled_indices.append(i)
+            name = attr.GetName()
+            if not full_scan and name not in dirty_attr_names:
+                continue
+            new_cache, dirty = _diff_time_samples(
+                attr, ts_cache.get(name), layer, convert=xform_sample_value,
+            )
+            dirty_times.update(float(t) for t, _val in dirty)
+            if op.GetOpType() == UsdGeom.XformOp.TypeTransform:
+                matrix_dirty[name] = {float(t): val for t, val in dirty}
+            ts_cache[name] = new_cache
+        if not dirty_times:
+            return []
+
+        times = sorted(dirty_times)
+        single = sampled_indices[0] if len(sampled_indices) == 1 else None
+        sampled_vals = (
+            matrix_dirty.get(ops[single].GetAttr().GetName())
+            if single is not None and not ops[single].IsInverseOp()
+            else None
+        )
+        if sampled_vals is not None:
+            # local = ops[n-1] * ... * ops[0] (row-vector convention), so a
+            # single sampled matrix op sandwiches between two static
+            # products computed once, skipping per-time USD resolution.
+            default_tc = Usd.TimeCode.Default()
+            pre = Gf.Matrix4d(1.0)
+            for op in ops[:single]:
+                pre = op.GetOpTransform(default_tc) * pre
+            post = Gf.Matrix4d(1.0)
+            for op in ops[single + 1:]:
+                post = op.GetOpTransform(default_tc) * post
+            # With a single sampled op, every dirty time came from its own
+            # diff, so the lookup cannot miss; a KeyError here means a new
+            # dirty_times source broke that invariant.
+            stack = np.stack([sampled_vals[t] for t in times])
+            locals_np = np.array(post) @ stack @ np.array(pre)
+        else:
+            locals_np = np.stack([
+                np.array(as_matrix(xf.GetLocalTransformation(ops, Usd.TimeCode(t))))
+                for t in times
+            ])
+
+        translates, rotates, scales = decompose_trs_batch(locals_np)
+        return [
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": prim_path,
+                "fields": ["t", "r", "s"],
+                "t": translates[i].tolist(),
+                "r": rotates[i].tolist(),
+                "s": scales[i].tolist(),
+                "time": t,
+            }
+            for i, t in enumerate(times)
+        ]
 
     def _visibility_sample_events(
         self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
@@ -1935,15 +2282,20 @@ class NoticeEmitter:
 
     def _gprim_attr_sample_events(
         self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+        owned_attrs: set[str] = frozenset(),
     ) -> list[dict]:
         if full_scan:
             attr_names = [
                 a.GetName()
                 for a in prim.GetAttributes()
                 if a.IsAuthored() and self._attr_filter(a.GetName())
+                and a.GetName() not in owned_attrs
             ]
         else:
-            attr_names = [n for n in dirty_attr_names if self._attr_filter(n)]
+            attr_names = [
+                n for n in dirty_attr_names
+                if self._attr_filter(n) and n not in owned_attrs
+            ]
         events: list[dict] = []
         for name in attr_names:
             attr = prim.GetAttribute(name)
@@ -1998,6 +2350,38 @@ class NoticeEmitter:
             ts_cache[cache_key] = new_cache
         return events
 
+    def _point_instancer_sample_events(
+        self, prim_path, prim, ts_cache, dirty_attr_names, full_scan, layer,
+    ) -> list[dict]:
+        if not prim.IsA(UsdGeom.PointInstancer):
+            return []
+        by_time: dict[float, dict] = {}
+        for usd_name, wire_name in _PI_USD_TO_WIRE.items():
+            if not full_scan and usd_name not in dirty_attr_names:
+                continue
+            attr = prim.GetAttribute(usd_name)
+            if not attr or not attr.IsValid() or not _has_layer_samples(layer, attr):
+                continue
+            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(usd_name), layer)
+            for t, val in dirty:
+                if usd_name in _PI_QUAT_ATTRS:
+                    val = _quat_array_to_wire(val)
+                    if val is None:
+                        continue
+                by_time.setdefault(float(t), {})[wire_name] = val
+            ts_cache[usd_name] = new_cache
+        # The prototypes rel is uniform and never rides timed events.
+        return [
+            {
+                "k": K_SET_POINT_INSTANCER,
+                "prim": prim_path,
+                "fields": list(fields),
+                **fields,
+                "time": t,
+            }
+            for t, fields in sorted(by_time.items())
+        ]
+
     def _build_stage_metadata_events(self) -> list[dict]:
         """Emit a SetStageMetadata event when the stage's units/timeline change."""
         if not self._stage_metadata_dirty:
@@ -2036,6 +2420,11 @@ class NoticeEmitter:
 
         for prim_path in dirty_now:
             prim = self.stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid() and prim.IsInPrototype():
+                self._dirty_attrs.pop(prim_path, None)
+                self._sample_dirty_attrs.pop(prim_path, None)
+                self._notice_resynced_prims.discard(prim_path)
+                continue
             if not prim or not prim.IsValid():
                 # Prim vanished between notice and build; drop its pending
                 # per-attr state so the dicts don't accumulate dead paths.
