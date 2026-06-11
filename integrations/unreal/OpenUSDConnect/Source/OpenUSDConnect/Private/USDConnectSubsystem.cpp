@@ -20,6 +20,7 @@
 
 #if USE_USD_SDK
 #include "USDIncludesStart.h"
+#include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -358,38 +359,102 @@ void UUSDConnectSubsystem::DrainAndApply()
 	if (!StageActor || !IsValid(StageActor))
 	{
 		// Don't discard: the queue holds the HELLO replay that arrived before
-		// the user imported their stage. Cap the buffer at a generous limit
-		// so we don't accumulate without bound if a stage never appears.
+		// the user imported their stage. Cap the buffer so we don't grow
+		// without bound if a stage never appears; FIFO-evict the oldest.
 		constexpr int32 MaxBufferedFrames = 5000;
 		FScopeLock Lock(&EventQueueCS);
 		if (EventQueue.Num() > MaxBufferedFrames)
 		{
 			const int32 ToDrop = EventQueue.Num() - MaxBufferedFrames;
 			EventQueue.RemoveAt(0, ToDrop, EAllowShrinking::No);
-			UE_LOG(LogUSDConnectSubsystem, Warning,
-				TEXT("Stage actor not attached — dropped %d oldest queued event(s); "
-				     "buffer capped at %d to prevent memory blowup"),
-				ToDrop, MaxBufferedFrames);
 		}
 		return;
 	}
 
-	TArray<TArray<uint8>> LocalQueue;
+	// Apply in bounded chunks. Each ApplyFrame triggers AUsdStageActor to
+	// resync Unreal scene components for the affected prim — when the HELLO
+	// replay delivers thousands of events, applying them all on a single
+	// tick freezes the editor for seconds. Cap by both count and wall-time
+	// so a single tick stays interactive; the rest stays queued for the
+	// next tick.
+	//
+	// The chunk is wrapped in a single outer pxr::SdfChangeBlock so that all
+	// stage notices fire once per tick instead of once per event — the stage
+	// actor's component-resync cost dominates per-event work, and batching
+	// the notice into one dispatch is the main throughput lever during a
+	// HELLO replay.
+	constexpr int32  MaxApplyPerTick        = 512;
+	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms — preserves ~60 fps
+
+	int32 ChunkSize = 0;
 	{
 		FScopeLock Lock(&EventQueueCS);
-		LocalQueue = MoveTemp(EventQueue);
+		ChunkSize = FMath::Min(EventQueue.Num(), MaxApplyPerTick);
+	}
+	if (ChunkSize == 0) return;
+
+	TArray<TArray<uint8>> Chunk;
+	Chunk.Reserve(ChunkSize);
+	{
+		FScopeLock Lock(&EventQueueCS);
+		for (int32 i = 0; i < ChunkSize && i < EventQueue.Num(); ++i)
+		{
+			Chunk.Add(MoveTemp(EventQueue[i]));
+		}
+		EventQueue.RemoveAt(0, ChunkSize, EAllowShrinking::No);
 	}
 
-	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		TEXT("Applying %d incoming event(s) to stage"), LocalQueue.Num());
+	const double Start = FPlatformTime::Seconds();
+	int32 Applied = 0;
 
-	// Suppress emitter while applying to prevent echo
 	bSuppressEmit.store(true);
-	for (TArray<uint8>& Frame : LocalQueue)
 	{
-		FUSDEventApplier::ApplyFrame(Frame, StageActor);
+#if USE_USD_SDK
+		// Outer SdfChangeBlock — nests with the per-frame block inside ApplyFrame.
+		// Notices only fire when the outermost block destructs, so the stage
+		// actor processes the whole chunk's worth of changes in one batch
+		// rather than once per event.
+		pxr::SdfChangeBlock BatchBlock;
+#endif
+		for (TArray<uint8>& Frame : Chunk)
+		{
+			FUSDEventApplier::ApplyFrame(Frame, StageActor);
+			++Applied;
+			if (FPlatformTime::Seconds() - Start > MaxApplySecondsPerTick)
+			{
+				break;
+			}
+		}
 	}
 	bSuppressEmit.store(false);
+
+	// If we hit the time budget before draining the chunk, push the unprocessed
+	// tail back to the front of the queue so we resume next tick.
+	if (Applied < Chunk.Num())
+	{
+		FScopeLock Lock(&EventQueueCS);
+		const int32 Remaining = Chunk.Num() - Applied;
+		TArray<TArray<uint8>> Merged;
+		Merged.Reserve(Remaining + EventQueue.Num());
+		for (int32 i = Applied; i < Chunk.Num(); ++i)
+		{
+			Merged.Add(MoveTemp(Chunk[i]));
+		}
+		for (TArray<uint8>& Frame : EventQueue)
+		{
+			Merged.Add(MoveTemp(Frame));
+		}
+		EventQueue = MoveTemp(Merged);
+	}
+
+	int32 QueueRemaining = 0;
+	{
+		FScopeLock Lock(&EventQueueCS);
+		QueueRemaining = EventQueue.Num();
+	}
+	UE_LOG(LogUSDConnectSubsystem, Verbose,
+		TEXT("Applied %d event(s) this tick (queue remaining: %d)"),
+		Applied, QueueRemaining);
 }
 
 // ---------------------------------------------------------------------------
