@@ -203,7 +203,7 @@ class TestCompactionUnion:
             rows.append((i + 1, encode_message(msg)))
 
         latest, _tombstoned = UsdSyncServer._build_compacted(rows)
-        merged_ev, _meta = latest[("/L", K_ENSURE_PRIM)]
+        merged_ev, _meta = latest[("/L", K_ENSURE_PRIM, None)]
         assert sorted(merged_ev["api_schemas"]) == ["ShadowAPI", "ShapingAPI"]
 
     def test_compaction_multi_apply_unique_instances(self, tmp_path):
@@ -224,7 +224,7 @@ class TestCompactionUnion:
             rows.append((i + 1, encode_message(msg)))
 
         latest, _tombstoned = UsdSyncServer._build_compacted(rows)
-        merged_ev, _meta = latest[("/X", K_ENSURE_PRIM)]
+        merged_ev, _meta = latest[("/X", K_ENSURE_PRIM, None)]
         assert sorted(merged_ev["api_schemas"]) == [
             "CollectionAPI:proxy",
             "CollectionAPI:render",

@@ -422,12 +422,17 @@ def _read_composition_arcs(stage, prim_path, arc_attr):
         if spec.layer.identifier not in own_layers:
             continue
         arc_list = getattr(spec, arc_attr)
-        for item in arc_list.prependedItems:
-            result.append((item.assetPath, str(item.primPath)))
-        for item in arc_list.explicitItems:
-            result.append((item.assetPath, str(item.primPath)))
-        for item in arc_list.appendedItems:
-            result.append((item.assetPath, str(item.primPath)))
+        for item in (
+            *arc_list.prependedItems,
+            *arc_list.explicitItems,
+            *arc_list.appendedItems,
+        ):
+            # Anchor authored-relative asset paths to the layer that holds
+            # them: receivers compose onto stages with different (often
+            # in-memory) anchors. Internal references (empty path) and
+            # already-absolute paths pass through unchanged.
+            asset_path = spec.layer.ComputeAbsolutePath(item.assetPath)
+            result.append((asset_path, str(item.primPath)))
     return result
 
 
@@ -1854,11 +1859,10 @@ class NoticeEmitter:
         # With per-attr notice detail, only attrs classified sample-dirty
         # need their sample tables re-read; a default-time drag on a
         # keyframed prim then skips sample diffing entirely. Without
-        # detail, fall back to the expanded set (or full scan when empty).
-        if had_notice_detail:
-            sample_attrs = sample_dirty
-        else:
-            sample_attrs = dirty_attr_names if dirty_attr_names else None
+        # detail (first encounter, resync, manual dirty), scan everything:
+        # the gprim expansion above is filter-scoped and would hide
+        # transform ops and connectable inputs from the sample paths.
+        sample_attrs = sample_dirty if had_notice_detail else None
         events.extend(
             self._build_time_sample_events(prim_path, prim, pc, sample_attrs),
         )

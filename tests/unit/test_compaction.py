@@ -240,3 +240,35 @@ class TestCompaction:
         refs = [e for e in events if e["k"] == K_SET_REFERENCE]
         assert len(refs) == 1
         assert refs[0]["refs"][0]["asset_path"] == "new.usda"
+
+    def test_timed_events_compact_per_sample(self, tmp_path):
+        """Events at distinct time samples must not collapse into each other
+        or into the default-time opinion."""
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"],
+                 "t": [10, 0, 0], "time": 1.0},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"],
+                 "t": [20, 0, 0], "time": 2.0},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"],
+                 "t": [21, 0, 0], "time": 2.0},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS]
+        by_time = {e.get("time"): e["t"] for e in trs}
+        assert len(trs) == 3
+        # The default-time opinion is not contaminated by sample values.
+        assert by_time[None] == [1.0, 0.0, 0.0]
+        assert by_time[1.0] == [10.0, 0.0, 0.0]
+        # Same-sample re-author is latest-wins.
+        assert by_time[2.0] == [21.0, 0.0, 0.0]
+        # Default sorts before samples for replay.
+        assert [e.get("time") for e in trs] == [None, 1.0, 2.0]

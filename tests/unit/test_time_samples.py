@@ -323,6 +323,23 @@ def test_emitter_emits_orient_quaternion_samples():
     assert decoded["r"] == pytest.approx(sampled[0]["r"])
 
 
+def test_snapshot_includes_samples_alongside_other_attrs():
+    """Full-scan cycles must reach transform samples even when the prim has
+    other authored attrs; the gprim expansion is filter-scoped and must not
+    bound the sample paths."""
+    stage = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    cube.GetSizeAttr().Set(2.0)
+    xf = UsdGeom.Xformable(cube)
+    t_op = xf.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble)
+    t_op.Set(Gf.Vec3d(1, 0, 0), Usd.TimeCode(1.0))
+    t_op.Set(Gf.Vec3d(2, 0, 0), Usd.TimeCode(2.0))
+    emitter = NoticeEmitter(stage)
+    events = emitter.snapshot_events()
+    timed = [e for e in events if e.get("k") == K_SET_XFORM_TRS and e.get("time") is not None]
+    assert {e["time"] for e in timed} == {1.0, 2.0}
+
+
 def test_invalidate_set_gprim_attrs_refreshes_default_time_cache():
     """After a remote default-time gprim_attrs apply, the per-attr cache
     must reflect the new value so a local edit back to it produces a diff

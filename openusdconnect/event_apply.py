@@ -402,9 +402,11 @@ def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
     prim = get_or_define_prim(stage, prim_path)
     vsets = prim.GetVariantSets()
+    # Selections are plain prim metadata: authoring one for a variant set
+    # that an arc has not composed yet is valid and takes effect when the
+    # set arrives, so apply order against set_reference does not matter.
     for set_name, variant_name in ev.get("selections", {}).items():
-        if vsets.HasVariantSet(set_name):
-            vsets.GetVariantSet(set_name).SetVariantSelection(variant_name)
+        vsets.GetVariantSet(set_name).SetVariantSelection(variant_name)
 
 
 @register_applier(K_SET_REFERENCE)

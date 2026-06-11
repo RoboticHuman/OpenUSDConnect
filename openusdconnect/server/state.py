@@ -926,15 +926,21 @@ class UsdSyncServer:
 
     @staticmethod
     def _merge_event(
-        latest: dict[tuple[str, str], tuple[dict, dict]],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
         tombstoned: set[str],
         record_bin: bytes,
     ):
-        """Merge a single event record into the compacted state."""
+        """Merge a single event record into the compacted state.
+
+        Keys are ``(prim, kind, time)``: events at distinct time samples
+        compact independently of each other and of the default-time
+        opinion, so a keyframed log keeps one merged event per sample.
+        """
         rec = message_to_dict(record_bin)
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
+        key = (prim, k, ev.get("time"))
         meta = {}
         for meta_key in ("origin", "client", "client_id"):
             val = rec.get(meta_key)
@@ -943,10 +949,10 @@ class UsdSyncServer:
 
         if k in (K_DELETE_PRIM, K_RENAME_PRIM):
             tombstoned.add(prim)
-            to_remove = [key for key in latest if key[0] == prim]
-            for key in to_remove:
-                del latest[key]
-            latest[(prim, k)] = (ev, meta)
+            to_remove = [existing for existing in latest if existing[0] == prim]
+            for existing in to_remove:
+                del latest[existing]
+            latest[key] = (ev, meta)
             return
 
         if prim in tombstoned:
@@ -954,16 +960,16 @@ class UsdSyncServer:
 
         # load/unload are mutually exclusive — only the last one wins.
         if k == K_LOAD_PAYLOAD:
-            latest.pop((prim, K_UNLOAD_PAYLOAD), None)
-            latest[(prim, k)] = (ev, meta)
+            latest.pop((prim, K_UNLOAD_PAYLOAD, None), None)
+            latest[key] = (ev, meta)
             return
         if k == K_UNLOAD_PAYLOAD:
-            latest.pop((prim, K_LOAD_PAYLOAD), None)
-            latest[(prim, k)] = (ev, meta)
+            latest.pop((prim, K_LOAD_PAYLOAD, None), None)
+            latest[key] = (ev, meta)
             return
 
         if k == K_SET_XFORM_TRS:
-            existing = latest.get((prim, k))
+            existing = latest.get(key)
             if existing:
                 prev = existing[0]
                 for comp in ("t", "r", "s"):
@@ -971,11 +977,11 @@ class UsdSyncServer:
                         prev[comp] = ev[comp]
                         if comp not in prev["fields"]:
                             prev["fields"].append(comp)
-                latest[(prim, k)] = (prev, meta)
+                latest[key] = (prev, meta)
             else:
-                latest[(prim, k)] = (ev, meta)
+                latest[key] = (ev, meta)
         elif k == K_SET_GPRIM_ATTRS:
-            existing = latest.get((prim, k))
+            existing = latest.get(key)
             if existing:
                 prev = existing[0]
                 prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
@@ -985,11 +991,11 @@ class UsdSyncServer:
                 new_interp = ev.get("attr_interp", {})
                 if new_interp:
                     prev.setdefault("attr_interp", {}).update(new_interp)
-                latest[(prim, k)] = (prev, meta)
+                latest[key] = (prev, meta)
             else:
-                latest[(prim, k)] = (ev, meta)
+                latest[key] = (ev, meta)
         elif k == K_SET_CONNECTABLE_INPUT:
-            existing = latest.get((prim, k))
+            existing = latest.get(key)
             if existing:
                 prev = existing[0]
                 prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
@@ -998,16 +1004,16 @@ class UsdSyncServer:
                 )
                 if ev.get("info_id"):
                     prev["info_id"] = ev["info_id"]
-                latest[(prim, k)] = (prev, meta)
+                latest[key] = (prev, meta)
             else:
-                latest[(prim, k)] = (ev, meta)
+                latest[key] = (ev, meta)
         elif k == K_ENSURE_PRIM:
             # Union api_schemas across subsequent ensure_prim events for the
             # same prim (latest typeName wins; api_schemas accumulates) so
             # ShapingAPI added later doesn't clobber a previously-merged
             # ShadowAPI. Multi-apply names (e.g. "CollectionAPI:render") are
             # unique strings so set-union is correct for them too.
-            existing = latest.get((prim, k))
+            existing = latest.get(key)
             if existing:
                 prev = existing[0]
                 if "typeName" in ev:
@@ -1016,36 +1022,39 @@ class UsdSyncServer:
                 merged.update(ev.get("api_schemas") or [])
                 if merged:
                     prev["api_schemas"] = list(merged)
-                latest[(prim, k)] = (prev, meta)
+                latest[key] = (prev, meta)
             else:
-                latest[(prim, k)] = (ev, meta)
+                latest[key] = (ev, meta)
         else:
-            latest[(prim, k)] = (ev, meta)
+            latest[key] = (ev, meta)
 
     @staticmethod
     def _build_compacted(
         rows: list[tuple[int, bytes]],
-    ) -> tuple[dict[tuple[str, str], tuple[dict, dict]], set[str]]:
+    ) -> tuple[dict[tuple[str, str, float | None], tuple[dict, dict]], set[str]]:
         """Build compacted event dict from raw log rows.
 
         Returns (latest, tombstoned) where:
-          latest: {(prim, kind) → (event_dict, metadata_dict)}
+          latest: {(prim, kind, time) → (event_dict, metadata_dict)}
           tombstoned: set of prim paths deleted/renamed
         """
         tombstoned: set[str] = set()
-        latest: dict[tuple[str, str], tuple[dict, dict]] = {}
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict]] = {}
         for _seq, record_bin in rows:
             UsdSyncServer._merge_event(latest, tombstoned, record_bin)
         return latest, tombstoned
 
     def _commit_compaction(
         self,
-        latest: dict[tuple[str, str], tuple[dict, dict]],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
         original_count: int,
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
         Must be called under exclusive txn_barrier.
+
+        Default-time events sort before time-sampled ones for the same prim
+        and kind, so replay establishes static state before samples.
         """
         sorted_entries = sorted(
             latest.values(),
@@ -1053,6 +1062,8 @@ class UsdSyncServer:
                 entry[0]["prim"].count("/"),
                 entry[0]["prim"],
                 event_apply_tier(entry[0]["k"]),
+                entry[0].get("time") is not None,
+                entry[0].get("time") or 0.0,
             ),
         )
 
