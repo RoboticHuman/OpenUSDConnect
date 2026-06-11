@@ -26,7 +26,7 @@ from openusdconnect.protocol_constants import (
     MSG_RESYNC,
 )
 from openusdconnect.receiver import ReceiverThread
-from openusdconnect.transport import send_msg
+from openusdconnect.transport import recv_msg, send_msg
 from tests.helpers import start_server, stop_server
 
 PORT = 7291  # Unique port to avoid conflicts with other tests
@@ -41,25 +41,54 @@ def server(tmp_path):
 
 
 def _send_events_to_server(events, port=PORT):
-    """Connect as emitter and send a batch of events."""
-    sock = socket.create_connection(("127.0.0.1", PORT), timeout=5)
-    hello = make_hello("emitter", client_id="test-emitter", origin="test")
-    send_msg(sock, hello)
-    txn = make_txn("test-emitter", events)
-    send_msg(sock, txn)
-    time.sleep(0.2)  # Let server process
-    sock.close()
+    """Connect as emitter, complete the handshake, and send a batch of events.
+
+    Mirrors the production EventSender contract: read hello_ok before
+    sending, and retry on a dropped connection. Reading hello_ok also
+    drains the receive buffer, so the close is an orderly FIN; closing
+    with unread data sends RST, which discards a txn the loaded server
+    has not pulled out of its receive buffer yet.
+    """
+    for attempt in range(3):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            send_msg(sock, make_hello("emitter", client_id="test-emitter", origin="test"))
+            reply = message_to_dict(recv_msg(sock))
+            assert reply.get("type") == "hello_ok", f"handshake failed: {reply}"
+            send_msg(sock, make_txn("test-emitter", events))
+            return
+        except ConnectionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.3)
+        finally:
+            sock.close()
 
 
-def _receive_events(wait=0.5):
-    """Connect as receiver and collect events."""
+def _receive_events(min_events=1, timeout=30.0):
+    """Connect as receiver and drain until the log replay arrives.
+
+    Polls for *min_events* parsed events instead of sleeping a fixed
+    interval: under machine load the server's startup, txn processing,
+    and replay can outlast any constant, which surfaces as spuriously
+    empty drains. The deadline is a ceiling, not a wait; healthy runs
+    return as soon as the events land. Fails here, at the wait, rather
+    than letting a short drain confuse downstream assertions.
+    """
     rt = ReceiverThread(
         host="127.0.0.1", port=PORT, sync_from=1, client_id="test-receiver", origin="test-recv"
     )
     rt.start()
-    time.sleep(wait)
-    lines = rt.drain_queue()
+    lines = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        lines.extend(rt.drain_queue())
+        if len(_parse_events_from_bufs(lines)) >= min_events:
+            break
+        time.sleep(0.05)
     rt.stop()
+    got = len(_parse_events_from_bufs(lines))
+    assert got >= min_events, f"receiver drained {got}/{min_events} events within {timeout}s"
     return lines
 
 
@@ -97,7 +126,7 @@ class TestStageFirstIntegration:
         _send_events_to_server(events)
 
         # Receiver collects from server
-        lines = _receive_events()
+        lines = _receive_events(min_events=3)
         assert len(lines) > 0
 
         parsed = _parse_events_from_bufs(lines)
@@ -134,7 +163,7 @@ class TestStageFirstIntegration:
         ]
 
         _send_events_to_server(events)
-        lines = _receive_events()
+        lines = _receive_events(min_events=2)
         parsed = _parse_events_from_bufs(lines)
 
         adapter_called = False
