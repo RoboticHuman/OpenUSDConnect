@@ -1,0 +1,136 @@
+// Copyright OpenUSDConnect Contributors. All Rights Reserved.
+#pragma once
+
+#include "Subsystems/WorldSubsystem.h"
+#include "HAL/CriticalSection.h"
+#include "Containers/Set.h"
+#include "Delegates/IDelegateInstance.h"
+#include <atomic>
+#include "USDConnectSubsystem.generated.h"
+
+class FSyncClient;
+class FEmitClient;
+class AUsdStageActor;
+
+/**
+ * World subsystem that manages the OpenUSD Connect two-way sync.
+ *
+ * Receiver side (server → Unreal):
+ *   FSyncClient background thread receives BroadcastEvent frames and
+ *   pushes raw bytes to the event queue. Tick() drains the queue and
+ *   applies each event to the open AUsdStageActor stage via FUSDEventApplier.
+ *
+ * Emitter side (Unreal → server):
+ *   AUsdStageActor::OnPrimChanged fires whenever a prim changes in Unreal
+ *   (user edits in the viewport). The subsystem reads the current TRS and
+ *   visibility from the pxr stage and sends SetXformTrs/SetVisibility events
+ *   via FEmitClient. A feedback loop guard (bSuppressEmit) prevents echoing
+ *   events received from the server back out.
+ *
+ * Usage:
+ *  1. Place an AUsdStageActor in the level; set its RootLayer to the USD file
+ *     the server is managing.
+ *  2. Configure host/port in Edit > Project Settings > Plugins > OpenUSD Connect.
+ *  3. Press Play — the subsystem auto-connects both receiver and emitter.
+ */
+UCLASS()
+class OPENUSDCONNECT_API UUSDConnectSubsystem : public UTickableWorldSubsystem
+{
+	GENERATED_BODY()
+
+public:
+	// UWorldSubsystem
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
+
+	// UTickableWorldSubsystem
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+	virtual bool IsTickable() const override { return true; }
+
+	// Live sync must run in the editor (without PIE), not just during Play.
+	// UTickableWorldSubsystem defaults this to false — we override to true.
+	virtual bool IsTickableInEditor() const override { return true; }
+
+	// Keep ticking when the game is paused so sync stays responsive.
+	virtual bool IsTickableWhenPaused() const override { return true; }
+
+	/** Manually connect receiver and emitter */
+	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	void Connect();
+
+	/** Disconnect both receiver and emitter */
+	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	void Disconnect();
+
+	/** True while the receiver TCP connection is established */
+	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
+	bool IsConnected() const;
+
+	/** Called from FSyncClient background thread — pushes a raw BroadcastEvent frame */
+	void EnqueueEvent(TArray<uint8>&& RawBytes);
+
+private:
+	AUsdStageActor* FindStageActor() const;
+	void AttachToStageActor(AUsdStageActor* Actor);
+	void DetachFromStageActor();
+
+	void DrainAndApply();
+
+	/** Drain accumulated SdfPaths from the stage listener and emit one frame per unique path */
+	void DrainAndEmit();
+
+	/** Build and send a Txn event for a changed prim (emitter side) */
+	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
+
+	// --- Receiver ---
+	TSharedPtr<FSyncClient> SyncClient;
+	FCriticalSection EventQueueCS;
+	TArray<TArray<uint8>> EventQueue;
+
+	// --- Emitter ---
+	TSharedPtr<FEmitClient> EmitClient;
+
+	/** Stable client ID shared by both receiver and emitter connections */
+	FString ClientId;
+	/** Random session origin shared by both connections */
+	FString SessionOrigin;
+
+	/**
+	 * When true, Tick() will perform the auto-connect on the first tick that runs
+	 * AFTER the world is fully initialized. This avoids spawning TCP threads from
+	 * within UWorldSubsystem::Initialize() (which runs mid-world-load and can
+	 * destabilise editor startup).
+	 */
+	bool bPendingAutoConnect = false;
+
+	/**
+	 * Set to true while DrainAndApply() is applying received events.
+	 * Prevents OnPrimChanged from echoing those changes back to the server.
+	 *
+	 * Uses default seq_cst ordering. The other socket-thread atomics in this
+	 * module use relaxed because they only flag a state for polling; this one
+	 * fences a code region around stage mutation, so the stronger barrier is
+	 * the safer default and not on a hot path.
+	 */
+	std::atomic<bool> bSuppressEmit;
+
+	/** Cached weak reference to the currently attached stage actor */
+	TWeakObjectPtr<AUsdStageActor> CachedStageActor;
+
+	/**
+	 * Delegate handle for the engine FUsdListener::OnObjectsChanged subscription.
+	 * We use the engine's wrapper instead of registering our own pxr::TfNotice
+	 * because the wrapper avoids a `dynamic_cast` macro collision between UE's
+	 * CoreUObject and pxr's notice templates.
+	 *
+	 * The delegate gives us actual SdfPaths of changed prims (the engine's
+	 * OnPrimChanged delegate rolls sub-prim paths up to the nearest
+	 * KindsToCollapse ancestor, which is useless for emitting).
+	 */
+	FDelegateHandle ObjectsChangedHandle;
+
+	/** Prim paths accumulated by the OnObjectsChanged callback, drained each tick. */
+	FCriticalSection PendingEmitPathsCS;
+	TSet<FString> PendingEmitPaths;
+};
