@@ -218,6 +218,61 @@ def _fmt_vec(v) -> str:
     return "(" + ", ".join(f"{x:g}" for x in v) + ")"
 
 
+def _render_instancing_block(detail: dict):
+    """Render instancing flags plus PointInstancer summary when present."""
+    flags = []
+    if detail.get("isInstance"):
+        flags.append(("INSTANCE", "positive"))
+    elif detail.get("isInstanceable"):
+        flags.append(("INSTANCEABLE", "warning"))
+    if detail.get("isInstanceProxy"):
+        flags.append(("PROXY", "grey-7"))
+    proto = detail.get("prototype")
+    pi = detail.get("pointInstancer")
+    if not (flags or proto or pi):
+        return
+    with ui.row().classes("gap-2 items-center text-xs flex-wrap mt-1"):
+        for label, color in flags:
+            ui.badge(label, color=color).props("dense")
+        if proto:
+            with ui.row().classes("items-center gap-1"):
+                ui.icon("device_hub", size="xs").classes("dash-muted")
+                ui.label("prototype").classes("dash-muted")
+                ui.label(proto).classes("dash-prim font-mono")
+    if pi:
+        with ui.column().classes("w-full gap-1 mt-1 p-2").style(
+            "border: 1px solid rgba(128,128,128,0.18); border-radius: 4px"
+        ):
+            with ui.row().classes("items-center gap-2 text-xs"):
+                ui.icon("grain", size="xs").classes("dash-accent")
+                ui.label("POINT INSTANCER").classes(
+                    "text-xs font-semibold dash-accent uppercase"
+                )
+                ui.space()
+                ui.label(f"{pi.get('instanceCount', 0):,} instances").classes(
+                    "dash-muted font-mono"
+                )
+            protos = pi.get("prototypes") or []
+            if protos:
+                _i_arc = ui.row().classes("items-baseline gap-2 text-xs font-mono w-full")
+                with _i_arc:
+                    ui.icon("link", size="xs").classes("dash-muted")
+                    ui.label(f"prototypes ({len(protos)})").classes("dash-muted")
+                    ui.label(", ".join(protos)).classes("dash-prim flex-1 truncate")
+            animated = pi.get("animatedArrays") or []
+            if animated:
+                with ui.row().classes("items-baseline gap-2 text-xs font-mono w-full"):
+                    ui.icon("schedule", size="xs").classes("dash-muted")
+                    ui.label("animated").classes("dash-muted")
+                    ui.label(", ".join(animated)).classes("dash-kind flex-1 truncate")
+            inactive = pi.get("inactiveIdCount")
+            if inactive:
+                with ui.row().classes("items-baseline gap-2 text-xs font-mono w-full"):
+                    ui.icon("visibility_off", size="xs").classes("dash-muted")
+                    ui.label("inactiveIds").classes("dash-muted")
+                    ui.label(str(inactive)).classes("dash-prim")
+
+
 def _render_prim_detail(detail: dict):
     """Render a get_prim_detail() dict into the current container."""
     if not detail.get("exists"):
@@ -268,6 +323,8 @@ def _render_prim_detail(detail: dict):
         _arc_line("tune", "variants", [f"{k}={v}" for k, v in vsel.items()])
     if detail.get("materialBinding"):
         _arc_line("palette", "material", [detail["materialBinding"]])
+
+    _render_instancing_block(detail)
 
     attrs = detail.get("attributes", [])
     ui.separator().classes("my-1")
@@ -337,9 +394,19 @@ def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
     def _build_tree_nodes(prims: list[dict]) -> list[dict]:
         nodes_by_path: dict[str, dict] = {}
         for p in prims:
+            badges = []
+            if p.get("instanceable"):
+                badges.append("[I]")
+            if p.get("is_point_instancer"):
+                badges.append("[PI]")
+            suffix = (" " + " ".join(badges)) if badges else ""
             nodes_by_path[p["path"]] = {
                 "id": p["path"],
-                "label": p["path"].rsplit("/", 1)[-1] + f"  ({p['typeName']})",
+                "label": (
+                    p["path"].rsplit("/", 1)[-1]
+                    + f"  ({p['typeName']})"
+                    + suffix
+                ),
                 "children": [],
             }
         roots = []
@@ -402,7 +469,7 @@ def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
 
 
 def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
-    """Four stat cards."""
+    """Five stat cards plus an instancing strip."""
     with ui.row().classes("w-full gap-4 mb-4"):
         with ui.card().classes("flex-1"):
             ui.label("UPTIME").classes("text-xs dash-muted uppercase")
@@ -416,6 +483,11 @@ def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
         with ui.card().classes("flex-1"):
             ui.label("PRIMS (STAGE / TRACKED)").classes("text-xs dash-muted uppercase")
             prim_val = ui.label("--").classes("text-2xl font-bold dash-accent")
+        with ui.card().classes("flex-1").tooltip(
+            "Instanceable-flag prims (left) and the composition's resolved prototype count"
+        ):
+            ui.label("INSTANCES / PROTOTYPES").classes("text-xs dash-muted uppercase")
+            inst_val = ui.label("--").classes("text-2xl font-bold dash-accent")
 
     def _fmt(s):
         h, r = divmod(int(s), 3600)
@@ -427,6 +499,7 @@ def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
         event_val.text = f"{srv.get_event_count():,}"
         client_val.text = str(len(srv.get_client_list()))
         prim_val.text = f"{srv.get_prim_count()} / {srv.get_tracked_prim_count()}"
+        inst_val.text = f"{srv.get_instance_count()} / {srv.get_prototype_count()}"
 
     if register_refresh:
         register_refresh(refresh)
@@ -955,6 +1028,10 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
     feed_container = ui.column().classes("w-full gap-0")
     feed_container.move(feed_scroll)
 
+    # Expansions are reconstructed on every _rebuild, so we remember
+    # which seqs the user opened and restore them after the rebuild.
+    expanded_seqs: set = set()
+
     def _query():
         limit = page_size_sel.value
         offset = current_page["value"] * limit
@@ -971,7 +1048,18 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
         client = rec.get("client_id") or rec.get("client", "")
         origin = rec.get("origin", "")
 
-        exp = ui.expansion(icon="chevron_right").classes("w-full")
+        exp = ui.expansion(
+            icon="chevron_right", value=seq in expanded_seqs,
+        ).classes("w-full")
+
+        def _on_toggle(e, s=seq):
+            if e.value:
+                expanded_seqs.add(s)
+            else:
+                expanded_seqs.discard(s)
+
+        exp.on_value_change(_on_toggle)
+
         with exp.add_slot("header"):
             with ui.row().classes(
                 "items-center gap-3 w-full font-mono text-xs"
@@ -1074,6 +1162,8 @@ def _register_api_routes(srv: UsdSyncServer):
             "client_count": len(srv.get_client_list()),
             "prim_count": srv.get_prim_count(),
             "tracked_prim_count": srv.get_tracked_prim_count(),
+            "instance_count": srv.get_instance_count(),
+            "prototype_count": srv.get_prototype_count(),
         }
 
     @app.get("/api/clients")

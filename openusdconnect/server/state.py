@@ -36,6 +36,7 @@ from ..protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_POINT_INSTANCER,
     K_SET_VISIBILITY,
@@ -87,6 +88,48 @@ def _abbrev_scalar(value) -> str:
         return "—"
     s = str(value)
     return s if len(s) <= 120 else s[:117] + "…"
+
+
+_PI_ARRAY_ATTRS = (
+    "protoIndices", "positions", "orientations", "orientationsf", "scales",
+    "velocities", "accelerations", "angularVelocities", "ids", "invisibleIds",
+)
+
+
+def _point_instancer_summary(prim) -> dict:
+    """Bounded read of UsdGeomPointInstancer state for the inspector.
+
+    Returns prototypes targets, instance count (from protoIndices length),
+    which arrays are animated, and the size of the inactiveIds prim
+    metadata when authored.
+    """
+    pi = UsdGeom.PointInstancer(prim)
+    proto_rel = pi.GetPrototypesRel()
+    targets = (
+        [t.pathString for t in proto_rel.GetTargets()] if proto_rel else []
+    )
+    proto_indices = pi.GetProtoIndicesAttr()
+    if proto_indices and proto_indices.HasAuthoredValue():
+        sample_value = proto_indices.Get()
+        instance_count = len(sample_value) if sample_value is not None else 0
+    else:
+        instance_count = 0
+    animated = []
+    for name in _PI_ARRAY_ATTRS:
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsAuthored() and attr.GetNumTimeSamples() > 0:
+            animated.append(name)
+    inactive_count = None
+    if prim.HasAuthoredMetadata("inactiveIds"):
+        list_op = prim.GetMetadata("inactiveIds")
+        if list_op is not None:
+            inactive_count = len(list_op.ApplyOperations([]))
+    return {
+        "prototypes": targets,
+        "instanceCount": instance_count,
+        "animatedArrays": animated,
+        "inactiveIdCount": inactive_count,
+    }
 
 
 def _authored_attr_rows(prim) -> list[dict]:
@@ -232,6 +275,10 @@ class UsdSyncServer:
 
         # Incremental prim tracking — avoids full log scans on dashboard polls.
         self._prim_paths: dict[str, str] = {}  # prim_path → typeName
+        # Per-prim flags maintained incrementally from events so dashboard
+        # tree refreshes never have to query pxr per prim.
+        self._instanceable_paths: set[str] = set()
+        self._point_instancer_paths: set[str] = set()
 
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
@@ -365,20 +412,42 @@ class UsdSyncServer:
         return layer
 
     def _track_prim_event(self, ev: dict):
-        """Update _prim_paths from a single event (ensure/delete/rename)."""
+        """Update incremental prim trackers from a single event.
+
+        Covers ensure/delete/rename plus instancing flags. The dashboard
+        relies on this so its tree refresh never has to query pxr.
+        """
         k = ev.get("k")
         prim = ev.get("prim", "")
         if k == K_ENSURE_PRIM:
-            self._prim_paths[prim] = ev["typeName"]
+            type_name = ev["typeName"]
+            self._prim_paths[prim] = type_name
+            if type_name == "PointInstancer":
+                self._point_instancer_paths.add(prim)
         elif k == K_DELETE_PRIM:
             self._prim_paths.pop(prim, None)
+            self._instanceable_paths.discard(prim)
+            self._point_instancer_paths.discard(prim)
         elif k == K_RENAME_PRIM:
             type_name = self._prim_paths.pop(prim, "Xform")
+            was_instanceable = prim in self._instanceable_paths
+            was_pi = prim in self._point_instancer_paths
+            self._instanceable_paths.discard(prim)
+            self._point_instancer_paths.discard(prim)
             new_name = ev.get("new_name", "")
             if new_name:
                 parent = prim.rsplit("/", 1)[0] or "/"
                 new_path = f"{parent}/{new_name}" if parent != "/" else f"/{new_name}"
                 self._prim_paths[new_path] = type_name
+                if was_instanceable:
+                    self._instanceable_paths.add(new_path)
+                if was_pi:
+                    self._point_instancer_paths.add(new_path)
+        elif k == K_SET_INSTANCEABLE:
+            if ev.get("instanceable", True):
+                self._instanceable_paths.add(prim)
+            else:
+                self._instanceable_paths.discard(prim)
 
     def _replay_log_into_stage(self):
         """Apply all events from the event store to restore stage on startup.
@@ -1096,6 +1165,8 @@ class UsdSyncServer:
 
         # Rebuild incremental prim tracking from compacted state.
         self._prim_paths.clear()
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
         for ev, _meta in sorted_entries:
             self._track_prim_event(ev)
 
@@ -1126,6 +1197,8 @@ class UsdSyncServer:
             self.edit_layer.Clear()
         self.op_cache.clear()
         self._prim_paths.clear()
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
@@ -1619,8 +1692,11 @@ class UsdSyncServer:
             # the per-event GetPropertyStack/HasSpec strength checks.
             if target is self.edit_layer and len(self._ordered_session_layers) == 1:
                 for i, ev in enumerate(events):
-                    if ev.get("k") in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                    ev_kind = ev.get("k")
+                    if ev_kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                         self._prim_count_dirty = True
+                        self._track_prim_event(ev)
+                    elif ev_kind == K_SET_INSTANCEABLE:
                         self._track_prim_event(ev)
                     changed_indices.append(i)
                 return changed_indices
@@ -1634,6 +1710,8 @@ class UsdSyncServer:
                 k = ev.get("k")
                 if k in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                     self._prim_count_dirty = True
+                    self._track_prim_event(ev)
+                elif k == K_SET_INSTANCEABLE:
                     self._track_prim_event(ev)
                 pp = ev.get("prim", "")
                 if not pp:
@@ -1778,26 +1856,50 @@ class UsdSyncServer:
         """Build the prim tree from the incremental _prim_paths dict.
 
         No event log scan needed — uses the in-memory prim tracking.
+        Instancing flags come from set lookups, and ``has_children``
+        falls out of a single-pass parent count, so the tree refresh
+        stays linear and free of per-prim pxr calls.
         """
         prims = dict(self._prim_paths)  # snapshot
+        instanceable = set(self._instanceable_paths)
+        point_instancer = set(self._point_instancer_paths)
+
+        # Parent path -> direct-child count. Builds in O(N) and turns the
+        # has_children lookup into O(1) per row.
+        child_counts: dict[str, int] = {}
+        for path in prims:
+            parent = path.rsplit("/", 1)[0] or "/"
+            child_counts[parent] = child_counts.get(parent, 0) + 1
 
         result = []
         for path in sorted(prims):
             parent = path.rsplit("/", 1)[0] or "/"
-            depth = path.count("/")
-            has_children = any(
-                p.startswith(path + "/") and p.count("/") == depth + 1 for p in prims
-            )
             result.append(
                 {
                     "path": path,
                     "typeName": prims[path],
                     "parent": parent,
-                    "depth": depth,
-                    "has_children": has_children,
+                    "depth": path.count("/"),
+                    "has_children": child_counts.get(path, 0) > 0,
+                    "instanceable": path in instanceable,
+                    "is_point_instancer": path in point_instancer,
                 }
             )
         return result
+
+    def get_instance_count(self) -> int:
+        """Count of prims with authored ``instanceable=true``.
+
+        Whether each actually composes into an instance depends on a
+        composition arc; this is the upper bound and matches what the
+        tree's badge shows.
+        """
+        return len(self._instanceable_paths)
+
+    def get_prototype_count(self) -> int:
+        """Number of implicit prototype prims the stage composed."""
+        with self.stage_lock:
+            return len(self.stage.GetPrototypes())
 
     def get_prim_detail(self, path: str) -> dict:
         """Composed snapshot of one prim for the dashboard inspector.
@@ -1811,7 +1913,8 @@ class UsdSyncServer:
                 return {"path": path, "exists": False}
             img = UsdGeom.Imageable(prim)
             vis = img.GetVisibilityAttr().Get() if img else None
-            return {
+            prototype = prim.GetPrototype() if prim.IsInstance() else None
+            detail = {
                 "path": path,
                 "exists": True,
                 "typeName": str(prim.GetTypeName()),
@@ -1824,7 +1927,16 @@ class UsdSyncServer:
                 "variantSelections": dict(read_variant_selections(self.stage, path)),
                 "materialBinding": read_material_binding(self.stage, path) or None,
                 "attributes": _authored_attr_rows(prim),
+                "isInstanceable": prim.IsInstanceable(),
+                "isInstance": prim.IsInstance(),
+                "isInstanceProxy": prim.IsInstanceProxy(),
+                "prototype": (
+                    prototype.GetPath().pathString if prototype else None
+                ),
             }
+            if prim.IsA(UsdGeom.PointInstancer):
+                detail["pointInstancer"] = _point_instancer_summary(prim)
+            return detail
 
     def get_transforms_snapshot(self) -> list[dict]:
         """Composed translate/orient/scale for every Xformable prim with ops.
