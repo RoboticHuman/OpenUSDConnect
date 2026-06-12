@@ -108,7 +108,7 @@ In the emitter Blender:
 | `load_payload` | Payload load requested | Imports the payload asset |
 | `unload_payload` | Payload unload requested | Removes imported payload children |
 | `set_variant_selections` | Variant selection changed | Updates the active variant |
-| `set_material_binding` | Material bound/unbound | Updates the material:binding relationship |
+| `set_material_binding` | Material bound/unbound (per purpose) | Updates the `material:binding[:purpose]` relationship; `material_purpose` of `""` / `"preview"` / `"full"` selects the slot |
 | `set_connectable_input` | Shader, NodeGraph, Material, or UsdLux light input value changed | Writes the typed input via `UsdShade.ConnectableAPI` |
 | `set_connectable_connection` | Shader/NodeGraph/Material/light input or output connection authored or cleared | Updates the connection edge |
 | `set_instanceable` | Native scenegraph instancing toggled on a prim that has a reference/payload arc | Sets the `instanceable` flag; composition rebuilds the instance locally. The Blender adapter toggles collection-instance Empties best-effort |

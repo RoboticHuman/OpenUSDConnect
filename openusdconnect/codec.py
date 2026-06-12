@@ -202,7 +202,9 @@ _PI_ARRAYS = {
     "scales": (_fb.SetPointInstancerAddScales, "Scales", 3, np.float32),
     "velocities": (_fb.SetPointInstancerAddVelocities, "Velocities", 3, np.float32),
     "accelerations": (_fb.SetPointInstancerAddAccelerations, "Accelerations", 3, np.float32),
-    "angular_velocities": (_fb.SetPointInstancerAddAngularVelocities, "AngularVelocities", 3, np.float32),
+    "angular_velocities": (
+        _fb.SetPointInstancerAddAngularVelocities, "AngularVelocities", 3, np.float32,
+    ),
     "ids": (_fb.SetPointInstancerAddIds, "Ids", None, np.int64),
     "invisible_ids": (_fb.SetPointInstancerAddInvisibleIds, "InvisibleIds", None, np.int64),
     "inactive_ids": (_fb.SetPointInstancerAddInactiveIds, "InactiveIds", None, np.int64),
@@ -940,9 +942,13 @@ def _encode_set_variant_selections(b, ev):
 def _encode_set_material_binding(b, ev):
     prim = b.CreateString(ev["prim"])
     mp = b.CreateString(ev["material_path"])
+    purpose = ev.get("material_purpose", "") or ""
+    mpur = b.CreateString(purpose) if purpose else None
     _fb.SetMaterialBindingStart(b)
     _fb.SetMaterialBindingAddPrim(b, prim)
     _fb.SetMaterialBindingAddMaterialPath(b, mp)
+    if mpur is not None:
+        _fb.SetMaterialBindingAddMaterialPurpose(b, mpur)
     return _fb.SetMaterialBindingEnd(b)
 
 
@@ -961,12 +967,36 @@ def _encode_set_connectable_input(b, ev):
     for name, value in inputs.items():
         n = b.CreateString(name)
         tn = b.CreateString(input_types.get(name, ""))
+
+        # Coerce numeric sequences (incl. numpy arrays) into a flat float
+        # vector; numpy arrays are not list-typed, but iterate fine.
+        as_seq = None
+        if isinstance(value, np.ndarray) or (
+            isinstance(value, list) and not isinstance(value, str)
+        ):
+            as_seq = list(value) if isinstance(value, np.ndarray) else value
+
         str_off = None
         float_vec = None
+        int_vec = None
+        string_vec = None
         if isinstance(value, str):
             str_off = b.CreateString(value)
-        elif isinstance(value, list):
-            float_vec = _create_float_vector(b, [float(v) for v in value])
+        elif as_seq is not None and len(as_seq) > 0 and all(
+            isinstance(v, str) for v in as_seq
+        ):
+            str_offs = [b.CreateString(v) for v in as_seq]
+            _fb.ConnectableInputValueStartStringArrayVector(b, len(str_offs))
+            for off in reversed(str_offs):
+                b.PrependUOffsetTRelative(off)
+            string_vec = b.EndVector()
+        elif as_seq is not None and all(
+            isinstance(v, (int, np.integer)) and not isinstance(v, bool)
+            for v in as_seq
+        ):
+            int_vec = _create_int_vector(b, [int(v) for v in as_seq])
+        elif as_seq is not None:
+            float_vec = _create_float_vector(b, [float(v) for v in as_seq])
 
         _fb.ConnectableInputValueStart(b)
         _fb.ConnectableInputValueAddName(b, n)
@@ -983,6 +1013,12 @@ def _encode_set_connectable_input(b, ev):
         elif str_off is not None:
             _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarString)
             _fb.ConnectableInputValueAddScalarString(b, str_off)
+        elif string_vec is not None:
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.StringArray)
+            _fb.ConnectableInputValueAddStringArray(b, string_vec)
+        elif int_vec is not None:
+            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.IntArray)
+            _fb.ConnectableInputValueAddIntArray(b, int_vec)
         elif float_vec is not None:
             _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.FloatArray)
             _fb.ConnectableInputValueAddFloatArray(b, float_vec)
@@ -1554,7 +1590,15 @@ def _dict_set_variant_selections(sv, kind):
 
 @register_decoder(K_SET_MATERIAL_BINDING)
 def _dict_set_material_binding(mb, kind):
-    return {"k": kind, "prim": _str(mb.Prim()), "material_path": _str(mb.MaterialPath())}
+    out: dict = {
+        "k": kind,
+        "prim": _str(mb.Prim()),
+        "material_path": _str(mb.MaterialPath()),
+    }
+    purpose = _str(mb.MaterialPurpose())
+    if purpose:
+        out["material_purpose"] = purpose
+    return out
 
 
 @register_decoder(K_SET_CONNECTABLE_INPUT)
@@ -1568,14 +1612,23 @@ def _dict_set_connectable_input(sci, kind):
         vt = civ.ValueType()
         if vt == ConnectableInputValueType.FloatArray:
             inputs[name] = [civ.FloatArray(j) for j in range(civ.FloatArrayLength())]
+        elif vt == ConnectableInputValueType.IntArray:
+            inputs[name] = [civ.IntArray(j) for j in range(civ.IntArrayLength())]
+        elif vt == ConnectableInputValueType.StringArray:
+            inputs[name] = [
+                _str(civ.StringArray(j)) for j in range(civ.StringArrayLength())
+            ]
         elif vt == ConnectableInputValueType.ScalarString:
             inputs[name] = _str(civ.ScalarString())
         elif vt == ConnectableInputValueType.ScalarBool:
             inputs[name] = civ.ScalarBool()
         elif vt == ConnectableInputValueType.ScalarInt:
             inputs[name] = civ.ScalarInt()
-        else:
+        elif vt == ConnectableInputValueType.ScalarFloat:
             inputs[name] = civ.ScalarFloat()
+        # else: value type None or unrecognized — drop the input entry so the
+        # applier doesn't author a spurious default. type_name is preserved so
+        # the receiver can log the unsupported kind without silently corrupting.
     ev = {
         "k": kind,
         "prim": _str(sci.Prim()),

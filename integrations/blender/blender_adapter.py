@@ -173,6 +173,11 @@ class BlenderAdapter(DCCAdapter):
         # point cloud + geometry-nodes Instance on Points setup, the
         # structure Blender's own USD importer builds).
         self.point_instancer_paths: set[str] = set()
+        # Per-prim, per-purpose material bindings. Blender has a single
+        # material slot, so viewport assignment resolves preview > allPurpose
+        # > full, matching UsdShadeMaterialBindingAPI::ComputeBoundMaterial's
+        # preview-purpose fallback chain.
+        self._material_bindings: dict[str, dict[str, str]] = {}
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -659,9 +664,26 @@ class BlenderAdapter(DCCAdapter):
             len(faces),
         )
 
-    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+    def set_material_binding(
+        self, prim_path: str, material_path: str, material_purpose: str = "",
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
+        per_purpose = self._material_bindings.setdefault(prim_path, {})
+        if material_path:
+            per_purpose[material_purpose] = material_path
+        else:
+            per_purpose.pop(material_purpose, None)
+        # Resolve the viewport binding: preview overrides allPurpose, full is
+        # the last-resort fallback (final-render-only renderers may author it
+        # alone). Matches ComputeBoundMaterial(purpose="preview")'s lookup.
+        effective = (
+            per_purpose.get("preview")
+            or per_purpose.get("")
+            or per_purpose.get("full")
+            or ""
+        )
+        material_path = effective
         if not material_path:
             obj = self._find_object_by_prim(prim_path)
             if obj and obj.data and obj.data.materials:
@@ -1544,9 +1566,11 @@ class BlenderAdapter(DCCAdapter):
             file_path = str(prim.GetPath())
             scene_path = _remap(file_path)
 
-            binding_target = read_material_binding(stage, file_path)
-            if binding_target:
-                binding_events.append((scene_path, _remap(binding_target)))
+            for purpose, target in read_material_binding(stage, file_path).items():
+                if target:
+                    binding_events.append(
+                        (scene_path, _remap(target), purpose)
+                    )
 
             if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
                 _kind, sid, inputs, itypes, conns = read_usdshade_connectable(
@@ -1587,8 +1611,8 @@ class BlenderAdapter(DCCAdapter):
 
         # Bindings first so materials are tagged with usd_material_path
         # before set_connectable_input looks them up.
-        for scene_path, target in binding_events:
-            self.set_material_binding(scene_path, target)
+        for scene_path, target, purpose in binding_events:
+            self.set_material_binding(scene_path, target, purpose)
         # Blender's USD importer already handles UsdPreviewSurface shaders.
         # When a material's surface shader is multi-node MaterialX, the
         # mapper builds the full network itself — applying our texture

@@ -111,7 +111,7 @@ namespace OUC
 		inline constexpr uint16 StringPair_Key   = 4;
 		inline constexpr uint16 StringPair_Value = 6;
 
-		// ConnectableInputValue { name:string; type_name:string; value_type:ConnectableInputValueType; scalar_float:float; scalar_int:int; scalar_bool:bool; scalar_string:string; float_array:[float] }
+		// ConnectableInputValue { name:string; type_name:string; value_type:ConnectableInputValueType; scalar_float:float; scalar_int:int; scalar_bool:bool; scalar_string:string; float_array:[float]; int_array:[int]; string_array:[string] }
 		inline constexpr uint16 ConnectableInputValue_Name         = 4;
 		inline constexpr uint16 ConnectableInputValue_TypeName     = 6;
 		inline constexpr uint16 ConnectableInputValue_ValueType    = 8;
@@ -120,6 +120,8 @@ namespace OUC
 		inline constexpr uint16 ConnectableInputValue_ScalarBool   = 14;
 		inline constexpr uint16 ConnectableInputValue_ScalarString = 16;
 		inline constexpr uint16 ConnectableInputValue_FloatArray   = 18;
+		inline constexpr uint16 ConnectableInputValue_IntArray     = 20;
+		inline constexpr uint16 ConnectableInputValue_StringArray  = 22;
 
 		// EnsurePrim { prim:string; type_name:string; api_schemas:[string] }
 		inline constexpr uint16 EnsurePrim_Prim       = 4;
@@ -178,9 +180,10 @@ namespace OUC
 		inline constexpr uint16 SetVariantSelections_Prim       = 4;
 		inline constexpr uint16 SetVariantSelections_Selections = 6;
 
-		// SetMaterialBinding { prim:string; material_path:string }
-		inline constexpr uint16 SetMaterialBinding_Prim         = 4;
-		inline constexpr uint16 SetMaterialBinding_MaterialPath = 6;
+		// SetMaterialBinding { prim:string; material_path:string; material_purpose:string }
+		inline constexpr uint16 SetMaterialBinding_Prim            = 4;
+		inline constexpr uint16 SetMaterialBinding_MaterialPath    = 6;
+		inline constexpr uint16 SetMaterialBinding_MaterialPurpose = 8;
 
 		// SetConnectableInput { prim:string; info_id:string; inputs:[ConnectableInputValue]; time:double }
 		inline constexpr uint16 SetConnectableInput_Prim   = 4;

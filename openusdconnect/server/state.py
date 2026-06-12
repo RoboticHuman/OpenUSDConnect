@@ -1593,6 +1593,11 @@ class UsdSyncServer:
         if attr_names is None:
             return True  # unknown event type — always broadcast
 
+        if k == K_SET_MATERIAL_BINDING:
+            purpose = ev.get("material_purpose", "")
+            if purpose:
+                attr_names = [f"rel:material:binding:{purpose}"]
+
         prim_path = str(prim.GetPath())
 
         if not attr_names:

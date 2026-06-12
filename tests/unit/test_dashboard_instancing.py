@@ -12,13 +12,13 @@ import pytest
 
 try:
     from pxr import Sdf, Usd  # noqa: F401
+
+    from openusdconnect.server import UsdSyncServer
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
-
-from openusdconnect.server import UsdSyncServer
 
 
 @pytest.fixture

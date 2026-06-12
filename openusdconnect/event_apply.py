@@ -536,15 +536,19 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
 
     Uses direct relationship authoring so the binding works even if
     the target material prim hasn't been created yet (USD relationships
-    can target non-existent prims).
+    can target non-existent prims). ``material_purpose`` picks the slot:
+    empty = ``material:binding``; ``preview`` / ``full`` author the
+    purpose-suffixed rels.
     """
     prim = get_or_define_prim(stage, ev["prim"])
     material_path = ev.get("material_path", "")
+    purpose = ev.get("material_purpose", "") or ""
 
     UsdShade.MaterialBindingAPI.Apply(prim)
-    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
+    rel_name = REL_MATERIAL_BINDING + (f":{purpose}" if purpose else "")
+    binding_rel = prim.GetRelationship(rel_name)
     if not binding_rel or not binding_rel.IsValid():
-        binding_rel = prim.CreateRelationship(REL_MATERIAL_BINDING)
+        binding_rel = prim.CreateRelationship(rel_name)
     binding_rel.ClearTargets(removeSpec=False)
     if material_path:
         binding_rel.AddTarget(Sdf.Path(material_path))
@@ -576,12 +580,29 @@ def _set_connectable_input_value(
         return
 
     if isinstance(value, list):
-        if type_name in ("color3f", "float3", "normal3f"):
+        if type_name in ("color3f", "float3", "normal3f", "point3f", "vector3f"):
             inp.Set(Gf.Vec3f(*value), time)
-        elif type_name in ("float2", "texCoord2f"):
-            inp.Set(Gf.Vec2f(*value), time)
-        elif type_name in ("float4", "color4f"):
-            inp.Set(Gf.Vec4f(*value), time)
+        elif type_name in ("color3d", "double3", "normal3d", "point3d", "vector3d"):
+            inp.Set(Gf.Vec3d(*value), time)
+        elif type_name in ("float2", "texCoord2f", "double2"):
+            inp.Set(Gf.Vec2f(*value) if type_name != "double2" else Gf.Vec2d(*value), time)
+        elif type_name in ("float4", "color4f", "double4"):
+            inp.Set(Gf.Vec4f(*value) if type_name != "double4" else Gf.Vec4d(*value), time)
+        elif type_name == "matrix4d" and len(value) == 16:
+            m = Gf.Matrix4d(*value)
+            inp.Set(m, time)
+        elif type_name == "matrix3d" and len(value) == 9:
+            inp.Set(Gf.Matrix3d(*value), time)
+        elif type_name == "matrix2d" and len(value) == 4:
+            inp.Set(Gf.Matrix2d(*value), time)
+        elif type_name == "int[]":
+            inp.Set(Vt.IntArray([int(v) for v in value]), time)
+        elif type_name == "float[]":
+            inp.Set(Vt.FloatArray([float(v) for v in value]), time)
+        elif type_name == "token[]":
+            inp.Set(Vt.TokenArray([str(v) for v in value]), time)
+        elif type_name == "string[]":
+            inp.Set(Vt.StringArray([str(v) for v in value]), time)
         else:
             inp.Set(value, time)
     else:

@@ -434,8 +434,9 @@ def test_emitter_matrix_op_samples_decompose():
     for t in (1.0, 2.0):
         for label, st in (("src", stage), ("dst", dst)):
             assert st.GetPrimAtPath("/Rig").IsValid(), label
-        m_src = UsdGeom.Xformable(stage.GetPrimAtPath("/Rig")).GetLocalTransformation(Usd.TimeCode(t))
-        m_dst = UsdGeom.Xformable(dst.GetPrimAtPath("/Rig")).GetLocalTransformation(Usd.TimeCode(t))
+        tc = Usd.TimeCode(t)
+        m_src = UsdGeom.Xformable(stage.GetPrimAtPath("/Rig")).GetLocalTransformation(tc)
+        m_dst = UsdGeom.Xformable(dst.GetPrimAtPath("/Rig")).GetLocalTransformation(tc)
         if isinstance(m_src, tuple):
             m_src = m_src[0]
         if isinstance(m_dst, tuple):

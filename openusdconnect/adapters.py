@@ -100,6 +100,7 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     K_SET_MATERIAL_BINDING: lambda ev: {
         "prim_path": ev["prim"],
         "material_path": ev["material_path"],
+        "material_purpose": ev.get("material_purpose", ""),
     },
     K_SET_CONNECTABLE_INPUT: lambda ev: {
         "prim_path": ev["prim"],
@@ -181,10 +182,11 @@ class DCCAdapter(ABC):
         emitter and receiver roles and prevents axis-flip artefacts in
         Y-up ↔ Z-up coordinate conversion hierarchies.
 
-        Examples:
-        - Blender: new_basis = old_MPI @ old_basis, then MPI = Identity
-        - Maya: bake offsetParentMatrix into local xform, then clear it
-        - Houdini: fold pre-transform into main transform, then zero it
+        DCCs that hold a secondary pre-transform alongside the canonical
+        local transform (basis matrix, offset parent matrix, pre-xform)
+        must fold that pre-transform into the local transform and clear
+        the secondary slot, so the composed result is unchanged but the
+        canonical TRS stack carries the full opinion.
         """
         raise NotImplementedError
 
@@ -266,8 +268,16 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
-        """Bind or unbind a material to a prim."""
+    def set_material_binding(
+        self, prim_path: str, material_path: str, material_purpose: str = "",
+    ) -> bool:
+        """Bind or unbind a material to a prim.
+
+        ``material_purpose`` selects the per-purpose binding slot: empty
+        for allPurpose (``material:binding``), ``"preview"`` or ``"full"``
+        for the purpose-suffixed rels consumers select via
+        ``ComputeBoundMaterial(purpose)``.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -356,10 +366,10 @@ class DCCAdapter(ABC):
 class ShaderMapper(ABC):
     """Maps a USD shader type to a DCC-native node.
 
-    Subclass per DCC integration (Blender, Maya, etc.) and per shader
-    behavior (PBR surface, texture, UV reader).  The ``node`` parameter
-    in apply_value/post_apply is DCC-specific (untyped) — each
-    implementation knows its own node object type.
+    Subclass per DCC integration and per shader behavior (PBR surface,
+    texture, UV reader). The ``node`` parameter in apply_value/post_apply
+    is DCC-specific (untyped); each implementation knows its own node
+    object type.
     """
 
     def __init__(self, shader_id: str, node_type: str, input_map: dict):
@@ -613,11 +623,17 @@ class UsdStageAdapter(DCCAdapter):
         )
         return True
 
-    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
-        _apply_event_to_stage(
-            self.stage,
-            {"k": K_SET_MATERIAL_BINDING, "prim": prim_path, "material_path": material_path},
-        )
+    def set_material_binding(
+        self, prim_path: str, material_path: str, material_purpose: str = "",
+    ) -> bool:
+        ev = {
+            "k": K_SET_MATERIAL_BINDING,
+            "prim": prim_path,
+            "material_path": material_path,
+        }
+        if material_purpose:
+            ev["material_purpose"] = material_purpose
+        _apply_event_to_stage(self.stage, ev)
         return True
 
     def set_connectable_input(
@@ -894,13 +910,19 @@ class MockAdapter(DCCAdapter):
         LOG.info("MockAdapter: set variant selections on prim %s", prim_path)
         return True
 
-    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+    def set_material_binding(
+        self, prim_path: str, material_path: str, material_purpose: str = "",
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
-        p["material_binding"] = material_path
-        LOG.info("MockAdapter: set material binding %s -> %s", prim_path, material_path)
+        bindings = p.setdefault("material_bindings", {})
+        bindings[material_purpose] = material_path
+        LOG.info(
+            "MockAdapter: set material binding %s [%s] -> %s",
+            prim_path, material_purpose or "allPurpose", material_path,
+        )
         return True
 
     def set_connectable_input(

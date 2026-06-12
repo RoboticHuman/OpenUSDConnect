@@ -97,17 +97,21 @@ enum ConnectableInputValueType : byte {
     ScalarBool,
     ScalarString,
     FloatArray,
+    IntArray,
+    StringArray,
 }
 
 table ConnectableInputValue {
     name:string;
-    type_name:string;       // USD type: "float", "color3f", "asset", etc.
+    type_name:string;       // USD type: "float", "color3f", "asset", "matrix4d", "int[]", "token[]", ...
     value_type:ConnectableInputValueType;
     scalar_float:float;
     scalar_int:int;
     scalar_bool:bool;
     scalar_string:string;
-    float_array:[float];    // for vector types (color3f = 3 floats, etc.)
+    float_array:[float];    // vector types (color3f = 3 floats); matrices flatten row-major
+    int_array:[int];
+    string_array:[string];
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +192,7 @@ table SetVariantSelections {
 table SetMaterialBinding {
     prim:string;
     material_path:string;
+    material_purpose:string;    // "" = allPurpose; "preview" / "full" select purpose-scoped rels
 }
 
 table SetConnectableInput {
