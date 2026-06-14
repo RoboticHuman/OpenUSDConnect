@@ -18,6 +18,7 @@ except Exception:
     BPY_AVAILABLE = False
     BoolProperty = FloatProperty = IntProperty = StringProperty = None  # type: ignore[assignment]
 
+from openusdconnect import token_client
 from openusdconnect.codec import decode_messages
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
@@ -451,6 +452,8 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
                 sync_from=sync_from,
                 client_id=STABLE_CLIENT_ID,
                 origin=_ORIGIN,
+                token=token_client.load_token(host, port),
+                on_token_issued=lambda token: token_client.save_token(host, port, token),
                 on_stage_metadata=_on_stage_metadata,
                 on_playback_state=_on_playback_state,
                 on_playback_claimed=_on_playback_claimed,
@@ -465,6 +468,8 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             scene.usd_connect_recv_running = True
             self.report({"INFO"}, f"Receiver started ({host}:{port}), sync from seq={sync_from}")
         except Exception as e:
+            if _RECEIVER is not None and getattr(_RECEIVER, "auth_rejected", False):
+                token_client.delete_token(host, port)
             self.report({"ERROR"}, f"Failed to start receiver: {e}")
             return {"CANCELLED"}
         return {"FINISHED"}

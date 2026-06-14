@@ -7,6 +7,7 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 **Sync Server**
 - Authoritative sequencer with atomic transaction ordering
 - SQLite event log with late-join replay and log compaction
+- WebDAV/UNC live-open endpoint that serves a normal-looking USD snapshot
 - Per-department shared layers with configurable priority
 - TOFU (Trust On First Use) client authentication
 - Cross-department edit proposals (propose/approve/reject workflow)
@@ -23,11 +24,17 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 - **Blender** — Live emitter/receiver addon with material sync (UsdPreviewSurface, MaterialX), axis conversion, and auto-tracking
 - **Unreal Engine** — Bidirectional transform sync via USDStageActor
 
+**Live Open**
+- WebDAV/UNC directory: `\\127.0.0.1@7280\usd\`
+- Flattened snapshot: `scene.usd`
+- Composition root: `scene.live.usda`
+- Blender imports the snapshot and auto-connects receiver/emitter when metadata is present.
+
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/) for local development
 - OpenUSD Python bindings (`pxr`) — provided automatically in Docker or by DCC applications
 
@@ -35,10 +42,10 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 
 ```bash
 # Install dependencies
-uv sync
+uv sync --group server --group vfs
 
 # Start the sync server
-uv run openusdconnect-server --port 7200 --base scene.usda
+uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
 
 # Start with admin dashboard
 uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
@@ -57,16 +64,16 @@ The server image uses [`usd-core`](https://pypi.org/project/usd-core/) from PyPI
 docker build -t openusdconnect-server .
 
 # Run the server
-docker run -p 7200:7200 -v ./scenes:/scenes \
-  openusdconnect-server --port 7200 --base /scenes/scene.usda
+docker run -p 7200:7200 -p 7280:7280 -v ./scenes:/scenes \
+  openusdconnect-server --port 7200 --base /scenes/scene.usda --vfs-port 7280
 
 # Build with dashboard support
 docker build --build-arg DASHBOARD=1 -t openusdconnect-server:dashboard .
 
 # Run with dashboard
-docker run -p 7200:7200 -p 8080:8080 -v ./scenes:/scenes \
+docker run -p 7200:7200 -p 7280:7280 -p 8080:8080 -v ./scenes:/scenes \
   openusdconnect-server:dashboard \
-  --port 7200 --base /scenes/scene.usda --dashboard 8080
+  --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard 8080
 ```
 
 Or using Docker Compose:
@@ -87,6 +94,12 @@ uv run python scripts/build_blender_addon.py
 
 Install the output zip (`dist/usd_connect_blender.zip`) in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 
+For seamless live-open, start the server with `--vfs-port`, then import
+`\\127.0.0.1@7280\usd\scene.usd` in Blender or paste
+`http://127.0.0.1:7280/usd/scene.usd` into the addon's live URL field.
+The addon imports the snapshot and auto-connects receiver/emitter from
+embedded metadata.
+
 ### Unreal Engine
 
 Run the integration script from the Unreal Python console:
@@ -101,6 +114,9 @@ py "path/to/OpenUSDConnect/integrations/unreal/connect.py"
 - [Live Material Editing](docs/live-material-editing.md) — Material and shader synchronization
 - [Testing Setup](docs/testing-setup.md) — Test tiers, Blender configuration, adding new tests
 - [Profiling](docs/profiling.md) — Performance profiling with py-spy
+
+- [Live-Open Quickstart](docs/live-open-quickstart.md) - WebDAV/UNC live-open and Blender auto-connect
+- [Live-Open Production Guide](docs/live-open-production-guide.md) - Production architecture, limitations, and checklist
 
 ## Testing
 

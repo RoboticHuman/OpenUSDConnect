@@ -6,6 +6,7 @@ services:
         DASHBOARD: "0"
     ports:
       - "7200:7200"
+      - "7280:7280"
     volumes:
       - ./scenes:/scenes
       - server-data:/data
@@ -18,6 +19,12 @@ services:
       - "/scenes/test_scene.usda"
       - "--log"
       - "/data/events.db"
+      - "--vfs-host"
+      - "0.0.0.0"
+      - "--vfs-port"
+      - "7280"
+      - "--advertise-host"
+      - "127.0.0.1"
     profiles:
       - default
 
@@ -28,6 +35,7 @@ services:
         DASHBOARD: "1"
     ports:
       - "7200:7200"
+      - "7280:7280"
       - "8080:8080"
     volumes:
       - ./scenes:/scenes
@@ -43,6 +51,12 @@ services:
       - "/data/events.db"
       - "--dashboard"
       - "8080"
+      - "--vfs-host"
+      - "0.0.0.0"
+      - "--vfs-port"
+      - "7280"
+      - "--advertise-host"
+      - "127.0.0.1"
     profiles:
       - dashboard
 

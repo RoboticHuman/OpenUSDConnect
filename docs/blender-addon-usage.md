@@ -54,7 +54,55 @@ Listens to the sync server and applies incoming events to Blender objects.
 
 ## Two-Blender Live Sync Walkthrough
 
-This is the primary workflow: one Blender instance emits changes, another receives them in real time.
+This is the manual workflow: one Blender instance emits changes, another receives them in real time.
+For the newer live-open workflow, see [Live-Open Quickstart](live-open-quickstart.md).
+
+## Live-Open Via Virtual USD File
+
+The addon can import an OpenUSDConnect virtual USD file and auto-connect to
+the live server when the file contains `customLayerData["openusdconnect"]`.
+This is the preferred workflow when the server is started with `--vfs-port`.
+
+### Server
+
+```bash
+uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
+```
+
+This exposes:
+
+| Path | Use |
+|------|-----|
+| `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL and Blender live URL import. |
+| `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
+
+### Blender
+
+Use either entry point:
+
+- Click **Import USD (with prim tagging)** and choose the UNC path.
+- Paste the HTTP path into the live URL field and click the URL import button.
+
+The addon imports the snapshot first. If live metadata is present, it sets
+the receiver and emitter host/port, seeds the receiver from `snapshot_seq`,
+starts the emitter, and starts the receiver from `snapshot_seq + 1`.
+HTTP live URL imports are cached locally by URL and ETag so unchanged imports
+reuse the same base USD path instead of leaking temp files. If a live URL
+points at `scene.live.usda`, the addon follows the embedded flattened fallback
+URL because the one-file local cache cannot resolve the remote `_layers/`
+directory.
+
+The virtual share is read-only by default. Server operators can opt into
+compatibility drop mode with `--vfs-write-mode drop`, but direct file writes
+still do not become live sync edits.
+
+If metadata is not present, the import behaves like the existing manual
+workflow. If auto-connect fails, the imported snapshot remains open and the
+addon reports the connection error.
+
+When the server is running with `--require-token`, the USD file only says
+that a token is required. It does not contain the token. Blender uses the
+existing TOFU token store for the live emitter and receiver connections.
 
 ### 1. Start the sync server
 

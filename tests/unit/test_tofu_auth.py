@@ -128,13 +128,21 @@ class TestServerAuthenticate:
         # After revoke, client_id has no token — TOFU re-issues
         assert accepted  # Re-issued on first connect after revoke
 
-    def test_no_client_id_always_accepted(self, tmp_path):
+    def test_no_client_id_rejected_when_token_required(self, tmp_path):
         from openusdconnect.server import UsdSyncServer
 
         srv = UsdSyncServer(
             log_path=":memory:", require_token=True,
             token_db_path=str(tmp_path / "tokens.db"),
         )
+        accepted, token = srv.authenticate(None, None)
+        assert not accepted
+        assert token is None
+
+    def test_no_client_id_accepted_when_token_not_required(self):
+        from openusdconnect.server import UsdSyncServer
+
+        srv = UsdSyncServer(log_path=":memory:", require_token=False)
         accepted, token = srv.authenticate(None, None)
         assert accepted
         assert token is None

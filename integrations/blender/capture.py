@@ -26,6 +26,7 @@ try:
 except ImportError:
     _IDENTITY_4X4 = None
 
+from openusdconnect import token_client
 from openusdconnect.axis_conversion import (
     strip_axis_rotation,
     zup_to_yup_quat,
@@ -94,10 +95,62 @@ def sanitize_usd_name(name: str) -> str:
     return result or "_unnamed"
 
 
+def _strip_blender_numeric_suffix(name: str) -> str:
+    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+        return name[:-4]
+    return name
+
+
+def _repair_import_prim_tags(usd_path: str) -> int:
+    """Repair obvious Blender USDHook parent tags after a file import."""
+    try:
+        stage = Usd.Stage.Open(usd_path)
+    except Exception:
+        LOG.debug("Could not reopen imported USD for prim-tag repair", exc_info=True)
+        return 0
+    if stage is None:
+        return 0
+
+    by_leaf: dict[str, list[str]] = {}
+    for prim in stage.Traverse():
+        path = str(prim.GetPath())
+        leaf = sanitize_usd_name(prim.GetName())
+        by_leaf.setdefault(leaf, []).append(path)
+
+    repaired = 0
+    for obj in bpy.context.scene.objects:
+        leaf = sanitize_usd_name(_strip_blender_numeric_suffix(obj.name))
+        candidates = by_leaf.get(leaf, [])
+        if len(candidates) != 1:
+            continue
+        target = candidates[0]
+        current = obj.get("usd_prim_path")
+        if current == target:
+            continue
+        obj["usd_prim_path"] = target
+        prim = stage.GetPrimAtPath(target)
+        if prim and prim.IsValid() and prim.GetTypeName():
+            obj["usd_type_name"] = prim.GetTypeName()
+        repaired += 1
+    if repaired:
+        LOG.info("Repaired %d imported USD prim tags by object name", repaired)
+    return repaired
+
+
 # ---------------------------------------------------------------------------
 # Scene properties
 # ---------------------------------------------------------------------------
 _SCENE_PROPS = [
+    (
+        "usd_connect_live_url",
+        bpy.props.StringProperty,
+        {
+            "name": "Live URL",
+            "description": "OpenUSDConnect live file URL or WebDAV path",
+            "subtype": "FILE_PATH",
+            "default": "",
+        },
+    ),
     (
         "usd_connect_base_usd_path",
         bpy.props.StringProperty,
@@ -1007,6 +1060,94 @@ def _remove_handler():
         bpy.app.timers.unregister(_timer_tick)
 
 
+def _operator_cancelled(result) -> bool:
+    return isinstance(result, set) and "CANCELLED" in result
+
+
+def _call_required_operator(op, label: str):
+    result = op()
+    if _operator_cancelled(result):
+        raise RuntimeError(f"{label} was cancelled")
+    return result
+
+
+def _wait_for_receiver_handshake(receiver_addon, timeout: float = 2.0) -> None:
+    receiver = getattr(receiver_addon, "_RECEIVER", None)
+    if receiver is None:
+        raise RuntimeError("receiver did not start")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if getattr(receiver, "auth_rejected", False):
+            raise RuntimeError("receiver authentication rejected")
+        if getattr(receiver, "connected", False):
+            return
+        time.sleep(0.02)
+    if getattr(receiver, "auth_rejected", False):
+        raise RuntimeError("receiver authentication rejected")
+    raise RuntimeError("receiver did not connect")
+
+
+def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> bool:
+    scene = context.scene
+    host = (meta.get("host") or "").strip()
+    port = int(meta.get("port") or 0)
+    snapshot_seq = int(meta.get("snapshot_seq") or 0)
+    if not host or not (1 <= port <= 65535):
+        raise RuntimeError("live metadata is missing a valid host/port")
+
+    from . import receiver_addon
+
+    if getattr(scene, "usd_connect_recv_running", False):
+        _call_required_operator(bpy.ops.usd_connect.stop_receiver, "stop receiver")
+    if (
+        getattr(scene, "usd_connect_net_emitter_running", False)
+        or _state.sender is not None
+        or _state.author is not None
+    ):
+        _call_required_operator(bpy.ops.usd_connect.disconnect_emitter, "disconnect emitter")
+
+    scene.usd_connect_base_usd_path = local_path
+    scene.usd_connect_emit_host = host
+    scene.usd_connect_emit_port = port
+    scene.usd_connect_recv_host = host
+    scene.usd_connect_recv_port = port
+    scene.usd_connect_recv_last_seq = snapshot_seq
+    receiver_addon._LAST_SEQ = snapshot_seq
+    if receiver_addon._DISPATCHER is not None:
+        receiver_addon._DISPATCHER.last_seq = snapshot_seq
+
+    try:
+        _call_required_operator(bpy.ops.usd_connect.connect_emitter, "connect emitter")
+        scene.usd_connect_recv_last_seq = snapshot_seq
+        receiver_addon._LAST_SEQ = snapshot_seq
+        _call_required_operator(bpy.ops.usd_connect.start_receiver, "start receiver")
+        _wait_for_receiver_handshake(receiver_addon)
+    except Exception:
+        receiver = getattr(receiver_addon, "_RECEIVER", None)
+        if receiver is not None and getattr(receiver, "auth_rejected", False):
+            token_client.delete_token(host, port)
+        try:
+            if getattr(scene, "usd_connect_recv_running", False):
+                bpy.ops.usd_connect.stop_receiver()
+        except Exception:
+            LOG.exception("Failed to stop receiver after live auto-connect failure")
+        try:
+            if (
+                getattr(scene, "usd_connect_net_emitter_running", False)
+                or _state.sender is not None
+            ):
+                bpy.ops.usd_connect.disconnect_emitter()
+        except Exception:
+            LOG.exception("Failed to disconnect emitter after live auto-connect failure")
+        raise
+
+    report(
+        {"INFO"},
+        f"Live USD connected to {host}:{port} from seq={snapshot_seq + 1}",
+    )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
@@ -1025,18 +1166,44 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
         try:
-            bpy.ops.wm.usd_import(filepath=self.filepath)
-            context.scene.usd_connect_base_usd_path = self.filepath
+            from . import live_discovery
+
+            local_path, meta = live_discovery.resolve_import_source(self.filepath)
+            bpy.ops.wm.usd_import(filepath=local_path)
+            meta = live_discovery.read_live_metadata(local_path)
+            _repair_import_prim_tags(local_path)
+            context.scene.usd_connect_base_usd_path = local_path
+            if meta:
+                context.scene.usd_connect_live_url = meta.get("vfs_url") or self.filepath
             # Apply MaterialX materials that Blender's importer doesn't handle
             from .blender_adapter import BlenderAdapter
 
             adapter = BlenderAdapter()
-            adapter._enrich_materialx_from_import(self.filepath, "", "")
-            self.report({"INFO"}, "USD imported with prim tagging")
+            adapter._enrich_materialx_from_import(local_path, "", "")
         except Exception as e:
             self.report({"ERROR"}, f"USD import failed: {e}")
             return {"CANCELLED"}
+        if meta:
+            try:
+                _auto_connect_live_import(context, local_path, meta, self.report)
+            except Exception as e:
+                self.report({"ERROR"}, f"Live auto-connect failed: {e}")
+            return {"FINISHED"}
+        self.report({"INFO"}, "USD imported with prim tagging")
         return {"FINISHED"}
+
+
+class USD_CONNECT_OT_import_live_url(bpy.types.Operator):
+    bl_idname = "usd_connect.import_live_url"
+    bl_label = "Import Live URL"
+    bl_description = "Import an OpenUSDConnect live URL and auto-connect when metadata is present"
+
+    def execute(self, context):
+        src = (context.scene.usd_connect_live_url or "").strip()
+        if not src:
+            self.report({"ERROR"}, "Live URL is empty")
+            return {"CANCELLED"}
+        return bpy.ops.usd_connect.import_with_hook(filepath=src)
 
 
 class USD_CONNECT_OT_start_capture(bpy.types.Operator):
@@ -1148,11 +1315,25 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 port=scene.usd_connect_emit_port,
                 client_id=STABLE_CLIENT_ID,
                 origin=SESSION_ORIGIN,
+                token=token_client.load_token(
+                    scene.usd_connect_emit_host,
+                    scene.usd_connect_emit_port,
+                ),
+                on_token_issued=lambda token: token_client.save_token(
+                    scene.usd_connect_emit_host,
+                    scene.usd_connect_emit_port,
+                    token,
+                ),
             )
             if not _state.sender.connect():
                 reason = (
                     "auth rejected" if _state.sender.auth_rejected else "could not connect"
                 )
+                if _state.sender.auth_rejected:
+                    token_client.delete_token(
+                        scene.usd_connect_emit_host,
+                        scene.usd_connect_emit_port,
+                    )
                 _state.sender = None
                 self.report({"ERROR"}, f"Connection failed: {reason}")
                 return {"CANCELLED"}
@@ -1254,6 +1435,7 @@ class USD_CONNECT_OT_print_import_props(bpy.types.Operator):
 _CAPTURE_CLASSES = (
     USD_CONNECT_Hook,
     USD_CONNECT_OT_import_with_hook,
+    USD_CONNECT_OT_import_live_url,
     USD_CONNECT_OT_start_capture,
     USD_CONNECT_OT_stop_capture,
     USD_CONNECT_OT_emit_diff,

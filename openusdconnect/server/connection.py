@@ -166,11 +166,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         if role == "receiver":
             sync_from = hello_fb.SyncFrom() or 1
 
-            # If sync_from is beyond the current log (e.g., after compaction
-            # reset seq numbers), send resync so the receiver resets its
-            # sequence counter, then replay the full log.
+            # If sync_from is beyond the current log tail (e.g., after
+            # compaction reset seq numbers), send resync so the receiver
+            # resets its sequence counter, then replay the full log. Requesting
+            # exactly max_seq + 1 is a valid "start from the live tail" case.
             max_seq = sync_server.store.get_max_seq()
-            if sync_from > max_seq > 0:
+            if sync_from > (max_seq + 1) and max_seq > 0:
                 send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
                 sync_from = 1
 

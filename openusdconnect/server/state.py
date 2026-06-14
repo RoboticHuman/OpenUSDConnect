@@ -8,7 +8,9 @@ TOFU token store, and proposal bookkeeping.  Network handling lives in
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import queue
 import threading
 import time
@@ -164,6 +166,10 @@ class UsdSyncServer:
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         self._next_seq = self.store.get_max_seq() + 1
         self._event_count = self.store.get_count()
+        # Virtual-file snapshots are keyed by an epoch plus the latest assigned
+        # sequence. Epoch disambiguates compaction/purge resetting sequence IDs.
+        self._snapshot_epoch = 0
+        self.scene_id = self._make_scene_id(base_usd_path)
 
         # TOFU token authentication
         self.require_token = require_token
@@ -236,6 +242,18 @@ class UsdSyncServer:
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
         self._replay_log_into_stage()
+
+    @staticmethod
+    def _make_scene_id(base_usd_path: str | None) -> str:
+        """Readable, stable-ish identifier for the currently hosted stage."""
+        if base_usd_path:
+            label = os.path.splitext(os.path.basename(base_usd_path))[0] or "scene"
+            digest_src = os.path.abspath(base_usd_path)
+        else:
+            label = "scene"
+            digest_src = "in-memory"
+        digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:12]
+        return f"{label}-{digest}"
 
     def shutdown(self):
         """Signal background threads to drain queued work and exit.
@@ -440,10 +458,15 @@ class UsdSyncServer:
         - First connect (no token stored): issues a new token → (True, new_token)
         - Reconnect with valid token: accepted → (True, None)
         - Reconnect with wrong/missing token: rejected → (False, None)
-        - Token not required or no client_id: always accepted → (True, None)
+        - Token not required: always accepted → (True, None)
+        - Token required but no client_id: rejected → (False, None)
         """
-        if not self.require_token or not self.token_store or not client_id:
+        if not self.require_token or not self.token_store:
             return True, None
+
+        if not client_id:
+            LOG.warning("Auth rejected: missing client_id")
+            return False, None
 
         if not self.token_store.has_token(client_id):
             # First connect — issue token (TOFU)
@@ -461,6 +484,16 @@ class UsdSyncServer:
         if not self.token_store:
             return False
         return self.token_store.revoke(client_id)
+
+    def bump_snapshot_epoch(self, reason: str = "") -> None:
+        """Invalidate cached virtual-file snapshots after non-log stage changes."""
+        with self._seq_lock:
+            self._snapshot_epoch += 1
+            epoch = self._snapshot_epoch
+        if reason:
+            LOG.debug("Snapshot epoch bumped to %d (%s)", epoch, reason)
+        else:
+            LOG.debug("Snapshot epoch bumped to %d", epoch)
 
     def get_token_list(self) -> list[dict]:
         """Return all token records for the dashboard."""
@@ -609,6 +642,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(p.layer.identifier)
             del session.subLayerPaths[idx]
 
+        self.bump_snapshot_epoch(f"approve_proposal:{proposal_id}")
         p.status = "approved"
         LOG.info("Proposal %s approved — merged into %s", proposal_id, p.target_department)
         return True
@@ -626,6 +660,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(p.layer.identifier)
             del session.subLayerPaths[idx]
 
+        self.bump_snapshot_epoch(f"reject_proposal:{proposal_id}")
         p.status = "rejected"
         LOG.info("Proposal %s rejected", proposal_id)
         return True
@@ -696,6 +731,7 @@ class UsdSyncServer:
             self._dept_layers[department] = layer
             self.client_layers[client_id] = layer
             self._reorder_session_sublayers()
+        self.bump_snapshot_epoch(f"create_department_layer:{department}")
         LOG.info("Created shared layer for department %s (client %s)", department, client_id)
         return layer
 
@@ -748,6 +784,7 @@ class UsdSyncServer:
             return False
         with self.stage_lock:
             self.stage.MuteLayer(layer.identifier)
+        self.bump_snapshot_epoch(f"mute_layer:{key}")
         return True
 
     def unmute_layer(self, key: str) -> bool:
@@ -757,6 +794,7 @@ class UsdSyncServer:
             return False
         with self.stage_lock:
             self.stage.UnmuteLayer(layer.identifier)
+        self.bump_snapshot_epoch(f"unmute_layer:{key}")
         return True
 
     def merge_layer(self, client_id: str) -> bool:
@@ -803,6 +841,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(layer.identifier)
             del session.subLayerPaths[idx]
         self._cleanup_client_refs(client_id)
+        self.bump_snapshot_epoch(f"merge_layer:{client_id}")
         LOG.info("Merged and removed layer for client %s", client_id)
         return True
 
@@ -819,6 +858,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(layer.identifier)
             del session.subLayerPaths[idx]
         self._cleanup_client_refs(client_id)
+        self.bump_snapshot_epoch(f"delete_layer:{client_id}")
         LOG.info("Deleted layer for client %s", client_id)
         return True
 
@@ -838,6 +878,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.department_priority = list(ordered_departments)
             self._reorder_session_sublayers()
+        self.bump_snapshot_epoch("set_department_priority")
 
     def get_layer_stack_info(self) -> list[dict]:
         """Return ordered layer stack info for the dashboard.
@@ -1091,6 +1132,7 @@ class UsdSyncServer:
         self.store.clear_and_rewrite(records)
         with self._seq_lock:
             self._event_count = len(records)
+            self._snapshot_epoch += 1
 
         self.op_cache.clear()
 
@@ -1122,6 +1164,7 @@ class UsdSyncServer:
         with self._seq_lock:
             self._event_count = 0
             self._next_seq = 1
+            self._snapshot_epoch += 1
         with self.stage_lock:
             self.edit_layer.Clear()
         self.op_cache.clear()
@@ -1183,6 +1226,11 @@ class UsdSyncServer:
             s = self._next_seq
             self._next_seq += 1
             return s
+
+    def get_snapshot_token(self) -> tuple[int, int]:
+        """Return ``(epoch, latest_seq)`` for virtual-file cache keys."""
+        with self._seq_lock:
+            return self._snapshot_epoch, max(0, self._next_seq - 1)
 
     def append_log(self, rec: dict):
         """Append event record to the event store.

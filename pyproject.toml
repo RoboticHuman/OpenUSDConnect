@@ -21,6 +21,10 @@ dashboard = [
 server = [
     "usd-core==26.3",
 ]
+vfs = [
+    "cheroot==10.0.1",
+    "wsgidav==4.3.3",
+]
 profile = [
     "py-spy==0.4.2",
 ]
