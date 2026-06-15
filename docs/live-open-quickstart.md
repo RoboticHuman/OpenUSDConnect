@@ -132,6 +132,18 @@ Windows **WebClient** service from an elevated PowerShell or from
 Start-Service WebClient
 ```
 
+When WebClient cannot be started, use the no-admin local bridge instead. It
+maps a local folder as a drive with `subst`, keeps `scene.usd` refreshed from
+the VFS, and uploads local saves back through HTTP `PUT`:
+
+```powershell
+uv run python scripts/local_vfs_drive_bridge.py `
+  --url http://127.0.0.1:7280/usd/scene.usd `
+  --mount-dir .ouc_live_mount\usd `
+  --drive O: `
+  --force
+```
+
 Then open this in Blender or any file picker:
 
 ```text

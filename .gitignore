@@ -198,6 +198,7 @@ activemq-data/
 .venv
 env/
 venv/
+.ouc_live_mount/
 ENV/
 env.bak/
 venv.bak/

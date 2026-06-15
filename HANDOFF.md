@@ -10,6 +10,7 @@ A real-time USD sync framework for DCC livelink: a Python server holds an author
 - Blender can import the WebDAV/UNC file or a live URL, read that metadata, and auto-connect emitter/receiver from `snapshot_seq + 1`.
 - The VFS is read-only by default; `--vfs-write-mode drop` accepts/discards PUT writes, and `--vfs-write-mode translate` parses complete USD saves into live server events.
 - `scripts/mount_vfs_share.py` maps the WebDAV share to a Windows drive letter, so artists can pick `O:\scene.usd` from normal file dialogs instead of pasting URLs.
+- `scripts/local_vfs_drive_bridge.py` is the no-admin fallback when WebClient cannot start; it maps `O:` with `subst`, mirrors `scene.usd`, and PUTs local saves back to the VFS.
 - Live URL imports use a local ETag-keyed cache rather than one-off temp files.
 - VFS prewarm is enabled by default; `scripts/bench_vfs_snapshot.py` measures cold/cached snapshot generation.
 - `scripts/check_windows_unc_webdav.py` validates Windows WebClient/UNC workstation setup.

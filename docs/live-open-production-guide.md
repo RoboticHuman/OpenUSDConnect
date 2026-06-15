@@ -123,6 +123,21 @@ If Windows reports `Access is denied` while starting WebClient, start the
 service from an elevated PowerShell with `Start-Service WebClient`, or start
 it from `services.msc`, then rerun the helper.
 
+If WebClient is unavailable or blocked by policy, use the no-admin local
+bridge:
+
+```powershell
+uv run python scripts/local_vfs_drive_bridge.py `
+  --url http://127.0.0.1:7280/usd/scene.usd `
+  --mount-dir .ouc_live_mount\usd `
+  --drive O: `
+  --force
+```
+
+This uses `subst`, so it does not require admin privileges. It gives artists
+the same `O:\scene.usd` file-picker path and forwards local saves back to the
+VFS write endpoint.
+
 That maps:
 
 ```text
