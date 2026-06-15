@@ -2,7 +2,7 @@
 
 This guide covers the current live-open workflow: start one OpenUSDConnect
 server, expose the live scene as a normal-looking USD file, import that file
-in Blender, and let the addon auto-connect to the live sync sockets.
+in Blender, and let the addon configure live sync from metadata.
 
 ## What You Get
 
@@ -13,7 +13,7 @@ in Blender, and let the addon auto-connect to the live sync sockets.
 - Exported live layers under `_layers/`.
 - A Windows UNC path for file browsers: `\\127.0.0.1@7280\usd\scene.usd`.
 - A flattened snapshot for non-integrated tools.
-- Blender auto-connect when the imported file contains OpenUSDConnect metadata.
+- Blender metadata discovery with configurable auto-start for receiver/emitter.
 
 The WebDAV directory is read-only by default. Direct writes return `403`.
 For compatibility with tools that require a successful save, use
@@ -170,7 +170,7 @@ Notes:
 ## Blender Live-Open
 
 The Blender addon supports one live-open entry point: import a normal file
-path with prim tagging, then let the embedded metadata drive auto-connect.
+path with prim tagging, then let the embedded metadata configure live sync.
 
 1. Start the server with `--vfs-port`.
 2. In Blender, open the USD Connect sidebar.
@@ -182,11 +182,15 @@ path with prim tagging, then let the embedded metadata drive auto-connect.
 ```
 
 The addon imports the snapshot normally, reads the embedded metadata, sets
-the receiver/emitter host and port, seeds the receiver from
-`snapshot_seq + 1`, then starts live receive and emit.
+the receiver/emitter host and port, and seeds the receiver from
+`snapshot_seq`. When the Import panel's **Auto-start Emitter** and
+**Auto-start Receiver** checkboxes are enabled, it also starts live emit and
+receive from `snapshot_seq + 1`.
 
-If live auto-connect fails, the imported snapshot stays open and Blender
-reports the connection error.
+If live auto-start fails, the imported snapshot stays open and Blender
+reports the connection error. When either checkbox is disabled, the manual
+start/stop buttons remain available and use the metadata-populated host,
+port, and sequence values.
 
 ## Metadata Contract
 

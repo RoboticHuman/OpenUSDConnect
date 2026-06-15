@@ -152,6 +152,30 @@ _SCENE_PROPS = [
         },
     ),
     (
+        "usd_connect_live_auto_start_emitter",
+        bpy.props.BoolProperty,
+        {
+            "name": "Auto-start Emitter",
+            "description": (
+                "When imported USD contains OpenUSDConnect metadata, "
+                "start local capture and connect the network emitter"
+            ),
+            "default": True,
+        },
+    ),
+    (
+        "usd_connect_live_auto_start_receiver",
+        bpy.props.BoolProperty,
+        {
+            "name": "Auto-start Receiver",
+            "description": (
+                "When imported USD contains OpenUSDConnect metadata, "
+                "start the receiver from the snapshot sequence"
+            ),
+            "default": True,
+        },
+    ),
+    (
         "usd_connect_emit_to_file",
         bpy.props.BoolProperty,
         {
@@ -1082,14 +1106,20 @@ def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> b
     host = (meta.get("host") or "").strip()
     port = int(meta.get("port") or 0)
     snapshot_seq = int(meta.get("snapshot_seq") or 0)
+    auto_start_emitter = bool(
+        getattr(scene, "usd_connect_live_auto_start_emitter", True)
+    )
+    auto_start_receiver = bool(
+        getattr(scene, "usd_connect_live_auto_start_receiver", True)
+    )
     if not host or not (1 <= port <= 65535):
         raise RuntimeError("live metadata is missing a valid host/port")
 
     from . import receiver_addon
 
-    if getattr(scene, "usd_connect_recv_running", False):
+    if auto_start_receiver and getattr(scene, "usd_connect_recv_running", False):
         _call_required_operator(bpy.ops.usd_connect.stop_receiver, "stop receiver")
-    if (
+    if auto_start_emitter and (
         getattr(scene, "usd_connect_net_emitter_running", False)
         or _state.sender is not None
         or _state.author is not None
@@ -1102,39 +1132,52 @@ def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> b
     scene.usd_connect_recv_host = host
     scene.usd_connect_recv_port = port
     scene.usd_connect_recv_last_seq = snapshot_seq
-    receiver_addon._LAST_SEQ = snapshot_seq
-    if receiver_addon._DISPATCHER is not None:
-        receiver_addon._DISPATCHER.last_seq = snapshot_seq
+    if auto_start_receiver or not getattr(scene, "usd_connect_recv_running", False):
+        receiver_addon._LAST_SEQ = snapshot_seq
+        if receiver_addon._DISPATCHER is not None:
+            receiver_addon._DISPATCHER.last_seq = snapshot_seq
 
     try:
-        _call_required_operator(bpy.ops.usd_connect.connect_emitter, "connect emitter")
-        scene.usd_connect_recv_last_seq = snapshot_seq
-        receiver_addon._LAST_SEQ = snapshot_seq
-        _call_required_operator(bpy.ops.usd_connect.start_receiver, "start receiver")
-        _wait_for_receiver_handshake(receiver_addon)
+        if auto_start_emitter:
+            _call_required_operator(bpy.ops.usd_connect.connect_emitter, "connect emitter")
+        if auto_start_receiver:
+            scene.usd_connect_recv_last_seq = snapshot_seq
+            receiver_addon._LAST_SEQ = snapshot_seq
+            if receiver_addon._DISPATCHER is not None:
+                receiver_addon._DISPATCHER.last_seq = snapshot_seq
+            _call_required_operator(bpy.ops.usd_connect.start_receiver, "start receiver")
+            _wait_for_receiver_handshake(receiver_addon)
     except Exception:
         receiver = getattr(receiver_addon, "_RECEIVER", None)
         if receiver is not None and getattr(receiver, "auth_rejected", False):
             token_client.delete_token(host, port)
         try:
-            if getattr(scene, "usd_connect_recv_running", False):
+            if auto_start_receiver and getattr(scene, "usd_connect_recv_running", False):
                 bpy.ops.usd_connect.stop_receiver()
         except Exception:
-            LOG.exception("Failed to stop receiver after live auto-connect failure")
+            LOG.exception("Failed to stop receiver after live auto-start failure")
         try:
-            if (
+            if auto_start_emitter and (
                 getattr(scene, "usd_connect_net_emitter_running", False)
                 or _state.sender is not None
             ):
                 bpy.ops.usd_connect.disconnect_emitter()
         except Exception:
-            LOG.exception("Failed to disconnect emitter after live auto-connect failure")
+            LOG.exception("Failed to disconnect emitter after live auto-start failure")
         raise
 
-    report(
-        {"INFO"},
-        f"Live USD connected to {host}:{port} from seq={snapshot_seq + 1}",
-    )
+    started = []
+    if auto_start_emitter:
+        started.append("emitter")
+    if auto_start_receiver:
+        started.append(f"receiver from seq={snapshot_seq + 1}")
+    if started:
+        report(
+            {"INFO"},
+            f"Live USD connected to {host}:{port}; started {', '.join(started)}",
+        )
+    else:
+        report({"INFO"}, f"Live USD configured for {host}:{port}; auto-start disabled")
     return True
 
 
@@ -1175,7 +1218,7 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             try:
                 _auto_connect_live_import(context, local_path, meta, self.report)
             except Exception as e:
-                self.report({"ERROR"}, f"Live auto-connect failed: {e}")
+                self.report({"ERROR"}, f"Live auto-start failed: {e}")
             return {"FINISHED"}
         self.report({"INFO"}, "USD imported with prim tagging")
         return {"FINISHED"}

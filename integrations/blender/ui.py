@@ -21,6 +21,9 @@ def _draw_import_section(layout, scene):
     box = layout.box()
     box.label(text="Import", icon="IMPORT")
     box.operator("usd_connect.import_with_hook")
+    col = box.column(align=True)
+    col.prop(scene, "usd_connect_live_auto_start_emitter")
+    col.prop(scene, "usd_connect_live_auto_start_receiver")
     box.operator("usd_connect.print_import_props", icon="CONSOLE")
 
 

@@ -29,7 +29,8 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 - Browseable Windows drive helper: `uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open`
 - Flattened snapshot: `scene.usd`
 - Composition root: `scene.live.usda`
-- Blender imports the snapshot and auto-connects receiver/emitter when metadata is present.
+- Blender imports the snapshot, reads live metadata, and auto-starts
+  receiver/emitter when enabled.
 - Optional write fallback: `--vfs-write-mode translate` turns full-file USD saves into live events.
 
 ## Getting Started
@@ -98,8 +99,8 @@ Install the output zip (`dist/usd_connect_blender.zip`) in Blender via **Edit > 
 
 For seamless live-open, start the server with `--vfs-port`, then import
 `\\127.0.0.1@7280\usd\scene.usd` in Blender or mount it as `O:\scene.usd`.
-The addon imports the snapshot through the normal file picker and
-auto-connects receiver/emitter from embedded metadata.
+The addon imports the snapshot through the normal file picker, reads embedded
+metadata, and auto-starts receiver/emitter when enabled in the Import panel.
 
 ```powershell
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
@@ -120,7 +121,7 @@ py "path/to/OpenUSDConnect/integrations/unreal/connect.py"
 - [Testing Setup](docs/testing-setup.md) — Test tiers, Blender configuration, adding new tests
 - [Profiling](docs/profiling.md) — Performance profiling with py-spy
 
-- [Live-Open Quickstart](docs/live-open-quickstart.md) - WebDAV/UNC live-open and Blender auto-connect
+- [Live-Open Quickstart](docs/live-open-quickstart.md) - WebDAV/UNC live-open and Blender metadata sync
 - [Live-Open Production Guide](docs/live-open-production-guide.md) - Production architecture, limitations, and checklist
 
 ## Testing

@@ -8,7 +8,7 @@ A virtual USD file served by the sync server carries a metadata block in
      "scene_id": ..., "snapshot_seq": N, "epoch": ..., "vfs_url": ...,
      "department": ..., "requires_token": ...}
 
-This module reads that block so the Blender addon can auto-connect when the
+This module reads that block so the Blender addon can configure live sync when the
 user imports a live file. It is deliberately free of ``bpy`` so it can be
 unit-tested outside Blender; it depends only on ``pxr`` and the stdlib.
 """
@@ -113,7 +113,7 @@ def resolve_import_source(src: str) -> tuple[str, dict | None]:
 
     *src* may be a local file path or an ``http(s)://`` URL. Remote sources
     are fetched to a temp file. The returned local path is what Blender's USD
-    importer should open; the metadata (if any) drives auto-connect.
+    importer should open; the metadata (if any) drives live sync setup.
     """
     local_path = fetch_to_temp(src) if is_remote(src) else src
     meta = read_live_metadata(local_path)

@@ -32,6 +32,8 @@ def _parse_args():
     vfs_port = 7280
     out_path = ""
     require_token = False
+    auto_start_emitter = True
+    auto_start_receiver = True
     argv = sys.argv
     if "--" in argv:
         script_args = argv[argv.index("--") + 1 :]
@@ -44,9 +46,13 @@ def _parse_args():
                 out_path = script_args[i + 1]
             elif arg == "--require-token":
                 require_token = True
+            elif arg == "--no-auto-emitter":
+                auto_start_emitter = False
+            elif arg == "--no-auto-receiver":
+                auto_start_receiver = False
     if not out_path:
         raise RuntimeError("--out is required")
-    return port, vfs_port, out_path, require_token
+    return port, vfs_port, out_path, require_token, auto_start_emitter, auto_start_receiver
 
 
 def _find_prim_object(prim_path: str):
@@ -69,7 +75,14 @@ def _write_results(out_path: str, results: dict[str, str]) -> None:
 
 
 def main():
-    port, vfs_port, out_path, require_token = _parse_args()
+    (
+        port,
+        vfs_port,
+        out_path,
+        require_token,
+        auto_start_emitter,
+        auto_start_receiver,
+    ) = _parse_args()
     results: dict[str, str] = {}
 
     import integrations.blender as addon
@@ -81,6 +94,9 @@ def main():
     from openusdconnect.server.vfs import VirtualStageFile, run_vfs_server
 
     addon.register()
+    scene = bpy.context.scene
+    scene.usd_connect_live_auto_start_emitter = auto_start_emitter
+    scene.usd_connect_live_auto_start_receiver = auto_start_receiver
     token_client._TOKEN_DIR = os.path.dirname(out_path)
     token_client._TOKEN_FILE = os.path.join(os.path.dirname(out_path), "client_tokens.json")
     srv = UsdSyncServer(
@@ -120,7 +136,6 @@ def main():
         else:
             results["import_operator"] = "PASS"
 
-        scene = bpy.context.scene
         results["metadata_host"] = (
             "PASS"
             if scene.usd_connect_emit_host == "127.0.0.1"
@@ -132,15 +147,48 @@ def main():
             if scene.usd_connect_emit_port == port and scene.usd_connect_recv_port == port
             else f"FAIL: emit={scene.usd_connect_emit_port} recv={scene.usd_connect_recv_port}"
         )
-        results["receiver_running"] = "PASS" if scene.usd_connect_recv_running else "FAIL"
-        results["emitter_running"] = (
-            "PASS" if scene.usd_connect_net_emitter_running and capture._state.sender else "FAIL"
+        results["receiver_auto_state"] = (
+            "PASS"
+            if scene.usd_connect_recv_running == auto_start_receiver
+            else f"FAIL: running={scene.usd_connect_recv_running} expected={auto_start_receiver}"
+        )
+        emitter_running = bool(scene.usd_connect_net_emitter_running and capture._state.sender)
+        results["emitter_auto_state"] = (
+            "PASS"
+            if emitter_running == auto_start_emitter
+            else f"FAIL: running={emitter_running} expected={auto_start_emitter}"
         )
         results["snapshot_seq_seeded"] = (
             "PASS"
             if receiver_addon._LAST_SEQ >= 2 and scene.usd_connect_recv_last_seq >= 2
             else f"FAIL: last={receiver_addon._LAST_SEQ} scene={scene.usd_connect_recv_last_seq}"
         )
+        if not auto_start_emitter:
+            result = bpy.ops.usd_connect.connect_emitter()
+            results["manual_emitter_start"] = (
+                "PASS"
+                if "FINISHED" in result and scene.usd_connect_net_emitter_running
+                else f"FAIL: {result}"
+            )
+        if not auto_start_receiver:
+            result = bpy.ops.usd_connect.start_receiver()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                receiver = getattr(receiver_addon, "_RECEIVER", None)
+                if receiver is not None and getattr(receiver, "connected", False):
+                    break
+                time.sleep(0.05)
+            receiver = getattr(receiver_addon, "_RECEIVER", None)
+            results["manual_receiver_start"] = (
+                "PASS"
+                if (
+                    "FINISHED" in result
+                    and scene.usd_connect_recv_running
+                    and receiver is not None
+                    and getattr(receiver, "connected", False)
+                )
+                else f"FAIL: {result}"
+            )
         if require_token:
             saved_token = token_client.load_token("127.0.0.1", port)
             results["tofu_token_saved"] = "PASS" if saved_token else "FAIL"

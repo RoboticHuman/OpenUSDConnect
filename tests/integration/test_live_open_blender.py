@@ -20,7 +20,15 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _run_live_open_smoke(blender_exe, tmp_path, sync_port, *, require_token=False):
+def _run_live_open_smoke(
+    blender_exe,
+    tmp_path,
+    sync_port,
+    *,
+    require_token=False,
+    auto_start_emitter=True,
+    auto_start_receiver=True,
+):
     vfs_port = _free_port()
     results_path = str(tmp_path / "live_open_results.json")
 
@@ -42,6 +50,10 @@ def _run_live_open_smoke(blender_exe, tmp_path, sync_port, *, require_token=Fals
     ]
     if require_token:
         cmd.append("--require-token")
+    if not auto_start_emitter:
+        cmd.append("--no-auto-emitter")
+    if not auto_start_receiver:
+        cmd.append("--no-auto-receiver")
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -68,3 +80,13 @@ def test_blender_live_open_auto_connect(blender_exe, tmp_path, free_port):
 
 def test_blender_live_open_auto_connect_with_tofu_token(blender_exe, tmp_path, free_port):
     _run_live_open_smoke(blender_exe, tmp_path, free_port, require_token=True)
+
+
+def test_blender_live_open_can_defer_auto_start(blender_exe, tmp_path, free_port):
+    _run_live_open_smoke(
+        blender_exe,
+        tmp_path,
+        free_port,
+        auto_start_emitter=False,
+        auto_start_receiver=False,
+    )

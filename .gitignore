@@ -273,3 +273,5 @@ __marimo__/
 
 # Vendored libraries
 vendor/
+
+.ouc_live_mount/

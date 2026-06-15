@@ -7,7 +7,7 @@ The zip bundles the openusdconnect core library inside the addon directory.
 bl_info = {
     "name": "USD Connect",
     "author": "OpenUSDConnect",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > USD Connect",
     "description": "Real-time USD sync: capture and receive transform edits over the network",
@@ -69,7 +69,7 @@ if _is_addon_reload:
     import importlib
 
     if "live_discovery" in globals():
-        importlib.reload(live_discovery)
+        importlib.reload(globals()["live_discovery"])
     importlib.reload(shader_mapper)  # noqa: F821
     importlib.reload(blender_adapter)  # noqa: F821
     importlib.reload(capture)  # noqa: F821

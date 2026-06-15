@@ -1,7 +1,7 @@
 # Live-Open Production Guide
 
 This document describes the current production shape of OpenUSDConnect
-live-open: WebDAV snapshot fallback and Blender metadata-driven auto-connect.
+live-open: WebDAV snapshot fallback and Blender metadata-driven sync setup.
 
 ## Current Architecture
 
@@ -15,7 +15,7 @@ flowchart LR
     C --> L["_layers/*.usda live layers"]
     D --> E["Windows UNC \\\\host@7280\\usd\\scene.usd"]
     E --> G["Blender import normal USD import"]
-    G --> I["Read metadata auto-connect receiver/emitter"]
+    G --> I["Read metadata configure receiver/emitter"]
     I --> A
 ```
 
@@ -169,9 +169,10 @@ The current smooth path is:
    - Sets receiver and emitter host/port from metadata.
    - Sets the base USD path to the imported snapshot.
    - Seeds receiver last sequence to `snapshot_seq`.
-   - Starts the emitter.
-   - Starts the receiver from `snapshot_seq + 1`.
-6. If auto-connect fails, the imported snapshot remains open and the error
+   - Starts the emitter when **Auto-start Emitter** is enabled.
+   - Starts the receiver from `snapshot_seq + 1` when **Auto-start Receiver**
+     is enabled.
+6. If auto-start fails, the imported snapshot remains open and the error
    is reported to the user.
 
 This preserves backwards compatibility with the existing manual Blender
@@ -225,8 +226,8 @@ Before treating live-open as production ready for a show or team, verify:
 - WebDAV/UNC opens from the target artist workstation.
 - `scripts/check_windows_unc_webdav.py` succeeds on target Windows workstations.
 - Blender addon package includes `live_discovery.py`.
-- Blender can import the mounted drive or UNC path and auto-connect without
-  manual host/port.
+- Blender can import the mounted drive or UNC path, read metadata, and either
+  auto-start sync or leave manual start controls preconfigured.
 - Token-required mode works on a fresh workstation and after token rotation.
 - Non-integrated USD tools can open the snapshot read-only.
 - Direct save attempts return read-only errors unless `--vfs-write-mode drop`
