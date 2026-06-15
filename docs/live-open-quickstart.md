@@ -92,10 +92,10 @@ uv run openusdconnect-server `
 http://127.0.0.1:7280/usd/scene.usd
 ```
 
-This is the flattened fallback file. Browsers, `curl`,
-`Invoke-WebRequest`, and the Blender live URL operator can download it.
+This is the flattened fallback file. Browsers, `curl`, and
+`Invoke-WebRequest` can download it for diagnostics or custom launcher flows.
 Do not assume every stock USD runtime can open raw HTTP directly. Use the UNC
-path when an application expects a normal file path.
+or mounted drive path when an application expects a normal file path.
 
 The directory also contains:
 
@@ -169,14 +169,13 @@ Notes:
 
 ## Blender Live-Open
 
-The Blender addon supports two live-open entry points.
-
-### Option A: Import The UNC File
+The Blender addon supports one live-open entry point: import a normal file
+path with prim tagging, then let the embedded metadata drive auto-connect.
 
 1. Start the server with `--vfs-port`.
 2. In Blender, open the USD Connect sidebar.
 3. Click `Import USD (with prim tagging)`.
-4. Select or paste the UNC path:
+4. Select or paste the UNC path, or choose `O:\scene.usd` after mounting:
 
 ```text
 \\127.0.0.1@7280\usd\scene.usd
@@ -185,21 +184,6 @@ The Blender addon supports two live-open entry points.
 The addon imports the snapshot normally, reads the embedded metadata, sets
 the receiver/emitter host and port, seeds the receiver from
 `snapshot_seq + 1`, then starts live receive and emit.
-
-### Option B: Import A Live URL
-
-1. Paste one of these into the live URL field in the USD Connect sidebar:
-
-```text
-http://127.0.0.1:7280/usd/scene.usd
-```
-
-2. Click the URL import button.
-
-The addon downloads the snapshot to an ETag-keyed local `.usd` cache, imports
-that local file, reads the live metadata, and auto-connects. If the URL points
-at `scene.live.usda`, the addon follows its `flattened_fallback` metadata
-because local temp-file imports cannot resolve the remote `_layers/` directory.
 
 If live auto-connect fails, the imported snapshot stays open and Blender
 reports the connection error.

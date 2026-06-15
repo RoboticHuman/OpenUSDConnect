@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import urllib.request
 
 import bpy
 
@@ -111,8 +112,9 @@ def main():
             origin="seed-origin",
         )
 
-        bpy.context.scene.usd_connect_live_url = url
-        result = bpy.ops.usd_connect.import_live_url()
+        snapshot_path = os.path.join(os.path.dirname(out_path), "scene.usd")
+        urllib.request.urlretrieve(url, snapshot_path)
+        result = bpy.ops.usd_connect.import_with_hook(filepath=snapshot_path)
         if "FINISHED" not in result:
             results["import_operator"] = f"FAIL: {result}"
         else:

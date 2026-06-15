@@ -42,7 +42,7 @@ Blender:
 
 | Path form | Example | Best use |
 | --- | --- | --- |
-| HTTP/WebDAV | `http://127.0.0.1:7280/usd/scene.usd` | Browser/download clients and Blender live URL import. |
+| HTTP/WebDAV | `http://127.0.0.1:7280/usd/scene.usd` | Browser/download clients, diagnostics, launchers, and the local bridge. |
 | Windows UNC | `\\127.0.0.1@7280\usd\scene.usd` | Normal Windows file picker flow. |
 
 Additional VFS entries:
@@ -177,11 +177,10 @@ The current smooth path is:
 This preserves backwards compatibility with the existing manual Blender
 workflow.
 
-HTTP live URL imports are downloaded to an ETag-keyed local cache. Unchanged
-snapshots reuse the same local base file; a changed ETag creates a new cache
-file and prunes the older file for that URL. If the URL points at
-`scene.live.usda`, Blender follows the embedded `flattened_fallback` because a
-single downloaded temp file cannot resolve the remote `_layers/` directory.
+The HTTP URL is still the backing transport for WebDAV clients, diagnostics,
+and the no-admin local bridge. Blender's production path is intentionally the
+normal file import button so users pick `O:\scene.usd` or the UNC path instead
+of pasting a URL into a separate import field.
 
 ## Token And Security Model
 
@@ -226,8 +225,8 @@ Before treating live-open as production ready for a show or team, verify:
 - WebDAV/UNC opens from the target artist workstation.
 - `scripts/check_windows_unc_webdav.py` succeeds on target Windows workstations.
 - Blender addon package includes `live_discovery.py`.
-- Blender can import the UNC path and auto-connect without manual host/port.
-- Blender live URL import works for the HTTP URL.
+- Blender can import the mounted drive or UNC path and auto-connect without
+  manual host/port.
 - Token-required mode works on a fresh workstation and after token rotation.
 - Non-integrated USD tools can open the snapshot read-only.
 - Direct save attempts return read-only errors unless `--vfs-write-mode drop`

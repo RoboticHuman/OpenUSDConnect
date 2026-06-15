@@ -73,7 +73,7 @@ This exposes:
 
 | Path | Use |
 |------|-----|
-| `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL and Blender live URL import. |
+| `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL for diagnostics, launchers, and the local bridge. |
 | `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
 | `O:\scene.usd` | Drive-letter file-picker path after mounting the WebDAV share. |
 
@@ -85,20 +85,13 @@ uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
 
 ### Blender
 
-Use either entry point:
-
-- Click **Import USD (with prim tagging)** and choose the UNC path.
-- Or choose `O:\scene.usd` after mounting the WebDAV share as a drive.
-- Paste the HTTP path into the live URL field and click the URL import button.
+Click **Import USD (with prim tagging)** and choose the normal file path:
+the UNC path when Windows WebClient is available, or `O:\scene.usd` after
+mounting the WebDAV share or no-admin local bridge as a drive.
 
 The addon imports the snapshot first. If live metadata is present, it sets
 the receiver and emitter host/port, seeds the receiver from `snapshot_seq`,
 starts the emitter, and starts the receiver from `snapshot_seq + 1`.
-HTTP live URL imports are cached locally by URL and ETag so unchanged imports
-reuse the same base USD path instead of leaking temp files. If a live URL
-points at `scene.live.usda`, the addon follows the embedded flattened fallback
-URL because the one-file local cache cannot resolve the remote `_layers/`
-directory.
 
 The virtual share is read-only by default. Server operators can opt into
 compatibility drop mode with `--vfs-write-mode drop`, or fallback edit

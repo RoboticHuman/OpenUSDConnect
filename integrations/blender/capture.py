@@ -142,16 +142,6 @@ def _repair_import_prim_tags(usd_path: str) -> int:
 # ---------------------------------------------------------------------------
 _SCENE_PROPS = [
     (
-        "usd_connect_live_url",
-        bpy.props.StringProperty,
-        {
-            "name": "Live URL",
-            "description": "OpenUSDConnect live file URL or WebDAV path",
-            "subtype": "FILE_PATH",
-            "default": "",
-        },
-    ),
-    (
         "usd_connect_base_usd_path",
         bpy.props.StringProperty,
         {
@@ -1173,8 +1163,6 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             meta = live_discovery.read_live_metadata(local_path)
             _repair_import_prim_tags(local_path)
             context.scene.usd_connect_base_usd_path = local_path
-            if meta:
-                context.scene.usd_connect_live_url = meta.get("vfs_url") or self.filepath
             # Apply MaterialX materials that Blender's importer doesn't handle
             from .blender_adapter import BlenderAdapter
 
@@ -1191,19 +1179,6 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             return {"FINISHED"}
         self.report({"INFO"}, "USD imported with prim tagging")
         return {"FINISHED"}
-
-
-class USD_CONNECT_OT_import_live_url(bpy.types.Operator):
-    bl_idname = "usd_connect.import_live_url"
-    bl_label = "Import Live URL"
-    bl_description = "Import an OpenUSDConnect live URL and auto-connect when metadata is present"
-
-    def execute(self, context):
-        src = (context.scene.usd_connect_live_url or "").strip()
-        if not src:
-            self.report({"ERROR"}, "Live URL is empty")
-            return {"CANCELLED"}
-        return bpy.ops.usd_connect.import_with_hook(filepath=src)
 
 
 class USD_CONNECT_OT_start_capture(bpy.types.Operator):
@@ -1435,7 +1410,6 @@ class USD_CONNECT_OT_print_import_props(bpy.types.Operator):
 _CAPTURE_CLASSES = (
     USD_CONNECT_Hook,
     USD_CONNECT_OT_import_with_hook,
-    USD_CONNECT_OT_import_live_url,
     USD_CONNECT_OT_start_capture,
     USD_CONNECT_OT_stop_capture,
     USD_CONNECT_OT_emit_diff,

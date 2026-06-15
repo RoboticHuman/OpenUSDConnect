@@ -21,9 +21,6 @@ def _draw_import_section(layout, scene):
     box = layout.box()
     box.label(text="Import", icon="IMPORT")
     box.operator("usd_connect.import_with_hook")
-    row = box.row(align=True)
-    row.prop(scene, "usd_connect_live_url", text="")
-    row.operator("usd_connect.import_live_url", text="", icon="URL")
     box.operator("usd_connect.print_import_props", icon="CONSOLE")
 
 

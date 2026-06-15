@@ -97,10 +97,9 @@ uv run python scripts/build_blender_addon.py
 Install the output zip (`dist/usd_connect_blender.zip`) in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 
 For seamless live-open, start the server with `--vfs-port`, then import
-`\\127.0.0.1@7280\usd\scene.usd` in Blender, mount it as `O:\scene.usd`, or paste
-`http://127.0.0.1:7280/usd/scene.usd` into the addon's live URL field.
-The addon imports the snapshot and auto-connects receiver/emitter from
-embedded metadata.
+`\\127.0.0.1@7280\usd\scene.usd` in Blender or mount it as `O:\scene.usd`.
+The addon imports the snapshot through the normal file picker and
+auto-connects receiver/emitter from embedded metadata.
 
 ```powershell
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
