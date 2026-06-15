@@ -123,6 +123,27 @@ def vfs_drop(tmp_path, free_port):
         srv.store.close()
 
 
+@pytest.fixture
+def vfs_translate(tmp_path, free_port):
+    srv = UsdSyncServer(log_path=str(tmp_path / "test-translate.db"))
+    provider = VirtualStageFileSet(
+        srv,
+        flat_name=FILE_NAME,
+        advertise_host="127.0.0.1",
+        sync_port=7200,
+        share=SHARE,
+        vfs_base_url=f"http://127.0.0.1:{free_port}/{SHARE}",
+        write_mode=WriteMode.TRANSLATE,
+    )
+    handle = run_vfs_server(provider, "127.0.0.1", free_port, share=SHARE)
+    client = DavClient("127.0.0.1", free_port)
+    try:
+        yield srv, client
+    finally:
+        handle.stop()
+        srv.store.close()
+
+
 def _file_path():
     return f"/{SHARE}/{FILE_NAME}"
 
@@ -135,6 +156,14 @@ def _open_stage(data: bytes) -> Usd.Stage:
     layer = Sdf.Layer.CreateAnonymous(".usda")
     assert layer.ImportFromString(data.decode("utf-8"))
     return Usd.Stage.Open(layer)
+
+
+def _stage_bytes(specs: list[tuple[str, str]]) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    for path, type_name in specs:
+        stage.DefinePrim(path, type_name)
+    return layer.ExportToString().encode("utf-8")
 
 
 def _free_port():
@@ -316,6 +345,36 @@ class TestWriteDrop:
         status, _, _ = client.put(_file_path(), body)
         assert 200 <= status < 300
         assert srv.get_event_count() == 0
+
+    def test_put_translates_full_usd_snapshot_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        _send(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+                {"k": "ensure_prim", "prim": "/World/Old", "typeName": "Cube"},
+            ],
+        )
+        records = []
+        srv.add_event_listener(records.append)
+
+        body = _stage_bytes([
+            ("/World", "Xform"),
+            ("/World/New", "Sphere"),
+        ])
+        status, _, _ = client.put(_file_path(), body)
+        assert 200 <= status < 300
+
+        assert srv.get_event_count() > 0
+        assert any(rec.get("event", {}).get("prim") == "/World/New" for rec in records)
+        assert srv.stage.GetPrimAtPath("/World/New")
+        assert not srv.stage.GetPrimAtPath("/World/Old")
+
+        status, _, data = client.get(_file_path())
+        assert status == 200
+        stage = _open_stage(data)
+        assert stage.GetPrimAtPath("/World/New")
+        assert not stage.GetPrimAtPath("/World/Old")
 
     def test_delete_forbidden(self, vfs):
         _, client = vfs

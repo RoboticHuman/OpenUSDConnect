@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from pxr import Sdf
+from pxr import Sdf, Usd
 
 from ...protocol_constants import PROTOCOL_VERSION
 
@@ -86,6 +87,58 @@ class _DiscardSink:
         pass
 
 
+class _BufferedWriteSink:
+    """Write sink that buffers uploaded USD bytes until WebDAV commit."""
+
+    def __init__(self):
+        self.bytes_written = 0
+        self._file = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+
+    def write(self, data: bytes) -> int:
+        self.bytes_written += len(data)
+        return self._file.write(data)
+
+    def getvalue(self) -> bytes:
+        self._file.seek(0)
+        return self._file.read()
+
+    def close(self):
+        # WsgiDAV may call close() before end_write(); keep bytes available
+        # until finish_write() has translated them.
+        pass
+
+    def dispose(self):
+        self._file.close()
+
+
+def _open_uploaded_stage(data: bytes) -> Usd.Stage:
+    """Open uploaded USD bytes as a temporary layer.
+
+    The server serves USDA text under a ``.usd`` file name, but a DCC may save
+    back either text or crate bytes. Writing to a real temporary ``.usd`` lets
+    OpenUSD pick the correct parser.
+    """
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".usd")
+    tmp_path = tmp.name
+    try:
+        with tmp:
+            tmp.write(data)
+        layer = Sdf.Layer.FindOrOpen(tmp_path)
+        if layer is None:
+            raise ValueError("uploaded bytes are not a readable USD layer")
+        anon = Sdf.Layer.CreateAnonymous(".usda")
+        anon.TransferContent(layer)
+        stage = Usd.Stage.Open(anon)
+        if stage is None:
+            raise ValueError("uploaded USD layer did not open as a stage")
+        return stage
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def _safe_stem(value: str, fallback: str) -> str:
     stem = os.path.splitext(os.path.basename(value))[0]
     if not stem:
@@ -109,8 +162,6 @@ class _CachedVirtualFile:
         write_mode: WriteMode = WriteMode.FORBID,
         content_type: str = "application/octet-stream",
     ):
-        if write_mode is WriteMode.TRANSLATE:
-            raise ValueError("write mode 'translate' is not implemented yet")
         self._server = sync_server
         self.name = name
         self._write_mode = write_mode
@@ -130,7 +181,7 @@ class _CachedVirtualFile:
         return self._write_mode
 
     def can_write(self) -> bool:
-        return self._write_mode is WriteMode.DROP
+        return self._write_mode in (WriteMode.DROP, WriteMode.TRANSLATE)
 
     def read(self) -> bytes:
         return self._ensure_current()[0]
@@ -183,22 +234,42 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.DROP:
             LOG.warning("VFS write dropped (%d bytes) for %s", len(data), self.name)
             return
-        raise NotImplementedError("translate write mode is phase 2")
+        if self._write_mode is WriteMode.TRANSLATE:
+            self._translate_write(data)
+            return
+        raise NotImplementedError(f"unknown write mode {self._write_mode}")
 
     def open_write_sink(self) -> _DiscardSink:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
             return _DiscardSink()
-        raise NotImplementedError("translate write mode is phase 2")
+        if self._write_mode is WriteMode.TRANSLATE:
+            return _BufferedWriteSink()
+        raise NotImplementedError(f"unknown write mode {self._write_mode}")
 
-    def finish_write(self, sink: _DiscardSink) -> None:
+    def finish_write(self, sink: _DiscardSink | _BufferedWriteSink) -> None:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
             LOG.warning("VFS write dropped (%d bytes) for %s", sink.bytes_written, self.name)
             return
-        raise NotImplementedError("translate write mode is phase 2")
+        if self._write_mode is WriteMode.TRANSLATE:
+            try:
+                data = sink.getvalue()
+                self._translate_write(data)
+                LOG.warning(
+                    "VFS write translated (%d bytes) for %s",
+                    sink.bytes_written,
+                    self.name,
+                )
+            finally:
+                sink.dispose()
+            return
+        raise NotImplementedError(f"unknown write mode {self._write_mode}")
+
+    def _translate_write(self, data: bytes) -> None:
+        raise NotImplementedError(f"{self.name} cannot translate writes")
 
 
 class VirtualStageFile(_CachedVirtualFile):
@@ -258,6 +329,16 @@ class VirtualStageFile(_CachedVirtualFile):
         }
         meta.update(extra)
         return meta
+
+    def _translate_write(self, data: bytes) -> None:
+        stage = _open_uploaded_stage(data)
+        event_count = self._server.replace_from_stage_snapshot(stage)
+        LOG.warning(
+            "VFS write fallback translated %d bytes from %s into %d events",
+            len(data),
+            self.name,
+            event_count,
+        )
 
 
 class _GeneratedTextFile(_CachedVirtualFile):

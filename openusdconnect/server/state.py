@@ -19,6 +19,7 @@ from pxr import Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
+    NoticeEmitter,
     read_material_binding,
     read_payloads,
     read_references,
@@ -1231,6 +1232,79 @@ class UsdSyncServer:
         """Return ``(epoch, latest_seq)`` for virtual-file cache keys."""
         with self._seq_lock:
             return self._snapshot_epoch, max(0, self._next_seq - 1)
+
+    def replace_from_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        *,
+        client_id: str = "vfs-write",
+        origin: str = "vfs-write",
+    ) -> int:
+        """Replace the live edit state from a complete uploaded USD snapshot.
+
+        This is the WebDAV write-fallback path. A plain DCC save gives us a
+        complete USD layer, not semantic incremental events, so the server
+        translates it into a full event snapshot, resets the live edit log,
+        broadcasts a resync, then broadcasts the translated events.
+
+        Returns the number of translated events persisted to the event log.
+        """
+        with self.stage_lock:
+            before_paths = {
+                str(prim.GetPath())
+                for prim in self.stage.Traverse()
+                if str(prim.GetPath()) != "/"
+            }
+
+        uploaded_paths = {
+            str(prim.GetPath())
+            for prim in uploaded_stage.Traverse()
+            if str(prim.GetPath()) != "/"
+        }
+
+        emitter = NoticeEmitter(uploaded_stage)
+        try:
+            events = emitter.snapshot_events()
+        finally:
+            emitter.cleanup()
+
+        # Hide prims that existed in the previous composed stage but are absent
+        # from the uploaded snapshot. This lets full-file saves express deletes
+        # even when the original prim lives in the immutable base layer.
+        removed_paths = sorted(
+            before_paths - uploaded_paths,
+            key=lambda p: p.count("/"),
+            reverse=True,
+        )
+        for prim_path in removed_paths:
+            events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+
+        self.txn_barrier.acquire_exclusive()
+        try:
+            self._purge_inner()
+            if not events:
+                return 0
+
+            records, changed_set = self.process_txn(
+                events,
+                client_id=client_id,
+                origin=origin,
+            )
+            changed_records = []
+            changed_bins = []
+            for i, (rec, rec_bin) in enumerate(records):
+                if i in changed_set:
+                    changed_records.append(rec)
+                    changed_bins.append(rec_bin)
+            if changed_records:
+                self.broadcast_bytes(
+                    frame_batch(changed_bins),
+                    changed_records,
+                )
+            LOG.info("Translated VFS snapshot write into %d live events", len(events))
+            return len(events)
+        finally:
+            self.txn_barrier.release_exclusive()
 
     def append_log(self, rec: dict):
         """Append event record to the event store.

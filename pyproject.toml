@@ -41,6 +41,7 @@ markers = [
 
 [project.scripts]
 openusdconnect-server = "openusdconnect.server:main"
+openusdconnect-mount-vfs = "openusdconnect.vfs_mount:main"
 
 # --- Ruff (linter + formatter) ---
 # Docs: https://docs.astral.sh/ruff/

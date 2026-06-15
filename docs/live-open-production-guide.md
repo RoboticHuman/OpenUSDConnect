@@ -91,7 +91,7 @@ Supported operations:
 | `OPTIONS` | Advertises DAV class support for WebDAV clients. |
 | `PROPFIND` | Lists the virtual share and file metadata. |
 | `LOCK` / `UNLOCK` | Supported for Windows WebClient compatibility. |
-| `PUT` to a virtual file | Forbidden by default; `--vfs-write-mode drop` streams and discards the body with a warning log. |
+| `PUT` to `scene.usd` | Forbidden by default; `drop` streams and discards the body; `translate` parses a full USD save and broadcasts translated live events. |
 
 Forbidden operations:
 
@@ -101,7 +101,46 @@ Forbidden operations:
 - Rename, move, or copy resources.
 
 This is a deliberate safety policy. Direct file writes do not become live
-events yet; the default is now read-only behavior instead of silent success.
+events unless `--vfs-write-mode translate` is explicitly enabled; the default
+is read-only behavior instead of silent success.
+
+## File Picker UX
+
+For artists, the preferred browseable path is a mounted WebDAV drive:
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```
+
+The helper checks the VFS HTTP URL, tries to start the Windows WebClient
+service, and maps the official HTTP WebDAV target first:
+
+```text
+net use O: http://127.0.0.1:7280/usd /persistent:no
+```
+
+If Windows reports `Access is denied` while starting WebClient, start the
+service from an elevated PowerShell with `Start-Service WebClient`, or start
+it from `services.msc`, then rerun the helper.
+
+That maps:
+
+```text
+\\127.0.0.1@7280\usd
+```
+
+to:
+
+```text
+O:\
+```
+
+Users can then navigate to `O:\scene.usd` from normal Windows file pickers
+without pasting a URL or UNC string. The helper can also unmount the drive:
+
+```powershell
+uv run python scripts/mount_vfs_share.py unmount --drive O:
+```
 
 ## Blender UX
 
@@ -154,7 +193,7 @@ authenticated/TLS front door before exposing it beyond a workstation.
 | --- | --- | --- |
 | Single scene share | One server exposes one scene directory, not a multi-scene project browser. | Add a scene/session registry above the current file set. |
 | Composition root depends on base reachability | `scene.live.usda` uses the original base path when available; remote machines may not see it. | Add full virtual reference/layer remapping or package-like asset serving. |
-| Writes are not translated | Saves fail by default, or are dropped in compatibility mode. | Later translate file writes into sync events. |
+| Full-file writes are coarse | `translate` handles complete USD snapshots, not semantic edit intent or conflict-aware merges. | Keep plugin/TCP sync as primary for interactive authoring; later add diff/merge policies. |
 | Anonymous WebDAV | Snapshot can be read by reachable clients. | Bind locally by default; add TLS/auth or reverse proxy for LAN use. |
 | Windows WebDAV differences | Some file dialogs and WebClient policies may reject custom ports. | Add workstation setup checks and optionally a mounted drive/helper app. |
 | Snapshot flatten cost | Very large stages can make first flattened GET/import slow. | Prewarm is enabled; use `scene.live.usda`, benchmark real scenes, then add binary/range support if needed. |
@@ -177,7 +216,10 @@ Before treating live-open as production ready for a show or team, verify:
 - Token-required mode works on a fresh workstation and after token rotation.
 - Non-integrated USD tools can open the snapshot read-only.
 - Direct save attempts return read-only errors unless `--vfs-write-mode drop`
-  is intentionally enabled and documented for that deployment.
+  or `--vfs-write-mode translate` is intentionally enabled and documented for
+  that deployment.
+- `python scripts/mount_vfs_share.py --port <port> --drive <letter> --open` exposes a
+  browseable drive-letter path on target Windows workstations.
 - `scripts/bench_vfs_snapshot.py --base <scene>` has acceptable cold/cached
   timings for representative production scenes.
 - `tests/unit/test_vfs.py` passes.

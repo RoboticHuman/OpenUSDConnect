@@ -26,9 +26,11 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 
 **Live Open**
 - WebDAV/UNC directory: `\\127.0.0.1@7280\usd\`
+- Browseable Windows drive helper: `uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open`
 - Flattened snapshot: `scene.usd`
 - Composition root: `scene.live.usda`
 - Blender imports the snapshot and auto-connects receiver/emitter when metadata is present.
+- Optional write fallback: `--vfs-write-mode translate` turns full-file USD saves into live events.
 
 ## Getting Started
 
@@ -95,10 +97,14 @@ uv run python scripts/build_blender_addon.py
 Install the output zip (`dist/usd_connect_blender.zip`) in Blender via **Edit > Preferences > Add-ons > Install from Disk**.
 
 For seamless live-open, start the server with `--vfs-port`, then import
-`\\127.0.0.1@7280\usd\scene.usd` in Blender or paste
+`\\127.0.0.1@7280\usd\scene.usd` in Blender, mount it as `O:\scene.usd`, or paste
 `http://127.0.0.1:7280/usd/scene.usd` into the addon's live URL field.
 The addon imports the snapshot and auto-connects receiver/emitter from
 embedded metadata.
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```
 
 ### Unreal Engine
 

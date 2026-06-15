@@ -8,7 +8,8 @@ A real-time USD sync framework for DCC livelink: a Python server holds an author
 - `/usd/scene.usd` is the flattened fallback; `/usd/scene.live.usda` is the composition-aware root; `/usd/_layers/*.usda` exposes live layer exports; `/usd/openusdconnect.json` is the manifest.
 - Virtual USD roots embed `customLayerData["openusdconnect"]` metadata for host, port, scene id, epoch, and `snapshot_seq`.
 - Blender can import the WebDAV/UNC file or a live URL, read that metadata, and auto-connect emitter/receiver from `snapshot_seq + 1`.
-- The VFS is read-only by default; `--vfs-write-mode drop` is explicit compatibility mode for accepting and discarding PUT writes.
+- The VFS is read-only by default; `--vfs-write-mode drop` accepts/discards PUT writes, and `--vfs-write-mode translate` parses complete USD saves into live server events.
+- `scripts/mount_vfs_share.py` maps the WebDAV share to a Windows drive letter, so artists can pick `O:\scene.usd` from normal file dialogs instead of pasting URLs.
 - Live URL imports use a local ETag-keyed cache rather than one-off temp files.
 - VFS prewarm is enabled by default; `scripts/bench_vfs_snapshot.py` measures cold/cached snapshot generation.
 - `scripts/check_windows_unc_webdav.py` validates Windows WebClient/UNC workstation setup.

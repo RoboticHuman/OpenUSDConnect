@@ -16,8 +16,11 @@ in Blender, and let the addon auto-connect to the live sync sockets.
 - Blender auto-connect when the imported file contains OpenUSDConnect metadata.
 
 The WebDAV directory is read-only by default. Direct writes return `403`.
-For compatibility with tools that require a successful save, start the server
-with `--vfs-write-mode drop`; writes are then accepted and discarded.
+For compatibility with tools that require a successful save, use
+`--vfs-write-mode drop`; writes are accepted and discarded. For fallback
+editing from non-integrated tools, use `--vfs-write-mode translate`; a saved
+USD snapshot is parsed, translated into live events, and broadcast through the
+normal sync server.
 
 ## Prerequisites
 
@@ -65,7 +68,7 @@ Useful VFS flags:
 | `--vfs-live-name FILE` | `scene.live.usda` | Composition-aware root file name. |
 | `--vfs-layer-dir NAME` | `_layers` | Directory containing exported live layers. |
 | `--vfs-manifest-name FILE` | `openusdconnect.json` | Machine-readable VFS manifest. |
-| `--vfs-write-mode MODE` | `forbid` | `forbid` returns 403; `drop` accepts and discards PUT bodies. |
+| `--vfs-write-mode MODE` | `forbid` | `forbid` returns 403; `drop` accepts and discards PUT bodies; `translate` turns full-file USD saves into live events. |
 | `--no-vfs-prewarm` | prewarm enabled | Disables background snapshot pre-generation. |
 | `--advertise-host HOST` | bind host, or `127.0.0.1` for all interfaces | Host embedded in live metadata. |
 
@@ -115,6 +118,32 @@ can resolve the companion layer files.
 Use this when you want a normal file-picker experience on Windows. The OS
 WebDAV redirector maps the UNC path to the WebDAV endpoint.
 
+For a friendlier browseable drive letter, mount the share:
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```
+
+If the helper reports `WebClient: STOPPED` and `Access is denied`, start the
+Windows **WebClient** service from an elevated PowerShell or from
+`services.msc`, then run the mount command again:
+
+```powershell
+Start-Service WebClient
+```
+
+Then open this in Blender or any file picker:
+
+```text
+O:\scene.usd
+```
+
+Unmount it when done:
+
+```powershell
+uv run python scripts/mount_vfs_share.py unmount --drive O:
+```
+
 Notes:
 
 - The file appears as a normal `.usd` file.
@@ -122,8 +151,9 @@ Notes:
 - The virtual share contains the flattened snapshot, a live composition root,
   a manifest, and exported layer files.
 - Safe-save patterns that create temp files or rename files are forbidden.
-- Direct `PUT` writes are forbidden by default, or dropped only when
-  `--vfs-write-mode drop` is explicitly enabled.
+- Direct `PUT` writes are forbidden by default, dropped only when
+  `--vfs-write-mode drop` is explicitly enabled, or translated when
+  `--vfs-write-mode translate` is explicitly enabled.
 
 ## Blender Live-Open
 
@@ -226,6 +256,13 @@ Validate Windows UNC/WebClient on a workstation:
 
 ```powershell
 uv run python scripts/check_windows_unc_webdav.py --port 7280
+```
+
+Preview or create a drive-letter mapping:
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --print-only
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
 ```
 
 Measure snapshot cost on a real or synthetic scene:

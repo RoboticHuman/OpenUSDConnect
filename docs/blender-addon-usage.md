@@ -75,12 +75,20 @@ This exposes:
 |------|-----|
 | `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL and Blender live URL import. |
 | `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
+| `O:\scene.usd` | Drive-letter file-picker path after mounting the WebDAV share. |
+
+To mount a browseable drive:
+
+```bash
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```
 
 ### Blender
 
 Use either entry point:
 
 - Click **Import USD (with prim tagging)** and choose the UNC path.
+- Or choose `O:\scene.usd` after mounting the WebDAV share as a drive.
 - Paste the HTTP path into the live URL field and click the URL import button.
 
 The addon imports the snapshot first. If live metadata is present, it sets
@@ -93,8 +101,10 @@ URL because the one-file local cache cannot resolve the remote `_layers/`
 directory.
 
 The virtual share is read-only by default. Server operators can opt into
-compatibility drop mode with `--vfs-write-mode drop`, but direct file writes
-still do not become live sync edits.
+compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
+translation with `--vfs-write-mode translate`. Translate mode parses a full USD
+save and broadcasts it as live events; plugin/TCP sync remains the preferred
+interactive authoring path.
 
 If metadata is not present, the import behaves like the existing manual
 workflow. If auto-connect fails, the imported snapshot remains open and the

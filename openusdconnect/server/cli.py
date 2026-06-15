@@ -320,9 +320,12 @@ def main():
     )
     ap.add_argument(
         "--vfs-write-mode",
-        choices=["forbid", "drop"],
+        choices=["forbid", "drop", "translate"],
         default="forbid",
-        help="How WebDAV PUT writes are handled: forbid with 403, or accept/drop",
+        help=(
+            "How WebDAV PUT writes are handled: forbid with 403, accept/drop, "
+            "or translate full-file USD saves into live events"
+        ),
     )
     ap.add_argument(
         "--no-vfs-prewarm",

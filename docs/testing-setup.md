@@ -32,10 +32,10 @@ uv run pytest tests/unit/test_vfs.py tests/integration/test_vfs_webdav.py -q
 uv run pytest tests/integration/test_live_discovery.py -q
 ```
 
-These cover snapshot metadata, ETag/cache invalidation, read-only and drop
+These cover snapshot metadata, ETag/cache invalidation, read-only/drop/translate
 write modes, WebDAV verbs, virtual directory browsing, composition roots,
-startup cleanup, HTTP snapshot caching, and the replay contract for receivers
-started at `snapshot_seq + 1`.
+startup cleanup, HTTP snapshot caching, drive-mount helper path generation, and
+the replay contract for receivers started at `snapshot_seq + 1`.
 
 The Blender live-open smoke requires a Blender executable:
 
@@ -55,6 +55,13 @@ For a friendlier workstation diagnostic:
 
 ```powershell
 uv run python scripts/check_windows_unc_webdav.py --port 7280
+```
+
+To make the virtual share browseable in normal Windows file pickers:
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+uv run python scripts/mount_vfs_share.py unmount --drive O:
 ```
 
 For large-scene sizing:

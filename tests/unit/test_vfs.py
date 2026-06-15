@@ -55,6 +55,17 @@ def drop_vfile(srv):
 
 
 @pytest.fixture
+def translate_vfile(srv):
+    return VirtualStageFile(
+        srv,
+        name="live.usd",
+        advertise_host="127.0.0.1",
+        sync_port=7200,
+        write_mode=WriteMode.TRANSLATE,
+    )
+
+
+@pytest.fixture
 def vset(srv):
     return VirtualStageFileSet(
         srv,
@@ -80,6 +91,14 @@ def _open_stage(data: bytes) -> Usd.Stage:
     layer = Sdf.Layer.CreateAnonymous(".usda")
     assert layer.ImportFromString(data.decode("utf-8"))
     return Usd.Stage.Open(layer)
+
+
+def _stage_bytes(specs: list[tuple[str, str]]) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    for path, type_name in specs:
+        stage.DefinePrim(path, type_name)
+    return layer.ExportToString().encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -341,16 +360,6 @@ class TestWriteDrop:
         drop_vfile.finish_write(sink)
         assert srv.get_event_count() == 0
 
-    def test_translate_mode_rejected(self, srv):
-        with pytest.raises(ValueError, match="translate"):
-            VirtualStageFile(
-                srv,
-                name="live.usd",
-                advertise_host="127.0.0.1",
-                sync_port=7200,
-                write_mode=WriteMode.TRANSLATE,
-            )
-
     def test_unknown_format_rejected(self, srv):
         with pytest.raises(ValueError, match="usdc"):
             VirtualStageFile(
@@ -360,3 +369,50 @@ class TestWriteDrop:
                 sync_port=7200,
                 fmt="usdc",
             )
+
+
+class TestWriteTranslate:
+    def test_write_replaces_live_state_with_uploaded_snapshot(self, srv, translate_vfile):
+        _send(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+                {"k": "ensure_prim", "prim": "/World/Old", "typeName": "Cube"},
+            ],
+        )
+        assert srv.stage.GetPrimAtPath("/World/Old")
+
+        uploaded = _stage_bytes([
+            ("/World", "Xform"),
+            ("/World/New", "Sphere"),
+        ])
+        translate_vfile.write(uploaded)
+
+        assert srv.get_event_count() > 0
+        assert srv.stage.GetPrimAtPath("/World/New")
+        assert not srv.stage.GetPrimAtPath("/World/Old")
+        assert not srv.stage.GetPrimAtPath("/Root").IsActive()
+
+        fetched = _open_stage(translate_vfile.read())
+        assert fetched.GetPrimAtPath("/World/New")
+        assert not fetched.GetPrimAtPath("/World/Old")
+
+    def test_sink_translates_on_commit(self, srv, translate_vfile):
+        sink = translate_vfile.open_write_sink()
+        data = _stage_bytes([("/Fallback", "Xform")])
+        sink.write(data[:10])
+        sink.write(data[10:])
+        translate_vfile.finish_write(sink)
+
+        assert srv.stage.GetPrimAtPath("/Fallback")
+        assert srv.get_event_count() > 0
+
+    def test_invalid_upload_does_not_touch_state(self, srv, translate_vfile):
+        before = translate_vfile.read()
+        count = srv.get_event_count()
+
+        with pytest.raises(ValueError):
+            translate_vfile.write(b"this is not usd")
+
+        assert srv.get_event_count() == count
+        assert translate_vfile.read() == before
