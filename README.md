@@ -31,6 +31,8 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 - Composition root: `scene.live.usda`
 - Blender imports the snapshot, reads live metadata, and auto-starts
   receiver/emitter when enabled.
+- Unreal can open the same VFS snapshot in USD Stage and use its metadata for
+  host, port, and receiver replay position.
 - Optional write fallback: `--vfs-write-mode translate` turns full-file USD saves into live events.
 
 ## Getting Started
@@ -113,6 +115,11 @@ Run the integration script from the Unreal Python console:
 ```python
 py "path/to/OpenUSDConnect/integrations/unreal/connect.py"
 ```
+
+The native Unreal plugin can also open the VFS snapshot (`O:\scene.usd` or the
+UNC path) in USD Stage. When the root layer contains OpenUSDConnect metadata,
+the plugin uses that host, port, and snapshot sequence instead of the default
+Project Settings endpoint.
 
 ## Documentation
 

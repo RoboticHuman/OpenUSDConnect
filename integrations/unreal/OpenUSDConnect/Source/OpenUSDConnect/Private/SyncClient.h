@@ -33,7 +33,8 @@ public:
 	            const FString& InDepartment,
 	            const FString& InClientId,
 	            const FString& InSessionOrigin,
-	            float InReconnectDelaySecs);
+	            float InReconnectDelaySecs,
+	            int32 InInitialLastSeq = 0);
 
 	virtual ~FSyncClient();
 

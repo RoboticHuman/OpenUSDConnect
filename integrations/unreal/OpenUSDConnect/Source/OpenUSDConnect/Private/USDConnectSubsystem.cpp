@@ -17,9 +17,13 @@
 #include "Misc/App.h"
 #include "Misc/Crc.h"
 #include "HAL/PlatformProcess.h"
+#include <cstdint>
 
 #if USE_USD_SDK
 #include "USDIncludesStart.h"
+#include "pxr/base/vt/dictionary.h"
+#include "pxr/base/vt/value.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/prim.h"
@@ -43,6 +47,120 @@ DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenU
 // Helpers to read TRS/visibility from the pxr stage
 // ---------------------------------------------------------------------------
 #if USE_USD_SDK
+struct FLiveOpenMetadata
+{
+	FString LayerIdentifier;
+	FString Host;
+	int32 Port = 0;
+	int32 SnapshotSeq = 0;
+	int32 ProtocolVersion = 0;
+	int32 Epoch = 0;
+	FString SceneId;
+	FString VfsUrl;
+	bool bRequiresToken = false;
+
+	FString MakeKey() const
+	{
+		return FString::Printf(TEXT("%s|%s|%d|%d|%d"),
+			*LayerIdentifier, *Host, Port, Epoch, SnapshotSeq);
+	}
+};
+
+static bool TryGetLiveDictString(const pxr::VtDictionary& Dict, const char* Key, FString& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (!Value.IsHolding<std::string>()) return false;
+	Out = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
+	return true;
+}
+
+static bool TryGetLiveDictBool(const pxr::VtDictionary& Dict, const char* Key, bool& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (Value.IsHolding<bool>())
+	{
+		Out = Value.UncheckedGet<bool>();
+		return true;
+	}
+	return false;
+}
+
+static bool TryGetLiveDictInt(const pxr::VtDictionary& Dict, const char* Key, int32& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (Value.IsHolding<int>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<int>());
+		return true;
+	}
+	if (Value.IsHolding<int64_t>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<int64_t>());
+		return true;
+	}
+	if (Value.IsHolding<unsigned int>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<unsigned int>());
+		return true;
+	}
+	if (Value.IsHolding<uint64_t>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<uint64_t>());
+		return true;
+	}
+	return false;
+}
+
+static bool TryReadLiveOpenMetadata(AUsdStageActor* StageActor, FLiveOpenMetadata& Out)
+{
+	if (!StageActor || !IsValid(StageActor)) return false;
+
+	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
+		StageActor->GetOrOpenUsdStage());
+	if (!PxrStage) return false;
+
+	pxr::SdfLayerHandle RootLayer = PxrStage->GetRootLayer();
+	if (!RootLayer) return false;
+
+	pxr::VtDictionary CustomData = RootLayer->GetCustomLayerData();
+	const auto MetaIt = CustomData.find("openusdconnect");
+	if (MetaIt == CustomData.end()) return false;
+
+	const pxr::VtValue& MetaValue = MetaIt->second;
+	if (!MetaValue.IsHolding<pxr::VtDictionary>()) return false;
+
+	const pxr::VtDictionary& Meta = MetaValue.UncheckedGet<pxr::VtDictionary>();
+	bool bLive = false;
+	if (!TryGetLiveDictBool(Meta, "live", bLive) || !bLive) return false;
+
+	FLiveOpenMetadata Candidate;
+	Candidate.LayerIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
+	TryGetLiveDictString(Meta, "host", Candidate.Host);
+	TryGetLiveDictInt(Meta, "port", Candidate.Port);
+	TryGetLiveDictInt(Meta, "snapshot_seq", Candidate.SnapshotSeq);
+	TryGetLiveDictInt(Meta, "protocol_version", Candidate.ProtocolVersion);
+	TryGetLiveDictInt(Meta, "epoch", Candidate.Epoch);
+	TryGetLiveDictString(Meta, "scene_id", Candidate.SceneId);
+	TryGetLiveDictString(Meta, "vfs_url", Candidate.VfsUrl);
+	TryGetLiveDictBool(Meta, "requires_token", Candidate.bRequiresToken);
+
+	if (Candidate.Host.IsEmpty() || Candidate.Port < 1 || Candidate.Port > 65535)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Warning,
+			TEXT("OpenUSDConnect live metadata is present but has no valid host/port"));
+		return false;
+	}
+
+	Out = Candidate;
+	return true;
+}
+
 static bool ReadXformTrs(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitXformTrs& OutTrs)
 {
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
@@ -173,41 +291,155 @@ void UUSDConnectSubsystem::Deinitialize()
 
 void UUSDConnectSubsystem::Connect()
 {
-	if (SyncClient)
+	ConnectResolved(false);
+}
+
+void UUSDConnectSubsystem::StopClients()
+{
+	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
+	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+
+	{
+		FScopeLock Lock(&EventQueueCS);
+		EventQueue.Reset();
+	}
+
+	ActiveServerHost.Empty();
+	ActiveServerPort = 0;
+	bActiveReceiverStarted = false;
+	bActiveEmitterStarted = false;
+}
+
+void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
+{
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (!Settings) return;
+
+	FString TargetHost = Settings->ServerHost;
+	int32 TargetPort = Settings->ServerPort;
+	int32 ReceiverInitialLastSeq = 0;
+	bool bStartReceiver = true;
+	bool bStartEmitter = true;
+	bool bUsingLiveMetadata = false;
+
+#if USE_USD_SDK
+	if (Settings->bUseLiveMetadataFromStage)
+	{
+		if (AUsdStageActor* StageActor = CachedStageActor.Get())
+		{
+			FLiveOpenMetadata Metadata;
+			if (TryReadLiveOpenMetadata(StageActor, Metadata))
+			{
+				TargetHost = Metadata.Host;
+				TargetPort = Metadata.Port;
+				ReceiverInitialLastSeq = FMath::Max(0, Metadata.SnapshotSeq);
+				bUsingLiveMetadata = true;
+				if (bRespectLiveMetadataAutoStart)
+				{
+					bStartReceiver = Settings->bAutoStartReceiverFromLiveMetadata;
+					bStartEmitter = Settings->bAutoStartEmitterFromLiveMetadata;
+				}
+				if (Metadata.bRequiresToken)
+				{
+					UE_LOG(LogUSDConnectSubsystem, Warning,
+						TEXT("Live metadata says the server requires a token; Unreal token persistence is not implemented yet"));
+				}
+			}
+		}
+	}
+#endif
+
+	if (!bStartReceiver && !bStartEmitter)
+	{
+		StopClients();
+		ActiveServerHost = TargetHost;
+		ActiveServerPort = TargetPort;
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("OpenUSDConnect live metadata configured %s:%d, auto-start disabled"),
+			*TargetHost, TargetPort);
+		return;
+	}
+
+	if ((SyncClient || EmitClient) &&
+		ActiveServerHost == TargetHost &&
+		ActiveServerPort == TargetPort &&
+		bActiveReceiverStarted == bStartReceiver &&
+		bActiveEmitterStarted == bStartEmitter)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Warning, TEXT("Already connected"));
 		return;
 	}
 
-	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
-	if (!Settings) return;
+	StopClients();
 
 	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"),
-		*Settings->ServerHost, Settings->ServerPort, *ClientId);
+		*TargetHost, TargetPort, *ClientId);
+	if (bUsingLiveMetadata)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("Using USD live metadata; receiver will sync from seq=%d"),
+			ReceiverInitialLastSeq + 1);
+	}
 
-	// Both threads share the same ClientId and SessionOrigin.
-	// The server uses origin to route corrections; we use it to suppress echo.
-	SyncClient = MakeShared<FSyncClient>(
-		this, Settings->ServerHost, Settings->ServerPort,
-		Settings->Department, ClientId, SessionOrigin,
-		Settings->ReconnectDelaySecs);
-	if (!SyncClient->Start()) { SyncClient.Reset(); return; }
+	ActiveServerHost = TargetHost;
+	ActiveServerPort = TargetPort;
+	bActiveReceiverStarted = false;
+	bActiveEmitterStarted = false;
 
-	// Emitter thread — shares the same ClientId/SessionOrigin so the server
-	// can correlate the two connections to the same logical client
-	EmitClient = MakeShared<FEmitClient>(
-		Settings->ServerHost, Settings->ServerPort,
-		Settings->Department, ClientId, SessionOrigin,
-		Settings->ReconnectDelaySecs);
-	if (!EmitClient->Start()) { EmitClient.Reset(); }
+	if (bStartReceiver)
+	{
+		SyncClient = MakeShared<FSyncClient>(
+			this, TargetHost, TargetPort,
+			Settings->Department, ClientId, SessionOrigin,
+			Settings->ReconnectDelaySecs, ReceiverInitialLastSeq);
+		if (SyncClient->Start()) { bActiveReceiverStarted = true; }
+		else { SyncClient.Reset(); }
+	}
+
+	if (bStartEmitter)
+	{
+		EmitClient = MakeShared<FEmitClient>(
+			TargetHost, TargetPort,
+			Settings->Department, ClientId, SessionOrigin,
+			Settings->ReconnectDelaySecs);
+		if (EmitClient->Start()) { bActiveEmitterStarted = true; }
+		else { EmitClient.Reset(); }
+	}
 }
 
 void UUSDConnectSubsystem::Disconnect()
 {
 	DetachFromStageActor();
-	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
-	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+	StopClients();
 	CachedStageActor = nullptr;
+	LastLiveMetadataKey.Empty();
+}
+
+void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
+{
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (!Settings || !Settings->bUseLiveMetadataFromStage) return;
+
+#if USE_USD_SDK
+	FLiveOpenMetadata Metadata;
+	if (!TryReadLiveOpenMetadata(Actor, Metadata)) return;
+
+	const FString MetadataKey = Metadata.MakeKey();
+	if (MetadataKey == LastLiveMetadataKey) return;
+
+	LastLiveMetadataKey = MetadataKey;
+	UE_LOG(LogUSDConnectSubsystem, Log,
+		TEXT("Detected OpenUSDConnect live metadata on stage: %s:%d snapshot_seq=%d vfs_url=%s"),
+		*Metadata.Host, Metadata.Port, Metadata.SnapshotSeq, *Metadata.VfsUrl);
+
+	if (Settings->bAutoConnect)
+	{
+		bPendingAutoConnect = false;
+		ConnectResolved(true);
+	}
+#else
+	(void)Actor;
+#endif
 }
 
 bool UUSDConnectSubsystem::IsConnected() const
@@ -243,13 +475,6 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	// Perform deferred auto-connect on the first safe tick.
-	if (bPendingAutoConnect)
-	{
-		bPendingAutoConnect = false;
-		Connect();
-	}
-
 	// Attach to stage actor if not already done (handles late spawning / PIE).
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
@@ -259,6 +484,18 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 		{
 			AttachToStageActor(StageActor);
 		}
+	}
+	if (StageActor)
+	{
+		RefreshLiveMetadataFromStage(StageActor);
+	}
+
+	// Perform deferred auto-connect after stage metadata has had a chance to
+	// override the project-default endpoint.
+	if (bPendingAutoConnect)
+	{
+		bPendingAutoConnect = false;
+		ConnectResolved(true);
 	}
 
 	if (!EventQueue.IsEmpty())

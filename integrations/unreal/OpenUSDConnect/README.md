@@ -54,6 +54,9 @@ Unreal's USD Stage editor → Blender sees it.
 | Server Port | `7200` | TCP port |
 | Department | *(empty)* | Per-department layer name (match the server's `--department` arg if set) |
 | Auto Connect on World Start | `true` | Connect on first tick after world initialization |
+| Use USD Live Metadata | `true` | If the opened USD root layer has `customLayerData["openusdconnect"]`, use its host, port, and snapshot sequence. |
+| Auto-start Receiver from Metadata | `true` | Start the receiver automatically when live metadata is detected. |
+| Auto-start Emitter from Metadata | `true` | Start the emitter automatically when live metadata is detected. |
 | Reconnect Delay (s) | `3.0` | Wait time between reconnect attempts |
 
 ---
@@ -66,13 +69,24 @@ From the repo root:
 ```bash
 cd <repo>/OpenUSDConnect
 .\.venv\Scripts\activate          # or `source .venv/bin/activate`
-python -m openusdconnect.server --port 7200 --base my_scene.usda --dashboard 8080
+python -m openusdconnect.server --port 7200 --base my_scene.usda --vfs-port 7280 --dashboard 8080
 ```
 The optional `--dashboard 8080` enables a web UI at <http://localhost:8080> useful for verifying clients and event traffic.
 
 ### 2. Open the USD stage in Unreal
 
-The **standard** workflow:
+The **live-open** workflow:
+
+1. Mount or bridge the VFS share so `scene.usd` is browseable, for example:
+   ```bash
+   uv run python scripts/local_vfs_drive_bridge.py --url http://127.0.0.1:7280/usd/scene.usd --mount-dir .ouc_live_mount\usd --drive O: --force
+   ```
+2. Open the USD Stage panel and choose **File -> Open**.
+3. Pick `O:\scene.usd` or the UNC path.
+4. The plugin reads `customLayerData["openusdconnect"]`, switches to the metadata host/port, and starts the receiver from `snapshot_seq + 1`.
+5. Select the spawned `AUsdStageActor` in the World Outliner and set **Stage State -> `OpenedAndLoaded`**.
+
+The older manual workflow still works:
 
 1. **Window → Virtual Production → USD Stage** (or search the menu for "USD Stage")
 2. In the USD Stage panel: **File → Open** → pick the same `.usda` the server is hosting.
@@ -94,7 +108,9 @@ Without pressing Play — the subsystem ticks in the editor:
 
 The **Output Log** will show:
 ```
-LogUSDConnect:            Connected to OpenUSDConnect server at 127.0.0.1:7200 (receiver)
+LogUSDConnectSubsystem:   Detected OpenUSDConnect live metadata on stage: 127.0.0.1:7200 snapshot_seq=...
+LogUSDConnectSubsystem:   Using USD live metadata; receiver will sync from seq=...
+LogUSDConnect:            Connected to OpenUSDConnect server at 127.0.0.1:7200 (receiver, sync_from=...)
 LogUSDConnect:            HELLO_OK received — entering receive loop
 LogUSDEmit:               Emitter connected to 127.0.0.1:7200
 LogUSDEmit:               Emitter HELLO_OK — ready to send
@@ -126,6 +142,14 @@ Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
 ---
 
 ## Troubleshooting
+
+Live-open-specific checks:
+
+- If the plugin connects to the wrong port after opening `scene.usd`, confirm
+  **Use USD Live Metadata** is enabled and the opened root layer contains
+  `customLayerData["openusdconnect"]`.
+- If the receiver replays old events after live-open, confirm the log says
+  `receiver, sync_from=<snapshot_seq + 1>`.
 
 | Symptom | Cause / Fix |
 |---------|-------------|

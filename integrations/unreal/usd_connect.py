@@ -45,6 +45,7 @@ _client_id: str = ""  # Per-session identifier
 _origin: str = ""  # Shared origin for echo suppression
 _host: str = ""
 _port: int = 0
+_live_metadata: dict | None = None
 _coalesce_seconds: float = 0.1
 _last_send_time: float = 0.0
 _running: bool = False
@@ -76,6 +77,36 @@ def _is_stage_alive(stage) -> bool:
         return root is not None and bool(root.GetDisplayName())
     except Exception:
         return False
+
+
+def _read_live_metadata(stage) -> dict | None:
+    """Read OpenUSDConnect live metadata from the stage root layer."""
+    try:
+        root = stage.GetRootLayer()
+        meta = (root.customLayerData or {}).get("openusdconnect") if root else None
+    except Exception:
+        LOG.exception("Failed reading OpenUSDConnect live metadata")
+        return None
+    if not isinstance(meta, dict) or not meta.get("live"):
+        return None
+    host = str(meta.get("host") or "").strip()
+    try:
+        port = int(meta.get("port") or 0)
+        snapshot_seq = int(meta.get("snapshot_seq") or 0)
+    except (TypeError, ValueError):
+        LOG.warning("OpenUSDConnect live metadata has invalid port or snapshot_seq")
+        return None
+    if not host or not (1 <= port <= 65535):
+        LOG.warning("OpenUSDConnect live metadata is missing a valid host/port")
+        return None
+    return {
+        "host": host,
+        "port": port,
+        "snapshot_seq": max(0, snapshot_seq),
+        "scene_id": meta.get("scene_id", ""),
+        "vfs_url": meta.get("vfs_url", ""),
+        "requires_token": bool(meta.get("requires_token", False)),
+    }
 
 
 def _ensure_stage():
@@ -187,6 +218,7 @@ def start(
     receive: bool = True,
     emit: bool = True,
     coalesce: float = 0.1,
+    use_live_metadata: bool = True,
     client_id: str | None = None,
     origin: str | None = None,
 ):
@@ -200,12 +232,14 @@ def start(
         receive: Enable receiving events from the server.
         emit: Enable emitting local changes to the server.
         coalesce: Minimum seconds between emitter flushes.
+        use_live_metadata: When the opened stage has OpenUSDConnect metadata,
+            use its host/port and snapshot_seq for live sync.
         client_id: Optional client identifier (auto-generated if None).
         origin: Optional origin identifier for echo suppression.
     """
     global _receiver, _sender, _dispatcher, _tick_handle
     global _root_layer_name, _client_id, _origin, _host, _port
-    global _coalesce_seconds, _last_send_time, _running
+    global _live_metadata, _coalesce_seconds, _last_send_time, _running
 
     if _running:
         LOG.warning("Already running — call stop() first")
@@ -238,6 +272,27 @@ def start(
     _root_layer_id = stage.GetRootLayer().GetDisplayName()
     LOG.info("Found stage '%s' (%s)", root_layer_name, _root_layer_id)
 
+    sync_from = 1
+    _live_metadata = _read_live_metadata(stage) if use_live_metadata else None
+    if _live_metadata:
+        host = _live_metadata["host"]
+        port = _live_metadata["port"]
+        sync_from = _live_metadata["snapshot_seq"] + 1
+        _host = host
+        _port = port
+        LOG.info(
+            "Using OpenUSDConnect live metadata: %s:%d sync_from=%d vfs_url=%s",
+            host,
+            port,
+            sync_from,
+            _live_metadata.get("vfs_url", ""),
+        )
+        if _live_metadata.get("requires_token"):
+            LOG.warning(
+                "Live metadata says the server requires a token; "
+                "Unreal Python token persistence is not implemented yet"
+            )
+
     # -- Start receiver --------------------------------------------------
     if receive:
         from openusdconnect.receiver import ReceiverThread
@@ -245,7 +300,7 @@ def start(
         _receiver = ReceiverThread(
             host=host,
             port=port,
-            sync_from=1,
+            sync_from=sync_from,
             client_id=_client_id,
             origin=_origin,
         )
@@ -294,7 +349,7 @@ def start(
 def stop():
     """Stop the OpenUSDConnect sync bridge and clean up."""
     global _receiver, _emitter, _sender, _dispatcher, _tick_handle
-    global _stage, _root_layer_id, _running
+    global _stage, _root_layer_id, _live_metadata, _running
 
     if not _running:
         return
@@ -326,6 +381,7 @@ def stop():
 
     _stage = None
     _root_layer_id = ""
+    _live_metadata = None
     _running = False
     LOG.info("OpenUSDConnect sync stopped")
 
@@ -339,6 +395,7 @@ def status() -> dict:
         "receiver_connected": _receiver.connected if _receiver else False,
         "emitter_connected": _sender.connected if _sender else False,
         "last_seq": _dispatcher.last_seq if _dispatcher else 0,
+        "live_metadata": _live_metadata,
         "client_id": _client_id,
         "origin": _origin,
     }

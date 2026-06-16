@@ -28,7 +28,8 @@ FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
                          const FString& InDepartment,
                          const FString& InClientId,
                          const FString& InSessionOrigin,
-                         float InReconnectDelaySecs)
+                         float InReconnectDelaySecs,
+                         int32 InInitialLastSeq)
 	: Owner(InOwner)
 	, Host(InHost)
 	, Port(InPort)
@@ -36,7 +37,7 @@ FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
 	, ClientId(InClientId)
 	, SessionOrigin(InSessionOrigin)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
-	, LastSeq(0)
+	, LastSeq(InInitialLastSeq)
 	, Socket(nullptr)
 	, Thread(nullptr)
 	, bShouldStop(false)
@@ -130,12 +131,14 @@ uint32 FSyncClient::Run()
 			continue;
 		}
 		bHasAnnouncedFailure = false;
-		UE_LOG(LogUSDConnect, Log,
-			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver)"), *Host, Port);
 
 		// --- Send HELLO ---
+		const int32 SyncFrom = LastSeq > 0 ? LastSeq + 1 : 1;
+		UE_LOG(LogUSDConnect, Log,
+			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"),
+			*Host, Port, SyncFrom);
 		TArray<uint8> HelloFrame =
-			OUC::BuildHelloFrame(TEXT("receiver"), LastSeq, ClientId, SessionOrigin, Department);
+			OUC::BuildHelloFrame(TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to send HELLO"));

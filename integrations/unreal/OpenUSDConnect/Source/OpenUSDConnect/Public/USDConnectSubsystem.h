@@ -74,6 +74,9 @@ private:
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
+	void StopClients();
+	void ConnectResolved(bool bRespectLiveMetadataAutoStart);
+	void RefreshLiveMetadataFromStage(AUsdStageActor* Actor);
 
 	void DrainAndApply();
 
@@ -133,4 +136,13 @@ private:
 	/** Prim paths accumulated by the OnObjectsChanged callback, drained each tick. */
 	FCriticalSection PendingEmitPathsCS;
 	TSet<FString> PendingEmitPaths;
+
+	/** Active TCP endpoint for the currently running clients. */
+	FString ActiveServerHost;
+	int32 ActiveServerPort = 0;
+	bool bActiveReceiverStarted = false;
+	bool bActiveEmitterStarted = false;
+
+	/** Last live metadata key seen on the attached stage root layer. */
+	FString LastLiveMetadataKey;
 };

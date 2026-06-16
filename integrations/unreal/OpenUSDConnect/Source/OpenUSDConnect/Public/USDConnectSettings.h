@@ -35,6 +35,21 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Connection", meta=(DisplayName="Auto Connect on World Start"))
 	bool bAutoConnect = true;
 
+	/**
+	 * When the opened USD root layer contains customLayerData["openusdconnect"],
+	 * use that metadata to configure the live sync endpoint.
+	 */
+	UPROPERTY(config, EditAnywhere, Category="Live Open", meta=(DisplayName="Use USD Live Metadata"))
+	bool bUseLiveMetadataFromStage = true;
+
+	/** Auto-start the receiver when live metadata is detected on the opened stage. */
+	UPROPERTY(config, EditAnywhere, Category="Live Open", meta=(DisplayName="Auto-start Receiver from Metadata"))
+	bool bAutoStartReceiverFromLiveMetadata = true;
+
+	/** Auto-start the emitter when live metadata is detected on the opened stage. */
+	UPROPERTY(config, EditAnywhere, Category="Live Open", meta=(DisplayName="Auto-start Emitter from Metadata"))
+	bool bAutoStartEmitterFromLiveMetadata = true;
+
 	/** Seconds between reconnection attempts after a disconnect */
 	UPROPERTY(config, EditAnywhere, Category="Connection", meta=(DisplayName="Reconnect Delay (s)", ClampMin=1, ClampMax=60))
 	float ReconnectDelaySecs = 3.0f;
