@@ -12,15 +12,19 @@ in Blender, and let the addon configure live sync from metadata.
 - A composition-aware USD root: `scene.live.usda`.
 - Exported live layers under `_layers/`.
 - A Windows UNC path for file browsers: `\\127.0.0.1@7280\usd\scene.usd`.
+- A no-admin local bridge for normal drive-letter browsing, usually
+  `O:\scene.usd`.
 - A flattened snapshot for non-integrated tools.
-- Blender metadata discovery with configurable auto-start for receiver/emitter.
+- Blender and Unreal metadata discovery with configurable auto-start for
+  receiver/emitter.
 
 The WebDAV directory is read-only by default. Direct writes return `403`.
 For compatibility with tools that require a successful save, use
 `--vfs-write-mode drop`; writes are accepted and discarded. For fallback
 editing from non-integrated tools, use `--vfs-write-mode translate`; a saved
 USD snapshot is parsed, translated into live events, and broadcast through the
-normal sync server.
+normal sync server. Translate mode rejects stale live snapshots and obviously
+incomplete destructive saves instead of silently replacing newer live state.
 
 ## Prerequisites
 
@@ -44,6 +48,25 @@ For Windows UNC paths, the Windows WebClient service must be available and
 allowed to connect to the selected host and port.
 
 ## Start A Live-Open Server
+
+For a complete local workstation session, use the no-admin launcher:
+
+```powershell
+uv run python scripts/start_live_open.py `
+  --base D:\path\to\scene.usda `
+  --drive O: `
+  --open `
+  --force
+```
+
+This starts the sync server, the VFS endpoint, and the local drive bridge.
+Stop the recorded session with:
+
+```powershell
+uv run python scripts/start_live_open.py stop
+```
+
+To run the pieces manually:
 
 ```powershell
 uv run openusdconnect-server `
@@ -144,6 +167,26 @@ uv run python scripts/local_vfs_drive_bridge.py `
   --force
 ```
 
+Useful bridge options:
+
+```powershell
+uv run python scripts/local_vfs_drive_bridge.py `
+  --url http://127.0.0.1:7280/usd/scene.usd `
+  --mount-dir .ouc_live_mount\usd `
+  --drive O: `
+  --force `
+  --background `
+  --open
+
+uv run python scripts/local_vfs_drive_bridge.py status `
+  --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json
+
+uv run python scripts/local_vfs_drive_bridge.py unmount `
+  --drive O: `
+  --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json `
+  --stop-process
+```
+
 Then open this in Blender or any file picker:
 
 ```text
@@ -156,6 +199,12 @@ Unmount it when done:
 uv run python scripts/mount_vfs_share.py unmount --drive O:
 ```
 
+For a local bridge drive, use:
+
+```powershell
+uv run python scripts/local_vfs_drive_bridge.py unmount --drive O:
+```
+
 Notes:
 
 - The file appears as a normal `.usd` file.
@@ -166,6 +215,9 @@ Notes:
 - Direct `PUT` writes are forbidden by default, dropped only when
   `--vfs-write-mode drop` is explicitly enabled, or translated when
   `--vfs-write-mode translate` is explicitly enabled.
+- Translate mode records a write summary on the server and rejects uploaded
+  files whose embedded `epoch`/`snapshot_seq` are older than the current
+  server token.
 
 ## Blender Live-Open
 
@@ -224,13 +276,19 @@ receiver with `sync_from = snapshot_seq + 1`.
 `--require-token` applies to the TCP live sync protocol, not to the WebDAV
 snapshot endpoint. The virtual file never embeds an auth token.
 
-Blender uses the existing TOFU token store:
+Blender and the Unreal Python bridge use the existing TOFU token store:
 
 - On first connect, the server issues a token.
-- Blender saves the token for that host and port.
+- The client saves the token for that host and port.
 - Later receiver/emitter connections present the saved token.
-- If authentication is rejected, Blender deletes the stale token and reports
-  the failure.
+- If authentication is rejected, the client reports the failure.
+
+The native Unreal plugin stores issued tokens in the user's Unreal config
+when **Persist Auth Tokens** is enabled. If a token-required live-open file is
+opened and no token is saved yet, Unreal starts the receiver first, saves the
+issued token, then starts the emitter on the next tick with the same token.
+`GetStatus()` reports endpoint, metadata source, snapshot sequence,
+receiver/emitter state, and auth state.
 
 When a virtual file says `requires_token = true`, plugin-enabled clients
 must already support the server's token flow. Non-integrated tools can still

@@ -57,6 +57,7 @@ Unreal's USD Stage editor → Blender sees it.
 | Use USD Live Metadata | `true` | If the opened USD root layer has `customLayerData["openusdconnect"]`, use its host, port, and snapshot sequence. |
 | Auto-start Receiver from Metadata | `true` | Start the receiver automatically when live metadata is detected. |
 | Auto-start Emitter from Metadata | `true` | Start the emitter automatically when live metadata is detected. |
+| Persist Auth Tokens | `true` | Save server-issued TOFU tokens in the user's Unreal config and reuse them on reconnect. |
 | Reconnect Delay (s) | `3.0` | Wait time between reconnect attempts |
 
 ---
@@ -85,6 +86,12 @@ The **live-open** workflow:
 3. Pick `O:\scene.usd` or the UNC path.
 4. The plugin reads `customLayerData["openusdconnect"]`, switches to the metadata host/port, and starts the receiver from `snapshot_seq + 1`.
 5. Select the spawned `AUsdStageActor` in the World Outliner and set **Stage State -> `OpenedAndLoaded`**.
+
+For a one-command local session, run this from the repo root:
+
+```bash
+uv run python scripts/start_live_open.py --base my_scene.usda --drive O: --open --force
+```
 
 The older manual workflow still works:
 
@@ -118,6 +125,17 @@ LogUSDConnectSubsystem:   Attached to AUsdStageActor (UsdStageActor_0)
 ```
 Per-event chatter is at `Verbose` level — enable it via `LogUSDConnect Verbose` in the console if you need to debug traffic.
 
+Blueprint or editor utility tooling can call `GetStatus()` on the
+`USDConnectSubsystem` to display the active endpoint, metadata source,
+snapshot sequence, receiver/emitter connection state, and auth state.
+
+Token-required live-open:
+
+- On first connect, the receiver obtains the TOFU token.
+- The plugin saves it when **Persist Auth Tokens** is enabled.
+- If the emitter was waiting for that first token, it starts on the next tick.
+- Future reconnects send the saved token on both receiver and emitter sockets.
+
 ---
 
 ## How it works (high level)
@@ -150,6 +168,9 @@ Live-open-specific checks:
   `customLayerData["openusdconnect"]`.
 - If the receiver replays old events after live-open, confirm the log says
   `receiver, sync_from=<snapshot_seq + 1>`.
+- If auth fails, call `GetStatus()` or check the Output Log for
+  `auth_rejected`; deleting the saved token or revoking the server token will
+  force a new TOFU first-connect.
 
 | Symptom | Cause / Fix |
 |---------|-------------|

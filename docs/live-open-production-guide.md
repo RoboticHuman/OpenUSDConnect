@@ -14,7 +14,9 @@ flowchart LR
     C --> K["scene.live.usda composition root"]
     C --> L["_layers/*.usda live layers"]
     D --> E["Windows UNC \\\\host@7280\\usd\\scene.usd"]
+    D --> F["No-admin local bridge O:\\scene.usd"]
     E --> G["Blender import normal USD import"]
+    F --> G
     G --> I["Read metadata configure receiver/emitter"]
     I --> A
 ```
@@ -43,7 +45,8 @@ Blender:
 | Path form | Example | Best use |
 | --- | --- | --- |
 | HTTP/WebDAV | `http://127.0.0.1:7280/usd/scene.usd` | Browser/download clients, diagnostics, launchers, and the local bridge. |
-| Windows UNC | `\\127.0.0.1@7280\usd\scene.usd` | Normal Windows file picker flow. |
+| Windows UNC | `\\127.0.0.1@7280\usd\scene.usd` | Normal Windows file picker flow when WebClient is available. |
+| Local bridge | `O:\scene.usd` | Preferred no-admin workstation path; backed by HTTP GET/HEAD/PUT plus `subst`. |
 
 Additional VFS entries:
 
@@ -106,7 +109,24 @@ is read-only behavior instead of silent success.
 
 ## File Picker UX
 
-For artists, the preferred browseable path is a mounted WebDAV drive:
+For artists, the preferred no-admin path is the local live-open launcher:
+
+```powershell
+uv run python scripts/start_live_open.py --base D:\show\shot010\scene.usda --drive O: --open --force
+```
+
+This starts the sync server, the VFS endpoint, and the local bridge. Stop the
+recorded session with:
+
+```powershell
+uv run python scripts/start_live_open.py stop
+```
+
+The bridge writes a health JSON file and log under `.ouc_live_mount`. It keeps
+`O:\scene.usd` refreshed from VFS ETags and uploads local saves back with
+HTTP `PUT`.
+
+WebDAV/UNC remains available when a workstation has Windows WebClient enabled:
 
 ```powershell
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
@@ -136,7 +156,13 @@ uv run python scripts/local_vfs_drive_bridge.py `
 
 This uses `subst`, so it does not require admin privileges. It gives artists
 the same `O:\scene.usd` file-picker path and forwards local saves back to the
-VFS write endpoint.
+VFS write endpoint. It also supports background mode, status inspection, and
+clean unmount:
+
+```powershell
+uv run python scripts/local_vfs_drive_bridge.py status --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json
+uv run python scripts/local_vfs_drive_bridge.py unmount --drive O: --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json --stop-process
+```
 
 That maps:
 
@@ -151,7 +177,8 @@ O:\
 ```
 
 Users can then navigate to `O:\scene.usd` from normal Windows file pickers
-without pasting a URL or UNC string. The helper can also unmount the drive:
+without pasting a URL or UNC string. The WebDAV helper can also unmount a
+WebClient-backed drive:
 
 ```powershell
 uv run python scripts/mount_vfs_share.py unmount --drive O:
@@ -209,6 +236,7 @@ authenticated/TLS front door before exposing it beyond a workstation.
 | Single scene share | One server exposes one scene directory, not a multi-scene project browser. | Add a scene/session registry above the current file set. |
 | Composition root depends on base reachability | `scene.live.usda` uses the original base path when available; remote machines may not see it. | Add full virtual reference/layer remapping or package-like asset serving. |
 | Full-file writes are coarse | `translate` handles complete USD snapshots, not semantic edit intent or conflict-aware merges. | Keep plugin/TCP sync as primary for interactive authoring; later add diff/merge policies. |
+| Fallback writes infer intent conservatively | Rename/move intent may still appear as deactivate plus create. Stale snapshots and obviously incomplete destructive saves are rejected. | Add stable prim IDs and richer semantic diffing per DCC save style. |
 | Anonymous WebDAV | Snapshot can be read by reachable clients. | Bind locally by default; add TLS/auth or reverse proxy for LAN use. |
 | Windows WebDAV differences | Some file dialogs and WebClient policies may reject custom ports. | Add workstation setup checks and optionally a mounted drive/helper app. |
 | Snapshot flatten cost | Very large stages can make first flattened GET/import slow. | Prewarm is enabled; use `scene.live.usda`, benchmark real scenes, then add binary/range support if needed. |
@@ -233,8 +261,10 @@ Before treating live-open as production ready for a show or team, verify:
 - Direct save attempts return read-only errors unless `--vfs-write-mode drop`
   or `--vfs-write-mode translate` is intentionally enabled and documented for
   that deployment.
-- `python scripts/mount_vfs_share.py --port <port> --drive <letter> --open` exposes a
-  browseable drive-letter path on target Windows workstations.
+- `python scripts/start_live_open.py --base <scene> --drive <letter> --open --force`
+  exposes a browseable drive-letter path on target Windows workstations.
+- Bridge `status` JSON updates during normal polling, local uploads, and
+  remote downloads.
 - `scripts/bench_vfs_snapshot.py --base <scene>` has acceptable cold/cached
   timings for representative production scenes.
 - `tests/unit/test_vfs.py` passes.
@@ -249,10 +279,8 @@ Before treating live-open as production ready for a show or team, verify:
 
 ## Recommended Production UX Next Steps
 
-1. Add a launcher command that starts sync + VFS and prints/copies all open
-   paths.
-2. Add a read-only marker in Blender when the imported path is a VFS snapshot.
-3. Add authenticated/TLS VFS serving before exposing snapshots outside trusted
+1. Add a read-only marker in Blender when the imported path is a VFS snapshot.
+2. Add authenticated/TLS VFS serving before exposing snapshots outside trusted
    localhost or LAN environments.
-4. Expand from one scene directory per server to a browsable multi-scene
+3. Expand from one scene directory per server to a browsable multi-scene
    project namespace.

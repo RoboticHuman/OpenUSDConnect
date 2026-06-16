@@ -369,12 +369,50 @@ class TestWriteDrop:
         assert any(rec.get("event", {}).get("prim") == "/World/New" for rec in records)
         assert srv.stage.GetPrimAtPath("/World/New")
         assert not srv.stage.GetPrimAtPath("/World/Old")
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert "/World/New" in srv.last_vfs_write_analysis["created_prims"]
+        assert "/World/Old" in srv.last_vfs_write_analysis["removed_prims"]
+        assert srv.last_vfs_write_analysis["event_counts"]["ensure_prim"] >= 1
 
         status, _, data = client.get(_file_path())
         assert status == 200
         stage = _open_stage(data)
         assert stage.GetPrimAtPath("/World/New")
         assert not stage.GetPrimAtPath("/World/Old")
+
+    def test_put_rejects_stale_live_snapshot_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        status, _, stale_data = client.get(_file_path())
+        assert status == 200
+
+        _send(srv, [{"k": "ensure_prim", "prim": "/World/Fresh", "typeName": "Xform"}])
+        status, _, _ = client.put(_file_path(), stale_data)
+        assert status == 409
+
+        assert srv.stage.GetPrimAtPath("/World/Fresh")
+        assert srv.last_vfs_write_analysis["status"] == "stale_rejected"
+        assert (
+            srv.last_vfs_write_analysis["uploaded_seq"]
+            < srv.last_vfs_write_analysis["current_seq"]
+        )
+
+    def test_put_rejects_ambiguous_root_removal_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        _send(
+            srv,
+            [
+                {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
+                {"k": "ensure_prim", "prim": "/World/A", "typeName": "Xform"},
+                {"k": "ensure_prim", "prim": "/World/B", "typeName": "Xform"},
+            ],
+        )
+
+        body = _stage_bytes([("/Other", "Xform")])
+        status, _, _ = client.put(_file_path(), body)
+        assert status == 409
+
+        assert srv.stage.GetPrimAtPath("/World")
+        assert srv.last_vfs_write_analysis["status"] == "ambiguous_rejected"
 
     def test_delete_forbidden(self, vfs):
         _, client = vfs

@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 
+from ..types import VfsWriteRejectedError
+
 try:
     # wsgidav.util must load before wsgidav.dav_error; importing dav_error
     # first trips a circular import inside wsgidav itself.
     from wsgidav import util as _wsgidav_util  # noqa: F401
-    from wsgidav.dav_error import HTTP_FORBIDDEN, DAVError
+    from wsgidav.dav_error import HTTP_CONFLICT, HTTP_FORBIDDEN, DAVError
     from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
     from wsgidav.wsgidav_app import WsgiDAVApp
 except ImportError as exc:  # pragma: no cover - exercised only without deps
@@ -68,7 +70,11 @@ class _StageFileResource(DAVNonCollection):
         if with_errors:
             LOG.warning("VFS write aborted with errors for %s", self._file.name)
             return
-        self._file.finish_write(self._sink)
+        try:
+            self._file.finish_write(self._sink)
+        except VfsWriteRejectedError as exc:
+            LOG.warning("VFS write rejected for %s: %s", self._file.name, exc)
+            raise DAVError(HTTP_CONFLICT) from exc
 
     def delete(self):
         raise DAVError(HTTP_FORBIDDEN)

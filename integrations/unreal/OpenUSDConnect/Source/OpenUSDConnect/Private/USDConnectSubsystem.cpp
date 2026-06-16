@@ -13,8 +13,10 @@
 #include "EngineUtils.h"
 #include "Logging/LogMacros.h"
 #include "Stats/Stats.h"
+#include "Async/Async.h"
 #include "Misc/Guid.h"
 #include "Misc/App.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/Crc.h"
 #include "HAL/PlatformProcess.h"
 #include <cstdint>
@@ -252,6 +254,17 @@ static bool ReadVisibility(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, 
 }
 #endif // USE_USD_SDK
 
+static const TCHAR* OUCAuthConfigSection = TEXT("OpenUSDConnect.Tokens");
+
+static FString MakeAuthConfigKey(const FString& Host, int32 Port, const FString& Department)
+{
+	FString Key = FString::Printf(TEXT("%s:%d:%s"), *Host, Port, *Department);
+	Key.ReplaceInline(TEXT("\\"), TEXT("_"));
+	Key.ReplaceInline(TEXT("/"), TEXT("_"));
+	Key.ReplaceInline(TEXT(" "), TEXT("_"));
+	return Key;
+}
+
 // ---------------------------------------------------------------------------
 // UWorldSubsystem lifecycle
 // ---------------------------------------------------------------------------
@@ -308,6 +321,9 @@ void UUSDConnectSubsystem::StopClients()
 	ActiveServerPort = 0;
 	bActiveReceiverStarted = false;
 	bActiveEmitterStarted = false;
+	bActiveUsingLiveMetadata = false;
+	bDeferredEmitterForToken = false;
+	ActiveSnapshotSeq = 0;
 }
 
 void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
@@ -321,6 +337,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	bool bStartReceiver = true;
 	bool bStartEmitter = true;
 	bool bUsingLiveMetadata = false;
+	bool bTargetRequiresToken = false;
 
 #if USE_USD_SDK
 	if (Settings->bUseLiveMetadataFromStage)
@@ -334,26 +351,33 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 				TargetPort = Metadata.Port;
 				ReceiverInitialLastSeq = FMath::Max(0, Metadata.SnapshotSeq);
 				bUsingLiveMetadata = true;
+				bTargetRequiresToken = Metadata.bRequiresToken;
 				if (bRespectLiveMetadataAutoStart)
 				{
 					bStartReceiver = Settings->bAutoStartReceiverFromLiveMetadata;
 					bStartEmitter = Settings->bAutoStartEmitterFromLiveMetadata;
-				}
-				if (Metadata.bRequiresToken)
-				{
-					UE_LOG(LogUSDConnectSubsystem, Warning,
-						TEXT("Live metadata says the server requires a token; Unreal token persistence is not implemented yet"));
 				}
 			}
 		}
 	}
 #endif
 
+	const FString TargetToken = Settings->bPersistAuthTokens
+		? LoadAuthToken(TargetHost, TargetPort, Settings->Department)
+		: FString();
+	const bool bDelayEmitterForToken =
+		bTargetRequiresToken && TargetToken.IsEmpty() && bStartReceiver && bStartEmitter;
+
 	if (!bStartReceiver && !bStartEmitter)
 	{
 		StopClients();
 		ActiveServerHost = TargetHost;
 		ActiveServerPort = TargetPort;
+		bActiveUsingLiveMetadata = bUsingLiveMetadata;
+		ActiveSnapshotSeq = ReceiverInitialLastSeq;
+		SetStatusMessage(
+			bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
+			TEXT("Live metadata configured; auto-start disabled"));
 		UE_LOG(LogUSDConnectSubsystem, Log,
 			TEXT("OpenUSDConnect live metadata configured %s:%d, auto-start disabled"),
 			*TargetHost, TargetPort);
@@ -385,25 +409,65 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	ActiveServerPort = TargetPort;
 	bActiveReceiverStarted = false;
 	bActiveEmitterStarted = false;
+	bActiveUsingLiveMetadata = bUsingLiveMetadata;
+	bDeferredEmitterForToken = bDelayEmitterForToken;
+	ActiveSnapshotSeq = ReceiverInitialLastSeq;
+	SetStatusMessage(
+		bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required") : TEXT("connecting"),
+		bDelayEmitterForToken
+			? TEXT("Starting receiver first to obtain auth token")
+			: TEXT("Connecting receiver/emitter"));
 
 	if (bStartReceiver)
 	{
 		SyncClient = MakeShared<FSyncClient>(
 			this, TargetHost, TargetPort,
 			Settings->Department, ClientId, SessionOrigin,
-			Settings->ReconnectDelaySecs, ReceiverInitialLastSeq);
+			Settings->ReconnectDelaySecs, ReceiverInitialLastSeq, TargetToken);
 		if (SyncClient->Start()) { bActiveReceiverStarted = true; }
 		else { SyncClient.Reset(); }
 	}
 
-	if (bStartEmitter)
+	if (bStartEmitter && !bDelayEmitterForToken)
 	{
 		EmitClient = MakeShared<FEmitClient>(
-			TargetHost, TargetPort,
+			this, TargetHost, TargetPort,
 			Settings->Department, ClientId, SessionOrigin,
-			Settings->ReconnectDelaySecs);
+			Settings->ReconnectDelaySecs, TargetToken);
 		if (EmitClient->Start()) { bActiveEmitterStarted = true; }
 		else { EmitClient.Reset(); }
+	}
+}
+
+void UUSDConnectSubsystem::TryStartDeferredEmitter()
+{
+	if (!bDeferredEmitterForToken || EmitClient || ActiveServerHost.IsEmpty() || ActiveServerPort <= 0)
+	{
+		return;
+	}
+
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (!Settings) return;
+
+	const FString Token = Settings->bPersistAuthTokens
+		? LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department)
+		: FString();
+	if (Token.IsEmpty()) return;
+
+	bDeferredEmitterForToken = false;
+	EmitClient = MakeShared<FEmitClient>(
+		this, ActiveServerHost, ActiveServerPort,
+		Settings->Department, ClientId, SessionOrigin,
+		Settings->ReconnectDelaySecs, Token);
+	if (EmitClient->Start())
+	{
+		bActiveEmitterStarted = true;
+		SetStatusMessage(TEXT("token_saved"), TEXT("Auth token saved; emitter started"));
+	}
+	else
+	{
+		EmitClient.Reset();
+		SetStatusMessage(TEXT("error"), TEXT("Failed to start deferred emitter"));
 	}
 }
 
@@ -413,6 +477,7 @@ void UUSDConnectSubsystem::Disconnect()
 	StopClients();
 	CachedStageActor = nullptr;
 	LastLiveMetadataKey.Empty();
+	SetStatusMessage(TEXT("not_connected"), TEXT("Disconnected"));
 }
 
 void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
@@ -445,6 +510,128 @@ void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 bool UUSDConnectSubsystem::IsConnected() const
 {
 	return SyncClient && SyncClient->IsConnected();
+}
+
+FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
+{
+	FUSDConnectStatus Status;
+	Status.EndpointHost = ActiveServerHost;
+	Status.EndpointPort = ActiveServerPort;
+	Status.bUsingLiveMetadata = bActiveUsingLiveMetadata;
+	Status.SnapshotSeq = ActiveSnapshotSeq;
+	Status.bReceiverStarted = bActiveReceiverStarted;
+	Status.bReceiverConnected = SyncClient && SyncClient->IsConnected();
+	Status.bEmitterStarted = bActiveEmitterStarted;
+	Status.bEmitterConnected = EmitClient && EmitClient->IsConnected();
+	{
+		FScopeLock Lock(&StatusCS);
+		Status.AuthState = LastAuthState;
+		Status.LastMessage = LastStatusMessage;
+	}
+	return Status;
+}
+
+FString UUSDConnectSubsystem::LoadAuthToken(
+	const FString& Host,
+	int32 Port,
+	const FString& Department) const
+{
+	FString Token;
+	if (GConfig)
+	{
+		GConfig->GetString(
+			OUCAuthConfigSection,
+			*MakeAuthConfigKey(Host, Port, Department),
+			Token,
+			GGameUserSettingsIni);
+	}
+	return Token;
+}
+
+void UUSDConnectSubsystem::SaveAuthToken(
+	const FString& Host,
+	int32 Port,
+	const FString& Department,
+	const FString& Token) const
+{
+	if (!GConfig || Token.IsEmpty()) return;
+	GConfig->SetString(
+		OUCAuthConfigSection,
+		*MakeAuthConfigKey(Host, Port, Department),
+		*Token,
+		GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+}
+
+void UUSDConnectSubsystem::SetStatusMessage(const FString& AuthState, const FString& Message)
+{
+	FScopeLock Lock(&StatusCS);
+	LastAuthState = AuthState;
+	LastStatusMessage = Message;
+}
+
+void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Token]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientTokenIssued(Token);
+			}
+		});
+		return;
+	}
+
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (Settings && Settings->bPersistAuthTokens)
+	{
+		SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department, Token);
+	}
+	SetStatusMessage(TEXT("token_saved"), TEXT("Auth token issued and saved"));
+	if (bDeferredEmitterForToken)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("Auth token issued; emitter will start on the next tick"));
+	}
+}
+
+void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientHelloOk(Role);
+			}
+		});
+		return;
+	}
+
+	SetStatusMessage(TEXT("connected"), FString::Printf(TEXT("%s connected"), *Role));
+}
+
+void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientAuthRejected(Role);
+			}
+		});
+		return;
+	}
+
+	SetStatusMessage(TEXT("auth_rejected"), FString::Printf(TEXT("%s auth rejected"), *Role));
 }
 
 void UUSDConnectSubsystem::EnqueueEvent(TArray<uint8>&& RawBytes)
@@ -502,6 +689,8 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 	{
 		DrainAndApply();
 	}
+
+	TryStartDeferredEmitter();
 
 	// Emit any user edits captured by the USD notice listener since last tick.
 	DrainAndEmit();

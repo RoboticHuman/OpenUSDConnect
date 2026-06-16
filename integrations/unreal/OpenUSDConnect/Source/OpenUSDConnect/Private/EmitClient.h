@@ -7,6 +7,8 @@
 #include "Containers/Queue.h"
 #include <atomic>
 
+class UUSDConnectSubsystem;
+
 /**
  * Background TCP thread that connects to the OpenUSDConnect server as an **emitter**.
  *
@@ -27,12 +29,14 @@
 class FEmitClient : public FRunnable
 {
 public:
-	FEmitClient(const FString& InHost,
+	FEmitClient(UUSDConnectSubsystem* InOwner,
+	            const FString& InHost,
 	            int32 InPort,
 	            const FString& InDepartment,
 	            const FString& InClientId,
 	            const FString& InSessionOrigin,
-	            float InReconnectDelaySecs);
+	            float InReconnectDelaySecs,
+	            const FString& InAuthToken = FString());
 
 	virtual ~FEmitClient();
 
@@ -56,11 +60,13 @@ private:
 	bool SendAll(const uint8* Data, int32 Len);
 	void CloseSocket();
 
+	UUSDConnectSubsystem* Owner;
 	FString Host;
 	int32   Port;
 	FString Department;
 	FString ClientId;
 	FString SessionOrigin;
+	FString AuthToken;
 	float   ReconnectDelaySecs;
 
 	FSocket*         Socket;

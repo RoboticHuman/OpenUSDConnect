@@ -219,6 +219,7 @@ def start(
     emit: bool = True,
     coalesce: float = 0.1,
     use_live_metadata: bool = True,
+    persist_tokens: bool = True,
     client_id: str | None = None,
     origin: str | None = None,
 ):
@@ -234,6 +235,7 @@ def start(
         coalesce: Minimum seconds between emitter flushes.
         use_live_metadata: When the opened stage has OpenUSDConnect metadata,
             use its host/port and snapshot_seq for live sync.
+        persist_tokens: Save and reuse TOFU auth tokens for token-required servers.
         client_id: Optional client identifier (auto-generated if None).
         origin: Optional origin identifier for echo suppression.
     """
@@ -274,10 +276,12 @@ def start(
 
     sync_from = 1
     _live_metadata = _read_live_metadata(stage) if use_live_metadata else None
+    requires_token = False
     if _live_metadata:
         host = _live_metadata["host"]
         port = _live_metadata["port"]
         sync_from = _live_metadata["snapshot_seq"] + 1
+        requires_token = bool(_live_metadata.get("requires_token"))
         _host = host
         _port = port
         LOG.info(
@@ -287,11 +291,17 @@ def start(
             sync_from,
             _live_metadata.get("vfs_url", ""),
         )
-        if _live_metadata.get("requires_token"):
-            LOG.warning(
-                "Live metadata says the server requires a token; "
-                "Unreal Python token persistence is not implemented yet"
-            )
+    saved_token = None
+    if persist_tokens:
+        from openusdconnect import token_client
+
+        saved_token = token_client.load_token(host, port)
+
+        def _save_token(token: str) -> None:
+            token_client.save_token(host, port, token)
+
+    else:
+        _save_token = None
 
     # -- Start receiver --------------------------------------------------
     if receive:
@@ -303,9 +313,21 @@ def start(
             sync_from=sync_from,
             client_id=_client_id,
             origin=_origin,
+            token=saved_token,
+            on_token_issued=_save_token,
         )
         _receiver.start()
         LOG.info("Receiver started → %s:%d", host, port)
+
+    if emit and receive and requires_token and not saved_token and persist_tokens:
+        # First-use TOFU: let the receiver obtain and persist the token before
+        # opening the emitter socket with the same client_id.
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not saved_token:
+            saved_token = getattr(_receiver, "token", None)
+            if saved_token:
+                break
+            time.sleep(0.05)
 
     # -- Start emitter ---------------------------------------------------
     if emit:
@@ -314,6 +336,8 @@ def start(
         _sender = EventSender(
             host,
             port,
+            token=saved_token,
+            on_token_issued=_save_token,
             client_id=_client_id,
             origin=_origin,
         )

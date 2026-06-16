@@ -27,13 +27,16 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
 **Live Open**
 - WebDAV/UNC directory: `\\127.0.0.1@7280\usd\`
 - Browseable Windows drive helper: `uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open`
+- No-admin local live-open launcher:
+  `uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --force`
 - Flattened snapshot: `scene.usd`
 - Composition root: `scene.live.usda`
 - Blender imports the snapshot, reads live metadata, and auto-starts
   receiver/emitter when enabled.
 - Unreal can open the same VFS snapshot in USD Stage and use its metadata for
-  host, port, and receiver replay position.
-- Optional write fallback: `--vfs-write-mode translate` turns full-file USD saves into live events.
+  host, port, receiver replay position, and TOFU token reuse.
+- Optional write fallback: `--vfs-write-mode translate` turns full-file USD
+  saves into live events, rejecting stale or obviously incomplete snapshots.
 
 ## Getting Started
 
@@ -51,6 +54,9 @@ uv sync --group server --group vfs
 
 # Start the sync server
 uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
+
+# Start server + VFS + no-admin O: bridge in one command
+uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --force
 
 # Start with admin dashboard
 uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
@@ -108,6 +114,12 @@ metadata, and auto-starts receiver/emitter when enabled in the Import panel.
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
 ```
 
+If Windows WebClient is unavailable, use the no-admin local bridge instead:
+
+```powershell
+uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --force
+```
+
 ### Unreal Engine
 
 Run the integration script from the Unreal Python console:
@@ -119,7 +131,8 @@ py "path/to/OpenUSDConnect/integrations/unreal/connect.py"
 The native Unreal plugin can also open the VFS snapshot (`O:\scene.usd` or the
 UNC path) in USD Stage. When the root layer contains OpenUSDConnect metadata,
 the plugin uses that host, port, and snapshot sequence instead of the default
-Project Settings endpoint.
+Project Settings endpoint. `GetStatus()` exposes the active endpoint,
+receiver/emitter state, metadata source, snapshot sequence, and auth state.
 
 ## Documentation
 

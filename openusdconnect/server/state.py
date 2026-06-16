@@ -52,7 +52,13 @@ from ..protocol_constants import (
 )
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
-from .types import ClientInfo, Proposal
+from .types import (
+    AmbiguousVfsWriteError,
+    ClientInfo,
+    Proposal,
+    StaleVfsWriteError,
+    VfsWriteAnalysis,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -113,6 +119,30 @@ def _authored_attr_rows(prim) -> list[dict]:
     return rows
 
 
+def _stage_prim_types(stage: Usd.Stage) -> dict[str, str]:
+    return {
+        str(prim.GetPath()): prim.GetTypeName()
+        for prim in stage.Traverse()
+        if str(prim.GetPath()) != "/"
+    }
+
+
+def _stage_live_metadata(stage: Usd.Stage) -> dict:
+    try:
+        meta = (stage.GetRootLayer().customLayerData or {}).get("openusdconnect")
+    except Exception:
+        return {}
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _metadata_int(meta: dict, key: str) -> int | None:
+    try:
+        value = meta.get(key)
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class UsdSyncServer:
     """Holds all shared server state: stage, sequence counter, client list, event store."""
 
@@ -171,6 +201,7 @@ class UsdSyncServer:
         # sequence. Epoch disambiguates compaction/purge resetting sequence IDs.
         self._snapshot_epoch = 0
         self.scene_id = self._make_scene_id(base_usd_path)
+        self.last_vfs_write_analysis: dict | None = None
 
         # TOFU token authentication
         self.require_token = require_token
@@ -1239,6 +1270,8 @@ class UsdSyncServer:
         *,
         client_id: str = "vfs-write",
         origin: str = "vfs-write",
+        reject_stale: bool = True,
+        reject_ambiguous: bool = True,
     ) -> int:
         """Replace the live edit state from a complete uploaded USD snapshot.
 
@@ -1249,18 +1282,87 @@ class UsdSyncServer:
 
         Returns the number of translated events persisted to the event log.
         """
-        with self.stage_lock:
-            before_paths = {
-                str(prim.GetPath())
-                for prim in self.stage.Traverse()
-                if str(prim.GetPath()) != "/"
-            }
+        current_epoch, current_seq = self.get_snapshot_token()
+        uploaded_meta = _stage_live_metadata(uploaded_stage)
+        uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
+        uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
 
-        uploaded_paths = {
-            str(prim.GetPath())
-            for prim in uploaded_stage.Traverse()
-            if str(prim.GetPath()) != "/"
-        }
+        with self.stage_lock:
+            before_types = _stage_prim_types(self.stage)
+
+        uploaded_types = _stage_prim_types(uploaded_stage)
+        before_paths = set(before_types)
+        uploaded_paths = set(uploaded_types)
+        created_paths = sorted(uploaded_paths - before_paths)
+        removed_paths = sorted(
+            before_paths - uploaded_paths,
+            key=lambda p: p.count("/"),
+            reverse=True,
+        )
+        type_changed_paths = sorted(
+            p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
+        )
+
+        notes = []
+        if not uploaded_meta:
+            notes.append("uploaded file has no openusdconnect metadata; accepting as fallback save")
+        elif uploaded_epoch is None or uploaded_seq is None:
+            notes.append("uploaded openusdconnect metadata has no parseable epoch/snapshot_seq")
+
+        if reject_stale and uploaded_epoch is not None and uploaded_seq is not None:
+            stale = (uploaded_epoch, uploaded_seq) < (current_epoch, current_seq)
+            if stale:
+                analysis = VfsWriteAnalysis(
+                    status="stale_rejected",
+                    current_epoch=current_epoch,
+                    current_seq=current_seq,
+                    uploaded_epoch=uploaded_epoch,
+                    uploaded_seq=uploaded_seq,
+                    before_prim_count=len(before_paths),
+                    uploaded_prim_count=len(uploaded_paths),
+                    created_prims=created_paths,
+                    removed_prims=removed_paths,
+                    type_changed_prims=type_changed_paths,
+                    notes=["uploaded snapshot is older than the current live server state"],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise StaleVfsWriteError(
+                    "uploaded VFS snapshot is stale: "
+                    f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
+                    f"server epoch/seq={current_epoch}/{current_seq}"
+                )
+
+        removed_fraction = len(removed_paths) / max(1, len(before_paths))
+        removes_rootish_prim = any(
+            path.count("/") <= 1 and path != "/Root" for path in removed_paths
+        )
+        ambiguous_destructive = bool(removed_paths) and (
+            not uploaded_paths
+            or removes_rootish_prim
+            or (len(before_paths) >= 10 and removed_fraction >= 0.8)
+        )
+        if reject_ambiguous and ambiguous_destructive:
+            analysis = VfsWriteAnalysis(
+                status="ambiguous_rejected",
+                current_epoch=current_epoch,
+                current_seq=current_seq,
+                uploaded_epoch=uploaded_epoch,
+                uploaded_seq=uploaded_seq,
+                before_prim_count=len(before_paths),
+                uploaded_prim_count=len(uploaded_paths),
+                created_prims=created_paths,
+                removed_prims=removed_paths,
+                type_changed_prims=type_changed_paths,
+                notes=[
+                    "uploaded snapshot removes a root-level prim or most of the scene; "
+                    "refusing automatic fallback translation"
+                ],
+            )
+            self.last_vfs_write_analysis = analysis.to_dict()
+            raise AmbiguousVfsWriteError(
+                "uploaded VFS snapshot looks destructively incomplete; "
+                f"removed {len(removed_paths)} of {len(before_paths)} prims"
+            )
 
         emitter = NoticeEmitter(uploaded_stage)
         try:
@@ -1271,17 +1373,34 @@ class UsdSyncServer:
         # Hide prims that existed in the previous composed stage but are absent
         # from the uploaded snapshot. This lets full-file saves express deletes
         # even when the original prim lives in the immutable base layer.
-        removed_paths = sorted(
-            before_paths - uploaded_paths,
-            key=lambda p: p.count("/"),
-            reverse=True,
-        )
         for prim_path in removed_paths:
             events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+
+        event_counts: dict[str, int] = {}
+        for ev in events:
+            kind = ev.get("k", "")
+            if kind:
+                event_counts[kind] = event_counts.get(kind, 0) + 1
+
+        analysis = VfsWriteAnalysis(
+            status="translated",
+            current_epoch=current_epoch,
+            current_seq=current_seq,
+            uploaded_epoch=uploaded_epoch,
+            uploaded_seq=uploaded_seq,
+            before_prim_count=len(before_paths),
+            uploaded_prim_count=len(uploaded_paths),
+            created_prims=created_paths,
+            removed_prims=removed_paths,
+            type_changed_prims=type_changed_paths,
+            event_counts=event_counts,
+            notes=notes,
+        )
 
         self.txn_barrier.acquire_exclusive()
         try:
             self._purge_inner()
+            self.last_vfs_write_analysis = analysis.to_dict()
             if not events:
                 return 0
 
@@ -1301,7 +1420,14 @@ class UsdSyncServer:
                     frame_batch(changed_bins),
                     changed_records,
                 )
-            LOG.info("Translated VFS snapshot write into %d live events", len(events))
+            LOG.info(
+                "Translated VFS snapshot write into %d live events "
+                "(created=%d removed=%d type_changed=%d)",
+                len(events),
+                len(created_paths),
+                len(removed_paths),
+                len(type_changed_paths),
+            )
             return len(events)
         finally:
             self.txn_barrier.release_exclusive()
