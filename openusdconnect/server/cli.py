@@ -70,6 +70,7 @@ def run_server(
     vfs_layer_dir: str = "_layers",
     vfs_manifest_name: str = "openusdconnect.json",
     vfs_write_mode: str = "forbid",
+    vfs_validate_writes: bool = True,
     vfs_prewarm: bool = True,
     advertise_host: str | None = None,
 ):
@@ -150,6 +151,7 @@ def run_server(
                 layer_dir=layer_dir,
                 manifest_name=manifest_name,
                 scene_id=sync_server.scene_id,
+                validate_writes=vfs_validate_writes,
             )
             vfs_handle = run_vfs_server(provider_file, bind_host, vfs_port, share=share)
             if vfs_prewarm:
@@ -328,6 +330,14 @@ def main():
         ),
     )
     ap.add_argument(
+        "--vfs-bypass-write-validation",
+        action="store_true",
+        help=(
+            "Do not validate PUT bodies as readable USD before accepting drop/translate writes. "
+            "Default behavior rejects invalid USD writes."
+        ),
+    )
+    ap.add_argument(
         "--no-vfs-prewarm",
         action="store_true",
         help="Do not pre-generate VFS snapshots in the background on startup",
@@ -363,6 +373,7 @@ def main():
         vfs_layer_dir=args.vfs_layer_dir,
         vfs_manifest_name=args.vfs_manifest_name,
         vfs_write_mode=args.vfs_write_mode,
+        vfs_validate_writes=not args.vfs_bypass_write_validation,
         vfs_prewarm=not args.no_vfs_prewarm,
         advertise_host=args.advertise_host,
     )

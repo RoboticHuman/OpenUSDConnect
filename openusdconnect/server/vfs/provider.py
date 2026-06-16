@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from pxr import Sdf, Usd
 
 from ...protocol_constants import PROTOCOL_VERSION
+from ..types import InvalidVfsWriteError
 
 if TYPE_CHECKING:
     from ..state import UsdSyncServer
@@ -123,15 +124,20 @@ def _open_uploaded_stage(data: bytes) -> Usd.Stage:
     try:
         with tmp:
             tmp.write(data)
-        layer = Sdf.Layer.FindOrOpen(tmp_path)
-        if layer is None:
-            raise ValueError("uploaded bytes are not a readable USD layer")
-        anon = Sdf.Layer.CreateAnonymous(".usda")
-        anon.TransferContent(layer)
-        stage = Usd.Stage.Open(anon)
-        if stage is None:
-            raise ValueError("uploaded USD layer did not open as a stage")
-        return stage
+        try:
+            layer = Sdf.Layer.FindOrOpen(tmp_path)
+            if layer is None:
+                raise InvalidVfsWriteError("uploaded bytes are not a readable USD layer")
+            anon = Sdf.Layer.CreateAnonymous(".usda")
+            anon.TransferContent(layer)
+            stage = Usd.Stage.Open(anon)
+            if stage is None:
+                raise InvalidVfsWriteError("uploaded USD layer did not open as a stage")
+            return stage
+        except InvalidVfsWriteError:
+            raise
+        except Exception as exc:
+            raise InvalidVfsWriteError("uploaded bytes are not a valid USD file") from exc
     finally:
         try:
             os.remove(tmp_path)
@@ -161,11 +167,13 @@ class _CachedVirtualFile:
         name: str,
         write_mode: WriteMode = WriteMode.FORBID,
         content_type: str = "application/octet-stream",
+        validate_writes: bool = True,
     ):
         self._server = sync_server
         self.name = name
         self._write_mode = write_mode
         self._content_type = content_type
+        self._validate_writes = validate_writes
         self._cache_lock = threading.Lock()
         self._cached_bytes: bytes | None = None
         self._cached_key: tuple[int, int] | None = None
@@ -179,6 +187,10 @@ class _CachedVirtualFile:
     @property
     def write_mode(self) -> WriteMode:
         return self._write_mode
+
+    @property
+    def validate_writes(self) -> bool:
+        return self._validate_writes
 
     def can_write(self) -> bool:
         return self._write_mode in (WriteMode.DROP, WriteMode.TRANSLATE)
@@ -232,6 +244,8 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
+            if self._validate_writes:
+                _open_uploaded_stage(data)
             LOG.warning("VFS write dropped (%d bytes) for %s", len(data), self.name)
             return
         if self._write_mode is WriteMode.TRANSLATE:
@@ -243,7 +257,7 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
-            return _DiscardSink()
+            return _BufferedWriteSink() if self._validate_writes else _DiscardSink()
         if self._write_mode is WriteMode.TRANSLATE:
             return _BufferedWriteSink()
         raise NotImplementedError(f"unknown write mode {self._write_mode}")
@@ -252,7 +266,17 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
-            LOG.warning("VFS write dropped (%d bytes) for %s", sink.bytes_written, self.name)
+            try:
+                if self._validate_writes:
+                    if not isinstance(sink, _BufferedWriteSink):
+                        raise InvalidVfsWriteError(
+                            "validated VFS drops require a buffered write sink"
+                        )
+                    _open_uploaded_stage(sink.getvalue())
+                LOG.warning("VFS write dropped (%d bytes) for %s", sink.bytes_written, self.name)
+            finally:
+                if isinstance(sink, _BufferedWriteSink):
+                    sink.dispose()
             return
         if self._write_mode is WriteMode.TRANSLATE:
             try:
@@ -287,10 +311,16 @@ class VirtualStageFile(_CachedVirtualFile):
         department: str | None = None,
         scene_id: str | None = None,
         vfs_url: str = "",
+        validate_writes: bool = True,
     ):
         if fmt != "usda":
             raise ValueError(f"format {fmt!r} is not implemented yet (only 'usda')")
-        super().__init__(sync_server, name=name, write_mode=write_mode)
+        super().__init__(
+            sync_server,
+            name=name,
+            write_mode=write_mode,
+            validate_writes=validate_writes,
+        )
         self._advertise_host = advertise_host
         self._sync_port = sync_port
         self._fmt = fmt
@@ -331,7 +361,16 @@ class VirtualStageFile(_CachedVirtualFile):
         return meta
 
     def _translate_write(self, data: bytes) -> None:
-        stage = _open_uploaded_stage(data)
+        try:
+            stage = _open_uploaded_stage(data)
+        except InvalidVfsWriteError:
+            if self._validate_writes:
+                raise
+            LOG.warning(
+                "VFS write validation bypassed for %s; invalid USD bytes were accepted and dropped",
+                self.name,
+            )
+            return
         event_count = self._server.replace_from_stage_snapshot(stage)
         LOG.warning(
             "VFS write fallback translated %d bytes from %s into %d events",
@@ -350,12 +389,14 @@ class _GeneratedTextFile(_CachedVirtualFile):
         generator: Callable[[int, int], str | bytes],
         content_type: str = "application/octet-stream",
         write_mode: WriteMode = WriteMode.FORBID,
+        validate_writes: bool = True,
     ):
         super().__init__(
             sync_server,
             name=name,
             write_mode=write_mode,
             content_type=content_type,
+            validate_writes=validate_writes,
         )
         self._generator = generator
 
@@ -389,6 +430,7 @@ class VirtualStageFileSet:
         layer_dir: str = "_layers",
         manifest_name: str = "openusdconnect.json",
         scene_id: str | None = None,
+        validate_writes: bool = True,
     ):
         self._server = sync_server
         self.flat_name = flat_name
@@ -401,6 +443,7 @@ class VirtualStageFileSet:
         self._sync_port = sync_port
         self._scene_id = scene_id or getattr(sync_server, "scene_id", flat_name)
         self._write_mode = write_mode
+        self._validate_writes = validate_writes
         self.flattened = VirtualStageFile(
             sync_server,
             name=flat_name,
@@ -409,6 +452,7 @@ class VirtualStageFileSet:
             write_mode=write_mode,
             scene_id=self._scene_id,
             vfs_url=f"{self.vfs_base_url}/{flat_name}",
+            validate_writes=validate_writes,
         )
         self._composition = _GeneratedTextFile(
             sync_server,
@@ -533,6 +577,7 @@ class VirtualStageFileSet:
             ),
             "files": files,
             "write_mode": self._write_mode.value,
+            "write_validation": self._validate_writes,
             "notes": [
                 "scene.usd is the universal flattened fallback.",
                 (

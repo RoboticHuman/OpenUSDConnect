@@ -23,8 +23,9 @@ For compatibility with tools that require a successful save, use
 `--vfs-write-mode drop`; writes are accepted and discarded. For fallback
 editing from non-integrated tools, use `--vfs-write-mode translate`; a saved
 USD snapshot is parsed, translated into live events, and broadcast through the
-normal sync server. Translate mode rejects stale live snapshots and obviously
-incomplete destructive saves instead of silently replacing newer live state.
+normal sync server. Write fallback validates uploaded content as a readable USD
+file by default. Invalid USD, stale live snapshots, and obviously incomplete
+destructive saves are rejected instead of silently replacing newer live state.
 
 ## Prerequisites
 
@@ -66,6 +67,10 @@ Stop the recorded session with:
 uv run python scripts/start_live_open.py stop
 ```
 
+The launcher keeps write validation enabled by default. For compatibility
+testing only, pass `--bypass-write-validation` to forward
+`--vfs-bypass-write-validation` to the server.
+
 To run the pieces manually:
 
 ```powershell
@@ -92,6 +97,7 @@ Useful VFS flags:
 | `--vfs-layer-dir NAME` | `_layers` | Directory containing exported live layers. |
 | `--vfs-manifest-name FILE` | `openusdconnect.json` | Machine-readable VFS manifest. |
 | `--vfs-write-mode MODE` | `forbid` | `forbid` returns 403; `drop` accepts and discards PUT bodies; `translate` turns full-file USD saves into live events. |
+| `--vfs-bypass-write-validation` | validation enabled | Accept invalid USD writes instead of rejecting them. In `translate` mode invalid bypassed writes are accepted and dropped because they cannot be translated. |
 | `--no-vfs-prewarm` | prewarm enabled | Disables background snapshot pre-generation. |
 | `--advertise-host HOST` | bind host, or `127.0.0.1` for all interfaces | Host embedded in live metadata. |
 

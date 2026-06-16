@@ -113,6 +113,11 @@ def _run_start(argv: list[str]) -> int:
     parser.add_argument("--state-file", default=".ouc_live_mount/live_open_session.json")
     parser.add_argument("--log-dir", default=".ouc_live_mount")
     parser.add_argument("--write-mode", choices=["forbid", "drop", "translate"], default="translate")
+    parser.add_argument(
+        "--bypass-write-validation",
+        action="store_true",
+        help="Let VFS write fallback accept invalid USD bytes; default rejects invalid writes.",
+    )
     parser.add_argument("--dashboard", type=int, default=0)
     parser.add_argument("--open", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -145,6 +150,8 @@ def _run_start(argv: list[str]) -> int:
         "--vfs-write-mode",
         args.write_mode,
     ]
+    if args.bypass_write_validation:
+        server_cmd.append("--vfs-bypass-write-validation")
     if args.dashboard:
         server_cmd.extend(["--dashboard", str(args.dashboard)])
 
@@ -188,6 +195,7 @@ def _run_start(argv: list[str]) -> int:
         "drive": _drive_name(args.drive),
         "file_path": f"{_drive_name(args.drive)}\\scene.usd",
         "write_mode": args.write_mode,
+        "write_validation": not args.bypass_write_validation,
     }
     _write_json(state_file, payload)
     print(f"Server PID: {server.pid}")

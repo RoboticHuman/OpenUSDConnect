@@ -35,8 +35,9 @@ Real-time USD scene synchronization across DCC applications. OpenUSDConnect prov
   receiver/emitter when enabled.
 - Unreal can open the same VFS snapshot in USD Stage and use its metadata for
   host, port, receiver replay position, and TOFU token reuse.
-- Optional write fallback: `--vfs-write-mode translate` turns full-file USD
-  saves into live events, rejecting stale or obviously incomplete snapshots.
+- Optional write fallback: `--vfs-write-mode translate` turns valid full-file
+  USD saves into live events, rejecting invalid USD, stale snapshots, or
+  obviously incomplete snapshots by default.
 
 ## Getting Started
 

@@ -99,7 +99,9 @@ import.
 
 The virtual share is read-only by default. Server operators can opt into
 compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
-translation with `--vfs-write-mode translate`. Translate mode parses a full USD
+translation with `--vfs-write-mode translate`. Write fallback validates saved
+content as USD by default; invalid USD writes are rejected unless the server is
+started with `--vfs-bypass-write-validation`. Translate mode parses a full USD
 save and broadcasts it as live events; plugin/TCP sync remains the preferred
 interactive authoring path.
 
