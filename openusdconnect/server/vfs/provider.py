@@ -244,8 +244,6 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
-            if self._validate_writes:
-                _open_uploaded_stage(data)
             LOG.warning("VFS write dropped (%d bytes) for %s", len(data), self.name)
             return
         if self._write_mode is WriteMode.TRANSLATE:
@@ -257,7 +255,7 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
-            return _BufferedWriteSink() if self._validate_writes else _DiscardSink()
+            return _DiscardSink()
         if self._write_mode is WriteMode.TRANSLATE:
             return _BufferedWriteSink()
         raise NotImplementedError(f"unknown write mode {self._write_mode}")
@@ -266,17 +264,7 @@ class _CachedVirtualFile:
         if self._write_mode is WriteMode.FORBID:
             raise PermissionError(f"{self.name} is read-only")
         if self._write_mode is WriteMode.DROP:
-            try:
-                if self._validate_writes:
-                    if not isinstance(sink, _BufferedWriteSink):
-                        raise InvalidVfsWriteError(
-                            "validated VFS drops require a buffered write sink"
-                        )
-                    _open_uploaded_stage(sink.getvalue())
-                LOG.warning("VFS write dropped (%d bytes) for %s", sink.bytes_written, self.name)
-            finally:
-                if isinstance(sink, _BufferedWriteSink):
-                    sink.dispose()
+            LOG.warning("VFS write dropped (%d bytes) for %s", sink.bytes_written, self.name)
             return
         if self._write_mode is WriteMode.TRANSLATE:
             try:
@@ -577,7 +565,7 @@ class VirtualStageFileSet:
             ),
             "files": files,
             "write_mode": self._write_mode.value,
-            "write_validation": self._validate_writes,
+            "write_validation": self._write_mode is WriteMode.TRANSLATE and self._validate_writes,
             "notes": [
                 "scene.usd is the universal flattened fallback.",
                 (

@@ -116,7 +116,7 @@ def _run_start(argv: list[str]) -> int:
     parser.add_argument(
         "--bypass-write-validation",
         action="store_true",
-        help="Let VFS write fallback accept invalid USD bytes; default rejects invalid writes.",
+        help="Let translate write fallback accept and drop invalid USD bytes.",
     )
     parser.add_argument("--dashboard", type=int, default=0)
     parser.add_argument("--open", action="store_true")
@@ -195,7 +195,7 @@ def _run_start(argv: list[str]) -> int:
         "drive": _drive_name(args.drive),
         "file_path": f"{_drive_name(args.drive)}\\scene.usd",
         "write_mode": args.write_mode,
-        "write_validation": not args.bypass_write_validation,
+        "write_validation": args.write_mode == "translate" and not args.bypass_write_validation,
     }
     _write_json(state_file, payload)
     print(f"Server PID: {server.pid}")

@@ -333,8 +333,8 @@ def main():
         "--vfs-bypass-write-validation",
         action="store_true",
         help=(
-            "Do not validate PUT bodies as readable USD before accepting drop/translate writes. "
-            "Default behavior rejects invalid USD writes."
+            "Do not validate translate-mode PUT bodies as readable USD before accepting them. "
+            "Drop mode never validates because writes are discarded."
         ),
     )
     ap.add_argument(

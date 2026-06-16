@@ -94,7 +94,7 @@ Supported operations:
 | `OPTIONS` | Advertises DAV class support for WebDAV clients. |
 | `PROPFIND` | Lists the virtual share and file metadata. |
 | `LOCK` / `UNLOCK` | Supported for Windows WebClient compatibility. |
-| `PUT` to `scene.usd` | Forbidden by default; `drop` validates then discards the body; `translate` validates, parses a full USD save, and broadcasts translated live events. |
+| `PUT` to `scene.usd` | Forbidden by default; `drop` discards the body without validation; `translate` validates, parses a full USD save, and broadcasts translated live events. |
 
 Forbidden operations:
 
@@ -107,10 +107,11 @@ This is a deliberate safety policy. Direct file writes do not become live
 events unless `--vfs-write-mode translate` is explicitly enabled; the default
 is read-only behavior instead of silent success.
 
-Write fallback rejects invalid USD by default in both `drop` and `translate`
-mode. Operators can pass `--vfs-bypass-write-validation` for compatibility
-testing; in `translate` mode, invalid bypassed writes are accepted and dropped
-because there is no valid stage to diff into live events.
+Translate fallback rejects invalid USD by default. Operators can pass
+`--vfs-bypass-write-validation` for compatibility testing; invalid bypassed
+writes are accepted and dropped because there is no valid stage to diff into
+live events. Drop mode does not validate because it deliberately discards every
+write and never mutates the server stage.
 
 ## File Picker UX
 

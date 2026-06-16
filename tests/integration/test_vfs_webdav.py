@@ -124,28 +124,6 @@ def vfs_drop(tmp_path, free_port):
 
 
 @pytest.fixture
-def vfs_drop_without_validation(tmp_path, free_port):
-    srv = UsdSyncServer(log_path=str(tmp_path / "test-drop-bypass.db"))
-    provider = VirtualStageFileSet(
-        srv,
-        flat_name=FILE_NAME,
-        advertise_host="127.0.0.1",
-        sync_port=7200,
-        share=SHARE,
-        vfs_base_url=f"http://127.0.0.1:{free_port}/{SHARE}",
-        write_mode=WriteMode.DROP,
-        validate_writes=False,
-    )
-    handle = run_vfs_server(provider, "127.0.0.1", free_port, share=SHARE)
-    client = DavClient("127.0.0.1", free_port)
-    try:
-        yield srv, client
-    finally:
-        handle.stop()
-        srv.store.close()
-
-
-@pytest.fixture
 def vfs_translate(tmp_path, free_port):
     srv = UsdSyncServer(log_path=str(tmp_path / "test-translate.db"))
     provider = VirtualStageFileSet(
@@ -321,7 +299,7 @@ class TestRead:
         assert headers["Content-Type"].startswith("application/json")
         manifest = json.loads(data.decode("utf-8"))
         assert manifest["openusdconnect"]["snapshot_seq"] == 1
-        assert manifest["write_validation"] is True
+        assert manifest["write_validation"] is False
         assert any(entry["kind"] == "composition_root" for entry in manifest["files"])
 
     def test_composition_root_and_layer_file(self, vfs):
@@ -391,20 +369,8 @@ class TestWriteDrop:
         assert 200 <= status < 300
         assert srv.get_event_count() == 0
 
-    def test_put_invalid_usd_rejected_in_drop_mode(self, vfs_drop):
+    def test_put_invalid_usd_dropped_in_drop_mode(self, vfs_drop):
         srv, client = vfs_drop
-        before_count = srv.get_event_count()
-        _, _, before_data = client.get(_file_path())
-
-        status, _, _ = client.put(_file_path(), b"this is not usd")
-        assert status == 409
-
-        assert srv.get_event_count() == before_count
-        _, _, after_data = client.get(_file_path())
-        assert after_data == before_data
-
-    def test_put_invalid_usd_can_bypass_validation_in_drop_mode(self, vfs_drop_without_validation):
-        srv, client = vfs_drop_without_validation
         before_count = srv.get_event_count()
         _, _, before_data = client.get(_file_path())
 

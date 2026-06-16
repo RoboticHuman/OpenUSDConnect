@@ -56,18 +56,6 @@ def drop_vfile(srv):
 
 
 @pytest.fixture
-def drop_vfile_without_validation(srv):
-    return VirtualStageFile(
-        srv,
-        name="live.usd",
-        advertise_host="127.0.0.1",
-        sync_port=7200,
-        write_mode=WriteMode.DROP,
-        validate_writes=False,
-    )
-
-
-@pytest.fixture
 def translate_vfile(srv):
     return VirtualStageFile(
         srv,
@@ -378,41 +366,28 @@ class TestWriteDrop:
 
     def test_sink_discards(self, srv, drop_vfile):
         sink = drop_vfile.open_write_sink()
-        data = _stage_bytes([("/ValidatedDrop", "Xform")])
-        sink.write(data[:10])
-        sink.write(data[10:])
+        sink.write(b"x" * 1024)
+        sink.write(b"y" * 1024)
         sink.close()
-        assert sink.bytes_written == len(data)
+        assert sink.bytes_written == 2048
         drop_vfile.finish_write(sink)
         assert srv.get_event_count() == 0
 
-    def test_invalid_write_is_rejected_before_drop(self, srv, drop_vfile):
+    def test_invalid_write_is_dropped(self, srv, drop_vfile):
         before = drop_vfile.read()
         count = srv.get_event_count()
 
-        with pytest.raises(InvalidVfsWriteError):
-            drop_vfile.write(b"this is not usd")
+        drop_vfile.write(b"this is not usd")
 
         assert srv.get_event_count() == count
         assert drop_vfile.read() == before
 
-    def test_invalid_sink_is_rejected_before_drop(self, srv, drop_vfile):
+    def test_invalid_sink_is_dropped(self, srv, drop_vfile):
         sink = drop_vfile.open_write_sink()
         sink.write(b"this is not usd")
-
-        with pytest.raises(InvalidVfsWriteError):
-            drop_vfile.finish_write(sink)
+        drop_vfile.finish_write(sink)
 
         assert srv.get_event_count() == 0
-
-    def test_validation_can_be_bypassed_for_drop_mode(self, srv, drop_vfile_without_validation):
-        before = drop_vfile_without_validation.read()
-        count = srv.get_event_count()
-
-        drop_vfile_without_validation.write(b"this is not usd")
-
-        assert srv.get_event_count() == count
-        assert drop_vfile_without_validation.read() == before
 
     def test_unknown_format_rejected(self, srv):
         with pytest.raises(ValueError, match="usdc"):
