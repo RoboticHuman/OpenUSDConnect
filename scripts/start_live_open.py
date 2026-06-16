@@ -55,6 +55,15 @@ def _wait_for_http(url: str, timeout: float) -> None:
     raise TimeoutError(f"timed out waiting for {url}: {last_error}")
 
 
+def _wait_for_file(path: Path, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"timed out waiting for {path}")
+
+
 def _drive_name(drive: str) -> str:
     drive = drive.rstrip("\\/")
     if not drive.endswith(":"):
@@ -127,8 +136,11 @@ def _run_start(argv: list[str]) -> int:
     log_dir = Path(args.log_dir).resolve()
     state_file = Path(args.state_file).resolve()
     mount_dir = Path(args.mount_dir).resolve()
-    bridge_status = mount_dir / "openusdconnect_bridge_status.json"
-    bridge_log = mount_dir / "openusdconnect_bridge.log"
+    bridge_dir = log_dir / "bridge"
+    bridge_status = bridge_dir / "openusdconnect_bridge_status.json"
+    bridge_log = bridge_dir / "openusdconnect_bridge.log"
+    bridge_process_log = bridge_dir / "openusdconnect_bridge_process.log"
+    bridge_status.unlink(missing_ok=True)
     server_log = log_dir / "openusdconnect_server.log"
     server_db = log_dir / f"live-open-{args.port}.db"
     vfs_url = f"http://{args.host}:{args.vfs_port}/usd/scene.usd"
@@ -175,13 +187,13 @@ def _run_start(argv: list[str]) -> int:
         str(bridge_status),
         "--log-file",
         str(bridge_log),
-        "--background",
     ]
     if args.force:
         bridge_cmd.append("--force")
     if args.open:
         bridge_cmd.append("--open")
-    subprocess.check_call(bridge_cmd)
+    bridge = _start_process(bridge_cmd, bridge_process_log)
+    _wait_for_file(bridge_status, args.wait)
 
     payload = {
         "started_at": _now(),
@@ -192,6 +204,8 @@ def _run_start(argv: list[str]) -> int:
         "vfs_url": vfs_url,
         "bridge_status": str(bridge_status),
         "bridge_log": str(bridge_log),
+        "bridge_process_log": str(bridge_process_log),
+        "bridge_pid": bridge.pid,
         "drive": _drive_name(args.drive),
         "file_path": f"{_drive_name(args.drive)}\\scene.usd",
         "write_mode": args.write_mode,
@@ -217,6 +231,7 @@ def _run_stop(argv: list[str]) -> int:
     state = json.loads(state_file.read_text(encoding="utf-8"))
     drive = args.drive or state.get("drive") or "O:"
     bridge_status = state.get("bridge_status") or ""
+    bridge_pid = int(state.get("bridge_pid") or 0)
     bridge_cmd = [
         sys.executable,
         str(Path(__file__).with_name("local_vfs_drive_bridge.py")),
@@ -228,6 +243,7 @@ def _run_stop(argv: list[str]) -> int:
     if bridge_status:
         bridge_cmd.extend(["--status-file", bridge_status])
     subprocess.run(bridge_cmd, check=False)
+    _stop_pid(bridge_pid)
     _stop_pid(int(state.get("server_pid") or 0))
     state["stopped_at"] = _now()
     _write_json(state_file, state)

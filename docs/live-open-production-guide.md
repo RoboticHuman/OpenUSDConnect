@@ -162,12 +162,13 @@ uv run python scripts/local_vfs_drive_bridge.py `
 
 This uses `subst`, so it does not require admin privileges. It gives artists
 the same `O:\scene.usd` file-picker path and forwards local saves back to the
-VFS write endpoint. It also supports background mode, status inspection, and
-clean unmount:
+VFS write endpoint. Bridge status/log files live outside the mounted folder,
+so the artist-visible drive only contains virtual USD files. It also supports
+background mode, status inspection, and clean unmount:
 
 ```powershell
-uv run python scripts/local_vfs_drive_bridge.py status --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json
-uv run python scripts/local_vfs_drive_bridge.py unmount --drive O: --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json --stop-process
+uv run python scripts/local_vfs_drive_bridge.py status --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json
+uv run python scripts/local_vfs_drive_bridge.py unmount --drive O: --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json --stop-process
 ```
 
 That maps:

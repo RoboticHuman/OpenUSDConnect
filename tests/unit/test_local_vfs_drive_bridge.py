@@ -28,6 +28,62 @@ def test_status_file_roundtrip(tmp_path, capsys):
     assert payload["updated_at"]
 
 
+def test_default_control_files_live_outside_mount(tmp_path):
+    bridge = _load_bridge()
+    mount_dir = tmp_path / "usd"
+
+    assert bridge._default_status_file(mount_dir) == (
+        tmp_path / "bridge" / "openusdconnect_bridge_status.json"
+    )
+    assert bridge._default_log_file(mount_dir) == (
+        tmp_path / "bridge" / "openusdconnect_bridge.log"
+    )
+
+
+def test_legacy_control_files_are_removed_from_mount(tmp_path):
+    bridge = _load_bridge()
+    mount_dir = tmp_path / "usd"
+    mount_dir.mkdir()
+    legacy_status = mount_dir / "openusdconnect_bridge_status.json"
+    legacy_log = mount_dir / "openusdconnect_bridge.log"
+    scene = mount_dir / "scene.usd"
+    legacy_status.write_text("{}", encoding="utf-8")
+    legacy_log.write_text("log", encoding="utf-8")
+    scene.write_text("#usda 1.0\n", encoding="utf-8")
+
+    bridge._remove_legacy_control_files(mount_dir)
+
+    assert not legacy_status.exists()
+    assert not legacy_log.exists()
+    assert scene.exists()
+
+
+def test_content_changed_ignores_same_bytes(tmp_path):
+    bridge = _load_bridge()
+    path = tmp_path / "scene.usd"
+    path.write_bytes(b"#usda 1.0\n")
+    initial_hash = bridge._hash_file(path)
+
+    path.write_bytes(b"#usda 1.0\n")
+    changed, current_hash = bridge._content_changed(path, initial_hash)
+
+    assert changed is False
+    assert current_hash == initial_hash
+
+
+def test_content_changed_detects_new_bytes(tmp_path):
+    bridge = _load_bridge()
+    path = tmp_path / "scene.usd"
+    path.write_bytes(b"#usda 1.0\n")
+    initial_hash = bridge._hash_file(path)
+
+    path.write_bytes(b"#usda 1.0\ndef Xform \"World\" {}\n")
+    changed, current_hash = bridge._content_changed(path, initial_hash)
+
+    assert changed is True
+    assert current_hash != initial_hash
+
+
 def test_unmount_invokes_subst_and_optional_process_stop(tmp_path, monkeypatch):
     bridge = _load_bridge()
     status_file = tmp_path / "status.json"

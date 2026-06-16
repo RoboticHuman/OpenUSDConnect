@@ -186,13 +186,16 @@ uv run python scripts/local_vfs_drive_bridge.py `
   --open
 
 uv run python scripts/local_vfs_drive_bridge.py status `
-  --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json
+  --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json
 
 uv run python scripts/local_vfs_drive_bridge.py unmount `
   --drive O: `
-  --status-file .ouc_live_mount\usd\openusdconnect_bridge_status.json `
+  --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json `
   --stop-process
 ```
+
+The bridge keeps its status JSON and log outside the mounted folder, so the
+drive should only show the virtual USD file contents.
 
 Then open this in Blender or any file picker:
 

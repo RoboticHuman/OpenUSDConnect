@@ -9,6 +9,7 @@ and PUTs local file saves back to the VFS endpoint.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import logging
@@ -50,14 +51,31 @@ def _request(method: str, url: str, body: bytes | None = None) -> tuple[int, dic
         conn.close()
 
 
-def _download(url: str, path: Path) -> tuple[str, int]:
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _content_changed(path: Path, previous_hash: str) -> tuple[bool, str]:
+    current_hash = _hash_file(path)
+    return current_hash != previous_hash, current_hash
+
+
+def _download(url: str, path: Path) -> tuple[str, int, str]:
     status, headers, data = _request("GET", url)
     if not (200 <= status < 300):
         raise RuntimeError(f"GET {url} failed with HTTP {status}")
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
-    return headers.get("ETag", ""), len(data)
+    return headers.get("ETag", ""), len(data), _hash_bytes(data)
 
 
 def _upload(url: str, path: Path) -> None:
@@ -120,11 +138,19 @@ def _setup_logging(log_file: Path | None, *, verbose: bool) -> None:
 
 
 def _default_status_file(mount_dir: Path) -> Path:
-    return mount_dir / "openusdconnect_bridge_status.json"
+    return mount_dir.parent / "bridge" / "openusdconnect_bridge_status.json"
 
 
 def _default_log_file(mount_dir: Path) -> Path:
-    return mount_dir / "openusdconnect_bridge.log"
+    return mount_dir.parent / "bridge" / "openusdconnect_bridge.log"
+
+
+def _remove_legacy_control_files(mount_dir: Path) -> None:
+    for name in ("openusdconnect_bridge_status.json", "openusdconnect_bridge.log"):
+        try:
+            (mount_dir / name).unlink(missing_ok=True)
+        except OSError:
+            LOG.warning("Could not remove legacy bridge control file %s", mount_dir / name)
 
 
 def _spawn_background(args: argparse.Namespace, argv: list[str]) -> int:
@@ -239,7 +265,7 @@ def _run_unmount(argv: list[str]) -> int:
 
 def _run_status(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Print local VFS bridge status JSON")
-    parser.add_argument("--status-file", default=".ouc_live_mount/usd/openusdconnect_bridge_status.json")
+    parser.add_argument("--status-file", default=".ouc_live_mount/bridge/openusdconnect_bridge_status.json")
     args = parser.parse_args(argv)
     path = Path(args.status_file).resolve()
     if not path.exists():
@@ -261,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mount_dir = Path(args.mount_dir).resolve()
     mount_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_control_files(mount_dir)
     file_path = mount_dir / Path(urlparse(args.url).path).name
     status_file = Path(args.status_file).resolve() if args.status_file else _default_status_file(mount_dir)
     log_file = Path(args.log_file).resolve() if args.log_file else None
@@ -270,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _setup_logging(log_file, verbose=args.verbose)
 
-    etag, size = _download(args.url, file_path)
+    etag, size, last_seen_hash = _download(args.url, file_path)
     last_seen_mtime = file_path.stat().st_mtime
     _subst(args.drive, mount_dir, args.force)
     drive = _drive_name(args.drive)
@@ -323,8 +350,12 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 current_mtime = file_path.stat().st_mtime
                 if current_mtime > last_seen_mtime + 0.001:
+                    changed, current_hash = _content_changed(file_path, last_seen_hash)
+                    if not changed:
+                        last_seen_mtime = current_mtime
+                        continue
                     _upload(args.url, file_path)
-                    etag, size = _download(args.url, file_path)
+                    etag, size, last_seen_hash = _download(args.url, file_path)
                     last_seen_mtime = file_path.stat().st_mtime
                     _write_status(
                         status_file,
@@ -363,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
                     error="",
                 )
                 if remote_etag and remote_etag != etag:
-                    etag, size = _download(args.url, file_path)
+                    etag, size, last_seen_hash = _download(args.url, file_path)
                     last_seen_mtime = file_path.stat().st_mtime
                     _write_status(
                         status_file,
