@@ -64,6 +64,31 @@ def test_connect_is_noop_while_connected(monkeypatch):
     assert stopped == []
 
 
+def test_playback_status_reflects_broadcast(monkeypatch):
+    """playback_status reports the latest PlaybackState and leadership."""
+    started, stopped = [], []
+    _patch_net(monkeypatch, started, stopped)
+    session = session_mod.ConnectionSession(McpConfig(client_id="mcp-x"))
+    session.connect()
+
+    assert session.playback_status()["observed"] is False  # nothing broadcast yet
+
+    session._on_playback_state(
+        {"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"}
+    )
+    st = session.playback_status()
+    assert st["observed"] and st["playing"] is True
+    assert st["time"] == 12.0 and st["rate"] == 2.0
+    assert st["has_leader"] is True and st["is_leader"] is True
+
+    session._on_playback_state(
+        {"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"}
+    )
+    st2 = session.playback_status()
+    assert st2["is_leader"] is False
+    assert st2["leader_client_id"] == "someone-else"
+
+
 def test_disconnect_stops_receiver(monkeypatch):
     started, stopped = [], []
     _patch_net(monkeypatch, started, stopped)

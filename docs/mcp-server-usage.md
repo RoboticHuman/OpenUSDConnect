@@ -116,6 +116,8 @@ target a non-default server.
 
 ### Playback
 - `usd_claim_playback(time?)`, `usd_playback_control(action, time?, rate?)`.
+- `usd_playback_status()` — read the shared playhead (playing/time/rate, leader
+  client id, whether this client leads) from the latest broadcast PlaybackState.
 
 ## Authoring recipes
 

@@ -164,6 +164,33 @@ def test_changes_since_tracks_own_and_foreign_edits(server):
         session.disconnect()
 
 
+def test_playback_status_observes_claim_and_control(server):
+    session = _connect(server)
+    try:
+        session.claim_playback()
+        deadline = time.monotonic() + 5.0
+        st = {}
+        while time.monotonic() < deadline:
+            st = session.playback_status()
+            if st.get("is_leader"):
+                break
+            time.sleep(0.05)
+        assert st.get("observed") is True
+        assert st.get("is_leader") is True
+        assert st.get("leader_client_id") == "mcp-test"
+
+        session.playback_control("set_time", time_code=9.0)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            st = session.playback_status()
+            if st.get("time") == pytest.approx(9.0):
+                break
+            time.sleep(0.05)
+        assert st.get("time") == pytest.approx(9.0)
+    finally:
+        session.disconnect()
+
+
 def test_foreign_edit_visible_to_mcp(server):
     session = _connect(server)
     emitter = EventSender("127.0.0.1", server, client_id="foreign", origin="foreign-emit")

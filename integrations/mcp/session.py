@@ -40,6 +40,8 @@ class ConnectionSession:
         # prim_path -> sequence it last changed at, fed by the dispatcher's
         # on_applied hook; powers changes_since() diff queries.
         self._dirty: dict[str, int] = {}
+        # Latest PlaybackState the server broadcast, set on the receiver thread.
+        self._playback_state: dict | None = None
 
     @property
     def connected(self) -> bool:
@@ -109,6 +111,7 @@ class ConnectionSession:
         cfg = self.config
         self.mirror_stage = Usd.Stage.CreateInMemory()
         self._dirty = {}
+        self._playback_state = None
         self._seed_metadata(self.sender.stage_metadata)
         recv_token = token_client.load_token(cfg.host, cfg.port) or self.sender.token
         self.receiver = ReceiverThread(
@@ -118,6 +121,7 @@ class ConnectionSession:
             client_id=cfg.client_id,
             origin=f"{self._origin_base}-recv",
             token=recv_token,
+            on_playback_state=self._on_playback_state,
         )
         self.receiver.start()
         self.dispatcher = EventDispatcher(
@@ -133,6 +137,17 @@ class ConnectionSession:
         seq = self.dispatcher.last_seq if self.dispatcher else 0
         for path in prim_paths:
             self._dirty[path] = seq
+
+    def _on_playback_state(self, msg: dict) -> None:
+        """Store the latest shared-playhead snapshot. Runs on the receiver
+        thread, so assign a fresh dict (an atomic reference swap) rather than
+        mutating in place."""
+        self._playback_state = {
+            "playing": msg.get("playing"),
+            "time": msg.get("time"),
+            "rate": msg.get("rate"),
+            "leader_client_id": msg.get("leader_client_id") or "",
+        }
 
     def _seed_metadata(self, metadata: dict | None) -> None:
         payload = {k: v for k, v in (metadata or {}).items() if k in STAGE_METADATA_KEYS}
@@ -150,6 +165,7 @@ class ConnectionSession:
         self.dispatcher = None
         self.mirror_stage = None
         self._dirty = {}
+        self._playback_state = None
 
     def disconnect(self) -> dict:
         self._teardown()
@@ -238,6 +254,28 @@ class ConnectionSession:
             )
         ok = self.sender.send_playback_control(action, time=time_code, rate=rate)
         return {"ok": ok, "action": action}
+
+    def playback_status(self) -> dict:
+        """Read the shared playhead from the latest broadcast PlaybackState:
+        playing/time/rate, the leader's client id, and whether this client leads.
+        ``observed`` is False until the first PlaybackState arrives (needs the
+        mirror's receiver; disabled under --no-mirror)."""
+        if not self.connected:
+            raise ToolError("not connected, call usd_connect first", code="not_connected")
+        state = self._playback_state
+        if state is None:
+            return {"ok": True, "observed": False}
+        leader = state.get("leader_client_id") or ""
+        return {
+            "ok": True,
+            "observed": True,
+            "playing": bool(state.get("playing")),
+            "time": state.get("time"),
+            "rate": state.get("rate"),
+            "leader_client_id": leader,
+            "has_leader": bool(leader),
+            "is_leader": bool(leader) and leader == self.config.client_id,
+        }
 
     # -- status ------------------------------------------------------------
 

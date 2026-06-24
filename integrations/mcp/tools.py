@@ -253,5 +253,14 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
         set_rate; time for set_time; rate for set_rate."""
         return session.playback_control(action, time, rate)
 
+    @mcp.tool()
+    @_catch
+    def usd_playback_status() -> dict:
+        """Read the shared playhead: playing, time, rate, the leader's client id,
+        and whether this client is the leader. Reflects the latest PlaybackState
+        the server broadcast (claim/drive it with usd_claim_playback /
+        usd_playback_control). 'observed' is False until the first state arrives."""
+        return session.playback_status()
+
     mcp.usdconnect_session = session  # exposed for tests/diagnostics
     return mcp
