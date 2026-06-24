@@ -13,6 +13,13 @@ import socket
 
 import pytest
 
+# Make renderer plugin DLLs (e.g. RenderMan) loadable before any test imports
+# pxr. Once a renderer is installed into the shared USD tree, the Sdr registry
+# fails to initialize without its DLLs on PATH. No-op when RMANTREE is unset.
+from integrations.renderman import apply_dll_dirs as _apply_renderer_dll_dirs
+
+_apply_renderer_dll_dirs()
+
 _CFG_FILE = pathlib.Path(__file__).parent.parent / "blender.test.cfg"
 
 

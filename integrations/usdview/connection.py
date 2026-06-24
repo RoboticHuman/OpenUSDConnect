@@ -1,6 +1,6 @@
 """OpenUSDConnect receive-side wiring for usdview.
 
-Receive-only — no emitter, no feedback-loop guard. Stage mutation triggers
+Receive-only: no emitter, no feedback-loop guard. Stage mutation triggers
 ``Usd.Notice.ObjectsChanged`` which refreshes the viewport on its own.
 """
 
@@ -29,6 +29,7 @@ _host: str = ""
 _port: int = 0
 _client_id: str = ""
 _origin: str = ""
+_translate_openpbr: bool = False
 
 _TICK_INTERVAL_MS = 16
 
@@ -47,10 +48,10 @@ def start(
     Returns True on success, False if already running or the stage is missing.
     """
     global _receiver, _dispatcher, _qtimer, _usdview_api, _stage, _running
-    global _host, _port, _client_id, _origin
+    global _host, _port, _client_id, _origin, _translate_openpbr
 
     if _running:
-        LOG.warning("Already running — call stop() first")
+        LOG.warning("Already running, call stop() first")
         return False
 
     stage = usdviewApi.dataModel.stage
@@ -69,6 +70,10 @@ def start(
     _port = port
     _client_id = client_id or make_stable_client_id("usdview")
     _origin = origin or f"usdview-{uuid.uuid4().hex[:8]}"
+    # Receiver-side OpenPBR->standard_surface translation for RenderMan, which
+    # can't render the OpenPBR surface node. Enabled by the launcher's
+    # --renderman flag (which sets this env var).
+    _translate_openpbr = bool(os.environ.get("OPENUSDCONNECT_TRANSLATE_OPENPBR"))
 
     _receiver = ReceiverThread(
         host=host,
@@ -83,9 +88,17 @@ def start(
     _dispatcher = EventDispatcher(
         receiver=_receiver,
         adapter=UsdStageAdapter(stage),
+        on_applied=_on_applied if _translate_openpbr else None,
     )
     _usdview_api = usdviewApi
     _stage = stage
+
+    # Convert any OpenPBR materials already in the opened scene; subsequent edits
+    # are handled incrementally by _on_applied, scoped to the changed prims.
+    if _translate_openpbr:
+        from .openpbr_translate import translate_openpbr_materials
+
+        translate_openpbr_materials(stage)
 
     usdviewApi.dataModel.signalStageReplaced.connect(_on_stage_replaced)
 
@@ -110,14 +123,31 @@ def _on_stage_replaced() -> None:
         from openusdconnect.adapters import UsdStageAdapter
 
         _dispatcher.adapter = UsdStageAdapter(_stage)
-        LOG.info("Stage replaced — rebound receiver to the live stage")
+        if _translate_openpbr:
+            from .openpbr_translate import translate_openpbr_materials
+
+            translate_openpbr_materials(_stage)
+        LOG.info("Stage replaced, rebound receiver to the live stage")
 
 
 def _tick() -> None:
-    """Drain the receive queue each frame; idle while no stage is bound."""
+    """Drain the receive queue each frame; idle while no stage is bound.
+
+    OpenPBR translation is driven by the dispatcher's on_applied callback
+    (:func:`_on_applied`), scoped to the prims each batch actually changed.
+    """
     if _dispatcher is None or _stage is None:
         return
     _dispatcher.drain_and_apply()
+
+
+def _on_applied(prim_paths: list[str]) -> None:
+    """Translate or refresh only the materials owning the just-applied prims."""
+    if _stage is None:
+        return
+    from .openpbr_translate import translate_openpbr_for_paths
+
+    translate_openpbr_for_paths(_stage, prim_paths)
 
 
 def stop() -> None:
@@ -155,4 +185,5 @@ def status() -> dict:
         "origin": _origin,
         "receiver_connected": _receiver.connected if _receiver else False,
         "last_seq": _dispatcher.last_seq if _dispatcher else 0,
+        "translate_openpbr": _translate_openpbr,
     }

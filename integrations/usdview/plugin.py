@@ -1,6 +1,6 @@
 """PluginContainer entry point for usdview's libplug loader.
 
-Pulls in PySide6 transitively via ``pxr.Usdviewq`` — only safe to import
+Pulls in PySide6 transitively via ``pxr.Usdviewq``, only safe to import
 inside usdview's interpreter. The package ``__init__.py`` carries no Qt
 imports so non-Qt callers (launcher, tests) can import siblings without Qt.
 """
@@ -58,7 +58,7 @@ def _on_connect(usdviewApi) -> None:
         QtWidgets.QMessageBox.warning(
             usdviewApi.qMainWindow,
             "OpenUSDConnect",
-            "Failed to start receiver — see console for details.",
+            "Failed to start receiver. See console for details.",
         )
 
 
