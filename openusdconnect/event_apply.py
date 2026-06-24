@@ -866,18 +866,21 @@ def apply_event(stage: Usd.Stage, ev: Event) -> None:
 def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     """Apply a list of events to a USD stage.
 
-    Ordering: callers may pass events in any order. The structural pass
-    applies prim-creating kinds first (ancestors before descendants), then
-    the rest in received order, so the dependency that matters (the prim
-    exists before anything authors on it) holds regardless of input order.
-    USD composition and dangling targets cover the rest. Enforced by
-    ``test_apply_events_orders_create_before_connect`` and
-    ``test_receiver_matches_sender_under_shuffled_event_order``.
+    Ordering: within a segment, callers may pass events in any order. delete_prim
+    and rename_prim are sequencing barriers; the events between two barriers form
+    a segment applied prim-creating-kinds first (ancestors before descendants via
+    path depth), then the remaining structural kinds, then value-setting ops, so
+    the dependency that matters (a prim exists before anything authors on it)
+    holds regardless of shuffled input. Barriers are never reordered, so a
+    delete-then-recreate of the same path survives even when a whole replay
+    backlog is applied in one batch.
 
-    Structural events are applied outside a ChangeBlock; value-setting events
-    run inside one for atomicity. Namespace edits (delete_prim, rename_prim)
-    also apply outside, splitting the value run at their position, so each
-    sees the composed result of every event before it.
+    Structural events apply outside a ChangeBlock; value-setting events run
+    inside one for atomicity. delete_prim/rename_prim apply outside any block,
+    after the preceding segment's block closes, so each sees the composed result
+    of every event before it (Usd.NamespaceEditor and later events validate
+    against the composed stage, which does not refresh until a ChangeBlock
+    closes).
 
     *op_cache* is an optional dict-like mapping prim_path to
     (translate_op, orient_op, scale_op).  Pass a persistent cache
@@ -887,59 +890,55 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     if op_cache is None:
         op_cache = {}
 
-    # Structural pass: a prim must exist before anything authors on it, so
-    # apply the prim-creating kinds first (ancestors before descendants via
-    # path depth), then the rest in received order. USD composition and
-    # dangling connection/relationship targets make any finer ordering
-    # unnecessary; see CREATE_KINDS in protocol_constants.
-    structural = [ev for ev in events if ev.get("k") in STRUCTURAL_EVENT_KINDS]
-    create = [ev for ev in structural if ev.get("k") in CREATE_KINDS]
-    create.sort(key=lambda ev: ev.get("prim", "").count("/"))
-    modify = [ev for ev in structural if ev.get("k") not in CREATE_KINDS]
-    for ev in create + modify:
-        k = ev.get("k")
-        if k == K_ENSURE_XFORM_OPS:
-            if _is_instance_proxy_target(stage, ev):
-                continue
-            _prim, _xf, t, o, s = ensure_canonical_ops(
-                stage,
-                ev["prim"],
-                op_cache=op_cache,
-            )
-            op_cache[ev["prim"]] = (t, o, s)
-        else:
-            apply_event(stage, ev)
+    def _apply_segment(segment: list) -> None:
+        # A prim must exist before anything authors on it: prim-creating kinds
+        # first (ancestors before descendants via path depth), then the other
+        # structural kinds, then value-setting ops inside a ChangeBlock.
+        structural = [ev for ev in segment if ev.get("k") in STRUCTURAL_EVENT_KINDS]
+        create = [ev for ev in structural if ev.get("k") in CREATE_KINDS]
+        create.sort(key=lambda ev: ev.get("prim", "").count("/"))
+        modify = [ev for ev in structural if ev.get("k") not in CREATE_KINDS]
+        for ev in create + modify:
+            if ev.get("k") == K_ENSURE_XFORM_OPS:
+                if _is_instance_proxy_target(stage, ev):
+                    continue
+                _prim, _xf, t, o, s = ensure_canonical_ops(
+                    stage,
+                    ev["prim"],
+                    op_cache=op_cache,
+                )
+                op_cache[ev["prim"]] = (t, o, s)
+            else:
+                apply_event(stage, ev)
+        value = [ev for ev in segment if ev.get("k") not in STRUCTURAL_EVENT_KINDS]
+        if value:
+            with Sdf.ChangeBlock():
+                for run_ev in value:
+                    if run_ev.get("k") == K_SET_XFORM_TRS:
+                        if not _is_instance_proxy_target(stage, run_ev):
+                            _apply_set_xform_trs(stage, run_ev, op_cache)
+                    else:
+                        apply_event(stage, run_ev)
 
-    # Value-setting ops inside a ChangeBlock. Namespace edits (delete,
-    # rename) flush the pending run and apply outside any block:
-    # Usd.NamespaceEditor and later events validate against the composed
-    # stage, which does not refresh until a ChangeBlock closes. Without
-    # the flush, a rename chain (A->B, B->C) in one batch silently drops
-    # the second rename.
-    def _apply_value_run(run: list) -> None:
-        with Sdf.ChangeBlock():
-            for run_ev in run:
-                if run_ev.get("k") == K_SET_XFORM_TRS:
-                    if not _is_instance_proxy_target(stage, run_ev):
-                        _apply_set_xform_trs(stage, run_ev, op_cache)
-                else:
-                    apply_event(stage, run_ev)
-
-    run: list = []
+    # Split the batch at namespace edits so structural ops are never hoisted
+    # across a delete/rename. Without this, a delete received before a same-path
+    # recreate would let the recreate's structural ops run first and the delete
+    # would then clobber the recreated prim. That silently breaks a fresh client
+    # replaying the whole backlog in one batch (live clients escape it only
+    # because each transaction arrives as its own batch).
+    segment: list = []
     for ev in events:
         k = ev.get("k")
-        if k in STRUCTURAL_EVENT_KINDS:
-            continue
         if k in (K_DELETE_PRIM, K_RENAME_PRIM):
-            if run:
-                _apply_value_run(run)
-                run = []
+            if segment:
+                _apply_segment(segment)
+                segment = []
             op_cache.pop(ev.get("prim"), None)
             apply_event(stage, ev)
         else:
-            run.append(ev)
-    if run:
-        _apply_value_run(run)
+            segment.append(ev)
+    if segment:
+        _apply_segment(segment)
 
 
 class _AtomicApply:

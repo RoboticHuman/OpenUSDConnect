@@ -1271,6 +1271,36 @@ class TestNamespaceEditsInBatch:
         ])
         assert not stage.GetPrimAtPath("/World/F")
 
+    def test_delete_then_recreate_same_path_survives(self):
+        """A delete followed by a same-path recreate (with structural + value
+        ops after it) in one batch must leave the recreated prim intact. The
+        recreate's structural ops are not hoisted ahead of the delete barrier."""
+        stage = self._stage_with("/World/Ball")  # exists as Xform
+        apply_events(stage, [
+            {"k": K_DELETE_PRIM, "prim": "/World/Ball"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Ball", "typeName": "Sphere"},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Ball", "visible": False},
+        ])
+        prim = stage.GetPrimAtPath("/World/Ball")
+        assert prim.IsValid()
+        assert str(prim.GetTypeName()) == "Sphere"
+        assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
+
+    def test_create_delete_recreate_one_batch(self):
+        """create -> delete -> recreate-as-different-type in a single batch: the
+        shape a fresh client hits when it replays the whole backlog at once. The
+        prim must end up at the recreated type, not clobbered by the delete."""
+        stage = Usd.Stage.CreateInMemory()
+        apply_events(stage, [
+            {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Ball", "typeName": "Sphere"},
+            {"k": K_DELETE_PRIM, "prim": "/World/Ball"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Ball", "typeName": "Cube"},
+        ])
+        prim = stage.GetPrimAtPath("/World/Ball")
+        assert prim.IsValid()
+        assert str(prim.GetTypeName()) == "Cube"
+
 
 class TestScopedAtomicApply:
     """atomic_apply(stage, prim_paths=...) backs up only the touched specs."""
