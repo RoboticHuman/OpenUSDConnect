@@ -611,6 +611,28 @@ class TestConcurrentDepartmentWrites:
                 f"Layer opinion for {prim_path}: {val} != {expected}"
             )
 
+    def test_op_cache_invalidated_on_edit_target_change(self, tmp_path):
+        """Deterministic pin for the fix behind the flaky concurrent failures.
+
+        A cached XformOp is only valid while the stage edit target is unchanged.
+        Under concurrent department writes the edit target switches between
+        transactions, so the op cache must be invalidated on every switch; a
+        cache reused across a switch authors against the wrong layer and the
+        write is lost. ``_op_cache_for`` clears on change and keeps the cache
+        for consecutive same-layer edits (the single-client fast path).
+        """
+        srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
+        la = srv.get_or_create_client_layer("alice", "animation")
+        lb = srv.get_or_create_client_layer("bob", "lighting")
+
+        cache = srv._op_cache_for(la)
+        cache["/World/P"] = object()
+        # switching the edit target invalidates the cache
+        assert "/World/P" not in srv._op_cache_for(lb)
+        # staying on the same layer keeps it (no needless re-fetch)
+        srv._op_cache_for(lb)["/World/Q"] = object()
+        assert "/World/Q" in srv._op_cache_for(lb)
+
     def test_concurrent_writes_to_same_prim(self, tmp_path):
         """Two departments writing to the same prim concurrently.
         Regardless of thread scheduling, the composed value must always

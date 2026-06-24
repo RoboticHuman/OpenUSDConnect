@@ -266,12 +266,19 @@ class UsdSyncServer:
             )
             self._persist_thread.start()
 
-        # LRU cache: prim_path → (translate_op, orient_op, scale_op).
+        # prim_path → (translate_op, orient_op, scale_op). A cached XformOp is
+        # only valid while the stage edit target is unchanged: any SetEditTarget
+        # (e.g. switching to another department's layer) invalidates it, so a
+        # reused op authors against the wrong layer and the write is silently
+        # lost. _op_cache_for clears the cache whenever the edit target changes;
+        # consecutive edits to the same layer keep it (the single-client fast
+        # path).
         from cachetools import LRUCache
 
         self.op_cache: LRUCache = LRUCache(
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
+        self._op_cache_layer: str | None = None
 
         # Incremental prim tracking — avoids full log scans on dashboard polls.
         self._prim_paths: dict[str, str] = {}  # prim_path → typeName
@@ -411,6 +418,18 @@ class UsdSyncServer:
         self.stage.SetEditTarget(Usd.EditTarget(layer))
         return layer
 
+    def _op_cache_for(self, layer: Sdf.Layer):
+        """Return the op cache for editing *layer*, clearing it when the edit
+        target changed since it was last populated. A cached XformOp is only
+        valid while the edit target is unchanged, so any switch to another layer
+        invalidates every entry; without the clear a reused op authors against
+        the wrong layer and the write is lost. Callers must SetEditTarget to
+        *layer* before authoring."""
+        if self._op_cache_layer != layer.identifier:
+            self.op_cache.clear()
+            self._op_cache_layer = layer.identifier
+        return self.op_cache
+
     def _track_prim_event(self, ev: dict):
         """Update incremental prim trackers from a single event.
 
@@ -478,7 +497,7 @@ class UsdSyncServer:
             for cid, evts in by_client.items():
                 layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
                 self.stage.SetEditTarget(Usd.EditTarget(layer))
-                apply_events(self.stage, evts, op_cache=self.op_cache)
+                apply_events(self.stage, evts, op_cache=self._op_cache_for(layer))
 
             total = sum(len(v) for v in by_client.values())
         else:
@@ -489,7 +508,7 @@ class UsdSyncServer:
                 ev = rec.get("event", rec)
                 events.append(ev)
                 all_events.append(ev)
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(self.edit_layer))
             total = len(events)
 
         # Populate incremental prim tracking from replayed events.
@@ -728,7 +747,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.stage.UnmuteLayer(p.layer.identifier)
             self.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(p.layer))
             self.stage.MuteLayer(p.layer.identifier)
         p.events.extend(events)
         LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
@@ -1162,6 +1181,7 @@ class UsdSyncServer:
             self._event_count = len(records)
 
         self.op_cache.clear()
+        self._op_cache_layer = None
 
         # Rebuild incremental prim tracking from compacted state.
         self._prim_paths.clear()
@@ -1196,6 +1216,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.edit_layer.Clear()
         self.op_cache.clear()
+        self._op_cache_layer = None
         self._prim_paths.clear()
         self._instanceable_paths.clear()
         self._point_instancer_paths.clear()
@@ -1689,7 +1710,7 @@ class UsdSyncServer:
         changed_indices = []
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(target))
 
             # Single-layer mode: the edit layer is the only unmuted session
             # sublayer, and local session opinions are strongest in LIVRPS
