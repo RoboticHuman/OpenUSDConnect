@@ -21,6 +21,9 @@ dashboard = [
 server = [
     "usd-core==26.3",
 ]
+mcp = [
+    "mcp>=1.2",
+]
 profile = [
     "py-spy==0.4.2",
 ]
@@ -93,6 +96,8 @@ select = [
 "tests/unit/test_playback_leader.py" = ["E402"]
 "scripts/*.py" = ["E402", "E501"]
 "integrations/unreal/connect.py" = ["E402"]
+"tests/unit/test_mcp_*.py" = ["E402"]
+"tests/integration/test_mcp_*.py" = ["E402"]
 
 [tool.coverage.run]
 source = ["openusdconnect"]
