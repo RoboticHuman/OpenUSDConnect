@@ -168,6 +168,31 @@ class NormalMapShaderMapper(ShaderMapper):
         node.inputs[blender_name].default_value = value
 
 
+def _apply_glass_fixups(tree, bsdf, input_map, inputs) -> None:
+    """Rewire a standard_surface Principled BSDF for transmissive (glass) looks.
+
+    Blender's Principled BSDF has one IOR socket (both specular reflection and
+    refraction) and no transmission-color socket: it tints transmitted light by
+    Base Color. MaterialX standard_surface keeps specular_IOR, base_color, and
+    transmission_color separate, and glass sets base=0 (no diffuse). Mapped
+    literally that drives Base Color to black, so the glass renders opaque, and
+    specular_IOR lands on the specular weight rather than the refraction index.
+    When transmission is active, send specular_IOR to the IOR socket and the
+    transmission tint to Base Color, bypassing the diffuse base chain.
+    """
+    transmission = inputs.get("transmission")
+    if not (isinstance(transmission, (int, float)) and transmission > 0.0):
+        return
+    base_color = bsdf.inputs["Base Color"]
+    for link in list(base_color.links):
+        tree.links.remove(link)
+    base_color.default_value = (1.0, 1.0, 1.0, 1.0)
+    input_map["specular_IOR"] = bsdf.inputs["IOR"]
+    input_map["transmission_color"] = base_color
+    input_map.pop("base", None)
+    input_map.pop("base_color", None)
+
+
 class ActivisionMtlxMapper(MultiNodeShaderMapper):
     """Delegates to io_blender_mtlx's registered handler at runtime.
 
@@ -191,7 +216,10 @@ class ActivisionMtlxMapper(MultiNodeShaderMapper):
             )
 
         mx_node = self._create_mx_node(mx)
-        return handler(tree, mx_node)
+        nodes, input_map, output_map = handler(tree, mx_node)
+        if self.shader_id == "ND_standard_surface_surfaceshader":
+            _apply_glass_fixups(tree, nodes[0], input_map, inputs)
+        return nodes, input_map, output_map
 
     def _create_mx_node(self, mx):
         """Create a minimal mx.Node for the vendored handler."""
@@ -313,6 +341,7 @@ class MaterialXStandardSurfaceMapper(MultiNodeShaderMapper):
 
         output_map = {"out": bsdf.outputs[0]}
 
+        _apply_glass_fixups(tree, bsdf, input_map, inputs)
         return nodes, input_map, output_map
 
     def _get_or_create_bsdf(self, tree):

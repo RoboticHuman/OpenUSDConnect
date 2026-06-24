@@ -568,6 +568,101 @@ def test_vendored_open_pbr(r):
 
 
 # ------------------------------------------------------------------
+# Test: transmissive (glass) standard_surface maps to refractive Principled
+# ------------------------------------------------------------------
+
+
+_GLASS_INPUTS = {
+    "base": 0.0,
+    "base_color": [0.8, 0.8, 0.8],
+    "transmission": 1.0,
+    "transmission_color": [0.55, 0.9, 0.85],
+    "specular_IOR": 1.5,
+    "specular_roughness": 0.0,
+}
+
+
+def _apply_inputs(input_map, inputs):
+    """Apply USD input values to the mapped sockets (adapter's logic)."""
+    for usd_name, value in inputs.items():
+        socket = input_map.get(usd_name)
+        if socket is None:
+            continue
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            socket.default_value = (*value, 1.0) if socket.type == "RGBA" else tuple(value)
+        elif isinstance(value, (list, tuple)) and len(value) == 4:
+            socket.default_value = tuple(value)
+        else:
+            socket.default_value = value
+
+
+def _check_glass_fixup(r, name, mapper):
+    """A transmissive standard_surface must drive Blender's refraction IOR and
+    tint Base Color from transmission_color, not blacken it from base=0."""
+    _clear_materials()
+    mat = _fresh_material(f"Glass_{name}")
+    for node in list(mat.node_tree.nodes):
+        mat.node_tree.nodes.remove(node)
+
+    nodes, input_map, _ = mapper.create_network(mat.node_tree, _GLASS_INPUTS)
+    _apply_inputs(input_map, _GLASS_INPUTS)
+    bsdf = nodes[0]
+
+    # specular_IOR -> the refraction IOR socket (not Specular IOR Level).
+    # Compare by socket name: Blender hands back a fresh wrapper per access,
+    # so `is` identity is meaningless for bpy sockets.
+    ior_socket = input_map.get("specular_IOR")
+    if ior_socket is None or ior_socket.name != "IOR":
+        r.fail(name, f"specular_IOR maps to {ior_socket and ior_socket.name}, expected 'IOR'")
+        return
+    if abs(ior_socket.default_value - 1.5) > 0.01:
+        r.fail(name, f"IOR={ior_socket.default_value}, expected 1.5")
+        return
+
+    # transmission_color -> Base Color, unlinked, carrying the tint (not black)
+    tint_socket = input_map.get("transmission_color")
+    if tint_socket is None or tint_socket.name != "Base Color":
+        r.fail(name, f"transmission_color maps to {tint_socket and tint_socket.name}, expected 'Base Color'")
+        return
+    if tint_socket.is_linked:
+        r.fail(name, "Base Color is still linked to the diffuse base chain")
+        return
+    bc = tint_socket.default_value
+    if abs(bc[0] - 0.55) > 0.02 or abs(bc[1] - 0.9) > 0.02 or abs(bc[2] - 0.85) > 0.02:
+        r.fail(name, f"Base Color={tuple(bc)}, expected the aqua tint")
+        return
+
+    # transmission weight reaches the BSDF; diffuse base inputs are dropped
+    if abs(bsdf.inputs["Transmission Weight"].default_value - 1.0) > 0.01:
+        r.fail(name, f"Transmission Weight={bsdf.inputs['Transmission Weight'].default_value}")
+        return
+    if "base" in input_map or "base_color" in input_map:
+        r.fail(name, "diffuse base/base_color still mapped for a glass material")
+        return
+    r.ok(name)
+
+
+def test_fallback_glass_fixup(r):
+    """Fallback mapper: transmissive standard_surface becomes refractive glass."""
+    mapper = MaterialXStandardSurfaceMapper(
+        "ND_standard_surface_surfaceshader",
+        "ShaderNodeBsdfPrincipled",
+        {},
+    )
+    _check_glass_fixup(r, "fallback_glass_fixup", mapper)
+
+
+def test_vendored_glass_fixup(r):
+    """Vendored mapper: same transmissive fixup over io_blender_mtlx's handler."""
+    mapper = ActivisionMtlxMapper(
+        "ND_standard_surface_surfaceshader",
+        "",
+        {},
+    )
+    _check_glass_fixup(r, "vendored_glass_fixup", mapper)
+
+
+# ------------------------------------------------------------------
 # End-to-end: full adapter flow with brass material from basicTextured
 # ------------------------------------------------------------------
 
@@ -720,6 +815,66 @@ def test_adapter_brass_material(r):
     r.ok(name)
 
 
+def test_adapter_glass_enables_refraction(r):
+    """End-to-end: a transmissive standard_surface yields refractive glass.
+
+    Drives the full adapter path (the active mapper plus the material/scene
+    refraction flags EEVEE Next needs) and checks the Principled is glass, not
+    a black, non-refractive surface.
+    """
+    name = "adapter_glass_enables_refraction"
+    _clear_materials()
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+
+    from integrations.blender.blender_adapter import BlenderAdapter
+
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World/GlassCube", "Mesh")
+    adapter.set_material_binding("/World/GlassCube", "/World/Looks/Glass")
+    adapter.set_connectable_input(
+        "/World/Looks/Glass/Surface",
+        "ND_standard_surface_surfaceshader",
+        dict(_GLASS_INPUTS),
+        {
+            "base": "float",
+            "base_color": "color3f",
+            "transmission": "float",
+            "transmission_color": "color3f",
+            "specular_IOR": "float",
+            "specular_roughness": "float",
+        },
+    )
+
+    mat = bpy.data.materials.get("Glass")
+    if mat is None:
+        r.fail(name, "material Glass not created")
+        return
+    if hasattr(mat, "use_raytrace_refraction") and not mat.use_raytrace_refraction:
+        r.fail(name, "use_raytrace_refraction not enabled on the material")
+        return
+    eevee = getattr(bpy.context.scene, "eevee", None)
+    if eevee is not None and hasattr(eevee, "use_raytracing") and not eevee.use_raytracing:
+        r.fail(name, "scene EEVEE raytracing not enabled")
+        return
+
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        r.fail(name, "no Principled BSDF found")
+        return
+    if abs(bsdf.inputs["IOR"].default_value - 1.5) > 0.01:
+        r.fail(name, f"IOR={bsdf.inputs['IOR'].default_value}, expected 1.5")
+        return
+    if abs(bsdf.inputs["Transmission Weight"].default_value - 1.0) > 0.01:
+        r.fail(name, f"Transmission Weight={bsdf.inputs['Transmission Weight'].default_value}")
+        return
+    bc = bsdf.inputs["Base Color"].default_value
+    if bc[0] < 0.2 and bc[1] < 0.2 and bc[2] < 0.2:
+        r.fail(name, f"Base Color={tuple(bc)} is ~black (glass would be opaque)")
+        return
+    r.ok(name)
+
+
 # ------------------------------------------------------------------
 # Post-import MaterialX enrichment from USD reference
 # ------------------------------------------------------------------
@@ -815,10 +970,14 @@ def main():
         # Parity: both mappers vs io_blender_mtlx reference
         test_fallback_parity_with_io_blender_mtlx,
         test_vendored_parity_with_io_blender_mtlx,
+        # Transmissive (glass) fixup on both mapper paths
+        test_fallback_glass_fixup,
+        test_vendored_glass_fixup,
         # Vendored OpenPBR
         test_vendored_open_pbr,
         # End-to-end adapter with real material values
         test_adapter_brass_material,
+        test_adapter_glass_enables_refraction,
         # Post-import MaterialX enrichment
         test_enrichment_from_reference,
     ]

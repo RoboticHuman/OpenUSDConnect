@@ -1210,12 +1210,32 @@ class BlenderAdapter(DCCAdapter):
             else:
                 socket.default_value = value
 
+        transmission = inputs.get("transmission")
+        if isinstance(transmission, (int, float)) and transmission > 0.0:
+            self._enable_eevee_refraction(mat)
+
         LOG.info(
             "set_connectable_input (multi-node): %s on %s",
             list(inputs.keys()),
             prim_path,
         )
         return True
+
+    def _enable_eevee_refraction(self, mat):
+        """Make a transmissive material actually refract in EEVEE.
+
+        EEVEE Next bends transmitted light only when raytraced transmission is
+        enabled on the material and raytracing is on for the scene; the
+        Principled transmission nodes alone render the glass opaque. Both flags
+        are feature-detected so older Blender builds are left untouched.
+        """
+        for flag in ("use_raytrace_refraction", "use_screen_refraction"):
+            if hasattr(mat, flag):
+                setattr(mat, flag, True)
+        for scene in bpy.data.scenes:
+            eevee = getattr(scene, "eevee", None)
+            if eevee is not None and hasattr(eevee, "use_raytracing"):
+                eevee.use_raytracing = True
 
     def _find_material_for_shader(self, prim_path: str, create: bool = False):
         """Find the Blender material that owns a shader prim path.
