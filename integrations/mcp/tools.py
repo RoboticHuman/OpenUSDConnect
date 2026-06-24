@@ -210,6 +210,25 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
 
     @mcp.tool()
     @_catch
+    def usd_get_bounds(path: str) -> dict:
+        """World-space bounding box of a prim and its subtree as {min, max,
+        center, size}. Composes the full transform chain (scale, nesting,
+        references), so use it to place objects relative to each other (beside /
+        on top of / aligned with) without fetching geometry or doing transform
+        math by hand."""
+        return introspection.get_bounds(session.require_mirror(), path)
+
+    @mcp.tool()
+    @_catch
+    def usd_get_attributes(path: str, names: list = None, max_items: int = 12) -> dict:
+        """Read just the attributes you need. With names: returns {name: value}
+        for those only (arrays summarized to max_items; raise it for more, or to
+        pull a whole array). Without names: a cheap index of authored attributes
+        (name, type, array length) with no values, to see what is there first."""
+        return introspection.get_attributes(session.require_mirror(), path, names, max_items)
+
+    @mcp.tool()
+    @_catch
     def usd_describe_shader_network(material_path: str) -> dict:
         """Describe the UsdShade topology under a Material: each shader's info_id,
         input values/types, and connection edges."""

@@ -88,22 +88,28 @@ target a non-default server.
 `rotate_euler=[rx,ry,rz]` degrees + `rotate_order` (converted to a quaternion).
 
 ### Introspection (mirror-backed)
-- `usd_scene_summary(under?)` — total/active/material counts, max depth, and a
+- `usd_scene_summary(under?)`: total/active/material counts, max depth, and a
   count-by-type histogram. Cheap orientation before listing a large scene.
-- `usd_list_prims(under?, type_name?, is_a?, max?, offset?, depth?)` — filter by
+- `usd_list_prims(under?, type_name?, is_a?, max?, offset?, depth?)`: filter by
   exact `type_name` and/or schema base `is_a` (`"UsdGeomMesh"`, `"UsdGeomGprim"`,
-  `"UsdGeomImageable"`, …); `depth` limits descent (`1` = immediate children).
+  `"UsdGeomImageable"`, ...); `depth` limits descent (`1` = immediate children).
   Page large scenes with `offset`/`max` and the returned `next_offset` cursor.
-- `usd_get_prim(path, fields?)` — type, schemas, transform, attributes, variant
+- `usd_get_prim(path, fields?)`: type, schemas, transform, attributes, variant
   selections, material binding. Pass `fields` (e.g. `["xform","material_binding"]`)
   to return only those sections; the child list is capped (`child_count` exact).
-- `usd_get_prims(paths, fields?)` — batch `usd_get_prim` in one call (pairs with
+- `usd_get_attributes(path, names?, max_items?)`: read just the attributes you
+  need. With `names`, returns `{name: value}` for those only (arrays summarized to
+  `max_items`); without `names`, a values-free index (name, type, array length).
+- `usd_get_prims(paths, fields?)`: batch `usd_get_prim` in one call (pairs with
   `usd_changes_since`); an unresolved path yields an error entry, not a failure.
-- `usd_changes_since(since_seq?, max?)` — prims changed since a sequence (oldest
+- `usd_get_bounds(path)`: world-space bounding box (`min`/`max`/`center`/`size`)
+  of a prim and its subtree, transform chain composed. Use for relative placement
+  (beside / on top of / aligned with) without fetching geometry or doing the math.
+- `usd_changes_since(since_seq?, max?)`: prims changed since a sequence (oldest
   first). Poll with the `last_seq` from `usd_status`/a prior call to find your own
   and other clients' edits without re-listing the scene, then `usd_get_prims`
   those paths. Efficient diffs for thousand-object scenes.
-- `usd_describe_shader_network(material_path)` — full ConnectableAPI topology.
+- `usd_describe_shader_network(material_path)`: full ConnectableAPI topology.
 - `usd_get_stage_metadata()`
 
 ### Shader discovery (no connection needed)

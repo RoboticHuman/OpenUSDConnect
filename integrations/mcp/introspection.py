@@ -177,6 +177,65 @@ def get_prims(stage: Usd.Stage, paths: list, fields: list | None = None) -> dict
     return {"ok": True, "count": len(out), "prims": out}
 
 
+def get_bounds(stage: Usd.Stage, path: str) -> dict:
+    """World-space axis-aligned bounding box of a prim and its subtree as
+    ``{min, max, center, size}``.
+
+    Composes the full transform chain (scale, nesting, references) via BBoxCache,
+    so relative placement ('put X beside / on top of / aligned with Y') needs no
+    geometry fetch and no manual transform math. ``empty`` is True for a prim
+    with no boundable geometry."""
+    prim = _require_prim(stage, path)
+    cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+    )
+    rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+    if rng.IsEmpty():
+        return {"ok": True, "path": str(prim.GetPath()), "empty": True}
+    mn, mx = rng.GetMin(), rng.GetMax()
+    return {
+        "ok": True,
+        "path": str(prim.GetPath()),
+        "min": [mn[0], mn[1], mn[2]],
+        "max": [mx[0], mx[1], mx[2]],
+        "center": [(mn[i] + mx[i]) / 2.0 for i in range(3)],
+        "size": [mx[i] - mn[i] for i in range(3)],
+    }
+
+
+def get_attributes(
+    stage: Usd.Stage, path: str, names: list | None = None, max_items: int = _ATTR_SAMPLE
+) -> dict:
+    """Read just the attributes you need, without the rest of get_prim's payload.
+
+    With ``names``: returns ``{name: value}`` for those attributes only (arrays
+    summarized to ``max_items``; raise it for more, or to fetch a whole array).
+    Without ``names``: a lightweight index of authored attributes (name, Sdf
+    type, and array length) with no values, for cheap discovery."""
+    prim = _require_prim(stage, path)
+    if names is None:
+        out: list[dict] = []
+        for attr in prim.GetAttributes():
+            if not attr.IsAuthored():
+                continue
+            type_name = attr.GetTypeName()
+            entry = {"name": attr.GetName(), "type": str(type_name)}
+            if type_name.isArray:
+                value = attr.Get()
+                entry["array"] = True
+                entry["len"] = len(value) if value is not None else 0
+            out.append(entry)
+        return {"ok": True, "path": str(prim.GetPath()), "count": len(out), "attributes": out}
+    values: dict = {}
+    for name in names:
+        attr = prim.GetAttribute(name)
+        values[name] = (
+            to_jsonable(attr.Get(), max_items=max_items) if attr and attr.HasValue() else None
+        )
+    return {"ok": True, "path": str(prim.GetPath()), "attributes": values}
+
+
 def scene_summary(stage: Usd.Stage, under: str = "/") -> dict:
     """One-shot orientation for a large scene: total prim count, active count,
     material count, max depth, and a count-by-type histogram (descending)."""
