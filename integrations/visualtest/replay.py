@@ -12,10 +12,19 @@ from __future__ import annotations
 import json
 
 
-def load_events(path: str) -> list[dict]:
-    """Load a JSONL event log -- one semantic event dict per line."""
+def load_events(path: str, *, subst: dict[str, str] | None = None) -> list[dict]:
+    """Load a JSONL event log -- one semantic event dict per line.
+
+    ``subst`` literal-replaces each key with its value in the raw text before
+    parsing. Fixtures store portable path tokens (e.g. ``{REPO}``) instead of
+    machine-absolute asset paths; the caller expands them to a real root at
+    replay time so the committed JSONL stays machine-independent.
+    """
     with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        text = f.read()
+    for token, value in (subst or {}).items():
+        text = text.replace(token, value)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def reconstruct(base_path: str, events: list[dict], *, edit_session: bool = True,

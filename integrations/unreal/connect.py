@@ -1,10 +1,10 @@
 """Launcher for OpenUSDConnect in Unreal Engine.
 
-Run from the UE console:
-    py "D:/gamedev/OpenUSDConnect/integrations/unreal/connect.py"
+Run from the UE console (use this checkout's absolute path):
+    py "<OpenUSDConnect>/integrations/unreal/connect.py"
 
 To stop:
-    py "D:/gamedev/OpenUSDConnect/integrations/unreal/disconnect.py"
+    py "<OpenUSDConnect>/integrations/unreal/disconnect.py"
 """
 
 import os

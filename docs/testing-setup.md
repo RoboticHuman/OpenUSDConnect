@@ -262,14 +262,14 @@ The tier skips cleanly when RenderMan (`RMANTREE`) or `flip-evaluator` is absent
 
 **Renderers are pluggable** (`renderers.py`): a renderer name maps to a Hydra delegate plus optional env setup and material conditioning. `renderman` (default) sets the `RMAN_*` paths and translates OpenPBR to standard_surface (hdPrman has no OpenPBR adapter); `embree`/`storm` need neither. Add Cycles or Mitsuba as one `RENDERERS` entry.
 
-**Scenes** are static `.usda` (`tests/visual/scenes/`) or a curated event log replayed through the real `codec` + `apply_events` pipeline. `test_material_zoo.py` replays `material_zoo.jsonl` (UsdPreviewSurface, MaterialX standard_surface, OpenPBR, textures, a PxrSurface asset) onto `test_scene.usda` under a framed camera + StinsonBeach IBL. The fixture is JSONL (semantic events re-encoded through the current codec at replay), so it survives wire/storage changes without a binary db.
+**Scenes** are static `.usda` (`tests/visual/scenes/`) or a curated event log replayed through the real `codec` + `apply_events` pipeline. `test_material_zoo.py` replays `material_zoo.jsonl` (UsdPreviewSurface, MaterialX standard_surface, OpenPBR, tiled / triplanar / UV-image texturing, a referenced chess piece) onto `test_scene.usda` under a framed camera + StinsonBeach IBL. Heavy assets come from the `usd-wg/assets` submodule (run `git submodule update --init --recursive`) plus a vendored UV sphere in `tests/visual/assets/`; the log stores them as portable `{REPO}` path tokens expanded at replay time, so the committed fixture carries no machine paths. The fixture is JSONL (semantic events re-encoded through the current codec at replay), so it survives wire/storage changes without a binary db.
 
 | File | Purpose |
 |------|---------|
 | `integrations/visualtest/renderers.py` | Pluggable Hydra renderer registry; add Cycles/Mitsuba here |
 | `visualtest/render.py`, `compare.py`, `harness.py` | Render, FLIP compare (mean + p99), baseline primitive |
 | `visualtest/replay.py`, `scene.py` | Event-log replay, camera framing + IBL |
-| `tests/visual/{scenes,fixtures,references}/` | Static `.usda`, JSONL logs, LFS goldens |
+| `tests/visual/{scenes,fixtures,references,assets}/` | Static `.usda`, JSONL logs, LFS goldens, vendored geometry |
 
 > Requires USD >= 0.26.5 (earlier builds hit a RenderMan `ri:projection` camera-adapter bug). HdEmbree and Storm are registered alongside RenderMan in `renderers.py`.
 

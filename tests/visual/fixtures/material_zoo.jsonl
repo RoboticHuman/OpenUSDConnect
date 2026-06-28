@@ -147,7 +147,7 @@
 {"k": "set_material_binding", "material_path": "/World/Looks/EmeraldMcp", "prim": "/World/McpBall2"}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [6.0, 1.5, 0.0]}
 {"k": "ensure_prim", "prim": "/World/Bishop", "typeName": "Xform"}
-{"k": "set_reference", "prim": "/World/Bishop", "refs": [{"asset_path": "D:/gamedev/OpenUSDConnect/assets/full_assets/OpenChessSet/assets/Bishop/Bishop.usd", "prim_path": "/Bishop"}]}
+{"k": "set_reference", "prim": "/World/Bishop", "refs": [{"asset_path": "{REPO}/assets/full_assets/OpenChessSet/assets/Bishop/Bishop.usd", "prim_path": "/Bishop"}]}
 {"k": "ensure_xform_ops", "prim": "/World/Bishop"}
 {"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Bishop", "s": [15.0, 15.0, 15.0], "t": [0.0, 0.0, 3.0]}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [0.0, 2.5, 0.0]}
@@ -164,17 +164,17 @@
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MirrorBall", "t": [-1.0, 0.5, 0.0]}
 {"k": "set_material_binding", "material_path": "/World/Looks/Chrome", "prim": "/World/MirrorBall"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodTiled", "typeName": "Scope"}
-{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "D:/gamedev/MaterialX/resources/Materials/Examples/StandardSurface/standard_surface_wood_tiled.mtlx"}]}
-{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "D:/gamedev/MaterialX/resources/Materials/Examples/StandardSurface/standard_surface_wood_tiled.mtlx", "prim_path": "/MaterialX"}]}
+{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "{REPO}/assets/test_assets/MaterialXTest/standard_surface_brass_tiled.mtlx"}]}
+{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "{REPO}/assets/test_assets/MaterialXTest/standard_surface_brass_tiled.mtlx", "prim_path": "/MaterialX"}]}
 {"k": "ensure_prim", "prim": "/World/WoodBall", "typeName": "Sphere"}
 {"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/WoodBall"}
 {"k": "ensure_xform_ops", "prim": "/World/WoodBall"}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 0.0, 0.0]}
-{"k": "set_material_binding", "material_path": "/World/Looks/WoodTiled/Materials/Tiled_Wood", "prim": "/World/WoodBall"}
+{"k": "set_material_binding", "material_path": "/World/Looks/WoodTiled/Materials/Tiled_Brass", "prim": "/World/WoodBall"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodTri", "typeName": "Material"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodTri/Surface", "typeName": "Shader"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodTri/TriColor", "typeName": "Shader"}
-{"info_id": "ND_triplanarprojection_color3", "input_types": {"filex": "asset", "filey": "asset", "filez": "asset"}, "inputs": {"filex": "D:/gamedev/MaterialX/resources/Images/wood_color.jpg", "filey": "D:/gamedev/MaterialX/resources/Images/wood_color.jpg", "filez": "D:/gamedev/MaterialX/resources/Images/wood_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/TriColor"}
+{"info_id": "ND_triplanarprojection_color3", "input_types": {"filex": "asset", "filey": "asset", "filez": "asset"}, "inputs": {"filex": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg", "filey": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg", "filez": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/TriColor"}
 {"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base": "float", "coat": "float", "specular": "float", "specular_roughness": "float"}, "inputs": {"base": 1, "coat": 0, "specular": 0.30000001192092896, "specular_roughness": 0.550000011920929}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/Surface"}
 {"connections": {"inputs:base_color": {"source_attr": "outputs:out", "source_prim": "/World/Looks/WoodTri/TriColor"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodTri/Surface"}
 {"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/WoodTri/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodTri"}
@@ -182,13 +182,13 @@
 {"info_id": "ND_triplanarprojection_color3", "input_types": {"blend": "float"}, "inputs": {"blend": 2}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/TriColor"}
 {"k": "delete_prim", "prim": "/World/WoodBall"}
 {"k": "ensure_prim", "prim": "/World/WoodBall", "typeName": ""}
-{"k": "set_reference", "prim": "/World/WoodBall", "refs": [{"asset_path": "D:/gamedev/OpenUSDConnect/assets/generated/uv_sphere_wood.usda"}]}
+{"k": "set_reference", "prim": "/World/WoodBall", "refs": [{"asset_path": "{REPO}/tests/visual/assets/uv_sphere.usda"}]}
 {"k": "ensure_xform_ops", "prim": "/World/WoodBall"}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 0.0, 0.0]}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodUV", "typeName": "Material"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodUV/Surface", "typeName": "Shader"}
 {"k": "ensure_prim", "prim": "/World/Looks/WoodUV/Img", "typeName": "Shader"}
-{"info_id": "ND_image_color3", "input_types": {"file": "asset"}, "inputs": {"file": "D:/gamedev/MaterialX/resources/Images/wood_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodUV/Img"}
+{"info_id": "ND_image_color3", "input_types": {"file": "asset"}, "inputs": {"file": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodUV/Img"}
 {"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base": "float", "coat": "float", "specular": "float", "specular_roughness": "float"}, "inputs": {"base": 1, "coat": 0, "specular": 0.30000001192092896, "specular_roughness": 0.550000011920929}, "k": "set_connectable_input", "prim": "/World/Looks/WoodUV/Surface"}
 {"connections": {"inputs:base_color": {"source_attr": "outputs:out", "source_prim": "/World/Looks/WoodUV/Img"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodUV/Surface"}
 {"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/WoodUV/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodUV"}
@@ -199,7 +199,7 @@
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 1.5, 0.0]}
 {"k": "delete_prim", "prim": "/World/WoodBall"}
 {"k": "ensure_prim", "prim": "/World/WoodBall2", "typeName": ""}
-{"k": "set_reference", "prim": "/World/WoodBall2", "refs": [{"asset_path": "D:/gamedev/OpenUSDConnect/assets/generated/uv_sphere_wood.usda"}]}
+{"k": "set_reference", "prim": "/World/WoodBall2", "refs": [{"asset_path": "{REPO}/tests/visual/assets/uv_sphere.usda"}]}
 {"k": "ensure_xform_ops", "prim": "/World/WoodBall2"}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall2", "t": [1.5, 1.5, 0.0]}
 {"k": "set_material_binding", "material_path": "/World/Looks/WoodUV", "prim": "/World/WoodBall2"}

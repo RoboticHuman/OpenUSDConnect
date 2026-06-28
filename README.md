@@ -74,6 +74,21 @@ emit/receive event flow.
 
 ## Getting started
 
+### Clone
+The repository vendors the [USD Working Group asset library](https://github.com/usd-wg/assets)
+as a git submodule (`assets/`), used by the visual-regression and asset E2E test
+suites. Clone recursively so it comes along:
+
+```bash
+git clone --recursive https://github.com/RoboticHuman/OpenUSDConnect.git
+```
+
+Already cloned without `--recursive`? Pull the submodule in:
+
+```bash
+git submodule update --init --recursive
+```
+
 ### Prerequisites
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
@@ -172,6 +187,7 @@ running sync server. See [MCP Server Usage](docs/mcp-server-usage.md).
 uv run pytest tests/unit/ -v                                   # unit (fast, no DCC)
 uv run pytest tests/ -v                                        # plus headless integration
 uv run pytest tests/integration/asset_tests/ --asset-tests -v  # asset E2E (requires Blender)
+uv run pytest tests/visual --visual-tests -v                   # visual regression (RenderMan + submodule)
 ```
 
 ## Acknowledgments
