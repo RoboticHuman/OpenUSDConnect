@@ -110,47 +110,6 @@ def _has_renderer_arg(args: Sequence[str]) -> bool:
     return any(a in ("-r", "--renderer") or a.startswith("--renderer=") for a in args)
 
 
-def renderman_env(
-    install_root: str | os.PathLike,
-    rmantree: str | os.PathLike | None = None,
-) -> dict[str, str]:
-    """Build the ``RMAN_*`` environment hdPrman needs to load as a delegate.
-
-    ``install_root`` is the OpenUSD install prefix (the parent of
-    ``bin/usdview``); its ``plugin/usd`` tree supplies hdPrman's shaders.
-    ``rmantree`` defaults to ``$RMANTREE``. Returns a dict suitable for
-    ``env.update(...)``. The caller must also prepend ``$RMANTREE/bin`` and
-    ``$RMANTREE/lib`` to ``PATH`` so ``libprman.dll`` and its dependencies
-    resolve at load time on Windows.
-
-    See https://openusd.org/release/plugins_renderman.html
-    """
-    from integrations.renderman import rmantree as _resolve_rmantree
-
-    rt = str(rmantree) if rmantree else _resolve_rmantree()
-    if not rt:
-        raise RuntimeError(
-            "RenderMan requested (--renderman) but RMANTREE is not set. Install "
-            "RenderManProServer and set RMANTREE to its root, or pass rmantree=."
-        )
-    root = Path(str(rt).rstrip("\\/"))
-    plugin_usd = Path(install_root) / "plugin" / "usd"
-    plugins = root / "lib" / "plugins"
-    sep = os.pathsep
-    return {
-        "RMANTREE": str(root),
-        "RMAN_SHADERPATH": sep.join(
-            [str(root / "lib" / "shaders"), str(plugin_usd / "resources" / "shaders")]
-        ),
-        "RMAN_RIXPLUGINPATH": str(plugins),
-        "RMAN_TEXTUREPATH": sep.join(
-            [str(root / "lib" / "textures"), str(plugins), str(plugin_usd)]
-        ),
-        "RMAN_DISPLAYPATH": str(plugins),
-        "RMAN_PROCEDURALPATH": str(plugins),
-    }
-
-
 def launch_usdview(
     stage_path: str | os.PathLike,
     host: str = "127.0.0.1",
@@ -198,6 +157,7 @@ def launch_usdview(
     # tree, and independent of which delegate usdview starts in. No-op when
     # RMANTREE is unset. (integrations.renderman owns the RMANTREE knowledge.)
     from integrations.renderman import dll_dirs as _rman_dll_dirs
+    from integrations.renderman import renderman_env
 
     rman_dirs = _rman_dll_dirs()
     if rman_dirs:
@@ -207,7 +167,13 @@ def launch_usdview(
     if renderman:
         # hdPrman ships inside the OpenUSD install tree (parent of bin/usdview).
         install_root = exe.resolve().parents[1]
-        env.update(renderman_env(install_root))  # render-time RMAN_* search paths
+        rman_env = renderman_env(install_root)  # render-time RMAN_* search paths
+        if not rman_env:
+            raise RuntimeError(
+                "RenderMan requested (--renderman) but RMANTREE is not set. "
+                "Install RenderManProServer and set RMANTREE to its root."
+            )
+        env.update(rman_env)
         # hdPrman can't render the OpenPBR surface node; have the receiver
         # translate OpenPBR materials to standard_surface (see openpbr_translate).
         env["OPENUSDCONNECT_TRANSLATE_OPENPBR"] = "1"
