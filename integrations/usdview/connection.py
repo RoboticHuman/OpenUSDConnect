@@ -96,7 +96,7 @@ def start(
     # Convert any OpenPBR materials already in the opened scene; subsequent edits
     # are handled incrementally by _on_applied, scoped to the changed prims.
     if _translate_openpbr:
-        from .openpbr_translate import translate_openpbr_materials
+        from integrations.openpbr_translate import translate_openpbr_materials
 
         translate_openpbr_materials(stage)
 
@@ -124,7 +124,7 @@ def _on_stage_replaced() -> None:
 
         _dispatcher.adapter = UsdStageAdapter(_stage)
         if _translate_openpbr:
-            from .openpbr_translate import translate_openpbr_materials
+            from integrations.openpbr_translate import translate_openpbr_materials
 
             translate_openpbr_materials(_stage)
         LOG.info("Stage replaced, rebound receiver to the live stage")
@@ -145,7 +145,7 @@ def _on_applied(prim_paths: list[str]) -> None:
     """Translate or refresh only the materials owning the just-applied prims."""
     if _stage is None:
         return
-    from .openpbr_translate import translate_openpbr_for_paths
+    from integrations.openpbr_translate import translate_openpbr_for_paths
 
     translate_openpbr_for_paths(_stage, prim_paths)
 

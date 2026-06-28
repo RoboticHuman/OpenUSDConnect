@@ -1,10 +1,11 @@
 # Testing Setup
 
-OpenUSDConnect has three tiers of tests:
+OpenUSDConnect has four tiers of tests:
 
 - **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices, stage parity including shader inputs (no Blender needed)
 - **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
 - **Asset E2E tests** (`tests/integration/asset_tests/`) — full pipeline with real USD assets, material enrichment, texture connections, variant switching (requires Blender GUI, skipped by default)
+- **Visual regression tests** (`tests/visual/`) — render reference scenes with RenderMan and FLIP-compare against committed goldens; catches rendered-output regressions across materials, shaders, cameras, lights, and geometry (requires RenderMan + `uv sync --group visual`, skipped by default)
 
 ## Running Tests
 
@@ -241,6 +242,36 @@ The addon is automatically rebuilt before running. Each test starts its own serv
 ### Adding new asset tests
 
 See `tests/integration/asset_tests/README.md` for the `TestHarness` API and step-by-step guide.
+
+## Visual Regression Tests
+
+A headless harness that renders reference scenes and FLIP-compares against committed golden images, catching any change to rendered output (materials, cameras, lights, geometry). **Skipped by default.**
+
+```bash
+# Run the visual tier (requires RenderMan installed + the visual deps)
+uv sync --group visual
+uv run pytest tests/visual --visual-tests -v
+
+# Regenerate the golden images (review the change before committing)
+uv run pytest tests/visual --visual-tests --update-baselines -v
+```
+
+The tier skips cleanly when RenderMan (`RMANTREE`) or `flip-evaluator` is absent. A render regresses when its mean [FLIP](https://github.com/NVIDIA/flip) error exceeds the per-scene threshold; the error map lands in the pytest temp dir. Goldens are pinned to the renderer, sample budget (`HD_PRMAN_MAX_SAMPLES`), and USD/RenderMan version, so changing any of those needs a deliberate `--update-baselines` regen. Goldens use Git LFS (`git lfs install` once per clone).
+
+**Regenerating goldens.** `--update-baselines` re-renders and overwrites the goldens, so that run *skips* (nothing left to compare); rerun without the flag to confirm they are stable. To review an intended change first, run the compare pass: a failing test writes a FLIP error map (path in its assert message) showing what moved. Scope to one scene with its test path (e.g. `tests/visual/test_material_zoo.py`); a new scene reports `missing` until its golden is captured the same way. Inspect the regenerated PNG before committing (the git diff is an opaque LFS pointer).
+
+**Renderers are pluggable** (`renderers.py`): a renderer name maps to a Hydra delegate plus optional env setup and material conditioning. `renderman` (default) sets the `RMAN_*` paths and translates OpenPBR to standard_surface (hdPrman has no OpenPBR adapter); `embree`/`storm` need neither. Add Cycles or Mitsuba as one `RENDERERS` entry.
+
+**Scenes** are static `.usda` (`tests/visual/scenes/`) or a curated event log replayed through the real `codec` + `apply_events` pipeline. `test_material_zoo.py` replays `material_zoo.jsonl` (UsdPreviewSurface, MaterialX standard_surface, OpenPBR, textures, a PxrSurface asset) onto `test_scene.usda` under a framed camera + StinsonBeach IBL. The fixture is JSONL (semantic events re-encoded through the current codec at replay), so it survives wire/storage changes without a binary db.
+
+| File | Purpose |
+|------|---------|
+| `integrations/visualtest/renderers.py` | Pluggable Hydra renderer registry; add Cycles/Mitsuba here |
+| `visualtest/render.py`, `compare.py`, `harness.py` | Render, FLIP compare (mean + p99), baseline primitive |
+| `visualtest/replay.py`, `scene.py` | Event-log replay, camera framing + IBL |
+| `tests/visual/{scenes,fixtures,references}/` | Static `.usda`, JSONL logs, LFS goldens |
+
+> Requires USD >= 0.26.5 (earlier builds hit a RenderMan `ri:projection` camera-adapter bug). HdEmbree and Storm are registered alongside RenderMan in `renderers.py`.
 
 ## What the Blender Tests Cover
 

@@ -1,0 +1,6 @@
+# Visual-regression reference images (goldens) are binary and grow over time;
+# track them via Git LFS. Requires `git lfs install` once per clone before the
+# goldens are committed. Error-map artifacts are written to a temp dir and are
+# never committed.
+tests/visual/references/**/*.png filter=lfs diff=lfs merge=lfs -text
+tests/visual/references/**/*.exr filter=lfs diff=lfs merge=lfs -text

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pxr import Gf, Sdf, Sdr, Usd, UsdShade
 
-from integrations.usdview.openpbr_translate import (
+from integrations.openpbr_translate import (
     OPENPBR_ID,
     STANDARD_SURFACE_ID,
     TRANSLATE_ID,

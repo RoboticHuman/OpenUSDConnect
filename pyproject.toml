@@ -27,6 +27,9 @@ mcp = [
 profile = [
     "py-spy==0.4.2",
 ]
+visual = [
+    "flip-evaluator==1.7",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
