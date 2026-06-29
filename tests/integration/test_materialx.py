@@ -48,7 +48,7 @@ def test_materialx_reference_pipeline(blender_exe, tmp_path, free_port):
     """Full pipeline: emitter sends teapot reference → server → receiver.
 
     Verifies hierarchy collapse (no redundant root) and MaterialX
-    enrichment (ActivisionMtlxMapper creates Standard Surface network).
+    enrichment (the shader mapper builds the Standard Surface network).
     """
     port = free_port
     server_proc = start_server(tmp_path, port)

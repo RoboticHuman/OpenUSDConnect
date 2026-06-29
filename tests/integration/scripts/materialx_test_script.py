@@ -1,7 +1,8 @@
-"""Blender headless test for MaterialX shader mappers.
+"""Blender headless test for the native MaterialX shader mappers.
 
-Tests both the vendored ActivisionMtlxMapper (delegates to io_blender_mtlx
-handlers at runtime) and the fallback MaterialXStandardSurfaceMapper.
+Covers the standard_surface / OpenPBR surface mappers and the utility-node
+mappers: registry coverage, node-network structure, the transmissive (glass)
+fixup, and the end-to-end BlenderAdapter flow.
 
 Run via: blender --background --python materialx_test_script.py
 Exit code 0 = all tests pass, 1 = failure.
@@ -24,9 +25,9 @@ for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
     del sys.modules[_k]
 
 from integrations.blender.shader_mapper import (
-    ActivisionMtlxMapper,
     MaterialXStandardSurfaceMapper,
     NormalMapShaderMapper,
+    OpenPBRSurfaceMapper,
     create_default_registry,
 )
 
@@ -60,12 +61,12 @@ def _clear_materials():
 
 
 # ------------------------------------------------------------------
-# Test: registry returns vendored mapper for Standard Surface
+# Test: registry returns the native Standard Surface mapper
 # ------------------------------------------------------------------
 
 
-def test_registry_returns_vendored_mapper(r):
-    name = "registry_returns_vendored_mapper"
+def test_registry_returns_native_surface_mapper(r):
+    name = "registry_returns_native_surface_mapper"
     reg = create_default_registry()
     mapper = reg.get("ND_standard_surface_surfaceshader")
     if mapper is None:
@@ -74,38 +75,37 @@ def test_registry_returns_vendored_mapper(r):
     if not mapper.is_multi_node:
         r.fail(name, f"is_multi_node={mapper.is_multi_node}, expected True")
         return
-    if not isinstance(mapper, ActivisionMtlxMapper):
-        r.fail(name, f"expected ActivisionMtlxMapper, got {type(mapper).__name__}")
+    if not isinstance(mapper, MaterialXStandardSurfaceMapper):
+        r.fail(name, f"expected MaterialXStandardSurfaceMapper, got {type(mapper).__name__}")
         return
     r.ok(name)
 
 
 # ------------------------------------------------------------------
-# Test: registry has OpenPBR and utility handlers from io_blender_mtlx
+# Test: registry covers the surface + utility MaterialX nodes natively
 # ------------------------------------------------------------------
 
 
-def test_registry_vendored_coverage(r):
-    name = "registry_vendored_coverage"
+def test_registry_native_coverage(r):
+    name = "registry_native_coverage"
     reg = create_default_registry()
 
-    expected_vendored = [
-        "ND_standard_surface_surfaceshader",
-        "ND_open_pbr_surface_surfaceshader",
-        "ND_surfacematerial",
-        "ND_multiply_float",
-        "ND_mix_color3",
-    ]
-    missing = []
-    for sid in expected_vendored:
-        mapper = reg.get(sid)
-        if mapper is None:
-            missing.append(sid)
-        elif not isinstance(mapper, ActivisionMtlxMapper):
-            missing.append(f"{sid} (got {type(mapper).__name__})")
+    if not isinstance(reg.get("ND_open_pbr_surface_surfaceshader"), OpenPBRSurfaceMapper):
+        r.fail(name, "ND_open_pbr_surface_surfaceshader should use OpenPBRSurfaceMapper")
+        return
 
+    utility = [
+        "ND_surfacematerial", "ND_multiply_float", "ND_multiply_color3",
+        "ND_mix_color3", "ND_mix_vector3", "ND_divide_vector2",
+        "ND_subtract_vector2", "ND_distance_vector3", "ND_texcoord_vector2",
+        "ND_convert_color3_vector3", "ND_convert_float_color3",
+        "ND_convert_color4_color3", "ND_convert_vector4_vector3",
+        "ND_ifequal_floatB", "ND_ifequal_color3B", "ND_ifequal_vector3B",
+        "ND_extract_color4",
+    ]
+    missing = [sid for sid in utility if reg.get(sid) is None]
     if missing:
-        r.fail(name, f"missing vendored mappers: {missing}")
+        r.fail(name, f"missing native utility mappers: {missing}")
         return
 
     normal_mapper = reg.get("ND_normalmap_float")
@@ -115,12 +115,6 @@ def test_registry_vendored_coverage(r):
             "ND_normalmap_float should use the specialized normal-map mapper, "
             f"got {type(normal_mapper).__name__}",
         )
-        return
-
-    # Texture nodes should NOT be vendored (our TextureShaderMapper handles them)
-    tex_mapper = reg.get("ND_image_color3")
-    if tex_mapper is not None and isinstance(tex_mapper, ActivisionMtlxMapper):
-        r.fail(name, "ND_image_color3 should use TextureShaderMapper, not vendored")
         return
 
     r.ok(name)
@@ -381,193 +375,6 @@ def test_our_mapper_idempotent(r):
 
 
 # ------------------------------------------------------------------
-# Test: parity with io_blender_mtlx handler
-# ------------------------------------------------------------------
-
-
-def _socket_identity(socket):
-    """Comparable identity: (node_type, node_name, socket_name)."""
-    return (socket.node.bl_idname, socket.name)
-
-
-def _compare_against_reference(r, name, our_tree, our_nodes, our_inputs, our_outputs):
-    """Compare a mapper's output against io_blender_mtlx's handler."""
-    import MaterialX as mx
-
-    vendor_path = os.path.join(
-        project_root,
-        "vendor",
-        "io_blender_mtlx",
-        "bl_env",
-        "addons",
-    )
-    if vendor_path not in sys.path:
-        sys.path.insert(0, vendor_path)
-
-    from io_data_mtlx.lib.standard_surface import (
-        ND_standard_surface_surfaceshader as ref_handler,
-    )
-
-    doc = mx.createDocument()
-    mx.loadLibraries(mx.getDefaultDataLibraryFolders(), mx.getDefaultDataSearchPath(), doc)
-    node_graph = doc.addNodeGraph(f"NG_{name}")
-    mx_node = node_graph.addNode(
-        "standard_surface",
-        "test_std_surf",
-        "surfaceshader",
-    )
-
-    ref_mat = _fresh_material(f"Ref_{name}")
-    for node in list(ref_mat.node_tree.nodes):
-        ref_mat.node_tree.nodes.remove(node)
-    ref_nodes, ref_inputs, ref_outputs = ref_handler(
-        ref_mat.node_tree,
-        mx_node,
-    )
-
-    # Compare node count
-    if len(ref_nodes) != len(our_nodes):
-        r.fail(name, f"node count: ref={len(ref_nodes)} ours={len(our_nodes)}")
-        return
-
-    # Compare node types in order
-    ref_types = [n.bl_idname for n in ref_nodes]
-    our_types = [n.bl_idname for n in our_nodes]
-    if ref_types != our_types:
-        r.fail(name, f"node types: ref={ref_types} ours={our_types}")
-        return
-
-    # Compare link topology
-    def link_topology(tree):
-        result = set()
-        for link in tree.links:
-            result.add(
-                (
-                    link.from_node.bl_idname,
-                    link.from_socket.name,
-                    link.to_node.bl_idname,
-                    link.to_socket.name,
-                )
-            )
-        return result
-
-    ref_links = link_topology(ref_mat.node_tree)
-    our_links = link_topology(our_tree)
-    if ref_links != our_links:
-        r.fail(name, f"link mismatch:\n  ref={ref_links}\n  ours={our_links}")
-        return
-
-    # Compare input mapping
-    for input_name, ref_socket in ref_inputs.items():
-        if input_name not in our_inputs:
-            r.fail(name, f"missing input '{input_name}'")
-            return
-        ref_id = _socket_identity(ref_socket)
-        our_id = _socket_identity(our_inputs[input_name])
-        if ref_id != our_id:
-            r.fail(name, f"input '{input_name}': ref={ref_id} ours={our_id}")
-            return
-
-    # Compare output mapping
-    for out_name, ref_socket in ref_outputs.items():
-        if out_name not in our_outputs:
-            r.fail(name, f"missing output '{out_name}'")
-            return
-        ref_id = _socket_identity(ref_socket)
-        our_id = _socket_identity(our_outputs[out_name])
-        if ref_id != our_id:
-            r.fail(name, f"output '{out_name}': ref={ref_id} ours={our_id}")
-            return
-
-    r.ok(name)
-
-
-def test_fallback_parity_with_io_blender_mtlx(r):
-    """Compare fallback MaterialXStandardSurfaceMapper against reference."""
-    name = "fallback_parity_with_io_blender_mtlx"
-    _clear_materials()
-
-    our_mat = _fresh_material("FallbackMaterial")
-    for node in list(our_mat.node_tree.nodes):
-        our_mat.node_tree.nodes.remove(node)
-    mapper = MaterialXStandardSurfaceMapper(
-        "ND_standard_surface_surfaceshader",
-        "ShaderNodeBsdfPrincipled",
-        {},
-    )
-    our_nodes, our_inputs, our_outputs = mapper.create_network(
-        our_mat.node_tree,
-        {},
-    )
-    _compare_against_reference(
-        r,
-        name,
-        our_mat.node_tree,
-        our_nodes,
-        our_inputs,
-        our_outputs,
-    )
-
-
-def test_vendored_parity_with_io_blender_mtlx(r):
-    """Compare ActivisionMtlxMapper against reference.
-
-    Since the vendored mapper delegates to the same handler,
-    this validates the mx.Node creation + handler delegation path.
-    """
-    name = "vendored_parity_with_io_blender_mtlx"
-    _clear_materials()
-
-    our_mat = _fresh_material("VendoredMaterial")
-    for node in list(our_mat.node_tree.nodes):
-        our_mat.node_tree.nodes.remove(node)
-    mapper = ActivisionMtlxMapper(
-        "ND_standard_surface_surfaceshader",
-        "",
-        {},
-    )
-    our_nodes, our_inputs, our_outputs = mapper.create_network(
-        our_mat.node_tree,
-        {},
-    )
-    _compare_against_reference(
-        r,
-        name,
-        our_mat.node_tree,
-        our_nodes,
-        our_inputs,
-        our_outputs,
-    )
-
-
-def test_vendored_open_pbr(r):
-    """Vendored OpenPBR mapper creates a valid node network."""
-    name = "vendored_open_pbr"
-    _clear_materials()
-
-    mat = _fresh_material("TestOpenPBR")
-    for node in list(mat.node_tree.nodes):
-        mat.node_tree.nodes.remove(node)
-    mapper = ActivisionMtlxMapper(
-        "ND_open_pbr_surface_surfaceshader",
-        "",
-        {},
-    )
-    nodes, input_map, output_map = mapper.create_network(mat.node_tree, {})
-
-    if len(nodes) < 5:
-        r.fail(name, f"expected >=5 nodes, got {len(nodes)}")
-        return
-    if "out" not in output_map:
-        r.fail(name, "missing 'out' in output_map")
-        return
-    if "base_color" not in input_map:
-        r.fail(name, "missing 'base_color' in input_map")
-        return
-    r.ok(name)
-
-
-# ------------------------------------------------------------------
 # Test: transmissive (glass) standard_surface maps to refractive Principled
 # ------------------------------------------------------------------
 
@@ -650,16 +457,6 @@ def test_fallback_glass_fixup(r):
         {},
     )
     _check_glass_fixup(r, "fallback_glass_fixup", mapper)
-
-
-def test_vendored_glass_fixup(r):
-    """Vendored mapper: same transmissive fixup over io_blender_mtlx's handler."""
-    mapper = ActivisionMtlxMapper(
-        "ND_standard_surface_surfaceshader",
-        "",
-        {},
-    )
-    _check_glass_fixup(r, "vendored_glass_fixup", mapper)
 
 
 # ------------------------------------------------------------------
@@ -959,22 +756,16 @@ def main():
 
     tests = [
         # Registry
-        test_registry_returns_vendored_mapper,
-        test_registry_vendored_coverage,
-        # Fallback mapper (MaterialXStandardSurfaceMapper)
+        test_registry_returns_native_surface_mapper,
+        test_registry_native_coverage,
+        # Standard Surface mapper (MaterialXStandardSurfaceMapper)
         test_our_mapper_node_count_and_types,
         test_our_mapper_internal_links,
         test_our_mapper_input_coverage,
         test_our_mapper_value_application,
         test_our_mapper_idempotent,
-        # Parity: both mappers vs io_blender_mtlx reference
-        test_fallback_parity_with_io_blender_mtlx,
-        test_vendored_parity_with_io_blender_mtlx,
-        # Transmissive (glass) fixup on both mapper paths
+        # Transmissive (glass) fixup
         test_fallback_glass_fixup,
-        test_vendored_glass_fixup,
-        # Vendored OpenPBR
-        test_vendored_open_pbr,
         # End-to-end adapter with real material values
         test_adapter_brass_material,
         test_adapter_glass_enables_refraction,

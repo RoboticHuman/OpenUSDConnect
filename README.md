@@ -191,5 +191,4 @@ uv run pytest tests/visual --visual-tests -v                   # visual regressi
 ```
 
 ## Acknowledgments
-- [io_blender_mtlx](https://github.com/Activision/io_blender_mtlx) by Activision: MaterialX node handlers for Blender shader networks
 - [USD Working Group Assets](https://github.com/usd-wg/assets): standardized test assets for the integration test suite

@@ -68,9 +68,9 @@ Maps to a 5-node Blender network: Principled BSDF + 2x HueSat + 2x Mix nodes.
 
 **Bidirectional**: The `input_map` from `create_network` maps every USD input to its exact Blender socket. The same map is used for both applying values (forward) and reading them back (reverse). Values stay in MaterialX input space throughout the roundtrip.
 
-### MaterialX via ActivisionMtlxMapper
+### MaterialX surface + utility nodes
 
-Delegates to the vendored `io_blender_mtlx` library for shader-specific node creation. Supports OpenPBR, Standard Surface, and 23+ MaterialX utility node types. Same `input_map` mechanism enables bidirectional editing.
+Native mappers build the Blender node networks for Standard Surface, OpenPBR (translated to standard_surface per the MaterialX spec), and the MaterialX utility nodes (math, mix, convert, ifequal, texcoord, ...). The same `input_map` mechanism enables bidirectional editing.
 
 ### Texture Connections (forward only)
 
@@ -209,4 +209,4 @@ The `input_map` is the key to bidirectional editing. The same map is used by:
 
 - **Texture connections**: forward only (receive). Swapping an image file in Blender's Image Texture node is not emitted.
 - **Locally-created multi-node materials**: reverse sync requires the `input_map` from `create_network`, which is populated during import. Materials created from scratch in Blender (not from a USD import) won't have this map.
-- **MaterialX reverse for ActivisionMtlxMapper**: depends on the vendored `io_blender_mtlx` handler being idempotent for re-creating networks on existing node trees.
+- **MaterialX multi-node reverse**: depends on the mapper re-creating networks idempotently on existing node trees.

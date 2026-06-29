@@ -1631,8 +1631,8 @@ class BlenderAdapter(DCCAdapter):
         """Read MaterialX materials from an imported USD file and apply them.
 
         Opens the file via pxr, walks Material/Shader prims, and applies
-        them through the adapter's shader pipeline so ActivisionMtlxMapper
-        creates proper node networks for shaders that Blender's built-in
+        them through the adapter's shader pipeline so the shader mappers
+        create proper node networks for shaders that Blender's built-in
         USD importer doesn't handle (e.g., ND_standard_surface_surfaceshader).
         """
         try:

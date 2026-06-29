@@ -49,11 +49,6 @@ STABLE_CLIENT_ID = make_stable_client_id("blender")
 # the server can distinguish multiple sessions from the same machine.
 SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 
-# io_blender_mtlx (Activision MaterialX node handlers) lives under vendor/
-_vendor_mtlx = os.path.join(_addon_dir, "vendor")
-if _vendor_mtlx not in sys.path:
-    sys.path.insert(0, _vendor_mtlx)
-
 # Make bundled pxr module available if Blender provides it
 try:
     import bpy
