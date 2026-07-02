@@ -34,6 +34,7 @@ def run_server(
     max_connections: int | None = None,
     txn_rate: float = 0,
     txn_burst: int = 0,
+    wire_metrics: bool = False,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
@@ -45,6 +46,7 @@ def run_server(
         durability=durability,
         txn_rate=txn_rate,
         txn_burst=txn_burst,
+        wire_metrics=wire_metrics,
     )
 
     if compact:
@@ -174,6 +176,12 @@ def main():
         metavar="N",
         help="Max burst size for transaction rate limiter (default: 0 = disabled)",
     )
+    ap.add_argument(
+        "--wire-metrics",
+        action="store_true",
+        help="Track encoded record bytes per event kind (off by default; "
+        "exposed via the dashboard /api/wire-metrics endpoint)",
+    )
     args = ap.parse_args()
     dept_list = args.departments.split(",") if args.departments else None
     run_server(
@@ -191,6 +199,7 @@ def main():
         max_connections=args.max_connections,
         txn_rate=args.txn_rate,
         txn_burst=args.txn_burst,
+        wire_metrics=args.wire_metrics,
     )
 
 

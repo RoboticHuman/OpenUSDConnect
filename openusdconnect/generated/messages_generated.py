@@ -2715,8 +2715,15 @@ class BroadcastEvent(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # BroadcastEvent
+    def Department(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def BroadcastEventStart(builder):
-    builder.StartObject(5)
+    builder.StartObject(6)
 
 def BroadcastEventAddSeq(builder, seq):
     builder.PrependInt32Slot(0, seq, 0)
@@ -2732,6 +2739,9 @@ def BroadcastEventAddClientId(builder, clientId):
 
 def BroadcastEventAddClient(builder, client):
     builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(client), 0)
+
+def BroadcastEventAddDepartment(builder, department):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(department), 0)
 
 def BroadcastEventEnd(builder):
     return builder.EndObject()

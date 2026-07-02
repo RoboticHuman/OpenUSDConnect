@@ -391,6 +391,7 @@ def _encode_broadcast_event(b, msg):
     origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
     client_id = b.CreateString(msg["client_id"]) if msg.get("client_id") else None
     client = b.CreateString(msg["client"]) if msg.get("client") else None
+    department = b.CreateString(msg["department"]) if msg.get("department") else None
     _fb.BroadcastEventStart(b)
     _fb.BroadcastEventAddSeq(b, msg["seq"])
     _fb.BroadcastEventAddEvent(b, ev_offset)
@@ -400,6 +401,8 @@ def _encode_broadcast_event(b, msg):
         _fb.BroadcastEventAddClientId(b, client_id)
     if client:
         _fb.BroadcastEventAddClient(b, client)
+    if department:
+        _fb.BroadcastEventAddDepartment(b, department)
     return _fb.BroadcastEventEnd(b)
 
 
@@ -1338,7 +1341,12 @@ def _dict_broadcast_event(be, msg_type, numpy_arrays=False):
     ew = be.Event()
     event_dict = event_to_dict(ew, numpy_arrays=numpy_arrays) if ew else {}
     msg = {"type": msg_type, "seq": be.Seq(), "event": event_dict}
-    for key, getter in [("origin", be.Origin), ("client_id", be.ClientId), ("client", be.Client)]:
+    for key, getter in [
+        ("origin", be.Origin),
+        ("client_id", be.ClientId),
+        ("client", be.Client),
+        ("department", be.Department),
+    ]:
         v = _str(getter())
         if v:
             msg[key] = v

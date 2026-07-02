@@ -249,12 +249,13 @@ namespace OUC
 		inline constexpr uint16 Txn_Events     = 6;
 		inline constexpr uint16 Txn_ProposalId = 8;
 
-		// BroadcastEvent { seq:int; event:EventWrapper; origin:string; client_id:string; client:string }
-		inline constexpr uint16 BroadcastEvent_Seq      = 4;
-		inline constexpr uint16 BroadcastEvent_Event    = 6;
-		inline constexpr uint16 BroadcastEvent_Origin   = 8;
-		inline constexpr uint16 BroadcastEvent_ClientId = 10;
-		inline constexpr uint16 BroadcastEvent_Client   = 12;
+		// BroadcastEvent { seq:int; event:EventWrapper; origin:string; client_id:string; client:string; department:string }
+		inline constexpr uint16 BroadcastEvent_Seq        = 4;
+		inline constexpr uint16 BroadcastEvent_Event      = 6;
+		inline constexpr uint16 BroadcastEvent_Origin     = 8;
+		inline constexpr uint16 BroadcastEvent_ClientId   = 10;
+		inline constexpr uint16 BroadcastEvent_Client     = 12;
+		inline constexpr uint16 BroadcastEvent_Department = 14;
 
 		// CreateProposal { target_department:string; events:[EventWrapper]; description:string }
 		inline constexpr uint16 CreateProposal_TargetDepartment = 4;

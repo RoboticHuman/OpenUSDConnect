@@ -153,6 +153,32 @@ def _authored_attr_rows(prim) -> list[dict]:
     return rows
 
 
+class _WireMetrics:
+    """Thread-safe per-event-kind counters of encoded record bytes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+        self._bytes: dict[str, int] = {}
+
+    def record(self, kind: str, nbytes: int) -> None:
+        with self._lock:
+            self._counts[kind] = self._counts.get(kind, 0) + 1
+            self._bytes[kind] = self._bytes.get(kind, 0) + nbytes
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            kinds = {
+                k: {"count": self._counts[k], "bytes": self._bytes[k]}
+                for k in sorted(self._counts)
+            }
+        return {
+            "kinds": kinds,
+            "total_count": sum(v["count"] for v in kinds.values()),
+            "total_bytes": sum(v["bytes"] for v in kinds.values()),
+        }
+
+
 class UsdSyncServer:
     """Holds all shared server state: stage, sequence counter, client list, event store."""
 
@@ -170,6 +196,7 @@ class UsdSyncServer:
         durability: str = "strict",
         txn_rate: float = 0,
         txn_burst: int = 0,
+        wire_metrics: bool = False,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -257,6 +284,11 @@ class UsdSyncServer:
         # Per-client rate limiting (0 = disabled)
         self.txn_rate = txn_rate
         self.txn_burst = txn_burst
+
+        # Opt-in wire traffic diagnostics (--wire-metrics)
+        self.wire_metrics: _WireMetrics | None = (
+            _WireMetrics() if wire_metrics else None
+        )
         self._persist_queue: queue.Queue | None = None
         if durability == "realtime":
             self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
@@ -485,21 +517,27 @@ class UsdSyncServer:
         all_events: list[dict] = []
 
         if self.department_priority:
-            # Per-client layers: route events to the correct client layer.
-            by_client: dict[str | None, list[dict]] = {}
+            # Per-client layers: route events to the layer the record was
+            # authored into, keyed by (client_id, department) since records
+            # carry the sender's department for exactly this replay routing.
+            by_layer_key: dict[tuple[str | None, str | None], list[dict]] = {}
             for _seq, record_bin in rows:
                 rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
-                cid = rec.get("client_id")
-                by_client.setdefault(cid, []).append(ev)
+                key = (rec.get("client_id"), rec.get("department"))
+                by_layer_key.setdefault(key, []).append(ev)
                 all_events.append(ev)
 
-            for cid, evts in by_client.items():
-                layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
+            for (cid, dept), evts in by_layer_key.items():
+                layer = (
+                    self.get_or_create_client_layer(cid, department=dept)
+                    if cid
+                    else self.edit_layer
+                )
                 self.stage.SetEditTarget(Usd.EditTarget(layer))
                 apply_events(self.stage, evts, op_cache=self._op_cache_for(layer))
 
-            total = sum(len(v) for v in by_client.values())
+            total = sum(len(v) for v in by_layer_key.values())
         else:
             # Legacy mode: all events to the shared edit_layer.
             events = []
@@ -668,12 +706,15 @@ class UsdSyncServer:
             records = []
             persist_tuples = []
             for ev in p.events:
+                # department is the TARGET: the merge authored these opinions
+                # into the target department's layer, so replay must too.
                 rec = {
                     "type": MSG_EVENT,
                     "seq": self.assign_seq(),
                     "event": ev,
                     "client_id": p.from_client,
                     "origin": f"proposal-{p.proposal_id}",
+                    "department": p.target_department,
                 }
                 rec_bin = encode_message(rec)
                 records.append(rec)
@@ -959,19 +1000,25 @@ class UsdSyncServer:
                 }
             )
 
-        # Non-department client layers
+        # Non-department client layers. Several clients can share one layer
+        # (the shared edit_layer fallback), so group clients per layer and
+        # flag the shared one: it is communal and refuses merge_layer.
+        grouped: dict[str, dict] = {}
         for cid, layer in client_items:
             if layer.identifier in seen:
                 continue
-            seen.add(layer.identifier)
-            result.append(
+            entry = grouped.setdefault(
+                layer.identifier,
                 {
                     "department": None,
-                    "clients": [cid],
+                    "clients": [],
                     "identifier": layer.identifier,
                     "muted": layer.identifier in muted,
-                }
+                    "shared": layer is self.edit_layer,
+                },
             )
+            entry["clients"].append(cid)
+        result.extend(grouped.values())
 
         # Sort by session sublayer order (strongest first)
         path_order = {p: i for i, p in enumerate(sublayer_paths)}
@@ -1030,7 +1077,7 @@ class UsdSyncServer:
         k = ev.get("k", "")
         key = (prim, k, ev.get("time"))
         meta = {}
-        for meta_key in ("origin", "client", "client_id"):
+        for meta_key in ("origin", "client", "client_id", "department"):
             val = rec.get(meta_key)
             if val:
                 meta[meta_key] = val
@@ -1339,16 +1386,16 @@ class UsdSyncServer:
         record_blobs = self.store.get_by_prim_prefix(prefix, replay_kinds)
 
         # Collect the latest event of each relevant kind per child prim.
-        # Store (ev, origin) tuples so replayed broadcasts can suppress
-        # echo back to the original sender.
-        latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
+        # Store (ev, origin, department) tuples so replayed broadcasts can
+        # suppress echo back to the original sender and keep layer routing.
+        latest: dict[tuple[str, str], tuple[dict, str | None, str | None]] = {}
         for blob in record_blobs:
             rec = message_to_dict(blob)
             ev = rec.get("event", rec)
             ep = ev.get("prim", "")
             ek = ev.get("k", "")
             if ep.startswith(prefix) and ek in replay_kinds:
-                latest[(ep, ek)] = (ev, rec.get("origin"))
+                latest[(ep, ek)] = (ev, rec.get("origin"), rec.get("department"))
 
         if not latest:
             return
@@ -1359,10 +1406,12 @@ class UsdSyncServer:
             key=lambda e: (e[0]["prim"], event_apply_tier(e[0]["k"])),
         )
 
-        for ev, origin in sorted_events:
+        for ev, origin, department in sorted_events:
             rec = {"type": MSG_EVENT, "seq": self.assign_seq(), "event": ev}
             if origin:
                 rec["origin"] = origin
+            if department:
+                rec["department"] = department
             self.append_log(rec)
             self.broadcast(rec, exclude_origin=origin)
 
@@ -1423,6 +1472,10 @@ class UsdSyncServer:
         if not records:
             return
         framed_payloads = [encode_message(rec) for rec in records]
+        if self.wire_metrics is not None:
+            for rec, buf in zip(records, framed_payloads, strict=True):
+                kind = rec.get("event", {}).get("k") or rec.get("type", "")
+                self.wire_metrics.record(kind, len(buf))
         payload = frame_batch(framed_payloads)
         self._broadcast_queue.put((payload, exclude_origin, None))
         # Notify event listeners synchronously — these are in-process
@@ -1796,6 +1849,7 @@ class UsdSyncServer:
         changed = self.apply_txn(events, layer=layer)
         changed_set = set(changed)
 
+        department = self._client_departments.get(client_id) if client_id else None
         records: list[tuple[dict, bytes]] = []
         persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]] = []
         for ev in events:
@@ -1808,7 +1862,11 @@ class UsdSyncServer:
             }
             if origin:
                 rec["origin"] = origin
+            if department:
+                rec["department"] = department
             rec_bin = encode_message(rec)
+            if self.wire_metrics is not None:
+                self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
             records.append((rec, rec_bin))
             persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
         self.append_log_batch(persist_tuples)
@@ -1829,6 +1887,18 @@ class UsdSyncServer:
     def get_event_count(self) -> int:
         """Return the number of events in the log (thread-safe, cached)."""
         return self._event_count
+
+    def get_wire_metrics(self) -> dict:
+        """Encoded record bytes per event kind since startup.
+
+        Counts each record once at encode time (txn sequencing and
+        server-initiated broadcasts); per-receiver fan-out and backlog
+        replays are not multiplied in. Returns {"enabled": False} unless
+        the server was started with wire metrics on.
+        """
+        if self.wire_metrics is None:
+            return {"enabled": False}
+        return {"enabled": True, **self.wire_metrics.snapshot()}
 
     def query_events(
         self,
