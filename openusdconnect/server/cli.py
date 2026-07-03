@@ -35,6 +35,8 @@ def run_server(
     txn_rate: float = 0,
     txn_burst: int = 0,
     wire_metrics: bool = False,
+    compact_interval: float = 0,
+    reclaim_interval: float = 0,
 ):
     """Start the server (blocking)."""
     sync_server = UsdSyncServer(
@@ -47,6 +49,8 @@ def run_server(
         txn_rate=txn_rate,
         txn_burst=txn_burst,
         wire_metrics=wire_metrics,
+        compact_interval=compact_interval,
+        reclaim_interval=reclaim_interval,
     )
 
     if compact:
@@ -182,6 +186,24 @@ def main():
         help="Track encoded record bytes per event kind (off by default; "
         "exposed via the dashboard /api/wire-metrics endpoint)",
     )
+    ap.add_argument(
+        "--compact-interval",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="Compact the event log every SECONDS (0 = disabled, default). "
+        "Skips when no events arrived since the last compaction. "
+        "Adjustable at runtime via the dashboard.",
+    )
+    ap.add_argument(
+        "--reclaim-interval",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="Reclaim event log disk space (VACUUM on the SQLite backend) "
+        "at most every SECONDS, at compaction/purge commits "
+        "(0 = disabled, default). Pair with --compact-interval.",
+    )
     args = ap.parse_args()
     dept_list = args.departments.split(",") if args.departments else None
     run_server(
@@ -200,6 +222,8 @@ def main():
         txn_rate=args.txn_rate,
         txn_burst=args.txn_burst,
         wire_metrics=args.wire_metrics,
+        compact_interval=args.compact_interval,
+        reclaim_interval=args.reclaim_interval,
     )
 
 

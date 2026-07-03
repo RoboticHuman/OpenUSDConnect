@@ -574,9 +574,39 @@ def _build_operations(srv: UsdSyncServer):
                 )
         dialog.open()
 
-    with ui.row().classes("gap-2 mb-4"):
+    def _set_auto_compact(e):
+        seconds = float(e.value or 0)
+        srv.set_compact_interval(seconds)
+        ui.notify(
+            f"Auto-compact every {seconds:.0f}s" if seconds > 0 else "Auto-compact off",
+            type="info",
+        )
+
+    def _set_auto_reclaim(e):
+        seconds = float(e.value or 0)
+        srv.set_reclaim_interval(seconds)
+        ui.notify(
+            f"Reclaim storage every {seconds:.0f}s" if seconds > 0 else "Storage reclaim off",
+            type="info",
+        )
+
+    with ui.row().classes("gap-2 mb-4 items-center"):
         ui.button("Compact Log", icon="compress", on_click=compact).props(
             "outline dense no-caps"
+        )
+        ui.number(
+            label="Auto-compact (s)", value=srv.get_compact_interval(), min=0,
+            on_change=_set_auto_compact,
+        ).props("dense outlined").classes("w-32").tooltip(
+            "Compact the event log every N seconds (0 = off). Skips when "
+            "idle; incoming edits queue during the compaction commit."
+        )
+        ui.number(
+            label="Reclaim disk (s)", value=srv.get_reclaim_interval(), min=0,
+            on_change=_set_auto_reclaim,
+        ).props("dense outlined").classes("w-32").tooltip(
+            "Return freed event-log disk space at most every N seconds "
+            "(0 = off). Runs at compaction/purge, so pair with auto-compact."
         )
         ui.button("Export Diff", icon="difference", on_click=export_diff).props(
             "outline dense no-caps"
@@ -1307,6 +1337,26 @@ def _register_api_routes(srv: UsdSyncServer):
     @app.get("/api/wire-metrics")
     def api_wire_metrics():
         return srv.get_wire_metrics()
+
+    @app.get("/api/compact-interval")
+    def api_get_compact_interval():
+        return {"seconds": srv.get_compact_interval()}
+
+    @app.post("/api/compact-interval")
+    async def api_set_compact_interval(request: Request):
+        body = await request.json()
+        srv.set_compact_interval(float(body.get("seconds", 0)))
+        return {"ok": True, "seconds": srv.get_compact_interval()}
+
+    @app.get("/api/reclaim-interval")
+    def api_get_reclaim_interval():
+        return {"seconds": srv.get_reclaim_interval()}
+
+    @app.post("/api/reclaim-interval")
+    async def api_set_reclaim_interval(request: Request):
+        body = await request.json()
+        srv.set_reclaim_interval(float(body.get("seconds", 0)))
+        return {"ok": True, "seconds": srv.get_reclaim_interval()}
 
     @app.get("/api/prim-tree")
     def api_prim_tree():

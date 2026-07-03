@@ -39,6 +39,21 @@ def pytest_addoption(parser):
         default=None,
         help="Path to Blender executable for integration tests",
     )
+    parser.addoption(
+        "--slow-tests",
+        action="store_true",
+        default=False,
+        help="Run timing-dependent tests marked 'slow' (skipped by default)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--slow-tests"):
+        return
+    skip = pytest.mark.skip(reason="timing-dependent; run with --slow-tests")
+    for item in items:
+        if item.get_closest_marker("slow"):
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")

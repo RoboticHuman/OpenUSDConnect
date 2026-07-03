@@ -15,8 +15,13 @@ uv sync
 # All tests
 uv run pytest tests/ -v
 
-# Unit tests only (fast, no Blender needed)
+# Unit tests only (fast, no Blender needed; timing-dependent "slow" tests
+# are skipped by default)
 uv run pytest tests/unit/ -v
+
+# Include the timing-dependent tests (e.g. periodic compaction, which
+# waits out real tick intervals)
+uv run pytest tests/unit/ --slow-tests -v
 
 # Integration tests only (requires Blender)
 uv run pytest tests/integration/ -v

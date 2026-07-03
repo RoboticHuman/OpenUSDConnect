@@ -96,6 +96,15 @@ class EventStore(ABC):
         (seq, record_bin, client_id, kind, prim) tuples."""
         raise NotImplementedError
 
+    def reclaim_storage(self) -> int:
+        """Reclaim storage freed by ``clear_and_rewrite``.
+
+        Returns the number of bytes reclaimed (0 when unknown or not
+        applicable). Default is a no-op for backends that reclaim
+        automatically or have no on-disk representation.
+        """
+        return 0
+
     @abstractmethod
     def close(self) -> None:
         """Release resources (close connections, etc.)."""
@@ -106,6 +115,7 @@ class SqliteEventStore(EventStore):
     """SQLite-backed event store with WAL mode for concurrent reads."""
 
     def __init__(self, db_path: str):
+        self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("""
@@ -245,6 +255,34 @@ class SqliteEventStore(EventStore):
                 records,
             )
             self._conn.commit()
+
+    def _size_on_disk(self) -> int:
+        import os
+
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(self._db_path + suffix)
+            except OSError:
+                pass
+        return total
+
+    def reclaim_storage(self) -> int:
+        """Rebuild the database file via VACUUM and truncate the WAL.
+
+        VACUUM copies only live pages, so calling it right after
+        ``clear_and_rewrite`` is cheap regardless of how large the file
+        grew. Must not run inside a transaction.
+        """
+        if self._db_path == ":memory:":
+            return 0
+        with self._lock:
+            before = self._size_on_disk()
+            self._conn.commit()
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            reclaimed = before - self._size_on_disk()
+        return max(reclaimed, 0)
 
     def close(self) -> None:
         self._conn.close()

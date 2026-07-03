@@ -356,3 +356,40 @@ class TestCompaction:
         inst = [e for e in events if e["k"] == K_SET_INSTANCEABLE]
         assert len(inst) == 1
         assert inst[0]["instanceable"] is True
+
+
+class TestGeometryHeavyLog:
+    def test_mesh_points_compact_fast_and_replay_intact(self, tmp_path):
+        """Large float-array attrs must take the numpy decode path during
+        compaction (the per-element path is ~100x slower and stalls the
+        periodic thread for minutes) and survive the re-encode on commit."""
+        import time
+
+        import numpy as np
+
+        db = str(tmp_path / "heavy.db")
+        srv = UsdSyncServer(log_path=db)
+        rng = np.random.default_rng(0)
+        base = rng.random((9216, 3), dtype=np.float32)
+        events = [{"k": K_ENSURE_PRIM, "prim": "/World/M", "typeName": "Mesh"}]
+        for i in range(30):
+            events.append({
+                "k": "set_gprim_attrs", "prim": "/World/M",
+                "attrs": {"points": (base + np.float32(i)).tolist()},
+            })
+        srv.process_txn(events, client_id="c", origin="o", client_addr="a:1")
+
+        t0 = time.perf_counter()
+        srv.compact_log()
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 10, f"compaction of 30 mesh events took {elapsed:.1f}s"
+        assert srv.get_event_count() == 2
+        srv.store.close()
+
+        srv2 = UsdSyncServer(log_path=db)
+        got = np.array(srv2.stage.GetPrimAtPath("/World/M").GetAttribute("points").Get())
+        assert got.shape == (9216, 3)
+        assert np.allclose(got, base + np.float32(29), atol=1e-5)
+        srv2.shutdown()
+        srv2.store.close()
+        srv.shutdown()

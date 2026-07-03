@@ -396,6 +396,9 @@ class TestDefaults:
         assert "MeshLightAPI" in DEFAULT_REPLICATED_API_SCHEMAS
         assert "VolumeLightAPI" in DEFAULT_REPLICATED_API_SCHEMAS
 
+    def test_default_set_includes_hydra_generative_procedural(self):
+        assert "HydraGenerativeProceduralAPI" in DEFAULT_REPLICATED_API_SCHEMAS
+
 
 class TestStructuralOrdering:
     def test_api_schemas_applied_before_inputs(self):

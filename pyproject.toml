@@ -35,6 +35,7 @@ visual = [
 testpaths = ["tests"]
 markers = [
     "materialx: MaterialX shader mapper integration tests (require Blender)",
+    "slow: timing-dependent tests that wait out real intervals; opt in with --slow-tests",
 ]
 # Blender integration tests: configure via one of:
 #   uv run pytest --blender /path/to/blender.exe

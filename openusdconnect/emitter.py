@@ -135,6 +135,9 @@ def _is_transform_attr(attr_name: str) -> bool:
 DEFAULT_REPLICATED_API_SCHEMAS = frozenset({
     "ShapingAPI", "ShadowAPI",          # UsdLux user-applied
     "MeshLightAPI", "VolumeLightAPI",   # UsdLux user-applied (light on Mesh/Volume)
+    # UsdHydra: marks a GenerativeProcedural prim for Hydra evaluation; without
+    # it a replicated procedural loses its imaging type and never resolves.
+    "HydraGenerativeProceduralAPI",
     # NOTE: LightAPI is built-in for typed UsdLux lights — replicating it
     # would add a redundant authored opinion. Excluded by design.
     # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.

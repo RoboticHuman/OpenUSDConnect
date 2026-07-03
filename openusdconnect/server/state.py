@@ -197,6 +197,8 @@ class UsdSyncServer:
         txn_rate: float = 0,
         txn_burst: int = 0,
         wire_metrics: bool = False,
+        compact_interval: float = 0,
+        reclaim_interval: float = 0,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -234,6 +236,10 @@ class UsdSyncServer:
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         self._next_seq = self.store.get_max_seq() + 1
         self._event_count = self.store.get_count()
+        # Periodic compaction skips when no seq was assigned since the last
+        # compaction. Starts at 1 so a pre-existing uncompacted log gets one
+        # compaction on the first tick.
+        self._seq_at_last_compact = 1
 
         # TOFU token authentication
         self.require_token = require_token
@@ -289,6 +295,23 @@ class UsdSyncServer:
         self.wire_metrics: _WireMetrics | None = (
             _WireMetrics() if wire_metrics else None
         )
+
+        # Periodic compaction (--compact-interval; 0 = disabled). Runtime
+        # adjustable via set_compact_interval. compact_log itself is safe
+        # against concurrent txns: its exclusive phase holds txn_barrier, so
+        # incoming txns queue and proceed against the compacted log.
+        self._compact_interval = max(0.0, float(compact_interval or 0))
+        self._compact_stop = False
+        self._compact_wake = threading.Event()
+        self._compact_thread: threading.Thread | None = None
+        if self._compact_interval > 0:
+            self._start_compaction_thread()
+
+        # Storage reclaim (--reclaim-interval; 0 = disabled). Evaluated at
+        # compaction and purge commits, where the log was just rewritten and
+        # the exclusive barrier is already held; no thread of its own.
+        self._reclaim_interval = max(0.0, float(reclaim_interval or 0))
+        self._last_reclaim = time.monotonic()
         self._persist_queue: queue.Queue | None = None
         if durability == "realtime":
             self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
@@ -326,13 +349,92 @@ class UsdSyncServer:
     def shutdown(self):
         """Signal background threads to drain queued work and exit.
 
-        Persist queue drains first (durability), then broadcast.
+        Compaction stops first (no rewrite mid-shutdown), then the persist
+        queue drains (durability), then broadcast.
         """
+        self._compact_stop = True
+        self._compact_wake.set()
+        if self._compact_thread is not None:
+            self._compact_thread.join(timeout=10.0)
         if self._persist_queue is not None:
             self._persist_queue.put(None)
             self._persist_thread.join(timeout=10.0)
         self._broadcast_queue.put(None)
         self._broadcast_thread.join(timeout=10.0)
+
+    # ------------------------------------------------------------------
+    # Periodic compaction
+    # ------------------------------------------------------------------
+
+    def _start_compaction_thread(self):
+        self._compact_thread = threading.Thread(
+            target=self._compaction_loop, daemon=True,
+        )
+        self._compact_thread.start()
+
+    def set_reclaim_interval(self, seconds: float) -> None:
+        """Set the storage-reclaim interval in seconds (0 disables).
+
+        Reclaim runs at compaction and purge commits, so an enabled
+        interval needs compaction (periodic or manual) to take effect.
+        """
+        self._reclaim_interval = max(0.0, float(seconds or 0))
+
+    def get_reclaim_interval(self) -> float:
+        return self._reclaim_interval
+
+    def _maybe_reclaim_storage(self) -> None:
+        """Reclaim store disk space when the interval has elapsed.
+
+        Called right after a log rewrite while the exclusive barrier is
+        held; reclaiming then is cheap because only live data is copied.
+        """
+        if self._reclaim_interval <= 0:
+            return
+        if time.monotonic() - self._last_reclaim < self._reclaim_interval:
+            return
+        reclaimed = self.store.reclaim_storage()
+        self._last_reclaim = time.monotonic()
+        if reclaimed:
+            LOG.info("Reclaimed %.1f MB of event log storage", reclaimed / 1048576)
+
+    def set_compact_interval(self, seconds: float) -> None:
+        """Set the periodic compaction interval in seconds (0 disables).
+
+        Takes effect immediately: the compaction thread re-reads the
+        interval on wake, so shortening, lengthening, and disabling all
+        apply without waiting out the previous period.
+        """
+        self._compact_interval = max(0.0, float(seconds or 0))
+        if self._compact_interval > 0 and self._compact_thread is None:
+            self._start_compaction_thread()
+        self._compact_wake.set()
+
+    def get_compact_interval(self) -> float:
+        return self._compact_interval
+
+    def _compaction_loop(self):
+        """Compact every interval, skipping when no event arrived since the
+        last compaction so idle servers don't resync receivers for nothing."""
+        while not self._compact_stop:
+            interval = self._compact_interval
+            if interval <= 0:
+                self._compact_wake.wait()
+                self._compact_wake.clear()
+                continue
+            if self._compact_wake.wait(timeout=interval):
+                self._compact_wake.clear()
+                continue
+            if self._compact_stop:
+                return
+            with self._seq_lock:
+                pending = self._next_seq > self._seq_at_last_compact
+            if not pending:
+                continue
+            try:
+                self.compact_log()
+            except Exception:
+                LOG.exception("Periodic compaction failed")
 
     # ------------------------------------------------------------------
     # Playback synchronization
@@ -1070,8 +1172,12 @@ class UsdSyncServer:
         Keys are ``(prim, kind, time)``: events at distinct time samples
         compact independently of each other and of the default-time
         opinion, so a keyframed log keeps one merged event per sample.
+
+        Decodes with numpy arrays: the per-element list path is ~100x
+        slower and turns compaction of geometry-heavy logs (meshes,
+        instancer arrays) into minutes of decode.
         """
-        rec = message_to_dict(record_bin)
+        rec = message_to_dict(record_bin, numpy_arrays=True)
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
@@ -1224,8 +1330,10 @@ class UsdSyncServer:
                 (seq, encode_message(rec), meta.get("client_id"), ev.get("k"), ev.get("prim"))
             )
         self.store.clear_and_rewrite(records)
+        self._maybe_reclaim_storage()
         with self._seq_lock:
             self._event_count = len(records)
+            self._seq_at_last_compact = self._next_seq
 
         self.op_cache.clear()
         self._op_cache_layer = None
@@ -1257,9 +1365,11 @@ class UsdSyncServer:
 
     def _purge_inner(self):
         self.store.clear_and_rewrite([])
+        self._maybe_reclaim_storage()
         with self._seq_lock:
             self._event_count = 0
             self._next_seq = 1
+            self._seq_at_last_compact = 1
         with self.stage_lock:
             self.edit_layer.Clear()
         self.op_cache.clear()
