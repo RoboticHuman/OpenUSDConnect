@@ -23,18 +23,25 @@ them into an authoritative, append-only log and fans them out to every connected
 client, which applies them to its own stage. The wire format is length-prefixed
 FlatBuffers over TCP.
 
+```mermaid
+flowchart LR
+    subgraph A["emitting client (any DCC)"]
+        E["native edit"] --> LS["local USD stage"]
+        LS -- "emitter diff" --> EV["typed events"]
+    end
+    EV -- "TCP · FlatBuffers" --> SQ
+    subgraph S["sync server"]
+        SQ["sequencer"] --> LOG[("SQLite event log")]
+    end
+    LOG -- "broadcast + late-join replay" --> MS
+    subgraph B["every other client"]
+        MS["mirror USD stage"] -- "DCCAdapter" --> N["native scene"]
+    end
 ```
-              +-------------------------------------------+
-              |                Sync Server                |
-              |   authoritative sequencer, SQLite event   |
-              |   log, per-department layers, dashboard    |
-              +-------------------------------------------+
-                  ^           ^           ^           ^
-                  |     TCP (length-prefixed FlatBuffers)
-                  v           v           v           v
-               Blender     usdview      Unreal     MCP / LLM
-             (emit+recv)  (hdPrman)   (transforms) (authoring)
-```
+
+The boxes are roles, not machines: a bidirectional client runs both halves
+at once, emitting its own edits while applying everyone else's. The server
+never echoes an event back to its origin.
 
 ## Features
 
