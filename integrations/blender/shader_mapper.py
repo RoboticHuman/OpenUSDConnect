@@ -8,6 +8,7 @@ a mapper to create_default_registry().
 from __future__ import annotations
 
 import logging
+import os
 
 from openusdconnect.adapters import MultiNodeShaderMapper, ShaderMapper, ShaderMapperRegistry
 
@@ -98,6 +99,21 @@ class TextureShaderMapper(ShaderMapper):
             return
         node.inputs[blender_name].default_value = value
 
+    def read_all_inputs(self, node) -> dict:
+        """Read the assigned image's filepath back as the ``file`` input.
+
+        Returns the absolute filesystem path (matching the wire convention
+        for asset values); empty when the node has no image or the image
+        has no filepath (generated/packed-only datablocks).
+        """
+        img = getattr(node, "image", None)
+        filepath = getattr(img, "filepath", "") if img is not None else ""
+        if not filepath:
+            return {}
+        if BPY_AVAILABLE:
+            filepath = bpy.path.abspath(filepath)
+        return {"file": os.path.normpath(filepath)}
+
     def _load_image(self, node, value, resolve_asset):
         if not BPY_AVAILABLE or not isinstance(value, str) or not value:
             return
@@ -132,6 +148,11 @@ class UVReaderMapper(ShaderMapper):
             return
         node.inputs[blender_name].default_value = value
 
+    def read_all_inputs(self, node) -> dict:
+        """Read the UV map name back as the ``varname`` input."""
+        uv_map = getattr(node, "uv_map", "")
+        return {"varname": str(uv_map)} if uv_map else {}
+
 
 class AttributeReaderMapper(ShaderMapper):
     """Non-UV UsdPrimvarReader variants → ShaderNodeAttribute.
@@ -150,6 +171,11 @@ class AttributeReaderMapper(ShaderMapper):
         if not blender_name or blender_name not in node.inputs:
             return
         node.inputs[blender_name].default_value = value
+
+    def read_all_inputs(self, node) -> dict:
+        """Read the attribute name back as the ``varname`` input."""
+        attribute_name = getattr(node, "attribute_name", "")
+        return {"varname": str(attribute_name)} if attribute_name else {}
 
 
 class NormalMapShaderMapper(ShaderMapper):

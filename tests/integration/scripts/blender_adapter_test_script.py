@@ -1204,6 +1204,97 @@ def test_capture_authors_camera_attrs_to_stage(r):
     r.ok(name)
 
 
+def test_texture_swap_reverse_sync(r):
+    """A tracked Image Texture node emits an asset-typed set_connectable_input
+    when its image is swapped: receive creates + tags the node, the seeding
+    pass baselines it, and the capture path authors the new path with the
+    synced input's exact USD type."""
+    import tempfile
+
+    from pxr import Sdf, UsdShade
+
+    from integrations.blender import receiver_addon
+    from integrations.blender.capture import BlenderStageAuthor
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.protocol_constants import K_SET_CONNECTABLE_INPUT
+
+    name = "test_texture_swap_reverse_sync"
+    _clear_scene()
+
+    tex_path = "/World/Looks/SwapMat/SwapTex"
+
+    # Two real image files so Blender can load/resolve them.
+    img_paths = []
+    for tag in ("a", "b"):
+        p = os.path.join(tempfile.gettempdir(), f"openusdconnect_swap_{tag}.png")
+        img = bpy.data.images.new(f"swap_src_{tag}", 4, 4)
+        img.filepath_raw = p
+        img.file_format = "PNG"
+        img.save()
+        bpy.data.images.remove(img)
+        img_paths.append(p)
+    path_a, path_b = img_paths
+
+    # Receive side: the framework creates and tags the texture node.
+    adapter = BlenderAdapter()
+    adapter.set_connectable_input(tex_path, "UsdUVTexture", {"file": path_a}, {"file": "asset"})
+    mat = adapter._find_material_for_shader(tex_path)
+    node = adapter._find_shader_node(mat.node_tree, tex_path) if mat else None
+    if node is None or node.image is None:
+        r.fail(name, f"receive did not create a tagged, loaded texture node (mat={mat})")
+        return
+
+    # Emitter mirror stage carrying the synced state (what the dispatcher's
+    # stage commit authors), so type resolution sees the real asset input.
+    base_path = os.path.join(tempfile.gettempdir(), "openusdconnect_swap_base.usda")
+    with open(base_path, "w") as f:
+        f.write('#usda 1.0\ndef Xform "World" {}\n')
+    author = BlenderStageAuthor(base_usd_path=base_path)
+    author.enabled = True
+    shader = UsdShade.Shader(author.stage.DefinePrim(tex_path, "Shader"))
+    shader.CreateIdAttr("UsdUVTexture")
+    shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(path_a))
+
+    # Post-apply seeding: baseline the tracked node from its current state.
+    receiver_addon._seed_shader_maps(author, adapter, "/World/Looks/SwapMat")
+    seeded = author._last_shader_values.get(tex_path)
+    if not seeded or os.path.normcase(seeded.get("file", "")) != os.path.normcase(
+        os.path.normpath(path_a)
+    ):
+        r.fail(name, f"baseline not seeded from tracked node: {seeded}")
+        return
+
+    emitter = NoticeEmitter(author.stage)
+    emitter.build_events_for_dirty()  # flush first-encounter state
+
+    # Local edit: swap the image and run the capture path.
+    node.image = bpy.data.images.load(path_b, check_existing=True)
+    author.on_material_update([mat])
+
+    events = [
+        e
+        for e in emitter.build_events_for_dirty()
+        if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == tex_path
+    ]
+    if not events:
+        r.fail(name, "no set_connectable_input emitted for the image swap")
+        return
+    ev = events[0]
+    got_file = ev.get("inputs", {}).get("file", "")
+    if os.path.normcase(os.path.normpath(got_file)) != os.path.normcase(
+        os.path.normpath(path_b)
+    ):
+        r.fail(name, f"file={got_file!r}, expected {path_b!r}")
+        return
+    if ev.get("input_types", {}).get("file") != "asset":
+        r.fail(name, f"input_types={ev.get('input_types')}, expected file: asset")
+        return
+    if ev.get("info_id") != "UsdUVTexture":
+        r.fail(name, f"info_id={ev.get('info_id')!r}")
+        return
+    r.ok(name)
+
+
 def test_capture_camera_move_emits_trs_only(r):
     """After first encounter, moving the camera emits set_xform_trs but no
     camera attrs event (params unchanged → CameraAttrsChannel.diff is empty)."""
@@ -1388,6 +1479,7 @@ def main():
         test_capture_authors_camera_attrs_to_stage,
         test_capture_camera_move_emits_trs_only,
         test_capture_camera_lens_only_emits_attrs,
+        test_texture_swap_reverse_sync,
     ]
 
     for t in tests:

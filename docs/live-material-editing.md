@@ -38,7 +38,7 @@ The same `ShaderMapperRegistry` serves both directions: the mapper that applies 
 3. authors the changed values to the emitter's USD stage
 4. the `NoticeEmitter` then diffs that stage change against its own per-prim cache before building events
 
-First encounter seeds the baseline without authoring, so importing a material does not broadcast its defaults.
+First encounter seeds the baseline without authoring, so importing a material does not broadcast its defaults. The receive pipeline also seeds baselines right after applying shader events, reading the freshly applied node state, so the first local edit to a synced shader diffs against the synced values instead of being swallowed as a seed.
 
 On the stage side, the emitter reads the whole connectable interface once per cycle (`read_usdshade_connectable`) and fans the diff out into `set_connectable_input` and `set_connectable_connection` events. An input that carries a connection is excluded from value events, since its value comes from the source node.
 
@@ -89,6 +89,8 @@ Math (`ND_multiply_*`, `ND_divide_vector2`, `ND_subtract_vector2`, `ND_distance_
 ### Textures and primvar readers
 
 `UsdUVTexture` and the MaterialX image nodes (`ND_image_*`, `ND_tiledimage_*`) map to Image Texture nodes. Color-typed variants load as sRGB; float and vector variants load as Non-Color, so normal maps and roughness data skip gamma correction. Relative file paths resolve against the scene's asset root (or the imported base USD's directory), and image datablocks already loaded from the same absolute path are reused rather than duplicated.
+
+Texture sync is bidirectional on tracked nodes: swapping the image on a framework-created Image Texture node emits the new file path as an asset-typed `file` input, which other receivers load through the same resolution path. Changing the UV map or attribute name on a tracked reader node emits `varname` the same way.
 
 `UsdPrimvarReader_float2` maps to a UV Map node; the other `UsdPrimvarReader_*` variants map to Attribute nodes that read the named primvar (vertex colors, custom data) at render time.
 
@@ -201,9 +203,8 @@ The `input_map` (USD input name -> native socket) is the key to bidirectional ed
 
 ## Behavior notes and limitations
 
-- Texture wiring replicates on receive: image nodes are created, files load, connections apply. Swapping an image file inside Blender does not emit an event; texture mappers have no reverse read.
+- Reverse authoring preserves USD types: the type authored on the synced prim wins, then the shader's Sdr node definition, then a value-shape heuristic for inputs the stage has never seen. A texture swap round-trips as `asset`, a subsurface radius as `float3`, exactly as the source authored them.
 - Reverse sync reads unlinked value sockets only. An input driven by a connection is skipped when reading back, so a value edit never fights a texture link.
-- Reverse authoring covers float and color inputs, the value types surface-shader sockets carry.
 - Multi-node reverse sync requires the socket map produced by `create_network`, which exists once the network has been built by the receive/import path. A multi-node material authored from scratch inside Blender has no map and does not emit.
-- On the emit side, Blender nodes are matched to USD shader prims through the `usd_shader_path` / `usd_shader_id` tags set during import and receive. An untagged Principled BSDF inside a tagged material falls back to matching a UsdPreviewSurface shader found under the material prim on the stage.
+- On the emit side, Blender nodes are matched to USD shader prims through the `usd_shader_path` / `usd_shader_id` tags set during import and receive. An untagged Principled BSDF inside a tagged material falls back to matching a UsdPreviewSurface shader found under the material prim on the stage; other untagged nodes are not tracked.
 - Connections targeting Material or NodeGraph *output* ports are skipped by the Blender adapter: the Material surface terminal is wired automatically when a surface-shader network is built, and NodeGraph ports are flattened at import.

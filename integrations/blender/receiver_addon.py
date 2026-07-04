@@ -33,6 +33,8 @@ _ADAPTER: BlenderAdapter | None = None
 _QUEUE_TIMER_REGISTERED = False
 # Prim paths that need emitter cache seeding after view_layer.update().
 _pending_seed_paths: set[str] = set()
+# Shader prim paths whose reverse-sync baselines need seeding after apply.
+_pending_shader_seed_paths: set[str] = set()
 # Feedback loop guard: set True while applying remote events
 _APPLYING_REMOTE = False
 # Track last sequence number across reconnects
@@ -119,28 +121,39 @@ def _set_applying_remote(value: bool):
             pass
 
 
-def _seed_multi_node_shader_maps(cap, prim_path: str):
-    """Copy multi-node shader input maps from adapter to author.
+def _seed_shader_maps(author, adapter, prim_path: str):
+    """Seed the author's reverse-sync state for shaders at or under prim_path.
 
-    The adapter caches ``input_map`` dicts (usd_name -> socket) during
-    forward application.  The author needs them for reverse reading
-    (Blender -> USD).  Also seeds ``_last_shader_values`` baseline so
-    the first depsgraph tick doesn't emit all inputs as changes.
+    Multi-node shaders: copy the adapter's cached ``input_map`` socket dicts
+    (usd_name -> socket) to the author, which needs them for reverse reading,
+    and seed the ``_last_shader_values`` baseline from the sockets.
+    Single-node shaders (PBR, textures, primvar readers): locate the tagged
+    Blender node and seed the baseline from the mapper's reverse read.
+    A seeded baseline means the first local edit diffs against the synced
+    state instead of being swallowed as a first-encounter seed.
     """
-    author = cap._state.author
     prefix = prim_path + "/"
-    for shader_path, sc in _ADAPTER._registry.iter_shaders():
-        if "input_map" not in sc:
-            continue
+    for shader_path, sc in adapter._registry.iter_shaders():
         if shader_path != prim_path and not shader_path.startswith(prefix):
             continue
-        author._shader_input_maps[shader_path] = sc["input_map"]
         shader_id = sc.get("shader_id")
-        if not shader_id:
-            continue
-        mapper = author._shader_registry.get(shader_id)
-        if mapper and mapper.is_multi_node:
-            values = mapper.read_all_inputs(input_map=sc["input_map"])
+        mapper = author._shader_registry.get(shader_id) if shader_id else None
+        if "input_map" in sc:
+            input_map = sc["input_map"]
+            # Cached sockets go stale when their material is removed (e.g.
+            # importer duplicates cleaned up after rebinding). A raising
+            # timer callback gets unregistered by Blender, killing the
+            # receiver, so dead maps are dropped instead of read.
+            try:
+                values = (
+                    mapper.read_all_inputs(input_map=input_map)
+                    if mapper and mapper.is_multi_node
+                    else {}
+                )
+            except ReferenceError:
+                author._shader_input_maps.pop(shader_path, None)
+                continue
+            author._shader_input_maps[shader_path] = input_map
             if values:
                 author._last_shader_values[shader_path] = values
                 LOG.debug(
@@ -148,6 +161,26 @@ def _seed_multi_node_shader_maps(cap, prim_path: str):
                     shader_path,
                     len(values),
                 )
+            continue
+        if not mapper or mapper.is_multi_node or not hasattr(mapper, "read_all_inputs"):
+            continue
+        try:
+            mat = adapter._find_material_for_shader(shader_path)
+            if mat is None or not getattr(mat, "node_tree", None):
+                continue
+            node = adapter._find_shader_node(mat.node_tree, shader_path)
+            if node is None:
+                continue
+            values = mapper.read_all_inputs(node)
+        except ReferenceError:
+            continue
+        if values:
+            author._last_shader_values[shader_path] = values
+            LOG.debug(
+                "seeded shader baseline %s with %d inputs",
+                shader_path,
+                len(values),
+            )
 
 
 # Latest-wins PlaybackState handoff: written by the receiver thread,
@@ -276,6 +309,21 @@ def _on_imported(prim_paths: list[str]) -> None:
     _pending_seed_paths.update(prim_paths)
 
 
+def _on_applied(prim_paths: list[str]) -> None:
+    """Collect applied prim paths that hold shader state for baseline seeding.
+
+    Filtered to paths the adapter's registry knows as shaders, so transform
+    spam never reaches the seeding loop.  Seeding itself is deferred to the
+    timer cycle alongside the import seeding.
+    """
+    if _ADAPTER is None:
+        return
+    registry = _ADAPTER._registry
+    _pending_shader_seed_paths.update(
+        pp for pp in prim_paths if registry.get_shader(pp)
+    )
+
+
 def _on_resync() -> None:
     """Reset the adapter so all caches (including _imported_refs) are clean."""
     global _ADAPTER
@@ -304,6 +352,7 @@ def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
         emitter=emitter,
         on_imported=_on_imported,
         on_resync=_on_resync,
+        on_applied=_on_applied,
     )
 
 
@@ -393,17 +442,19 @@ def _process_queue_timer():
             # before the update captures stale matrices that won't match the
             # next depsgraph evaluation, causing the emitter to re-process
             # every imported object.
-            if _pending_seed_paths:
+            if _pending_seed_paths or _pending_shader_seed_paths:
                 cap = _get_capture_mod()
                 if cap is not None:
                     for pp in _pending_seed_paths:
                         cap.seed_emitter_caches_for_import(pp)
-                    # Seed multi-node shader input maps and baselines so the
-                    # emitter can read values back from multi-node networks.
+                    # Seed reverse-sync shader state (input maps + value
+                    # baselines) for imported subtrees and applied shader
+                    # prims so the emitter can read values back.
                     if cap._state.author is not None and _ADAPTER is not None:
-                        for pp in _pending_seed_paths:
-                            _seed_multi_node_shader_maps(cap, pp)
+                        for pp in _pending_seed_paths | _pending_shader_seed_paths:
+                            _seed_shader_maps(cap._state.author, _ADAPTER, pp)
                 _pending_seed_paths.clear()
+                _pending_shader_seed_paths.clear()
     finally:
         _set_applying_remote(False)
 
