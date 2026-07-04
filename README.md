@@ -111,7 +111,7 @@ uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
 
 # With per-department layers and authentication
 uv run openusdconnect-server --port 7200 --base scene.usda \
-  --department-priority animation,lighting,fx --require-token
+  --departments animation,lighting,fx --require-token
 ```
 
 If a Hydra renderer such as RenderMan is installed into the shared USD build,

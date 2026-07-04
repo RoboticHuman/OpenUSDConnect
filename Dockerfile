@@ -18,7 +18,7 @@ ARG DASHBOARD=0
 WORKDIR /app
 
 # Install core package and server dependencies
-COPY pyproject.toml .
+COPY pyproject.toml README.md LICENSE ./
 COPY openusdconnect/ openusdconnect/
 
 RUN pip install --no-cache-dir . \

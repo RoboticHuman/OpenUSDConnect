@@ -57,11 +57,11 @@ Blender integration tests run headless (`blender --background`) and require Blen
 The bundled setup script downloads the official portable Blender build, extracts it to `.blender/` in the repo root, and writes `blender.test.cfg` automatically:
 
 ```bash
-# Download latest stable (currently 4.5.7)
+# Download latest stable
 uv run python scripts/setup_blender_test.py
 
 # Or specify a version
-uv run python scripts/setup_blender_test.py --version 4.4.3
+uv run python scripts/setup_blender_test.py --version 5.0.1
 ```
 
 After this, all Blender tests work immediately:
