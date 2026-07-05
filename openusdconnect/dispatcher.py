@@ -85,6 +85,7 @@ class EventDispatcher:
         on_imported: Callable[[list[str]], None] | None = None,
         on_resync: Callable[[], None] | None = None,
         on_applied: Callable[[list[str]], None] | None = None,
+        on_applied_events: Callable[[list[dict]], None] | None = None,
     ):
         """
         Args:
@@ -114,6 +115,11 @@ class EventDispatcher:
                 (non-skipped) event in the batch.  Use for post-apply
                 conditioning scoped to what changed (e.g. receiver-side
                 material rewrites).  Fires inside the suppress block.
+            on_applied_events: Like ``on_applied`` but receives the applied
+                event dicts themselves.  Use when the post-apply work needs
+                finer granularity than prim paths (e.g. which inputs an
+                event edited).  Fires inside the suppress block, before
+                ``on_applied``.
         """
         self.receiver = receiver
         self.adapter = adapter
@@ -122,6 +128,7 @@ class EventDispatcher:
         self.on_imported = on_imported
         self.on_resync = on_resync
         self.on_applied = on_applied
+        self.on_applied_events = on_applied_events
         self._last_seq = 0
 
     @property
@@ -236,6 +243,9 @@ class EventDispatcher:
                 ]
                 if imported:
                     self.on_imported(imported)
+
+            if self.on_applied_events is not None and non_skipped:
+                self.on_applied_events(non_skipped)
 
             if self.on_applied is not None:
                 applied = [ev["prim"] for ev in non_skipped if ev.get("prim")]

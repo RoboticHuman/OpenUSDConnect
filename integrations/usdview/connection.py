@@ -89,6 +89,7 @@ def start(
         receiver=_receiver,
         adapter=UsdStageAdapter(stage),
         on_applied=_on_applied if _translate_openpbr else None,
+        on_applied_events=_on_applied_events,
     )
     _usdview_api = usdviewApi
     _stage = stage
@@ -133,16 +134,59 @@ def _on_stage_replaced() -> None:
 def _tick() -> None:
     """Drain the receive queue each frame; idle while no stage is bound.
 
-    OpenPBR translation is driven by the dispatcher's on_applied callback
-    (:func:`_on_applied`), scoped to the prims each batch actually changed.
+    Post-apply fixups (interface-input forwarding, OpenPBR translation) are
+    driven by the dispatcher's on_applied callback (:func:`_on_applied`),
+    scoped to the prims each batch actually changed.
     """
     if _dispatcher is None or _stage is None:
         return
     _dispatcher.drain_and_apply()
 
 
+def _forward_interface_edits(stage, events: list[dict]) -> None:
+    """Forward edited Material interface-input values onto their consumers.
+
+    Hydra rebuilds a material network when a *shader* prim changes, but an
+    edit that only touches a Material's interface inputs leaves the render
+    stale. Forwarding is scoped to the inputs each event edited; the
+    forwarded local value never wins resolution — connected inputs resolve
+    through the connection — it exists to dirty the shader prim so the
+    network re-resolves.
+    """
+    from pxr import UsdShade
+
+    from openusdconnect.protocol_constants import K_SET_CONNECTABLE_INPUT
+
+    for ev in events:
+        if ev.get("k") != K_SET_CONNECTABLE_INPUT:
+            continue
+        edited = ev.get("inputs") or {}
+        if not edited:
+            continue
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if not prim or not prim.IsA(UsdShade.Material):
+            continue
+        material = UsdShade.Material(prim)
+        for iface, consumers in material.ComputeInterfaceInputConsumersMap().items():
+            if iface.GetBaseName() not in edited:
+                continue
+            value = iface.Get()
+            if value is None:
+                continue
+            for consumer in consumers:
+                if consumer.Get() != value:
+                    consumer.Set(value)
+
+
+def _on_applied_events(events: list[dict]) -> None:
+    """Post-apply conditioning scoped to what each event edited."""
+    if _stage is None:
+        return
+    _forward_interface_edits(_stage, events)
+
+
 def _on_applied(prim_paths: list[str]) -> None:
-    """Translate or refresh only the materials owning the just-applied prims."""
+    """Translate OpenPBR materials owning the just-applied prims."""
     if _stage is None:
         return
     from integrations.openpbr_translate import translate_openpbr_for_paths
