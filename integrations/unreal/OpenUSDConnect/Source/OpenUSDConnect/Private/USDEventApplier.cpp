@@ -545,163 +545,6 @@ TArray<float> FloatsFromIntWire(const uint8* Table, uint16 VtOff)
 	return Out;
 }
 
-// ---- OpenPBR -> standard_surface translation --------------------------------
-//
-// UE's USD MaterialX parser handles standard_surface but not open_pbr_surface,
-// so OpenPBR shaders translate at apply time. Faithful port of
-// integrations/openpbr_to_standard_surface.py (itself a port of MaterialX's
-// official ND_open_pbr_surface_to_standard_surface nodegraph) — that Python
-// module is canonical; keep this in lockstep with it.
-
-struct FOpenPBRParams
-{
-	TMap<FString, float>        Scalars;
-	TMap<FString, pxr::GfVec3f> Colors;
-	bool bThinWalled = false;
-};
-
-FOpenPBRParams OpenPBRDefaults()
-{
-	FOpenPBRParams P;
-	P.Scalars = {
-		{ TEXT("base_weight"), 1.0f },
-		{ TEXT("base_diffuse_roughness"), 0.0f },
-		{ TEXT("base_metalness"), 0.0f },
-		{ TEXT("specular_weight"), 1.0f },
-		{ TEXT("specular_roughness"), 0.3f },
-		{ TEXT("specular_ior"), 1.5f },
-		{ TEXT("specular_roughness_anisotropy"), 0.0f },
-		{ TEXT("transmission_weight"), 0.0f },
-		{ TEXT("transmission_depth"), 0.0f },
-		{ TEXT("transmission_scatter_anisotropy"), 0.0f },
-		{ TEXT("transmission_dispersion_scale"), 0.0f },
-		{ TEXT("subsurface_weight"), 0.0f },
-		{ TEXT("subsurface_radius"), 1.0f },
-		{ TEXT("subsurface_scatter_anisotropy"), 0.0f },
-		{ TEXT("fuzz_weight"), 0.0f },
-		{ TEXT("fuzz_roughness"), 0.5f },
-		{ TEXT("coat_weight"), 0.0f },
-		{ TEXT("coat_roughness"), 0.0f },
-		{ TEXT("coat_roughness_anisotropy"), 0.0f },
-		{ TEXT("coat_ior"), 1.6f },
-		{ TEXT("coat_darkening"), 1.0f },
-		{ TEXT("thin_film_weight"), 0.0f },
-		{ TEXT("thin_film_thickness"), 0.5f },
-		{ TEXT("thin_film_ior"), 1.4f },
-		{ TEXT("emission_luminance"), 0.0f },
-		{ TEXT("geometry_opacity"), 1.0f },
-	};
-	P.Colors = {
-		{ TEXT("base_color"), pxr::GfVec3f(0.8f) },
-		{ TEXT("specular_color"), pxr::GfVec3f(1.0f) },
-		{ TEXT("transmission_color"), pxr::GfVec3f(1.0f) },
-		{ TEXT("transmission_scatter"), pxr::GfVec3f(0.0f) },
-		{ TEXT("subsurface_color"), pxr::GfVec3f(0.8f) },
-		{ TEXT("subsurface_radius_scale"), pxr::GfVec3f(1.0f, 0.5f, 0.25f) },
-		{ TEXT("fuzz_color"), pxr::GfVec3f(1.0f) },
-		{ TEXT("coat_color"), pxr::GfVec3f(1.0f) },
-		{ TEXT("emission_color"), pxr::GfVec3f(1.0f) },
-	};
-	return P;
-}
-
-pxr::GfVec3f MixColor(const pxr::GfVec3f& Fg, const pxr::GfVec3f& Bg, float T)
-{
-	return Bg + (Fg - Bg) * T;
-}
-
-// The modulated_base_darkening color the nodegraph multiplies base and
-// subsurface color by, modelling how a coat darkens what sits under it.
-pxr::GfVec3f CoatBaseDarkening(const FOpenPBRParams& P)
-{
-	const float CoatIor = P.Scalars.FindRef(TEXT("coat_ior"));
-	const float F0Sqrt = (CoatIor - 1.0f) / (CoatIor + 1.0f);
-	const float CoatF0 = F0Sqrt * F0Sqrt;
-	const float Kcoat = 1.0f - (1.0f - CoatF0) / (CoatIor * CoatIor);
-
-	const pxr::GfVec3f BaseColor = P.Colors.FindRef(TEXT("base_color"));
-	const pxr::GfVec3f Emetal = BaseColor * P.Scalars.FindRef(TEXT("specular_weight"));
-	const pxr::GfVec3f Edielectric = MixColor(
-		P.Colors.FindRef(TEXT("subsurface_color")), BaseColor,
-		P.Scalars.FindRef(TEXT("subsurface_weight")));
-	const pxr::GfVec3f Ebase = MixColor(
-		Emetal, Edielectric, P.Scalars.FindRef(TEXT("base_metalness")));
-
-	pxr::GfVec3f Darkening;
-	for (int32 i = 0; i < 3; ++i)
-	{
-		Darkening[i] = (1.0f - Kcoat) / (1.0f - Ebase[i] * Kcoat);
-	}
-	const float T = P.Scalars.FindRef(TEXT("coat_weight")) * P.Scalars.FindRef(TEXT("coat_darkening"));
-	return MixColor(Darkening, pxr::GfVec3f(1.0f), T);
-}
-
-// Translated standard_surface inputs: (name, is-color, value). Scalar entries
-// carry X in Value; thin_walled authors separately as bool.
-struct FStdSurfaceInput
-{
-	const TCHAR* Name;
-	bool bIsColor;
-	pxr::GfVec3f Value;
-};
-
-TArray<FStdSurfaceInput> OpenPBRToStandardSurface(const FOpenPBRParams& P)
-{
-	const pxr::GfVec3f Darkening = CoatBaseDarkening(P);
-	auto S = [&P](const TCHAR* N) { return P.Scalars.FindRef(N); };
-	auto C = [&P](const TCHAR* N) { return P.Colors.FindRef(N); };
-	auto MulC = [](const pxr::GfVec3f& A, const pxr::GfVec3f& B)
-	{
-		return pxr::GfVec3f(A[0] * B[0], A[1] * B[1], A[2] * B[2]);
-	};
-	// MaterialX <mix>: bg at t=0, fg at t=1 (same shape as MixColor).
-	auto MixF = [](float Fg, float Bg, float T) { return Bg + (Fg - Bg) * T; };
-
-	const float CoatWeight = S(TEXT("coat_weight"));
-	const float ThinFilm = S(TEXT("thin_film_weight")) > 0.0f
-		? S(TEXT("thin_film_thickness")) * 1000.0f : 0.0f;
-
-	return {
-		{ TEXT("base"),                false, pxr::GfVec3f(S(TEXT("base_weight"))) },
-		{ TEXT("base_color"),          true,  MulC(C(TEXT("base_color")), Darkening) },
-		{ TEXT("diffuse_roughness"),   false, pxr::GfVec3f(S(TEXT("base_diffuse_roughness"))) },
-		{ TEXT("metalness"),           false, pxr::GfVec3f(S(TEXT("base_metalness"))) },
-		{ TEXT("specular"),            false, pxr::GfVec3f(S(TEXT("specular_weight"))) },
-		{ TEXT("specular_color"),      true,  C(TEXT("specular_color")) },
-		{ TEXT("specular_roughness"),  false, pxr::GfVec3f(MixF(
-			S(TEXT("coat_roughness")), S(TEXT("specular_roughness")), CoatWeight)) },
-		{ TEXT("specular_IOR"),        false, pxr::GfVec3f(S(TEXT("specular_ior"))) },
-		{ TEXT("specular_anisotropy"), false, pxr::GfVec3f(S(TEXT("specular_roughness_anisotropy"))) },
-		{ TEXT("transmission"),        false, pxr::GfVec3f(S(TEXT("transmission_weight"))) },
-		{ TEXT("transmission_color"),  true,  C(TEXT("transmission_color")) },
-		{ TEXT("transmission_depth"),  false, pxr::GfVec3f(S(TEXT("transmission_depth"))) },
-		{ TEXT("transmission_scatter"), true, C(TEXT("transmission_scatter")) },
-		{ TEXT("transmission_scatter_anisotropy"), false, pxr::GfVec3f(S(TEXT("transmission_scatter_anisotropy"))) },
-		{ TEXT("transmission_dispersion"), false, pxr::GfVec3f(S(TEXT("transmission_dispersion_scale"))) },
-		{ TEXT("subsurface"),          false, pxr::GfVec3f(S(TEXT("subsurface_weight"))) },
-		{ TEXT("subsurface_color"),    true,  MulC(C(TEXT("subsurface_color")), Darkening) },
-		{ TEXT("subsurface_radius"),   true,  C(TEXT("subsurface_radius_scale")) },
-		{ TEXT("subsurface_scale"),    false, pxr::GfVec3f(S(TEXT("subsurface_radius"))) },
-		{ TEXT("subsurface_anisotropy"), false, pxr::GfVec3f(S(TEXT("subsurface_scatter_anisotropy"))) },
-		{ TEXT("sheen"),               false, pxr::GfVec3f(S(TEXT("fuzz_weight"))) },
-		{ TEXT("sheen_color"),         true,  C(TEXT("fuzz_color")) },
-		{ TEXT("sheen_roughness"),     false, pxr::GfVec3f(FMath::Pow(S(TEXT("fuzz_roughness")), 2.5f)) },
-		{ TEXT("coat"),                false, pxr::GfVec3f(CoatWeight) },
-		{ TEXT("coat_color"),          true,  C(TEXT("coat_color")) },
-		{ TEXT("coat_roughness"),      false, pxr::GfVec3f(S(TEXT("coat_roughness"))) },
-		{ TEXT("coat_anisotropy"),     false, pxr::GfVec3f(S(TEXT("coat_roughness_anisotropy"))) },
-		{ TEXT("coat_IOR"),            false, pxr::GfVec3f(S(TEXT("coat_ior"))) },
-		{ TEXT("coat_affect_roughness"), false, pxr::GfVec3f(1.0f) },
-		{ TEXT("thin_film_thickness"), false, pxr::GfVec3f(ThinFilm) },
-		{ TEXT("thin_film_IOR"),       false, pxr::GfVec3f(S(TEXT("thin_film_ior"))) },
-		{ TEXT("emission"),            false, pxr::GfVec3f(S(TEXT("emission_luminance"))) },
-		{ TEXT("emission_color"),      true,  C(TEXT("emission_color")) },
-		{ TEXT("opacity"),             true,  pxr::GfVec3f(S(TEXT("geometry_opacity"))) },
-	};
-}
-
-// ---- SetConnectableInput / SetConnectableConnection -----------------------
-
 // Build a VtValue for a ConnectableInputValue payload according to its USD
 // type name. Mirrors the core applier's value coercion table. Fixed-size
 // types demand exact element counts — a mismatch is a malformed encoder and
@@ -773,96 +616,6 @@ bool DecodeConnectableValue(const uint8* Val, const FString& TypeNameStr, pxr::V
 	}
 }
 
-// OpenPBR shaders: incoming originals accumulate under an "openpbr:" input
-// namespace (names like specular_roughness collide with standard_surface
-// inputs of different semantics), then the full translated standard_surface
-// parameter set re-authors from the accumulated stage state — stateless
-// across partial updates. Texture connections into OpenPBR inputs are not
-// remapped.
-void ApplyOpenPBRInputs(pxr::UsdPrim& Prim, const uint8* Ev, const pxr::UsdTimeCode& Time)
-{
-	pxr::UsdShadeShader Shader(Prim);
-	if (!Shader) return;
-	Shader.CreateIdAttr(pxr::VtValue(pxr::TfToken("ND_standard_surface_surfaceshader")));
-
-	pxr::UsdShadeConnectableAPI Connectable(Prim);
-	const uint32 Count = FB::GetVecSize(Ev, VT::SetConnectableInput_Inputs);
-	for (uint32 i = 0; i < Count; ++i)
-	{
-		const uint8* Val = FB::GetVecElem(Ev, VT::SetConnectableInput_Inputs, i);
-		if (!Val) continue;
-		const FString Name     = FB::GetStr(Val, VT::ConnectableInputValue_Name);
-		const FString TypeName = FB::GetStr(Val, VT::ConnectableInputValue_TypeName);
-		if (Name.IsEmpty()) continue;
-		const pxr::SdfValueTypeName SdfType =
-			pxr::SdfSchema::GetInstance().FindType(TCHAR_TO_UTF8(*TypeName));
-		pxr::VtValue Value;
-		if (!SdfType || !DecodeConnectableValue(Val, TypeName, Value))
-		{
-			UE_LOG(LogUSDEventApplier, Warning,
-				TEXT("OpenPBR: undecodable input %s (%s)"), *Name, *TypeName);
-			continue;
-		}
-		const pxr::TfToken Namespaced = ToToken(TEXT("openpbr:") + Name);
-		pxr::UsdShadeInput Input = Connectable.GetInput(Namespaced);
-		if (!Input) { Input = Connectable.CreateInput(Namespaced, SdfType); }
-		Input.Set(Value, Time);
-	}
-
-	FOpenPBRParams P = OpenPBRDefaults();
-	for (const pxr::UsdShadeInput& Input : Connectable.GetInputs())
-	{
-		const FString Base = UTF8_TO_TCHAR(Input.GetBaseName().GetString().c_str());
-		if (!Base.StartsWith(TEXT("openpbr:"))) continue;
-		const FString Name = Base.Mid(8);
-		pxr::VtValue V;
-		if (!Input.Get(&V, Time)) continue;
-		if (V.IsHolding<float>())
-		{
-			if (Name == TEXT("geometry_thin_walled"))
-			{
-				P.bThinWalled = V.Get<float>() != 0.0f;
-			}
-			else if (P.Colors.Contains(Name))
-			{
-				P.Colors.Add(Name, pxr::GfVec3f(V.Get<float>()));
-			}
-			else
-			{
-				P.Scalars.Add(Name, V.Get<float>());
-			}
-		}
-		else if (V.IsHolding<pxr::GfVec3f>())
-		{
-			P.Colors.Add(Name, V.Get<pxr::GfVec3f>());
-		}
-		else if (V.IsHolding<bool>())
-		{
-			P.bThinWalled = V.Get<bool>();
-		}
-	}
-
-	for (const FStdSurfaceInput& Std : OpenPBRToStandardSurface(P))
-	{
-		const pxr::TfToken NameTok = ToToken(Std.Name);
-		pxr::UsdShadeInput Input = Connectable.GetInput(NameTok);
-		if (!Input)
-		{
-			Input = Connectable.CreateInput(NameTok, Std.bIsColor
-				? pxr::SdfValueTypeNames->Color3f : pxr::SdfValueTypeNames->Float);
-		}
-		if (Std.bIsColor) { Input.Set(Std.Value, Time); }
-		else              { Input.Set(Std.Value[0], Time); }
-	}
-	pxr::UsdShadeInput ThinWalled = Connectable.GetInput(pxr::TfToken("thin_walled"));
-	if (!ThinWalled)
-	{
-		ThinWalled = Connectable.CreateInput(
-			pxr::TfToken("thin_walled"), pxr::SdfValueTypeNames->Bool);
-	}
-	ThinWalled.Set(P.bThinWalled, Time);
-}
-
 void ApplySetConnectableInput(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 {
 	const FString PrimPath = FB::GetStr(Ev, VT::SetConnectableInput_Prim);
@@ -884,11 +637,6 @@ void ApplySetConnectableInput(pxr::UsdStageRefPtr& Stage, const uint8* Ev)
 		? pxr::UsdTimeCode(FB::GetField<double>(Ev, VT::SetConnectableInput_Time, 0.0))
 		: pxr::UsdTimeCode::Default();
 
-	if (InfoId == TEXT("ND_open_pbr_surface_surfaceshader"))
-	{
-		ApplyOpenPBRInputs(Prim, Ev, Time);
-		return;
-	}
 	if (!InfoId.IsEmpty() && Prim.IsA<pxr::UsdShadeShader>())
 	{
 		pxr::UsdShadeShader(Prim).CreateIdAttr(pxr::VtValue(ToToken(InfoId)));
@@ -1360,7 +1108,8 @@ bool FUSDEventApplier::FrameUsesChangeBlock(const TArray<uint8>& RawFrame)
 // ---------------------------------------------------------------------------
 // FUSDEventApplier::ApplyFrame
 // ---------------------------------------------------------------------------
-void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor)
+void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+                                  FString* OutTouchedPrim, uint8* OutEventKind)
 {
 	if (!StageActor || RawFrame.Num() < 8) return;
 
@@ -1385,6 +1134,17 @@ void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 
 	const uint8  EventKind  = FB::GetField<uint8>(EventWrapper, VT::EventWrapper_EventType, 0);
 	const uint8* EventTable = FB::GetPtr(EventWrapper, VT::EventWrapper_Event);
+
+	if (OutEventKind)
+	{
+		*OutEventKind = EventKind;
+	}
+	// Every event table declares its target prim as the first field (vtable
+	// offset 4) except SetStageMetadata, which is stage-scoped.
+	if (OutTouchedPrim && EventTable && EventKind != kEvSetStageMetadata)
+	{
+		*OutTouchedPrim = FB::GetStr(EventTable, 4);
+	}
 
 	// Structural events must apply outside an SdfChangeBlock: recomposition is
 	// deferred until the block closes, so UsdStage::DefinePrim cannot return

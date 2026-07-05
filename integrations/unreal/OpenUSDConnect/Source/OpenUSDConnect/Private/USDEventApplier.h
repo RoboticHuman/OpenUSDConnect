@@ -27,8 +27,12 @@ public:
 	 * Decode and apply a single BroadcastEvent frame to the given stage actor.
 	 * @param RawFrame  Complete FlatBuffers Envelope bytes (no framing prefix).
 	 * @param StageActor  The AUsdStageActor whose pxr stage to modify.
+	 * @param OutTouchedPrim  Optional: receives the event's target prim path
+	 *        (empty for stage-scoped events).
+	 * @param OutEventKind  Optional: receives the wire event kind (kEv*).
 	 */
-	static void ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor);
+	static void ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+	                       FString* OutTouchedPrim = nullptr, uint8* OutEventKind = nullptr);
 
 	/**
 	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.

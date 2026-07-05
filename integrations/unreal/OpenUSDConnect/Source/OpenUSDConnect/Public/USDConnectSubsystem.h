@@ -87,6 +87,9 @@ private:
 	/** Build and send a SetConnectableInput Txn for changed shader inputs on one prim */
 	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames);
 
+	/** Refresh local .mtlx documents for materials dirtied this tick */
+	void ProcessPendingMaterializations();
+
 	// --- Receiver ---
 	TSharedPtr<FSyncClient> SyncClient;
 	FCriticalSection EventQueueCS;
@@ -144,4 +147,12 @@ private:
 	 * shader inputs instead of the whole network.
 	 */
 	TMap<FString, TSet<FString>> PendingEmitInputs;
+
+	/**
+	 * Prims whose material networks changed this tick (received events and
+	 * local edits), resolved to owning materials and materialized to local
+	 * .mtlx documents at the end of Tick. Game thread only — both producers
+	 * (DrainAndApply, DrainAndEmit) and the consumer run there.
+	 */
+	TSet<FString> PendingMaterializePrims;
 };

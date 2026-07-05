@@ -21,8 +21,11 @@ public class OpenUSDConnect : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"USDStage",         // AUsdStageActor
+			"USDStage",         // AUsdStageActor, UUsdPrimLinkCache
+			"USDClasses",       // UUsdAssetCache3
+			"USDUtilities",     // UsdToUnreal::ConvertMaterial, FUsdPrimLinkCache
 			"UnrealUSDWrapper", // FUsdListener + pxr SDK propagation
+			"RHI",              // GMaxRHIShaderPlatform (FMaterialUpdateContext default arg)
 		});
 
 		// Call the engine helper that configures USD SDK linkage, RTTI, exceptions,

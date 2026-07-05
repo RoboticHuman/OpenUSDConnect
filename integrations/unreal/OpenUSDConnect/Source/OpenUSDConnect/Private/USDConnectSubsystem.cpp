@@ -6,6 +6,8 @@
 #include "EmitClient.h"
 #include "USDConnectSettings.h"
 #include "USDEventApplier.h"
+#include "USDMaterialXMaterializer.h"
+#include "USDConnectProtocol.h"
 #include "TxnBuilder.h"
 
 #include "USDStageActor.h"
@@ -21,6 +23,7 @@
 #if USE_USD_SDK
 #include "USDIncludesStart.h"
 #include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -31,11 +34,15 @@
 #include "pxr/usd/usdShade/connectableAPI.h"
 #include "pxr/usd/usdShade/shader.h"
 #include "pxr/usd/sdf/assetPath.h"
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/transform.h"
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec4f.h"
+#include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/quatf.h"
+#include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "USDIncludesEnd.h"
 #endif
@@ -49,7 +56,9 @@ DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenU
 // Helpers to read TRS/visibility from the pxr stage
 // ---------------------------------------------------------------------------
 #if USE_USD_SDK
-static bool ReadXformTrs(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitXformTrs& OutTrs)
+static bool ReadXformTrs(
+	pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitXformTrs& OutTrs,
+	bool* bOutFromMatrixOp = nullptr)
 {
 	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
 	if (!Prim)
@@ -110,8 +119,74 @@ static bool ReadXformTrs(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FE
 			OutTrs.S[0] = S[0]; OutTrs.S[1] = S[1]; OutTrs.S[2] = S[2];
 			OutTrs.Fields |= 4;
 		}
+		else if (OpType == pxr::UsdGeomXformOp::TypeTransform)
+		{
+			// The engine's component write-back collapses op stacks into a
+			// single matrix op (UnrealToUsd::ConvertXformable). Component
+			// transforms are shear-free, so decompose back to full TRS.
+			pxr::GfMatrix4d Matrix(1.0);
+			Op.Get(&Matrix, Time);
+			const pxr::GfTransform Decomposed(Matrix);
+
+			const pxr::GfVec3d T = Decomposed.GetTranslation();
+			OutTrs.T[0] = (float)T[0]; OutTrs.T[1] = (float)T[1]; OutTrs.T[2] = (float)T[2];
+			const pxr::GfQuatd R = Decomposed.GetRotation().GetQuat().GetNormalized();
+			OutTrs.R[0] = (float)R.GetReal();
+			const pxr::GfVec3d Im = R.GetImaginary();
+			OutTrs.R[1] = (float)Im[0]; OutTrs.R[2] = (float)Im[1]; OutTrs.R[3] = (float)Im[2];
+			const pxr::GfVec3d S = Decomposed.GetScale();
+			OutTrs.S[0] = (float)S[0]; OutTrs.S[1] = (float)S[1]; OutTrs.S[2] = (float)S[2];
+
+			OutTrs.Fields |= 7;
+			if (bOutFromMatrixOp)
+			{
+				*bOutFromMatrixOp = true;
+			}
+		}
 	}
 	return OutTrs.Fields != 0;
+}
+
+// Rewrite a matrix-collapsed prim back to the canonical translate/orient/scale
+// op stack with the decomposed values. The composed transform is identical, so
+// the stage actor's component sync sees no change — but per-op attribute edits
+// (USD Stage panel) work again and the wire keeps TRS semantics.
+static void RestoreCanonicalXformOps(
+	pxr::UsdStageRefPtr& Stage, const FString& PrimPath, const FEmitXformTrs& Trs)
+{
+	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
+	if (!Prim)
+	{
+		return;
+	}
+
+	// Only reshape prims that carried canonical ops before the engine
+	// collapsed them — foreign matrix-native prims keep their authored shape.
+	const pxr::UsdAttribute Translate = Prim.GetAttribute(pxr::TfToken("xformOp:translate"));
+	const pxr::UsdAttribute Orient    = Prim.GetAttribute(pxr::TfToken("xformOp:orient"));
+	if ((!Translate || !Translate.HasAuthoredValue()) && (!Orient || !Orient.HasAuthoredValue()))
+	{
+		return;
+	}
+
+	pxr::SdfChangeBlock ChangeBlock;
+
+	Prim.CreateAttribute(
+			pxr::TfToken("xformOp:translate"), pxr::SdfValueTypeNames->Double3, false)
+		.Set(pxr::GfVec3d(Trs.T[0], Trs.T[1], Trs.T[2]));
+	Prim.CreateAttribute(
+			pxr::TfToken("xformOp:orient"), pxr::SdfValueTypeNames->Quatf, false)
+		.Set(pxr::GfQuatf(Trs.R[0], pxr::GfVec3f(Trs.R[1], Trs.R[2], Trs.R[3])));
+	Prim.CreateAttribute(
+			pxr::TfToken("xformOp:scale"), pxr::SdfValueTypeNames->Float3, false)
+		.Set(pxr::GfVec3f(Trs.S[0], Trs.S[1], Trs.S[2]));
+
+	pxr::VtTokenArray Order{
+		pxr::TfToken("xformOp:translate"),
+		pxr::TfToken("xformOp:orient"),
+		pxr::TfToken("xformOp:scale"),
+	};
+	pxr::UsdGeomXformable(Prim).CreateXformOpOrderAttr().Set(Order);
 }
 
 // Map a shader-input VtValue onto the typed wire slots. Values arrive as their
@@ -385,6 +460,10 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 
 	// Emit any user edits captured by the USD notice listener since last tick.
 	DrainAndEmit();
+
+	// Refresh .mtlx documents for materials whose networks changed this tick
+	// (received or local edits) so the engine's MaterialX rendering follows.
+	ProcessPendingMaterializations();
 }
 
 // ---------------------------------------------------------------------------
@@ -556,7 +635,19 @@ void UUSDConnectSubsystem::DrainAndApply()
 				RunBlock.Reset();
 			}
 #endif
-			FUSDEventApplier::ApplyFrame(Frame, StageActor);
+			FString TouchedPrim;
+			uint8 EventKind = 0;
+			FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind);
+			// Received network edits dirty their owning material for the
+			// materializer. ensure_prim is included because shader-node
+			// creation changes the network without a connectable event.
+			if (!TouchedPrim.IsEmpty()
+				&& (EventKind == OUC::kEvSetConnectableInput
+					|| EventKind == OUC::kEvSetConnectableConnection
+					|| EventKind == OUC::kEvEnsurePrim))
+			{
+				PendingMaterializePrims.Add(MoveTemp(TouchedPrim));
+			}
 			++Applied;
 			if (FPlatformTime::Seconds() - Start > MaxApplySecondsPerTick)
 			{
@@ -627,7 +718,18 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	}
 	for (const auto& Pair : ChangedInputs)
 	{
+		// Edits on a Material's document-projected interface inputs are
+		// local artifacts; reroute them onto the inline shader instead of
+		// emitting an orphan material-level event. The shader authoring
+		// re-enters this path next tick and emits/rematerializes normally.
+		if (FUSDMaterialXMaterializer::RerouteMaterialInterfaceEdit(StageActor, Pair.Key, Pair.Value))
+		{
+			continue;
+		}
 		EmitConnectableInputs(StageActor, Pair.Key, Pair.Value);
+		// Local shader edits also dirty their owning material so the
+		// materializer refreshes the local .mtlx document.
+		PendingMaterializePrims.Add(Pair.Key);
 	}
 }
 
@@ -641,13 +743,24 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 	// Try to read and emit TRS
 	{
 		FEmitXformTrs Xform;
-		if (ReadXformTrs(PxrStage, PrimPath, Xform))
+		bool bFromMatrixOp = false;
+		if (ReadXformTrs(PxrStage, PrimPath, Xform, &bFromMatrixOp))
 		{
+			if (bFromMatrixOp)
+			{
+				// Suppress our own listener: the restore fires notices, but
+				// it re-authors the exact values being emitted below.
+				bSuppressEmit.store(true);
+				RestoreCanonicalXformOps(PxrStage, PrimPath, Xform);
+				bSuppressEmit.store(false);
+			}
+
 			TArray<FEmitXformTrs> Batch = { Xform };
 			TArray<uint8> Frame = BuildXformTxnFrame(ClientId, Batch);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x) — enqueueing"),
-				*PrimPath, Frame.Num(), Xform.Fields);
+				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s) — enqueueing"),
+				*PrimPath, Frame.Num(), Xform.Fields,
+				bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""));
 			if (Frame.Num() > 0)
 			{
 				EmitClient->EnqueueFrame(MoveTemp(Frame));
@@ -698,4 +811,46 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 		EmitClient->EnqueueFrame(MoveTemp(Frame));
 	}
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Materialization (local .mtlx documents for MaterialX rendering)
+// ---------------------------------------------------------------------------
+
+void UUSDConnectSubsystem::ProcessPendingMaterializations()
+{
+	if (PendingMaterializePrims.IsEmpty())
+	{
+		return;
+	}
+
+	AUsdStageActor* StageActor = CachedStageActor.Get();
+	if (!StageActor || !IsValid(StageActor))
+	{
+		PendingMaterializePrims.Reset();
+		return;
+	}
+
+	TSet<FString> Sources = MoveTemp(PendingMaterializePrims);
+	PendingMaterializePrims.Reset();
+
+	TSet<FString> Materials;
+	for (const FString& Path : Sources)
+	{
+		FString Material = FUSDMaterialXMaterializer::FindOwningMaterial(StageActor, Path);
+		if (!Material.IsEmpty())
+		{
+			Materials.Add(MoveTemp(Material));
+		}
+	}
+
+	// The session-layer authoring below fires stage notices; suppress our own
+	// listener so they don't loop back into the emit path. The stage actor's
+	// listener still sees them — that's what triggers the re-import.
+	bSuppressEmit.store(true);
+	for (const FString& Material : Materials)
+	{
+		FUSDMaterialXMaterializer::MaterializeMaterial(StageActor, Material);
+	}
+	bSuppressEmit.store(false);
 }
