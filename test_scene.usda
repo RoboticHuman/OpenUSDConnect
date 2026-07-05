@@ -5,7 +5,9 @@
     upAxis = "Y"
 )
 
-def Xform "World"
+def Xform "World" (
+    kind = "group"
+)
 {
     def Xform "Cube"
     {
