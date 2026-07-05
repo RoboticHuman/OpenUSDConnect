@@ -955,6 +955,21 @@ def _encode_set_material_binding(b, ev):
     return _fb.SetMaterialBindingEnd(b)
 
 
+# Declared USD types whose numeric payloads travel in the float wire slots.
+# The emitting language's literal type must not leak into the wire: a JSON
+# "1" or "[1, 1, 1]" for a float-typed input encodes as float, so receivers
+# can trust that the payload slot matches the declared type.
+_FLOAT_WIRE_TYPES = frozenset({
+    "float", "double",
+    "color3f", "float3", "normal3f", "point3f", "vector3f",
+    "color3d", "double3", "normal3d", "point3d", "vector3d",
+    "float2", "texCoord2f", "double2",
+    "float4", "color4f", "double4",
+    "matrix2d", "matrix3d", "matrix4d",
+    "float[]",
+})
+
+
 @register_encoder(
     K_SET_CONNECTABLE_INPUT,
     fb_tag=EventPayloadType.SetConnectableInput,
@@ -969,7 +984,9 @@ def _encode_set_connectable_input(b, ev):
     civ_offsets = []
     for name, value in inputs.items():
         n = b.CreateString(name)
-        tn = b.CreateString(input_types.get(name, ""))
+        type_name = input_types.get(name, "")
+        tn = b.CreateString(type_name)
+        float_declared = type_name in _FLOAT_WIRE_TYPES
 
         # Coerce numeric sequences (incl. numpy arrays) into a flat float
         # vector; numpy arrays are not list-typed, but iterate fine.
@@ -993,7 +1010,7 @@ def _encode_set_connectable_input(b, ev):
             for off in reversed(str_offs):
                 b.PrependUOffsetTRelative(off)
             string_vec = b.EndVector()
-        elif as_seq is not None and all(
+        elif as_seq is not None and not float_declared and all(
             isinstance(v, (int, np.integer)) and not isinstance(v, bool)
             for v in as_seq
         ):
@@ -1008,8 +1025,12 @@ def _encode_set_connectable_input(b, ev):
             _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarBool)
             _fb.ConnectableInputValueAddScalarBool(b, value)
         elif isinstance(value, int) and not isinstance(value, bool):
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarInt)
-            _fb.ConnectableInputValueAddScalarInt(b, value)
+            if float_declared:
+                _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarFloat)
+                _fb.ConnectableInputValueAddScalarFloat(b, float(value))
+            else:
+                _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarInt)
+                _fb.ConnectableInputValueAddScalarInt(b, value)
         elif isinstance(value, float):
             _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarFloat)
             _fb.ConnectableInputValueAddScalarFloat(b, value)
