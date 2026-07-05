@@ -114,6 +114,11 @@ def material_to_mtlx(
         node.set("name", _node_name(prim))
         node.set("type", out_type)
         for name, value in inputs.items():
+            # Namespaced inputs (consumer-side bookkeeping like preserved
+            # openpbr:* originals) are not MaterialX inputs; one in the
+            # document makes name-matching consumers reject the whole file.
+            if ":" in name:
+                continue
             usd_type = input_types.get(name, "")
             mtlx_type = _USD_TO_MTLX_TYPE.get(usd_type)
             if mtlx_type is None:
@@ -126,7 +131,7 @@ def material_to_mtlx(
             inp.set("value", _format_value(value, mtlx_type))
         for local_attr, conn in connections.items():
             side, _, base = local_attr.partition(":")
-            if side != "inputs":
+            if side != "inputs" or ":" in base:
                 continue
             source = stage.GetPrimAtPath(conn["source_prim"])
             if not source or not source.IsA(UsdShade.Shader):

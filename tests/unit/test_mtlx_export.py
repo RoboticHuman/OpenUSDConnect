@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 pxr = pytest.importorskip("pxr")
-from pxr import Gf, Usd, UsdShade  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdShade  # noqa: E402
 
 from openusdconnect.event_apply import apply_events  # noqa: E402
 from openusdconnect.mtlx_export import material_to_mtlx  # noqa: E402
@@ -138,6 +138,17 @@ class TestMaterialToMtlx:
         doc = material_to_mtlx(stage, "/World/Looks/Brushed")
         assert 'value="D:/textures/brass_color.jpg"' in doc
         assert "\\" not in doc
+
+    def test_namespaced_inputs_excluded(self):
+        stage = _authored_stage()
+        surface = UsdShade.Shader(
+            stage.GetPrimAtPath("/World/Looks/Brushed/Surface")
+        )
+        surface.CreateInput("openpbr:base_color", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(1, 0, 1)
+        )
+        doc = material_to_mtlx(stage, "/World/Looks/Brushed")
+        assert "openpbr:" not in doc
 
     def test_material_name_override(self):
         doc = material_to_mtlx(
