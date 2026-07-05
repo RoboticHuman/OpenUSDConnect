@@ -28,9 +28,15 @@
 #include "pxr/usd/usdGeom/xformOp.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
+#include "pxr/usd/usdShade/connectableAPI.h"
+#include "pxr/usd/usdShade/shader.h"
+#include "pxr/usd/sdf/assetPath.h"
+#include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec4f.h"
 #include "pxr/base/gf/quatf.h"
+#include "pxr/base/vt/value.h"
 #include "USDIncludesEnd.h"
 #endif
 
@@ -106,6 +112,117 @@ static bool ReadXformTrs(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FE
 		}
 	}
 	return OutTrs.Fields != 0;
+}
+
+// Map a shader-input VtValue onto the typed wire slots. Values arrive as their
+// declared USD type (read from the stage, not JSON), so no cross-slot routing
+// is needed — unhandled types (arrays, matrices) are skipped by returning false.
+static bool ConvertVtValueToWire(const pxr::VtValue& Value, FEmitConnectableValue& Out)
+{
+	if (Value.IsHolding<float>())
+	{
+		Out.ValueType   = ECivType::Float;
+		Out.ScalarFloat = Value.UncheckedGet<float>();
+	}
+	else if (Value.IsHolding<double>())
+	{
+		Out.ValueType   = ECivType::Float;
+		Out.ScalarFloat = static_cast<float>(Value.UncheckedGet<double>());
+	}
+	else if (Value.IsHolding<int>())
+	{
+		Out.ValueType = ECivType::Int;
+		Out.ScalarInt = Value.UncheckedGet<int>();
+	}
+	else if (Value.IsHolding<bool>())
+	{
+		Out.ValueType   = ECivType::Bool;
+		Out.bScalarBool = Value.UncheckedGet<bool>();
+	}
+	else if (Value.IsHolding<pxr::TfToken>())
+	{
+		Out.ValueType    = ECivType::String;
+		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::TfToken>().GetText());
+	}
+	else if (Value.IsHolding<std::string>())
+	{
+		Out.ValueType    = ECivType::String;
+		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
+	}
+	else if (Value.IsHolding<pxr::SdfAssetPath>())
+	{
+		Out.ValueType    = ECivType::String;
+		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::SdfAssetPath>().GetAssetPath().c_str());
+	}
+	else if (Value.IsHolding<pxr::GfVec2f>())
+	{
+		const pxr::GfVec2f V = Value.UncheckedGet<pxr::GfVec2f>();
+		Out.ValueType = ECivType::FloatArray;
+		Out.Floats    = {V[0], V[1]};
+	}
+	else if (Value.IsHolding<pxr::GfVec3f>())
+	{
+		const pxr::GfVec3f V = Value.UncheckedGet<pxr::GfVec3f>();
+		Out.ValueType = ECivType::FloatArray;
+		Out.Floats    = {V[0], V[1], V[2]};
+	}
+	else if (Value.IsHolding<pxr::GfVec4f>())
+	{
+		const pxr::GfVec4f V = Value.UncheckedGet<pxr::GfVec4f>();
+		Out.ValueType = ECivType::FloatArray;
+		Out.Floats    = {V[0], V[1], V[2], V[3]};
+	}
+	else
+	{
+		return false;
+	}
+	return true;
+}
+
+// Read the authored values of specific "inputs:*" attributes on a UsdShade
+// connectable prim (Shader, Material, NodeGraph, or light container).
+static bool ReadConnectableInputs(
+	pxr::UsdStageRefPtr& Stage,
+	const FString& PrimPath,
+	const TSet<FString>& InputAttrNames,
+	FEmitConnectableInput& Out)
+{
+	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
+	if (!Prim || !pxr::UsdShadeConnectableAPI(Prim))
+	{
+		return false;
+	}
+
+	Out.PrimPath = PrimPath;
+	if (pxr::UsdShadeShader Shader{Prim})
+	{
+		pxr::TfToken IdToken;
+		Shader.GetIdAttr().Get(&IdToken);
+		Out.InfoId = UTF8_TO_TCHAR(IdToken.GetText());
+	}
+
+	for (const FString& AttrName : InputAttrNames)
+	{
+		pxr::UsdAttribute Attr = Prim.GetAttribute(pxr::TfToken(TCHAR_TO_UTF8(*AttrName)));
+		pxr::VtValue Value;
+		if (!Attr || !Attr.Get(&Value, pxr::UsdTimeCode::Default()))
+		{
+			continue;
+		}
+
+		FEmitConnectableValue Wire;
+		Wire.Name     = AttrName.RightChop(7);	  // strip "inputs:" — wire names are bare
+		Wire.TypeName = UTF8_TO_TCHAR(Attr.GetTypeName().GetAsToken().GetText());
+		if (!ConvertVtValueToWire(Value, Wire))
+		{
+			UE_LOG(LogUSDConnectSubsystem, Verbose,
+				TEXT("ReadConnectableInputs(%s): skipping %s — unhandled value type %s"),
+				*PrimPath, *AttrName, UTF8_TO_TCHAR(Value.GetTypeName().c_str()));
+			continue;
+		}
+		Out.Inputs.Add(MoveTemp(Wire));
+	}
+	return Out.Inputs.Num() > 0;
 }
 
 static bool ReadVisibility(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitVisibility& OutVis)
@@ -313,10 +430,18 @@ void UUSDConnectSubsystem::AttachToStageActor(AUsdStageActor* Actor)
 				if (Path.IsEmpty() || Path == TEXT("/")) continue;
 
 				// Strip property suffix ".attrName" — we want the prim path.
+				// Changed "inputs:*" properties keep their name so the drain
+				// can emit just the edited shader inputs.
 				int32 DotIdx = INDEX_NONE;
 				if (Path.FindChar(TEXT('.'), DotIdx))
 				{
-					PendingEmitPaths.Add(Path.Left(DotIdx));
+					FString PrimPath = Path.Left(DotIdx);
+					FString PropName = Path.RightChop(DotIdx + 1);
+					if (PropName.StartsWith(TEXT("inputs:")))
+					{
+						PendingEmitInputs.FindOrAdd(PrimPath).Add(MoveTemp(PropName));
+					}
+					PendingEmitPaths.Add(MoveTemp(PrimPath));
 				}
 				else
 				{
@@ -347,6 +472,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 	{
 		FScopeLock Lock(&PendingEmitPathsCS);
 		PendingEmitPaths.Reset();
+		PendingEmitInputs.Reset();
 	}
 
 	CachedStageActor = nullptr;
@@ -482,11 +608,14 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	if (!StageActor || !IsValid(StageActor)) return;
 
 	TSet<FString> Changed;
+	TMap<FString, TSet<FString>> ChangedInputs;
 	{
 		FScopeLock Lock(&PendingEmitPathsCS);
-		if (PendingEmitPaths.Num() == 0) return;
+		if (PendingEmitPaths.Num() == 0 && PendingEmitInputs.Num() == 0) return;
 		Changed = MoveTemp(PendingEmitPaths);
+		ChangedInputs = MoveTemp(PendingEmitInputs);
 		PendingEmitPaths.Reset();
+		PendingEmitInputs.Reset();
 	}
 
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
@@ -495,6 +624,10 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	for (const FString& Path : Changed)
 	{
 		EmitPrimChange(StageActor, Path);
+	}
+	for (const auto& Pair : ChangedInputs)
+	{
+		EmitConnectableInputs(StageActor, Pair.Key, Pair.Value);
 	}
 }
 
@@ -537,6 +670,32 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 				EmitClient->EnqueueFrame(MoveTemp(Frame));
 			}
 		}
+	}
+#endif
+}
+
+void UUSDConnectSubsystem::EmitConnectableInputs(
+	AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames)
+{
+#if USE_USD_SDK
+	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
+		StageActor->GetOrOpenUsdStage());
+	if (!PxrStage) return;
+
+	FEmitConnectableInput Event;
+	if (!ReadConnectableInputs(PxrStage, PrimPath, InputAttrNames, Event))
+	{
+		return;
+	}
+
+	TArray<FEmitConnectableInput> Batch = { MoveTemp(Event) };
+	TArray<uint8> Frame = BuildConnectableInputTxnFrame(ClientId, Batch);
+	UE_LOG(LogUSDConnectSubsystem, Verbose,
+		TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes — enqueueing"),
+		*PrimPath, Batch[0].Inputs.Num(), Frame.Num());
+	if (Frame.Num() > 0)
+	{
+		EmitClient->EnqueueFrame(MoveTemp(Frame));
 	}
 #endif
 }

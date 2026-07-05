@@ -24,6 +24,38 @@ struct FEmitVisibility
 	bool bVisible = true;
 };
 
+/** Wire enum ConnectableInputValueType (events.fbs). */
+enum class ECivType : uint8
+{
+	None        = 0,
+	Float       = 1,
+	Int         = 2,
+	Bool        = 3,
+	String      = 4,
+	FloatArray  = 5,
+	IntArray    = 6,
+	StringArray = 7,
+};
+
+struct FEmitConnectableValue
+{
+	FString Name;         // input name without the "inputs:" prefix
+	FString TypeName;     // declared USD type (e.g. "color3f", "float", "asset")
+	ECivType ValueType = ECivType::None;
+	float   ScalarFloat = 0.f;
+	int32   ScalarInt   = 0;
+	bool    bScalarBool = false;
+	FString ScalarString;
+	TArray<float> Floats;  // vector/color payloads
+};
+
+struct FEmitConnectableInput
+{
+	FString PrimPath;
+	FString InfoId;       // shader info:id; empty for Material/NodeGraph/light containers
+	TArray<FEmitConnectableValue> Inputs;
+};
+
 /**
  * Encode a batch of SetXformTrs events into a complete Envelope{Txn} FlatBuffers frame,
  * including the 4-byte big-endian length prefix.
@@ -34,3 +66,8 @@ TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXfor
  * Encode a batch of SetVisibility events into a complete Envelope{Txn} frame.
  */
 TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmitVisibility>& Visibilities);
+
+/**
+ * Encode a batch of SetConnectableInput events into a complete Envelope{Txn} frame.
+ */
+TArray<uint8> BuildConnectableInputTxnFrame(const FString& ClientId, const TArray<FEmitConnectableInput>& Events);

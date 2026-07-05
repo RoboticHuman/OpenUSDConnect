@@ -124,7 +124,7 @@ Blender ←recv───   │   pxr stage  ←───────────
 The plugin opens **two** TCP connections to the server:
 
 - **Receiver** — gets `BroadcastEvent` frames and applies them to the pxr stage that `AUsdStageActor` is holding. The stage actor's USD notice listener then refreshes the Unreal scene components.
-- **Emitter** — subscribes to `AUsdStageActor::OnPrimChanged`; when a prim is edited locally, reads the prim's TRS/visibility from the pxr stage and sends a `Txn` frame.
+- **Emitter** — subscribes to the stage actor's USD listener; when a prim is edited locally (viewport transforms, USD Stage panel properties), reads the prim's TRS/visibility — and for shader prims, the edited `inputs:*` values — from the pxr stage and sends a `Txn` frame.
 
 An echo guard (origin matching + an in-flight `bSuppressEmit` flag) prevents the receiver from re-emitting events it just applied.
 
@@ -175,7 +175,8 @@ Log LogUSDEventApplier Verbose
 | SetMaterialBinding | ✅ | — |
 | SetGprimAttrs (mesh points/normals/primvars, camera params) | ✅ | — |
 | SetInstanceable / SetPointInstancer | ✅ | — |
-| SetConnectableInput / SetConnectableConnection (shaders) | ✅ | — |
+| SetConnectableInput (shader/material/light parameters) | ✅ | ✅ |
+| SetConnectableConnection (connection edges) | ✅ | — |
 
 `SetConnectableInput` / `SetConnectableConnection` author the shader network onto
 the pxr stage (typed values, `info:id`, connection edges); what renders from it

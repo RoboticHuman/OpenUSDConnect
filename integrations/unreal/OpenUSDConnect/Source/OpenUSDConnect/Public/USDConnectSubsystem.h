@@ -21,10 +21,11 @@ class AUsdStageActor;
  *   applies each event to the open AUsdStageActor stage via FUSDEventApplier.
  *
  * Emitter side (Unreal → server):
- *   AUsdStageActor::OnPrimChanged fires whenever a prim changes in Unreal
- *   (user edits in the viewport). The subsystem reads the current TRS and
- *   visibility from the pxr stage and sends SetXformTrs/SetVisibility events
- *   via FEmitClient. A feedback loop guard (bSuppressEmit) prevents echoing
+ *   The stage listener fires whenever the USD stage changes locally (viewport
+ *   transforms, USD Stage panel property edits). The subsystem reads the
+ *   current TRS, visibility, and changed shader inputs from the pxr stage and
+ *   sends SetXformTrs/SetVisibility/SetConnectableInput events via
+ *   FEmitClient. A feedback loop guard (bSuppressEmit) prevents echoing
  *   events received from the server back out.
  *
  * Usage:
@@ -83,6 +84,9 @@ private:
 	/** Build and send a Txn event for a changed prim (emitter side) */
 	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
 
+	/** Build and send a SetConnectableInput Txn for changed shader inputs on one prim */
+	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames);
+
 	// --- Receiver ---
 	TSharedPtr<FSyncClient> SyncClient;
 	FCriticalSection EventQueueCS;
@@ -133,4 +137,11 @@ private:
 	/** Prim paths accumulated by the OnObjectsChanged callback, drained each tick. */
 	FCriticalSection PendingEmitPathsCS;
 	TSet<FString> PendingEmitPaths;
+
+	/**
+	 * Changed "inputs:*" property names per prim (same lock as PendingEmitPaths).
+	 * Keeping the property names lets the drain read and emit only the edited
+	 * shader inputs instead of the whole network.
+	 */
+	TMap<FString, TSet<FString>> PendingEmitInputs;
 };
