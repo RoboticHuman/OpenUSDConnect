@@ -39,6 +39,7 @@ from ..protocol_constants import (
     K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_POINT_INSTANCER,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
@@ -1132,8 +1133,9 @@ class UsdSyncServer:
 
         For latest-wins events (TRS, visibility, etc.), only the final value
         is kept.  Partial TRS fields are merged.  delete_prim tombstones all
-        prior events for that prim.  deactivate_prim is latest-wins (TRS
-        preserved for payload reload).
+        prior events for that prim's subtree.  deactivate_prim is latest-wins
+        (TRS preserved for payload reload).  Surviving events keep their
+        original relative order so replay stays causally valid.
 
         Two-phase design minimizes emitter blocking:
           Phase 1 (no lock): snapshot the log and build the compacted dict.
@@ -1144,7 +1146,7 @@ class UsdSyncServer:
         if not rows:
             return
         max_seq = rows[-1][0]
-        latest, tombstoned = self._build_compacted(rows)
+        latest = self._build_compacted(rows)
         original_count = len(rows)
 
         # Phase 2 — merge delta + commit (exclusive, emitters blocked)
@@ -1153,8 +1155,8 @@ class UsdSyncServer:
             # Catch any events that arrived during phase 1
             delta = self.store.get_from_seq_asc(max_seq + 1)
             if delta:
-                for _seq, record_bin in delta:
-                    self._merge_event(latest, tombstoned, record_bin)
+                for seq, record_bin in delta:
+                    self._merge_event(latest, seq, record_bin)
                 original_count += len(delta)
 
             self._commit_compaction(latest, original_count)
@@ -1163,8 +1165,8 @@ class UsdSyncServer:
 
     @staticmethod
     def _merge_event(
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
-        tombstoned: set[str],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
+        seq: int,
         record_bin: bytes,
     ):
         """Merge a single event record into the compacted state.
@@ -1172,6 +1174,15 @@ class UsdSyncServer:
         Keys are ``(prim, kind, time)``: events at distinct time samples
         compact independently of each other and of the default-time
         opinion, so a keyframed log keeps one merged event per sample.
+        ``set_material_binding`` keys additionally carry the binding
+        purpose so allPurpose/preview/full bindings survive independently.
+
+        Each entry carries a replay stamp — the seq of the last record
+        merged into it, except creates, which keep their first-seen seq.
+        Rewriting in stamp order preserves the original log's causal
+        order: a prim's create replays before every event that references
+        it (connections, bindings), and a delete replays before the
+        events that recreate the prim.
 
         Decodes with numpy arrays: the per-element list path is ~100x
         slower and turns compaction of geometry-heavy logs (meshes,
@@ -1182,6 +1193,8 @@ class UsdSyncServer:
         prim = ev.get("prim", "")
         k = ev.get("k", "")
         key = (prim, k, ev.get("time"))
+        if k == K_SET_MATERIAL_BINDING:
+            key = (prim, f"{k}:{ev.get('material_purpose') or ''}", ev.get("time"))
         meta = {}
         for meta_key in ("origin", "client", "client_id", "department"):
             val = rec.get(meta_key)
@@ -1189,24 +1202,28 @@ class UsdSyncServer:
                 meta[meta_key] = val
 
         if k in (K_DELETE_PRIM, K_RENAME_PRIM):
-            tombstoned.add(prim)
-            to_remove = [existing for existing in latest if existing[0] == prim]
+            # Tombstone the whole subtree: descendants of a deleted or
+            # renamed prim must not replay and recreate it as a typeless
+            # zombie. Events after the tombstone are kept — they represent
+            # a recreation and replay after the delete via their stamps.
+            child_prefix = prim + "/"
+            to_remove = [
+                existing for existing in latest
+                if existing[0] == prim or existing[0].startswith(child_prefix)
+            ]
             for existing in to_remove:
                 del latest[existing]
-            latest[key] = (ev, meta)
-            return
-
-        if prim in tombstoned:
+            latest[key] = (ev, meta, seq)
             return
 
         # load/unload are mutually exclusive — only the last one wins.
         if k == K_LOAD_PAYLOAD:
             latest.pop((prim, K_UNLOAD_PAYLOAD, None), None)
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
             return
         if k == K_UNLOAD_PAYLOAD:
             latest.pop((prim, K_LOAD_PAYLOAD, None), None)
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
             return
 
         if k == K_SET_XFORM_TRS:
@@ -1218,9 +1235,9 @@ class UsdSyncServer:
                         prev[comp] = ev[comp]
                         if comp not in prev["fields"]:
                             prev["fields"].append(comp)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_GPRIM_ATTRS:
             existing = latest.get(key)
             if existing:
@@ -1232,9 +1249,9 @@ class UsdSyncServer:
                 new_interp = ev.get("attr_interp", {})
                 if new_interp:
                     prev.setdefault("attr_interp", {}).update(new_interp)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_CONNECTABLE_INPUT:
             existing = latest.get(key)
             if existing:
@@ -1245,9 +1262,31 @@ class UsdSyncServer:
                 )
                 if ev.get("info_id"):
                     prev["info_id"] = ev["info_id"]
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
+        elif k == K_SET_CONNECTABLE_CONNECTION:
+            # Connection events carry a partial dict of edges — merge, so a
+            # later event for one input doesn't drop earlier ones.
+            existing = latest.get(key)
+            if existing:
+                prev = existing[0]
+                prev.setdefault("connections", {}).update(
+                    ev.get("connections", {}),
+                )
+                latest[key] = (prev, meta, seq)
+            else:
+                latest[key] = (ev, meta, seq)
+        elif k == K_SET_VARIANT_SELECTIONS:
+            existing = latest.get(key)
+            if existing:
+                prev = existing[0]
+                prev.setdefault("selections", {}).update(
+                    ev.get("selections", {}),
+                )
+                latest[key] = (prev, meta, seq)
+            else:
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_POINT_INSTANCER:
             existing = latest.get(key)
             if existing:
@@ -1256,15 +1295,17 @@ class UsdSyncServer:
                     prev[f] = ev[f]
                     if f not in prev["fields"]:
                         prev["fields"].append(f)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_ENSURE_PRIM:
             # Union api_schemas across subsequent ensure_prim events for the
             # same prim (latest typeName wins; api_schemas accumulates) so
             # ShapingAPI added later doesn't clobber a previously-merged
             # ShadowAPI. Multi-apply names (e.g. "CollectionAPI:render") are
             # unique strings so set-union is correct for them too.
+            # Keeps the first-seen stamp: later re-ensures must not push the
+            # create past events that reference the prim.
             existing = latest.get(key)
             if existing:
                 prev = existing[0]
@@ -1274,55 +1315,50 @@ class UsdSyncServer:
                 merged.update(ev.get("api_schemas") or [])
                 if merged:
                     prev["api_schemas"] = list(merged)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, existing[2])
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
+        elif k == K_ENSURE_XFORM_OPS:
+            if key not in latest:
+                latest[key] = (ev, meta, seq)
         else:
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
 
     @staticmethod
     def _build_compacted(
         rows: list[tuple[int, bytes]],
-    ) -> tuple[dict[tuple[str, str, float | None], tuple[dict, dict]], set[str]]:
+    ) -> dict[tuple[str, str, float | None], tuple[dict, dict, int]]:
         """Build compacted event dict from raw log rows.
 
-        Returns (latest, tombstoned) where:
-          latest: {(prim, kind, time) → (event_dict, metadata_dict)}
-          tombstoned: set of prim paths deleted/renamed
+        Returns {(prim, kind, time) → (event_dict, metadata_dict, stamp)}
+        where stamp is the replay-order seq (see ``_merge_event``).
         """
-        tombstoned: set[str] = set()
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]] = {}
-        for _seq, record_bin in rows:
-            UsdSyncServer._merge_event(latest, tombstoned, record_bin)
-        return latest, tombstoned
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]] = {}
+        for seq, record_bin in rows:
+            UsdSyncServer._merge_event(latest, seq, record_bin)
+        return latest
 
     def _commit_compaction(
         self,
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
         original_count: int,
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
         Must be called under exclusive txn_barrier.
 
-        Default-time events sort before time-sampled ones for the same prim
-        and kind, so replay establishes static state before samples.
+        Surviving events are rewritten in stamp order — the original log's
+        relative order — so replay is causally equivalent to replaying the
+        full log: creates precede the connections and bindings that
+        reference them, and deletes precede recreates. Receivers that apply
+        events strictly one at a time depend on this.
         """
-        sorted_entries = sorted(
-            latest.values(),
-            key=lambda entry: (
-                entry[0]["prim"].count("/"),
-                entry[0]["prim"],
-                event_apply_tier(entry[0]["k"]),
-                entry[0].get("time") is not None,
-                entry[0].get("time") or 0.0,
-            ),
-        )
+        sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
 
         with self._seq_lock:
             self._next_seq = 1
         records = []
-        for ev, meta in sorted_entries:
+        for ev, meta, _stamp in sorted_entries:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
@@ -1342,7 +1378,7 @@ class UsdSyncServer:
         self._prim_paths.clear()
         self._instanceable_paths.clear()
         self._point_instancer_paths.clear()
-        for ev, _meta in sorted_entries:
+        for ev, _meta, _stamp in sorted_entries:
             self._track_prim_event(ev)
 
         LOG.info("Compacted event log: %d -> %d events", original_count, len(sorted_entries))
@@ -1510,10 +1546,12 @@ class UsdSyncServer:
         if not latest:
             return
 
-        # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
+        # Tier-major: every create replays before the bindings and
+        # connections that reference sibling prims; within a tier, path
+        # order puts parents before children.
         sorted_events = sorted(
             latest.values(),
-            key=lambda e: (e[0]["prim"], event_apply_tier(e[0]["k"])),
+            key=lambda e: (event_apply_tier(e[0]["k"]), e[0]["prim"]),
         )
 
         for ev, origin, department in sorted_events:

@@ -7,7 +7,11 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
+    K_SET_MATERIAL_BINDING,
     K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     MSG_EVENT,
@@ -356,6 +360,232 @@ class TestCompaction:
         inst = [e for e in events if e["k"] == K_SET_INSTANCEABLE]
         assert len(inst) == 1
         assert inst[0]["instanceable"] is True
+
+
+class TestCompactionReplayOrder:
+    """The compacted log must replay causally for strict one-event-at-a-time
+    receivers: creates before the events that reference the created prims,
+    deletes before recreates, no zombie descendants."""
+
+    def test_connection_replays_after_referenced_prim_create(self, tmp_path):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M", "typeName": "Material"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface", "typeName": "Shader"},
+                {"k": K_SET_CONNECTABLE_INPUT, "prim": "/World/Looks/M/Surface",
+                 "info_id": "ND_standard_surface_surfaceshader",
+                 "inputs": {"metalness": 1.0}, "input_types": {"metalness": "float"}},
+                {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/M",
+                 "connections": {"outputs:mtlx:surface": {
+                     "source_prim": "/World/Looks/M/Surface",
+                     "source_attr": "outputs:surface"}}},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        keys = [(e["k"], e["prim"]) for e in events]
+        create_idx = keys.index((K_ENSURE_PRIM, "/World/Looks/M/Surface"))
+        conn_idx = keys.index((K_SET_CONNECTABLE_CONNECTION, "/World/Looks/M"))
+        assert create_idx < conn_idx
+
+    def test_delete_tombstones_subtree(self, tmp_path):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M", "typeName": "Material"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface", "typeName": "Shader"},
+                {"k": K_SET_CONNECTABLE_INPUT, "prim": "/World/Looks/M/Surface",
+                 "info_id": "ND_standard_surface_surfaceshader",
+                 "inputs": {"metalness": 1.0}, "input_types": {"metalness": "float"}},
+                {"k": K_DELETE_PRIM, "prim": "/World/Looks/M"},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        subtree = [e for e in events if e["prim"].startswith("/World/Looks/M")]
+        assert [e["k"] for e in subtree] == [K_DELETE_PRIM]
+
+    def test_delete_then_recreate_survives(self, tmp_path):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [1, 0, 0]},
+                {"k": K_DELETE_PRIM, "prim": "/World/A"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Sphere"},
+                {"k": K_SET_XFORM_TRS, "prim": "/World/A", "fields": ["t"], "t": [2, 0, 0]},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        kinds = [e["k"] for e in events if e["prim"] == "/World/A"]
+        assert kinds == [K_DELETE_PRIM, K_ENSURE_PRIM, K_SET_XFORM_TRS]
+        ensure = [e for e in events if e["k"] == K_ENSURE_PRIM][0]
+        assert ensure["typeName"] == "Sphere"
+        trs = [e for e in events if e["k"] == K_SET_XFORM_TRS][0]
+        assert trs["t"] == [2.0, 0.0, 0.0]
+
+    def test_reensure_keeps_create_before_dependents(self, tmp_path):
+        """A late api_schemas re-ensure must not push the create past a
+        connection that references the prim."""
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M", "typeName": "Material"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface", "typeName": "Shader"},
+                {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/M",
+                 "connections": {"outputs:mtlx:surface": {
+                     "source_prim": "/World/Looks/M/Surface",
+                     "source_attr": "outputs:surface"}}},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface",
+                 "typeName": "Shader", "api_schemas": ["NodeDefAPI"]},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        keys = [(e["k"], e["prim"]) for e in events]
+        create_idx = keys.index((K_ENSURE_PRIM, "/World/Looks/M/Surface"))
+        conn_idx = keys.index((K_SET_CONNECTABLE_CONNECTION, "/World/Looks/M"))
+        assert create_idx < conn_idx
+        assert events[create_idx]["api_schemas"] == ["NodeDefAPI"]
+
+    def test_connection_events_merge(self, tmp_path):
+        """Connection events for different inputs on one prim merge instead of
+        latest-wins clobbering."""
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface", "typeName": "Shader"},
+                {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/M/Surface",
+                 "connections": {"inputs:base_color": {
+                     "source_prim": "/World/Looks/M/Img",
+                     "source_attr": "outputs:out"}}},
+                {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/M/Surface",
+                 "connections": {"inputs:roughness": {
+                     "source_prim": "/World/Looks/M/Rough",
+                     "source_attr": "outputs:out"}}},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        conns = [e for e in events if e["k"] == K_SET_CONNECTABLE_CONNECTION]
+        assert len(conns) == 1
+        assert set(conns[0]["connections"]) == {"inputs:base_color", "inputs:roughness"}
+
+    def test_binding_purposes_survive_independently(self, tmp_path):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Sphere"},
+                {"k": K_SET_MATERIAL_BINDING, "prim": "/World/A",
+                 "material_path": "/World/Looks/M"},
+                {"k": K_SET_MATERIAL_BINDING, "prim": "/World/A",
+                 "material_path": "/World/Looks/Preview",
+                 "material_purpose": "preview"},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        binds = [e for e in events if e["k"] == K_SET_MATERIAL_BINDING]
+        by_purpose = {
+            e.get("material_purpose") or "": e["material_path"] for e in binds
+        }
+        assert by_purpose == {
+            "": "/World/Looks/M",
+            "preview": "/World/Looks/Preview",
+        }
+
+    def test_variant_selections_merge(self, tmp_path):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_VARIANT_SELECTIONS, "prim": "/World/A",
+                 "selections": {"size": "large"}},
+                {"k": K_SET_VARIANT_SELECTIONS, "prim": "/World/A",
+                 "selections": {"color": "red"}},
+                {"k": K_SET_VARIANT_SELECTIONS, "prim": "/World/A",
+                 "selections": {"size": "small"}},
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+
+        sels = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(sels) == 1
+        assert sels[0]["selections"] == {"size": "small", "color": "red"}
+
+    def test_per_event_replay_equivalence(self, tmp_path):
+        """Golden property: applying the compacted log one event at a time
+        composes the same stage as applying the original log one event at a
+        time — the contract strict sequential receivers rely on."""
+        import pytest
+
+        pxr = pytest.importorskip("pxr")
+        from pxr import Usd
+
+        from openusdconnect.event_apply import apply_events
+
+        original = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M", "typeName": "Material"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Looks/M/Surface", "typeName": "Shader"},
+            {"k": K_SET_CONNECTABLE_INPUT, "prim": "/World/Looks/M/Surface",
+             "info_id": "ND_standard_surface_surfaceshader",
+             "inputs": {"metalness": 0.2}, "input_types": {"metalness": "float"}},
+            {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/M",
+             "connections": {"outputs:mtlx:surface": {
+                 "source_prim": "/World/Looks/M/Surface",
+                 "source_attr": "outputs:surface"}}},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Ball", "typeName": "Sphere"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Ball"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Ball", "fields": ["t"], "t": [1, 0, 0]},
+            {"k": K_SET_MATERIAL_BINDING, "prim": "/World/Ball",
+             "material_path": "/World/Looks/M"},
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Ball", "fields": ["t"], "t": [3, 0, 0]},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Ball", "visible": False},
+            {"k": K_SET_VISIBILITY, "prim": "/World/Ball", "visible": True},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Temp", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Temp/Child", "typeName": "Sphere"},
+            {"k": K_DELETE_PRIM, "prim": "/World/Temp"},
+            {"k": K_SET_CONNECTABLE_INPUT, "prim": "/World/Looks/M/Surface",
+             "info_id": "", "inputs": {"metalness": 1.0},
+             "input_types": {"metalness": "float"}},
+        ]
+
+        srv = _make_server(tmp_path)
+        _inject_events(srv, original)
+        srv.compact_log()
+        compacted = _read_log(srv)
+        assert len(compacted) < len(original)
+
+        def replay_one_at_a_time(events):
+            stage = Usd.Stage.CreateInMemory()
+            for ev in events:
+                apply_events(stage, [ev])
+            return stage.Flatten().ExportToString()
+
+        assert replay_one_at_a_time(compacted) == replay_one_at_a_time(original)
 
 
 class TestGeometryHeavyLog:
