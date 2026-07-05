@@ -16,7 +16,15 @@ Unreal's USD Stage editor → Blender sees it.
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
 | **`USDCore` plugin enabled** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). |
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
-| FlatBuffers headers | Header-only. Source-engine checkouts ship them at `Engine/Source/ThirdParty/flatbuffers` and the Build.cs picks up whatever version the engine carries. Launcher builds ship only the license stub: run `python setup_flatbuffers.py --engine <engine root>` once from the plugin folder — it detects the version the engine declares and downloads it into the plugin's ThirdParty directory. |
+| FlatBuffers headers | Header-only. Run `python setup_flatbuffers.py` once from the plugin folder — it downloads the runtime headers matching the committed flatc-generated protocol bindings (the generated code pins the exact version via a `static_assert`, so engine-shipped copies are not used). |
+
+**Development note:** the protocol bindings under `Source/OpenUSDConnect/Private/Schema/`
+are generated from the repo's FlatBuffers schemas and committed, so plugin *users*
+never need the compiler. Changing the schemas requires `flatc` — available from the
+official scoop repo (`scoop install main/flatc`) — and one run of
+`bash scripts/generate_flatbuffers.sh` from the repo root, which regenerates the
+Python and Unreal bindings together. Keep `setup_flatbuffers.py`'s `DEFAULT_VERSION`
+in lockstep with the `flatc` version used to regenerate.
 
 ---
 
@@ -27,11 +35,11 @@ Unreal's USD Stage editor → Blender sees it.
    <YourProject>/Plugins/OpenUSDConnect/
    ```
 
-   On a **Launcher-installed engine**, also fetch the FlatBuffers headers once
-   (source checkouts skip this — the engine ships them):
+   Fetch the FlatBuffers runtime headers once (header-only download, any
+   engine flavor):
    ```
    cd <YourProject>/Plugins/OpenUSDConnect
-   python setup_flatbuffers.py --engine "D:/UE_5.8"
+   python setup_flatbuffers.py
    ```
 
 2. **Enable it in your `.uproject`** (alongside `USDImporter`):

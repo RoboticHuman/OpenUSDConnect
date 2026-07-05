@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "USDConnectProtocol.h"
 
 class AUsdStageActor;
 
@@ -10,10 +11,10 @@ class AUsdStageActor;
  * and applies the contained USD event to the pxr stage owned by the given
  * AUsdStageActor.
  *
- * The raw byte manipulation follows the FlatBuffers wire format directly
- * (no generated C++ code required). All pxr USD API calls are guarded by
- * #if USE_USD_SDK so the module compiles even without the USD SDK, though
- * event application will be a no-op in that case.
+ * Decoding uses the flatc-generated bindings (Schema/messages_generated.h).
+ * All pxr USD API calls are guarded by #if USE_USD_SDK so the module
+ * compiles even without the USD SDK, though event application will be a
+ * no-op in that case.
  *
  * All 19 event kinds apply. Everything is stage-level authoring: what
  * renders from the result is up to UE's own USD translation (materials per
@@ -29,10 +30,11 @@ public:
 	 * @param StageActor  The AUsdStageActor whose pxr stage to modify.
 	 * @param OutTouchedPrim  Optional: receives the event's target prim path
 	 *        (empty for stage-scoped events).
-	 * @param OutEventKind  Optional: receives the wire event kind (kEv*).
+	 * @param OutEventKind  Optional: receives the wire event kind.
 	 */
 	static void ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
-	                       FString* OutTouchedPrim = nullptr, uint8* OutEventKind = nullptr);
+	                       FString* OutTouchedPrim = nullptr,
+	                       OpenUSDConnect::EventPayload* OutEventKind = nullptr);
 
 	/**
 	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.

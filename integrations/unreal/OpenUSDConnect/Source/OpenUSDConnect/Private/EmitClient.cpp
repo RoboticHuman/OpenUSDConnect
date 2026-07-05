@@ -96,14 +96,14 @@ uint32 FEmitClient::Run()
 				continue;
 			}
 
-			const uint8 PType = GetEnvelopePayloadType(Frame);
-			if (PType == kPayloadAuthRejected)
+			const OpenUSDConnect::Payload PType = GetEnvelopePayloadType(Frame);
+			if (PType == OpenUSDConnect::Payload::AuthRejected)
 			{
 				UE_LOG(LogUSDEmit, Error, TEXT("Emitter auth rejected"));
 				CloseSocket();
 				return 0;
 			}
-			if (PType != kPayloadHelloOk)
+			if (PType != OpenUSDConnect::Payload::HelloOk)
 			{
 				CloseSocket();
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
@@ -144,12 +144,11 @@ uint32 FEmitClient::Run()
 					bShouldDisconnect = true;
 					break;
 				}
-				const uint8 PType = GetEnvelopePayloadType(InFrame);
-				if (PType == kPayloadRateLimited)
+				const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(InFrame);
+				if (Env && Env->payload_type() == OpenUSDConnect::Payload::RateLimited)
 				{
-					const uint8* Env = FB::GetRoot(InFrame);
-					const uint8* RL  = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
-					const float Retry = RL ? FB::GetField<float>(RL, VT::RateLimited_RetryAfter, 1.0f) : 1.0f;
+					const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
+					const float Retry = RL ? RL->retry_after() : 1.0f;
 					UE_LOG(LogUSDEmit, Warning,
 						TEXT("Emitter rate limited — sleeping %.1fs"), Retry);
 					FPlatformProcess::Sleep(Retry);

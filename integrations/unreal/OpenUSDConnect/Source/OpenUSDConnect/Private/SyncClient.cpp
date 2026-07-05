@@ -11,9 +11,6 @@
 #include "SocketSubsystem.h"
 #include "HAL/PlatformProcess.h"
 
-// FlatBuffers builder for HELLO encoding (read-only side uses OUC::FB::*)
-#include "flatbuffers/flatbuffer_builder.h"
-
 DEFINE_LOG_CATEGORY_STATIC(LogUSDConnect, Log, All);
 
 using namespace OUC;
@@ -154,17 +151,17 @@ uint32 FSyncClient::Run()
 				continue;
 			}
 
-			const uint8 PType = GetEnvelopePayloadType(Frame);
-			if (PType == kPayloadAuthRejected)
+			const OpenUSDConnect::Payload PType = GetEnvelopePayloadType(Frame);
+			if (PType == OpenUSDConnect::Payload::AuthRejected)
 			{
 				UE_LOG(LogUSDConnect, Error, TEXT("OpenUSDConnect: auth rejected by server"));
 				CloseSocket();
 				return 0;
 			}
-			if (PType != kPayloadHelloOk)
+			if (PType != OpenUSDConnect::Payload::HelloOk)
 			{
 				UE_LOG(LogUSDConnect, Warning,
-					TEXT("Unexpected response to HELLO (type=%u)"), PType);
+					TEXT("Unexpected response to HELLO (type=%u)"), static_cast<uint8>(PType));
 				CloseSocket();
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
 				continue;
@@ -278,19 +275,19 @@ bool FSyncClient::SendAll(const uint8* Data, int32 Len)
 
 void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 {
-	const uint8 PType = GetEnvelopePayloadType(Frame);
+	const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
+	const OpenUSDConnect::Payload PType =
+		Env ? Env->payload_type() : OpenUSDConnect::Payload::NONE;
 
-	if (PType == kPayloadBroadcastEvent)
+	if (PType == OpenUSDConnect::Payload::BroadcastEvent)
 	{
-		const uint8* Env     = FB::GetRoot(Frame);
-		const uint8* BcEvent = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
-		if (BcEvent)
+		if (const OpenUSDConnect::BroadcastEvent* BcEvent = Env->payload_as_BroadcastEvent())
 		{
-			const int32 Seq = FB::GetField<int32>(BcEvent, VT::BroadcastEvent_Seq, 0);
+			const int32 Seq = BcEvent->seq();
 			if (Seq > LastSeq) LastSeq = Seq;
 
 			// Echo suppression: skip events we originated (server broadcasts them back).
-			const FString Origin = FB::GetStr(BcEvent, VT::BroadcastEvent_Origin);
+			const FString Origin = ToFString(BcEvent->origin());
 			if (!Origin.IsEmpty() && Origin == SessionOrigin)
 			{
 				return;
@@ -306,20 +303,19 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 			Owner->EnqueueEvent(MoveTemp(Copy));
 		}
 	}
-	else if (PType == kPayloadPing)
+	else if (PType == OpenUSDConnect::Payload::Ping)
 	{
 		// Heartbeat — receivers ignore (server is just checking the connection).
 	}
-	else if (PType == kPayloadRateLimited)
+	else if (PType == OpenUSDConnect::Payload::RateLimited)
 	{
-		const uint8* Env = FB::GetRoot(Frame);
-		const uint8* RL  = Env ? FB::GetPtr(Env, VT::Envelope_Payload) : nullptr;
-		const float Retry = RL ? FB::GetField<float>(RL, VT::RateLimited_RetryAfter, 1.0f) : 1.0f;
+		const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
+		const float Retry = RL ? RL->retry_after() : 1.0f;
 		UE_LOG(LogUSDConnect, Warning,
 			TEXT("Rate limited — sleeping %.1fs"), Retry);
 		FPlatformProcess::Sleep(Retry);
 	}
-	else if (PType == kPayloadResync)
+	else if (PType == OpenUSDConnect::Payload::Resync)
 	{
 		UE_LOG(LogUSDConnect, Log, TEXT("Resync received — resetting seq counter"));
 		LastSeq = 0;

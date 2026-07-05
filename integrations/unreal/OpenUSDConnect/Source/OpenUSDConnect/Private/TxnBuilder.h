@@ -2,11 +2,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "USDConnectProtocol.h"
 
 /**
  * Lightweight structs for USD events to be emitted to the server.
  * These are populated by UUSDConnectSubsystem when it detects a stage change,
- * then encoded into a FlatBuffers Txn frame by BuildTxnFrame().
+ * then encoded into a FlatBuffers Txn frame by the builders below.
  */
 
 struct FEmitXformTrs
@@ -24,24 +25,12 @@ struct FEmitVisibility
 	bool bVisible = true;
 };
 
-/** Wire enum ConnectableInputValueType (events.fbs). */
-enum class ECivType : uint8
-{
-	None        = 0,
-	Float       = 1,
-	Int         = 2,
-	Bool        = 3,
-	String      = 4,
-	FloatArray  = 5,
-	IntArray    = 6,
-	StringArray = 7,
-};
-
 struct FEmitConnectableValue
 {
 	FString Name;         // input name without the "inputs:" prefix
 	FString TypeName;     // declared USD type (e.g. "color3f", "float", "asset")
-	ECivType ValueType = ECivType::None;
+	OpenUSDConnect::ConnectableInputValueType ValueType =
+		OpenUSDConnect::ConnectableInputValueType::None;
 	float   ScalarFloat = 0.f;
 	int32   ScalarInt   = 0;
 	bool    bScalarBool = false;

@@ -194,57 +194,59 @@ static void RestoreCanonicalXformOps(
 // is needed — unhandled types (arrays, matrices) are skipped by returning false.
 static bool ConvertVtValueToWire(const pxr::VtValue& Value, FEmitConnectableValue& Out)
 {
+	using OpenUSDConnect::ConnectableInputValueType;
+
 	if (Value.IsHolding<float>())
 	{
-		Out.ValueType   = ECivType::Float;
+		Out.ValueType   = ConnectableInputValueType::ScalarFloat;
 		Out.ScalarFloat = Value.UncheckedGet<float>();
 	}
 	else if (Value.IsHolding<double>())
 	{
-		Out.ValueType   = ECivType::Float;
+		Out.ValueType   = ConnectableInputValueType::ScalarFloat;
 		Out.ScalarFloat = static_cast<float>(Value.UncheckedGet<double>());
 	}
 	else if (Value.IsHolding<int>())
 	{
-		Out.ValueType = ECivType::Int;
+		Out.ValueType = ConnectableInputValueType::ScalarInt;
 		Out.ScalarInt = Value.UncheckedGet<int>();
 	}
 	else if (Value.IsHolding<bool>())
 	{
-		Out.ValueType   = ECivType::Bool;
+		Out.ValueType   = ConnectableInputValueType::ScalarBool;
 		Out.bScalarBool = Value.UncheckedGet<bool>();
 	}
 	else if (Value.IsHolding<pxr::TfToken>())
 	{
-		Out.ValueType    = ECivType::String;
+		Out.ValueType    = ConnectableInputValueType::ScalarString;
 		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::TfToken>().GetText());
 	}
 	else if (Value.IsHolding<std::string>())
 	{
-		Out.ValueType    = ECivType::String;
+		Out.ValueType    = ConnectableInputValueType::ScalarString;
 		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
 	}
 	else if (Value.IsHolding<pxr::SdfAssetPath>())
 	{
-		Out.ValueType    = ECivType::String;
+		Out.ValueType    = ConnectableInputValueType::ScalarString;
 		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::SdfAssetPath>().GetAssetPath().c_str());
 	}
 	else if (Value.IsHolding<pxr::GfVec2f>())
 	{
 		const pxr::GfVec2f V = Value.UncheckedGet<pxr::GfVec2f>();
-		Out.ValueType = ECivType::FloatArray;
+		Out.ValueType = ConnectableInputValueType::FloatArray;
 		Out.Floats    = {V[0], V[1]};
 	}
 	else if (Value.IsHolding<pxr::GfVec3f>())
 	{
 		const pxr::GfVec3f V = Value.UncheckedGet<pxr::GfVec3f>();
-		Out.ValueType = ECivType::FloatArray;
+		Out.ValueType = ConnectableInputValueType::FloatArray;
 		Out.Floats    = {V[0], V[1], V[2]};
 	}
 	else if (Value.IsHolding<pxr::GfVec4f>())
 	{
 		const pxr::GfVec4f V = Value.UncheckedGet<pxr::GfVec4f>();
-		Out.ValueType = ECivType::FloatArray;
+		Out.ValueType = ConnectableInputValueType::FloatArray;
 		Out.Floats    = {V[0], V[1], V[2], V[3]};
 	}
 	else
@@ -636,15 +638,15 @@ void UUSDConnectSubsystem::DrainAndApply()
 			}
 #endif
 			FString TouchedPrim;
-			uint8 EventKind = 0;
+			OpenUSDConnect::EventPayload EventKind = OpenUSDConnect::EventPayload::NONE;
 			FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind);
 			// Received network edits dirty their owning material for the
-			// materializer. ensure_prim is included because shader-node
+			// materializer. EnsurePrim is included because shader-node
 			// creation changes the network without a connectable event.
 			if (!TouchedPrim.IsEmpty()
-				&& (EventKind == OUC::kEvSetConnectableInput
-					|| EventKind == OUC::kEvSetConnectableConnection
-					|| EventKind == OUC::kEvEnsurePrim))
+				&& (EventKind == OpenUSDConnect::EventPayload::SetConnectableInput
+					|| EventKind == OpenUSDConnect::EventPayload::SetConnectableConnection
+					|| EventKind == OpenUSDConnect::EventPayload::EnsurePrim))
 			{
 				PendingMaterializePrims.Add(MoveTemp(TouchedPrim));
 			}
