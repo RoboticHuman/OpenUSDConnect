@@ -12,11 +12,11 @@ Unreal's USD Stage editor → Blender sees it.
 
 | Requirement | Why |
 |-------------|-----|
-| **Unreal Engine 5.5+ source build** | The plugin uses the pxr USD C++ SDK behind the `USDImporter` plugin's wrappers. Launcher builds do not link the USD SDK. Tested against 5.7. |
+| **Unreal Engine 5.5+** (source or Launcher) | The plugin uses the pxr USD C++ SDK behind the `USDImporter` plugin's wrappers. Launcher builds of 5.8 ship the full USD SDK (headers + libs under the `USDCore` plugin's ThirdParty), so a source checkout is no longer required. Tested against 5.7 (source) and 5.8 (Launcher). |
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
 | **`USDCore` plugin enabled** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). |
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
-| FlatBuffers 24.3.25 | Already shipped with UE5 at `Engine/Source/ThirdParty/flatbuffers/flatbuffers-24.3.25/`. The Build.cs references it directly — no separate install. |
+| FlatBuffers headers | Header-only. Source-engine checkouts ship them at `Engine/Source/ThirdParty/flatbuffers` and the Build.cs picks up whatever version the engine carries. Launcher builds ship only the license stub: run `python setup_flatbuffers.py --engine <engine root>` once from the plugin folder — it detects the version the engine declares and downloads it into the plugin's ThirdParty directory. |
 
 ---
 
@@ -25,6 +25,13 @@ Unreal's USD Stage editor → Blender sees it.
 1. **Copy the plugin folder** into your project:
    ```
    <YourProject>/Plugins/OpenUSDConnect/
+   ```
+
+   On a **Launcher-installed engine**, also fetch the FlatBuffers headers once
+   (source checkouts skip this — the engine ships them):
+   ```
+   cd <YourProject>/Plugins/OpenUSDConnect
+   python setup_flatbuffers.py --engine "D:/UE_5.8"
    ```
 
 2. **Enable it in your `.uproject`** (alongside `USDImporter`):
@@ -132,6 +139,11 @@ Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
 | `Could not connect to 127.0.0.1:7200 — retrying` | Server isn't running, or port mismatch. Start the server. |
 | `LogPluginManager: ... incompatible with engine version` | The `.uplugin` declares `5.7.0` and the plugin uses 5.5+ APIs (e.g. `EAllowShrinking`). If you're on an older UE, source-port those call sites first. |
 | Connection works but edits don't reflect in Unreal viewport | The stage actor's `Stage State` is `Opened` instead of `OpenedAndLoaded`. Change it in the Details panel. |
+| Geometry imports but renders default gray | The asset's materials only author a MaterialX context (`outputs:mtlx:surface`, e.g. the usd-wg OpenChessSet), and the stage actor defaults to the `universal` (UsdPreviewSurface) context. Set **Render Context → `mtlx`** on the `AUsdStageActor` Details panel. |
+| `LogUsd: ... failed to find a valid referenced MaterialX file. Reverting to parsing the generated Material prims` | Expected for wire-authored inline shader networks (there is no `.mtlx` file behind them) — but note the fallback prim parse **does not translate MaterialX values**: the material asset is created, the surface renders default gray/black. |
+| Inline MaterialX materials render default gray or black | UE 5.8 translates MaterialX only from **referenced `.mtlx` documents** (via Interchange); inline `ND_*` prim networks are recognized structurally but their values are not translated. Reference a document instead (`set_reference` with a `.mtlx` asset path), **name the USD Material prim exactly like the material inside the document** (UE maps the generated material back by name), and consider **Substrate Adaptive GBuffer** (Project Settings → Rendering) for full standard_surface fidelity. UsdPreviewSurface inline networks are unaffected — they translate through the universal context. |
+| Generated meshes are named after a **container** prim instead of the individual objects (e.g. `SM_World1`, `SM_World2`, … for a root prim called `World`), every synced edit rebuilds them, and materials jump between objects on visibility changes | That container prim is being **collapsed**: it has no `kind`, and UE collapses kind-less subtrees by default (`USD.CollapsePrimsWithoutKind` is true), folding the whole subtree into **one** static mesh whose sections and material slots re-index on every rebuild. Author `kind = "group"` on scene-root Xforms (correct USD model hierarchy), or set `USD.CollapsePrimsWithoutKind 0`, or uncheck **Use Prim Kinds For Collapsing** on the stage actor. |
+| Generated assets churn constantly (new transient packages per edit); appearance drifts until a full stage reload | No persistent asset cache: each stage actor defaults to a throwaway transient cache. Create a **USD Asset Cache** asset and assign it on the stage actor (or Project Settings → USDCore → Default Asset Cache). Consider also disabling **Share Assets for Identical Prims**, so prims with identical geometry but different materials don't share one mesh asset. |
 | Edits in Unreal don't reach Blender | Confirm the **Emitter HELLO_OK** line appears in the log; if not, the emitter socket failed. Check the dashboard's *Clients* tab. |
 | `Plugin requires engine version '5.7.0'` warning on UE 5.5/5.6 | Source-compatible if you replace `EAllowShrinking::No` with `false` in `USDConnectSubsystem.cpp`. |
 
@@ -154,14 +166,20 @@ Log LogUSDEventApplier Verbose
 | SetXformTrs (T/R/S) | ✅ | ✅ |
 | DeletePrim | ✅ | — |
 | DeactivatePrim | ✅ | — |
-| RenamePrim | ⚠ stub | — |
+| RenamePrim | ✅ | — |
 | SetVisibility | ✅ | ✅ |
 | SetStageMetadata (FPS, timecodes, metersPerUnit) | ✅ | — |
 | SetReference / SetPayload | ✅ | — |
 | LoadPayload / UnloadPayload | ✅ | — |
 | SetVariantSelections | ✅ | — |
 | SetMaterialBinding | ✅ | — |
-| SetGprimAttrs (mesh points/normals/primvars) | ❌ | ❌ |
-| SetConnectableInput / SetConnectableConnection (shaders) | ❌ | ❌ |
+| SetGprimAttrs (mesh points/normals/primvars, camera params) | ✅ | — |
+| SetInstanceable / SetPointInstancer | ✅ | — |
+| SetConnectableInput / SetConnectableConnection (shaders) | ✅ | — |
+
+`SetConnectableInput` / `SetConnectableConnection` author the shader network onto
+the pxr stage (typed values, `info:id`, connection edges); what renders from it
+is up to UE's USD material translation and the stage actor's **Render Context**
+(see Troubleshooting).
 
 See [`PLUGIN_DEV.md`](PLUGIN_DEV.md) for the protocol details and a list of remaining work.

@@ -75,7 +75,7 @@ emit/receive event flow.
 |---|---|---|
 | **Blender** | bidirectional | Emitter/receiver addon: live transform and material sync (UsdPreviewSurface, MaterialX), Y-up/Z-up conversion, depsgraph auto-tracking |
 | **usdview** | receive | Live viewer plugin and launcher; RenderMan-safe (Sdr plugin bootstrap) with OpenPBR to standard_surface translation for hdPrman |
-| **Unreal Engine** | bidirectional | Transform sync via `USDStageActor` |
+| **Unreal Engine** | bidirectional | Transform/visibility emit; receive-side composition arcs, variants, bindings, and shader networks via `USDStageActor` |
 | **MCP server** | author + introspect | Exposes the event protocol as Model Context Protocol tools so an LLM (e.g. Claude) can author USD and inspect scenes |
 | **Dashboard** | admin | Web admin UI: status, client table, prim tree, event log |
 

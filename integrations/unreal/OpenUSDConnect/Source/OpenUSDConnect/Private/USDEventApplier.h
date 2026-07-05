@@ -15,13 +15,10 @@ class AUsdStageActor;
  * #if USE_USD_SDK so the module compiles even without the USD SDK, though
  * event application will be a no-op in that case.
  *
- * Supported events (MVP):
- *   EnsurePrim, EnsureXformOps, SetXformTrs, DeletePrim, DeactivatePrim,
- *   RenamePrim, SetVisibility, SetStageMetadata, SetReference, SetPayload,
- *   LoadPayload, UnloadPayload, SetVariantSelections, SetMaterialBinding
- *
- * Deferred / TODO:
- *   SetGprimAttrs (bulk mesh data), SetConnectableInput, SetConnectableConnection
+ * All 19 event kinds apply. Everything is stage-level authoring: what
+ * renders from the result is up to UE's own USD translation (materials per
+ * the stage actor's render context, PointInstancers as instanced meshes,
+ * gprims and cameras per the USDImporter schema translators).
  */
 class OPENUSDCONNECT_API FUSDEventApplier
 {
@@ -32,4 +29,13 @@ public:
 	 * @param StageActor  The AUsdStageActor whose pxr stage to modify.
 	 */
 	static void ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor);
+
+	/**
+	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.
+	 * Value writes on existing prims are; structural events (prim definition,
+	 * composition arcs, variants, schema application) are not — they need the
+	 * stage to recompose as they apply. Callers batching multiple frames must
+	 * close any open block before applying a frame this returns false for.
+	 */
+	static bool FrameUsesChangeBlock(const TArray<uint8>& RawFrame);
 };

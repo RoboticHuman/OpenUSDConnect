@@ -30,14 +30,43 @@ public class OpenUSDConnect : ModuleRules
 		// This is the same pattern USDStage uses.
 		UnrealBuildTool.Rules.UnrealUSDWrapper.CheckAndSetupUsdSdk(Target, this);
 
-		// FlatBuffers headers — shipped with Unreal Engine
-		string FlatBuffersInclude = Path.Combine(
-			EngineDirectory,
-			"Source", "ThirdParty", "flatbuffers", "flatbuffers-24.3.25", "include");
-
-		if (Directory.Exists(FlatBuffersInclude))
+		// FlatBuffers headers (header-only): source engine checkouts ship them
+		// under Engine/Source/ThirdParty (version directory varies per engine
+		// release); Launcher builds ship only the license stub, so
+		// setup_flatbuffers.py fetches the engine's declared version into this
+		// plugin's ThirdParty folder.
+		string FlatBuffersInclude = ResolveFlatBuffersInclude();
+		if (FlatBuffersInclude == null)
 		{
-			PublicSystemIncludePaths.Add(FlatBuffersInclude);
+			throw new BuildException(
+				"OpenUSDConnect: FlatBuffers headers not found. This engine does " +
+				"not ship them (Launcher builds carry only the license stub). " +
+				"Run  python <plugin>/setup_flatbuffers.py --engine \"" +
+				EngineDirectory + "\"  once, then rebuild.");
 		}
+		PublicSystemIncludePaths.Add(FlatBuffersInclude);
+	}
+
+	private string ResolveFlatBuffersInclude()
+	{
+		string EngineFb = Path.Combine(EngineDirectory, "Source", "ThirdParty", "flatbuffers");
+		if (Directory.Exists(EngineFb))
+		{
+			foreach (string VersionDir in Directory.GetDirectories(EngineFb, "flatbuffers-*"))
+			{
+				string Include = Path.Combine(VersionDir, "include");
+				if (File.Exists(Path.Combine(Include, "flatbuffers", "flatbuffer_builder.h")))
+				{
+					return Include;
+				}
+			}
+		}
+
+		string LocalInclude = Path.Combine(ModuleDirectory, "ThirdParty", "flatbuffers", "include");
+		if (File.Exists(Path.Combine(LocalInclude, "flatbuffers", "flatbuffer_builder.h")))
+		{
+			return LocalInclude;
+		}
+		return null;
 	}
 }

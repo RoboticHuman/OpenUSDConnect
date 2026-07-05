@@ -380,12 +380,6 @@ void UUSDConnectSubsystem::DrainAndApply()
 	// tick freezes the editor for seconds. Cap by both count and wall-time
 	// so a single tick stays interactive; the rest stays queued for the
 	// next tick.
-	//
-	// The chunk is wrapped in a single outer pxr::SdfChangeBlock so that all
-	// stage notices fire once per tick instead of once per event — the stage
-	// actor's component-resync cost dominates per-event work, and batching
-	// the notice into one dispatch is the main throughput lever during a
-	// HELLO replay.
 	constexpr int32  MaxApplyPerTick        = 512;
 	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms — preserves ~60 fps
 
@@ -413,14 +407,29 @@ void UUSDConnectSubsystem::DrainAndApply()
 	bSuppressEmit.store(true);
 	{
 #if USE_USD_SDK
-		// Outer SdfChangeBlock — nests with the per-frame block inside ApplyFrame.
-		// Notices only fire when the outermost block destructs, so the stage
-		// actor processes the whole chunk's worth of changes in one batch
-		// rather than once per event.
-		pxr::SdfChangeBlock BatchBlock;
+		// Contiguous value events share one SdfChangeBlock so their notices
+		// fire as a single batch — the stage actor's per-notice component
+		// resync dominates replay throughput. Structural events cannot apply
+		// inside a block (UsdStage::DefinePrim and composition-arc edits need
+		// the stage to recompose immediately), so the run's block closes
+		// before one applies and a fresh block opens for the next value run.
+		TUniquePtr<pxr::SdfChangeBlock> RunBlock;
 #endif
 		for (TArray<uint8>& Frame : Chunk)
 		{
+#if USE_USD_SDK
+			if (FUSDEventApplier::FrameUsesChangeBlock(Frame))
+			{
+				if (!RunBlock)
+				{
+					RunBlock = MakeUnique<pxr::SdfChangeBlock>();
+				}
+			}
+			else
+			{
+				RunBlock.Reset();
+			}
+#endif
 			FUSDEventApplier::ApplyFrame(Frame, StageActor);
 			++Applied;
 			if (FPlatformTime::Seconds() - Start > MaxApplySecondsPerTick)
