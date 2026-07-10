@@ -13,6 +13,13 @@ import socket
 
 import pytest
 
+# Make renderer plugin DLLs (e.g. RenderMan) loadable before any test imports
+# pxr. Once a renderer is installed into the shared USD tree, the Sdr registry
+# fails to initialize without its DLLs on PATH. No-op when RMANTREE is unset.
+from integrations.renderman import apply_dll_dirs as _apply_renderer_dll_dirs
+
+_apply_renderer_dll_dirs()
+
 _CFG_FILE = pathlib.Path(__file__).parent.parent / "blender.test.cfg"
 
 
@@ -32,6 +39,21 @@ def pytest_addoption(parser):
         default=None,
         help="Path to Blender executable for integration tests",
     )
+    parser.addoption(
+        "--slow-tests",
+        action="store_true",
+        default=False,
+        help="Run timing-dependent tests marked 'slow' (skipped by default)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--slow-tests"):
+        return
+    skip = pytest.mark.skip(reason="timing-dependent; run with --slow-tests")
+    for item in items:
+        if item.get_closest_marker("slow"):
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")

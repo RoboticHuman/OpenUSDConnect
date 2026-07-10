@@ -4,6 +4,7 @@ Mocks bpy to test auto-track, depsgraph-to-events flow, partial diff,
 deletion detection, and feedback guard using the new architecture.
 """
 
+import os
 import sys
 import tempfile
 import types
@@ -69,6 +70,9 @@ def _install_bpy_mock():
     bpy.utils = types.ModuleType("bpy.utils")
     bpy.utils.register_class = lambda cls: None
     bpy.utils.unregister_class = lambda cls: None
+
+    bpy.path = types.ModuleType("bpy.path")
+    bpy.path.abspath = lambda p: p
 
     bpy.data.objects = _BlenderObjectList()
 
@@ -446,3 +450,152 @@ class TestNonObjectUpdates:
         fake_update = MockDepsgraphUpdate(MagicMock())
         events = _get_events(author, emitter, [fake_update])
         assert len(events) == 0
+
+
+class TestReverseShaderAuthoring:
+    """_author_shader_inputs: baseline diffing + type-preserving authoring."""
+
+    def _make_author(self):
+        sys.modules["bpy"].data.objects = _BlenderObjectList()
+        author, _ = _make_author_and_emitter()
+        return author
+
+    def test_first_encounter_seeds_without_authoring(self):
+        author = self._make_author()
+        author._author_shader_inputs(
+            "/World/Looks/M/S", {"roughness": 0.5}, shader_id="UsdPreviewSurface"
+        )
+        assert author._last_shader_values["/World/Looks/M/S"] == {"roughness": 0.5}
+        assert not author.stage.GetPrimAtPath("/World/Looks/M/S")
+
+    def test_existing_asset_input_type_wins(self):
+        from pxr import Sdf, UsdShade
+
+        author = self._make_author()
+        prim = author.stage.DefinePrim("/World/Looks/M/Tex", "Shader")
+        shader = UsdShade.Shader(prim)
+        shader.CreateIdAttr("UsdUVTexture")
+        shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath("D:/old.png"))
+        author._last_shader_values["/World/Looks/M/Tex"] = {"file": "D:/old.png"}
+
+        author._author_shader_inputs(
+            "/World/Looks/M/Tex", {"file": "D:/new.png"}, shader_id="UsdUVTexture"
+        )
+
+        inp = UsdShade.Shader(author.stage.GetPrimAtPath("/World/Looks/M/Tex")).GetInput("file")
+        assert str(inp.GetAttr().GetTypeName()) == "asset"
+        assert inp.Get().path == "D:/new.png"
+
+    def test_existing_vector_input_type_wins(self):
+        from pxr import Gf, Sdf, UsdShade
+
+        author = self._make_author()
+        path = "/World/Looks/M/Surface"
+        prim = author.stage.DefinePrim(path, "Shader")
+        shader = UsdShade.Shader(prim)
+        shader.CreateIdAttr("ND_standard_surface_surfaceshader")
+        shader.CreateInput("subsurface_radius", Sdf.ValueTypeNames.Float3).Set(
+            Gf.Vec3f(1.0, 1.0, 1.0)
+        )
+        author._last_shader_values[path] = {"subsurface_radius": [1.0, 1.0, 1.0]}
+
+        author._author_shader_inputs(
+            path,
+            {"subsurface_radius": [1.0, 2.0, 3.0]},
+            shader_id="ND_standard_surface_surfaceshader",
+        )
+
+        inp = UsdShade.Shader(author.stage.GetPrimAtPath(path)).GetInput("subsurface_radius")
+        assert str(inp.GetAttr().GetTypeName()) == "float3"
+        assert inp.Get() == Gf.Vec3f(1.0, 2.0, 3.0)
+
+    def test_sdr_resolves_type_for_new_input(self):
+        from pxr import UsdShade
+
+        author = self._make_author()
+        path = "/World/Looks/M/Tex"
+        author._last_shader_values[path] = {"file": "D:/old.png"}
+
+        author._author_shader_inputs(path, {"file": "D:/new.png"}, shader_id="UsdUVTexture")
+
+        inp = UsdShade.Shader(author.stage.GetPrimAtPath(path)).GetInput("file")
+        # A str would be "string" by heuristic; Sdr knows UsdUVTexture.file is asset.
+        assert str(inp.GetAttr().GetTypeName()) == "asset"
+        assert inp.Get().path == "D:/new.png"
+
+    def test_heuristic_types_for_unknown_shader(self):
+        from pxr import UsdShade
+
+        author = self._make_author()
+        path = "/World/Looks/M/Custom"
+        author._last_shader_values[path] = {"s": "a", "c": [0.0, 0.0, 0.0], "f": 1.0}
+
+        author._author_shader_inputs(
+            path, {"s": "b", "c": [1.0, 0.0, 0.0], "f": 2.0}, shader_id="MyCustomShader"
+        )
+
+        shader = UsdShade.Shader(author.stage.GetPrimAtPath(path))
+        assert str(shader.GetInput("s").GetAttr().GetTypeName()) == "string"
+        assert str(shader.GetInput("c").GetAttr().GetTypeName()) == "color3f"
+        assert str(shader.GetInput("f").GetAttr().GetTypeName()) == "float"
+
+    def test_unchanged_values_do_not_author(self):
+        author = self._make_author()
+        path = "/World/Looks/M/S"
+        author._last_shader_values[path] = {"roughness": 0.5}
+
+        author._author_shader_inputs(path, {"roughness": 0.5}, shader_id="UsdPreviewSurface")
+
+        assert not author.stage.GetPrimAtPath(path)
+
+
+class TestMapperReverseReads:
+    """Reverse reads on the texture / primvar-reader mappers."""
+
+    def _ensure_bpy_path(self):
+        bpy = sys.modules["bpy"]
+        if not hasattr(bpy, "path"):
+            bpy.path = types.SimpleNamespace(abspath=lambda p: p)
+
+    def test_texture_mapper_reads_image_filepath(self):
+        self._ensure_bpy_path()
+        from integrations.blender.shader_mapper import TextureShaderMapper
+
+        mapper = TextureShaderMapper("UsdUVTexture", "ShaderNodeTexImage", {"file": "_image"})
+        node = MagicMock()
+        node.image.filepath = "D:/tex/albedo.png"
+        assert mapper.read_all_inputs(node) == {"file": os.path.normpath("D:/tex/albedo.png")}
+
+    def test_texture_mapper_skips_imageless_node(self):
+        self._ensure_bpy_path()
+        from integrations.blender.shader_mapper import TextureShaderMapper
+
+        mapper = TextureShaderMapper("UsdUVTexture", "ShaderNodeTexImage", {"file": "_image"})
+        node = MagicMock()
+        node.image = None
+        assert mapper.read_all_inputs(node) == {}
+        node.image = MagicMock()
+        node.image.filepath = ""
+        assert mapper.read_all_inputs(node) == {}
+
+    def test_uv_reader_mapper_reads_varname(self):
+        from integrations.blender.shader_mapper import UVReaderMapper
+
+        mapper = UVReaderMapper(
+            "UsdPrimvarReader_float2", "ShaderNodeUVMap", {"varname": "_uv_map"}
+        )
+        node = MagicMock()
+        node.uv_map = "st"
+        assert mapper.read_all_inputs(node) == {"varname": "st"}
+        node.uv_map = ""
+        assert mapper.read_all_inputs(node) == {}
+
+    def test_attribute_reader_mapper_reads_varname(self):
+        from integrations.blender.shader_mapper import AttributeReaderMapper
+
+        mapper = AttributeReaderMapper(
+            "UsdPrimvarReader_float3", "ShaderNodeAttribute", {"varname": "_attribute_name"}
+        )
+        node = MagicMock()
+        node.attribute_name = "displayColor"
+        assert mapper.read_all_inputs(node) == {"varname": "displayColor"}

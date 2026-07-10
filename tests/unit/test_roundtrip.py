@@ -1027,6 +1027,8 @@ class TestStageToStageRoundtrip:
         )
         if not os.path.isfile(asset_path):
             pytest.skip(f"OpenPBR asset not present: {asset_path}")
+        if Sdf.FileFormat.FindByExtension("mtlx", {"target": "usd"}) is None:
+            pytest.skip("usdMtlx file-format plugin is not registered in this OpenUSD runtime")
 
         src = Usd.Stage.Open(asset_path)
         assert src is not None

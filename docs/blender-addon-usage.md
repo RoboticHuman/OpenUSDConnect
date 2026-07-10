@@ -53,6 +53,14 @@ Listens to the sync server and applies incoming events to Blender objects.
 - **Last seq** — Shows the highest event sequence number processed.
 - **Reset Seq** — Clears the sequence counter to force a full replay on next connect.
 
+### Playback Sync
+Shared-playhead control (see the Playback synchronization section below).
+
+- **Claim Playback**: request the leader role from the server; shown while another client (or nobody) holds it.
+- **Play / Pause / Push Frame**: leader-only transport controls. Push Frame broadcasts the current frame as the shared time.
+- **Release Playback**: give up the leader role.
+- **Leader / Time / Playing**: read-only status from the latest broadcast playback state.
+
 ## Two-Blender Live Sync Walkthrough
 
 This is the manual workflow: one Blender instance emits changes, another receives them in real time.
@@ -164,7 +172,7 @@ In the emitter Blender:
 | `load_payload` | Payload load requested | Imports the payload asset |
 | `unload_payload` | Payload unload requested | Removes imported payload children |
 | `set_variant_selections` | Variant selection changed | Updates the active variant |
-| `set_material_binding` | Material bound/unbound | Updates the material:binding relationship |
+| `set_material_binding` | Material bound/unbound (per purpose) | Updates the `material:binding[:purpose]` relationship; `material_purpose` of `""` / `"preview"` / `"full"` selects the slot |
 | `set_connectable_input` | Shader, NodeGraph, Material, or UsdLux light input value changed | Writes the typed input via `UsdShade.ConnectableAPI` |
 | `set_connectable_connection` | Shader/NodeGraph/Material/light input or output connection authored or cleared | Updates the connection edge |
 | `set_instanceable` | Native scenegraph instancing toggled on a prim that has a reference/payload arc | Sets the `instanceable` flag; composition rebuilds the instance locally. The Blender adapter toggles collection-instance Empties best-effort |
@@ -181,9 +189,9 @@ primvar attributes and `attr_interp` for non-primvar attributes with interpolati
 
 ### UsdLux lights
 
-Light prims (`DistantLight`, `SphereLight`, `RectLight`, `DiskLight`, `DomeLight`) replicate through the same machinery as shaders and materials — they're `UsdShade.ConnectableAPI` containers and their parameters (`intensity`, `color`, `radius`, `shaping:cone:angle`, `texture:file`, etc.) ride on `set_connectable_input` events with empty `info_id`. Applied API schemas (`ShapingAPI` for spot/cone lights, `ShadowAPI` for shadow controls, `MeshLightAPI`/`VolumeLightAPI` for mesh-as-light) flow via the optional `api_schemas` field on `ensure_prim` (additive only — removing an API schema is out of scope for v1).
+Light prims (`DistantLight`, `SphereLight`, `RectLight`, `DiskLight`, `DomeLight`) replicate through the same machinery as shaders and materials — they're `UsdShade.ConnectableAPI` containers and their parameters (`intensity`, `color`, `radius`, `shaping:cone:angle`, `texture:file`, etc.) ride on `set_connectable_input` events with empty `info_id`. Applied API schemas (`ShapingAPI` for spot/cone lights, `ShadowAPI` for shadow controls, `MeshLightAPI`/`VolumeLightAPI` for mesh-as-light) flow via the optional `api_schemas` field on `ensure_prim` (additive only; removing an API schema does not replicate).
 
-The Blender adapter's UsdLux→Blender light translation (intensity↔energy conversion, mapping ShapingAPI to Blender's spot data) is not yet wired up — the receive path lands the schema on the mirror USD stage but doesn't currently create a Blender light object.
+On receive, the Blender adapter creates native light objects for the directly mappable UsdLux types: `SphereLight` becomes a point light, `DistantLight` a sun, `RectLight` and `DiskLight` area lights. `DomeLight` maps to the World environment instead of a light object (Blender has one World per scene, so with multiple domes the most recent wins). Light inputs apply to the light data block: `intensity` to energy, `color`, `radius` (point soft size / disk size), `width`/`height` (area size), and `angle` (sun, converted degrees to radians). UsdLux types with no Blender equivalent (`CylinderLight`, `GeometryLight`, `PortalLight`, `PluginLight`) land on the mirror USD stage only, as do inputs with no clean mapping on the current light type (for example, shaping cone angles on a point light).
 
 ### UsdGeomCamera
 

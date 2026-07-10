@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openusdconnect.codec import decode_messages, encode_message
+from openusdconnect.codec import decode_messages, encode_message, message_to_dict
 
 
 def _event(seq: int, prim: str = "/World/Cube") -> bytes:
@@ -13,6 +13,21 @@ def _event(seq: int, prim: str = "/World/Cube") -> bytes:
             "event": {"k": "ensure_prim", "prim": prim, "typeName": "Xform"},
         }
     )
+
+
+def test_broadcast_event_department_roundtrip():
+    buf = encode_message(
+        {
+            "type": "event",
+            "seq": 7,
+            "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+            "department": "fx",
+        }
+    )
+    assert message_to_dict(buf)["department"] == "fx"
+
+    without = message_to_dict(_event(8))
+    assert "department" not in without
 
 
 class TestDecodeMessages:

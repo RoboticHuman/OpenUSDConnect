@@ -62,6 +62,9 @@ def run_server(
     max_connections: int | None = None,
     txn_rate: float = 0,
     txn_burst: int = 0,
+    wire_metrics: bool = False,
+    compact_interval: float = 0,
+    reclaim_interval: float = 0,
     vfs_port: int | None = None,
     vfs_host: str | None = None,
     vfs_share: str = "usd",
@@ -84,6 +87,9 @@ def run_server(
         durability=durability,
         txn_rate=txn_rate,
         txn_burst=txn_burst,
+        wire_metrics=wire_metrics,
+        compact_interval=compact_interval,
+        reclaim_interval=reclaim_interval,
     )
 
     if compact:
@@ -95,9 +101,60 @@ def run_server(
         run_dashboard(sync_server, dashboard_port)
         LOG.info("Dashboard running on http://localhost:%d", dashboard_port)
 
+    server = ThreadedTCPServer(
+        (host, port), ConnectionHandler, sync_server, max_workers=max_connections
+    )
     vfs_handle = None
-    server = None
-    served = False
+
+    if vfs_port is not None:
+        from .vfs import VirtualStageFileSet, WriteMode, run_vfs_server
+
+        share = _normalize_vfs_share(vfs_share)
+        file_name = _validate_vfs_name(vfs_name)
+        live_name = _validate_vfs_name(vfs_live_name) if vfs_live_name else None
+        layer_dir = _normalize_vfs_share(vfs_layer_dir)
+        manifest_name = _validate_vfs_name(vfs_manifest_name)
+        write_mode = WriteMode(vfs_write_mode)
+        bind_host = vfs_host or host
+        public_host = advertise_host or _default_advertise_host(bind_host)
+        vfs_base_url = f"http://{_host_for_url(public_host)}:{vfs_port}/{share}"
+        provider_file = VirtualStageFileSet(
+            sync_server,
+            flat_name=file_name,
+            advertise_host=public_host,
+            sync_port=port,
+            share=share,
+            vfs_base_url=vfs_base_url,
+            write_mode=write_mode,
+            live_name=live_name,
+            layer_dir=layer_dir,
+            manifest_name=manifest_name,
+            scene_id=sync_server.scene_id,
+            validate_writes=vfs_validate_writes,
+        )
+        vfs_handle = run_vfs_server(provider_file, bind_host, vfs_port, share=share)
+        if vfs_prewarm:
+            provider_file.prewarm(include_flattened=True)
+            LOG.info("VFS snapshot prewarm started")
+        LOG.info("VFS WebDAV running on %s/", vfs_base_url)
+        LOG.info("VFS flattened snapshot: %s/%s", vfs_base_url, file_name)
+        LOG.info("VFS live composition root: %s/%s", vfs_base_url, provider_file.live_name)
+        LOG.info("VFS manifest: %s/%s", vfs_base_url, manifest_name)
+        LOG.info(
+            "Windows UNC path: \\\\%s@%d\\%s\\%s",
+            public_host,
+            vfs_port,
+            share,
+            file_name,
+        )
+        LOG.info(
+            "Windows UNC live root: \\\\%s@%d\\%s\\%s",
+            public_host,
+            vfs_port,
+            share,
+            provider_file.live_name,
+        )
+
     _cleaned_up = False
 
     def _cleanup():
@@ -122,88 +179,28 @@ def run_server(
         except Exception:
             LOG.exception("Failed to close event store")
 
+    atexit.register(_cleanup)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+
+    LOG.info(
+        "Server listening on %s:%s (PID %d) durability=%s",
+        host,
+        port,
+        os.getpid(),
+        sync_server.durability,
+    )
+    LOG.info("Event log: %s", log_path)
+    if base_usd_path:
+        LOG.info("Base USD: %s", base_usd_path)
+    if export_diff:
+        LOG.info("Will export diff to %s on shutdown", export_diff)
     try:
-        server = ThreadedTCPServer(
-            (host, port), ConnectionHandler, sync_server, max_workers=max_connections
-        )
-
-        if vfs_port is not None:
-            from .vfs import VirtualStageFileSet, WriteMode, run_vfs_server
-
-            share = _normalize_vfs_share(vfs_share)
-            file_name = _validate_vfs_name(vfs_name)
-            live_name = _validate_vfs_name(vfs_live_name) if vfs_live_name else None
-            layer_dir = _normalize_vfs_share(vfs_layer_dir)
-            manifest_name = _validate_vfs_name(vfs_manifest_name)
-            write_mode = WriteMode(vfs_write_mode)
-            bind_host = vfs_host or host
-            public_host = advertise_host or _default_advertise_host(bind_host)
-            vfs_base_url = f"http://{_host_for_url(public_host)}:{vfs_port}/{share}"
-            provider_file = VirtualStageFileSet(
-                sync_server,
-                flat_name=file_name,
-                advertise_host=public_host,
-                sync_port=port,
-                share=share,
-                vfs_base_url=vfs_base_url,
-                write_mode=write_mode,
-                live_name=live_name,
-                layer_dir=layer_dir,
-                manifest_name=manifest_name,
-                scene_id=sync_server.scene_id,
-                validate_writes=vfs_validate_writes,
-            )
-            vfs_handle = run_vfs_server(provider_file, bind_host, vfs_port, share=share)
-            if vfs_prewarm:
-                provider_file.prewarm(include_flattened=True)
-                LOG.info("VFS snapshot prewarm started")
-            LOG.info("VFS WebDAV running on %s/", vfs_base_url)
-            LOG.info("VFS flattened snapshot: %s/%s", vfs_base_url, file_name)
-            LOG.info("VFS live composition root: %s/%s", vfs_base_url, provider_file.live_name)
-            LOG.info("VFS manifest: %s/%s", vfs_base_url, manifest_name)
-            LOG.info(
-                "Windows UNC path: \\\\%s@%d\\%s\\%s",
-                public_host,
-                vfs_port,
-                share,
-                file_name,
-            )
-            LOG.info(
-                "Windows UNC live root: \\\\%s@%d\\%s\\%s",
-                public_host,
-                vfs_port,
-                share,
-                provider_file.live_name,
-            )
-
-        atexit.register(_cleanup)
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(
-                signal.SIGTERM,
-                lambda *_: threading.Thread(target=server.shutdown, daemon=True).start(),
-            )
-
-        LOG.info(
-            "Server listening on %s:%s (PID %d) durability=%s",
-            host,
-            port,
-            os.getpid(),
-            sync_server.durability,
-        )
-        LOG.info("Event log: %s", log_path)
-        if base_usd_path:
-            LOG.info("Base USD: %s", base_usd_path)
-        if export_diff:
-            LOG.info("Will export diff to %s on shutdown", export_diff)
-        served = True
         server.serve_forever()
     except KeyboardInterrupt:
         LOG.info("Server shutting down")
     finally:
-        if server is not None:
-            if served:
-                server.shutdown()
-            server.server_close()
+        server.shutdown()
         _cleanup()
 
 
@@ -276,6 +273,30 @@ def main():
         default=0,
         metavar="N",
         help="Max burst size for transaction rate limiter (default: 0 = disabled)",
+    )
+    ap.add_argument(
+        "--wire-metrics",
+        action="store_true",
+        help="Track encoded record bytes per event kind (off by default; "
+        "exposed via the dashboard /api/wire-metrics endpoint)",
+    )
+    ap.add_argument(
+        "--compact-interval",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="Compact the event log every SECONDS (0 = disabled, default). "
+        "Skips when no events arrived since the last compaction. "
+        "Adjustable at runtime via the dashboard.",
+    )
+    ap.add_argument(
+        "--reclaim-interval",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="Reclaim event log disk space (VACUUM on the SQLite backend) "
+        "at most every SECONDS, at compaction/purge commits "
+        "(0 = disabled, default). Pair with --compact-interval.",
     )
     ap.add_argument(
         "--vfs-port",
@@ -365,6 +386,9 @@ def main():
         max_connections=args.max_connections,
         txn_rate=args.txn_rate,
         txn_burst=args.txn_burst,
+        wire_metrics=args.wire_metrics,
+        compact_interval=args.compact_interval,
+        reclaim_interval=args.reclaim_interval,
         vfs_port=args.vfs_port,
         vfs_host=args.vfs_host,
         vfs_share=args.vfs_share,

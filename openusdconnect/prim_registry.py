@@ -24,8 +24,8 @@ def _default_alive(_obj) -> bool:
     """Default liveness check — assumes the object is valid.
 
     DCC adapters should provide their own ``alive_fn`` for proper
-    freed-reference detection (e.g. Blender raises ReferenceError,
-    Maya raises RuntimeError, Houdini raises ObjectWasDeleted).
+    freed-reference detection. The exception type raised on stale
+    handles varies by host runtime.
     """
     return True
 

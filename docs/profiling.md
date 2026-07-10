@@ -106,9 +106,9 @@ py-spy record --pid <BLENDER_PID> --output blender_profile.svg
 
 | Function | What it does |
 |---|---|
-| `_process_queue_timer` | Timer-based event queue drain |
-| `_drain_and_process` | Parses and deduplicates received events |
-| `_process_event` | Dispatches event to BlenderAdapter |
+| `_process_queue_timer` | Timer callback that drains the receive queue |
+| `drain_and_apply` | EventDispatcher cycle: decode, dedup, mirror commit, adapter dispatch |
+| `apply_event` | Dispatches one event to the adapter method |
 
 ## Platform Notes
 

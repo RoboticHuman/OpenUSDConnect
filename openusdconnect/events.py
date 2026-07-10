@@ -198,11 +198,18 @@ class SetVariantSelections(TypedDict):
 
 
 class SetMaterialBinding(TypedDict):
-    """Bind a material to a prim via ``UsdShade.MaterialBindingAPI``."""
+    """Bind a material to a prim via ``UsdShade.MaterialBindingAPI``.
+
+    ``material_purpose`` selects the per-purpose relationship slot.
+    Empty or absent (allPurpose) authors ``material:binding``; ``preview``
+    and ``full`` author the purpose-suffixed rels that consumers select
+    via ``ComputeBoundMaterial(purpose)``.
+    """
 
     k: Literal["set_material_binding"]
     prim: str
     material_path: str
+    material_purpose: NotRequired[str]
 
 
 class SetConnectableInput(TypedDict):

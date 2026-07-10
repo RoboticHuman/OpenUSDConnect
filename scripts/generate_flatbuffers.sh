@@ -21,10 +21,14 @@ flatc --python --gen-all --gen-onefile \
 
 echo "Python bindings generated: $OUT_DIR/messages_generated.py"
 
-# Unreal C++ protocol header (hand-rolled vtable decoding — see script docstring)
-python "$SCRIPT_DIR/generate_unreal_protocol.py"
+# Unreal C++ bindings — one self-contained header, committed alongside the
+# plugin. The generated code pins the flatc runtime version (static_assert);
+# keep setup_flatbuffers.py's DEFAULT_VERSION in lockstep with the flatc
+# used here.
+UE_SCHEMA_DIR="$ROOT/integrations/unreal/OpenUSDConnect/Source/OpenUSDConnect/Private/Schema"
+flatc --cpp --gen-all --cpp-std c++17 \
+    -I "$SCHEMA_DIR" \
+    -o "$UE_SCHEMA_DIR" \
+    "$SCHEMA_DIR/messages.fbs"
 
-# Uncomment to generate other languages:
-# flatc --cpp --gen-all -I "$SCHEMA_DIR" -o "$OUT_DIR/cpp" "$SCHEMA_DIR/messages.fbs"
-# flatc --csharp --gen-all -I "$SCHEMA_DIR" -o "$OUT_DIR/csharp" "$SCHEMA_DIR/messages.fbs"
-# flatc --rust --gen-all -I "$SCHEMA_DIR" -o "$OUT_DIR/rust" "$SCHEMA_DIR/messages.fbs"
+echo "Unreal C++ bindings generated: $UE_SCHEMA_DIR/messages_generated.h (flatc $(flatc --version | grep -o '[0-9.]*'))"

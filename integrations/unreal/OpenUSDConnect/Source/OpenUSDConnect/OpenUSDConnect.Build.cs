@@ -21,8 +21,11 @@ public class OpenUSDConnect : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"USDStage",         // AUsdStageActor
+			"USDStage",         // AUsdStageActor, UUsdPrimLinkCache
+			"USDClasses",       // UUsdAssetCache3
+			"USDUtilities",     // UsdToUnreal::ConvertMaterial, FUsdPrimLinkCache
 			"UnrealUSDWrapper", // FUsdListener + pxr SDK propagation
+			"RHI",              // GMaxRHIShaderPlatform (FMaterialUpdateContext default arg)
 		});
 
 		// Call the engine helper that configures USD SDK linkage, RTTI, exceptions,
@@ -30,14 +33,18 @@ public class OpenUSDConnect : ModuleRules
 		// This is the same pattern USDStage uses.
 		UnrealBuildTool.Rules.UnrealUSDWrapper.CheckAndSetupUsdSdk(Target, this);
 
-		// FlatBuffers headers — shipped with Unreal Engine
-		string FlatBuffersInclude = Path.Combine(
-			EngineDirectory,
-			"Source", "ThirdParty", "flatbuffers", "flatbuffers-24.3.25", "include");
-
-		if (Directory.Exists(FlatBuffersInclude))
+		// FlatBuffers runtime headers (header-only). Always the plugin-local
+		// vendored copy: the flatc-generated bindings under Private/Schema pin
+		// the exact runtime version they were produced with (static_assert),
+		// so whatever version an engine happens to ship cannot be trusted to
+		// match. setup_flatbuffers.py fetches the pinned version.
+		string LocalInclude = Path.Combine(ModuleDirectory, "ThirdParty", "flatbuffers", "include");
+		if (!File.Exists(Path.Combine(LocalInclude, "flatbuffers", "flatbuffer_builder.h")))
 		{
-			PublicSystemIncludePaths.Add(FlatBuffersInclude);
+			throw new BuildException(
+				"OpenUSDConnect: FlatBuffers headers not found. Run  " +
+				"python <plugin>/setup_flatbuffers.py  once, then rebuild.");
 		}
+		PublicSystemIncludePaths.Add(LocalInclude);
 	}
 }

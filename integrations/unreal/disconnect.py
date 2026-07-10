@@ -1,7 +1,7 @@
 """Stop OpenUSDConnect sync in Unreal Engine.
 
-Run from the UE console:
-    py "D:/gamedev/OpenUSDConnect/integrations/unreal/disconnect.py"
+Run from the UE console (use this checkout's absolute path):
+    py "<OpenUSDConnect>/integrations/unreal/disconnect.py"
 """
 
 import os

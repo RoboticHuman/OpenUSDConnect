@@ -101,18 +101,28 @@ def setup_pages(srv: UsdSyncServer):
         dark = ui.dark_mode(True)
 
         # Shared refresh registry — sections register callbacks,
-        # single timer drives them all.
+        # single timer drives them all. Heavier panels that normally
+        # refresh manually register in the full registry instead; the
+        # timer runs those only when the refresh-all toggle is on.
         _refresh_callbacks: list[Callable] = []
+        _full_refresh_callbacks: list[Callable] = []
         _refresh_interval = {"value": 5.0}
+        _refresh_all = {"value": False}
 
         def register_refresh(fn):
             _refresh_callbacks.append(fn)
+
+        def register_full_refresh(fn):
+            _full_refresh_callbacks.append(fn)
 
         def _tick():
             if _refresh_interval["value"] <= 0:
                 return
             for fn in _refresh_callbacks:
                 fn()
+            if _refresh_all["value"]:
+                for fn in _full_refresh_callbacks:
+                    fn()
 
         timer = ui.timer(5.0, _tick)
 
@@ -136,6 +146,23 @@ def setup_pages(srv: UsdSyncServer):
                 value=5,
                 on_change=lambda e: _set_rate(e.value),
             ).props('dense outlined label="Auto-refresh"').classes("w-28")
+
+            def _toggle_refresh_all():
+                _refresh_all["value"] = not _refresh_all["value"]
+                if _refresh_all["value"]:
+                    refresh_all_btn.props(add="color=primary")
+                    for fn in _full_refresh_callbacks:
+                        fn()
+                else:
+                    refresh_all_btn.props(remove="color=primary")
+
+            refresh_all_btn = ui.button(
+                icon="sync", on_click=_toggle_refresh_all,
+            ).props("flat round dense size=sm")
+            refresh_all_btn.tooltip(
+                "Refresh ALL panels on the auto-refresh timer, including the "
+                "manual ones (composed stage, prim tree, proposals)"
+            )
             ui.button(
                 icon="dark_mode",
                 on_click=lambda: dark.set_value(not dark.value),
@@ -152,10 +179,12 @@ def setup_pages(srv: UsdSyncServer):
         _build_stage_metadata(srv, register_refresh)
         _build_status_cards(srv, register_refresh)
         _build_operations(srv)
-        _build_layer_stack(srv, register_refresh)
-        _build_proposals_panel(srv, register_refresh)
+        _build_layer_stack(srv, register_refresh, register_full_refresh)
+        _build_proposals_panel(srv, register_refresh, register_full_refresh)
         _build_clients_table(srv, register_refresh)
-        _build_prim_tree(srv, on_focus=_focus_prim)
+        _build_wire_metrics(srv, register_refresh)
+        _build_prim_tree(srv, on_focus=_focus_prim,
+                         register_full_refresh=register_full_refresh)
         _build_event_feed(srv, register_refresh, feed_api=feed_api)
 
     _register_api_routes(srv)
@@ -218,6 +247,61 @@ def _fmt_vec(v) -> str:
     return "(" + ", ".join(f"{x:g}" for x in v) + ")"
 
 
+def _render_instancing_block(detail: dict):
+    """Render instancing flags plus PointInstancer summary when present."""
+    flags = []
+    if detail.get("isInstance"):
+        flags.append(("INSTANCE", "positive"))
+    elif detail.get("isInstanceable"):
+        flags.append(("INSTANCEABLE", "warning"))
+    if detail.get("isInstanceProxy"):
+        flags.append(("PROXY", "grey-7"))
+    proto = detail.get("prototype")
+    pi = detail.get("pointInstancer")
+    if not (flags or proto or pi):
+        return
+    with ui.row().classes("gap-2 items-center text-xs flex-wrap mt-1"):
+        for label, color in flags:
+            ui.badge(label, color=color).props("dense")
+        if proto:
+            with ui.row().classes("items-center gap-1"):
+                ui.icon("device_hub", size="xs").classes("dash-muted")
+                ui.label("prototype").classes("dash-muted")
+                ui.label(proto).classes("dash-prim font-mono")
+    if pi:
+        with ui.column().classes("w-full gap-1 mt-1 p-2").style(
+            "border: 1px solid rgba(128,128,128,0.18); border-radius: 4px"
+        ):
+            with ui.row().classes("items-center gap-2 text-xs"):
+                ui.icon("grain", size="xs").classes("dash-accent")
+                ui.label("POINT INSTANCER").classes(
+                    "text-xs font-semibold dash-accent uppercase"
+                )
+                ui.space()
+                ui.label(f"{pi.get('instanceCount', 0):,} instances").classes(
+                    "dash-muted font-mono"
+                )
+            protos = pi.get("prototypes") or []
+            if protos:
+                _i_arc = ui.row().classes("items-baseline gap-2 text-xs font-mono w-full")
+                with _i_arc:
+                    ui.icon("link", size="xs").classes("dash-muted")
+                    ui.label(f"prototypes ({len(protos)})").classes("dash-muted")
+                    ui.label(", ".join(protos)).classes("dash-prim flex-1 truncate")
+            animated = pi.get("animatedArrays") or []
+            if animated:
+                with ui.row().classes("items-baseline gap-2 text-xs font-mono w-full"):
+                    ui.icon("schedule", size="xs").classes("dash-muted")
+                    ui.label("animated").classes("dash-muted")
+                    ui.label(", ".join(animated)).classes("dash-kind flex-1 truncate")
+            inactive = pi.get("inactiveIdCount")
+            if inactive:
+                with ui.row().classes("items-baseline gap-2 text-xs font-mono w-full"):
+                    ui.icon("visibility_off", size="xs").classes("dash-muted")
+                    ui.label("inactiveIds").classes("dash-muted")
+                    ui.label(str(inactive)).classes("dash-prim")
+
+
 def _render_prim_detail(detail: dict):
     """Render a get_prim_detail() dict into the current container."""
     if not detail.get("exists"):
@@ -269,6 +353,8 @@ def _render_prim_detail(detail: dict):
     if detail.get("materialBinding"):
         _arc_line("palette", "material", [detail["materialBinding"]])
 
+    _render_instancing_block(detail)
+
     attrs = detail.get("attributes", [])
     ui.separator().classes("my-1")
     with ui.row().classes("items-center gap-2"):
@@ -296,7 +382,7 @@ def _render_prim_detail(detail: dict):
                     ui.label(str(a["numTimeSamples"])).classes("dash-muted")
 
 
-def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
+def _build_prim_tree(srv: UsdSyncServer, on_focus=None, register_full_refresh=None):
     """Stage prim tree with a composed-state inspector.
 
     Selecting a prim renders its composed detail and (via on_focus) filters
@@ -337,9 +423,19 @@ def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
     def _build_tree_nodes(prims: list[dict]) -> list[dict]:
         nodes_by_path: dict[str, dict] = {}
         for p in prims:
+            badges = []
+            if p.get("instanceable"):
+                badges.append("[I]")
+            if p.get("is_point_instancer"):
+                badges.append("[PI]")
+            suffix = (" " + " ".join(badges)) if badges else ""
             nodes_by_path[p["path"]] = {
                 "id": p["path"],
-                "label": p["path"].rsplit("/", 1)[-1] + f"  ({p['typeName']})",
+                "label": (
+                    p["path"].rsplit("/", 1)[-1]
+                    + f"  ({p['typeName']})"
+                    + suffix
+                ),
                 "children": [],
             }
         roots = []
@@ -399,10 +495,12 @@ def _build_prim_tree(srv: UsdSyncServer, on_focus=None):
 
     _show_placeholder()
     _refresh_tree()
+    if register_full_refresh:
+        register_full_refresh(_refresh_tree)
 
 
 def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
-    """Four stat cards."""
+    """Five stat cards plus an instancing strip."""
     with ui.row().classes("w-full gap-4 mb-4"):
         with ui.card().classes("flex-1"):
             ui.label("UPTIME").classes("text-xs dash-muted uppercase")
@@ -416,6 +514,11 @@ def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
         with ui.card().classes("flex-1"):
             ui.label("PRIMS (STAGE / TRACKED)").classes("text-xs dash-muted uppercase")
             prim_val = ui.label("--").classes("text-2xl font-bold dash-accent")
+        with ui.card().classes("flex-1").tooltip(
+            "Instanceable-flag prims (left) and the composition's resolved prototype count"
+        ):
+            ui.label("INSTANCES / PROTOTYPES").classes("text-xs dash-muted uppercase")
+            inst_val = ui.label("--").classes("text-2xl font-bold dash-accent")
 
     def _fmt(s):
         h, r = divmod(int(s), 3600)
@@ -427,6 +530,7 @@ def _build_status_cards(srv: UsdSyncServer, register_refresh=None):
         event_val.text = f"{srv.get_event_count():,}"
         client_val.text = str(len(srv.get_client_list()))
         prim_val.text = f"{srv.get_prim_count()} / {srv.get_tracked_prim_count()}"
+        inst_val.text = f"{srv.get_instance_count()} / {srv.get_prototype_count()}"
 
     if register_refresh:
         register_refresh(refresh)
@@ -470,9 +574,39 @@ def _build_operations(srv: UsdSyncServer):
                 )
         dialog.open()
 
-    with ui.row().classes("gap-2 mb-4"):
+    def _set_auto_compact(e):
+        seconds = float(e.value or 0)
+        srv.set_compact_interval(seconds)
+        ui.notify(
+            f"Auto-compact every {seconds:.0f}s" if seconds > 0 else "Auto-compact off",
+            type="info",
+        )
+
+    def _set_auto_reclaim(e):
+        seconds = float(e.value or 0)
+        srv.set_reclaim_interval(seconds)
+        ui.notify(
+            f"Reclaim storage every {seconds:.0f}s" if seconds > 0 else "Storage reclaim off",
+            type="info",
+        )
+
+    with ui.row().classes("gap-2 mb-4 items-center"):
         ui.button("Compact Log", icon="compress", on_click=compact).props(
             "outline dense no-caps"
+        )
+        ui.number(
+            label="Auto-compact (s)", value=srv.get_compact_interval(), min=0,
+            on_change=_set_auto_compact,
+        ).props("dense outlined").classes("w-32").tooltip(
+            "Compact the event log every N seconds (0 = off). Skips when "
+            "idle; incoming edits queue during the compaction commit."
+        )
+        ui.number(
+            label="Reclaim disk (s)", value=srv.get_reclaim_interval(), min=0,
+            on_change=_set_auto_reclaim,
+        ).props("dense outlined").classes("w-32").tooltip(
+            "Return freed event-log disk space at most every N seconds "
+            "(0 = off). Runs at compaction/purge, so pair with auto-compact."
         )
         ui.button("Export Diff", icon="difference", on_click=export_diff).props(
             "outline dense no-caps"
@@ -529,7 +663,8 @@ def _build_per_layer_view(srv: UsdSyncServer):
             ui.label(usda).classes("usda-viewer")
 
 
-def _build_layer_stack(srv: UsdSyncServer, register_refresh=None):
+def _build_layer_stack(srv: UsdSyncServer, register_refresh=None,
+                       register_full_refresh=None):
     """Layer stack panel with composed USDA viewer side-by-side."""
 
     with ui.row().classes("w-full gap-4 mb-4 items-start"):
@@ -577,6 +712,11 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None):
 
     view_toggle.on_value_change(lambda _: _refresh_composed())
 
+    # Per-layer roster expansion open/closed state, keyed by layer
+    # identifier. The timer rebuilds the cards every tick; without this
+    # an open roster would snap shut on every refresh.
+    roster_open: dict[str, bool] = {}
+
     def _refresh_layer_cards():
         """Refresh only the layer card list (safe for timer — no expansion reset)."""
         layers = srv.get_layer_stack_info()
@@ -594,6 +734,7 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None):
                         i, info, connected_clients,
                         _mute, _unmute, _merge, _move_layer,
                         is_first=(i == 0), is_last=(i == n - 1),
+                        roster_open=roster_open,
                     )
 
     def _refresh_all():
@@ -641,18 +782,26 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None):
 
     if register_refresh:
         register_refresh(_timer_tick)
+    if register_full_refresh:
+        # Transforms mode already refreshes on the light timer; the full
+        # pass covers the Per Layer / Full USDA modes.
+        register_full_refresh(
+            lambda: None if view_toggle.value == "transforms" else _refresh_composed()
+        )
 
 
 def _build_layer_card(
     i, info, connected_clients,
     on_mute, on_unmute, on_merge, on_move,
     is_first=False, is_last=False,
+    roster_open=None,
 ):
     """Render a single layer card in the stack."""
     dept = info.get("department")
     clients = info.get("clients", [])
     muted = info.get("muted", False)
     identifier = info.get("identifier", "")
+    shared = info.get("shared", False)
 
     with ui.card().classes("w-full p-2"):
         with ui.row().classes("items-center w-full gap-2"):
@@ -676,6 +825,11 @@ def _build_layer_card(
             if dept:
                 ui.icon("layers", size="xs").classes("dash-accent")
                 ui.label(dept).classes("font-semibold text-sm dash-accent")
+            elif shared:
+                ui.icon("group", size="xs").classes("dash-muted")
+                ui.label("shared edits").classes("font-semibold text-sm").tooltip(
+                    "Communal fallback layer for clients without a department"
+                )
             else:
                 ui.icon("person", size="xs").classes("dash-muted")
                 label = clients[0] if clients else identifier
@@ -683,15 +837,15 @@ def _build_layer_card(
 
             ui.space()
 
-            # Connected/disconnected indicators
-            for cid in clients:
-                online = cid in connected_clients
-                color = "positive" if online else "grey-6"
-                ui.icon(
-                    "circle", size="xs",
-                ).classes(f"text-{color}").tooltip(
-                    f"{cid} — {'connected' if online else 'disconnected'}"
-                )
+            # Connection summary: one dot + connected/total, not a dot
+            # per client (unreadable past a handful).
+            online_count = sum(1 for cid in clients if cid in connected_clients)
+            if clients:
+                dot = "positive" if online_count else "grey-6"
+                ui.icon("circle", size="xs").classes(f"text-{dot}")
+                ui.label(f"{online_count}/{len(clients)}").classes(
+                    "text-xs dash-muted font-mono"
+                ).tooltip(f"{online_count} of {len(clients)} clients connected")
 
             # Muted badge
             if muted:
@@ -711,25 +865,46 @@ def _build_layer_card(
                         on_click=lambda k=key: on_mute(k),
                     ).props("flat round dense size=sm").tooltip("Mute")
 
-            # Merge button (only for non-department, single client)
-            if not dept and clients:
+            # Merge button (per-client layers only; the shared layer is
+            # communal and merge_layer refuses it)
+            if not dept and not shared and clients:
                 ui.button(
                     icon="merge",
                     on_click=lambda cid=clients[0]: on_merge(cid),
                 ).props("flat round dense size=sm").tooltip("Merge into root")
 
-        # Client list for department layers
-        if dept and clients:
-            with ui.row().classes("pl-8 gap-1 flex-wrap"):
-                for cid in clients:
-                    online = cid in connected_clients
-                    ui.label(cid).classes(
-                        "text-xs font-mono "
-                        + ("" if online else "dash-muted")
+        # Full roster in a collapsed, scrollable expansion (connected first)
+        # so a layer with hundreds of clients stays one compact card. Open
+        # state persists across timer rebuilds via roster_open.
+        if (dept or shared) and clients:
+            exp = ui.expansion(f"clients ({len(clients)})", value=bool(
+                (roster_open or {}).get(identifier, False)
+            )).props("dense header-class=text-caption").classes("w-full")
+            if roster_open is not None:
+                exp.on_value_change(
+                    lambda e, ident=identifier: roster_open.__setitem__(
+                        ident, bool(e.value)
                     )
+                )
+            with exp, ui.row().classes("gap-x-3 gap-y-1 flex-wrap pl-2").style(
+                "max-height: 130px; overflow-y: auto"
+            ):
+                ordered = sorted(
+                    clients, key=lambda c: (c not in connected_clients, c)
+                )
+                for cid in ordered:
+                    online = cid in connected_clients
+                    with ui.row().classes("items-center gap-1"):
+                        ui.icon("circle", size="8px").classes(
+                            "text-positive" if online else "text-grey-6"
+                        )
+                        ui.label(cid).classes(
+                            "text-xs font-mono" + ("" if online else " dash-muted")
+                        )
 
 
-def _build_proposals_panel(srv: UsdSyncServer, register_refresh=None):
+def _build_proposals_panel(srv: UsdSyncServer, register_refresh=None,
+                           register_full_refresh=None):
     """Cross-department edit proposals panel."""
     with ui.row().classes("items-center gap-2 mb-1"):
         ui.label("PROPOSALS").classes(
@@ -828,6 +1003,10 @@ def _build_proposals_panel(srv: UsdSyncServer, register_refresh=None):
 
     if register_refresh:
         register_refresh(_check_proposals)
+    if register_full_refresh:
+        # The light timer only reacts to count changes; the full pass
+        # also picks up status/content changes on existing proposals.
+        register_full_refresh(_refresh_proposals)
 
 
 def _build_clients_table(srv: UsdSyncServer, register_refresh=None):
@@ -870,6 +1049,55 @@ def _build_clients_table(srv: UsdSyncServer, register_refresh=None):
     # Token management (only when TOFU is enabled)
     if srv.require_token:
         _build_token_panel(srv)
+
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
+
+
+def _build_wire_metrics(srv: UsdSyncServer, register_refresh=None):
+    """Encoded bytes per event kind (only when --wire-metrics is on)."""
+    if srv.wire_metrics is None:
+        return
+    ui.label("WIRE TRAFFIC BY EVENT KIND").classes(
+        "text-xs font-semibold dash-muted uppercase mb-1"
+    )
+
+    columns = [
+        {"name": "kind", "label": "Kind", "field": "kind", "align": "left"},
+        {"name": "count", "label": "Count", "field": "count", "align": "right"},
+        {"name": "bytes", "label": "Bytes", "field": "bytes", "align": "right"},
+        {"name": "avg", "label": "Avg", "field": "avg", "align": "right"},
+        {"name": "share", "label": "Share", "field": "share", "align": "right"},
+    ]
+    table = ui.table(
+        columns=columns, rows=[], row_key="kind",
+    ).props("dense flat bordered").classes("w-full mb-4")
+
+    def refresh():
+        m = srv.get_wire_metrics()
+        total = m["total_bytes"] or 1
+        rows = [
+            {
+                "kind": kind,
+                "count": f"{v['count']:,}",
+                "bytes": _fmt_bytes(v["bytes"]),
+                "avg": _fmt_bytes(v["bytes"] // max(v["count"], 1)),
+                "share": f"{v['bytes'] / total * 100:.1f}%",
+                "_bytes": v["bytes"],
+            }
+            for kind, v in m["kinds"].items()
+        ]
+        rows.sort(key=lambda r: -r["_bytes"])
+        table.rows = rows
+
+    if register_refresh:
+        register_refresh(refresh)
+    refresh()
 
 
 def _build_token_panel(srv: UsdSyncServer):
@@ -955,6 +1183,10 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
     feed_container = ui.column().classes("w-full gap-0")
     feed_container.move(feed_scroll)
 
+    # Expansions are reconstructed on every _rebuild, so we remember
+    # which seqs the user opened and restore them after the rebuild.
+    expanded_seqs: set = set()
+
     def _query():
         limit = page_size_sel.value
         offset = current_page["value"] * limit
@@ -971,7 +1203,18 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
         client = rec.get("client_id") or rec.get("client", "")
         origin = rec.get("origin", "")
 
-        exp = ui.expansion(icon="chevron_right").classes("w-full")
+        exp = ui.expansion(
+            icon="chevron_right", value=seq in expanded_seqs,
+        ).classes("w-full")
+
+        def _on_toggle(e, s=seq):
+            if e.value:
+                expanded_seqs.add(s)
+            else:
+                expanded_seqs.discard(s)
+
+        exp.on_value_change(_on_toggle)
+
         with exp.add_slot("header"):
             with ui.row().classes(
                 "items-center gap-3 w-full font-mono text-xs"
@@ -1074,6 +1317,8 @@ def _register_api_routes(srv: UsdSyncServer):
             "client_count": len(srv.get_client_list()),
             "prim_count": srv.get_prim_count(),
             "tracked_prim_count": srv.get_tracked_prim_count(),
+            "instance_count": srv.get_instance_count(),
+            "prototype_count": srv.get_prototype_count(),
         }
 
     @app.get("/api/clients")
@@ -1088,6 +1333,30 @@ def _register_api_routes(srv: UsdSyncServer):
     @app.get("/api/server-info")
     def api_server_info():
         return srv.get_server_info()
+
+    @app.get("/api/wire-metrics")
+    def api_wire_metrics():
+        return srv.get_wire_metrics()
+
+    @app.get("/api/compact-interval")
+    def api_get_compact_interval():
+        return {"seconds": srv.get_compact_interval()}
+
+    @app.post("/api/compact-interval")
+    async def api_set_compact_interval(request: Request):
+        body = await request.json()
+        srv.set_compact_interval(float(body.get("seconds", 0)))
+        return {"ok": True, "seconds": srv.get_compact_interval()}
+
+    @app.get("/api/reclaim-interval")
+    def api_get_reclaim_interval():
+        return {"seconds": srv.get_reclaim_interval()}
+
+    @app.post("/api/reclaim-interval")
+    async def api_set_reclaim_interval(request: Request):
+        body = await request.json()
+        srv.set_reclaim_interval(float(body.get("seconds", 0)))
+        return {"ok": True, "seconds": srv.get_reclaim_interval()}
 
     @app.get("/api/prim-tree")
     def api_prim_tree():

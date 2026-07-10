@@ -4,6 +4,10 @@ Intermediate/
 DerivedDataCache/
 Saved/
 
+# FlatBuffers runtime headers fetched by setup_flatbuffers.py (version pinned
+# to the committed flatc-generated bindings under Private/Schema)
+Source/OpenUSDConnect/ThirdParty/flatbuffers/
+
 # Visual Studio user files (in case someone runs GenerateProjectFiles from this dir)
 *.suo
 *.user

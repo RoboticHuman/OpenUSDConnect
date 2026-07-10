@@ -28,7 +28,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect.sender import EventSender  # noqa: E402
+from openusdconnect.sender import EventSender  # noqa: E402,I001
 
 
 DEFAULT_ASSET = (

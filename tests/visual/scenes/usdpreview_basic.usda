@@ -1,0 +1,95 @@
+#usda 1.0
+(
+    """Visual-regression reference scene: UsdPreviewSurface, solid colors, no
+    external texture dependencies so it stays self-contained and deterministic.
+
+    /World/_TestCam is the canonical harness camera (fixed transform + lens).
+    A red sphere on a gray ground plane, lit by a uniform dome plus one sphere
+    key light. Renders identically under any Hydra delegate that supports
+    UsdPreviewSurface (RIS is the reference)."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "_TestCam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (0.1, 1000)
+        token projection = "perspective"
+        double3 xformOp:translate = (0, 0.75, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Dome"
+    {
+        float inputs:intensity = 1
+        color3f inputs:color = (1, 1, 1)
+    }
+
+    def SphereLight "KeyLight"
+    {
+        float inputs:intensity = 80
+        float inputs:radius = 1
+        bool inputs:normalize = 1
+        double3 xformOp:translate = (4, 5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1
+        float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+        rel material:binding = </World/Materials/RedPreview>
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Ground" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-12, -1, -12), (12, -1, -12), (12, -1, 6), (-12, -1, 6)]
+        float3[] extent = [(-12, -1, -12), (12, -1, 6)]
+        rel material:binding = </World/Materials/GrayPreview>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "RedPreview"
+        {
+            token outputs:surface.connect = </World/Materials/RedPreview/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+                float inputs:metallic = 0
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+
+        def Material "GrayPreview"
+        {
+            token outputs:surface.connect = </World/Materials/GrayPreview/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                float inputs:metallic = 0
+                float inputs:roughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+}

@@ -15,7 +15,6 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_XFORM_TRS,
-    MSG_EVENT,
 )
 from openusdconnect.server import UsdSyncServer
 
@@ -29,18 +28,10 @@ def _make_server(tmp_path, department_priority=None):
 
 
 def _emit_events(srv, client_id, events, department=None):
-    """Simulate an emitter: create layer, apply txn, persist."""
-    from openusdconnect.codec import encode_message
-
+    """Simulate an emitter through the production txn path: create layer,
+    apply, persist (records carry the sender's department for replay)."""
     layer = srv.get_or_create_client_layer(client_id, department=department)
-    srv.apply_txn(events, layer=layer)
-    tuples = []
-    for ev in events:
-        seq = srv.assign_seq()
-        rec = {"type": MSG_EVENT, "seq": seq, "event": ev, "client_id": client_id}
-        rec_bin = encode_message(rec)
-        tuples.append((seq, rec_bin, client_id, ev.get("k"), ev.get("prim")))
-    srv.append_log_batch(tuples)
+    srv.process_txn(events, client_id=client_id, layer=layer)
 
 
 def _read_translate(stage, prim_path):
@@ -331,6 +322,27 @@ class TestLayerStackInfo:
         info = srv.get_layer_stack_info()
         assert info[0]["muted"] is False
 
+    def test_shared_layer_grouped_and_flagged(self, tmp_path):
+        """All department-less clients group onto one shared card, flagged
+        shared; the communal layer refuses merge."""
+        srv = _make_server(tmp_path, department_priority=["animation"])
+        _emit_events(srv, "anim-01", _make_trs_events("/World/A", (1, 2, 3)),
+                     department="animation")
+        _emit_events(srv, "loose-01", _make_trs_events("/World/B", (4, 5, 6)))
+        _emit_events(srv, "loose-02", _make_trs_events("/World/C", (7, 8, 9)))
+
+        info = srv.get_layer_stack_info()
+        shared = [e for e in info if e.get("shared")]
+        assert len(shared) == 1
+        assert sorted(shared[0]["clients"]) == ["loose-01", "loose-02"]
+        assert shared[0]["department"] is None
+
+        dept = [e for e in info if e["department"] == "animation"]
+        assert dept and not dept[0].get("shared")
+
+        assert srv.merge_layer("loose-01") is False
+        srv.store.close()
+
 
 class TestMergeParity:
     def test_merge_preserves_composed_parity(self, tmp_path):
@@ -520,6 +532,13 @@ class TestReplayWithClientLayers:
         # Events routed to separate client layers
         assert "alice" in srv2.client_layers
         assert "bob" in srv2.client_layers
+
+        # Opinions landed in the department layers themselves, not the
+        # shared fallback: replay preserves layer topology and strength.
+        assert srv2._dept_layers["layout"].GetPrimAtPath("/World/A")
+        assert srv2._dept_layers["animation"].GetPrimAtPath("/World/B")
+        assert not srv2.edit_layer.GetPrimAtPath("/World/A")
+        assert not srv2.edit_layer.GetPrimAtPath("/World/B")
         srv2.store.close()
 
 
@@ -610,6 +629,28 @@ class TestConcurrentDepartmentWrites:
             assert (val[0], val[1], val[2]) == expected, (
                 f"Layer opinion for {prim_path}: {val} != {expected}"
             )
+
+    def test_op_cache_invalidated_on_edit_target_change(self, tmp_path):
+        """Deterministic pin for the fix behind the flaky concurrent failures.
+
+        A cached XformOp is only valid while the stage edit target is unchanged.
+        Under concurrent department writes the edit target switches between
+        transactions, so the op cache must be invalidated on every switch; a
+        cache reused across a switch authors against the wrong layer and the
+        write is lost. ``_op_cache_for`` clears on change and keeps the cache
+        for consecutive same-layer edits (the single-client fast path).
+        """
+        srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
+        la = srv.get_or_create_client_layer("alice", "animation")
+        lb = srv.get_or_create_client_layer("bob", "lighting")
+
+        cache = srv._op_cache_for(la)
+        cache["/World/P"] = object()
+        # switching the edit target invalidates the cache
+        assert "/World/P" not in srv._op_cache_for(lb)
+        # staying on the same layer keeps it (no needless re-fetch)
+        srv._op_cache_for(lb)["/World/Q"] = object()
+        assert "/World/Q" in srv._op_cache_for(lb)
 
     def test_concurrent_writes_to_same_prim(self, tmp_path):
         """Two departments writing to the same prim concurrently.

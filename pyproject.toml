@@ -1,13 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openusdconnect"]
+
 [project]
 name = "openusdconnect"
 version = "0.1.0"
 description = "General-purpose real-time USD sync framework for DCC livelink"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "cachetools==7.0.5",
     "flatbuffers==25.12.19",
     "numpy==2.4.4",
 ]
+
+[project.urls]
+Repository = "https://github.com/RoboticHuman/OpenUSDConnect"
 
 [dependency-groups]
 dev = [
@@ -25,14 +38,21 @@ vfs = [
     "cheroot==10.0.1",
     "wsgidav==4.3.3",
 ]
+mcp = [
+    "mcp>=1.2",
+]
 profile = [
     "py-spy==0.4.2",
+]
+visual = [
+    "flip-evaluator==1.7",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "materialx: MaterialX shader mapper integration tests (require Blender)",
+    "slow: timing-dependent tests that wait out real intervals; opt in with --slow-tests",
 ]
 # Blender integration tests: configure via one of:
 #   uv run pytest --blender /path/to/blender.exe
@@ -98,6 +118,8 @@ select = [
 "tests/unit/test_playback_leader.py" = ["E402"]
 "scripts/*.py" = ["E402", "E501"]
 "integrations/unreal/connect.py" = ["E402"]
+"tests/unit/test_mcp_*.py" = ["E402"]
+"tests/integration/test_mcp_*.py" = ["E402"]
 
 [tool.coverage.run]
 source = ["openusdconnect"]

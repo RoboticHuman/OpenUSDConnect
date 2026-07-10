@@ -147,6 +147,103 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
         stop_server(server)
 
 
+def test_chair_backlog_replay(blender_exe, tmp_path):
+    """Chair material inheritance after a SINGLE full backlog replay
+    (sync_from=1), with no second resync.
+
+    The scene is authored to the server BEFORE Blender connects, with the wood
+    material bound only on the parent Xform and the binding authored before the
+    child cubes exist. The receiver replays it all in one full sync; the native
+    child cubes must inherit the wood material after that single replay.
+    """
+    from openusdconnect.protocol_constants import (
+        K_ENSURE_PRIM,
+        K_ENSURE_XFORM_OPS,
+        K_SET_CONNECTABLE_CONNECTION,
+        K_SET_CONNECTABLE_INPUT,
+        K_SET_MATERIAL_BINDING,
+        K_SET_XFORM_TRS,
+    )
+    from openusdconnect.sender import EventSender
+
+    port = 7217
+    server = start_server(tmp_path, port)
+    try:
+        sender = EventSender(
+            host="127.0.0.1", port=port, client_id="chair-emit",
+            role="emitter", origin="chair-origin",
+        )
+        assert sender.connect(), "chair EventSender failed to connect"
+        try:
+            def _cube(p, t, s):
+                return [
+                    {"k": K_ENSURE_PRIM, "prim": p, "typeName": "Cube"},
+                    {"k": K_ENSURE_XFORM_OPS, "prim": p},
+                    {"k": K_SET_XFORM_TRS, "prim": p, "fields": ["t", "s"], "t": t, "s": s},
+                ]
+
+            wood_network = [
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks", "typeName": "Scope"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/Wood", "typeName": "Material"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Looks/Wood/Surface", "typeName": "Shader"},
+                {
+                    "k": K_SET_CONNECTABLE_INPUT,
+                    "prim": "/World/Looks/Wood/Surface",
+                    "info_id": "UsdPreviewSurface",
+                    "inputs": {
+                        "diffuseColor": [0.4, 0.26, 0.13],
+                        "metallic": 0.0,
+                        "roughness": 0.6,
+                    },
+                    "input_types": {
+                        "diffuseColor": "color3f",
+                        "metallic": "float",
+                        "roughness": "float",
+                    },
+                },
+                {"k": K_SET_CONNECTABLE_CONNECTION, "prim": "/World/Looks/Wood",
+                 "connections": {"outputs:surface": {
+                     "source_prim": "/World/Looks/Wood/Surface", "source_attr": "outputs:surface"}},
+                 "disconnections": []},
+            ]
+            # The parent-Xform binding is authored BEFORE the child cubes, so at
+            # binding-apply time the chair Empty has no children to propagate to.
+            # The cubes must still inherit the material once they are created.
+            events = [
+                {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+                {"k": K_ENSURE_PRIM, "prim": "/World/Chair", "typeName": "Xform"},
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Chair"},
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Chair",
+                    "fields": ["t"],
+                    "t": [0.0, 0.0, 0.0],
+                },
+                *wood_network,
+                {"k": K_SET_MATERIAL_BINDING, "prim": "/World/Chair",
+                 "material_path": "/World/Looks/Wood"},
+                *_cube("/World/Chair/Seat", [0.0, 0.42, 0.0], [0.46, 0.06, 0.46]),
+                *_cube("/World/Chair/LegFL", [-0.4, 0.2, -0.4], [0.05, 0.4, 0.05]),
+                *_cube("/World/Chair/Backrest", [0.0, 0.9, -0.4], [0.46, 0.4, 0.05]),
+            ]
+            assert sender.send_events(events), "send_events returned False"
+        finally:
+            sender.disconnect()
+
+        r = run_blender(blender_exe, os.path.join(SCRIPTS_DIR, "test_chair_replay.py"),
+                        port, timeout=90, background=False)
+        print("\n=== test_chair_replay.py stdout ===")
+        print(r.stdout[-2000:] if len(r.stdout) > 2000 else r.stdout)
+        if r.stderr:
+            print("=== stderr ===")
+            print(r.stderr[-500:])
+        assert "SUCCESS" in r.stdout, (
+            f"chair backlog replay did not print SUCCESS.\nLast output: {r.stdout[-800:]}"
+        )
+    finally:
+        stop_server(server)
+
+
 def test_two_blender_playback(blender_exe, tmp_path):
     """Two Blender processes share a server; one claims playback and
     scrubs through frames, the other follows. Asserts SUCCESS in both.

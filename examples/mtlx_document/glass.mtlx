@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<materialx version="1.38">
+  <standard_surface name="glass_srf" type="surfaceshader">
+    <input name="base" type="float" value="0" />
+    <input name="specular_roughness" type="float" value="0" />
+    <input name="specular_IOR" type="float" value="1.5" />
+    <input name="transmission" type="float" value="1" />
+    <input name="transmission_color" type="color3" value="0.55, 0.9, 0.85" />
+  </standard_surface>
+  <surfacematerial name="GlassMtlx" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="glass_srf" />
+  </surfacematerial>
+</materialx>

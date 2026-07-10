@@ -637,3 +637,42 @@ class TestSchemaProtocolSync:
             f"in schema but not codec: {fb_tags - codec_tags}, "
             f"in codec but not schema: {codec_tags - fb_tags}"
         )
+
+
+class TestConnectableInputDeclaredTypeWire:
+    """Numeric payload slots follow the declared type, not the emitting
+    language's literal type: a JSON 1 / [1, 1, 1] for float-typed inputs
+    travels in the float slots, so typed receivers never see int payloads
+    for float inputs."""
+
+    def test_integral_literals_encode_as_floats(self):
+        ev = {
+            "k": "set_connectable_input",
+            "prim": "/World/Looks/Chrome/Surface",
+            "info_id": "UsdPreviewSurface",
+            "inputs": {"diffuseColor": [1, 1, 1], "metallic": 1, "roughness": 0},
+            "input_types": {
+                "diffuseColor": "color3f",
+                "metallic": "float",
+                "roughness": "float",
+            },
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["diffuseColor"] == [1.0, 1.0, 1.0]
+        assert all(isinstance(v, float) for v in d["inputs"]["diffuseColor"])
+        assert isinstance(d["inputs"]["metallic"], float)
+        assert isinstance(d["inputs"]["roughness"], float)
+
+    def test_int_declared_inputs_stay_int(self):
+        ev = {
+            "k": "set_connectable_input",
+            "prim": "/World/Looks/M/S",
+            "info_id": "MyShader",
+            "inputs": {"samples": 4, "indices": [1, 2, 3]},
+            "input_types": {"samples": "int", "indices": "int[]"},
+        }
+        d = _txn_roundtrip(ev)
+        assert d["inputs"]["samples"] == 4
+        assert isinstance(d["inputs"]["samples"], int)
+        assert d["inputs"]["indices"] == [1, 2, 3]
+        assert all(isinstance(v, int) for v in d["inputs"]["indices"])

@@ -19,20 +19,19 @@ try:
     from openusdconnect.adapters import MockAdapter, UsdStageAdapter
     from openusdconnect.emitter import NoticeEmitter
     from openusdconnect.event_apply import apply_events
+    from openusdconnect.protocol_constants import (
+        K_ENSURE_PRIM,
+        K_SET_GPRIM_ATTRS,
+        K_SET_INSTANCEABLE,
+        K_SET_POINT_INSTANCER,
+        MSG_TXN,
+    )
 
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
-
-from openusdconnect.protocol_constants import (
-    K_ENSURE_PRIM,
-    K_SET_GPRIM_ATTRS,
-    K_SET_INSTANCEABLE,
-    K_SET_POINT_INSTANCER,
-    MSG_TXN,
-)
 
 WXYZ = np.array([[1, 0, 0, 0], [0.5, 0.5, 0.5, 0.5]], dtype=np.float32)
 
@@ -265,7 +264,9 @@ def test_emitter_first_encounter_emits_full_point_instancer():
     pi_evs = [e for e in events if e["k"] == K_SET_POINT_INSTANCER]
     assert len(pi_evs) == 1
     ev = pi_evs[0]
-    assert sorted(ev["fields"]) == ["ids", "orientations", "positions", "proto_indices", "prototypes"]
+    assert sorted(ev["fields"]) == [
+        "ids", "orientations", "positions", "proto_indices", "prototypes",
+    ]
     # quath source converts to float32 wxyz rows on the wire
     assert np.allclose(ev["orientations"][1], [0.5, 0.5, 0.5, 0.5])
     assert np.asarray(ev["ids"]).dtype == np.int64
@@ -342,8 +343,9 @@ def test_emitter_animated_point_instancer_per_time_events():
     emitter = NoticeEmitter(stage)
     stage.DefinePrim("/Protos/A", "Xform")
     pi = _author_pi(stage)
-    pi.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(2, 0, 0)]), Usd.TimeCode(1.0))
-    pi.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(3, 0, 0), Gf.Vec3f(4, 0, 0)]), Usd.TimeCode(2.0))
+    pos_attr = pi.GetPositionsAttr()
+    pos_attr.Set(Vt.Vec3fArray([Gf.Vec3f(1, 0, 0), Gf.Vec3f(2, 0, 0)]), Usd.TimeCode(1.0))
+    pos_attr.Set(Vt.Vec3fArray([Gf.Vec3f(3, 0, 0), Gf.Vec3f(4, 0, 0)]), Usd.TimeCode(2.0))
     events = emitter.build_events_for_dirty()
     timed = [e for e in events if e["k"] == K_SET_POINT_INSTANCER and "time" in e]
     assert {e["time"] for e in timed} == {1.0, 2.0}
@@ -353,7 +355,9 @@ def test_emitter_animated_point_instancer_per_time_events():
     assert emitter.build_events_for_dirty() == []
 
     # changing one sample re-emits only that time
-    pi.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(9, 0, 0), Gf.Vec3f(9, 0, 0)]), Usd.TimeCode(2.0))
+    pi.GetPositionsAttr().Set(
+        Vt.Vec3fArray([Gf.Vec3f(9, 0, 0), Gf.Vec3f(9, 0, 0)]), Usd.TimeCode(2.0),
+    )
     out = emitter.build_events_for_dirty()
     timed = [e for e in out if e["k"] == K_SET_POINT_INSTANCER and "time" in e]
     assert [e["time"] for e in timed] == [2.0]
@@ -534,7 +538,9 @@ def test_round_trip_emitter_codec_apply():
     _make_instance(src, path="/World/Tree", proto="/Protos/Tree")
     src.DefinePrim("/Protos/A", "Xform")
     pi = _author_pi(src, quat_half=True)
-    pi.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(7, 7, 7), Gf.Vec3f(8, 8, 8)]), Usd.TimeCode(48.0))
+    pi.GetPositionsAttr().Set(
+        Vt.Vec3fArray([Gf.Vec3f(7, 7, 7), Gf.Vec3f(8, 8, 8)]), Usd.TimeCode(48.0),
+    )
 
     decoded = _round_trip(emitter.build_events_for_dirty())
     dst = Usd.Stage.CreateInMemory()

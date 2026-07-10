@@ -451,6 +451,327 @@ class TestMaterialXComposeParity:
                 f"NodeGraph baseColor sourceType on {label}: {src.sourceType}"
             )
 
+    def test_nested_nodegraphs_round_trip(self, srv):
+        """Material -> NG_outer -> NG_inner -> Shader survives the wire.
+
+        Three-level interface forwarding (Material.surface -> NG_outer.surface
+        -> NG_inner.surface -> Shader.surface) plus an input value plumbed
+        down the same path (Material.tint -> NG_outer.tint -> NG_inner.tint
+        -> Shader.base_color). Pins that ConnectableAPI's uniform handling
+        actually works at depth > 2.
+        """
+        sender = Usd.Stage.CreateInMemory()
+        material = UsdShade.Material.Define(sender, "/M")
+        ng_outer = UsdShade.NodeGraph.Define(sender, "/M/NG_outer")
+        ng_inner = UsdShade.NodeGraph.Define(sender, "/M/NG_outer/NG_inner")
+        shader = UsdShade.Shader.Define(sender, "/M/NG_outer/NG_inner/Surf")
+        shader.CreateIdAttr("ND_standard_surface_surfaceshader")
+
+        # Surface output forwarding: Material <- NG_outer <- NG_inner <- Shader.
+        shader_out = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        inner_out = ng_inner.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        outer_out = ng_outer.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        mat_out = material.CreateSurfaceOutput()
+        inner_out.ConnectToSource(shader_out)
+        outer_out.ConnectToSource(inner_out)
+        mat_out.ConnectToSource(outer_out)
+
+        # Value plumbed top-down: Material.tint -> NG_outer.tint
+        # -> NG_inner.tint -> Shader.base_color.
+        mat_tint = material.CreateInput("tint", Sdf.ValueTypeNames.Color3f)
+        mat_tint.Set(Gf.Vec3f(0.7, 0.3, 0.1))
+        outer_tint = ng_outer.CreateInput("tint", Sdf.ValueTypeNames.Color3f)
+        inner_tint = ng_inner.CreateInput("tint", Sdf.ValueTypeNames.Color3f)
+        shader_base = shader.CreateInput("base_color", Sdf.ValueTypeNames.Color3f)
+        outer_tint.ConnectToSource(mat_tint)
+        inner_tint.ConnectToSource(outer_tint)
+        shader_base.ConnectToSource(inner_tint)
+
+        emitter = NoticeEmitter(sender)
+        replayed = _server_process_and_replay(srv, emitter.snapshot_events())
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        def _src(stage, path, input_name):
+            connectable = UsdShade.ConnectableAPI(stage.GetPrimAtPath(path))
+            srcs, _ = connectable.GetInput(input_name).GetConnectedSources()
+            return srcs
+
+        def _out_src(stage, path, output_name):
+            connectable = UsdShade.ConnectableAPI(stage.GetPrimAtPath(path))
+            srcs, _ = connectable.GetOutput(output_name).GetConnectedSources()
+            return srcs
+
+        for label, stage in (
+            ("sender", sender), ("server", srv.stage), ("receiver", receiver),
+        ):
+            mat_srcs = _out_src(stage, "/M", "surface")
+            assert len(mat_srcs) == 1, label
+            assert str(mat_srcs[0].source.GetPath()) == "/M/NG_outer", label
+            outer_srcs = _out_src(stage, "/M/NG_outer", "surface")
+            assert len(outer_srcs) == 1, label
+            assert str(outer_srcs[0].source.GetPath()) == "/M/NG_outer/NG_inner", label
+            inner_srcs = _out_src(stage, "/M/NG_outer/NG_inner", "surface")
+            assert len(inner_srcs) == 1, label
+            assert str(inner_srcs[0].source.GetPath()) == "/M/NG_outer/NG_inner/Surf", label
+
+            outer_in = _src(stage, "/M/NG_outer", "tint")
+            assert len(outer_in) == 1 and str(outer_in[0].source.GetPath()) == "/M", label
+            inner_in = _src(stage, "/M/NG_outer/NG_inner", "tint")
+            assert len(inner_in) == 1, label
+            assert str(inner_in[0].source.GetPath()) == "/M/NG_outer", label
+            shader_in = _src(stage, "/M/NG_outer/NG_inner/Surf", "base_color")
+            assert len(shader_in) == 1, label
+            assert str(shader_in[0].source.GetPath()) == "/M/NG_outer/NG_inner", label
+
+            tint_attr = stage.GetPrimAtPath("/M").GetAttribute("inputs:tint")
+            assert tint_attr.IsValid() and tint_attr.Get() == Gf.Vec3f(0.7, 0.3, 0.1), label
+
+    def test_time_sampled_connectable_input_round_trip(self, srv):
+        """A Shader input authored as time samples must replicate as
+        per-(attr, time) set_connectable_input events and apply as time
+        samples on the receiving stage."""
+        sender = Usd.Stage.CreateInMemory()
+        emitter = NoticeEmitter(sender)
+        material = UsdShade.Material.Define(sender, "/M")
+        shader = UsdShade.Shader.Define(sender, "/M/Surf")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader_out = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        material.CreateSurfaceOutput().ConnectToSource(shader_out)
+        diffuse = shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f)
+        diffuse.Set(Gf.Vec3f(0.1, 0.2, 0.3), Usd.TimeCode(1.0))
+        diffuse.Set(Gf.Vec3f(0.4, 0.5, 0.6), Usd.TimeCode(2.0))
+        diffuse.Set(Gf.Vec3f(0.7, 0.8, 0.9), Usd.TimeCode(3.0))
+
+        events = emitter.build_events_for_dirty()
+        timed = [
+            e for e in events
+            if e.get("k") == K_SET_CONNECTABLE_INPUT and "time" in e
+        ]
+        assert {e["time"] for e in timed} == {1.0, 2.0, 3.0}, (
+            f"expected three timed events for the three samples; got {timed}"
+        )
+
+        replayed = _server_process_and_replay(srv, events)
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        for label, stage in (
+            ("sender", sender), ("server", srv.stage), ("receiver", receiver),
+        ):
+            attr = stage.GetPrimAtPath("/M/Surf").GetAttribute("inputs:diffuseColor")
+            assert attr.IsValid(), f"{label}: shader input missing"
+            samples = attr.GetTimeSamples()
+            assert samples == [1.0, 2.0, 3.0], f"{label}: samples {samples}"
+            assert attr.Get(Usd.TimeCode(2.0)) == Gf.Vec3f(0.4, 0.5, 0.6), label
+
+        # Second emit cycle must be silent (no spurious re-emission).
+        assert emitter.build_events_for_dirty() == [], (
+            "second emit cycle re-emitted unchanged time samples"
+        )
+
+    def test_exotic_sdf_type_inputs_round_trip(self, srv):
+        """Less-common Sdf types on shader inputs: matrix4d for transform
+        nodes, token (singular), and a token[]/int[] pair. Pins what we
+        actually carry across the wire for atypical MaterialX inputs."""
+        from pxr import Vt
+
+        sender = Usd.Stage.CreateInMemory()
+        emitter = NoticeEmitter(sender)
+        material = UsdShade.Material.Define(sender, "/M")
+        shader = UsdShade.Shader.Define(sender, "/M/S")
+        shader.CreateIdAttr("ND_transformmatrix")
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
+
+        # matrix4d (e.g. an ND_transformmatrix input)
+        xform = Gf.Matrix4d(1.0)
+        xform.SetTranslateOnly(Gf.Vec3d(2.0, 3.0, 4.0))
+        m_in = shader.CreateInput("xform", Sdf.ValueTypeNames.Matrix4d)
+        m_in.Set(xform)
+
+        # singular token
+        tok_in = shader.CreateInput("mode", Sdf.ValueTypeNames.Token)
+        tok_in.Set("clamp")
+
+        # int[] (rare but appears on procedural / selector nodes)
+        ints_in = shader.CreateInput("counts", Sdf.ValueTypeNames.IntArray)
+        ints_in.Set(Vt.IntArray([2, 5, 11]))
+
+        # token[] (rare; MaterialX uses string[] for some selectors)
+        toks_in = shader.CreateInput("names", Sdf.ValueTypeNames.TokenArray)
+        toks_in.Set(Vt.TokenArray(["a", "b", "c"]))
+
+        replayed = _server_process_and_replay(
+            srv, emitter.build_events_for_dirty()
+        )
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        for label, stage in (
+            ("sender", sender), ("server", srv.stage), ("receiver", receiver),
+        ):
+            shader = stage.GetPrimAtPath("/M/S")
+            assert shader.IsValid(), f"{label}: shader missing"
+
+            m_attr = shader.GetAttribute("inputs:xform")
+            assert m_attr.IsValid() and m_attr.IsAuthored(), (
+                f"{label}: matrix4d input not authored"
+            )
+            m_val = m_attr.Get()
+            assert m_val is not None, f"{label}: matrix4d input returned None"
+            for r in range(4):
+                for c in range(4):
+                    assert abs(m_val[r][c] - xform[r][c]) < 1e-9, (
+                        f"{label}: matrix4d[{r}][{c}] mismatch"
+                    )
+
+            tok_attr = shader.GetAttribute("inputs:mode")
+            assert tok_attr.Get() == "clamp", f"{label}: token mismatch"
+
+            ints_attr = shader.GetAttribute("inputs:counts")
+            assert list(ints_attr.Get()) == [2, 5, 11], f"{label}: int[] mismatch"
+
+            toks_attr = shader.GetAttribute("inputs:names")
+            assert list(toks_attr.Get()) == ["a", "b", "c"], (
+                f"{label}: token[] mismatch"
+            )
+
+
+    def test_variant_scoped_material_binding_follows_selection(self, srv):
+        """Material bindings authored inside a variant scope must follow the
+        active selection across the wire. A variant flip is a composition
+        resync of the variant set's owner path only; the emitter must
+        re-walk the subtree so the moved binding and the now-composed
+        material content both reach the receiver.
+        """
+        sender = Usd.Stage.CreateInMemory()
+        world = sender.DefinePrim("/World", "Xform")
+        mesh = UsdGeom.Cube.Define(sender, "/World/Mesh")
+        sender.DefinePrim("/World/Materials", "Scope")
+        vset = world.GetVariantSets().AddVariantSet("lookVariant")
+        for variant_name, color in (("Red", (1.0, 0.0, 0.0)),
+                                    ("Blue", (0.0, 0.0, 1.0))):
+            vset.AddVariant(variant_name)
+            vset.SetVariantSelection(variant_name)
+            with vset.GetVariantEditContext():
+                mp = f"/World/Materials/{variant_name}"
+                mat = UsdShade.Material.Define(sender, mp)
+                shader = UsdShade.Shader.Define(sender, f"{mp}/Surf")
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput(
+                    "diffuseColor", Sdf.ValueTypeNames.Color3f
+                ).Set(color)
+                surface_out = shader.CreateOutput(
+                    "surface", Sdf.ValueTypeNames.Token
+                )
+                mat.CreateSurfaceOutput().ConnectToSource(surface_out)
+                UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(mat)
+        vset.SetVariantSelection("Red")
+
+        emitter = NoticeEmitter(sender)
+        events_initial = emitter.snapshot_events()
+        replayed_initial = _server_process_and_replay(srv, events_initial)
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed_initial)
+
+        mesh_r = receiver.GetPrimAtPath("/World/Mesh")
+        rel = mesh_r.GetRelationship("material:binding")
+        assert [str(t) for t in rel.GetTargets()] == ["/World/Materials/Red"]
+
+        vset.SetVariantSelection("Blue")
+        events_flip = emitter.build_events_for_dirty()
+        replayed_flip = _server_process_and_replay(srv, events_flip)
+        apply_events(receiver, replayed_flip)
+
+        rel = receiver.GetPrimAtPath("/World/Mesh").GetRelationship(
+            "material:binding"
+        )
+        assert [str(t) for t in rel.GetTargets()] == ["/World/Materials/Blue"]
+        blue_shader = UsdShade.Shader(
+            receiver.GetPrimAtPath("/World/Materials/Blue/Surf")
+        )
+        assert blue_shader.GetIdAttr().Get() == "UsdPreviewSurface"
+        diffuse = blue_shader.GetInput("diffuseColor").Get()
+        assert tuple(diffuse) == (0.0, 0.0, 1.0)
+
+
+    def test_material_purpose_bindings_round_trip(self, srv):
+        """Per-purpose bindings (allPurpose + preview + full) must each
+        replicate through their purpose-suffixed relationship slot. The
+        receiver should reconstruct the same purpose-resolution behavior
+        via ``ComputeBoundMaterial(purpose)``.
+        """
+        sender = Usd.Stage.CreateInMemory()
+        sphere = sender.DefinePrim("/World/Sphere", "Sphere")
+        for name in ("MatAll", "MatPreview", "MatFull"):
+            mat = UsdShade.Material.Define(sender, f"/World/Materials/{name}")
+            shader = UsdShade.Shader.Define(sender, f"/World/Materials/{name}/S")
+            shader.CreateIdAttr("UsdPreviewSurface")
+            mat.CreateSurfaceOutput().ConnectToSource(
+                shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+            )
+        api = UsdShade.MaterialBindingAPI.Apply(sphere)
+        api.Bind(
+            UsdShade.Material(sender.GetPrimAtPath("/World/Materials/MatAll")),
+        )
+        api.Bind(
+            UsdShade.Material(sender.GetPrimAtPath("/World/Materials/MatPreview")),
+            materialPurpose="preview",
+        )
+        api.Bind(
+            UsdShade.Material(sender.GetPrimAtPath("/World/Materials/MatFull")),
+            materialPurpose="full",
+        )
+
+        emitter = NoticeEmitter(sender)
+        events = emitter.snapshot_events()
+        binding_events = [e for e in events if e["k"] == K_SET_MATERIAL_BINDING]
+        by_purpose = {
+            e.get("material_purpose", ""): e["material_path"] for e in binding_events
+        }
+        assert by_purpose == {
+            "": "/World/Materials/MatAll",
+            "preview": "/World/Materials/MatPreview",
+            "full": "/World/Materials/MatFull",
+        }
+
+        replayed = _server_process_and_replay(srv, events)
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        for stage_label, stage in (("server", srv.stage), ("receiver", receiver)):
+            sphere_r = stage.GetPrimAtPath("/World/Sphere")
+            api_r = UsdShade.MaterialBindingAPI(sphere_r)
+            for purpose, expected in (
+                ("", "/World/Materials/MatAll"),
+                ("preview", "/World/Materials/MatPreview"),
+                ("full", "/World/Materials/MatFull"),
+            ):
+                bound = api_r.ComputeBoundMaterial(purpose)[0]
+                assert bound and str(bound.GetPath()) == expected, (
+                    f"{stage_label}: purpose={purpose!r} expected {expected}, "
+                    f"got {bound.GetPath() if bound else None}"
+                )
+
+        # Rebind preview to a different material; only that one event should fly.
+        api.Bind(
+            UsdShade.Material(sender.GetPrimAtPath("/World/Materials/MatAll")),
+            materialPurpose="preview",
+        )
+        ev2 = emitter.build_events_for_dirty()
+        bind_ev2 = [e for e in ev2 if e["k"] == K_SET_MATERIAL_BINDING]
+        assert len(bind_ev2) == 1
+        assert bind_ev2[0].get("material_purpose") == "preview"
+        assert bind_ev2[0]["material_path"] == "/World/Materials/MatAll"
+
+        replayed2 = _server_process_and_replay(srv, ev2)
+        apply_events(receiver, replayed2)
+        bound_preview = UsdShade.MaterialBindingAPI(
+            receiver.GetPrimAtPath("/World/Sphere")
+        ).ComputeBoundMaterial("preview")[0]
+        assert str(bound_preview.GetPath()) == "/World/Materials/MatAll"
+
 
 # ---------------------------------------------------------------------------
 # Asset-driven test: open a real flattened MaterialX asset on the sender
@@ -481,6 +802,10 @@ def _compare_prim_tree(stage_a, stage_b, label_a="A", label_b="B"):
 # is invoked from.
 _REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
 _BASIC_MTLX_ASSET = _REPO_ROOT / "assets" / "test_assets" / "MaterialXTest" / "basic_flatten.usda"
+_SHADERBALL_ENV_ASSET = (
+    _REPO_ROOT / "assets" / "full_assets" / "StandardShaderBall"
+    / "layers" / "environment.usda"
+)
 
 
 @pytest.mark.skipif(not _BASIC_MTLX_ASSET.exists(), reason="basic_flatten.usda missing")
@@ -561,3 +886,75 @@ class TestAssetReproduce:
             assert src.sourceType == UsdShade.AttributeType.Input, (
                 f"diffuseColor sourceType on {label}: {src.sourceType} (expected Input)"
             )
+
+
+@pytest.mark.skipif(
+    not _SHADERBALL_ENV_ASSET.exists(),
+    reason="StandardShaderBall environment.usda missing",
+)
+class TestPurposeBindingAsset:
+    """Drive the per-purpose binding code paths off a real asset.
+
+    ``StandardShaderBall/layers/environment.usda`` authors
+    ``material:binding:full`` (the ``"full"`` material purpose) on every
+    wall mesh of the studio enclosure. Opening it on the sender and
+    replaying the events must reproduce all five purpose-suffixed bindings
+    on the receiver, resolvable via ``ComputeBoundMaterial("full")``.
+    """
+
+    _WALL_BINDINGS = {
+        "/standard_shader_ball_scene/box/back":
+            "/standard_shader_ball_scene/materials/back",
+        "/standard_shader_ball_scene/box/right":
+            "/standard_shader_ball_scene/materials/right",
+        "/standard_shader_ball_scene/box/top":
+            "/standard_shader_ball_scene/materials/top",
+        "/standard_shader_ball_scene/box/front":
+            "/standard_shader_ball_scene/materials/front",
+        "/standard_shader_ball_scene/box/left":
+            "/standard_shader_ball_scene/materials/left",
+    }
+
+    def test_full_purpose_bindings_round_trip(self, srv):
+        sender = Usd.Stage.Open(str(_SHADERBALL_ENV_ASSET))
+        emitter = NoticeEmitter(sender)
+        events = emitter.snapshot_events()
+
+        full_events = [
+            e for e in events
+            if e["k"] == K_SET_MATERIAL_BINDING
+            and e.get("material_purpose") == "full"
+        ]
+        assert len(full_events) == len(self._WALL_BINDINGS), (
+            f"expected {len(self._WALL_BINDINGS)} full-purpose bind events, "
+            f"got {len(full_events)}"
+        )
+        emitted = {e["prim"]: e["material_path"] for e in full_events}
+        assert emitted == self._WALL_BINDINGS
+
+        replayed = _server_process_and_replay(srv, events)
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        for stage_label, stage in (("server", srv.stage), ("receiver", receiver)):
+            for mesh_path, expected_mat in self._WALL_BINDINGS.items():
+                mesh = stage.GetPrimAtPath(mesh_path)
+                assert mesh.IsValid(), f"{stage_label}: {mesh_path} missing"
+                # The full-purpose rel must exist on the suffixed slot.
+                rel = mesh.GetRelationship("material:binding:full")
+                assert rel and rel.IsValid() and rel.IsAuthored(), (
+                    f"{stage_label}: {mesh_path} missing material:binding:full"
+                )
+                assert [str(t) for t in rel.GetTargets()] == [expected_mat]
+                # And it must resolve via ComputeBoundMaterial("full").
+                bound = UsdShade.MaterialBindingAPI(mesh).ComputeBoundMaterial("full")[0]
+                assert bound and str(bound.GetPath()) == expected_mat, (
+                    f"{stage_label}: ComputeBoundMaterial('full') for {mesh_path} "
+                    f"resolved to {bound.GetPath() if bound else None}, "
+                    f"expected {expected_mat}"
+                )
+                # The allPurpose slot must NOT be authored on these meshes.
+                allp = mesh.GetRelationship("material:binding")
+                assert not (allp and allp.IsAuthored()), (
+                    f"{stage_label}: {mesh_path} unexpectedly has allPurpose binding"
+                )

@@ -29,7 +29,7 @@ def srv_with_layers(srv):
         {"k": "ensure_xform_ops", "prim": "/World/Cube"},
         {"k": "set_xform_trs", "prim": "/World/Cube",
          "fields": ["t"], "t": [1.0, 0.0, 0.0]},
-    ], op_cache=srv.op_cache)
+    ], op_cache=srv._op_cache_for(layer_a))
 
     layer_b = srv.get_or_create_client_layer("bob", "animation")
     srv.stage.SetEditTarget(Usd.EditTarget(layer_b))
@@ -38,7 +38,7 @@ def srv_with_layers(srv):
         {"k": "ensure_xform_ops", "prim": "/World/Cube"},
         {"k": "set_xform_trs", "prim": "/World/Cube",
          "fields": ["t"], "t": [5.0, 3.0, 0.0]},
-    ], op_cache=srv.op_cache)
+    ], op_cache=srv._op_cache_for(layer_b))
 
     return srv
 

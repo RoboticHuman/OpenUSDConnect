@@ -4,9 +4,27 @@
 #include "USDConnectProtocol.h"
 #include "USDWireFraming.h"
 
-#include "flatbuffers/flatbuffer_builder.h"
-
 using namespace OUC;
+
+// ---------------------------------------------------------------------------
+// Shared: Envelope{Txn{events}} wrapping
+// ---------------------------------------------------------------------------
+
+static TArray<uint8> FinishTxnFrame(
+	flatbuffers::FlatBufferBuilder& Builder,
+	const FString& ClientId,
+	const std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>>& Events)
+{
+	const auto Txn = OpenUSDConnect::CreateTxn(
+		Builder,
+		Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
+		Builder.CreateVector(Events));
+
+	Builder.Finish(OpenUSDConnect::CreateEnvelope(
+		Builder, OpenUSDConnect::Payload::Txn, Txn.Union()));
+
+	return FrameWithLengthPrefix(Builder);
+}
 
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetXformTrs}, ...] } }
@@ -17,50 +35,24 @@ TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXfor
 
 	flatbuffers::FlatBufferBuilder Builder(512 + Xforms.Num() * 128);
 
-	// Build all EventWrapper offsets first (depth-first / bottom-up)
-	TArray<flatbuffers::Offset<void>> EwOffsets;
-	EwOffsets.Reserve(Xforms.Num());
+	std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>> Events;
+	Events.reserve(Xforms.Num());
 
 	for (const FEmitXformTrs& X : Xforms)
 	{
-		auto PrimStr = Builder.CreateString(TCHAR_TO_UTF8(*X.PrimPath));
-		auto TOff    = Builder.CreateVector(X.T, 3);
-		auto ROff    = Builder.CreateVector(X.R, 4);
-		auto SOff    = Builder.CreateVector(X.S, 3);
+		const auto Trs = OpenUSDConnect::CreateSetXformTrs(
+			Builder,
+			Builder.CreateString(TCHAR_TO_UTF8(*X.PrimPath)),
+			X.Fields,
+			Builder.CreateVector(X.T, 3),
+			Builder.CreateVector(X.R, 4),
+			Builder.CreateVector(X.S, 3));
 
-		const flatbuffers::uoffset_t TrsStart = Builder.StartTable();
-		Builder.AddOffset(VT::SetXformTrs_Prim,             PrimStr);
-		Builder.AddElement<uint8_t>(VT::SetXformTrs_Fields, X.Fields, 0);
-		Builder.AddOffset(VT::SetXformTrs_T,                TOff);
-		Builder.AddOffset(VT::SetXformTrs_R,                ROff);
-		Builder.AddOffset(VT::SetXformTrs_S,                SOff);
-		const flatbuffers::uoffset_t TrsOff = Builder.EndTable(TrsStart);
-
-		const flatbuffers::uoffset_t EwStart = Builder.StartTable();
-		Builder.AddElement<uint8_t>(VT::EventWrapper_EventType, kEvSetXformTrs, 0);
-		Builder.AddOffset(VT::EventWrapper_Event, flatbuffers::Offset<void>(TrsOff));
-		const flatbuffers::uoffset_t EwOff = Builder.EndTable(EwStart);
-
-		EwOffsets.Add(flatbuffers::Offset<void>(EwOff));
+		Events.push_back(OpenUSDConnect::CreateEventWrapper(
+			Builder, OpenUSDConnect::EventPayload::SetXformTrs, Trs.Union()));
 	}
 
-	// CreateVector<Offset<void>> writes a vector of relative offsets to tables.
-	// TArray<Offset<void>> is layout-compatible with the raw Offset<void>[] expected.
-	auto EventsVec = Builder.CreateVector(EwOffsets.GetData(), EwOffsets.Num());
-
-	auto ClientIdStr = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
-	const flatbuffers::uoffset_t TxnStart = Builder.StartTable();
-	Builder.AddOffset(VT::Txn_ClientId, ClientIdStr);
-	Builder.AddOffset(VT::Txn_Events,   EventsVec);
-	const flatbuffers::uoffset_t TxnOff = Builder.EndTable(TxnStart);
-
-	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadTxn, 0);
-	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(TxnOff));
-	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
-	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
-
-	return FrameWithLengthPrefix(Builder);
+	return FinishTxnFrame(Builder, ClientId, Events);
 }
 
 // ---------------------------------------------------------------------------
@@ -72,39 +64,82 @@ TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmi
 
 	flatbuffers::FlatBufferBuilder Builder(256 + Visibilities.Num() * 64);
 
-	TArray<flatbuffers::Offset<void>> EwOffsets;
-	EwOffsets.Reserve(Visibilities.Num());
+	std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>> Events;
+	Events.reserve(Visibilities.Num());
 
 	for (const FEmitVisibility& V : Visibilities)
 	{
-		auto PrimStr = Builder.CreateString(TCHAR_TO_UTF8(*V.PrimPath));
+		const auto Vis = OpenUSDConnect::CreateSetVisibility(
+			Builder,
+			Builder.CreateString(TCHAR_TO_UTF8(*V.PrimPath)),
+			V.bVisible);
 
-		const flatbuffers::uoffset_t VisStart = Builder.StartTable();
-		Builder.AddOffset(VT::SetVisibility_Prim, PrimStr);
-		Builder.AddElement<uint8_t>(VT::SetVisibility_Visible, V.bVisible ? 1 : 0, 0);
-		const flatbuffers::uoffset_t VisOff = Builder.EndTable(VisStart);
-
-		const flatbuffers::uoffset_t EwStart = Builder.StartTable();
-		Builder.AddElement<uint8_t>(VT::EventWrapper_EventType, kEvSetVisibility, 0);
-		Builder.AddOffset(VT::EventWrapper_Event, flatbuffers::Offset<void>(VisOff));
-		const flatbuffers::uoffset_t EwOff = Builder.EndTable(EwStart);
-
-		EwOffsets.Add(flatbuffers::Offset<void>(EwOff));
+		Events.push_back(OpenUSDConnect::CreateEventWrapper(
+			Builder, OpenUSDConnect::EventPayload::SetVisibility, Vis.Union()));
 	}
 
-	auto EventsVec = Builder.CreateVector(EwOffsets.GetData(), EwOffsets.Num());
+	return FinishTxnFrame(Builder, ClientId, Events);
+}
 
-	auto ClientIdStr = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
-	const flatbuffers::uoffset_t TxnStart = Builder.StartTable();
-	Builder.AddOffset(VT::Txn_ClientId, ClientIdStr);
-	Builder.AddOffset(VT::Txn_Events,   EventsVec);
-	const flatbuffers::uoffset_t TxnOff = Builder.EndTable(TxnStart);
+// ---------------------------------------------------------------------------
+// Build Envelope { Txn { events: [EventWrapper{SetConnectableInput}, ...] } }
+// ---------------------------------------------------------------------------
+TArray<uint8> BuildConnectableInputTxnFrame(const FString& ClientId, const TArray<FEmitConnectableInput>& InEvents)
+{
+	if (InEvents.IsEmpty()) return {};
 
-	const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-	Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadTxn, 0);
-	Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(TxnOff));
-	const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
-	Builder.Finish(flatbuffers::Offset<void>(EnvOff));
+	flatbuffers::FlatBufferBuilder Builder(512 + InEvents.Num() * 256);
 
-	return FrameWithLengthPrefix(Builder);
+	std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>> Events;
+	Events.reserve(InEvents.Num());
+
+	for (const FEmitConnectableInput& Ev : InEvents)
+	{
+		std::vector<flatbuffers::Offset<OpenUSDConnect::ConnectableInputValue>> Inputs;
+		Inputs.reserve(Ev.Inputs.Num());
+
+		for (const FEmitConnectableValue& In : Ev.Inputs)
+		{
+			using OpenUSDConnect::ConnectableInputValueType;
+
+			const auto NameStr = Builder.CreateString(TCHAR_TO_UTF8(*In.Name));
+			const auto TypeStr = Builder.CreateString(TCHAR_TO_UTF8(*In.TypeName));
+			flatbuffers::Offset<flatbuffers::String> StrOff;
+			flatbuffers::Offset<flatbuffers::Vector<float>> FloatsOff;
+			if (In.ValueType == ConnectableInputValueType::ScalarString)
+			{
+				StrOff = Builder.CreateString(TCHAR_TO_UTF8(*In.ScalarString));
+			}
+			else if (In.ValueType == ConnectableInputValueType::FloatArray)
+			{
+				FloatsOff = Builder.CreateVector(In.Floats.GetData(), In.Floats.Num());
+			}
+
+			OpenUSDConnect::ConnectableInputValueBuilder VB(Builder);
+			VB.add_name(NameStr);
+			VB.add_type_name(TypeStr);
+			VB.add_value_type(In.ValueType);
+			switch (In.ValueType)
+			{
+				case ConnectableInputValueType::ScalarFloat:  VB.add_scalar_float(In.ScalarFloat); break;
+				case ConnectableInputValueType::ScalarInt:    VB.add_scalar_int(In.ScalarInt);     break;
+				case ConnectableInputValueType::ScalarBool:   VB.add_scalar_bool(In.bScalarBool);  break;
+				case ConnectableInputValueType::ScalarString: VB.add_scalar_string(StrOff);        break;
+				case ConnectableInputValueType::FloatArray:   VB.add_float_array(FloatsOff);       break;
+				default:                                                                           break;
+			}
+			Inputs.push_back(VB.Finish());
+		}
+
+		const auto Ci = OpenUSDConnect::CreateSetConnectableInput(
+			Builder,
+			Builder.CreateString(TCHAR_TO_UTF8(*Ev.PrimPath)),
+			Builder.CreateString(TCHAR_TO_UTF8(*Ev.InfoId)),
+			Builder.CreateVector(Inputs));
+
+		Events.push_back(OpenUSDConnect::CreateEventWrapper(
+			Builder, OpenUSDConnect::EventPayload::SetConnectableInput, Ci.Union()));
+	}
+
+	return FinishTxnFrame(Builder, ClientId, Events);
 }

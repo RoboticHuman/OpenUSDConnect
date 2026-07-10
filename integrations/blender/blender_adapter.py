@@ -79,14 +79,27 @@ def apply_stage_metadata_to_scene(
 
 
 def _has_axis_rotation(obj) -> bool:
-    """Return True if obj's world transform includes non-identity rotation.
+    """Return True if obj's world transform includes non-identity rotation,
+    catching axis-conversion rotation from any ancestor.
 
-    Uses matrix_world so it catches axis-conversion rotation from any
-    ancestor, not just the direct parent.
+    Composes the world matrix from local matrices (matrix_basis /
+    matrix_parent_inverse), which are current immediately, rather than reading
+    matrix_world. The depsgraph only re-evaluates matrix_world after
+    view_layer.update, which the receiver defers to end-of-tick, so mid-drain
+    matrix_world can still miss an ancestor rotation (e.g. an imported Y-up root)
+    that a child created in the same drain must inherit.
     """
     if not BPY_AVAILABLE or obj is None:
         return False
-    return obj.matrix_world.to_quaternion() != _IDENTITY_QUAT
+    m = mathutils.Matrix.Identity(4)
+    chain = []
+    o = obj
+    while o is not None:
+        chain.append(o)
+        o = o.parent
+    for o in reversed(chain):
+        m = m @ o.matrix_parent_inverse @ o.matrix_basis
+    return m.to_quaternion() != _IDENTITY_QUAT
 
 
 def _apply_camera_attrs(camera_data, attrs: dict, meters_per_unit: float) -> None:
@@ -173,6 +186,11 @@ class BlenderAdapter(DCCAdapter):
         # point cloud + geometry-nodes Instance on Points setup, the
         # structure Blender's own USD importer builds).
         self.point_instancer_paths: set[str] = set()
+        # Per-prim, per-purpose material bindings. Blender has a single
+        # material slot, so viewport assignment resolves preview > allPurpose
+        # > full, matching UsdShadeMaterialBindingAPI::ComputeBoundMaterial's
+        # preview-purpose fallback chain.
+        self._material_bindings: dict[str, dict[str, str]] = {}
         # Rebuild caches from scene so a fresh adapter (after receiver reset)
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
@@ -409,6 +427,7 @@ class BlenderAdapter(DCCAdapter):
         self._link_object(new)
         self._registry.register(prim_path, new)
         self._parent_to_ancestor(new, prim_path)
+        self._apply_inherited_binding(new, prim_path)
 
         LOG.info("ensure_prim: linked %s '%s' for %s", type_name, new.name, prim_path)
         return True
@@ -433,6 +452,19 @@ class BlenderAdapter(DCCAdapter):
             obj.matrix_parent_inverse = _IDENTITY_4X4.copy()
             obj.matrix_basis = old_mpi @ old_basis
         return True
+
+    def _apply_object_scale(self, obj) -> None:
+        """Set ``obj.scale`` to the USD xform scale times the parametric gprim scale.
+
+        ``set_xform_trs`` (xform scale) and ``set_gprim_attrs`` (Cube ``size``,
+        Sphere ``radius``, ...) arrive as separate events. Storing each
+        contribution and composing here stops one from clobbering the other on
+        the single ``obj.scale``, which would flatten a non-uniformly-scaled
+        primitive (e.g. a chair slab) into a uniform shape.
+        """
+        gs = obj.get("usd_geom_scale", (1.0, 1.0, 1.0))
+        xs = obj.get("usd_xform_scale", (1.0, 1.0, 1.0))
+        obj.scale = (gs[0] * xs[0], gs[1] * xs[1], gs[2] * xs[2])
 
     def set_xform_trs(
         self,
@@ -489,7 +521,8 @@ class BlenderAdapter(DCCAdapter):
             sx, sy, sz = float(s[0]), float(s[1]), float(s[2])
             if convert:
                 sx, sy, sz = yup_to_zup_scale(sx, sy, sz)
-            obj.scale = (sx, sy, sz)
+            obj["usd_xform_scale"] = (sx, sy, sz)
+            self._apply_object_scale(obj)
 
         return True
 
@@ -598,17 +631,20 @@ class BlenderAdapter(DCCAdapter):
         usd_type = obj.get("usd_type_name", "")
         if usd_type == "Sphere" and "radius" in attrs:
             r = float(attrs["radius"])
-            obj.scale = (r, r, r)
+            obj["usd_geom_scale"] = (r, r, r)
+            self._apply_object_scale(obj)
         elif usd_type == "Cube" and "size" in attrs:
             s = float(attrs["size"]) / 2.0  # Blender default cube is 2 units
-            obj.scale = (s, s, s)
+            obj["usd_geom_scale"] = (s, s, s)
+            self._apply_object_scale(obj)
         elif usd_type in ("Cylinder", "Cone"):
+            gs = list(obj.get("usd_geom_scale", (1.0, 1.0, 1.0)))
             if "radius" in attrs:
-                r = float(attrs["radius"])
-                obj.scale = (r, r, obj.scale[2])
+                gs[0] = gs[1] = float(attrs["radius"])
             if "height" in attrs:
-                h = float(attrs["height"]) / 2.0
-                obj.scale = (obj.scale[0], obj.scale[1], h)
+                gs[2] = float(attrs["height"]) / 2.0
+            obj["usd_geom_scale"] = tuple(gs)
+            self._apply_object_scale(obj)
         LOG.info("BlenderAdapter: set gprim attrs %s on %s", attrs, prim_path)
         return True
 
@@ -659,23 +695,92 @@ class BlenderAdapter(DCCAdapter):
             len(faces),
         )
 
-    def set_material_binding(self, prim_path: str, material_path: str) -> bool:
+    def set_material_binding(
+        self, prim_path: str, material_path: str, material_purpose: str = "",
+    ) -> bool:
         if not BPY_AVAILABLE:
             return True
+        per_purpose = self._material_bindings.setdefault(prim_path, {})
+        if material_path:
+            per_purpose[material_purpose] = material_path
+        else:
+            per_purpose.pop(material_purpose, None)
+        material_path = self._effective_material_path(per_purpose)
         if not material_path:
             obj = self._find_object_by_prim(prim_path)
             if obj and obj.data and obj.data.materials:
                 obj.data.materials.clear()
             return True
-        # Find or create the material.  Path-based lookup first so two
-        # references to the same asset get separate materials per composed path.
+        mat = self._get_or_create_material(material_path)
+        # Assign to the target. A binding on an Xform (a Blender Empty, no mesh
+        # data) is propagated to descendant meshes that have neither their own
+        # binding nor a material yet, mirroring USD's binding inheritance without
+        # ever overwriting a material Blender already set.
+        obj = self._find_object_by_prim(prim_path)
+        if obj is None:
+            self._remove_unused_material_duplicates(mat, material_path)
+            return True
+        if obj.data is not None:
+            recipients = [obj]
+        else:
+            recipients = [
+                c
+                for c in obj.children_recursive
+                if c.type == "MESH"
+                and c.data is not None
+                and not c.data.materials
+                and not self._has_own_binding(c.get("usd_prim_path"))
+            ]
+        for recipient in recipients:
+            if not recipient.data.materials:
+                recipient.data.materials.append(mat)
+            else:
+                recipient.data.materials[0] = mat
+        self._remove_unused_material_duplicates(mat, material_path)
+        LOG.info(
+            "set_material_binding: %s -> %s (%d objects)",
+            prim_path,
+            mat.name,
+            len(recipients),
+        )
+        return True
+
+    def _has_own_binding(self, prim_path: str | None) -> bool:
+        """True if ``prim_path`` carries its own non-empty binding, so it keeps
+        that instead of inheriting an ancestor Xform's."""
+        per_purpose = self._material_bindings.get(prim_path or "")
+        return bool(per_purpose) and any(per_purpose.values())
+
+    def _remove_unused_material_duplicates(self, keep, material_path: str) -> None:
+        """Remove importer leftovers after rebinding to the path-stable material."""
+        mat_name = material_path.rsplit("/", 1)[-1]
+        for mat in list(bpy.data.materials):
+            if mat == keep or not mat.name.startswith(mat_name):
+                continue
+            if mat.users != 0:
+                continue
+            tagged_path = mat.get("usd_material_path", "")
+            if not tagged_path or tagged_path == material_path:
+                bpy.data.materials.remove(mat)
+
+    def _effective_material_path(self, per_purpose: dict) -> str:
+        """Viewport binding from a per-purpose map: preview overrides allPurpose,
+        full is the last-resort fallback (final-render-only renderers may author
+        it alone). Mirrors ComputeBoundMaterial(purpose="preview")."""
+        return (
+            per_purpose.get("preview")
+            or per_purpose.get("")
+            or per_purpose.get("full")
+            or ""
+        )
+
+    def _get_or_create_material(self, material_path: str):
+        """Find (path-stable) or create the Blender material for a USD material
+        path. Path-based lookup first so two references to the same asset get
+        separate materials per composed path."""
         mat = self._registry.find_material(material_path)
         if not mat:
             mat_name = material_path.rsplit("/", 1)[-1]
-            # Scan all materials with this leaf name.  Prefer:
-            # 1. Exact path match (same composed path)
-            # 2. Untagged material (created by Blender's importer, not yet claimed)
-            # 3. Create new (all existing copies are claimed by other paths)
             untagged = None
             for m in bpy.data.materials:
                 if not m.name.startswith(mat_name):
@@ -691,30 +796,38 @@ class BlenderAdapter(DCCAdapter):
             mat.use_nodes = True
         mat["usd_material_path"] = material_path
         self._registry.register_material(material_path, mat)
-        # Assign to the target object if it exists
-        obj = self._find_object_by_prim(prim_path)
-        if not obj or not obj.data:
-            self._remove_unused_material_duplicates(mat, material_path)
-            return True
-        if not obj.data.materials:
-            obj.data.materials.append(mat)
-        else:
-            obj.data.materials[0] = mat
-        self._remove_unused_material_duplicates(mat, material_path)
-        LOG.info("set_material_binding: %s -> %s", prim_path, mat.name)
-        return True
+        return mat
 
-    def _remove_unused_material_duplicates(self, keep, material_path: str) -> None:
-        """Remove importer leftovers after rebinding to the path-stable material."""
-        mat_name = material_path.rsplit("/", 1)[-1]
-        for mat in list(bpy.data.materials):
-            if mat == keep or not mat.name.startswith(mat_name):
-                continue
-            if mat.users != 0:
-                continue
-            tagged_path = mat.get("usd_material_path", "")
-            if not tagged_path or tagged_path == material_path:
-                bpy.data.materials.remove(mat)
+    def _inherited_material_path(self, prim_path: str) -> str:
+        """Nearest ancestor binding for prim_path (USD binding inheritance), or
+        empty if no ancestor is bound."""
+        parent = prim_path.rsplit("/", 1)[0]
+        while parent:
+            per_purpose = self._material_bindings.get(parent)
+            if per_purpose:
+                eff = self._effective_material_path(per_purpose)
+                if eff:
+                    return eff
+            parent = parent.rsplit("/", 1)[0]
+        return ""
+
+    def _apply_inherited_binding(self, obj, prim_path: str) -> None:
+        """Assign the nearest ancestor's bound material to a freshly created mesh.
+
+        USD binding is inherited but Blender's is not, so a gprim created after
+        its ancestor's binding has been applied would otherwise carry no
+        material. The push side (set_material_binding propagating to existing
+        children) covers the opposite order, when the gprim already exists."""
+        if obj is None or obj.data is None or obj.type != "MESH":
+            return
+        if obj.data.materials or self._has_own_binding(prim_path):
+            return
+        material_path = self._inherited_material_path(prim_path)
+        if not material_path:
+            return
+        mat = self._get_or_create_material(material_path)
+        obj.data.materials.append(mat)
+        self._remove_unused_material_duplicates(mat, material_path)
 
     def set_connectable_input(
         self,
@@ -1102,12 +1215,32 @@ class BlenderAdapter(DCCAdapter):
             else:
                 socket.default_value = value
 
+        transmission = inputs.get("transmission")
+        if isinstance(transmission, (int, float)) and transmission > 0.0:
+            self._enable_eevee_refraction(mat)
+
         LOG.info(
             "set_connectable_input (multi-node): %s on %s",
             list(inputs.keys()),
             prim_path,
         )
         return True
+
+    def _enable_eevee_refraction(self, mat):
+        """Make a transmissive material actually refract in EEVEE.
+
+        EEVEE Next bends transmitted light only when raytraced transmission is
+        enabled on the material and raytracing is on for the scene; the
+        Principled transmission nodes alone render the glass opaque. Both flags
+        are feature-detected so older Blender builds are left untouched.
+        """
+        for flag in ("use_raytrace_refraction", "use_screen_refraction"):
+            if hasattr(mat, flag):
+                setattr(mat, flag, True)
+        for scene in bpy.data.scenes:
+            eevee = getattr(scene, "eevee", None)
+            if eevee is not None and hasattr(eevee, "use_raytracing"):
+                eevee.use_raytracing = True
 
     def _find_material_for_shader(self, prim_path: str, create: bool = False):
         """Find the Blender material that owns a shader prim path.
@@ -1503,8 +1636,8 @@ class BlenderAdapter(DCCAdapter):
         """Read MaterialX materials from an imported USD file and apply them.
 
         Opens the file via pxr, walks Material/Shader prims, and applies
-        them through the adapter's shader pipeline so ActivisionMtlxMapper
-        creates proper node networks for shaders that Blender's built-in
+        them through the adapter's shader pipeline so the shader mappers
+        create proper node networks for shaders that Blender's built-in
         USD importer doesn't handle (e.g., ND_standard_surface_surfaceshader).
         """
         try:
@@ -1544,9 +1677,11 @@ class BlenderAdapter(DCCAdapter):
             file_path = str(prim.GetPath())
             scene_path = _remap(file_path)
 
-            binding_target = read_material_binding(stage, file_path)
-            if binding_target:
-                binding_events.append((scene_path, _remap(binding_target)))
+            for purpose, target in read_material_binding(stage, file_path).items():
+                if target:
+                    binding_events.append(
+                        (scene_path, _remap(target), purpose)
+                    )
 
             if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
                 _kind, sid, inputs, itypes, conns = read_usdshade_connectable(
@@ -1587,8 +1722,8 @@ class BlenderAdapter(DCCAdapter):
 
         # Bindings first so materials are tagged with usd_material_path
         # before set_connectable_input looks them up.
-        for scene_path, target in binding_events:
-            self.set_material_binding(scene_path, target)
+        for scene_path, target, purpose in binding_events:
+            self.set_material_binding(scene_path, target, purpose)
         # Blender's USD importer already handles UsdPreviewSurface shaders.
         # When a material's surface shader is multi-node MaterialX, the
         # mapper builds the full network itself — applying our texture

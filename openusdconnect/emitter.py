@@ -46,6 +46,12 @@ from .protocol_constants import (
     REL_MATERIAL_BINDING,
     STAGE_METADATA_KEYS,
 )
+from .xform_decompose import (
+    as_matrix,
+    decompose_trs_batch,
+    decompose_trs_from_matrix,
+    xform_sample_value,
+)
 
 # Notice field tokens the stage-metadata watcher cares about. Anything outside
 # this set on the pseudo-root (comments, customLayerData, etc.) is ignored
@@ -129,6 +135,9 @@ def _is_transform_attr(attr_name: str) -> bool:
 DEFAULT_REPLICATED_API_SCHEMAS = frozenset({
     "ShapingAPI", "ShadowAPI",          # UsdLux user-applied
     "MeshLightAPI", "VolumeLightAPI",   # UsdLux user-applied (light on Mesh/Volume)
+    # UsdHydra: marks a GenerativeProcedural prim for Hydra evaluation; without
+    # it a replicated procedural loses its imaging type and never resolves.
+    "HydraGenerativeProceduralAPI",
     # NOTE: LightAPI is built-in for typed UsdLux lights — replicating it
     # would add a redundant authored opinion. Excluded by design.
     # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.
@@ -246,6 +255,12 @@ def _usd_value_to_python(val):
         if isinstance(val, quat_type):
             im = val.GetImaginary()
             return [float(val.GetReal()), float(im[0]), float(im[1]), float(im[2])]
+    # GfMatrix types → row-major flat list; the wire reuses FloatArray and
+    # the receiver reconstructs from the type_name (matrix4d/matrix4f/etc.).
+    for matrix_type in (Gf.Matrix2d, Gf.Matrix2f, Gf.Matrix3d, Gf.Matrix3f,
+                        Gf.Matrix4d, Gf.Matrix4f):
+        if isinstance(val, matrix_type):
+            return [float(c) for row in val for c in row]
     # VtArray types (Vec3fArray, IntArray, FloatArray, etc.)
     # Detected by type name ending in "Array" — no shared base class in pxr.
     # Convert to numpy directly — pxr VtArrays support the buffer protocol.
@@ -275,20 +290,12 @@ def _usd_value_to_python(val):
     return None
 
 
-# PrimResyncType enum for classifying resync notices.
-# Not available in all USD builds (e.g. Blender's bundled pxr).
+# PrimResyncType enum for classifying resync notices. Not available in all
+# USD builds; some embedded pxr distributions lag the open-source release.
 try:
     _PrimResyncType = Usd.Notice.ObjectsChanged.PrimResyncType
 except AttributeError:
     _PrimResyncType = None
-
-
-from .xform_decompose import (
-    as_matrix,
-    decompose_trs_batch,
-    decompose_trs_from_matrix,
-    xform_sample_value,
-)
 
 
 def near_list(a: list[float] | None, b: list[float] | None, eps: float) -> bool:
@@ -464,21 +471,31 @@ def read_variant_selections(stage, prim_path):
     return result
 
 
-def read_material_binding(stage, prim_path):
-    """Read the material:binding relationship target from the composed stage.
+_MATERIAL_BINDING_PURPOSE_RELS = (
+    ("", REL_MATERIAL_BINDING),
+    ("preview", REL_MATERIAL_BINDING + ":preview"),
+    ("full", REL_MATERIAL_BINDING + ":full"),
+)
 
-    Returns the target material prim path string, or empty string if unbound.
-    Reads from the full composed view so bindings from referenced files are
-    visible — the emitter's per-prim cache handles deduplication.
+
+def read_material_binding(stage, prim_path):
+    """Read all authored material binding targets keyed by purpose.
+
+    Returns a dict ``{purpose: target_path}`` over the three USD purposes
+    (allPurpose as ``""``, ``"preview"``, ``"full"``). Unauthored slots
+    are absent from the dict; an authored-but-empty binding maps to ``""``.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        return ""
-    binding_rel = prim.GetRelationship(REL_MATERIAL_BINDING)
-    if not binding_rel or not binding_rel.IsValid():
-        return ""
-    targets = binding_rel.GetTargets()
-    return str(targets[0]) if targets else ""
+        return {}
+    result: dict[str, str] = {}
+    for purpose, rel_name in _MATERIAL_BINDING_PURPOSE_RELS:
+        rel = prim.GetRelationship(rel_name)
+        if not rel or not rel.IsValid() or not rel.IsAuthored():
+            continue
+        targets = rel.GetTargets()
+        result[purpose] = str(targets[0]) if targets else ""
+    return result
 
 
 def _attr_event_metadata(prim, attr_name: str, attr) -> tuple[dict, dict]:
@@ -782,18 +799,39 @@ class MaterialBindingChannel(PrimChannel):
     """``material:binding`` is a relationship property, not a composition arc.
 
     Rebinds and clears arrive as info-only notices on the relationship name,
-    so this channel watches the property directly.
+    so this channel watches the property directly. The cache holds a
+    ``{purpose: target_path}`` dict; the diff emits one event per purpose
+    whose target changed (added, removed, or rebound).
     """
 
     cache_key = _C_MATERIAL_BINDING
-    cache_default = ""
-    watched_attrs = ("material:binding",)
+    cache_default: dict[str, str] = {}
+    watched_prefixes = ("material:binding",)
 
     def read(self, stage, prim_path):
         return read_material_binding(stage, prim_path)
 
+    def diff(self, current, cached):
+        if cached is None:
+            cached = self.cache_default
+        changed: dict[str, str] = {}
+        for purpose in set(current) | set(cached):
+            if current.get(purpose, "") != cached.get(purpose, ""):
+                changed[purpose] = current.get(purpose, "")
+        return changed or None
+
     def to_event(self, prim_path, diff):
-        return {"k": K_SET_MATERIAL_BINDING, "prim": prim_path, "material_path": diff}
+        events = []
+        for purpose, target in diff.items():
+            ev = {
+                "k": K_SET_MATERIAL_BINDING,
+                "prim": prim_path,
+                "material_path": target,
+            }
+            if purpose:
+                ev["material_purpose"] = purpose
+            events.append(ev)
+        return events
 
 
 class ConnectableChannel(PrimChannel):
@@ -2412,6 +2450,24 @@ class NoticeEmitter:
         events.extend(self._build_stage_metadata_events())
         events.extend(self._build_rename_events())
         events.extend(self._build_deactivation_events())
+
+        # A composition resync (variant flip, reference/payload swap) on a
+        # parent path invalidates the whole subtree but Sdf reports only the
+        # parent. Walk the now-composed subtree so descendants re-diff
+        # (binding rels that moved) or first-encounter-emit (content that
+        # was hidden by the prior variant selection).
+        for prim_path in list(self._notice_resynced_prims):
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if not (prim and prim.IsValid()):
+                continue
+            for desc in Usd.PrimRange(prim):
+                if desc.GetPath() == prim.GetPath() or desc.IsInPrototype():
+                    continue
+                desc_path = str(desc.GetPath())
+                if desc_path.startswith("/__Prototype"):
+                    continue
+                self.dirty.add(desc_path)
+                self._notice_resynced_prims.add(desc_path)
 
         # Dirty prims (creation + TRS changes)
         # Sort by path depth so parents are emitted before children.

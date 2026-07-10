@@ -202,8 +202,8 @@ class TestCompactionUnion:
             msg = {"type": MSG_EVENT, "seq": i + 1, "event": ev}
             rows.append((i + 1, encode_message(msg)))
 
-        latest, _tombstoned = UsdSyncServer._build_compacted(rows)
-        merged_ev, _meta = latest[("/L", K_ENSURE_PRIM, None)]
+        latest = UsdSyncServer._build_compacted(rows)
+        merged_ev = latest[("/L", K_ENSURE_PRIM, None)][0]
         assert sorted(merged_ev["api_schemas"]) == ["ShadowAPI", "ShapingAPI"]
 
     def test_compaction_multi_apply_unique_instances(self, tmp_path):
@@ -223,8 +223,8 @@ class TestCompactionUnion:
             msg = {"type": MSG_EVENT, "seq": i + 1, "event": ev}
             rows.append((i + 1, encode_message(msg)))
 
-        latest, _tombstoned = UsdSyncServer._build_compacted(rows)
-        merged_ev, _meta = latest[("/X", K_ENSURE_PRIM, None)]
+        latest = UsdSyncServer._build_compacted(rows)
+        merged_ev = latest[("/X", K_ENSURE_PRIM, None)][0]
         assert sorted(merged_ev["api_schemas"]) == [
             "CollectionAPI:proxy",
             "CollectionAPI:render",
@@ -395,6 +395,9 @@ class TestDefaults:
         assert "ShadowAPI" in DEFAULT_REPLICATED_API_SCHEMAS
         assert "MeshLightAPI" in DEFAULT_REPLICATED_API_SCHEMAS
         assert "VolumeLightAPI" in DEFAULT_REPLICATED_API_SCHEMAS
+
+    def test_default_set_includes_hydra_generative_procedural(self):
+        assert "HydraGenerativeProceduralAPI" in DEFAULT_REPLICATED_API_SCHEMAS
 
 
 class TestStructuralOrdering:

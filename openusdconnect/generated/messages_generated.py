@@ -25,6 +25,8 @@ class ConnectableInputValueType(object):
     ScalarBool = 3
     ScalarString = 4
     FloatArray = 5
+    IntArray = 6
+    StringArray = 7
 
 
 class EventPayload(object):
@@ -626,8 +628,55 @@ class ConnectableInputValue(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
         return o == 0
 
+    # ConnectableInputValue
+    def IntArray(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(20))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Int32Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return 0
+
+    # ConnectableInputValue
+    def IntArrayAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(20))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Int32Flags, o)
+        return 0
+
+    # ConnectableInputValue
+    def IntArrayLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(20))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ConnectableInputValue
+    def IntArrayIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(20))
+        return o == 0
+
+    # ConnectableInputValue
+    def StringArray(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return ""
+
+    # ConnectableInputValue
+    def StringArrayLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ConnectableInputValue
+    def StringArrayIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        return o == 0
+
 def ConnectableInputValueStart(builder):
-    builder.StartObject(8)
+    builder.StartObject(10)
 
 def ConnectableInputValueAddName(builder, name):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(name), 0)
@@ -654,6 +703,18 @@ def ConnectableInputValueAddFloatArray(builder, floatArray):
     builder.PrependUOffsetTRelativeSlot(7, flatbuffers.number_types.UOffsetTFlags.py_type(floatArray), 0)
 
 def ConnectableInputValueStartFloatArrayVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def ConnectableInputValueAddIntArray(builder, intArray):
+    builder.PrependUOffsetTRelativeSlot(8, flatbuffers.number_types.UOffsetTFlags.py_type(intArray), 0)
+
+def ConnectableInputValueStartIntArrayVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def ConnectableInputValueAddStringArray(builder, stringArray):
+    builder.PrependUOffsetTRelativeSlot(9, flatbuffers.number_types.UOffsetTFlags.py_type(stringArray), 0)
+
+def ConnectableInputValueStartStringArrayVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
 def ConnectableInputValueEnd(builder):
@@ -1546,14 +1607,24 @@ class SetMaterialBinding(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # SetMaterialBinding
+    def MaterialPurpose(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def SetMaterialBindingStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def SetMaterialBindingAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
 def SetMaterialBindingAddMaterialPath(builder, materialPath):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(materialPath), 0)
+
+def SetMaterialBindingAddMaterialPurpose(builder, materialPurpose):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(materialPurpose), 0)
 
 def SetMaterialBindingEnd(builder):
     return builder.EndObject()
@@ -2644,8 +2715,15 @@ class BroadcastEvent(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # BroadcastEvent
+    def Department(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def BroadcastEventStart(builder):
-    builder.StartObject(5)
+    builder.StartObject(6)
 
 def BroadcastEventAddSeq(builder, seq):
     builder.PrependInt32Slot(0, seq, 0)
@@ -2661,6 +2739,9 @@ def BroadcastEventAddClientId(builder, clientId):
 
 def BroadcastEventAddClient(builder, client):
     builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(client), 0)
+
+def BroadcastEventAddDepartment(builder, department):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(department), 0)
 
 def BroadcastEventEnd(builder):
     return builder.EndObject()

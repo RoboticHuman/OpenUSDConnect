@@ -132,7 +132,7 @@ def main():
     else:
         results["material_exists"] = "PASS"
 
-    # Check for MaterialX shader (cached input_map proves ActivisionMtlxMapper ran)
+    # Check for MaterialX shader (cached input_map proves the shader mapper ran)
     mtlx_path = "/World/Teapot/mtl/default_material/default_shader_mtlx"
     cached = adapter._registry.get_shader(mtlx_path).get("input_map")
     if cached is not None:

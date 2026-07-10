@@ -24,6 +24,29 @@ usdview opens, the **OpenUSDConnect** menu appears in the menubar, and
 the plugin auto-connects ~100ms after the window is up (driven by the
 `OPENUSDCONNECT_HOST` env var the launcher sets).
 
+## RenderMan (hdPrman) renderer — optional
+
+Pixar's **hdPrman** Hydra delegate is off by default. Pass `--renderman`
+to make it available and start usdview in it:
+
+```bash
+uv run python -m integrations.usdview.launcher test_scene.usda --renderman
+```
+
+The flag sets the `RMAN_*` search paths from `$RMANTREE` plus the OpenUSD
+install that ships hdPrman (discovered the same way as `usdview`), prepends
+`$RMANTREE\bin` and `$RMANTREE\lib` to `PATH` so `libprman.dll` loads, and
+selects the `HdPrmanLoaderRendererPlugin` delegate ("RenderMan RIS"). It
+requires a RenderManProServer install with `RMANTREE` set and an OpenUSD
+build made with the RenderMan imaging plugin (`PXR_BUILD_PRMAN_PLUGIN=ON`).
+
+Without `--renderman` nothing changes — usdview runs Storm-only as before.
+You can still switch renderers from usdview's **Renderer** menu once
+`--renderman` is on, and you can override which delegate it starts in by
+forwarding your own `--renderer` (e.g. `--renderman --renderer Storm` opens
+in Storm with RenderMan available in the menu). See
+https://openusd.org/release/plugins_renderman.html
+
 ## How `find_usdview()` works
 
 The launcher's `find_usdview()` tries three strategies in order:
@@ -72,6 +95,7 @@ enter the host/port.
 | `USDVIEW_PATH` | Explicit path to `usdview` executable for the launcher |
 | `PXR_PLUGINPATH_NAME` | Directory containing this `plugInfo.json` |
 | `PYTHONPATH` | Must include the OpenUSDConnect repo root so `integrations.usdview` and `openusdconnect` resolve |
+| `RMANTREE` | RenderManProServer install root. Read only when `--renderman` is passed; the launcher derives all `RMAN_*` paths from it. |
 
 ## Out of scope (later phases)
 

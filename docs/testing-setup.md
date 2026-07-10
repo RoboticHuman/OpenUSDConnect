@@ -1,10 +1,11 @@
 # Testing Setup
 
-OpenUSDConnect has three tiers of tests:
+OpenUSDConnect has four tiers of tests:
 
 - **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices, stage parity including shader inputs (no Blender needed)
 - **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
 - **Asset E2E tests** (`tests/integration/asset_tests/`) — full pipeline with real USD assets, material enrichment, texture connections, variant switching (requires Blender GUI, skipped by default)
+- **Visual regression tests** (`tests/visual/`) — render reference scenes with RenderMan and FLIP-compare against committed goldens; catches rendered-output regressions across materials, shaders, cameras, lights, and geometry (requires RenderMan + `uv sync --group visual`, skipped by default)
 
 ## Running Tests
 
@@ -14,8 +15,13 @@ uv sync --group server --group vfs
 # All tests
 uv run pytest tests/ -v
 
-# Unit tests only (fast, no Blender needed)
+# Unit tests only (fast, no Blender needed; timing-dependent "slow" tests
+# are skipped by default)
 uv run pytest tests/unit/ -v
+
+# Include the timing-dependent tests (e.g. periodic compaction, which
+# waits out real tick intervals)
+uv run pytest tests/unit/ --slow-tests -v
 
 # Integration tests only (requires Blender)
 uv run pytest tests/integration/ -v
@@ -99,11 +105,11 @@ Blender integration tests run headless (`blender --background`) and require Blen
 The bundled setup script downloads the official portable Blender build, extracts it to `.blender/` in the repo root, and writes `blender.test.cfg` automatically:
 
 ```bash
-# Download latest stable (currently 4.5.7)
+# Download latest stable
 uv run python scripts/setup_blender_test.py
 
 # Or specify a version
-uv run python scripts/setup_blender_test.py --version 4.4.3
+uv run python scripts/setup_blender_test.py --version 5.0.1
 ```
 
 After this, all Blender tests work immediately:
@@ -289,6 +295,36 @@ The addon is automatically rebuilt before running. Each test starts its own serv
 ### Adding new asset tests
 
 See `tests/integration/asset_tests/README.md` for the `TestHarness` API and step-by-step guide.
+
+## Visual Regression Tests
+
+A headless harness that renders reference scenes and FLIP-compares against committed golden images, catching any change to rendered output (materials, cameras, lights, geometry). **Skipped by default.**
+
+```bash
+# Run the visual tier (requires RenderMan installed + the visual deps)
+uv sync --group visual
+uv run pytest tests/visual --visual-tests -v
+
+# Regenerate the golden images (review the change before committing)
+uv run pytest tests/visual --visual-tests --update-baselines -v
+```
+
+The tier skips cleanly when RenderMan (`RMANTREE`) or `flip-evaluator` is absent. A render regresses when its mean [FLIP](https://github.com/NVIDIA/flip) error exceeds the per-scene threshold; the error map lands in the pytest temp dir. Goldens are pinned to the renderer, sample budget (`HD_PRMAN_MAX_SAMPLES`), and USD/RenderMan version, so changing any of those needs a deliberate `--update-baselines` regen. Goldens use Git LFS (`git lfs install` once per clone).
+
+**Regenerating goldens.** `--update-baselines` re-renders and overwrites the goldens, so that run *skips* (nothing left to compare); rerun without the flag to confirm they are stable. To review an intended change first, run the compare pass: a failing test writes a FLIP error map (path in its assert message) showing what moved. Scope to one scene with its test path (e.g. `tests/visual/test_material_zoo.py`); a new scene reports `missing` until its golden is captured the same way. Inspect the regenerated PNG before committing (the git diff is an opaque LFS pointer).
+
+**Renderers are pluggable** (`renderers.py`): a renderer name maps to a Hydra delegate plus optional env setup and material conditioning. `renderman` (default) sets the `RMAN_*` paths and translates OpenPBR to standard_surface (hdPrman has no OpenPBR adapter); `embree`/`storm` need neither. Add Cycles or Mitsuba as one `RENDERERS` entry.
+
+**Scenes** are static `.usda` (`tests/visual/scenes/`) or a curated event log replayed through the real `codec` + `apply_events` pipeline. `test_material_zoo.py` replays `material_zoo.jsonl` (UsdPreviewSurface, MaterialX standard_surface, OpenPBR, tiled / triplanar / UV-image texturing, a referenced chess piece) onto `test_scene.usda` under a framed camera + StinsonBeach IBL. Heavy assets come from the `usd-wg/assets` submodule (run `git submodule update --init --recursive`) plus a vendored UV sphere in `tests/visual/assets/`; the log stores them as portable `{REPO}` path tokens expanded at replay time, so the committed fixture carries no machine paths. The fixture is JSONL (semantic events re-encoded through the current codec at replay), so it survives wire/storage changes without a binary db.
+
+| File | Purpose |
+|------|---------|
+| `integrations/visualtest/renderers.py` | Pluggable Hydra renderer registry; add Cycles/Mitsuba here |
+| `visualtest/render.py`, `compare.py`, `harness.py` | Render, FLIP compare (mean + p99), baseline primitive |
+| `visualtest/replay.py`, `scene.py` | Event-log replay, camera framing + IBL |
+| `tests/visual/{scenes,fixtures,references,assets}/` | Static `.usda`, JSONL logs, LFS goldens, vendored geometry |
+
+> Requires USD >= 0.26.5 (earlier builds hit a RenderMan `ri:projection` camera-adapter bug). HdEmbree and Storm are registered alongside RenderMan in `renderers.py`.
 
 ## What the Blender Tests Cover
 

@@ -718,6 +718,8 @@ class BlenderStageAuthor:
         """
         from pxr import UsdShade
 
+        from openusdconnect.event_apply import _set_connectable_input_value
+
         last = self._last_shader_values.get(shader_path)
         if last is None:
             self._last_shader_values[shader_path] = dict(values)
@@ -739,15 +741,36 @@ class BlenderStageAuthor:
         # can identify the shader type when building events.
         if shader_id and not shader.GetIdAttr().Get():
             shader.CreateIdAttr(shader_id)
+        connectable = UsdShade.ConnectableAPI(prim)
         for usd_name, value in changed.items():
-            if isinstance(value, list) and len(value) == 3:
-                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Color3f)
-                inp.Set(Gf.Vec3f(*value))
-            else:
-                inp = shader.CreateInput(usd_name, Sdf.ValueTypeNames.Float)
-                inp.Set(float(value))
+            type_name = self._reverse_input_type(connectable, prim, usd_name, value)
+            _set_connectable_input_value(connectable, usd_name, value, type_name)
 
         self._last_shader_values[shader_path] = dict(values)
+
+    @staticmethod
+    def _reverse_input_type(connectable, prim, usd_name, value) -> str:
+        """USD type name for a reverse-authored shader input.
+
+        The type authored on the synced prim wins (values written by sync
+        carry the source's exact Sdf type), then the shader's Sdr node
+        definition, then a value-shape heuristic for inputs the stage has
+        never seen.
+        """
+        from openusdconnect.connectable_attrs import input_attr
+        from openusdconnect.event_apply import _resolve_shader_port_type
+
+        existing = connectable.GetInput(usd_name)
+        if existing:
+            return str(existing.GetAttr().GetTypeName())
+        sdr_type = _resolve_shader_port_type(prim, input_attr(usd_name))
+        if sdr_type is not None:
+            return str(sdr_type)
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list) and len(value) == 3:
+            return "color3f"
+        return "float"
 
     def purge_prim_refs(self, prefix: str):
         """Remove tracked references for prims matching a path prefix."""

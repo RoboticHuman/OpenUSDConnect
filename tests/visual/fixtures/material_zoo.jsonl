@@ -1,0 +1,256 @@
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Cube", "t": [0.0, 0.0, 0.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Sphere", "t": [0.0, 1.5, 0.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Cone", "t": [0.0, 3.0, 0.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Cylinder", "t": [0.0, 4.5, 0.0]}
+{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}
+{"k": "ensure_prim", "prim": "/World/McpBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.699999988079071}, "k": "set_gprim_attrs", "prim": "/World/McpBall"}
+{"k": "ensure_xform_ops", "prim": "/World/McpBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall", "t": [3.0, 1.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks", "typeName": "Xform"}
+{"k": "ensure_prim", "prim": "/World/Looks/Gold", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/Gold/Surface", "typeName": "Shader"}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [1.0, 0.8399999737739563, 0.0], "metallic": 1, "roughness": 0.25}, "k": "set_connectable_input", "prim": "/World/Looks/Gold/Surface"}
+{"connections": {"outputs:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/Gold/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/Gold"}
+{"k": "set_material_binding", "material_path": "/World/Looks/Gold", "prim": "/World/McpBall"}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [0.8999999761581421, 0.05000000074505806, 0.05000000074505806], "metallic": 0, "roughness": 0.5}, "k": "set_connectable_input", "prim": "/World/Looks/Gold/Surface"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall", "t": [3.0, 3.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/MysticBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/MysticBall"}
+{"k": "ensure_xform_ops", "prim": "/World/MysticBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MysticBall", "t": [-3.0, 2.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/MysticPurple", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/MysticPurple/Surface", "typeName": "Shader"}
+{"info_id": "UsdPreviewSurface", "input_types": {"clearcoat": "float", "clearcoatRoughness": "float", "diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"clearcoat": 1, "clearcoatRoughness": 0.019999999552965164, "diffuseColor": [0.44999998807907104, 0.11999999731779099, 0.699999988079071], "metallic": 0, "roughness": 0.3499999940395355}, "k": "set_connectable_input", "prim": "/World/Looks/MysticPurple/Surface"}
+{"connections": {"outputs:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/MysticPurple/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/MysticPurple"}
+{"k": "set_material_binding", "material_path": "/World/Looks/MysticPurple", "prim": "/World/MysticBall"}
+{"k": "ensure_prim", "prim": "/World/MysticBallMtlx", "typeName": "Sphere"}
+{"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/MysticBallMtlx"}
+{"k": "ensure_xform_ops", "prim": "/World/MysticBallMtlx"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MysticBallMtlx", "t": [-5.0, 2.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/MysticPurpleMtlx", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/MysticPurpleMtlx/Surface", "typeName": "Shader"}
+{"info_id": "ND_open_pbr_surface_surfaceshader", "input_types": {"base_color": "color3f", "base_metalness": "float", "coat_roughness": "float", "coat_weight": "float", "specular_roughness": "float"}, "inputs": {"base_color": [0.44999998807907104, 0.11999999731779099, 0.699999988079071], "base_metalness": 0, "coat_roughness": 0.019999999552965164, "coat_weight": 1, "specular_roughness": 0.3499999940395355}, "k": "set_connectable_input", "prim": "/World/Looks/MysticPurpleMtlx/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:out", "source_prim": "/World/Looks/MysticPurpleMtlx/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/MysticPurpleMtlx"}
+{"k": "set_material_binding", "material_path": "/World/Looks/MysticPurpleMtlx", "prim": "/World/MysticBallMtlx"}
+{"k": "ensure_prim", "prim": "/World/Chair", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [0.0, 0.0, 5.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/Wood", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/Wood/Surface", "typeName": "Shader"}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [0.4000000059604645, 0.25999999046325684, 0.12999999523162842], "metallic": 0, "roughness": 0.6000000238418579}, "k": "set_connectable_input", "prim": "/World/Looks/Wood/Surface"}
+{"connections": {"outputs:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/Wood/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/Wood"}
+{"k": "set_material_binding", "material_path": "/World/Looks/Wood", "prim": "/World/Chair"}
+{"k": "ensure_prim", "prim": "/World/Chair/Seat", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/Seat"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/Seat"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/Seat", "s": [0.46000000834465027, 0.05999999865889549, 0.46000000834465027], "t": [0.0, 0.41999998688697815, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Chair/LegFL", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/LegFL"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/LegFL"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/LegFL", "s": [0.05000000074505806, 0.38999998569488525, 0.05000000074505806], "t": [-0.1899999976158142, 0.19499999284744263, 0.1899999976158142]}
+{"k": "ensure_prim", "prim": "/World/Chair/LegFR", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/LegFR"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/LegFR"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/LegFR", "s": [0.05000000074505806, 0.38999998569488525, 0.05000000074505806], "t": [0.1899999976158142, 0.19499999284744263, 0.1899999976158142]}
+{"k": "ensure_prim", "prim": "/World/Chair/LegBL", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/LegBL"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/LegBL"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/LegBL", "s": [0.05000000074505806, 0.8500000238418579, 0.05000000074505806], "t": [-0.1899999976158142, 0.42500001192092896, -0.1899999976158142]}
+{"k": "ensure_prim", "prim": "/World/Chair/LegBR", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/LegBR"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/LegBR"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/LegBR", "s": [0.05000000074505806, 0.8500000238418579, 0.05000000074505806], "t": [0.1899999976158142, 0.42500001192092896, -0.1899999976158142]}
+{"k": "ensure_prim", "prim": "/World/Chair/Backrest", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/Chair/Backrest"}
+{"k": "ensure_xform_ops", "prim": "/World/Chair/Backrest"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Chair/Backrest", "s": [0.41999998688697815, 0.30000001192092896, 0.03999999910593033], "t": [0.0, 0.6800000071525574, -0.1899999976158142]}
+{"k": "delete_prim", "prim": "/World/MysticBallMtlx"}
+{"k": "delete_prim", "prim": "/World/Looks/MysticPurpleMtlx"}
+{"k": "set_material_binding", "material_path": "/World/Looks/MysticPurple", "prim": "/World/MysticBallMtlx"}
+{"k": "delete_prim", "prim": "/World/Looks/MysticPurpleMtlx"}
+{"k": "ensure_prim", "prim": "/World/OpenPBRTest", "typeName": "Sphere"}
+{"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/OpenPBRTest"}
+{"k": "ensure_xform_ops", "prim": "/World/OpenPBRTest"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/OpenPBRTest", "t": [-5.0, 4.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/OpenPBRPurple", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/OpenPBRPurple/Surface", "typeName": "Shader"}
+{"info_id": "ND_open_pbr_surface_surfaceshader", "input_types": {"base_color": "color3f", "base_metalness": "float", "coat_roughness": "float", "coat_weight": "float", "specular_roughness": "float"}, "inputs": {"base_color": [0.44999998807907104, 0.11999999731779099, 0.699999988079071], "base_metalness": 0, "coat_roughness": 0.019999999552965164, "coat_weight": 1.0, "specular_roughness": 0.3499999940395355}, "k": "set_connectable_input", "prim": "/World/Looks/OpenPBRPurple/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:out", "source_prim": "/World/Looks/OpenPBRPurple/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/OpenPBRPurple"}
+{"k": "set_material_binding", "material_path": "/World/Looks/OpenPBRPurple", "prim": "/World/OpenPBRTest"}
+{"k": "ensure_prim", "prim": "/World/CarPaintBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.8999999761581421}, "k": "set_gprim_attrs", "prim": "/World/CarPaintBall"}
+{"k": "ensure_xform_ops", "prim": "/World/CarPaintBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/CarPaintBall", "t": [6.0, 1.5, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/CarPaint", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/CarPaint/Surface", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/CarPaint/Flakes", "typeName": "Shader"}
+{"info_id": "PxrSurface", "input_types": {"clearcoatEdgeColor": "color3f", "clearcoatFaceColor": "color3f", "clearcoatRoughness": "float", "diffuseColor": "color3f", "diffuseGain": "float", "specularEdgeColor": "color3f", "specularFaceColor": "color3f", "specularRoughness": "float"}, "inputs": {"clearcoatEdgeColor": [1.0, 1.0, 1.0], "clearcoatFaceColor": [0.03999999910593033, 0.03999999910593033, 0.03999999910593033], "clearcoatRoughness": 0.0, "diffuseColor": [0.029999999329447746, 0.07000000029802322, 0.2199999988079071], "diffuseGain": 0.5, "specularEdgeColor": [0.699999988079071, 0.8500000238418579, 1.0], "specularFaceColor": [0.20000000298023224, 0.41999998688697815, 0.9200000166893005], "specularRoughness": 0.11999999731779099}, "k": "set_connectable_input", "prim": "/World/Looks/CarPaint/Surface"}
+{"info_id": "PxrFlakes", "input_types": {"density": "float", "size": "float"}, "inputs": {"density": 0.6000000238418579, "size": 0.25}, "k": "set_connectable_input", "prim": "/World/Looks/CarPaint/Flakes"}
+{"connections": {"inputs:specularBumpNormal": {"source_attr": "outputs:resultN", "source_prim": "/World/Looks/CarPaint/Flakes"}}, "k": "set_connectable_connection", "prim": "/World/Looks/CarPaint/Surface"}
+{"connections": {"outputs:ri:surface": {"source_attr": "outputs:out", "source_prim": "/World/Looks/CarPaint/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/CarPaint"}
+{"k": "set_material_binding", "material_path": "/World/Looks/CarPaint", "prim": "/World/CarPaintBall"}
+{"k": "ensure_prim", "prim": "/World/LamaBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.8999999761581421}, "k": "set_gprim_attrs", "prim": "/World/LamaBall"}
+{"k": "ensure_xform_ops", "prim": "/World/LamaBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/LamaBall", "t": [4.0, 1.5, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/Metal", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/Coat", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/Layer", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/Surface", "typeName": "Shader"}
+{"info_id": "LamaConductor", "input_types": {"edgeColor": "color3f", "reflectivity": "color3f", "roughness": "float"}, "inputs": {"edgeColor": [1.0, 1.0, 1.0], "reflectivity": [0.20000000298023224, 0.41999998688697815, 0.9200000166893005], "roughness": 0.25}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Metal"}
+{"info_id": "LamaDielectric", "input_types": {"IOR": "float", "roughness": "float"}, "inputs": {"IOR": 1.5, "roughness": 0.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Coat"}
+{"info_id": "LamaLayer", "input_types": {"topMix": "float"}, "inputs": {"topMix": 1.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Layer"}
+{"info_id": "LamaSurface", "input_types": {}, "inputs": {}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Surface"}
+{"connections": {"inputs:materialBase": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Metal"}, "inputs:materialTop": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Coat"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaCarPaint/Layer"}
+{"connections": {"inputs:materialFront": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Layer"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaCarPaint/Surface"}
+{"connections": {"outputs:ri:surface": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaCarPaint"}
+{"k": "set_material_binding", "material_path": "/World/Looks/LamaCarPaint", "prim": "/World/LamaBall"}
+{"k": "ensure_prim", "prim": "/World/LamaIridBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.8999999761581421}, "k": "set_gprim_attrs", "prim": "/World/LamaIridBall"}
+{"k": "ensure_xform_ops", "prim": "/World/LamaIridBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/LamaIridBall", "t": [4.0, -0.800000011920929, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaIrid", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaIrid/Base", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaIrid/Irid", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaIrid/Layer", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaIrid/Surface", "typeName": "Shader"}
+{"info_id": "LamaConductor", "input_types": {"edgeColor": "color3f", "reflectivity": "color3f", "roughness": "float"}, "inputs": {"edgeColor": [0.20000000298023224, 0.20000000298023224, 0.25], "reflectivity": [0.029999999329447746, 0.029999999329447746, 0.03999999910593033], "roughness": 0.25}, "k": "set_connectable_input", "prim": "/World/Looks/LamaIrid/Base"}
+{"info_id": "LamaIridescence", "input_types": {"filmIOR": "float", "relativeFilmThickness": "float", "roughness": "float"}, "inputs": {"filmIOR": 1.2999999523162842, "relativeFilmThickness": 0.5, "roughness": 0.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaIrid/Irid"}
+{"info_id": "LamaLayer", "input_types": {"topMix": "float"}, "inputs": {"topMix": 1.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaIrid/Layer"}
+{"info_id": "LamaSurface", "input_types": {}, "inputs": {}, "k": "set_connectable_input", "prim": "/World/Looks/LamaIrid/Surface"}
+{"connections": {"inputs:materialBase": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaIrid/Base"}, "inputs:materialTop": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaIrid/Irid"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaIrid/Layer"}
+{"connections": {"inputs:materialFront": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaIrid/Layer"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaIrid/Surface"}
+{"connections": {"outputs:ri:surface": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaIrid/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaIrid"}
+{"k": "set_material_binding", "material_path": "/World/Looks/LamaIrid", "prim": "/World/LamaIridBall"}
+{"k": "delete_prim", "prim": "/World/LamaIridBall"}
+{"k": "delete_prim", "prim": "/World/Looks/LamaIrid"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/Irid", "typeName": "Shader"}
+{"info_id": "LamaIridescence", "input_types": {"filmIOR": "float", "relativeFilmThickness": "float", "roughness": "float"}, "inputs": {"filmIOR": 1.2999999523162842, "relativeFilmThickness": 0.5, "roughness": 0.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Irid"}
+{"k": "ensure_prim", "prim": "/World/Looks/LamaCarPaint/InnerLayer", "typeName": "Shader"}
+{"info_id": "LamaLayer", "input_types": {"topMix": "float"}, "inputs": {"topMix": 1.0}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/InnerLayer"}
+{"connections": {"inputs:materialBase": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Metal"}, "inputs:materialTop": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/Irid"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaCarPaint/InnerLayer"}
+{"connections": {"inputs:materialBase": {"source_attr": "outputs:out", "source_prim": "/World/Looks/LamaCarPaint/InnerLayer"}}, "k": "set_connectable_connection", "prim": "/World/Looks/LamaCarPaint/Layer"}
+{"info_id": "LamaConductor", "input_types": {"reflectivity": "color3f"}, "inputs": {"reflectivity": [0.8500000238418579, 0.15000000596046448, 0.550000011920929]}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Metal"}
+{"info_id": "LamaIridescence", "input_types": {"filmIOR": "float", "relativeFilmThickness": "float"}, "inputs": {"filmIOR": 2.200000047683716, "relativeFilmThickness": 0.8999999761581421}, "k": "set_connectable_input", "prim": "/World/Looks/LamaCarPaint/Irid"}
+{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}
+{"k": "ensure_prim", "prim": "/World/Looks", "typeName": "Xform"}
+{"k": "ensure_prim", "prim": "/World/Looks/EmeraldMcp", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/EmeraldMcp/Surface", "typeName": "Shader"}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [0.0, 0.550000011920929, 0.3799999952316284], "metallic": 1, "roughness": 0.11999999731779099}, "k": "set_connectable_input", "prim": "/World/Looks/EmeraldMcp/Surface"}
+{"connections": {"outputs:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/EmeraldMcp/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/EmeraldMcp"}
+{"k": "ensure_prim", "prim": "/World/McpBall2", "typeName": "Sphere"}
+{"attrs": {"radius": 0.699999988079071}, "k": "set_gprim_attrs", "prim": "/World/McpBall2"}
+{"k": "ensure_xform_ops", "prim": "/World/McpBall2"}
+{"fields": [], "k": "set_xform_trs", "prim": "/World/McpBall2"}
+{"k": "set_material_binding", "material_path": "/World/Looks/EmeraldMcp", "prim": "/World/McpBall2"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [6.0, 1.5, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Bishop", "typeName": "Xform"}
+{"k": "set_reference", "prim": "/World/Bishop", "refs": [{"asset_path": "{REPO}/assets/full_assets/OpenChessSet/assets/Bishop/Bishop.usd", "prim_path": "/Bishop"}]}
+{"k": "ensure_xform_ops", "prim": "/World/Bishop"}
+{"fields": ["t", "s"], "k": "set_xform_trs", "prim": "/World/Bishop", "s": [15.0, 15.0, 15.0], "t": [0.0, 0.0, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [0.0, 2.5, 0.0]}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [0.0, 0.6499999761581421, 0.41999998688697815], "metallic": 0, "roughness": 0.30000001192092896}, "k": "set_connectable_input", "prim": "/World/Looks/EmeraldMcp/Surface"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [1.0, 4.0, 0.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [-1.5, 0.0, 3.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/Chrome", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/Chrome/Surface", "typeName": "Shader"}
+{"info_id": "UsdPreviewSurface", "input_types": {"diffuseColor": "color3f", "metallic": "float", "roughness": "float"}, "inputs": {"diffuseColor": [1, 1, 1], "metallic": 1, "roughness": 0}, "k": "set_connectable_input", "prim": "/World/Looks/Chrome/Surface"}
+{"connections": {"outputs:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/Chrome/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/Chrome"}
+{"k": "ensure_prim", "prim": "/World/MirrorBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/MirrorBall"}
+{"k": "ensure_xform_ops", "prim": "/World/MirrorBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MirrorBall", "t": [-1.0, 0.5, 0.0]}
+{"k": "set_material_binding", "material_path": "/World/Looks/Chrome", "prim": "/World/MirrorBall"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodTiled", "typeName": "Scope"}
+{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "{REPO}/assets/test_assets/MaterialXTest/standard_surface_brass_tiled.mtlx"}]}
+{"k": "set_reference", "prim": "/World/Looks/WoodTiled", "refs": [{"asset_path": "{REPO}/assets/test_assets/MaterialXTest/standard_surface_brass_tiled.mtlx", "prim_path": "/MaterialX"}]}
+{"k": "ensure_prim", "prim": "/World/WoodBall", "typeName": "Sphere"}
+{"attrs": {"radius": 0.800000011920929}, "k": "set_gprim_attrs", "prim": "/World/WoodBall"}
+{"k": "ensure_xform_ops", "prim": "/World/WoodBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 0.0, 0.0]}
+{"k": "set_material_binding", "material_path": "/World/Looks/WoodTiled/Materials/Tiled_Brass", "prim": "/World/WoodBall"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodTri", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodTri/Surface", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodTri/TriColor", "typeName": "Shader"}
+{"info_id": "ND_triplanarprojection_color3", "input_types": {"filex": "asset", "filey": "asset", "filez": "asset"}, "inputs": {"filex": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg", "filey": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg", "filez": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/TriColor"}
+{"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base": "float", "coat": "float", "specular": "float", "specular_roughness": "float"}, "inputs": {"base": 1, "coat": 0, "specular": 0.30000001192092896, "specular_roughness": 0.550000011920929}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/Surface"}
+{"connections": {"inputs:base_color": {"source_attr": "outputs:out", "source_prim": "/World/Looks/WoodTri/TriColor"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodTri/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/WoodTri/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodTri"}
+{"k": "set_material_binding", "material_path": "/World/Looks/WoodTri", "prim": "/World/WoodBall"}
+{"info_id": "ND_triplanarprojection_color3", "input_types": {"blend": "float"}, "inputs": {"blend": 2}, "k": "set_connectable_input", "prim": "/World/Looks/WoodTri/TriColor"}
+{"k": "delete_prim", "prim": "/World/WoodBall"}
+{"k": "ensure_prim", "prim": "/World/WoodBall", "typeName": ""}
+{"k": "set_reference", "prim": "/World/WoodBall", "refs": [{"asset_path": "{REPO}/tests/visual/assets/uv_sphere.usda"}]}
+{"k": "ensure_xform_ops", "prim": "/World/WoodBall"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 0.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodUV", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodUV/Surface", "typeName": "Shader"}
+{"k": "ensure_prim", "prim": "/World/Looks/WoodUV/Img", "typeName": "Shader"}
+{"info_id": "ND_image_color3", "input_types": {"file": "asset"}, "inputs": {"file": "{REPO}/assets/test_assets/MaterialXTest/textures/brass_color.jpg"}, "k": "set_connectable_input", "prim": "/World/Looks/WoodUV/Img"}
+{"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base": "float", "coat": "float", "specular": "float", "specular_roughness": "float"}, "inputs": {"base": 1, "coat": 0, "specular": 0.30000001192092896, "specular_roughness": 0.550000011920929}, "k": "set_connectable_input", "prim": "/World/Looks/WoodUV/Surface"}
+{"connections": {"inputs:base_color": {"source_attr": "outputs:out", "source_prim": "/World/Looks/WoodUV/Img"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodUV/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/WoodUV/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/WoodUV"}
+{"k": "set_material_binding", "material_path": "/World/Looks/WoodUV", "prim": "/World/WoodBall"}
+{"info_id": "ND_open_pbr_surface_surfaceshader", "input_types": {"base_color": "color3f"}, "inputs": {"base_color": [0.10000000149011612, 0.8999999761581421, 0.20000000298023224]}, "k": "set_connectable_input", "prim": "/World/Looks/OpenPBRPurple/Surface"}
+{"k": "delete_prim", "prim": "/World/Looks/WoodTiled"}
+{"k": "delete_prim", "prim": "/World/Looks/WoodTri"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall", "t": [1.5, 1.5, 0.0]}
+{"k": "delete_prim", "prim": "/World/WoodBall"}
+{"k": "ensure_prim", "prim": "/World/WoodBall2", "typeName": ""}
+{"k": "set_reference", "prim": "/World/WoodBall2", "refs": [{"asset_path": "{REPO}/tests/visual/assets/uv_sphere.usda"}]}
+{"k": "ensure_xform_ops", "prim": "/World/WoodBall2"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/WoodBall2", "t": [1.5, 1.5, 0.0]}
+{"k": "set_material_binding", "material_path": "/World/Looks/WoodUV", "prim": "/World/WoodBall2"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [-1.0, 0.0, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [1.0, 0.0, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [-1.0, 0.0, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [-1.0, 0.28060001134872437, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [0.0, 0.28060001134872437, 3.799999952316284]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Chair", "t": [1.0, 0.28060001134872437, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/Bishop", "t": [-2.0, 0.0, 3.0]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MirrorBall", "t": [-0.5, 1.0806000232696533, 3.0]}
+{"k": "ensure_prim", "prim": "/World/MetalCube", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/MetalCube"}
+{"k": "ensure_xform_ops", "prim": "/World/MetalCube"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/MetalCube", "t": [3.0, 0.7806000113487244, 3.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/BrushedMetal", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/BrushedMetal/Surface", "typeName": "Shader"}
+{"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base_color": "color3f", "metalness": "float", "specular_anisotropy": "float", "specular_roughness": "float"}, "inputs": {"base_color": [0.5600000023841858, 0.5699999928474426, 0.5799999833106995], "metalness": 1, "specular_anisotropy": 0.8500000238418579, "specular_roughness": 0.3499999940395355}, "k": "set_connectable_input", "prim": "/World/Looks/BrushedMetal/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/BrushedMetal/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/BrushedMetal"}
+{"k": "set_material_binding", "material_path": "/World/Looks/BrushedMetal", "prim": "/World/MetalCube"}
+{"k": "ensure_prim", "prim": "/World/GlassCube", "typeName": "Cube"}
+{"attrs": {"size": 1}, "k": "set_gprim_attrs", "prim": "/World/GlassCube"}
+{"k": "ensure_xform_ops", "prim": "/World/GlassCube"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/GlassCube", "t": [4.5, 0.7806000113487244, 3.0]}
+{"k": "ensure_prim", "prim": "/World/Looks/Glass", "typeName": "Material"}
+{"k": "ensure_prim", "prim": "/World/Looks/Glass/Surface", "typeName": "Shader"}
+{"info_id": "ND_standard_surface_surfaceshader", "input_types": {"base": "float", "specular_IOR": "float", "specular_roughness": "float", "transmission": "float"}, "inputs": {"base": 0, "specular_IOR": 1.5, "specular_roughness": 0, "transmission": 1}, "k": "set_connectable_input", "prim": "/World/Looks/Glass/Surface"}
+{"connections": {"outputs:mtlx:surface": {"source_attr": "outputs:surface", "source_prim": "/World/Looks/Glass/Surface"}}, "k": "set_connectable_connection", "prim": "/World/Looks/Glass"}
+{"k": "set_material_binding", "material_path": "/World/Looks/Glass", "prim": "/World/GlassCube"}
+{"info_id": "ND_standard_surface_surfaceshader", "input_types": {"transmission_color": "color3f"}, "inputs": {"transmission_color": [0.550000011920929, 0.8999999761581421, 0.8500000238418579]}, "k": "set_connectable_input", "prim": "/World/Looks/Glass/Surface"}
+{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World"}
+{"fields": ["t", "r", "s"], "k": "set_xform_trs", "prim": "/World", "r": [1.0, 0.0, 0.0, 0.0], "s": [0.9999999403953552, 1.0, 1.0], "t": [0.0, 0.0, 0.0]}
+{"k": "ensure_prim", "prim": "/World/Cylinder", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World/Cylinder"}
+{"k": "ensure_prim", "prim": "/World/Sphere", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World/Sphere"}
+{"k": "ensure_prim", "prim": "/World/Cone", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World/Cone"}
+{"k": "ensure_prim", "prim": "/World/GlassCube", "typeName": "Cube"}
+{"k": "ensure_xform_ops", "prim": "/World/GlassCube"}
+{"fields": ["t", "r", "s"], "k": "set_xform_trs", "prim": "/World/GlassCube", "r": [1.0, 0.0, 0.0, 0.0], "s": [0.5, 0.5, 0.5], "t": [-2.435262680053711, 0.7805998921394348, 4.746233940124512]}
+{"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"}
+{"k": "ensure_xform_ops", "prim": "/World/Cube"}
+{"k": "ensure_prim", "prim": "/World/Sphere/Geom", "typeName": "Sphere"}
+{"attrs": {"radius": 0.6000000238418579}, "k": "set_gprim_attrs", "prim": "/World/Sphere/Geom"}
+{"k": "ensure_prim", "prim": "/World/Cone/Geom", "typeName": "Cone"}
+{"attrs": {"height": 1.399999976158142, "radius": 0.6000000238418579}, "k": "set_gprim_attrs", "prim": "/World/Cone/Geom"}
+{"k": "ensure_prim", "prim": "/World/Cube/Geom", "typeName": "Cube"}
+{"attrs": {"size": 1.0}, "k": "set_gprim_attrs", "prim": "/World/Cube/Geom"}
+{"k": "ensure_prim", "prim": "/World/Cylinder/Geom", "typeName": "Cylinder"}
+{"attrs": {"height": 1.399999976158142, "radius": 0.5}, "k": "set_gprim_attrs", "prim": "/World/Cylinder/Geom"}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/GlassCube", "t": [-2.4288651943206787, 0.7805998921394348, 4.746233940124512]}
+{"fields": ["t"], "k": "set_xform_trs", "prim": "/World/GlassCube", "t": [-2.4160571098327637, 0.7805998921394348, 4.746233940124512]}

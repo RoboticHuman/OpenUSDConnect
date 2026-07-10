@@ -39,8 +39,10 @@ from ..protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_POINT_INSTANCER,
+    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
@@ -98,6 +100,48 @@ def _abbrev_scalar(value) -> str:
     return s if len(s) <= 120 else s[:117] + "…"
 
 
+_PI_ARRAY_ATTRS = (
+    "protoIndices", "positions", "orientations", "orientationsf", "scales",
+    "velocities", "accelerations", "angularVelocities", "ids", "invisibleIds",
+)
+
+
+def _point_instancer_summary(prim) -> dict:
+    """Bounded read of UsdGeomPointInstancer state for the inspector.
+
+    Returns prototypes targets, instance count (from protoIndices length),
+    which arrays are animated, and the size of the inactiveIds prim
+    metadata when authored.
+    """
+    pi = UsdGeom.PointInstancer(prim)
+    proto_rel = pi.GetPrototypesRel()
+    targets = (
+        [t.pathString for t in proto_rel.GetTargets()] if proto_rel else []
+    )
+    proto_indices = pi.GetProtoIndicesAttr()
+    if proto_indices and proto_indices.HasAuthoredValue():
+        sample_value = proto_indices.Get()
+        instance_count = len(sample_value) if sample_value is not None else 0
+    else:
+        instance_count = 0
+    animated = []
+    for name in _PI_ARRAY_ATTRS:
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsAuthored() and attr.GetNumTimeSamples() > 0:
+            animated.append(name)
+    inactive_count = None
+    if prim.HasAuthoredMetadata("inactiveIds"):
+        list_op = prim.GetMetadata("inactiveIds")
+        if list_op is not None:
+            inactive_count = len(list_op.ApplyOperations([]))
+    return {
+        "prototypes": targets,
+        "instanceCount": instance_count,
+        "animatedArrays": animated,
+        "inactiveIdCount": inactive_count,
+    }
+
+
 def _authored_attr_rows(prim) -> list[dict]:
     """Authored attributes as ``{name, type, value, numTimeSamples}`` rows.
 
@@ -143,6 +187,32 @@ def _metadata_int(meta: dict, key: str) -> int | None:
         return None
 
 
+class _WireMetrics:
+    """Thread-safe per-event-kind counters of encoded record bytes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+        self._bytes: dict[str, int] = {}
+
+    def record(self, kind: str, nbytes: int) -> None:
+        with self._lock:
+            self._counts[kind] = self._counts.get(kind, 0) + 1
+            self._bytes[kind] = self._bytes.get(kind, 0) + nbytes
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            kinds = {
+                k: {"count": self._counts[k], "bytes": self._bytes[k]}
+                for k in sorted(self._counts)
+            }
+        return {
+            "kinds": kinds,
+            "total_count": sum(v["count"] for v in kinds.values()),
+            "total_bytes": sum(v["bytes"] for v in kinds.values()),
+        }
+
+
 class UsdSyncServer:
     """Holds all shared server state: stage, sequence counter, client list, event store."""
 
@@ -160,6 +230,9 @@ class UsdSyncServer:
         durability: str = "strict",
         txn_rate: float = 0,
         txn_burst: int = 0,
+        wire_metrics: bool = False,
+        compact_interval: float = 0,
+        reclaim_interval: float = 0,
     ):
         if base_usd_path:
             self.stage = Usd.Stage.Open(base_usd_path)
@@ -197,6 +270,10 @@ class UsdSyncServer:
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         self._next_seq = self.store.get_max_seq() + 1
         self._event_count = self.store.get_count()
+        # Periodic compaction skips when no seq was assigned since the last
+        # compaction. Starts at 1 so a pre-existing uncompacted log gets one
+        # compaction on the first tick.
+        self._seq_at_last_compact = 1
         # Virtual-file snapshots are keyed by an epoch plus the latest assigned
         # sequence. Epoch disambiguates compaction/purge resetting sequence IDs.
         self._snapshot_epoch = 0
@@ -252,6 +329,28 @@ class UsdSyncServer:
         # Per-client rate limiting (0 = disabled)
         self.txn_rate = txn_rate
         self.txn_burst = txn_burst
+
+        # Opt-in wire traffic diagnostics (--wire-metrics)
+        self.wire_metrics: _WireMetrics | None = (
+            _WireMetrics() if wire_metrics else None
+        )
+
+        # Periodic compaction (--compact-interval; 0 = disabled). Runtime
+        # adjustable via set_compact_interval. compact_log itself is safe
+        # against concurrent txns: its exclusive phase holds txn_barrier, so
+        # incoming txns queue and proceed against the compacted log.
+        self._compact_interval = max(0.0, float(compact_interval or 0))
+        self._compact_stop = False
+        self._compact_wake = threading.Event()
+        self._compact_thread: threading.Thread | None = None
+        if self._compact_interval > 0:
+            self._start_compaction_thread()
+
+        # Storage reclaim (--reclaim-interval; 0 = disabled). Evaluated at
+        # compaction and purge commits, where the log was just rewritten and
+        # the exclusive barrier is already held; no thread of its own.
+        self._reclaim_interval = max(0.0, float(reclaim_interval or 0))
+        self._last_reclaim = time.monotonic()
         self._persist_queue: queue.Queue | None = None
         if durability == "realtime":
             self._persist_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
@@ -261,15 +360,26 @@ class UsdSyncServer:
             )
             self._persist_thread.start()
 
-        # LRU cache: prim_path → (translate_op, orient_op, scale_op).
+        # prim_path → (translate_op, orient_op, scale_op). A cached XformOp is
+        # only valid while the stage edit target is unchanged: any SetEditTarget
+        # (e.g. switching to another department's layer) invalidates it, so a
+        # reused op authors against the wrong layer and the write is silently
+        # lost. _op_cache_for clears the cache whenever the edit target changes;
+        # consecutive edits to the same layer keep it (the single-client fast
+        # path).
         from cachetools import LRUCache
 
         self.op_cache: LRUCache = LRUCache(
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
+        self._op_cache_layer: str | None = None
 
         # Incremental prim tracking — avoids full log scans on dashboard polls.
         self._prim_paths: dict[str, str] = {}  # prim_path → typeName
+        # Per-prim flags maintained incrementally from events so dashboard
+        # tree refreshes never have to query pxr per prim.
+        self._instanceable_paths: set[str] = set()
+        self._point_instancer_paths: set[str] = set()
 
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
@@ -290,13 +400,92 @@ class UsdSyncServer:
     def shutdown(self):
         """Signal background threads to drain queued work and exit.
 
-        Persist queue drains first (durability), then broadcast.
+        Compaction stops first (no rewrite mid-shutdown), then the persist
+        queue drains (durability), then broadcast.
         """
+        self._compact_stop = True
+        self._compact_wake.set()
+        if self._compact_thread is not None:
+            self._compact_thread.join(timeout=10.0)
         if self._persist_queue is not None:
             self._persist_queue.put(None)
             self._persist_thread.join(timeout=10.0)
         self._broadcast_queue.put(None)
         self._broadcast_thread.join(timeout=10.0)
+
+    # ------------------------------------------------------------------
+    # Periodic compaction
+    # ------------------------------------------------------------------
+
+    def _start_compaction_thread(self):
+        self._compact_thread = threading.Thread(
+            target=self._compaction_loop, daemon=True,
+        )
+        self._compact_thread.start()
+
+    def set_reclaim_interval(self, seconds: float) -> None:
+        """Set the storage-reclaim interval in seconds (0 disables).
+
+        Reclaim runs at compaction and purge commits, so an enabled
+        interval needs compaction (periodic or manual) to take effect.
+        """
+        self._reclaim_interval = max(0.0, float(seconds or 0))
+
+    def get_reclaim_interval(self) -> float:
+        return self._reclaim_interval
+
+    def _maybe_reclaim_storage(self) -> None:
+        """Reclaim store disk space when the interval has elapsed.
+
+        Called right after a log rewrite while the exclusive barrier is
+        held; reclaiming then is cheap because only live data is copied.
+        """
+        if self._reclaim_interval <= 0:
+            return
+        if time.monotonic() - self._last_reclaim < self._reclaim_interval:
+            return
+        reclaimed = self.store.reclaim_storage()
+        self._last_reclaim = time.monotonic()
+        if reclaimed:
+            LOG.info("Reclaimed %.1f MB of event log storage", reclaimed / 1048576)
+
+    def set_compact_interval(self, seconds: float) -> None:
+        """Set the periodic compaction interval in seconds (0 disables).
+
+        Takes effect immediately: the compaction thread re-reads the
+        interval on wake, so shortening, lengthening, and disabling all
+        apply without waiting out the previous period.
+        """
+        self._compact_interval = max(0.0, float(seconds or 0))
+        if self._compact_interval > 0 and self._compact_thread is None:
+            self._start_compaction_thread()
+        self._compact_wake.set()
+
+    def get_compact_interval(self) -> float:
+        return self._compact_interval
+
+    def _compaction_loop(self):
+        """Compact every interval, skipping when no event arrived since the
+        last compaction so idle servers don't resync receivers for nothing."""
+        while not self._compact_stop:
+            interval = self._compact_interval
+            if interval <= 0:
+                self._compact_wake.wait()
+                self._compact_wake.clear()
+                continue
+            if self._compact_wake.wait(timeout=interval):
+                self._compact_wake.clear()
+                continue
+            if self._compact_stop:
+                return
+            with self._seq_lock:
+                pending = self._next_seq > self._seq_at_last_compact
+            if not pending:
+                continue
+            try:
+                self.compact_log()
+            except Exception:
+                LOG.exception("Periodic compaction failed")
 
     # ------------------------------------------------------------------
     # Playback synchronization
@@ -414,21 +603,55 @@ class UsdSyncServer:
         self.stage.SetEditTarget(Usd.EditTarget(layer))
         return layer
 
+    def _op_cache_for(self, layer: Sdf.Layer):
+        """Return the op cache for editing *layer*, clearing it when the edit
+        target changed since it was last populated. A cached XformOp is only
+        valid while the edit target is unchanged, so any switch to another layer
+        invalidates every entry; without the clear a reused op authors against
+        the wrong layer and the write is lost. Callers must SetEditTarget to
+        *layer* before authoring."""
+        if self._op_cache_layer != layer.identifier:
+            self.op_cache.clear()
+            self._op_cache_layer = layer.identifier
+        return self.op_cache
+
     def _track_prim_event(self, ev: dict):
-        """Update _prim_paths from a single event (ensure/delete/rename)."""
+        """Update incremental prim trackers from a single event.
+
+        Covers ensure/delete/rename plus instancing flags. The dashboard
+        relies on this so its tree refresh never has to query pxr.
+        """
         k = ev.get("k")
         prim = ev.get("prim", "")
         if k == K_ENSURE_PRIM:
-            self._prim_paths[prim] = ev["typeName"]
+            type_name = ev["typeName"]
+            self._prim_paths[prim] = type_name
+            if type_name == "PointInstancer":
+                self._point_instancer_paths.add(prim)
         elif k == K_DELETE_PRIM:
             self._prim_paths.pop(prim, None)
+            self._instanceable_paths.discard(prim)
+            self._point_instancer_paths.discard(prim)
         elif k == K_RENAME_PRIM:
             type_name = self._prim_paths.pop(prim, "Xform")
+            was_instanceable = prim in self._instanceable_paths
+            was_pi = prim in self._point_instancer_paths
+            self._instanceable_paths.discard(prim)
+            self._point_instancer_paths.discard(prim)
             new_name = ev.get("new_name", "")
             if new_name:
                 parent = prim.rsplit("/", 1)[0] or "/"
                 new_path = f"{parent}/{new_name}" if parent != "/" else f"/{new_name}"
                 self._prim_paths[new_path] = type_name
+                if was_instanceable:
+                    self._instanceable_paths.add(new_path)
+                if was_pi:
+                    self._point_instancer_paths.add(new_path)
+        elif k == K_SET_INSTANCEABLE:
+            if ev.get("instanceable", True):
+                self._instanceable_paths.add(prim)
+            else:
+                self._instanceable_paths.discard(prim)
 
     def _replay_log_into_stage(self):
         """Apply all events from the event store to restore stage on startup.
@@ -447,21 +670,27 @@ class UsdSyncServer:
         all_events: list[dict] = []
 
         if self.department_priority:
-            # Per-client layers: route events to the correct client layer.
-            by_client: dict[str | None, list[dict]] = {}
+            # Per-client layers: route events to the layer the record was
+            # authored into, keyed by (client_id, department) since records
+            # carry the sender's department for exactly this replay routing.
+            by_layer_key: dict[tuple[str | None, str | None], list[dict]] = {}
             for _seq, record_bin in rows:
                 rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
-                cid = rec.get("client_id")
-                by_client.setdefault(cid, []).append(ev)
+                key = (rec.get("client_id"), rec.get("department"))
+                by_layer_key.setdefault(key, []).append(ev)
                 all_events.append(ev)
 
-            for cid, evts in by_client.items():
-                layer = self.get_or_create_client_layer(cid) if cid else self.edit_layer
+            for (cid, dept), evts in by_layer_key.items():
+                layer = (
+                    self.get_or_create_client_layer(cid, department=dept)
+                    if cid
+                    else self.edit_layer
+                )
                 self.stage.SetEditTarget(Usd.EditTarget(layer))
-                apply_events(self.stage, evts, op_cache=self.op_cache)
+                apply_events(self.stage, evts, op_cache=self._op_cache_for(layer))
 
-            total = sum(len(v) for v in by_client.values())
+            total = sum(len(v) for v in by_layer_key.values())
         else:
             # Legacy mode: all events to the shared edit_layer.
             events = []
@@ -470,7 +699,7 @@ class UsdSyncServer:
                 ev = rec.get("event", rec)
                 events.append(ev)
                 all_events.append(ev)
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(self.edit_layer))
             total = len(events)
 
         # Populate incremental prim tracking from replayed events.
@@ -490,8 +719,7 @@ class UsdSyncServer:
         - First connect (no token stored): issues a new token → (True, new_token)
         - Reconnect with valid token: accepted → (True, None)
         - Reconnect with wrong/missing token: rejected → (False, None)
-        - Token not required: always accepted → (True, None)
-        - Token required but no client_id: rejected → (False, None)
+        - Token not required or no client_id: always accepted → (True, None)
         """
         if not self.require_token or not self.token_store:
             return True, None
@@ -645,12 +873,15 @@ class UsdSyncServer:
             records = []
             persist_tuples = []
             for ev in p.events:
+                # department is the TARGET: the merge authored these opinions
+                # into the target department's layer, so replay must too.
                 rec = {
                     "type": MSG_EVENT,
                     "seq": self.assign_seq(),
                     "event": ev,
                     "client_id": p.from_client,
                     "origin": f"proposal-{p.proposal_id}",
+                    "department": p.target_department,
                 }
                 rec_bin = encode_message(rec)
                 records.append(rec)
@@ -674,8 +905,8 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(p.layer.identifier)
             del session.subLayerPaths[idx]
 
-        self.bump_snapshot_epoch(f"approve_proposal:{proposal_id}")
         p.status = "approved"
+        self.bump_snapshot_epoch(f"approve_proposal:{proposal_id}")
         LOG.info("Proposal %s approved — merged into %s", proposal_id, p.target_department)
         return True
 
@@ -692,8 +923,8 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(p.layer.identifier)
             del session.subLayerPaths[idx]
 
-        self.bump_snapshot_epoch(f"reject_proposal:{proposal_id}")
         p.status = "rejected"
+        self.bump_snapshot_epoch(f"reject_proposal:{proposal_id}")
         LOG.info("Proposal %s rejected", proposal_id)
         return True
 
@@ -726,7 +957,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.stage.UnmuteLayer(p.layer.identifier)
             self.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(p.layer))
             self.stage.MuteLayer(p.layer.identifier)
         p.events.extend(events)
         LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
@@ -944,19 +1175,25 @@ class UsdSyncServer:
                 }
             )
 
-        # Non-department client layers
+        # Non-department client layers. Several clients can share one layer
+        # (the shared edit_layer fallback), so group clients per layer and
+        # flag the shared one: it is communal and refuses merge_layer.
+        grouped: dict[str, dict] = {}
         for cid, layer in client_items:
             if layer.identifier in seen:
                 continue
-            seen.add(layer.identifier)
-            result.append(
+            entry = grouped.setdefault(
+                layer.identifier,
                 {
                     "department": None,
-                    "clients": [cid],
+                    "clients": [],
                     "identifier": layer.identifier,
                     "muted": layer.identifier in muted,
-                }
+                    "shared": layer is self.edit_layer,
+                },
             )
+            entry["clients"].append(cid)
+        result.extend(grouped.values())
 
         # Sort by session sublayer order (strongest first)
         path_order = {p: i for i, p in enumerate(sublayer_paths)}
@@ -968,8 +1205,9 @@ class UsdSyncServer:
 
         For latest-wins events (TRS, visibility, etc.), only the final value
         is kept.  Partial TRS fields are merged.  delete_prim tombstones all
-        prior events for that prim.  deactivate_prim is latest-wins (TRS
-        preserved for payload reload).
+        prior events for that prim's subtree.  deactivate_prim is latest-wins
+        (TRS preserved for payload reload).  Surviving events keep their
+        original relative order so replay stays causally valid.
 
         Two-phase design minimizes emitter blocking:
           Phase 1 (no lock): snapshot the log and build the compacted dict.
@@ -980,7 +1218,7 @@ class UsdSyncServer:
         if not rows:
             return
         max_seq = rows[-1][0]
-        latest, tombstoned = self._build_compacted(rows)
+        latest = self._build_compacted(rows)
         original_count = len(rows)
 
         # Phase 2 — merge delta + commit (exclusive, emitters blocked)
@@ -989,8 +1227,8 @@ class UsdSyncServer:
             # Catch any events that arrived during phase 1
             delta = self.store.get_from_seq_asc(max_seq + 1)
             if delta:
-                for _seq, record_bin in delta:
-                    self._merge_event(latest, tombstoned, record_bin)
+                for seq, record_bin in delta:
+                    self._merge_event(latest, seq, record_bin)
                 original_count += len(delta)
 
             self._commit_compaction(latest, original_count)
@@ -999,8 +1237,8 @@ class UsdSyncServer:
 
     @staticmethod
     def _merge_event(
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
-        tombstoned: set[str],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
+        seq: int,
         record_bin: bytes,
     ):
         """Merge a single event record into the compacted state.
@@ -1008,37 +1246,56 @@ class UsdSyncServer:
         Keys are ``(prim, kind, time)``: events at distinct time samples
         compact independently of each other and of the default-time
         opinion, so a keyframed log keeps one merged event per sample.
+        ``set_material_binding`` keys additionally carry the binding
+        purpose so allPurpose/preview/full bindings survive independently.
+
+        Each entry carries a replay stamp — the seq of the last record
+        merged into it, except creates, which keep their first-seen seq.
+        Rewriting in stamp order preserves the original log's causal
+        order: a prim's create replays before every event that references
+        it (connections, bindings), and a delete replays before the
+        events that recreate the prim.
+
+        Decodes with numpy arrays: the per-element list path is ~100x
+        slower and turns compaction of geometry-heavy logs (meshes,
+        instancer arrays) into minutes of decode.
         """
-        rec = message_to_dict(record_bin)
+        rec = message_to_dict(record_bin, numpy_arrays=True)
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
         key = (prim, k, ev.get("time"))
+        if k == K_SET_MATERIAL_BINDING:
+            key = (prim, f"{k}:{ev.get('material_purpose') or ''}", ev.get("time"))
         meta = {}
-        for meta_key in ("origin", "client", "client_id"):
+        for meta_key in ("origin", "client", "client_id", "department"):
             val = rec.get(meta_key)
             if val:
                 meta[meta_key] = val
 
         if k in (K_DELETE_PRIM, K_RENAME_PRIM):
-            tombstoned.add(prim)
-            to_remove = [existing for existing in latest if existing[0] == prim]
+            # Tombstone the whole subtree: descendants of a deleted or
+            # renamed prim must not replay and recreate it as a typeless
+            # zombie. Events after the tombstone are kept — they represent
+            # a recreation and replay after the delete via their stamps.
+            child_prefix = prim + "/"
+            to_remove = [
+                existing for existing in latest
+                if existing[0] == prim or existing[0].startswith(child_prefix)
+            ]
             for existing in to_remove:
                 del latest[existing]
-            latest[key] = (ev, meta)
-            return
-
-        if prim in tombstoned:
+            latest[key] = (ev, meta, seq)
             return
 
         # load/unload are mutually exclusive — only the last one wins.
         if k == K_LOAD_PAYLOAD:
             latest.pop((prim, K_UNLOAD_PAYLOAD, None), None)
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
             return
         if k == K_UNLOAD_PAYLOAD:
             latest.pop((prim, K_LOAD_PAYLOAD, None), None)
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
             return
 
         if k == K_SET_XFORM_TRS:
@@ -1050,9 +1307,9 @@ class UsdSyncServer:
                         prev[comp] = ev[comp]
                         if comp not in prev["fields"]:
                             prev["fields"].append(comp)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_GPRIM_ATTRS:
             existing = latest.get(key)
             if existing:
@@ -1064,9 +1321,9 @@ class UsdSyncServer:
                 new_interp = ev.get("attr_interp", {})
                 if new_interp:
                     prev.setdefault("attr_interp", {}).update(new_interp)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_CONNECTABLE_INPUT:
             existing = latest.get(key)
             if existing:
@@ -1077,9 +1334,31 @@ class UsdSyncServer:
                 )
                 if ev.get("info_id"):
                     prev["info_id"] = ev["info_id"]
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
+        elif k == K_SET_CONNECTABLE_CONNECTION:
+            # Connection events carry a partial dict of edges — merge, so a
+            # later event for one input doesn't drop earlier ones.
+            existing = latest.get(key)
+            if existing:
+                prev = existing[0]
+                prev.setdefault("connections", {}).update(
+                    ev.get("connections", {}),
+                )
+                latest[key] = (prev, meta, seq)
+            else:
+                latest[key] = (ev, meta, seq)
+        elif k == K_SET_VARIANT_SELECTIONS:
+            existing = latest.get(key)
+            if existing:
+                prev = existing[0]
+                prev.setdefault("selections", {}).update(
+                    ev.get("selections", {}),
+                )
+                latest[key] = (prev, meta, seq)
+            else:
+                latest[key] = (ev, meta, seq)
         elif k == K_SET_POINT_INSTANCER:
             existing = latest.get(key)
             if existing:
@@ -1088,15 +1367,17 @@ class UsdSyncServer:
                     prev[f] = ev[f]
                     if f not in prev["fields"]:
                         prev["fields"].append(f)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
         elif k == K_ENSURE_PRIM:
             # Union api_schemas across subsequent ensure_prim events for the
             # same prim (latest typeName wins; api_schemas accumulates) so
             # ShapingAPI added later doesn't clobber a previously-merged
             # ShadowAPI. Multi-apply names (e.g. "CollectionAPI:render") are
             # unique strings so set-union is correct for them too.
+            # Keeps the first-seen stamp: later re-ensures must not push the
+            # create past events that reference the prim.
             existing = latest.get(key)
             if existing:
                 prev = existing[0]
@@ -1106,55 +1387,50 @@ class UsdSyncServer:
                 merged.update(ev.get("api_schemas") or [])
                 if merged:
                     prev["api_schemas"] = list(merged)
-                latest[key] = (prev, meta)
+                latest[key] = (prev, meta, existing[2])
             else:
-                latest[key] = (ev, meta)
+                latest[key] = (ev, meta, seq)
+        elif k == K_ENSURE_XFORM_OPS:
+            if key not in latest:
+                latest[key] = (ev, meta, seq)
         else:
-            latest[key] = (ev, meta)
+            latest[key] = (ev, meta, seq)
 
     @staticmethod
     def _build_compacted(
         rows: list[tuple[int, bytes]],
-    ) -> tuple[dict[tuple[str, str, float | None], tuple[dict, dict]], set[str]]:
+    ) -> dict[tuple[str, str, float | None], tuple[dict, dict, int]]:
         """Build compacted event dict from raw log rows.
 
-        Returns (latest, tombstoned) where:
-          latest: {(prim, kind, time) → (event_dict, metadata_dict)}
-          tombstoned: set of prim paths deleted/renamed
+        Returns {(prim, kind, time) → (event_dict, metadata_dict, stamp)}
+        where stamp is the replay-order seq (see ``_merge_event``).
         """
-        tombstoned: set[str] = set()
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]] = {}
-        for _seq, record_bin in rows:
-            UsdSyncServer._merge_event(latest, tombstoned, record_bin)
-        return latest, tombstoned
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]] = {}
+        for seq, record_bin in rows:
+            UsdSyncServer._merge_event(latest, seq, record_bin)
+        return latest
 
     def _commit_compaction(
         self,
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict]],
+        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
         original_count: int,
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
         Must be called under exclusive txn_barrier.
 
-        Default-time events sort before time-sampled ones for the same prim
-        and kind, so replay establishes static state before samples.
+        Surviving events are rewritten in stamp order — the original log's
+        relative order — so replay is causally equivalent to replaying the
+        full log: creates precede the connections and bindings that
+        reference them, and deletes precede recreates. Receivers that apply
+        events strictly one at a time depend on this.
         """
-        sorted_entries = sorted(
-            latest.values(),
-            key=lambda entry: (
-                entry[0]["prim"].count("/"),
-                entry[0]["prim"],
-                event_apply_tier(entry[0]["k"]),
-                entry[0].get("time") is not None,
-                entry[0].get("time") or 0.0,
-            ),
-        )
+        sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
 
         with self._seq_lock:
             self._next_seq = 1
         records = []
-        for ev, meta in sorted_entries:
+        for ev, meta, _stamp in sorted_entries:
             seq = self.assign_seq()
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
@@ -1162,15 +1438,20 @@ class UsdSyncServer:
                 (seq, encode_message(rec), meta.get("client_id"), ev.get("k"), ev.get("prim"))
             )
         self.store.clear_and_rewrite(records)
+        self._maybe_reclaim_storage()
         with self._seq_lock:
             self._event_count = len(records)
+            self._seq_at_last_compact = self._next_seq
             self._snapshot_epoch += 1
 
         self.op_cache.clear()
+        self._op_cache_layer = None
 
         # Rebuild incremental prim tracking from compacted state.
         self._prim_paths.clear()
-        for ev, _meta in sorted_entries:
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
+        for ev, _meta, _stamp in sorted_entries:
             self._track_prim_event(ev)
 
         LOG.info("Compacted event log: %d -> %d events", original_count, len(sorted_entries))
@@ -1193,14 +1474,19 @@ class UsdSyncServer:
 
     def _purge_inner(self):
         self.store.clear_and_rewrite([])
+        self._maybe_reclaim_storage()
         with self._seq_lock:
             self._event_count = 0
             self._next_seq = 1
+            self._seq_at_last_compact = 1
             self._snapshot_epoch += 1
         with self.stage_lock:
             self.edit_layer.Clear()
         self.op_cache.clear()
+        self._op_cache_layer = None
         self._prim_paths.clear()
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
         LOG.info("Purged event log and reset edit layer")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
@@ -1493,30 +1779,34 @@ class UsdSyncServer:
         record_blobs = self.store.get_by_prim_prefix(prefix, replay_kinds)
 
         # Collect the latest event of each relevant kind per child prim.
-        # Store (ev, origin) tuples so replayed broadcasts can suppress
-        # echo back to the original sender.
-        latest: dict[tuple[str, str], tuple[dict, str | None]] = {}
+        # Store (ev, origin, department) tuples so replayed broadcasts can
+        # suppress echo back to the original sender and keep layer routing.
+        latest: dict[tuple[str, str], tuple[dict, str | None, str | None]] = {}
         for blob in record_blobs:
             rec = message_to_dict(blob)
             ev = rec.get("event", rec)
             ep = ev.get("prim", "")
             ek = ev.get("k", "")
             if ep.startswith(prefix) and ek in replay_kinds:
-                latest[(ep, ek)] = (ev, rec.get("origin"))
+                latest[(ep, ek)] = (ev, rec.get("origin"), rec.get("department"))
 
         if not latest:
             return
 
-        # Order: ensure_prim → ensure_xform_ops → set_xform_trs → set_visibility
+        # Tier-major: every create replays before the bindings and
+        # connections that reference sibling prims; within a tier, path
+        # order puts parents before children.
         sorted_events = sorted(
             latest.values(),
-            key=lambda e: (e[0]["prim"], event_apply_tier(e[0]["k"])),
+            key=lambda e: (event_apply_tier(e[0]["k"]), e[0]["prim"]),
         )
 
-        for ev, origin in sorted_events:
+        for ev, origin, department in sorted_events:
             rec = {"type": MSG_EVENT, "seq": self.assign_seq(), "event": ev}
             if origin:
                 rec["origin"] = origin
+            if department:
+                rec["department"] = department
             self.append_log(rec)
             self.broadcast(rec, exclude_origin=origin)
 
@@ -1577,6 +1867,10 @@ class UsdSyncServer:
         if not records:
             return
         framed_payloads = [encode_message(rec) for rec in records]
+        if self.wire_metrics is not None:
+            for rec, buf in zip(records, framed_payloads, strict=True):
+                kind = rec.get("event", {}).get("k") or rec.get("type", "")
+                self.wire_metrics.record(kind, len(buf))
         payload = frame_batch(framed_payloads)
         self._broadcast_queue.put((payload, exclude_origin, None))
         # Notify event listeners synchronously — these are in-process
@@ -1768,6 +2062,11 @@ class UsdSyncServer:
         if attr_names is None:
             return True  # unknown event type — always broadcast
 
+        if k == K_SET_MATERIAL_BINDING:
+            purpose = ev.get("material_purpose", "")
+            if purpose:
+                attr_names = [f"rel:material:binding:{purpose}"]
+
         prim_path = str(prim.GetPath())
 
         if not attr_names:
@@ -1859,7 +2158,7 @@ class UsdSyncServer:
         changed_indices = []
         with self.stage_lock:
             self.stage.SetEditTarget(Usd.EditTarget(target))
-            apply_events(self.stage, events, op_cache=self.op_cache)
+            apply_events(self.stage, events, op_cache=self._op_cache_for(target))
 
             # Single-layer mode: the edit layer is the only unmuted session
             # sublayer, and local session opinions are strongest in LIVRPS
@@ -1867,8 +2166,11 @@ class UsdSyncServer:
             # the per-event GetPropertyStack/HasSpec strength checks.
             if target is self.edit_layer and len(self._ordered_session_layers) == 1:
                 for i, ev in enumerate(events):
-                    if ev.get("k") in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                    ev_kind = ev.get("k")
+                    if ev_kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                         self._prim_count_dirty = True
+                        self._track_prim_event(ev)
+                    elif ev_kind == K_SET_INSTANCEABLE:
                         self._track_prim_event(ev)
                     changed_indices.append(i)
                 return changed_indices
@@ -1882,6 +2184,8 @@ class UsdSyncServer:
                 k = ev.get("k")
                 if k in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                     self._prim_count_dirty = True
+                    self._track_prim_event(ev)
+                elif k == K_SET_INSTANCEABLE:
                     self._track_prim_event(ev)
                 pp = ev.get("prim", "")
                 if not pp:
@@ -1940,6 +2244,7 @@ class UsdSyncServer:
         changed = self.apply_txn(events, layer=layer)
         changed_set = set(changed)
 
+        department = self._client_departments.get(client_id) if client_id else None
         records: list[tuple[dict, bytes]] = []
         persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]] = []
         for ev in events:
@@ -1952,7 +2257,11 @@ class UsdSyncServer:
             }
             if origin:
                 rec["origin"] = origin
+            if department:
+                rec["department"] = department
             rec_bin = encode_message(rec)
+            if self.wire_metrics is not None:
+                self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
             records.append((rec, rec_bin))
             persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
         self.append_log_batch(persist_tuples)
@@ -1973,6 +2282,18 @@ class UsdSyncServer:
     def get_event_count(self) -> int:
         """Return the number of events in the log (thread-safe, cached)."""
         return self._event_count
+
+    def get_wire_metrics(self) -> dict:
+        """Encoded record bytes per event kind since startup.
+
+        Counts each record once at encode time (txn sequencing and
+        server-initiated broadcasts); per-receiver fan-out and backlog
+        replays are not multiplied in. Returns {"enabled": False} unless
+        the server was started with wire metrics on.
+        """
+        if self.wire_metrics is None:
+            return {"enabled": False}
+        return {"enabled": True, **self.wire_metrics.snapshot()}
 
     def query_events(
         self,
@@ -2026,26 +2347,50 @@ class UsdSyncServer:
         """Build the prim tree from the incremental _prim_paths dict.
 
         No event log scan needed — uses the in-memory prim tracking.
+        Instancing flags come from set lookups, and ``has_children``
+        falls out of a single-pass parent count, so the tree refresh
+        stays linear and free of per-prim pxr calls.
         """
         prims = dict(self._prim_paths)  # snapshot
+        instanceable = set(self._instanceable_paths)
+        point_instancer = set(self._point_instancer_paths)
+
+        # Parent path -> direct-child count. Builds in O(N) and turns the
+        # has_children lookup into O(1) per row.
+        child_counts: dict[str, int] = {}
+        for path in prims:
+            parent = path.rsplit("/", 1)[0] or "/"
+            child_counts[parent] = child_counts.get(parent, 0) + 1
 
         result = []
         for path in sorted(prims):
             parent = path.rsplit("/", 1)[0] or "/"
-            depth = path.count("/")
-            has_children = any(
-                p.startswith(path + "/") and p.count("/") == depth + 1 for p in prims
-            )
             result.append(
                 {
                     "path": path,
                     "typeName": prims[path],
                     "parent": parent,
-                    "depth": depth,
-                    "has_children": has_children,
+                    "depth": path.count("/"),
+                    "has_children": child_counts.get(path, 0) > 0,
+                    "instanceable": path in instanceable,
+                    "is_point_instancer": path in point_instancer,
                 }
             )
         return result
+
+    def get_instance_count(self) -> int:
+        """Count of prims with authored ``instanceable=true``.
+
+        Whether each actually composes into an instance depends on a
+        composition arc; this is the upper bound and matches what the
+        tree's badge shows.
+        """
+        return len(self._instanceable_paths)
+
+    def get_prototype_count(self) -> int:
+        """Number of implicit prototype prims the stage composed."""
+        with self.stage_lock:
+            return len(self.stage.GetPrototypes())
 
     def get_prim_detail(self, path: str) -> dict:
         """Composed snapshot of one prim for the dashboard inspector.
@@ -2059,7 +2404,8 @@ class UsdSyncServer:
                 return {"path": path, "exists": False}
             img = UsdGeom.Imageable(prim)
             vis = img.GetVisibilityAttr().Get() if img else None
-            return {
+            prototype = prim.GetPrototype() if prim.IsInstance() else None
+            detail = {
                 "path": path,
                 "exists": True,
                 "typeName": str(prim.GetTypeName()),
@@ -2072,7 +2418,16 @@ class UsdSyncServer:
                 "variantSelections": dict(read_variant_selections(self.stage, path)),
                 "materialBinding": read_material_binding(self.stage, path) or None,
                 "attributes": _authored_attr_rows(prim),
+                "isInstanceable": prim.IsInstanceable(),
+                "isInstance": prim.IsInstance(),
+                "isInstanceProxy": prim.IsInstanceProxy(),
+                "prototype": (
+                    prototype.GetPath().pathString if prototype else None
+                ),
             }
+            if prim.IsA(UsdGeom.PointInstancer):
+                detail["pointInstancer"] = _point_instancer_summary(prim)
+            return detail
 
     def get_transforms_snapshot(self) -> list[dict]:
         """Composed translate/orient/scale for every Xformable prim with ops.

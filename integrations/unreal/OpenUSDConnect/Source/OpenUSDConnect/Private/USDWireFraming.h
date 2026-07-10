@@ -3,7 +3,6 @@
 
 #include "CoreMinimal.h"
 #include "USDConnectProtocol.h"
-#include "flatbuffers/flatbuffer_builder.h"
 
 namespace OUC
 {
@@ -24,15 +23,6 @@ namespace OUC
 		return Frame;
 	}
 
-	// Decode Envelope.payload_type from a raw framed buffer. Returns 0 if the
-	// buffer is too small or the field is absent.
-	inline uint8 GetEnvelopePayloadType(const TArray<uint8>& Frame)
-	{
-		if (Frame.Num() < 8) return 0;
-		const uint8* Root = FB::GetRoot(Frame);
-		return Root ? FB::GetField<uint8>(Root, VT::Envelope_PayloadType, 0) : 0;
-	}
-
 	// Build a complete framed Envelope{Hello} message.
 	//   Role     = "receiver" or "emitter"
 	//   SyncFrom = receiver-side resume point (0 = full replay; emitters pass 0)
@@ -47,27 +37,18 @@ namespace OUC
 	{
 		flatbuffers::FlatBufferBuilder Builder(512);
 
-		auto RoleOff       = Builder.CreateString(TCHAR_TO_UTF8(*Role));
-		auto ClientIdOff   = Builder.CreateString(TCHAR_TO_UTF8(*ClientId));
-		auto OriginOff     = Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin));
-		auto DepartmentOff = Builder.CreateString(TCHAR_TO_UTF8(*Department));
-		auto TokenOff      = Builder.CreateString(TCHAR_TO_UTF8(*Token));
+		const auto Hello = OpenUSDConnect::CreateHello(
+			Builder,
+			Builder.CreateString(TCHAR_TO_UTF8(*Role)),
+			/*protocol_version=*/1,
+			SyncFrom,
+			Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
+			Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin)),
+			Builder.CreateString(TCHAR_TO_UTF8(*Department)),
+			Builder.CreateString(TCHAR_TO_UTF8(*Token)));
 
-		const flatbuffers::uoffset_t HelloStart = Builder.StartTable();
-		Builder.AddOffset(VT::Hello_Role,                      RoleOff);
-		Builder.AddElement<int32_t>(VT::Hello_ProtocolVersion, 1,        0);
-		Builder.AddElement<int32_t>(VT::Hello_SyncFrom,        SyncFrom, 0);
-		Builder.AddOffset(VT::Hello_ClientId,                  ClientIdOff);
-		Builder.AddOffset(VT::Hello_Origin,                    OriginOff);
-		Builder.AddOffset(VT::Hello_Department,                DepartmentOff);
-		Builder.AddOffset(VT::Hello_Token,                     TokenOff);
-		const flatbuffers::uoffset_t HelloOff = Builder.EndTable(HelloStart);
-
-		const flatbuffers::uoffset_t EnvStart = Builder.StartTable();
-		Builder.AddElement<uint8_t>(VT::Envelope_PayloadType, kPayloadHello, 0);
-		Builder.AddOffset(VT::Envelope_Payload, flatbuffers::Offset<void>(HelloOff));
-		const flatbuffers::uoffset_t EnvOff = Builder.EndTable(EnvStart);
-		Builder.Finish(flatbuffers::Offset<void>(EnvOff));
+		Builder.Finish(OpenUSDConnect::CreateEnvelope(
+			Builder, OpenUSDConnect::Payload::Hello, Hello.Union()));
 
 		return FrameWithLengthPrefix(Builder);
 	}

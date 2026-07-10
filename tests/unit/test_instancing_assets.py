@@ -23,16 +23,16 @@ import pytest
 try:
     from pxr import Usd, UsdGeom
 
+    from openusdconnect.codec import message_to_dict
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.event_apply import apply_events
+    from openusdconnect.server import UsdSyncServer
+
     PXR_AVAILABLE = True
 except ImportError:
     PXR_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
-
-from openusdconnect.codec import message_to_dict
-from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.event_apply import apply_events
-from openusdconnect.server import UsdSyncServer
 
 ASSETS = Path(__file__).parents[2] / "assets" / "full_assets"
 CHESS_SET = ASSETS / "OpenChessSet" / "chess_set.usda"
@@ -75,7 +75,7 @@ def test_chess_set_point_instancers_parity(srv):
         xf_src = pi_src.ComputeInstanceTransformsAtTime(default, default)
         xf_dst = pi_dst.ComputeInstanceTransformsAtTime(default, default)
         assert len(xf_dst) == len(xf_src) == 8
-        for a, b in zip(xf_src, xf_dst):
+        for a, b in zip(xf_src, xf_dst, strict=True):
             for r in range(4):
                 for c in range(4):
                     assert abs(a[r][c] - b[r][c]) < 1e-6, f"{pi_path} transform mismatch"
