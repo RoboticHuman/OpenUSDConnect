@@ -219,7 +219,6 @@ running sync server. See [MCP Server Usage](docs/mcp-server-usage.md).
 ## Documentation
 - [Blender Addon Usage](docs/blender-addon-usage.md): installation, UI overview, live-sync walkthrough
 - [Live-Open Quickstart](docs/live-open-quickstart.md): WebDAV/UNC live-open and metadata sync
-- [Live-Open Production Guide](docs/live-open-production-guide.md): architecture, limitations, and rollout checklist
 - [Live Material Editing](docs/live-material-editing.md): material and shader synchronization
 - [Unreal Engine Plugin](integrations/unreal/OpenUSDConnect/README.md): UE5 plugin requirements, install, two-way sync
 - [MCP Server Usage](docs/mcp-server-usage.md): tools, configuration, Claude client setup
