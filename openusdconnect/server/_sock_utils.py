@@ -29,11 +29,14 @@ def _set_send_timeout(sock: socket.socket, timeout_s: float):
 
     # Unix variants take ``struct timeval`` but the field widths differ:
     #   Linux / *BSD: { long tv_sec; long tv_usec; }              → 16 B on 64-bit
-    #   macOS:        { time_t tv_sec; suseconds_t tv_usec; }     → 12 B on 64-bit
-    #                 (suseconds_t is int32_t on Darwin)
+    #   macOS:        { time_t tv_sec; suseconds_t tv_usec; }     → 16 B on 64-bit
+    #                 (suseconds_t is int32_t on Darwin, but the struct pads to
+    #                 16 B for 8-byte alignment of tv_sec, same layout on arm64
+    #                 and x86_64. The kernel rejects any optlen != sizeof(struct
+    #                 timeval) with EINVAL, so the trailing pad is required.)
     secs = int(timeout_s)
     usecs = int((timeout_s - secs) * 1_000_000)
-    fmt = "@li" if sys.platform == "darwin" else "@ll"
+    fmt = "@li4x" if sys.platform == "darwin" else "@ll"
     sock.setsockopt(
         socket.SOL_SOCKET,
         socket.SO_SNDTIMEO,
