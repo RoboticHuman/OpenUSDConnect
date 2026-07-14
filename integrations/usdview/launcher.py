@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -103,11 +104,40 @@ def _resolve_command(exe: Path) -> list[str]:
 # "RenderMan RIS"). usdview's --renderer accepts either the id or the
 # display name; the id is version-stable, so prefer it.
 RENDERMAN_RENDERER_ID = "HdPrmanLoaderRendererPlugin"
+CYCLES_RENDERER_ID = "HdCyclesPlugin"
 
 
 def _has_renderer_arg(args: Sequence[str]) -> bool:
     """True if ``args`` already selects a Hydra renderer (-r/--renderer)."""
     return any(a in ("-r", "--renderer") or a.startswith("--renderer=") for a in args)
+
+
+def _configure_cycles_runtime(env: dict[str, str]) -> None:
+    """Configure the validated Apple Silicon Cycles/OIDN runtime."""
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return
+
+    # HdCycles otherwise defaults to CPU and currently forces denoising onto
+    # the render device. Preserve an explicit user choice.
+    env.setdefault("CYCLES_DEVICE", "METAL")
+
+    # OIDN GPU backends are runtime-loaded from the Cycles install's lib
+    # directory rather than linked directly into hdCycles.dylib.
+    runtime_dirs: list[str] = []
+    for entry in env.get("PXR_PLUGINPATH_NAME", "").split(os.pathsep):
+        plugin_dir = Path(entry)
+        if not entry or not (
+            (plugin_dir / "hdCycles.dylib").is_file()
+            or (plugin_dir / "hdCycles" / "resources" / "plugInfo.json").is_file()
+        ):
+            continue
+        runtime_dir = plugin_dir.parent / "lib"
+        if runtime_dir.is_dir():
+            runtime_dirs.append(str(runtime_dir))
+    if runtime_dirs:
+        env["DYLD_LIBRARY_PATH"] = os.pathsep.join(
+            filter(None, [*runtime_dirs, env.get("DYLD_LIBRARY_PATH", "")])
+        )
 
 
 def launch_usdview(
@@ -119,6 +149,7 @@ def launch_usdview(
     extra_args: Sequence[str] = (),
     usdview_exe: str | os.PathLike | None = None,
     renderman: bool = False,
+    cycles: bool = False,
 ) -> subprocess.Popen:
     """Spawn usdview with the OpenUSDConnect plugin discovered and auto-connecting.
 
@@ -181,6 +212,11 @@ def launch_usdview(
         if not _has_renderer_arg(forwarded):
             forwarded = ["--renderer", RENDERMAN_RENDERER_ID, *forwarded]
 
+    if cycles:
+        _configure_cycles_runtime(env)
+        if not _has_renderer_arg(forwarded):
+            forwarded = ["--renderer", CYCLES_RENDERER_ID, *forwarded]
+
     cmd = [*_resolve_command(exe), str(stage_path), *forwarded]
     return subprocess.Popen(cmd, env=env)
 
@@ -208,6 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         "default Storm-only behavior. Pass your own --renderer to override which "
         "delegate it starts in while keeping RenderMan available in the menu.",
     )
+    parser.add_argument(
+        "--cycles",
+        action="store_true",
+        help="Configure the Cycles runtime and start in the Cycles delegate "
+        "unless --renderer is provided.",
+    )
     parser.epilog = (
         "Any arguments not recognized above are forwarded verbatim to usdview "
         "(e.g. --quitAfterStartup, --norender, --renderer Storm)."
@@ -222,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         extra_args=unknown,
         usdview_exe=args.usdview,
         renderman=args.renderman,
+        cycles=args.cycles,
     )
     return proc.wait()
 

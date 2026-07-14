@@ -259,6 +259,29 @@ node_modules/
 # Ruff stuff:
 .ruff_cache/
 
+# macOS Finder and filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# macOS volume and temporary directories
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# macOS network-share metadata
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
 # PyPI configuration file
 .pypirc
 

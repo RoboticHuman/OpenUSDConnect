@@ -13,6 +13,17 @@ from openusdconnect.protocol_constants import (
 
 TESTS_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
+BLENDER_PYTHON_DEPS = os.path.join(PROJECT_ROOT, ".blender", "python_deps")
+
+
+def blender_test_env():
+    """Return an isolated environment for Blender integration tests."""
+    env = os.environ.copy()
+    env["BLENDER_USER_RESOURCES"] = os.path.join(PROJECT_ROOT, ".blender", "user_data")
+    # Do not forward the host PYTHONPATH: it may contain extension modules
+    # compiled for the project's Python rather than Blender's embedded Python.
+    env["PYTHONPATH"] = BLENDER_PYTHON_DEPS
+    return env
 
 
 def _wait_for_server(port, timeout=5):
@@ -63,7 +74,10 @@ def stop_server(proc):
 
 def run_blender(blender_exe, script, port, extra_args=None, timeout=60, background=True):
     """Run a Blender script and return the subprocess result."""
-    cmd = [blender_exe]
+    # Blender ignores PYTHONPATH by default.  The environment contains only
+    # the pure-Python dependencies installed by setup_blender_test.py, never
+    # the host venv whose extension modules may target another Python minor.
+    cmd = [blender_exe, "--python-use-system-env"]
     if background:
         cmd.append("--background")
     cmd.extend(
@@ -77,9 +91,8 @@ def run_blender(blender_exe, script, port, extra_args=None, timeout=60, backgrou
     )
     if extra_args:
         cmd.extend(extra_args)
-    # Isolate Blender user data to repo-local directory (not system AppData)
-    env = os.environ.copy()
-    env["BLENDER_USER_RESOURCES"] = os.path.join(PROJECT_ROOT, ".blender", "user_data")
+    # Isolate Blender user data to repo-local directory (not system AppData).
+    env = blender_test_env()
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 

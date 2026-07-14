@@ -18,13 +18,16 @@ import pathlib
 import platform
 import re
 import shutil
+import subprocess
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 BLENDER_DIR = REPO_ROOT / ".blender"
 CFG_FILE = REPO_ROOT / "blender.test.cfg"
+PYTHON_DEPS_DIR = BLENDER_DIR / "python_deps"
 
 BASE_URL = "https://download.blender.org/release"
 FALLBACK_VERSION = "5.0.1"
@@ -146,6 +149,8 @@ def _find_blender_exe(extract_dir: pathlib.Path) -> pathlib.Path:
     system = platform.system().lower()
     if system == "windows":
         pattern = "**/blender.exe"
+    elif system == "darwin":
+        pattern = "**/Blender.app/Contents/MacOS/Blender"
     else:
         pattern = "**/blender"
 
@@ -154,6 +159,44 @@ def _find_blender_exe(extract_dir: pathlib.Path) -> pathlib.Path:
             return match
 
     raise FileNotFoundError(f"Could not find blender executable in {extract_dir}")
+
+
+def _extract_dmg(download_path: pathlib.Path, version: str) -> None:
+    """Mount a Blender DMG read-only and copy its app bundle into .blender/."""
+    _, arch, _ = _detect_platform()
+    extract_dir = BLENDER_DIR / f"blender-{version}-macos-{arch}"
+    mount_dir = pathlib.Path(tempfile.mkdtemp(prefix="openusdconnect-blender-"))
+    mounted = False
+    try:
+        subprocess.run(
+            [
+                "hdiutil",
+                "attach",
+                str(download_path),
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mount_dir),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        mounted = True
+        app = next(mount_dir.glob("*.app"), None)
+        if app is None:
+            raise RuntimeError(f"Blender app bundle not found in {download_path}")
+        extract_dir.mkdir(parents=True, exist_ok=False)
+        shutil.copytree(app, extract_dir / app.name, symlinks=True)
+    finally:
+        if mounted:
+            subprocess.run(
+                ["hdiutil", "detach", str(mount_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        shutil.rmtree(mount_dir, ignore_errors=True)
 
 
 def download_and_extract(version: str) -> pathlib.Path:
@@ -195,6 +238,8 @@ def download_and_extract(version: str) -> pathlib.Path:
         elif filename.endswith(".tar.xz"):
             with tarfile.open(download_path, "r:xz") as tf:
                 tf.extractall(BLENDER_DIR, filter="data")
+        elif filename.endswith(".dmg"):
+            _extract_dmg(download_path, version)
         else:
             raise RuntimeError(f"Unsupported archive format: {filename}")
         extract_dir = _find_extracted_dir(version)
@@ -230,6 +275,30 @@ def write_config(exe_path: pathlib.Path):
     """Write blender.test.cfg with the resolved exe path."""
     CFG_FILE.write_text(str(exe_path) + "\n")
     print(f"Wrote {CFG_FILE}")
+
+
+def install_python_dependencies() -> None:
+    """Vendor pure-Python runtime dependencies for Blender test scripts.
+
+    Blender embeds a different Python minor version from the project virtual
+    environment on some platforms.  Exposing the whole virtual environment
+    would make incompatible extension modules (notably NumPy) shadow
+    Blender's bundled copies, so only the pure-Python FlatBuffers runtime is
+    copied here.
+    """
+    import flatbuffers
+
+    source = pathlib.Path(flatbuffers.__path__[0])
+    destination = PYTHON_DEPS_DIR / "flatbuffers"
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    print(f"Installed Blender Python dependencies: {PYTHON_DEPS_DIR}")
 
 
 def cleanup():
@@ -290,6 +359,7 @@ Files:
         print(f"Resolved: Blender {version}")
 
     exe_path = download_and_extract(version)
+    install_python_dependencies()
     write_config(exe_path)
 
     print("\nReady! Run tests with:")

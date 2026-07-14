@@ -47,6 +47,38 @@ forwarding your own `--renderer` (e.g. `--renderman --renderer Storm` opens
 in Storm with RenderMan available in the menu). See
 https://openusd.org/release/plugins_renderman.html
 
+## Cycles (hdCycles) renderer — optional
+
+When an hdCycles plugin built against the same OpenUSD installation is already
+discoverable through `PXR_PLUGINPATH_NAME`, pass `--cycles` to start in Cycles
+while keeping scene interpretation entirely under HdCycles' control:
+
+```bash
+PXR_PLUGINPATH_NAME="/path/to/cycles/install/hydra:$PXR_PLUGINPATH_NAME" \
+uv run python -m integrations.usdview.launcher test_scene.usda --cycles
+```
+
+OpenUSDConnect does not author renderer-specific material branches. Portable
+materials are presented to HdCycles unchanged, and an explicitly authored
+`outputs:cycles:surface` network passes through like any other synchronized USD
+data. This keeps unsupported MaterialX features visible as delegate capability
+gaps instead of approximating them in the receiver.
+
+The `--cycles` path does not change HdCycles sampling, adaptive sampling,
+denoising, lighting, or other viewport-quality settings. Those remain under the
+renderer and user's control. On Apple Silicon, the launcher defaults
+`CYCLES_DEVICE` to `METAL` before the delegate is created and exposes the
+installed OIDN runtime modules. An explicitly set `CYCLES_DEVICE` still wins.
+
+On first use for a new scene feature set, the HdCycles viewport may remain black
+while Cycles compiles its Metal render kernels. This build reports that warm-up
+as 76 kernels and warns internally that it may take a few minutes; a controlled
+M4 run took about 69 seconds. The compiled kernels are cached under
+`~/.cache/cycles`, and subsequent matching launches render immediately. Set
+`CYCLES_LOGGING=1` and `CYCLES_LOGGING_LEVEL=info` before launch to expose device
+and render progress in the terminal, or set `CYCLES_DEVICE=CPU` to opt out of
+Metal rendering and GPU denoising.
+
 ## How `find_usdview()` works
 
 The launcher's `find_usdview()` tries three strategies in order:
