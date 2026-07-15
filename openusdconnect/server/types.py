@@ -53,6 +53,10 @@ class InvalidVfsWriteError(VfsWriteRejectedError):
     """Raised when uploaded VFS bytes are not a readable USD stage."""
 
 
+class UnsupportedVfsWriteError(VfsWriteRejectedError):
+    """Raised when a valid uploaded USD stage cannot be safely translated."""
+
+
 @dataclass(frozen=True)
 class VfsWriteAnalysis:
     """Summary of a translated full-file VFS save."""

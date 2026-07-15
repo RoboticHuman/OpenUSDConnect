@@ -59,6 +59,7 @@ from .types import (
     ClientInfo,
     Proposal,
     StaleVfsWriteError,
+    UnsupportedVfsWriteError,
     VfsWriteAnalysis,
 )
 
@@ -185,6 +186,39 @@ def _metadata_int(meta: dict, key: str) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_supported_translate_custom_attr(name: str) -> bool:
+    if name == "xformOpOrder" or name.startswith("xformOp:"):
+        return True
+    return name.startswith(("primvars:", "inputs:", "outputs:", "info:"))
+
+
+def _is_supported_translate_relationship(name: str) -> bool:
+    return name == "material:binding" or name.startswith("material:binding:")
+
+
+def _unsupported_translate_properties(stage: Usd.Stage) -> list[str]:
+    """Return authored properties that the VFS translator cannot round-trip."""
+    unsupported: list[str] = []
+    for prim in stage.Traverse():
+        prim_path = str(prim.GetPath())
+        for attr in prim.GetAuthoredAttributes():
+            if not attr.IsCustom():
+                continue
+            name = attr.GetName()
+            if _is_supported_translate_custom_attr(name):
+                continue
+            unsupported.append(f"{prim_path}.{name}")
+
+        for rel in prim.GetRelationships():
+            if not rel.IsAuthored():
+                continue
+            name = rel.GetName()
+            if _is_supported_translate_relationship(name):
+                continue
+            unsupported.append(f"{prim_path}.{name}")
+    return unsupported
 
 
 class _WireMetrics:
@@ -719,7 +753,8 @@ class UsdSyncServer:
         - First connect (no token stored): issues a new token → (True, new_token)
         - Reconnect with valid token: accepted → (True, None)
         - Reconnect with wrong/missing token: rejected → (False, None)
-        - Token not required or no client_id: always accepted → (True, None)
+        - Token not required: always accepted → (True, None)
+        - Token required and no client_id: rejected → (False, None)
         """
         if not self.require_token or not self.token_store:
             return True, None
@@ -1568,38 +1603,47 @@ class UsdSyncServer:
 
         Returns the number of translated events persisted to the event log.
         """
-        current_epoch, current_seq = self.get_snapshot_token()
         uploaded_meta = _stage_live_metadata(uploaded_stage)
         uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
         uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
 
-        with self.stage_lock:
-            before_types = _stage_prim_types(self.stage)
+        self.txn_barrier.acquire_exclusive()
+        try:
+            current_epoch, current_seq = self.get_snapshot_token()
+            with self.stage_lock:
+                department_layers = sorted(self._dept_layers)
+                before_types = _stage_prim_types(self.stage)
+            with self.proposals_lock:
+                pending_proposals = sorted(
+                    proposal_id
+                    for proposal_id, proposal in self.proposals.items()
+                    if proposal.status == "pending"
+                )
 
-        uploaded_types = _stage_prim_types(uploaded_stage)
-        before_paths = set(before_types)
-        uploaded_paths = set(uploaded_types)
-        created_paths = sorted(uploaded_paths - before_paths)
-        removed_paths = sorted(
-            before_paths - uploaded_paths,
-            key=lambda p: p.count("/"),
-            reverse=True,
-        )
-        type_changed_paths = sorted(
-            p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
-        )
+            uploaded_types = _stage_prim_types(uploaded_stage)
+            before_paths = set(before_types)
+            uploaded_paths = set(uploaded_types)
+            created_paths = sorted(uploaded_paths - before_paths)
+            removed_paths = sorted(
+                before_paths - uploaded_paths,
+                key=lambda p: p.count("/"),
+                reverse=True,
+            )
+            type_changed_paths = sorted(
+                p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
+            )
 
-        notes = []
-        if not uploaded_meta:
-            notes.append("uploaded file has no openusdconnect metadata; accepting as fallback save")
-        elif uploaded_epoch is None or uploaded_seq is None:
-            notes.append("uploaded openusdconnect metadata has no parseable epoch/snapshot_seq")
+            notes = []
+            if not uploaded_meta:
+                notes.append(
+                    "uploaded file has no openusdconnect metadata; accepting as fallback save"
+                )
+            elif uploaded_epoch is None or uploaded_seq is None:
+                notes.append("uploaded openusdconnect metadata has no parseable epoch/snapshot_seq")
 
-        if reject_stale and uploaded_epoch is not None and uploaded_seq is not None:
-            stale = (uploaded_epoch, uploaded_seq) < (current_epoch, current_seq)
-            if stale:
-                analysis = VfsWriteAnalysis(
-                    status="stale_rejected",
+            def _analysis(status: str, status_notes: list[str], event_counts=None):
+                return VfsWriteAnalysis(
+                    status=status,
                     current_epoch=current_epoch,
                     current_seq=current_seq,
                     uploaded_epoch=uploaded_epoch,
@@ -1609,82 +1653,105 @@ class UsdSyncServer:
                     created_prims=created_paths,
                     removed_prims=removed_paths,
                     type_changed_prims=type_changed_paths,
-                    notes=["uploaded snapshot is older than the current live server state"],
+                    event_counts=event_counts or {},
+                    notes=status_notes,
+                )
+
+            if department_layers or pending_proposals:
+                details = []
+                if department_layers:
+                    details.append(f"department layers: {', '.join(department_layers)}")
+                if pending_proposals:
+                    details.append(f"pending proposals: {', '.join(pending_proposals)}")
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "translate write fallback is disabled while department "
+                        f"or proposal layers are active ({'; '.join(details)})"
+                    ],
                 )
                 self.last_vfs_write_analysis = analysis.to_dict()
-                raise StaleVfsWriteError(
-                    "uploaded VFS snapshot is stale: "
-                    f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
-                    f"server epoch/seq={current_epoch}/{current_seq}"
+                raise UnsupportedVfsWriteError(
+                    "VFS translate writes are disabled while department or "
+                    "proposal layers are active"
                 )
 
-        removed_fraction = len(removed_paths) / max(1, len(before_paths))
-        removes_rootish_prim = any(
-            path.count("/") <= 1 and path != "/Root" for path in removed_paths
-        )
-        ambiguous_destructive = bool(removed_paths) and (
-            not uploaded_paths
-            or removes_rootish_prim
-            or (len(before_paths) >= 10 and removed_fraction >= 0.8)
-        )
-        if reject_ambiguous and ambiguous_destructive:
-            analysis = VfsWriteAnalysis(
-                status="ambiguous_rejected",
-                current_epoch=current_epoch,
-                current_seq=current_seq,
-                uploaded_epoch=uploaded_epoch,
-                uploaded_seq=uploaded_seq,
-                before_prim_count=len(before_paths),
-                uploaded_prim_count=len(uploaded_paths),
-                created_prims=created_paths,
-                removed_prims=removed_paths,
-                type_changed_prims=type_changed_paths,
-                notes=[
-                    "uploaded snapshot removes a root-level prim or most of the scene; "
-                    "refusing automatic fallback translation"
-                ],
+            if reject_stale and uploaded_epoch is not None and uploaded_seq is not None:
+                stale = (uploaded_epoch, uploaded_seq) < (current_epoch, current_seq)
+                if stale:
+                    analysis = _analysis(
+                        "stale_rejected",
+                        ["uploaded snapshot is older than the current live server state"],
+                    )
+                    self.last_vfs_write_analysis = analysis.to_dict()
+                    raise StaleVfsWriteError(
+                        "uploaded VFS snapshot is stale: "
+                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
+                        f"server epoch/seq={current_epoch}/{current_seq}"
+                    )
+
+            removed_fraction = len(removed_paths) / max(1, len(before_paths))
+            removes_rootish_prim = any(
+                path.count("/") <= 1 and path != "/Root" for path in removed_paths
             )
-            self.last_vfs_write_analysis = analysis.to_dict()
-            raise AmbiguousVfsWriteError(
-                "uploaded VFS snapshot looks destructively incomplete; "
-                f"removed {len(removed_paths)} of {len(before_paths)} prims"
+            ambiguous_destructive = bool(removed_paths) and (
+                not uploaded_paths
+                or removes_rootish_prim
+                or (len(before_paths) >= 10 and removed_fraction >= 0.8)
             )
+            if reject_ambiguous and ambiguous_destructive:
+                analysis = _analysis(
+                    "ambiguous_rejected",
+                    [
+                        "uploaded snapshot removes a root-level prim or most of the scene; "
+                        "refusing automatic fallback translation"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise AmbiguousVfsWriteError(
+                    "uploaded VFS snapshot looks destructively incomplete; "
+                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
+                )
 
-        emitter = NoticeEmitter(uploaded_stage)
-        try:
-            events = emitter.snapshot_events()
-        finally:
-            emitter.cleanup()
+            unsupported_properties = _unsupported_translate_properties(uploaded_stage)
+            if unsupported_properties:
+                shown = ", ".join(unsupported_properties[:10])
+                more = len(unsupported_properties) - 10
+                if more > 0:
+                    shown = f"{shown}, ... (+{more} more)"
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "uploaded snapshot contains authored USD properties outside "
+                        f"the VFS translate event subset: {shown}"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains authored USD properties "
+                    "that cannot be safely translated"
+                )
 
-        # Hide prims that existed in the previous composed stage but are absent
-        # from the uploaded snapshot. This lets full-file saves express deletes
-        # even when the original prim lives in the immutable base layer.
-        for prim_path in removed_paths:
-            events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+            emitter = NoticeEmitter(uploaded_stage)
+            try:
+                events = emitter.snapshot_events()
+            finally:
+                emitter.cleanup()
 
-        event_counts: dict[str, int] = {}
-        for ev in events:
-            kind = ev.get("k", "")
-            if kind:
-                event_counts[kind] = event_counts.get(kind, 0) + 1
+            # Hide prims that existed in the previous composed stage but are absent
+            # from the uploaded snapshot. This lets full-file saves express deletes
+            # even when the original prim lives in the immutable base layer.
+            for prim_path in removed_paths:
+                events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
 
-        analysis = VfsWriteAnalysis(
-            status="translated",
-            current_epoch=current_epoch,
-            current_seq=current_seq,
-            uploaded_epoch=uploaded_epoch,
-            uploaded_seq=uploaded_seq,
-            before_prim_count=len(before_paths),
-            uploaded_prim_count=len(uploaded_paths),
-            created_prims=created_paths,
-            removed_prims=removed_paths,
-            type_changed_prims=type_changed_paths,
-            event_counts=event_counts,
-            notes=notes,
-        )
+            event_counts: dict[str, int] = {}
+            for ev in events:
+                kind = ev.get("k", "")
+                if kind:
+                    event_counts[kind] = event_counts.get(kind, 0) + 1
 
-        self.txn_barrier.acquire_exclusive()
-        try:
+            analysis = _analysis("translated", notes, event_counts)
+
             self._purge_inner()
             self.last_vfs_write_analysis = analysis.to_dict()
             if not events:

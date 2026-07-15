@@ -35,15 +35,24 @@ def _drive_name(drive: str) -> str:
     return drive.upper()
 
 
-def _request(method: str, url: str, body: bytes | None = None) -> tuple[int, dict, bytes]:
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _request(
+    method: str,
+    url: str,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict, bytes]:
     parsed = urlparse(url)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
     path = parsed.path or "/"
     try:
-        headers = {}
+        request_headers = dict(headers or {})
         if body is not None:
-            headers["Content-Length"] = str(len(body))
-        conn.request(method, path, body=body, headers=headers)
+            request_headers["Content-Length"] = str(len(body))
+        conn.request(method, path, body=body, headers=request_headers)
         resp = conn.getresponse()
         data = resp.read()
         return resp.status, dict(resp.getheaders()), data
@@ -78,9 +87,10 @@ def _download(url: str, path: Path) -> tuple[str, int, str]:
     return headers.get("ETag", ""), len(data), _hash_bytes(data)
 
 
-def _upload(url: str, path: Path) -> None:
+def _upload(url: str, path: Path, etag: str = "") -> None:
     data = path.read_bytes()
-    status, _headers, _body = _request("PUT", url, body=data)
+    headers = {"If-Match": etag} if etag else None
+    status, _headers, _body = _request("PUT", url, body=data, headers=headers)
     if not (200 <= status < 300):
         raise RuntimeError(f"PUT {url} failed with HTTP {status}")
 
@@ -168,7 +178,7 @@ def _spawn_background(args: argparse.Namespace, argv: list[str]) -> int:
         cmd.extend(["--log-file", str(log_file)])
 
     creationflags = 0
-    if os.name == "nt":
+    if _is_windows():
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
             subprocess, "DETACHED_PROCESS", 0
         )
@@ -199,7 +209,7 @@ def _spawn_background(args: argparse.Namespace, argv: list[str]) -> int:
 
 
 def _maybe_open(path: str) -> None:
-    if os.name == "nt":
+    if _is_windows():
         os.startfile(path)  # type: ignore[attr-defined]
         return
     subprocess.Popen(["xdg-open", path])
@@ -234,7 +244,7 @@ def _parse_unmount(argv: list[str]) -> argparse.Namespace:
 def _stop_pid(pid: int) -> None:
     if pid <= 0 or pid == os.getpid():
         return
-    if os.name == "nt":
+    if _is_windows():
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
@@ -354,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not changed:
                         last_seen_mtime = current_mtime
                         continue
-                    _upload(args.url, file_path)
+                    _upload(args.url, file_path, etag)
                     etag, size, last_seen_hash = _download(args.url, file_path)
                     last_seen_mtime = file_path.stat().st_mtime
                     _write_status(

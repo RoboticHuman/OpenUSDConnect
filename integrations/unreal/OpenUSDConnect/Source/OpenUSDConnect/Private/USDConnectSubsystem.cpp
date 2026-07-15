@@ -514,6 +514,7 @@ void UUSDConnectSubsystem::StopClients()
 	bActiveUsingLiveMetadata = false;
 	bDeferredEmitterForToken = false;
 	ActiveSnapshotSeq = 0;
+	ActiveAuthToken.Empty();
 }
 
 void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
@@ -565,6 +566,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 		ActiveServerPort = TargetPort;
 		bActiveUsingLiveMetadata = bUsingLiveMetadata;
 		ActiveSnapshotSeq = ReceiverInitialLastSeq;
+		ActiveAuthToken = TargetToken;
 		SetStatusMessage(
 			bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
 			TEXT("Live metadata configured; auto-start disabled"));
@@ -602,6 +604,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	bActiveUsingLiveMetadata = bUsingLiveMetadata;
 	bDeferredEmitterForToken = bDelayEmitterForToken;
 	ActiveSnapshotSeq = ReceiverInitialLastSeq;
+	ActiveAuthToken = TargetToken;
 	SetStatusMessage(
 		bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required") : TEXT("connecting"),
 		bDelayEmitterForToken
@@ -639,9 +642,12 @@ void UUSDConnectSubsystem::TryStartDeferredEmitter()
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
 	if (!Settings) return;
 
-	const FString Token = Settings->bPersistAuthTokens
-		? LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department)
-		: FString();
+	FString Token = ActiveAuthToken;
+	if (Token.IsEmpty() && Settings->bPersistAuthTokens)
+	{
+		Token = LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department);
+		ActiveAuthToken = Token;
+	}
 	if (Token.IsEmpty()) return;
 
 	bDeferredEmitterForToken = false;
@@ -652,7 +658,7 @@ void UUSDConnectSubsystem::TryStartDeferredEmitter()
 	if (EmitClient->Start())
 	{
 		bActiveEmitterStarted = true;
-		SetStatusMessage(TEXT("token_saved"), TEXT("Auth token saved; emitter started"));
+		SetStatusMessage(TEXT("connected"), TEXT("Auth token available; emitter started"));
 	}
 	else
 	{
@@ -776,11 +782,16 @@ void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
 	}
 
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	ActiveAuthToken = Token;
+	bool bPersisted = false;
 	if (Settings && Settings->bPersistAuthTokens)
 	{
 		SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department, Token);
+		bPersisted = true;
 	}
-	SetStatusMessage(TEXT("token_saved"), TEXT("Auth token issued and saved"));
+	SetStatusMessage(
+		bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
+		bPersisted ? TEXT("Auth token issued and saved") : TEXT("Auth token issued for this session"));
 	if (bDeferredEmitterForToken)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Log,

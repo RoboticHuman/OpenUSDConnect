@@ -101,7 +101,7 @@ def _strip_blender_numeric_suffix(name: str) -> str:
     return name
 
 
-def _repair_import_prim_tags(usd_path: str) -> int:
+def _repair_import_prim_tags(usd_path: str, objects=None) -> int:
     """Repair obvious Blender USDHook parent tags after a file import."""
     try:
         stage = Usd.Stage.Open(usd_path)
@@ -118,15 +118,15 @@ def _repair_import_prim_tags(usd_path: str) -> int:
         by_leaf.setdefault(leaf, []).append(path)
 
     repaired = 0
-    for obj in bpy.context.scene.objects:
+    repair_objects = list(objects) if objects is not None else list(bpy.context.scene.objects)
+    for obj in repair_objects:
+        if obj.get("usd_prim_path"):
+            continue
         leaf = sanitize_usd_name(_strip_blender_numeric_suffix(obj.name))
         candidates = by_leaf.get(leaf, [])
         if len(candidates) != 1:
             continue
         target = candidates[0]
-        current = obj.get("usd_prim_path")
-        if current == target:
-            continue
         obj["usd_prim_path"] = target
         prim = stage.GetPrimAtPath(target)
         if prim and prim.IsValid() and prim.GetTypeName():
@@ -1225,9 +1225,13 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             from . import live_discovery
 
             local_path, meta = live_discovery.resolve_import_source(self.filepath)
+            before_import = {obj.as_pointer() for obj in context.scene.objects}
             bpy.ops.wm.usd_import(filepath=local_path)
             meta = live_discovery.read_live_metadata(local_path)
-            _repair_import_prim_tags(local_path)
+            imported_objects = [
+                obj for obj in context.scene.objects if obj.as_pointer() not in before_import
+            ]
+            _repair_import_prim_tags(local_path, imported_objects)
             context.scene.usd_connect_base_usd_path = local_path
             # Apply MaterialX materials that Blender's importer doesn't handle
             from .blender_adapter import BlenderAdapter

@@ -84,6 +84,30 @@ def test_content_changed_detects_new_bytes(tmp_path):
     assert current_hash != initial_hash
 
 
+def test_upload_sends_if_match_header(tmp_path, monkeypatch):
+    bridge = _load_bridge()
+    path = tmp_path / "scene.usd"
+    path.write_bytes(b"#usda 1.0\n")
+    calls = []
+
+    def fake_request(method, url, body=None, headers=None):
+        calls.append((method, url, body, headers))
+        return 200, {}, b""
+
+    monkeypatch.setattr(bridge, "_request", fake_request)
+
+    bridge._upload("http://127.0.0.1:7280/usd/scene.usd", path, '"1-2"')
+
+    assert calls == [
+        (
+            "PUT",
+            "http://127.0.0.1:7280/usd/scene.usd",
+            b"#usda 1.0\n",
+            {"If-Match": '"1-2"'},
+        )
+    ]
+
+
 def test_unmount_invokes_subst_and_optional_process_stop(tmp_path, monkeypatch):
     bridge = _load_bridge()
     status_file = tmp_path / "status.json"
@@ -100,7 +124,7 @@ def test_unmount_invokes_subst_and_optional_process_stop(tmp_path, monkeypatch):
 
         return Result()
 
-    monkeypatch.setattr(bridge.os, "name", "nt")
+    monkeypatch.setattr(bridge, "_is_windows", lambda: True)
     monkeypatch.setattr(bridge.subprocess, "run", fake_run)
 
     assert (

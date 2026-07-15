@@ -297,11 +297,13 @@ def start(
 
         saved_token = token_client.load_token(host, port)
 
-        def _save_token(token: str) -> None:
-            token_client.save_token(host, port, token)
+    token_for_clients = saved_token
 
-    else:
-        _save_token = None
+    def _remember_token(token: str) -> None:
+        nonlocal token_for_clients
+        token_for_clients = token
+        if persist_tokens:
+            token_client.save_token(host, port, token)
 
     # -- Start receiver --------------------------------------------------
     if receive:
@@ -313,19 +315,20 @@ def start(
             sync_from=sync_from,
             client_id=_client_id,
             origin=_origin,
-            token=saved_token,
-            on_token_issued=_save_token,
+            token=token_for_clients,
+            on_token_issued=_remember_token,
         )
         _receiver.start()
         LOG.info("Receiver started → %s:%d", host, port)
 
-    if emit and receive and requires_token and not saved_token and persist_tokens:
-        # First-use TOFU: let the receiver obtain and persist the token before
+    if emit and receive and requires_token and not token_for_clients:
+        # First-use TOFU: let the receiver obtain the token before
         # opening the emitter socket with the same client_id.
         deadline = time.time() + 5.0
-        while time.time() < deadline and not saved_token:
-            saved_token = getattr(_receiver, "token", None)
-            if saved_token:
+        while time.time() < deadline and not token_for_clients:
+            token = getattr(_receiver, "token", None)
+            if token:
+                _remember_token(token)
                 break
             time.sleep(0.05)
 
@@ -336,8 +339,8 @@ def start(
         _sender = EventSender(
             host,
             port,
-            token=saved_token,
-            on_token_issued=_save_token,
+            token=token_for_clients,
+            on_token_issued=_remember_token,
             client_id=_client_id,
             origin=_origin,
         )

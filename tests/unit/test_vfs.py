@@ -11,7 +11,7 @@ from pxr import Sdf, Usd
 
 from openusdconnect.protocol_constants import PROTOCOL_VERSION
 from openusdconnect.server import UsdSyncServer
-from openusdconnect.server.types import InvalidVfsWriteError
+from openusdconnect.server.types import InvalidVfsWriteError, UnsupportedVfsWriteError
 from openusdconnect.server.vfs import VirtualStageFile, VirtualStageFileSet, WriteMode
 
 
@@ -111,6 +111,15 @@ def _stage_bytes(specs: list[tuple[str, str]]) -> bytes:
     stage = Usd.Stage.Open(layer)
     for path, type_name in specs:
         stage.DefinePrim(path, type_name)
+    return layer.ExportToString().encode("utf-8")
+
+
+def _stage_bytes_with_custom_properties() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/World", "Xform")
+    prim.CreateAttribute("customFoo", Sdf.ValueTypeNames.String, custom=True).Set("bar")
+    prim.CreateRelationship("customRel", custom=True).AddTarget(Sdf.Path("/World"))
     return layer.ExportToString().encode("utf-8")
 
 
@@ -456,3 +465,52 @@ class TestWriteTranslate:
 
         assert srv.get_event_count() == count
         assert translate_vfile_without_validation.read() == before
+
+    def test_custom_properties_are_rejected(self, srv, translate_vfile):
+        _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
+        before = translate_vfile.read()
+        count = srv.get_event_count()
+
+        with pytest.raises(UnsupportedVfsWriteError):
+            translate_vfile.write(_stage_bytes_with_custom_properties())
+
+        assert srv.get_event_count() == count
+        assert translate_vfile.read() == before
+        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
+        assert "customFoo" in srv.last_vfs_write_analysis["notes"][0]
+        assert "customRel" in srv.last_vfs_write_analysis["notes"][0]
+
+    def test_department_layers_disable_translate(self, dept_srv):
+        layer = dept_srv.get_or_create_client_layer("alice", "layout")
+        _send_to_layer(
+            dept_srv,
+            layer,
+            [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}],
+            client_id="alice",
+        )
+        translate_vfile = VirtualStageFile(
+            dept_srv,
+            name="live.usd",
+            advertise_host="127.0.0.1",
+            sync_port=7200,
+            write_mode=WriteMode.TRANSLATE,
+        )
+        count = dept_srv.get_event_count()
+
+        with pytest.raises(UnsupportedVfsWriteError):
+            translate_vfile.write(_stage_bytes([("/World", "Xform")]))
+
+        assert dept_srv.get_event_count() == count
+        assert dept_srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
+        assert "department layers" in dept_srv.last_vfs_write_analysis["notes"][0]
+
+    def test_pending_proposals_disable_translate(self, srv, translate_vfile):
+        proposal_id = srv.create_proposal("alice", "layout")
+        count = srv.get_event_count()
+
+        with pytest.raises(UnsupportedVfsWriteError):
+            translate_vfile.write(_stage_bytes([("/World", "Xform")]))
+
+        assert srv.get_event_count() == count
+        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
+        assert proposal_id in srv.last_vfs_write_analysis["notes"][0]

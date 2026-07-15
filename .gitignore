@@ -1,5 +1,6 @@
 # Prerequisites
 *.d
+.DS_Store
 
 # Compiled Object files
 *.slo
@@ -273,5 +274,3 @@ __marimo__/
 
 # Vendored libraries
 vendor/
-
-.ouc_live_mount/

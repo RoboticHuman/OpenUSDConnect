@@ -212,6 +212,7 @@ private:
 	bool bActiveUsingLiveMetadata = false;
 	bool bDeferredEmitterForToken = false;
 	int32 ActiveSnapshotSeq = 0;
+	FString ActiveAuthToken;
 
 	/** Last live metadata key seen on the attached stage root layer. */
 	FString LastLiveMetadataKey;

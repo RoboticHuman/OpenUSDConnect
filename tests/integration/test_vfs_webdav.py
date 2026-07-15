@@ -188,6 +188,14 @@ def _stage_bytes(specs: list[tuple[str, str]]) -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
+def _stage_bytes_with_custom_property() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/World", "Xform")
+    prim.CreateAttribute("customFoo", Sdf.ValueTypeNames.String, custom=True).Set("bar")
+    return layer.ExportToString().encode("utf-8")
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -458,6 +466,20 @@ class TestWriteDrop:
         assert status == 409
 
         assert srv.get_event_count() == before_count
+        _, _, after_data = client.get(_file_path())
+        assert after_data == before_data
+
+    def test_put_custom_property_rejected_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
+        before_count = srv.get_event_count()
+        _, _, before_data = client.get(_file_path())
+
+        status, _, _ = client.put(_file_path(), _stage_bytes_with_custom_property())
+        assert status == 409
+
+        assert srv.get_event_count() == before_count
+        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
         _, _, after_data = client.get(_file_path())
         assert after_data == before_data
 

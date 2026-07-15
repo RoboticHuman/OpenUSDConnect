@@ -147,7 +147,8 @@ snapshot sequence, receiver/emitter connection state, and auth state.
 Token-required live-open:
 
 - On first connect, the receiver obtains the TOFU token.
-- The plugin saves it when **Persist Auth Tokens** is enabled.
+- The plugin keeps it in memory for the current session and saves it when
+  **Persist Auth Tokens** is enabled.
 - If the emitter was waiting for that first token, it starts on the next tick.
 - Future reconnects send the saved token on both receiver and emitter sockets.
 
@@ -184,7 +185,7 @@ Live-open-specific checks:
 - If the receiver replays old events after live-open, confirm the log says
   `receiver, sync_from=<snapshot_seq + 1>`.
 - If auth fails, call `GetStatus()` or check the Output Log for
-  `auth_rejected`; deleting the saved token or revoking the server token will
+  `auth_rejected`; revoke the server token and delete the saved local token to
   force a new TOFU first-connect.
 
 | Symptom | Cause / Fix |

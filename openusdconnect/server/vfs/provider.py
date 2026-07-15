@@ -51,8 +51,8 @@ class WriteMode(enum.Enum):
 
     FORBID = "forbid"
     DROP = "drop"
-    # Phase 2: parse the written layer, diff against snapshot_seq, and emit
-    # the diff as sync events.
+    # Experimental fallback: parse a full saved snapshot and rebuild the
+    # live event stream from the protocol-supported authored subset.
     TRANSLATE = "translate"
 
 

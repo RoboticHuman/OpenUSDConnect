@@ -228,6 +228,9 @@ Notes:
 - Translate mode records a write summary on the server and rejects uploaded
   files whose embedded `epoch`/`snapshot_seq` are older than the current
   server token.
+- Translate mode also rejects authored USD properties outside the supported
+  event subset, and it is disabled while department or proposal layers are
+  active.
 
 ## Blender Live-Open
 
@@ -286,6 +289,10 @@ receiver with `sync_from = snapshot_seq + 1`.
 `--require-token` applies to the TCP live sync protocol, not to the WebDAV
 snapshot endpoint. The virtual file never embeds an auth token.
 
+The WebDAV snapshot endpoint is intentionally unauthenticated. Keep
+`--vfs-host` bound to `127.0.0.1` for local workflows, or put remote VFS access
+behind a trusted network boundary or proxy.
+
 Blender and the Unreal Python bridge use the existing TOFU token store:
 
 - On first connect, the server issues a token.
@@ -295,8 +302,9 @@ Blender and the Unreal Python bridge use the existing TOFU token store:
 
 The native Unreal plugin stores issued tokens in the user's Unreal config
 when **Persist Auth Tokens** is enabled. If a token-required live-open file is
-opened and no token is saved yet, Unreal starts the receiver first, saves the
-issued token, then starts the emitter on the next tick with the same token.
+opened and no token is saved yet, Unreal starts the receiver first, keeps the
+issued token in memory, optionally saves it, then starts the emitter on the
+next tick with the same token.
 `GetStatus()` reports endpoint, metadata source, snapshot sequence,
 receiver/emitter state, and auth state.
 
