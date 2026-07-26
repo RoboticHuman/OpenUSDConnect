@@ -2,7 +2,10 @@
 
 import pytest
 
+import openusdconnect.server.cli as server_cli
 from openusdconnect.server.cli import (
+    ServerConfig,
+    VfsConfig,
     _default_advertise_host,
     _host_for_url,
     _normalize_vfs_share,
@@ -41,3 +44,56 @@ def test_validate_vfs_name_accepts_file_name():
 def test_validate_vfs_name_rejects_paths(name):
     with pytest.raises(ValueError, match="vfs-name"):
         _validate_vfs_name(name)
+
+
+def test_server_config_disables_vfs_by_default():
+    config = ServerConfig()
+
+    assert config.host == "127.0.0.1"
+    assert config.port == 7200
+    assert config.vfs is None
+
+
+def test_main_maps_vfs_arguments_to_nested_config(monkeypatch):
+    captured = []
+    monkeypatch.setattr(server_cli, "run_server", captured.append)
+
+    server_cli.main(
+        [
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "7210",
+            "--departments",
+            "lighting,layout",
+            "--vfs-port",
+            "7280",
+            "--vfs-host",
+            "127.0.0.1",
+            "--vfs-name",
+            "live.usd",
+            "--vfs-write-mode",
+            "translate",
+            "--vfs-bypass-write-validation",
+            "--no-vfs-prewarm",
+            "--advertise-host",
+            "workstation",
+        ]
+    )
+
+    assert captured == [
+        ServerConfig(
+            host="0.0.0.0",
+            port=7210,
+            department_priority=["lighting", "layout"],
+            vfs=VfsConfig(
+                port=7280,
+                host="127.0.0.1",
+                name="live.usd",
+                write_mode="translate",
+                validate_writes=False,
+                prewarm=False,
+                advertise_host="workstation",
+            ),
+        )
+    ]

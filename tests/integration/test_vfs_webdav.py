@@ -180,6 +180,14 @@ def _open_stage(data: bytes) -> Usd.Stage:
     return Usd.Stage.Open(layer)
 
 
+def _stage_bytes_with_live_metadata(metadata) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    stage.DefinePrim("/World", "Xform")
+    layer.customLayerData = {"openusdconnect": metadata}
+    return layer.ExportToString().encode("utf-8")
+
+
 def _stage_bytes(specs: list[tuple[str, str]]) -> bytes:
     layer = Sdf.Layer.CreateAnonymous(".usda")
     stage = Usd.Stage.Open(layer)
@@ -439,6 +447,21 @@ class TestWriteDrop:
             < srv.last_vfs_write_analysis["current_seq"]
         )
 
+    def test_put_rejects_malformed_live_metadata_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
+        count = srv.get_event_count()
+
+        status, _, _ = client.put(
+            _file_path(),
+            _stage_bytes_with_live_metadata({"epoch": "invalid", "snapshot_seq": 0}),
+        )
+
+        assert status == 409
+        assert srv.get_event_count() == count
+        _send(srv, [{"k": "ensure_prim", "prim": "/World/After", "typeName": "Cube"}])
+        assert srv.stage.GetPrimAtPath("/World/After")
+
     def test_put_rejects_ambiguous_root_removal_in_translate_mode(self, vfs_translate):
         srv, client = vfs_translate
         _send(
@@ -547,7 +570,7 @@ class TestUsdLayerImport:
 
 class TestSnapshotReplayContract:
     def test_cli_does_not_start_vfs_when_sync_bind_fails(self, tmp_path):
-        from openusdconnect.server.cli import run_server
+        from openusdconnect.server.cli import ServerConfig, VfsConfig, run_server
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as guard:
             guard.bind(("127.0.0.1", 0))
@@ -557,11 +580,12 @@ class TestSnapshotReplayContract:
 
             with pytest.raises(OSError):
                 run_server(
-                    host="127.0.0.1",
-                    port=sync_port,
-                    log_path=str(tmp_path / "bind-fail.db"),
-                    vfs_port=vfs_port,
-                    vfs_host="127.0.0.1",
+                    ServerConfig(
+                        host="127.0.0.1",
+                        port=sync_port,
+                        log_path=str(tmp_path / "bind-fail.db"),
+                        vfs=VfsConfig(port=vfs_port, host="127.0.0.1"),
+                    )
                 )
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:

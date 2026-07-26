@@ -43,12 +43,6 @@ write modes, WebDAV verbs, virtual directory browsing, composition roots,
 startup cleanup, HTTP snapshot caching, drive-mount helper path generation, and
 the replay contract for receivers started at `snapshot_seq + 1`.
 
-The Blender live-open smoke requires a Blender executable:
-
-```powershell
-uv run pytest tests/integration/test_live_open_blender.py -q --blender "D:\Workspace\Git\build_windows_x64_vc17_Release\bin\Release\blender.exe"
-```
-
 Real Windows WebClient/UNC behavior is opt-in because it depends on local
 Windows service and policy configuration:
 

@@ -95,48 +95,6 @@ def sanitize_usd_name(name: str) -> str:
     return result or "_unnamed"
 
 
-def _strip_blender_numeric_suffix(name: str) -> str:
-    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
-        return name[:-4]
-    return name
-
-
-def _repair_import_prim_tags(usd_path: str, objects=None) -> int:
-    """Repair obvious Blender USDHook parent tags after a file import."""
-    try:
-        stage = Usd.Stage.Open(usd_path)
-    except Exception:
-        LOG.debug("Could not reopen imported USD for prim-tag repair", exc_info=True)
-        return 0
-    if stage is None:
-        return 0
-
-    by_leaf: dict[str, list[str]] = {}
-    for prim in stage.Traverse():
-        path = str(prim.GetPath())
-        leaf = sanitize_usd_name(prim.GetName())
-        by_leaf.setdefault(leaf, []).append(path)
-
-    repaired = 0
-    repair_objects = list(objects) if objects is not None else list(bpy.context.scene.objects)
-    for obj in repair_objects:
-        if obj.get("usd_prim_path"):
-            continue
-        leaf = sanitize_usd_name(_strip_blender_numeric_suffix(obj.name))
-        candidates = by_leaf.get(leaf, [])
-        if len(candidates) != 1:
-            continue
-        target = candidates[0]
-        obj["usd_prim_path"] = target
-        prim = stage.GetPrimAtPath(target)
-        if prim and prim.IsValid() and prim.GetTypeName():
-            obj["usd_type_name"] = prim.GetTypeName()
-        repaired += 1
-    if repaired:
-        LOG.info("Repaired %d imported USD prim tags by object name", repaired)
-    return repaired
-
-
 # ---------------------------------------------------------------------------
 # Scene properties
 # ---------------------------------------------------------------------------
@@ -336,10 +294,21 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             except Exception as e:
                 LOG.warning("USDHook: Could not infer root prim: %s", e)
 
-        tagged = 0
+        # Blender may map a collapsed parent Xform to an Object while mapping
+        # the represented child Mesh/Camera/Light prim to that object's data.
+        # Resolve both forms before tagging so edits target the schema prim,
+        # not the collapsed parent.
+        owners_by_data: dict[int, list] = {}
+        for obj in bpy.data.objects:
+            data = getattr(obj, "data", None)
+            if data is not None:
+                owners_by_data.setdefault(data.as_pointer(), []).append(obj)
+
+        from .blender_adapter import _PROP_USD_IMPORTED
+
+        object_tags: dict[int, tuple[tuple[int, int], object, str, str]] = {}
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
-            # Look up prim type from the stage
             prim_type_name = ""
             if stage:
                 try:
@@ -349,19 +318,39 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                 except Exception:
                     LOG.debug("USDHook: could not look up prim type for %s", prim_path_str)
 
-            from .blender_adapter import _PROP_USD_IMPORTED
-
             for db in data_blocks:
                 if isinstance(db, bpy.types.Object):
-                    db["usd_prim_path"] = prim_path_str
-                    if prim_type_name:
-                        db["usd_type_name"] = prim_type_name
-                    if stage_id:
-                        db["usd_stage_id"] = stage_id
-                    db[_PROP_USD_IMPORTED] = True
-                    tagged += 1
+                    objects = [db]
+                    data_owner = 0
+                else:
+                    try:
+                        owners = owners_by_data.get(db.as_pointer(), [])
+                    except (AttributeError, ReferenceError):
+                        owners = []
+                    objects = owners if len(owners) == 1 else []
+                    data_owner = 1
 
-        LOG.info("USDHook: Tagged %d objects with usd_prim_path", tagged)
+                rank = (prim_path_str.count("/"), data_owner)
+                for obj in objects:
+                    key = obj.as_pointer()
+                    current = object_tags.get(key)
+                    if current is None or rank > current[0]:
+                        object_tags[key] = (
+                            rank,
+                            obj,
+                            prim_path_str,
+                            prim_type_name,
+                        )
+
+        for _, obj, prim_path_str, prim_type_name in object_tags.values():
+            obj["usd_prim_path"] = prim_path_str
+            if prim_type_name:
+                obj["usd_type_name"] = prim_type_name
+            if stage_id:
+                obj["usd_stage_id"] = stage_id
+            obj[_PROP_USD_IMPORTED] = True
+
+        LOG.info("USDHook: Tagged %d objects with usd_prim_path", len(object_tags))
         return True
 
 
@@ -1225,13 +1214,8 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             from . import live_discovery
 
             local_path, meta = live_discovery.resolve_import_source(self.filepath)
-            before_import = {obj.as_pointer() for obj in context.scene.objects}
             bpy.ops.wm.usd_import(filepath=local_path)
             meta = live_discovery.read_live_metadata(local_path)
-            imported_objects = [
-                obj for obj in context.scene.objects if obj.as_pointer() not in before_import
-            ]
-            _repair_import_prim_tags(local_path, imported_objects)
             context.scene.usd_connect_base_usd_path = local_path
             # Apply MaterialX materials that Blender's importer doesn't handle
             from .blender_adapter import BlenderAdapter

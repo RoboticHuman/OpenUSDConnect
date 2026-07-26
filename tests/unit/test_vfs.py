@@ -123,6 +123,14 @@ def _stage_bytes_with_custom_properties() -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
+def _stage_bytes_with_live_metadata(metadata) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    stage.DefinePrim("/World", "Xform")
+    layer.customLayerData = {"openusdconnect": metadata}
+    return layer.ExportToString().encode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Snapshot token (state.py additions)
 # ---------------------------------------------------------------------------
@@ -451,6 +459,29 @@ class TestWriteTranslate:
 
         with pytest.raises(InvalidVfsWriteError):
             translate_vfile.write(b"this is not usd")
+
+        assert srv.get_event_count() == count
+        assert translate_vfile.read() == before
+
+    @pytest.mark.parametrize(
+        ("metadata", "message"),
+        [
+            ("invalid", "must be a dictionary"),
+            ({"snapshot_seq": 0}, "'epoch'"),
+            ({"epoch": "0", "snapshot_seq": 0}, "'epoch'"),
+            ({"epoch": 0, "snapshot_seq": False}, "'snapshot_seq'"),
+            ({"epoch": -1, "snapshot_seq": 0}, "'epoch'"),
+        ],
+    )
+    def test_invalid_live_metadata_does_not_touch_state(
+        self, srv, translate_vfile, metadata, message
+    ):
+        _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
+        before = translate_vfile.read()
+        count = srv.get_event_count()
+
+        with pytest.raises(InvalidVfsWriteError, match=message):
+            translate_vfile.write(_stage_bytes_with_live_metadata(metadata))
 
         assert srv.get_event_count() == count
         assert translate_vfile.read() == before

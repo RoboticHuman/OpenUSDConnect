@@ -57,6 +57,7 @@ from ._txn_barrier import _TxnBarrier
 from .types import (
     AmbiguousVfsWriteError,
     ClientInfo,
+    InvalidVfsWriteError,
     Proposal,
     StaleVfsWriteError,
     UnsupportedVfsWriteError,
@@ -172,20 +173,26 @@ def _stage_prim_types(stage: Usd.Stage) -> dict[str, str]:
     }
 
 
-def _stage_live_metadata(stage: Usd.Stage) -> dict:
-    try:
-        meta = (stage.GetRootLayer().customLayerData or {}).get("openusdconnect")
-    except Exception:
-        return {}
-    return dict(meta) if isinstance(meta, dict) else {}
-
-
-def _metadata_int(meta: dict, key: str) -> int | None:
-    try:
-        value = meta.get(key)
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
+def _stage_live_metadata(stage: Usd.Stage) -> dict | None:
+    layer_data = stage.GetRootLayer().customLayerData or {}
+    if "openusdconnect" not in layer_data:
         return None
+    metadata = layer_data["openusdconnect"]
+    if not isinstance(metadata, dict):
+        raise InvalidVfsWriteError(
+            "uploaded openusdconnect metadata must be a dictionary"
+        )
+    return metadata
+
+
+def _metadata_int(metadata: dict, key: str) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidVfsWriteError(
+            f"uploaded openusdconnect metadata field {key!r} "
+            "must be a non-negative integer"
+        )
+    return value
 
 
 def _is_supported_translate_custom_attr(name: str) -> bool:
@@ -1604,8 +1611,12 @@ class UsdSyncServer:
         Returns the number of translated events persisted to the event log.
         """
         uploaded_meta = _stage_live_metadata(uploaded_stage)
-        uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
-        uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
+        if uploaded_meta is None:
+            uploaded_epoch = None
+            uploaded_seq = None
+        else:
+            uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
+            uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
 
         self.txn_barrier.acquire_exclusive()
         try:
@@ -1634,12 +1645,10 @@ class UsdSyncServer:
             )
 
             notes = []
-            if not uploaded_meta:
+            if uploaded_meta is None:
                 notes.append(
                     "uploaded file has no openusdconnect metadata; accepting as fallback save"
                 )
-            elif uploaded_epoch is None or uploaded_seq is None:
-                notes.append("uploaded openusdconnect metadata has no parseable epoch/snapshot_seq")
 
             def _analysis(status: str, status_notes: list[str], event_counts=None):
                 return VfsWriteAnalysis(
