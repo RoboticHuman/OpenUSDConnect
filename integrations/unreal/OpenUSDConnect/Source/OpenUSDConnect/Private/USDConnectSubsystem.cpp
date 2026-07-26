@@ -23,6 +23,10 @@
 #include "HAL/PlatformProcess.h"
 #include <cstdint>
 
+#if WITH_EDITOR
+#include "ScopedTransaction.h"
+#endif
+
 #if USE_USD_SDK
 #include "USDIncludesStart.h"
 #include "pxr/base/vt/dictionary.h"
@@ -1281,23 +1285,53 @@ void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
 	{
 		return;
 	}
-	LastMaterializedRootLayerIdentifier = RootIdentifier;
 
-	int32 Count = 0;
+	TArray<FString> Materials;
 	for (const pxr::UsdPrim& Prim : Stage->Traverse())
 	{
-		if (Prim && Prim.IsA<pxr::UsdShadeMaterial>())
+		const pxr::UsdShadeMaterial Material(Prim);
+		if (Material && Material.GetSurfaceOutput(pxr::TfToken("mtlx")))
 		{
-			PendingMaterializePrims.Add(UTF8_TO_TCHAR(Prim.GetPath().GetText()));
-			++Count;
+			Materials.Add(UTF8_TO_TCHAR(Prim.GetPath().GetText()));
 		}
 	}
-	if (Count > 0)
+	LastMaterializedRootLayerIdentifier = RootIdentifier;
+
+	if (Materials.IsEmpty())
 	{
-		UE_LOG(LogUSDConnectSubsystem, Log,
-			TEXT("Queued %d material(s) for initial OpenUSDConnect MaterialX refresh"),
-			Count);
+		return;
 	}
+
+	int32 Changed = 0;
+	bSuppressEmit.store(true);
+	{
+#if WITH_EDITOR
+		const FScopedTransaction Transaction(
+			NSLOCTEXT("OpenUSDConnect", "InitialMaterialXRefresh", "Prepare live MaterialX materials"));
+#endif
+
+		for (const FString& Material : Materials)
+		{
+			if (FUSDMaterialXMaterializer::MaterializeMaterial(Actor, Material))
+			{
+				++Changed;
+			}
+		}
+	}
+
+	const FName MaterialXRenderContext(TEXT("mtlx"));
+	const bool bChangedRenderContext = Actor->RenderContext != MaterialXRenderContext;
+	if (bChangedRenderContext)
+	{
+		// The materialization transaction has ended, so its accumulated USD
+		// notices are fully processed before SetRenderContext reloads the stage.
+		Actor->SetRenderContext(MaterialXRenderContext);
+	}
+	bSuppressEmit.store(false);
+
+	UE_LOG(LogUSDConnectSubsystem, Log,
+		TEXT("Initial OpenUSDConnect MaterialX refresh scanned %d material(s), updated %d, render_context=%s"),
+		Materials.Num(), Changed, bChangedRenderContext ? TEXT("mtlx (selected)") : TEXT("mtlx"));
 #endif
 }
 
@@ -1327,6 +1361,16 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 			Materials.Add(MoveTemp(Material));
 		}
 	}
+	if (Materials.IsEmpty())
+	{
+		return;
+	}
+
+	{
+#if WITH_EDITOR
+	const FScopedTransaction Transaction(
+		NSLOCTEXT("OpenUSDConnect", "LiveMaterialXRefresh", "Refresh live MaterialX materials"));
+#endif
 
 	// The session-layer authoring below fires stage notices; suppress our own
 	// listener so they don't loop back into the emit path. The stage actor's
@@ -1335,6 +1379,7 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 	for (const FString& Material : Materials)
 	{
 		FUSDMaterialXMaterializer::MaterializeMaterial(StageActor, Material);
+	}
 	}
 	bSuppressEmit.store(false);
 }

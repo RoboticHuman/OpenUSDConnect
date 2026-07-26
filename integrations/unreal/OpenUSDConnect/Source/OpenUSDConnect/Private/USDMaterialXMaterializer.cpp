@@ -25,6 +25,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdShade/connectableAPI.h"
 #include "pxr/usd/usdShade/material.h"
+#include "pxr/usd/usdShade/nodeGraph.h"
 #include "pxr/usd/usdShade/shader.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/layer.h"
@@ -283,6 +284,40 @@ namespace
 			Body += FString::Printf(TEXT("  <%s name=\"%s\" type=\"%s\">\n"),
 				*Category, *EscapeAttr(NodeName(Prim)), *OutType);
 
+			const auto AppendValueInput = [&Body, &MaterialPrim](
+				const FString& InputName, const pxr::UsdShadeInput& SourceInput)
+			{
+				const pxr::UsdAttribute SourceAttr = SourceInput.GetAttr();
+				const FString UsdType =
+					UTF8_TO_TCHAR(SourceInput.GetTypeName().GetAsToken().GetText());
+				const FString MtlxType = MtlxTypeForUsd(UsdType);
+				pxr::VtValue Value;
+				FString ValueStr;
+				if (MtlxType.IsEmpty()
+					|| !SourceAttr.Get(&Value)
+					|| !FormatValue(Value, MtlxType, ValueStr))
+				{
+					UE_LOG(LogUSDMaterializer, Verbose,
+						TEXT("Skipping %s: unmapped input %s (%s)"),
+						UTF8_TO_TCHAR(MaterialPrim.GetPath().GetText()), *InputName, *UsdType);
+					return false;
+				}
+				FString ColorSpaceAttr;
+				if (SourceAttr.HasColorSpace())
+				{
+					const FString ColorSpace = UTF8_TO_TCHAR(SourceAttr.GetColorSpace().GetText());
+					if (!ColorSpace.IsEmpty())
+					{
+						ColorSpaceAttr = FString::Printf(
+							TEXT(" colorspace=\"%s\""), *EscapeAttr(ColorSpace));
+					}
+				}
+				Body += FString::Printf(
+					TEXT("    <input name=\"%s\" type=\"%s\" value=\"%s\"%s />\n"),
+					*EscapeAttr(InputName), *MtlxType, *EscapeAttr(ValueStr), *ColorSpaceAttr);
+				return true;
+			};
+
 			// Two passes matching the Python exporter's shape: authored
 			// values first, then connection entries.
 			for (const pxr::UsdShadeInput& Input : Shader.GetInputs())
@@ -299,22 +334,10 @@ namespace
 				{
 					continue;
 				}
-				const FString UsdType = UTF8_TO_TCHAR(Input.GetTypeName().GetAsToken().GetText());
-				const FString MtlxType = MtlxTypeForUsd(UsdType);
-				pxr::VtValue Value;
-				FString ValueStr;
-				if (MtlxType.IsEmpty()
-					|| !Input.GetAttr().Get(&Value)
-					|| !FormatValue(Value, MtlxType, ValueStr))
+				if (!AppendValueInput(BaseName, Input))
 				{
-					UE_LOG(LogUSDMaterializer, Verbose,
-						TEXT("Skipping %s: unmapped input %s (%s)"),
-						UTF8_TO_TCHAR(MaterialPrim.GetPath().GetText()),
-						UTF8_TO_TCHAR(Input.GetBaseName().GetText()), *UsdType);
 					return {};
 				}
-				Body += FString::Printf(TEXT("    <input name=\"%s\" type=\"%s\" value=\"%s\" />\n"),
-					UTF8_TO_TCHAR(Input.GetBaseName().GetText()), *MtlxType, *EscapeAttr(ValueStr));
 			}
 			for (const pxr::UsdShadeInput& Input : Shader.GetInputs())
 			{
@@ -327,7 +350,53 @@ namespace
 				{
 					continue;
 				}
-				const pxr::UsdPrim SourcePrim = Sources[0].source.GetPrim();
+				pxr::UsdPrim SourcePrim = Sources[0].source.GetPrim();
+				pxr::TfToken SourceName = Sources[0].sourceName;
+				const pxr::UsdShadeAttributeType SourceAttrType = Sources[0].sourceType;
+
+				// Flattened .mtlx layers often wire shader inputs through a
+				// material interface. If the interface authored a value, emit it
+				// as a direct MaterialX input; if not, leave the nodedef default.
+				if (SourcePrim.GetPath() == MaterialPrim.GetPath()
+					&& SourceAttrType == pxr::UsdShadeAttributeType::Input)
+				{
+					const pxr::UsdShadeInput MaterialInput = Material.GetInput(SourceName);
+					if (!MaterialInput || !MaterialInput.GetAttr().HasAuthoredValue())
+					{
+						continue;
+					}
+					if (!AppendValueInput(
+							UTF8_TO_TCHAR(Input.GetBaseName().GetText()), MaterialInput))
+					{
+						return {};
+					}
+					continue;
+				}
+
+				// NodeGraph outputs are valid MaterialX topology. The local
+				// document writer flattens graph-contained nodes to top-level
+				// nodes, so follow the graph output to its driving shader.
+				if (SourcePrim.GetPath() != MaterialPrim.GetPath())
+				{
+					const pxr::UsdShadeNodeGraph SourceGraph(SourcePrim);
+					if (SourceGraph)
+					{
+						const pxr::UsdShadeOutput GraphOutput = SourceGraph.GetOutput(SourceName);
+						if (!GraphOutput)
+						{
+							continue;
+						}
+						const pxr::UsdShadeSourceInfoVector GraphSources =
+							GraphOutput.GetConnectedSources();
+						if (GraphSources.empty())
+						{
+							continue;
+						}
+						SourcePrim = GraphSources[0].source.GetPrim();
+						SourceName = GraphSources[0].sourceName;
+					}
+				}
+
 				pxr::TfToken SourceId;
 				if (pxr::UsdShadeShader SourceShader{SourcePrim})
 				{
@@ -342,9 +411,16 @@ namespace
 						UTF8_TO_TCHAR(SourcePrim.GetPath().GetText()));
 					return {};
 				}
-				Body += FString::Printf(TEXT("    <input name=\"%s\" type=\"%s\" nodename=\"%s\" />\n"),
+				const FString OutputAttr =
+					SourceName.IsEmpty() || SourceName == pxr::TfToken("out")
+						? FString()
+						: FString::Printf(
+							TEXT(" output=\"%s\""),
+							*EscapeAttr(UTF8_TO_TCHAR(SourceName.GetText())));
+				Body += FString::Printf(
+					TEXT("    <input name=\"%s\" type=\"%s\" nodename=\"%s\"%s />\n"),
 					UTF8_TO_TCHAR(Input.GetBaseName().GetText()), *SourceType,
-					*EscapeAttr(NodeName(SourcePrim)));
+					*EscapeAttr(NodeName(SourcePrim)), *OutputAttr);
 			}
 			Body += FString::Printf(TEXT("  </%s>\n"), *Category);
 		}
@@ -458,6 +534,9 @@ bool FUSDMaterialXMaterializer::MaterializeMaterial(AUsdStageActor* StageActor, 
 
 	if (HasForeignDocument(Prim))
 	{
+		UE_LOG(LogUSDMaterializer, Verbose,
+			TEXT("Skipping %s: material is already backed by a foreign .mtlx document"),
+			*MaterialPrimPath);
 		return false;
 	}
 
@@ -476,6 +555,9 @@ bool FUSDMaterialXMaterializer::MaterializeMaterial(AUsdStageActor* StageActor, 
 	const FString Doc = BuildDocument(Prim);
 	if (Doc.IsEmpty())
 	{
+		UE_LOG(LogUSDMaterializer, Warning,
+			TEXT("Skipping %s: inline MaterialX network cannot be serialized to a local .mtlx document"),
+			*MaterialPrimPath);
 		return false;
 	}
 

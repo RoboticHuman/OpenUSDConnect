@@ -28,6 +28,11 @@ public class OpenUSDConnect : ModuleRules
 			"RHI",              // GMaxRHIShaderPlatform (FMaterialUpdateContext default arg)
 		});
 
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd"); // FScopedTransaction for USD notice flushing
+		}
+
 		// Call the engine helper that configures USD SDK linkage, RTTI, exceptions,
 		// memory overload definitions, and USE_USD_SDK macros for this module.
 		// This is the same pattern USDStage uses.
