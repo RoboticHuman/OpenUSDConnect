@@ -128,6 +128,7 @@ private:
 	void ConnectResolved(bool bRespectLiveMetadataAutoStart);
 	void RefreshLiveMetadataFromStage(AUsdStageActor* Actor);
 	void TryStartDeferredEmitter();
+	void QueueInitialMaterializations(AUsdStageActor* Actor);
 	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
 	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department, const FString& Token) const;
 	void SetStatusMessage(const FString& AuthState, const FString& Message);
@@ -216,6 +217,9 @@ private:
 
 	/** Last live metadata key seen on the attached stage root layer. */
 	FString LastLiveMetadataKey;
+
+	/** Root layer identifier last scanned for initial MaterialX materialization. */
+	FString LastMaterializedRootLayerIdentifier;
 
 	mutable FCriticalSection StatusCS;
 	FString LastAuthState = TEXT("not_connected");

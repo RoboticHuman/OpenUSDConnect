@@ -31,12 +31,14 @@
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformOp.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdShade/connectableAPI.h"
+#include "pxr/usd/usdShade/material.h"
 #include "pxr/usd/usdShade/shader.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -876,6 +878,7 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 	if (StageActor)
 	{
 		RefreshLiveMetadataFromStage(StageActor);
+		QueueInitialMaterializations(StageActor);
 	}
 
 	// Perform deferred auto-connect after stage metadata has had a chance to
@@ -990,6 +993,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 	}
 
 	CachedStageActor = nullptr;
+	LastMaterializedRootLayerIdentifier.Empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,6 +1255,51 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 // ---------------------------------------------------------------------------
 // Materialization (local .mtlx documents for MaterialX rendering)
 // ---------------------------------------------------------------------------
+
+void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
+{
+#if USE_USD_SDK
+	if (!Actor || !IsValid(Actor))
+	{
+		return;
+	}
+
+	pxr::UsdStageRefPtr Stage = static_cast<pxr::UsdStageRefPtr>(Actor->GetOrOpenUsdStage());
+	if (!Stage)
+	{
+		return;
+	}
+
+	pxr::SdfLayerHandle RootLayer = Stage->GetRootLayer();
+	if (!RootLayer)
+	{
+		return;
+	}
+
+	const FString RootIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
+	if (RootIdentifier.IsEmpty() || RootIdentifier == LastMaterializedRootLayerIdentifier)
+	{
+		return;
+	}
+	LastMaterializedRootLayerIdentifier = RootIdentifier;
+
+	int32 Count = 0;
+	for (const pxr::UsdPrim& Prim : Stage->Traverse())
+	{
+		if (Prim && Prim.IsA<pxr::UsdShadeMaterial>())
+		{
+			PendingMaterializePrims.Add(UTF8_TO_TCHAR(Prim.GetPath().GetText()));
+			++Count;
+		}
+	}
+	if (Count > 0)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("Queued %d material(s) for initial OpenUSDConnect MaterialX refresh"),
+			Count);
+	}
+#endif
+}
 
 void UUSDConnectSubsystem::ProcessPendingMaterializations()
 {
