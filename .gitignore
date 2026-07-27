@@ -1,3 +1,16 @@
+# macOS filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
 # Prerequisites
 *.d
 .DS_Store
@@ -274,3 +287,6 @@ __marimo__/
 
 # Vendored libraries
 vendor/
+
+# Generated Unreal dependencies
+/integrations/unreal/OpenUSDConnect/Source/*/ThirdParty/flatbuffers/
