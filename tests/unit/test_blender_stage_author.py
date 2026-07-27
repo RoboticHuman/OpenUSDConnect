@@ -95,6 +95,8 @@ def _install_bpy_mock():
 
 _bpy_mock = _install_bpy_mock()
 
+from openusdconnect import emitter as _core_emitter_before_blender_import
+
 
 # ---------------------------------------------------------------------------
 # Mock Blender objects
@@ -250,6 +252,18 @@ def _get_events(author, emitter, updates):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_source_import_keeps_core_module_identity():
+    import importlib
+
+    import integrations.blender as blender_package
+
+    emitter_module = sys.modules["openusdconnect.emitter"]
+    assert emitter_module is _core_emitter_before_blender_import
+
+    importlib.reload(blender_package)
+    assert sys.modules["openusdconnect.emitter"] is emitter_module
 
 
 class TestAutoTrack:
