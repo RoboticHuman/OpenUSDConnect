@@ -8,6 +8,7 @@ import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
 from openusdconnect.emitter import NoticeEmitter
+from openusdconnect.event_apply import apply_event
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
@@ -22,6 +23,7 @@ from openusdconnect.protocol_constants import (
     K_SET_VARIANT_SELECTIONS,
     K_SET_XFORM_TRS,
 )
+from openusdconnect.sdf_arc_state import read_arc_state
 
 
 def _make_stage_and_emitter():
@@ -997,6 +999,26 @@ class TestReferenceEmission:
         ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Clr"]
         assert len(ref_evs) == 1
         assert ref_evs[0]["refs"] == []
+        assert ref_evs[0]["list_op_authored"] is False
+        assert ref_evs[0]["list_op_explicit"] is False
+
+    def test_explicit_empty_reference_op_is_emitted(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Blocked", "Xform")
+        emitter.build_events_for_dirty()
+
+        spec = stage.GetSessionLayer().GetPrimAtPath("/World/Blocked")
+        spec.SetInfo("references", Sdf.ReferenceListOp.CreateExplicit([]))
+
+        events = emitter.build_events_for_dirty()
+        event = next(
+            ev
+            for ev in events
+            if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Blocked"
+        )
+        assert event["refs"] == []
+        assert event["list_op_authored"] is True
+        assert event["list_op_explicit"] is True
 
     def test_multiple_references_emitted(self):
         stage, emitter = _make_stage_and_emitter()
@@ -1011,6 +1033,57 @@ class TestReferenceEmission:
         ref_evs = [e for e in events if e["k"] == K_SET_REFERENCE and e["prim"] == "/World/Multi"]
         assert len(ref_evs) == 1
         assert len(ref_evs[0]["refs"]) == 2
+
+    def test_exact_list_op_survives_emit_and_apply(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Rich", "Xform")
+        spec = stage.GetSessionLayer().GetPrimAtPath("/World/Rich")
+        spec.referenceList.addedItems = [
+            Sdf.Reference(
+                "/tmp/added.usda",
+                "/Model",
+                Sdf.LayerOffset(7.0, 2.0),
+                {"rank": 7, "vector": Gf.Vec3d(1.0, 2.0, 3.0)},
+            )
+        ]
+        spec.referenceList.prependedItems = [
+            Sdf.Reference("/tmp/prepended.usda"),
+        ]
+        spec.referenceList.appendedItems = [
+            Sdf.Reference("/tmp/appended.usda"),
+        ]
+        spec.referenceList.deletedItems = [
+            Sdf.Reference("/tmp/deleted.usda"),
+        ]
+        spec.referenceList.orderedItems = [
+            Sdf.Reference("", "/Internal"),
+        ]
+
+        events = emitter.build_events_for_dirty()
+        event = next(
+            ev
+            for ev in events
+            if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Rich"
+        )
+        assert event["list_op_authored"] is True
+        assert event["list_op_explicit"] is False
+        assert {
+            entry.get("list_position", "prepended")
+            for entry in event["refs"]
+        } == {"added", "prepended", "appended", "deleted", "ordered"}
+
+        target = Usd.Stage.CreateInMemory()
+        apply_event(target, event)
+        assert read_arc_state(
+            target.GetRootLayer(),
+            "/World/Rich",
+            "referenceList",
+        ) == read_arc_state(
+            stage.GetSessionLayer(),
+            "/World/Rich",
+            "referenceList",
+            absolute_asset_paths=True,
+        )
 
 
 class TestVariantSelectionEmission:
@@ -1030,14 +1103,14 @@ class TestVariantSelectionEmission:
         emitter = NoticeEmitter(stage)
         return stage, emitter
 
-    def test_variant_emitted_on_first_encounter(self):
+    def test_weaker_variant_selection_not_reauthored_on_first_encounter(self):
         stage, emitter = self._make_variant_stage_and_emitter()
-        # Dirty the prim so it gets processed
+        # The fixture owns the selection in its root layer; this emitter
+        # authors into the session layer and must not flatten that baseline.
         emitter.mark_dirty("/World/Sphere")
         events = emitter.build_events_for_dirty()
         vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
-        assert len(vsel) == 1
-        assert vsel[0]["selections"] == {"size": "small"}
+        assert vsel == []
 
     def test_variant_change_detected(self):
         stage, emitter = self._make_variant_stage_and_emitter()
@@ -1200,8 +1273,8 @@ class TestGprimAttrEmission:
         attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         assert len(attr_evs) == 0
 
-    def test_gprim_attr_after_variant_switch(self):
-        """Variant switch that changes composed radius emits set_gprim_attrs."""
+    def test_variant_switch_does_not_flatten_composed_attribute(self):
+        """A local selection is enough when variant data lives in the base."""
         import os
 
         fixture = os.path.join(
@@ -1212,27 +1285,27 @@ class TestGprimAttrEmission:
         stage.SetEditTarget(Usd.EditTarget(session))
         emitter = NoticeEmitter(stage)
 
-        # First flush — "small" variant, radius=1
+        # First flush does not replay the root layer's selected value.
         emitter.mark_dirty("/World/Sphere")
         events1 = emitter.build_events_for_dirty()
         attr_evs1 = [
             e for e in events1 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
-        assert len(attr_evs1) == 1
-        initial_radius = attr_evs1[0]["attrs"]["radius"]
+        assert attr_evs1 == []
 
-        # Switch to "large" — radius changes via composition
+        # The session-layer selection crosses the wire, while the receiver's
+        # shared base layer supplies the selected radius.
         prim = stage.GetPrimAtPath("/World/Sphere")
         prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("large")
         events2 = emitter.build_events_for_dirty()
 
+        vsel = [e for e in events2 if e["k"] == K_SET_VARIANT_SELECTIONS]
+        assert len(vsel) == 1
+        assert vsel[0]["selections"] == {"size": "large"}
         attr_evs2 = [
             e for e in events2 if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
-        assert len(attr_evs2) == 1
-        new_radius = attr_evs2[0]["attrs"]["radius"]
-        assert new_radius != initial_radius
-        assert abs(new_radius - 10.0) < 1e-6
+        assert attr_evs2 == []
 
     def test_visibility_excluded(self):
         """Visibility changes do not produce gprim attr events."""

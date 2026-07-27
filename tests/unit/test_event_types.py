@@ -25,6 +25,7 @@ from openusdconnect.events import (
     SetPayload,
     SetPointInstancer,
     SetReference,
+    SetSdfPropertyFields,
     SetStageMetadata,
     SetVariantSelections,
     SetVisibility,
@@ -178,6 +179,17 @@ _CASES: list[tuple[str, Event]] = [
             endTimeCode=240.0,
             metersPerUnit=0.01,
             upAxis="Y",
+        ),
+    ),
+    (
+        "set_sdf_property_fields",
+        SetSdfPropertyFields(
+            k="set_sdf_property_fields",
+            prim="/World/Thing",
+            spec_path="/World/Thing.userProperties:value",
+            fields=["default"],
+            fragment='#usda 1.0\n\nover "World" {}\n',
+            removed=False,
         ),
     ),
 ]

@@ -34,6 +34,7 @@ from ..protocol_constants import (
     MSG_PROPOSAL_CREATED,
     MSG_RATE_LIMITED,
     MSG_RESYNC,
+    PROTOCOL_VERSION,
 )
 from ..transport import send_msg
 from ._sock_utils import _set_keepalive, _set_send_timeout
@@ -88,6 +89,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             _, hello_fb = resolve_payload(env)
         except Exception as e:
             LOG.warning("Failed to parse hello message: %s", e)
+            return
+
+        protocol_version = hello_fb.ProtocolVersion()
+        if protocol_version != PROTOCOL_VERSION:
+            LOG.warning(
+                "Rejected client protocol version %s from %s; expected %s",
+                protocol_version,
+                self.client_address,
+                PROTOCOL_VERSION,
+            )
             return
 
         role_raw = hello_fb.Role()

@@ -6,7 +6,7 @@ Requires pxr (OpenUSD Python bindings). Tests are skipped if pxr is not availabl
 import pytest
 
 try:
-    from pxr import Sdf, Usd, UsdGeom  # noqa: F401
+    from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: F401
 
     PXR_AVAILABLE = True
 except ImportError:
@@ -37,6 +37,7 @@ from openusdconnect.protocol_constants import (
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
 )
+from openusdconnect.sdf_arc_state import serialize_reference_custom_data
 
 
 @pytest.fixture
@@ -343,6 +344,107 @@ class TestSetReference:
         assert prim.IsValid()
         assert prim.HasAuthoredReferences()
 
+    def test_preserves_nonexplicit_list_op_state(self, stage):
+        custom_data = {
+            "rank": 7,
+            "vector": Gf.Vec3d(1.0, 2.0, 3.0),
+        }
+        apply_event(
+            stage,
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Rich",
+                "refs": [
+                    {
+                        "asset_path": "/tmp/added.usda",
+                        "prim_path": "/Added",
+                        "list_position": "added",
+                        "layer_offset": 7.0,
+                        "layer_scale": 2.0,
+                        "custom_data_fragment": serialize_reference_custom_data(
+                            custom_data,
+                        ),
+                    },
+                    {
+                        "asset_path": "/tmp/prepended.usda",
+                        "list_position": "prepended",
+                    },
+                    {
+                        "asset_path": "/tmp/appended.usda",
+                        "list_position": "appended",
+                    },
+                    {
+                        "asset_path": "/tmp/deleted.usda",
+                        "list_position": "deleted",
+                    },
+                    {
+                        "prim_path": "/Internal",
+                        "list_position": "ordered",
+                    },
+                ],
+                "list_op_authored": True,
+                "list_op_explicit": False,
+            },
+        )
+
+        op = stage.GetRootLayer().GetPrimAtPath("/World/Rich").referenceList
+        assert op.addedItems[0].layerOffset == Sdf.LayerOffset(7.0, 2.0)
+        assert op.addedItems[0].customData == custom_data
+        assert op.prependedItems[0].assetPath == "/tmp/prepended.usda"
+        assert op.appendedItems[0].assetPath == "/tmp/appended.usda"
+        assert op.deletedItems[0].assetPath == "/tmp/deleted.usda"
+        assert op.orderedItems[0].primPath == Sdf.Path("/Internal")
+
+    def test_distinguishes_explicit_empty_from_clear(self, stage):
+        prim_path = "/World/Blocked"
+        apply_event(
+            stage,
+            {
+                "k": K_SET_REFERENCE,
+                "prim": prim_path,
+                "refs": [],
+                "list_op_authored": True,
+                "list_op_explicit": True,
+            },
+        )
+        spec = stage.GetRootLayer().GetPrimAtPath(prim_path)
+        assert spec.HasInfo("references")
+        assert spec.referenceList.isExplicit
+        assert spec.referenceList.explicitItems == []
+
+        apply_event(
+            stage,
+            {
+                "k": K_SET_REFERENCE,
+                "prim": prim_path,
+                "refs": [],
+                "list_op_authored": False,
+                "list_op_explicit": False,
+            },
+        )
+        assert not spec.HasInfo("references")
+
+    def test_unauthored_clear_does_not_create_local_prim_spec(self):
+        base = Sdf.Layer.CreateAnonymous("reference-clear-base")
+        base_stage = Usd.Stage.Open(base)
+        base_stage.DefinePrim("/World/Composed", "Xform")
+        session = Sdf.Layer.CreateAnonymous("reference-clear-session")
+        stage = Usd.Stage.Open(base, session)
+        stage.SetEditTarget(Usd.EditTarget(session))
+
+        apply_event(
+            stage,
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Composed",
+                "refs": [],
+                "list_op_authored": False,
+                "list_op_explicit": False,
+            },
+        )
+
+        assert session.GetPrimAtPath("/World/Composed") is None
+
 
 class TestSetPayload:
     def test_add_payload(self, stage):
@@ -419,6 +521,32 @@ class TestSetPayload:
         prim = stage.GetPrimAtPath("/World/InternalPay")
         assert prim.IsValid()
         assert prim.HasAuthoredPayloads()
+
+    def test_preserves_payload_position_and_offset(self, stage):
+        apply_event(
+            stage,
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": "/World/RichPayload",
+                "payloads": [
+                    {
+                        "asset_path": "/tmp/heavy.usda",
+                        "prim_path": "/Asset",
+                        "list_position": "appended",
+                        "layer_offset": -4.0,
+                        "layer_scale": 0.25,
+                    }
+                ],
+                "list_op_authored": True,
+                "list_op_explicit": False,
+            },
+        )
+
+        op = stage.GetRootLayer().GetPrimAtPath(
+            "/World/RichPayload",
+        ).payloadList
+        assert op.prependedItems == []
+        assert op.appendedItems[0].layerOffset == Sdf.LayerOffset(-4.0, 0.25)
 
     def test_load_payload(self):
         """load_payload makes payload children visible on the stage."""

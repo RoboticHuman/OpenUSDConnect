@@ -39,6 +39,7 @@ from . import events as _events
 from .events import Event, register_decoder, register_encoder
 from .generated import messages_generated as _fb
 from .protocol_constants import (
+    ARC_LIST_POSITIONS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -53,6 +54,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -113,6 +115,7 @@ SetConnectableConnection = _fb.SetConnectableConnection
 SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
+SetSdfPropertyFields = _fb.SetSdfPropertyFields
 ClaimPlayback = _fb.ClaimPlayback
 PlaybackClaimed = _fb.PlaybackClaimed
 PlaybackRejected = _fb.PlaybackRejected
@@ -127,11 +130,12 @@ ConnectableInputValue = _fb.ConnectableInputValue
 Connection = _fb.Connection
 ConnectableInputValueType = _fb.ConnectableInputValueType
 ArcEntry = _fb.ArcEntry
+ArcListPositionType = _fb.ArcListPosition
 StringPair = _fb.StringPair
 PayloadType = _fb.Payload
 EventPayloadType = _fb.EventPayload
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -156,6 +160,17 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_PLAYBACK_CONTROL: PayloadType.PlaybackControl,
     MSG_PLAYBACK_STATE: PayloadType.PlaybackState,
 }
+
+_ARC_POSITION_TO_FB = {
+    "explicit": ArcListPositionType.Explicit,
+    "added": ArcListPositionType.Added,
+    "prepended": ArcListPositionType.Prepended,
+    "appended": ArcListPositionType.Appended,
+    "deleted": ArcListPositionType.Deleted,
+    "ordered": ArcListPositionType.Ordered,
+}
+assert frozenset(_ARC_POSITION_TO_FB) == ARC_LIST_POSITIONS
+_FB_TO_ARC_POSITION = {value: key for key, value in _ARC_POSITION_TO_FB.items()}
 
 _PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
 
@@ -224,7 +239,13 @@ _DEFAULT_BUILDER_SIZE = 512
 
 def decode_envelope(buf: bytes | bytearray) -> Envelope:
     """Decode wire bytes to a FlatBuffers Envelope (zero-copy)."""
-    return Envelope.GetRootAs(buf, 0)
+    envelope = Envelope.GetRootAs(buf, 0)
+    version = envelope.SchemaVersion()
+    if version != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported schema version {version}; expected {SCHEMA_VERSION}",
+        )
+    return envelope
 
 
 def resolve_payload(envelope: Envelope):
@@ -854,16 +875,32 @@ def _encode_set_gprim_attrs(b, ev):
     return _fb.SetGprimAttrsEnd(b)
 
 
-def _encode_arc_entries(b, entries):
+def _encode_arc_entries(b, entries, *, explicit):
     offsets = []
     for entry in entries:
         ap = b.CreateString(entry["asset_path"]) if entry.get("asset_path") else None
         pp = b.CreateString(entry["prim_path"]) if entry.get("prim_path") else None
+        custom_data = (
+            b.CreateString(entry["custom_data_fragment"])
+            if entry.get("custom_data_fragment")
+            else None
+        )
+        position = entry.get(
+            "list_position",
+            "explicit" if explicit else "prepended",
+        )
         _fb.ArcEntryStart(b)
         if ap:
             _fb.ArcEntryAddAssetPath(b, ap)
         if pp:
             _fb.ArcEntryAddPrimPath(b, pp)
+        _fb.ArcEntryAddListPosition(b, _ARC_POSITION_TO_FB[position])
+        if entry.get("layer_offset") is not None:
+            _fb.ArcEntryAddLayerOffset(b, float(entry["layer_offset"]))
+        if entry.get("layer_scale") is not None:
+            _fb.ArcEntryAddLayerScale(b, float(entry["layer_scale"]))
+        if custom_data:
+            _fb.ArcEntryAddCustomDataFragment(b, custom_data)
         offsets.append(_fb.ArcEntryEnd(b))
     return offsets
 
@@ -871,7 +908,9 @@ def _encode_arc_entries(b, entries):
 @register_encoder(K_SET_REFERENCE, fb_tag=EventPayloadType.SetReference, fb_class=SetReference)
 def _encode_set_reference(b, ev):
     prim = b.CreateString(ev["prim"])
-    arc_offsets = _encode_arc_entries(b, ev["refs"])
+    explicit = bool(ev.get("list_op_explicit", False))
+    authored = bool(ev.get("list_op_authored", ev["refs"] or explicit))
+    arc_offsets = _encode_arc_entries(b, ev["refs"], explicit=explicit)
     _fb.SetReferenceStartRefsVector(b, len(arc_offsets))
     for off in reversed(arc_offsets):
         b.PrependUOffsetTRelative(off)
@@ -879,13 +918,17 @@ def _encode_set_reference(b, ev):
     _fb.SetReferenceStart(b)
     _fb.SetReferenceAddPrim(b, prim)
     _fb.SetReferenceAddRefs(b, refs_vec)
+    _fb.SetReferenceAddListOpAuthored(b, authored)
+    _fb.SetReferenceAddListOpExplicit(b, explicit)
     return _fb.SetReferenceEnd(b)
 
 
 @register_encoder(K_SET_PAYLOAD, fb_tag=EventPayloadType.SetPayload, fb_class=SetPayload)
 def _encode_set_payload(b, ev):
     prim = b.CreateString(ev["prim"])
-    arc_offsets = _encode_arc_entries(b, ev["payloads"])
+    explicit = bool(ev.get("list_op_explicit", False))
+    authored = bool(ev.get("list_op_authored", ev["payloads"] or explicit))
+    arc_offsets = _encode_arc_entries(b, ev["payloads"], explicit=explicit)
     _fb.SetPayloadStartPayloadsVector(b, len(arc_offsets))
     for off in reversed(arc_offsets):
         b.PrependUOffsetTRelative(off)
@@ -893,6 +936,8 @@ def _encode_set_payload(b, ev):
     _fb.SetPayloadStart(b)
     _fb.SetPayloadAddPrim(b, prim)
     _fb.SetPayloadAddPayloads(b, payloads_vec)
+    _fb.SetPayloadAddListOpAuthored(b, authored)
+    _fb.SetPayloadAddListOpExplicit(b, explicit)
     return _fb.SetPayloadEnd(b)
 
 
@@ -1158,6 +1203,30 @@ def _encode_set_point_instancer(b, ev):
     if ev.get("time") is not None:
         _fb.SetPointInstancerAddTime(b, float(ev["time"]))
     return _fb.SetPointInstancerEnd(b)
+
+
+@register_encoder(
+    K_SET_SDF_PROPERTY_FIELDS,
+    fb_tag=EventPayloadType.SetSdfPropertyFields,
+    fb_class=SetSdfPropertyFields,
+)
+def _encode_set_sdf_property_fields(b, ev):
+    prim = b.CreateString(ev["prim"])
+    spec_path = b.CreateString(ev["spec_path"])
+    fragment = b.CreateString(ev.get("fragment", ""))
+    field_offsets = [b.CreateString(field) for field in ev.get("fields", ())]
+    _fb.SetSdfPropertyFieldsStartFieldsVector(b, len(field_offsets))
+    for offset in reversed(field_offsets):
+        b.PrependUOffsetTRelative(offset)
+    fields = b.EndVector()
+
+    _fb.SetSdfPropertyFieldsStart(b)
+    _fb.SetSdfPropertyFieldsAddPrim(b, prim)
+    _fb.SetSdfPropertyFieldsAddSpecPath(b, spec_path)
+    _fb.SetSdfPropertyFieldsAddFields(b, fields)
+    _fb.SetSdfPropertyFieldsAddFragment(b, fragment)
+    _fb.SetSdfPropertyFieldsAddRemoved(b, bool(ev.get("removed", False)))
+    return _fb.SetSdfPropertyFieldsEnd(b)
 
 
 # ===================================================================
@@ -1568,6 +1637,7 @@ def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
 
 @register_decoder(K_SET_REFERENCE)
 def _dict_set_reference(sr, kind):
+    explicit = sr.ListOpExplicit()
     refs = []
     for i in range(sr.RefsLength()):
         arc = sr.Refs(i)
@@ -1578,12 +1648,30 @@ def _dict_set_reference(sr, kind):
         pp = _str(arc.PrimPath())
         if pp:
             entry["prim_path"] = pp
+        position = _FB_TO_ARC_POSITION[arc.ListPosition()]
+        default_position = "explicit" if explicit else "prepended"
+        if position != default_position:
+            entry["list_position"] = position
+        if arc.LayerOffset() != 0.0:
+            entry["layer_offset"] = arc.LayerOffset()
+        if arc.LayerScale() != 1.0:
+            entry["layer_scale"] = arc.LayerScale()
+        custom_data = _str(arc.CustomDataFragment())
+        if custom_data:
+            entry["custom_data_fragment"] = custom_data
         refs.append(entry)
-    return {"k": kind, "prim": _str(sr.Prim()), "refs": refs}
+    return {
+        "k": kind,
+        "prim": _str(sr.Prim()),
+        "refs": refs,
+        "list_op_authored": sr.ListOpAuthored(),
+        "list_op_explicit": explicit,
+    }
 
 
 @register_decoder(K_SET_PAYLOAD)
 def _dict_set_payload(sp, kind):
+    explicit = sp.ListOpExplicit()
     payloads = []
     for i in range(sp.PayloadsLength()):
         arc = sp.Payloads(i)
@@ -1594,8 +1682,25 @@ def _dict_set_payload(sp, kind):
         pp = _str(arc.PrimPath())
         if pp:
             entry["prim_path"] = pp
+        position = _FB_TO_ARC_POSITION[arc.ListPosition()]
+        default_position = "explicit" if explicit else "prepended"
+        if position != default_position:
+            entry["list_position"] = position
+        if arc.LayerOffset() != 0.0:
+            entry["layer_offset"] = arc.LayerOffset()
+        if arc.LayerScale() != 1.0:
+            entry["layer_scale"] = arc.LayerScale()
+        custom_data = _str(arc.CustomDataFragment())
+        if custom_data:
+            entry["custom_data_fragment"] = custom_data
         payloads.append(entry)
-    return {"k": kind, "prim": _str(sp.Prim()), "payloads": payloads}
+    return {
+        "k": kind,
+        "prim": _str(sp.Prim()),
+        "payloads": payloads,
+        "list_op_authored": sp.ListOpAuthored(),
+        "list_op_explicit": explicit,
+    }
 
 
 @register_decoder(K_LOAD_PAYLOAD)
@@ -1732,3 +1837,15 @@ def _dict_set_connectable_connection(scc, kind):
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
+
+
+@register_decoder(K_SET_SDF_PROPERTY_FIELDS)
+def _dict_set_sdf_property_fields(sss, kind):
+    return {
+        "k": kind,
+        "prim": _str(sss.Prim()),
+        "spec_path": _str(sss.SpecPath()),
+        "fields": [_str(sss.Fields(i)) for i in range(sss.FieldsLength())],
+        "fragment": _str(sss.Fragment()),
+        "removed": bool(sss.Removed()),
+    }

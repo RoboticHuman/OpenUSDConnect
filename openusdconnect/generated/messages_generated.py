@@ -18,6 +18,15 @@ class AttrValueType(object):
     NestedList = 8
 
 
+class ArcListPosition(object):
+    Explicit = 0
+    Added = 1
+    Prepended = 2
+    Appended = 3
+    Deleted = 4
+    Ordered = 5
+
+
 class ConnectableInputValueType(object):
     None_ = 0
     ScalarFloat = 1
@@ -50,6 +59,7 @@ class EventPayload(object):
     SetStageMetadata = 17
     SetInstanceable = 18
     SetPointInstancer = 19
+    SetSdfPropertyFields = 20
 
 
 class Payload(object):
@@ -418,14 +428,54 @@ class ArcEntry(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # ArcEntry
+    def ListPosition(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int8Flags, o + self._tab.Pos)
+        return 2
+
+    # ArcEntry
+    def LayerOffset(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return 0.0
+
+    # ArcEntry
+    def LayerScale(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return 1.0
+
+    # ArcEntry
+    def CustomDataFragment(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def ArcEntryStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(6)
 
 def ArcEntryAddAssetPath(builder, assetPath):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(assetPath), 0)
 
 def ArcEntryAddPrimPath(builder, primPath):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(primPath), 0)
+
+def ArcEntryAddListPosition(builder, listPosition):
+    builder.PrependInt8Slot(2, listPosition, 2)
+
+def ArcEntryAddLayerOffset(builder, layerOffset):
+    builder.PrependFloat64Slot(3, layerOffset, 0.0)
+
+def ArcEntryAddLayerScale(builder, layerScale):
+    builder.PrependFloat64Slot(4, layerScale, 1.0)
+
+def ArcEntryAddCustomDataFragment(builder, customDataFragment):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(customDataFragment), 0)
 
 def ArcEntryEnd(builder):
     return builder.EndObject()
@@ -1354,8 +1404,22 @@ class SetReference(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         return o == 0
 
+    # SetReference
+    def ListOpAuthored(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+    # SetReference
+    def ListOpExplicit(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def SetReferenceStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(4)
 
 def SetReferenceAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
@@ -1365,6 +1429,12 @@ def SetReferenceAddRefs(builder, refs):
 
 def SetReferenceStartRefsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SetReferenceAddListOpAuthored(builder, listOpAuthored):
+    builder.PrependBoolSlot(2, listOpAuthored, 0)
+
+def SetReferenceAddListOpExplicit(builder, listOpExplicit):
+    builder.PrependBoolSlot(3, listOpExplicit, 0)
 
 def SetReferenceEnd(builder):
     return builder.EndObject()
@@ -1420,8 +1490,22 @@ class SetPayload(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         return o == 0
 
+    # SetPayload
+    def ListOpAuthored(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+    # SetPayload
+    def ListOpExplicit(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def SetPayloadStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(4)
 
 def SetPayloadAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
@@ -1431,6 +1515,12 @@ def SetPayloadAddPayloads(builder, payloads):
 
 def SetPayloadStartPayloadsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SetPayloadAddListOpAuthored(builder, listOpAuthored):
+    builder.PrependBoolSlot(2, listOpAuthored, 0)
+
+def SetPayloadAddListOpExplicit(builder, listOpExplicit):
+    builder.PrependBoolSlot(3, listOpExplicit, 0)
 
 def SetPayloadEnd(builder):
     return builder.EndObject()
@@ -2263,6 +2353,98 @@ def SetPointInstancerStartInactiveIdsVector(builder, numElems):
     return builder.StartVector(8, numElems, 8)
 
 def SetPointInstancerEnd(builder):
+    return builder.EndObject()
+
+
+
+class SetSdfPropertyFields(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = SetSdfPropertyFields()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsSetSdfPropertyFields(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # SetSdfPropertyFields
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # SetSdfPropertyFields
+    def Prim(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # SetSdfPropertyFields
+    def SpecPath(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # SetSdfPropertyFields
+    def Fields(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return ""
+
+    # SetSdfPropertyFields
+    def FieldsLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # SetSdfPropertyFields
+    def FieldsIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        return o == 0
+
+    # SetSdfPropertyFields
+    def Fragment(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # SetSdfPropertyFields
+    def Removed(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+def SetSdfPropertyFieldsStart(builder):
+    builder.StartObject(5)
+
+def SetSdfPropertyFieldsAddPrim(builder, prim):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
+
+def SetSdfPropertyFieldsAddSpecPath(builder, specPath):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(specPath), 0)
+
+def SetSdfPropertyFieldsAddFields(builder, fields):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(fields), 0)
+
+def SetSdfPropertyFieldsStartFieldsVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def SetSdfPropertyFieldsAddFragment(builder, fragment):
+    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(fragment), 0)
+
+def SetSdfPropertyFieldsAddRemoved(builder, removed):
+    builder.PrependBoolSlot(4, removed, 0)
+
+def SetSdfPropertyFieldsEnd(builder):
     return builder.EndObject()
 
 
@@ -3290,7 +3472,7 @@ class Envelope(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Uint16Flags, o + self._tab.Pos)
-        return 1
+        return 0
 
 def EnvelopeStart(builder):
     builder.StartObject(3)
@@ -3302,7 +3484,7 @@ def EnvelopeAddPayload(builder, payload):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(payload), 0)
 
 def EnvelopeAddSchemaVersion(builder, schemaVersion):
-    builder.PrependUint16Slot(2, schemaVersion, 1)
+    builder.PrependUint16Slot(2, schemaVersion, 0)
 
 def EnvelopeEnd(builder):
     return builder.EndObject()

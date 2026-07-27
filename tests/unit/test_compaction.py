@@ -229,12 +229,28 @@ class TestCompaction:
     def test_set_reference_latest_wins(self, tmp_path):
         """Multiple set_reference for same prim keeps only the last."""
         srv = _make_server(tmp_path)
+        latest = {
+            "k": K_SET_REFERENCE,
+            "prim": "/World/A",
+            "refs": [
+                {
+                    "asset_path": "new.usda",
+                    "prim_path": "/Model",
+                    "list_position": "appended",
+                    "layer_offset": 7.0,
+                    "layer_scale": 2.0,
+                    "custom_data_fragment": "#usda 1.0\n",
+                }
+            ],
+            "list_op_authored": True,
+            "list_op_explicit": False,
+        }
         _inject_events(
             srv,
             [
                 {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
                 {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "old.usda"}]},
-                {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "new.usda"}]},
+                latest,
             ],
         )
 
@@ -243,7 +259,7 @@ class TestCompaction:
 
         refs = [e for e in events if e["k"] == K_SET_REFERENCE]
         assert len(refs) == 1
-        assert refs[0]["refs"][0]["asset_path"] == "new.usda"
+        assert refs[0] == latest
 
     def test_timed_events_compact_per_sample(self, tmp_path):
         """Events at distinct time samples must not collapse into each other

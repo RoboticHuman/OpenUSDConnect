@@ -37,6 +37,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -70,6 +71,16 @@ def _time_kwarg(ev: dict) -> dict:
     return {"time": t} if t is not None else {}
 
 
+def _arc_state_kwargs(ev: dict, entries_key: str) -> dict:
+    explicit = bool(ev.get("list_op_explicit", False))
+    return {
+        "list_op_authored": bool(
+            ev.get("list_op_authored", ev[entries_key] or explicit),
+        ),
+        "list_op_explicit": explicit,
+    }
+
+
 _DISPATCH: dict[str, Callable[[dict], dict]] = {
     K_ENSURE_PRIM: lambda ev: {
         "prim_path": ev["prim"],
@@ -89,12 +100,27 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     K_SET_GPRIM_ATTRS: lambda ev: {
         "prim_path": ev["prim"], "attrs": ev["attrs"], **_time_kwarg(ev),
     },
-    K_SET_REFERENCE: lambda ev: {"prim_path": ev["prim"], "refs": ev["refs"]},
+    K_SET_SDF_PROPERTY_FIELDS: lambda ev: {
+        "prim_path": ev["prim"],
+        "spec_path": ev["spec_path"],
+        "fields": ev.get("fields", []),
+        "fragment": ev.get("fragment", ""),
+        "removed": bool(ev.get("removed", False)),
+    },
+    K_SET_REFERENCE: lambda ev: {
+        "prim_path": ev["prim"],
+        "refs": ev["refs"],
+        **_arc_state_kwargs(ev, "refs"),
+    },
     K_SET_VARIANT_SELECTIONS: lambda ev: {
         "prim_path": ev["prim"],
         "selections": ev["selections"],
     },
-    K_SET_PAYLOAD: lambda ev: {"prim_path": ev["prim"], "payloads": ev["payloads"]},
+    K_SET_PAYLOAD: lambda ev: {
+        "prim_path": ev["prim"],
+        "payloads": ev["payloads"],
+        **_arc_state_kwargs(ev, "payloads"),
+    },
     K_LOAD_PAYLOAD: lambda ev: {"prim_path": ev["prim"]},
     K_UNLOAD_PAYLOAD: lambda ev: {"prim_path": ev["prim"]},
     K_SET_MATERIAL_BINDING: lambda ev: {
@@ -244,12 +270,42 @@ class DCCAdapter(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    def set_sdf_property_fields(
+        self,
+        prim_path: str,
+        spec_path: str,
+        fields: list[str],
+        fragment: str,
+        removed: bool = False,
+    ) -> bool:
+        """Accept an Sdf-only mirror update.
+
+        DCC-backed adapters keep this as a no-op because the dispatcher
+        applies the event to their mirror stage. Stage-backed adapters
+        override it and apply the property delta directly.
+        """
+        return True
+
     @abstractmethod
-    def set_reference(self, prim_path: str, refs: list) -> bool:
+    def set_reference(
+        self,
+        prim_path: str,
+        refs: list,
+        *,
+        list_op_authored: bool,
+        list_op_explicit: bool,
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def set_payload(self, prim_path: str, payloads: list) -> bool:
+    def set_payload(
+        self,
+        prim_path: str,
+        payloads: list,
+        *,
+        list_op_authored: bool,
+        list_op_explicit: bool,
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -592,19 +648,67 @@ class UsdStageAdapter(DCCAdapter):
         _apply_event_to_stage(self.stage, ev)
         return True
 
-    def set_reference(self, prim_path: str, refs: list) -> bool:
+    def set_sdf_property_fields(
+        self,
+        prim_path: str,
+        spec_path: str,
+        fields: list[str],
+        fragment: str,
+        removed: bool = False,
+    ) -> bool:
         _apply_event_to_stage(
             self.stage,
-            {"k": K_SET_REFERENCE, "prim": prim_path, "refs": refs},
+            {
+                "k": K_SET_SDF_PROPERTY_FIELDS,
+                "prim": prim_path,
+                "spec_path": spec_path,
+                "fields": fields,
+                "fragment": fragment,
+                "removed": removed,
+            },
         )
         return True
 
-    def set_payload(self, prim_path: str, payloads: list) -> bool:
+    def set_reference(
+        self,
+        prim_path: str,
+        refs: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
         _apply_event_to_stage(
             self.stage,
-            {"k": K_SET_PAYLOAD, "prim": prim_path, "payloads": payloads},
+            {
+                "k": K_SET_REFERENCE,
+                "prim": prim_path,
+                "refs": refs,
+                "list_op_authored": list_op_authored,
+                "list_op_explicit": list_op_explicit,
+            },
         )
-        if payloads:
+        return True
+
+    def set_payload(
+        self,
+        prim_path: str,
+        payloads: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
+        _apply_event_to_stage(
+            self.stage,
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": prim_path,
+                "payloads": payloads,
+                "list_op_authored": list_op_authored,
+                "list_op_explicit": list_op_explicit,
+            },
+        )
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.HasPayload():
             self.stage.Unload(prim_path)
         return True
 
@@ -875,21 +979,39 @@ class MockAdapter(DCCAdapter):
         )
         return True
 
-    def set_reference(self, prim_path: str, refs: list) -> bool:
+    def set_reference(
+        self,
+        prim_path: str,
+        refs: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
         p["references"] = list(refs)
+        p["reference_list_op_authored"] = list_op_authored
+        p["reference_list_op_explicit"] = list_op_explicit
         LOG.info("MockAdapter: set reference on prim %s", prim_path)
         return True
 
-    def set_payload(self, prim_path: str, payloads: list) -> bool:
+    def set_payload(
+        self,
+        prim_path: str,
+        payloads: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
             self._prims[prim_path] = {"typeName": "Xform", "ops": set(), "trs": {}}
             p = self._prims[prim_path]
         p["payloads"] = list(payloads)
+        p["payload_list_op_authored"] = list_op_authored
+        p["payload_list_op_explicit"] = list_op_explicit
         LOG.info("MockAdapter: set payload on prim %s", prim_path)
         return True
 

@@ -58,8 +58,11 @@ never echoes an event back to its origin.
 ### USD coverage
 - **Transforms**: translate / orient / scale with quaternion rotation; partial TRS updates
 - **Geometry**: meshes, curves, points; typed attributes, primvars and interpolation; visibility
+- **Custom property data**: exact Sdf field deltas for locally authored custom attributes, relationships, and metadata not represented by specialized events
 - **Materials and shaders**: UsdPreviewSurface and MaterialX (`ND_*`) networks, nested NodeGraphs, per-purpose bindings
-- **Composition**: references, payloads (load/unload), variant selections
+- **Composition**: exact reference and payload list-op opinions, including
+  offsets, scales, reference custom data, payload load/unload, and variant
+  selections
 - **Instancing**: native scenegraph instancing and `UsdGeomPointInstancer`
 - **Cameras and lights**: `UsdGeomCamera`; `UsdLux` lights with applied API schemas (Shaping, Shadow, and others)
 - **Stage metadata**: units (`metersPerUnit`, `upAxis`) and timeline (fps, time codes, range)
@@ -126,6 +129,12 @@ uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
 uv run openusdconnect-server --port 7200 --base scene.usda \
   --departments animation,lighting,fx --require-token
 ```
+
+Department ordering is preserved by server restart and log compaction. Current
+receivers replay department-tagged records into one local edit layer, however,
+so receiver-side replay does not reconstruct cross-department layer strength.
+Some live event kinds also lack a composed-value correction. The server stage
+remains authoritative; layered receiver replay needs a protocol extension.
 
 If a Hydra renderer such as RenderMan is installed into the shared USD build,
 launch through the renderer-safe wrapper so the Sdr registry can load its plugins:

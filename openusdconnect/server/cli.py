@@ -199,7 +199,21 @@ def run_server(config: ServerConfig | None = None):
 
     atexit.register(_cleanup)
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+        shutdown_requested = threading.Event()
+
+        def _request_shutdown(*_):
+            if shutdown_requested.is_set():
+                return
+            shutdown_requested.set()
+            # socketserver.BaseServer.shutdown() must run outside the thread
+            # executing serve_forever(), otherwise both wait on each other.
+            threading.Thread(
+                target=server.shutdown,
+                name="server-shutdown",
+                daemon=True,
+            ).start()
+
+        signal.signal(signal.SIGTERM, _request_shutdown)
 
     LOG.info(
         "Server listening on %s:%s (PID %d) durability=%s",
@@ -219,6 +233,7 @@ def run_server(config: ServerConfig | None = None):
         LOG.info("Server shutting down")
     finally:
         server.shutdown()
+        server.server_close()
         _cleanup()
 
 

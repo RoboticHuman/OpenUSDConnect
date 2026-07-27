@@ -295,6 +295,76 @@ class TestValidateEvent:
             }
         )
 
+    def test_set_reference_rich_list_op(self):
+        assert validate_event(
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Chair",
+                "refs": [
+                    {
+                        "asset_path": "chair.usd",
+                        "list_position": "appended",
+                        "layer_offset": 4.0,
+                        "layer_scale": 0.5,
+                        "custom_data_fragment": "#usda 1.0\n",
+                    }
+                ],
+                "list_op_authored": True,
+                "list_op_explicit": False,
+            }
+        )
+
+    def test_set_reference_explicit_empty(self):
+        assert validate_event(
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Chair",
+                "refs": [],
+                "list_op_authored": True,
+                "list_op_explicit": True,
+            }
+        )
+
+    def test_set_reference_rejects_position_mismatched_with_mode(self):
+        assert not validate_event(
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Chair",
+                "refs": [
+                    {
+                        "asset_path": "chair.usd",
+                        "list_position": "explicit",
+                    }
+                ],
+                "list_op_authored": True,
+                "list_op_explicit": False,
+            }
+        )
+
+    def test_set_reference_rejects_entries_on_unauthored_opinion(self):
+        assert not validate_event(
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Chair",
+                "refs": [{"asset_path": "chair.usd"}],
+                "list_op_authored": False,
+            }
+        )
+
+    def test_set_reference_rejects_nonfinite_offset(self):
+        assert not validate_event(
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Chair",
+                "refs": [
+                    {
+                        "asset_path": "chair.usd",
+                        "layer_offset": float("nan"),
+                    }
+                ],
+            }
+        )
+
     # --- set_payload ---
     def test_set_payload_valid(self):
         assert validate_event(
@@ -311,6 +381,20 @@ class TestValidateEvent:
                 "k": K_SET_PAYLOAD,
                 "prim": "/World/Asset",
                 "payloads": [{"asset_path": "./payload.usda", "prim_path": "/Model"}],
+            }
+        )
+
+    def test_set_payload_rejects_reference_custom_data(self):
+        assert not validate_event(
+            {
+                "k": K_SET_PAYLOAD,
+                "prim": "/World/Asset",
+                "payloads": [
+                    {
+                        "asset_path": "./payload.usda",
+                        "custom_data_fragment": "#usda 1.0\n",
+                    }
+                ],
             }
         )
 

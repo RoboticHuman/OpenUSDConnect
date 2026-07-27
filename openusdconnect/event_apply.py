@@ -34,6 +34,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -42,6 +43,7 @@ from .protocol_constants import (
     REL_MATERIAL_BINDING,
     STRUCTURAL_EVENT_KINDS,
 )
+from .sdf_arc_state import apply_arc_state
 
 LOG = logging.getLogger(__name__)
 
@@ -138,15 +140,18 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
 
     When per-client layers are in use, ops may already exist on the
     composed stage (from another client's layer) but not in the current
-    edit target.  This function checks the edit target layer and
-    re-authors ops locally so each layer is self-contained — a layer
-    can be muted or removed without losing xform op definitions.
+    edit target. This function re-authors the op specs locally while
+    preserving the prim's ownership: an existing composed prim receives
+    an ``over`` unless an earlier ensure_prim deliberately authored a
+    local ``def``.
 
     If *op_cache* has a hit and the edit target already has the ops,
     returns cached op handles directly (avoids 3x find_op per txn).
     Op handles are composed-stage references — valid for any edit target.
     """
-    prim = get_or_define_prim(stage, prim_path, "Xform")
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        prim = stage.DefinePrim(prim_path, "Xform")
     xf = UsdGeom.Xformable(prim)
 
     # Pre-built Sdf.Path objects — avoids ~70 µs of string→path parsing.
@@ -170,10 +175,13 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
         # The ChangeBlock batches the spec authoring into one
         # change-processing round; authored individually, every spec
         # creation and field write pays its own stage recomposition.
-        # OverridePrim is Usd-level and must stay outside the block.
-        stage.OverridePrim(prim_path)
         layer_spec = layer.GetPrimAtPath(prim_path)
         with Sdf.ChangeBlock():
+            if layer_spec is None:
+                # OverridePrim is a no-op when the prim already exists only
+                # through composition. CreatePrimInLayer explicitly authors
+                # the local over needed to hold these xform opinions.
+                layer_spec = Sdf.CreatePrimInLayer(layer, prim_path)
             for attr_name, type_name in _XFORM_OP_SPECS:
                 if not layer_spec.GetAttributeAtPath(
                     Sdf.Path(prim_path).AppendProperty(attr_name)
@@ -453,6 +461,13 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
         )
 
 
+@register_applier(K_SET_SDF_PROPERTY_FIELDS)
+def _apply_set_sdf_property_fields(stage: Usd.Stage, ev: dict) -> None:
+    from .sdf_property_delta import apply_property_spec_delta
+
+    apply_property_spec_delta(stage, ev)
+
+
 @register_applier(K_SET_STAGE_METADATA)
 def _apply_set_stage_metadata(stage: Usd.Stage, ev: dict) -> None:
     """Write stage-level metadata. Only keys present in ``ev`` are touched."""
@@ -479,45 +494,37 @@ def _apply_set_variant_selections(stage: Usd.Stage, ev: dict) -> None:
     # that an arc has not composed yet is valid and takes effect when the
     # set arrives, so apply order against set_reference does not matter.
     for set_name, variant_name in ev.get("selections", {}).items():
-        vsets.GetVariantSet(set_name).SetVariantSelection(variant_name)
+        variant_set = vsets.GetVariantSet(set_name)
+        if variant_name:
+            variant_set.SetVariantSelection(variant_name)
+        else:
+            variant_set.ClearVariantSelection()
 
 
 @register_applier(K_SET_REFERENCE)
 def _apply_set_reference(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
-    prim = get_or_define_prim(stage, prim_path)
-    refs = prim.GetReferences()
-    refs.ClearReferences()
-
-    for ref_entry in ev.get("refs", []):
-        asset_path = ref_entry.get("asset_path", "")
-        prim_path_ref = ref_entry.get("prim_path", "")
-        if asset_path:
-            if prim_path_ref:
-                refs.AddReference(asset_path, prim_path_ref)
-            else:
-                refs.AddReference(asset_path)
-        elif prim_path_ref:
-            refs.AddInternalReference(Sdf.Path(prim_path_ref))
+    apply_arc_state(
+        stage,
+        prim_path,
+        ev.get("refs", []),
+        authored=ev.get("list_op_authored"),
+        explicit=bool(ev.get("list_op_explicit", False)),
+        arc_attr="referenceList",
+    )
 
 
 @register_applier(K_SET_PAYLOAD)
 def _apply_set_payload(stage: Usd.Stage, ev: dict) -> None:
     prim_path = ev["prim"]
-    prim = get_or_define_prim(stage, prim_path)
-    payloads = prim.GetPayloads()
-    payloads.ClearPayloads()
-
-    for entry in ev.get("payloads", []):
-        asset_path = entry.get("asset_path", "")
-        prim_path_ref = entry.get("prim_path", "")
-        if asset_path:
-            if prim_path_ref:
-                payloads.AddPayload(asset_path, prim_path_ref)
-            else:
-                payloads.AddPayload(asset_path)
-        elif prim_path_ref:
-            payloads.AddInternalPayload(Sdf.Path(prim_path_ref))
+    apply_arc_state(
+        stage,
+        prim_path,
+        ev.get("payloads", []),
+        authored=ev.get("list_op_authored"),
+        explicit=bool(ev.get("list_op_explicit", False)),
+        arc_attr="payloadList",
+    )
 
 
 @register_applier(K_LOAD_PAYLOAD)
@@ -627,9 +634,14 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
     """
     info_id = ev.get("info_id", "")
     if info_id:
-        prim = get_or_define_prim(stage, ev["prim"], "Shader")
+        prim = stage.GetPrimAtPath(ev["prim"])
+        if not prim or not prim.IsValid():
+            prim = get_or_define_prim(stage, ev["prim"], "Shader")
         if prim.IsA(UsdShade.Shader):
-            UsdShade.Shader(prim).CreateIdAttr(info_id)
+            shader = UsdShade.Shader(prim)
+            id_attr = shader.GetIdAttr()
+            if not id_attr or id_attr.Get() != info_id:
+                shader.CreateIdAttr(info_id)
     else:
         prim = stage.GetPrimAtPath(ev["prim"])
         if not prim or not prim.IsValid():
@@ -798,7 +810,15 @@ def _apply_api_schemas(prim: Usd.Prim, names: list[str]) -> None:
 
 @register_applier(K_ENSURE_PRIM)
 def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
-    prim = get_or_define_prim(stage, ev["prim"], ev["typeName"])
+    type_name = ev["typeName"]
+    if type_name:
+        # DefinePrim also updates an existing local definition's typeName,
+        # which is required when an active variant changes the prim type.
+        prim = stage.DefinePrim(ev["prim"], type_name)
+    else:
+        prim = stage.GetPrimAtPath(ev["prim"])
+    if not prim or not prim.IsValid():
+        prim = get_or_define_prim(stage, ev["prim"], type_name)
     _apply_api_schemas(prim, ev.get("api_schemas", []))
 
 
@@ -895,9 +915,20 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
         # first (ancestors before descendants via path depth), then the other
         # structural kinds, then value-setting ops inside a ChangeBlock.
         structural = [ev for ev in segment if ev.get("k") in STRUCTURAL_EVENT_KINDS]
-        create = [ev for ev in structural if ev.get("k") in CREATE_KINDS]
+
+        # An empty-type ensure carrying only API schemas represents metadata
+        # on an already composed prim. Apply it after reference/payload arcs
+        # so it creates an over instead of a standalone typeless def.
+        def _is_api_over(ev):
+            return (
+                ev.get("k") == K_ENSURE_PRIM
+                and not ev.get("typeName")
+                and bool(ev.get("api_schemas"))
+            )
+
+        create = [ev for ev in structural if ev.get("k") in CREATE_KINDS and not _is_api_over(ev)]
         create.sort(key=lambda ev: ev.get("prim", "").count("/"))
-        modify = [ev for ev in structural if ev.get("k") not in CREATE_KINDS]
+        modify = [ev for ev in structural if ev.get("k") not in CREATE_KINDS or _is_api_over(ev)]
         for ev in create + modify:
             if ev.get("k") == K_ENSURE_XFORM_OPS:
                 if _is_instance_proxy_target(stage, ev):

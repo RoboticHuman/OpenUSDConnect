@@ -85,6 +85,31 @@ Without `OPENUSDCONNECT_HOST` set, the menu is present but won't
 auto-connect — pick **Connect to OpenUSDConnect…** from the menu and
 enter the host/port.
 
+## Refreshing a late asset dependency
+
+Variant definitions remain in referenced or payloaded assets; OpenUSDConnect
+replicates the local selection opinion. If a shared asset was unavailable when
+its composition event arrived, make it available through the receiver's normal
+asset resolver and retry it from usdview's Python console:
+
+```python
+from integrations.usdview.connection import refresh_asset_dependency
+
+refresh_asset_dependency("asset:Character/{$VERSION}/Character.usda")
+# Omit the argument to retry every currently unresolved dependency.
+```
+
+The retry refreshes the stage's resolver context and locally reapplies matching
+composition events that resolve. Passing an explicit identifier also refreshes
+an already-resolved dependency whose custom-resolver mapping changed. It does
+not send anything to the server or advance the receiver sequence. Reapplication
+uses the edit target that originally received the arc and abandons stale
+tracking if that local opinion has since changed. The reapplied event preserves
+the complete authored list op, including list position, layer offset and scale,
+and reference custom data. Custom resolvers must be installed and configured in
+the usdview process. Since a resolver context refresh is context-wide, other
+tracked arcs whose resolution changes in the same refresh are updated too.
+
 ## Environment variables
 
 | Variable | Purpose |

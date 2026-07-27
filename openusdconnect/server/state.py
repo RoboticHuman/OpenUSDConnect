@@ -42,6 +42,7 @@ from ..protocol_constants import (
     K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_POINT_INSTANCER,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -52,6 +53,7 @@ from ..protocol_constants import (
     MSG_RESYNC,
     event_apply_tier,
 )
+from ..sdf_property_delta import merge_property_spec_events
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
 from .types import (
@@ -71,6 +73,12 @@ LOG = logging.getLogger(__name__)
 _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
 _PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
+
+# Log compaction is scoped to the layer that receives an event. Department
+# names identify shared department layers; the empty string identifies the
+# shared fallback edit layer used by every department-less client.
+_CompactionKey = tuple[str, str, float | None, str]
+_CompactedEntry = tuple[dict, dict, int]
 
 
 def _prim_xform_trs(prim) -> dict | None:
@@ -697,8 +705,9 @@ class UsdSyncServer:
     def _replay_log_into_stage(self):
         """Apply all events from the event store to restore stage on startup.
 
-        Routes events to per-client layers based on stored client_id.
-        Events without a client_id go to the shared edit_layer.
+        Routes events to their shared department layer, or to the fallback
+        edit layer when no department was recorded. Global log order is
+        preserved across layers; adjacent events for one layer are batched.
         Also populates _prim_paths for incremental prim tracking.
         """
         from ..event_apply import apply_events
@@ -711,27 +720,46 @@ class UsdSyncServer:
         all_events: list[dict] = []
 
         if self.department_priority:
-            # Per-client layers: route events to the layer the record was
-            # authored into, keyed by (client_id, department) since records
-            # carry the sender's department for exactly this replay routing.
-            by_layer_key: dict[tuple[str | None, str | None], list[dict]] = {}
+            routed: list[tuple[Sdf.Layer, dict]] = []
             for _seq, record_bin in rows:
                 rec = message_to_dict(record_bin, numpy_arrays=True)
                 ev = rec.get("event", rec)
-                key = (rec.get("client_id"), rec.get("department"))
-                by_layer_key.setdefault(key, []).append(ev)
+                client_id = rec.get("client_id")
+                department = rec.get("department")
+                if department:
+                    layer = self._get_or_create_department_layer(department)
+                    if client_id:
+                        self._client_departments[client_id] = department
+                        self.client_layers[client_id] = layer
+                else:
+                    layer = self.edit_layer
+                    if client_id:
+                        self.client_layers[client_id] = layer
+                routed.append((layer, ev))
                 all_events.append(ev)
 
-            for (cid, dept), evts in by_layer_key.items():
-                layer = (
-                    self.get_or_create_client_layer(cid, department=dept)
-                    if cid
-                    else self.edit_layer
-                )
-                self.stage.SetEditTarget(Usd.EditTarget(layer))
-                apply_events(self.stage, evts, op_cache=self._op_cache_for(layer))
+            current_layer = None
+            run: list[dict] = []
 
-            total = sum(len(v) for v in by_layer_key.values())
+            def _apply_run():
+                if not run:
+                    return
+                self.stage.SetEditTarget(Usd.EditTarget(current_layer))
+                apply_events(
+                    self.stage,
+                    run,
+                    op_cache=self._op_cache_for(current_layer),
+                )
+
+            for layer, ev in routed:
+                if current_layer is not None and layer is not current_layer:
+                    _apply_run()
+                    run = []
+                current_layer = layer
+                run.append(ev)
+            _apply_run()
+
+            total = len(routed)
         else:
             # Legacy mode: all events to the shared edit_layer.
             events = []
@@ -1023,21 +1051,24 @@ class UsdSyncServer:
             return self.edit_layer
 
         self._client_departments[client_id] = department
+        layer = self._get_or_create_department_layer(department)
+        self.client_layers[client_id] = layer
+        return layer
 
-        # Lock the whole lookup+create so two threads for the same
-        # department don't both miss the check and create duplicate layers.
+    def _get_or_create_department_layer(self, department: str) -> Sdf.Layer:
+        """Return the shared layer for *department*, creating it if needed."""
+        # Lock the whole lookup and create so two threads for the same
+        # department cannot both create a layer.
         with self.stage_lock:
             existing = self._dept_layers.get(department)
             if existing:
-                self.client_layers[client_id] = existing
                 return existing
 
             layer = self._create_edit_layer(label=f"dept-{department}")
             self._dept_layers[department] = layer
-            self.client_layers[client_id] = layer
             self._reorder_session_sublayers()
         self.bump_snapshot_epoch(f"create_department_layer:{department}")
-        LOG.info("Created shared layer for department %s (client %s)", department, client_id)
+        LOG.info("Created shared layer for department %s", department)
         return layer
 
     def _reorder_session_sublayers(self):
@@ -1279,15 +1310,15 @@ class UsdSyncServer:
 
     @staticmethod
     def _merge_event(
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
+        latest: dict[_CompactionKey, _CompactedEntry],
         seq: int,
         record_bin: bytes,
     ):
         """Merge a single event record into the compacted state.
 
-        Keys are ``(prim, kind, time)``: events at distinct time samples
-        compact independently of each other and of the default-time
-        opinion, so a keyframed log keeps one merged event per sample.
+        Keys are ``(prim, kind, time, layer_scope)``. Opinions compact only
+        with other opinions authored into the same department layer (or the
+        shared fallback layer), and distinct time samples remain independent.
         ``set_material_binding`` keys additionally carry the binding
         purpose so allPurpose/preview/full bindings survive independently.
 
@@ -1306,9 +1337,22 @@ class UsdSyncServer:
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
-        key = (prim, k, ev.get("time"))
+        layer_scope = rec.get("department") or ""
+        key = (prim, k, ev.get("time"), layer_scope)
         if k == K_SET_MATERIAL_BINDING:
-            key = (prim, f"{k}:{ev.get('material_purpose') or ''}", ev.get("time"))
+            key = (
+                prim,
+                f"{k}:{ev.get('material_purpose') or ''}",
+                ev.get("time"),
+                layer_scope,
+            )
+        elif k == K_SET_SDF_PROPERTY_FIELDS:
+            key = (
+                prim,
+                f"{k}:{ev.get('spec_path') or ''}",
+                None,
+                layer_scope,
+            )
         meta = {}
         for meta_key in ("origin", "client", "client_id", "department"):
             val = rec.get(meta_key)
@@ -1322,8 +1366,10 @@ class UsdSyncServer:
             # a recreation and replay after the delete via their stamps.
             child_prefix = prim + "/"
             to_remove = [
-                existing for existing in latest
-                if existing[0] == prim or existing[0].startswith(child_prefix)
+                existing
+                for existing in latest
+                if existing[3] == layer_scope
+                and (existing[0] == prim or existing[0].startswith(child_prefix))
             ]
             for existing in to_remove:
                 del latest[existing]
@@ -1332,11 +1378,11 @@ class UsdSyncServer:
 
         # load/unload are mutually exclusive — only the last one wins.
         if k == K_LOAD_PAYLOAD:
-            latest.pop((prim, K_UNLOAD_PAYLOAD, None), None)
+            latest.pop((prim, K_UNLOAD_PAYLOAD, None, layer_scope), None)
             latest[key] = (ev, meta, seq)
             return
         if k == K_UNLOAD_PAYLOAD:
-            latest.pop((prim, K_LOAD_PAYLOAD, None), None)
+            latest.pop((prim, K_LOAD_PAYLOAD, None, layer_scope), None)
             latest[key] = (ev, meta, seq)
             return
 
@@ -1412,6 +1458,12 @@ class UsdSyncServer:
                 latest[key] = (prev, meta, seq)
             else:
                 latest[key] = (ev, meta, seq)
+        elif k == K_SET_SDF_PROPERTY_FIELDS:
+            existing = latest.get(key)
+            if existing:
+                latest[key] = (merge_property_spec_events(existing[0], ev), meta, seq)
+            else:
+                latest[key] = (ev, meta, seq)
         elif k == K_ENSURE_PRIM:
             # Union api_schemas across subsequent ensure_prim events for the
             # same prim (latest typeName wins; api_schemas accumulates) so
@@ -1441,31 +1493,31 @@ class UsdSyncServer:
     @staticmethod
     def _build_compacted(
         rows: list[tuple[int, bytes]],
-    ) -> dict[tuple[str, str, float | None], tuple[dict, dict, int]]:
+    ) -> dict[_CompactionKey, _CompactedEntry]:
         """Build compacted event dict from raw log rows.
 
-        Returns {(prim, kind, time) → (event_dict, metadata_dict, stamp)}
-        where stamp is the replay-order seq (see ``_merge_event``).
+        Returns ``{(prim, kind, time, layer_scope): (event, metadata, stamp)}``
+        where ``stamp`` is the replay-order sequence (see ``_merge_event``).
         """
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]] = {}
+        latest: dict[_CompactionKey, _CompactedEntry] = {}
         for seq, record_bin in rows:
             UsdSyncServer._merge_event(latest, seq, record_bin)
         return latest
 
     def _commit_compaction(
         self,
-        latest: dict[tuple[str, str, float | None], tuple[dict, dict, int]],
+        latest: dict[_CompactionKey, _CompactedEntry],
         original_count: int,
     ):
         """Commit compacted state: rewrite store, reset seqs, resync receivers.
 
         Must be called under exclusive txn_barrier.
 
-        Surviving events are rewritten in stamp order — the original log's
-        relative order — so replay is causally equivalent to replaying the
-        full log: creates precede the connections and bindings that
-        reference them, and deletes precede recreates. Receivers that apply
-        events strictly one at a time depend on this.
+        Surviving events are rewritten in stamp order, preserving causal
+        ordering within and across authored layers: creates precede the
+        connections and bindings that reference them, and deletes precede
+        recreates. Reconstructing department strength on a flat receiver
+        remains a separate replay-protocol concern.
         """
         sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
 
@@ -1499,6 +1551,8 @@ class UsdSyncServer:
         LOG.info("Compacted event log: %d -> %d events", original_count, len(sorted_entries))
 
         # Tell connected receivers to reset and replay from the compacted log.
+        # Department tags survive this replay, but current flat receivers do
+        # not reconstruct a matching layer stack.
         self.broadcast({"type": MSG_RESYNC, "reason": "compact"})
         with self.clients_lock:
             targets = list(self.receivers)
@@ -2572,6 +2626,8 @@ class UsdSyncServer:
         All events are replayed regardless of origin — the receiver needs
         its own prior edits (which share its origin) to restore state.
         Origin filtering only applies to live broadcast to prevent echo.
+        Department metadata remains on each record; applying those records
+        to one flat layer does not reproduce department strength ordering.
 
         Sends binary blobs directly from the store — no re-serialization.
         """

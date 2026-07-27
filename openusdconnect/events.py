@@ -26,11 +26,26 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 
-class ArcEntry(TypedDict):
-    """One entry in a reference or payload arc list."""
+ArcListPosition = Literal[
+    "explicit",
+    "added",
+    "prepended",
+    "appended",
+    "deleted",
+    "ordered",
+]
 
-    asset_path: str
+
+class ArcEntry(TypedDict):
+    """One item in an authored reference or payload Sdf list operation."""
+
+    asset_path: NotRequired[str]  # omit for an internal arc
     prim_path: NotRequired[str]  # omit to use the referenced layer's default prim
+    # Defaults to ``explicit`` for explicit ops, otherwise ``prepended``.
+    list_position: NotRequired[ArcListPosition]
+    layer_offset: NotRequired[float]  # defaults to 0
+    layer_scale: NotRequired[float]  # defaults to 1
+    custom_data_fragment: NotRequired[str]  # reference-only typed USDA dictionary
 
 
 class PrimvarMeta(TypedDict):
@@ -160,19 +175,23 @@ class SetGprimAttrs(TypedDict):
 
 
 class SetReference(TypedDict):
-    """Set the list of reference composition arcs on a prim."""
+    """Replace the authored reference list operation on a prim."""
 
     k: Literal["set_reference"]
     prim: str
     refs: list[ArcEntry]
+    list_op_authored: NotRequired[bool]
+    list_op_explicit: NotRequired[bool]
 
 
 class SetPayload(TypedDict):
-    """Set the list of payload composition arcs on a prim (unloaded by default)."""
+    """Replace the authored payload list operation on a prim."""
 
     k: Literal["set_payload"]
     prim: str
     payloads: list[ArcEntry]
+    list_op_authored: NotRequired[bool]
+    list_op_explicit: NotRequired[bool]
 
 
 class LoadPayload(TypedDict):
@@ -306,6 +325,22 @@ class SetPointInstancer(TypedDict):
     time: NotRequired[float]
 
 
+class SetSdfPropertyFields(TypedDict):
+    """Delta for selected fields on one Sdf property spec.
+
+    ``fragment`` contains declaration data plus the fields listed in
+    ``fields``. A listed field absent from the fragment is cleared.
+    ``removed=True`` removes the property spec and ignores the fragment.
+    """
+
+    k: Literal["set_sdf_property_fields"]
+    prim: str
+    spec_path: str
+    fields: list[str]
+    fragment: str
+    removed: bool
+
+
 # ---------------------------------------------------------------------------
 # Discriminated union — accept any event kind
 # ---------------------------------------------------------------------------
@@ -330,6 +365,7 @@ Event = (
     | SetStageMetadata
     | SetInstanceable
     | SetPointInstancer
+    | SetSdfPropertyFields
 )
 
 
@@ -431,6 +467,7 @@ def all_specs() -> list[EventSpec]:
 
 
 __all__ = [
+    "ArcListPosition",
     "ArcEntry",
     "PrimvarMeta",
     "ConnSource",
@@ -455,6 +492,7 @@ __all__ = [
     "SetStageMetadata",
     "SetInstanceable",
     "SetPointInstancer",
+    "SetSdfPropertyFields",
     "Event",
     "EventSpec",
     "register_encoder",

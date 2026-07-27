@@ -998,6 +998,62 @@ def test_set_reference_reimport_after_delete(r):
     r.ok(name)
 
 
+def test_set_payload_import_preserves_y_up_orientation(r):
+    """A Y-up payload must remain upright after Blender's USD import."""
+    import tempfile
+
+    import mathutils
+    from unit.test_asset_builder import create_chair_asset
+
+    name = "test_set_payload_import_preserves_y_up_orientation"
+    _clear_scene()
+    adapter = BlenderAdapter(scene_up_axis="Y")
+    adapter.ensure_prim("/World", "Xform")
+    adapter.ensure_prim("/World/Asset", "Xform")
+    adapter.ensure_xform_ops("/World/Asset")
+    adapter.set_xform_trs(
+        "/World/Asset",
+        t=[0, 0, 0],
+        r=[1, 0, 0, 0],
+        s=[1, 1, 1],
+    )
+
+    tmp_dir = tempfile.mkdtemp()
+    tmp_usd = os.path.join(tmp_dir, "chair.usda")
+    create_chair_asset(tmp_usd)
+    payloads = [{"asset_path": tmp_usd, "prim_path": "/Model"}]
+    if not adapter.set_payload("/World/Asset", payloads):
+        r.fail(name, "set_payload returned False")
+        return
+    if not adapter.load_payload("/World/Asset"):
+        r.fail(name, "load_payload returned False")
+        return
+
+    seat = next(
+        (
+            obj
+            for obj in bpy.data.objects
+            if obj.type == "MESH"
+            and obj.get("usd_prim_path", "").endswith("/Seat")
+        ),
+        None,
+    )
+    if seat is None:
+        r.fail(name, "imported Seat mesh not found")
+        return
+
+    corners = [seat.matrix_world @ mathutils.Vector(corner) for corner in seat.bound_box]
+    dimensions = [
+        max(corner[axis] for corner in corners)
+        - min(corner[axis] for corner in corners)
+        for axis in range(3)
+    ]
+    if dimensions[2] > min(dimensions[0], dimensions[1]):
+        r.fail(name, f"seat tipped after payload import: world dimensions={dimensions}")
+        return
+    r.ok(name)
+
+
 def test_ensure_prim_camera_creates_camera_object(r):
     """ensure_prim with typeName=Camera creates a Blender CAMERA object."""
     name = "test_ensure_prim_camera_creates_camera_object"
@@ -1471,6 +1527,7 @@ def main():
         test_ensure_xform_ops_no_parent,
         test_set_reference_imports_usd,
         test_set_reference_reimport_after_delete,
+        test_set_payload_import_preserves_y_up_orientation,
         test_set_reference_missing_file,
         test_ensure_prim_camera_creates_camera_object,
         test_set_gprim_attrs_camera_full_roundtrip,

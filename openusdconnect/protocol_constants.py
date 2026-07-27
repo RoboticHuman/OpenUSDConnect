@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 # Message type constants
 MSG_HELLO = "hello"
@@ -45,6 +45,19 @@ K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
 K_SET_STAGE_METADATA = "set_stage_metadata"
 K_SET_INSTANCEABLE = "set_instanceable"
 K_SET_POINT_INSTANCER = "set_point_instancer"
+K_SET_SDF_PROPERTY_FIELDS = "set_sdf_property_fields"
+
+# Sdf list-op buckets carried by reference and payload arc entries.
+ARC_LIST_POSITIONS = frozenset(
+    {
+        "explicit",
+        "added",
+        "prepended",
+        "appended",
+        "deleted",
+        "ordered",
+    }
+)
 
 # Array/relationship fields carried by a SetPointInstancer event, in wire
 # bitmask order. Authoritative list: the codec, adapter dispatch, and
@@ -142,6 +155,7 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_STAGE_METADATA: EventKindInfo(create=True, structural=True, stage_sync=True),
     K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
     K_SET_POINT_INSTANCER: EventKindInfo(),
+    K_SET_SDF_PROPERTY_FIELDS: EventKindInfo(structural=True, stage_sync=True),
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)

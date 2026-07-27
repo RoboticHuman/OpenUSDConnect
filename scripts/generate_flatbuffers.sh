@@ -25,7 +25,7 @@ echo "Python bindings generated: $OUT_DIR/messages_generated.py"
 # plugin. The generated code pins the flatc runtime version (static_assert);
 # keep setup_flatbuffers.py's DEFAULT_VERSION in lockstep with the flatc
 # used here.
-UE_SCHEMA_DIR="$ROOT/integrations/unreal/OpenUSDConnect/Source/OpenUSDConnect/Private/Schema"
+UE_SCHEMA_DIR="$ROOT/integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/Public/Schema"
 flatc --cpp --gen-all --cpp-std c++17 \
     -I "$SCHEMA_DIR" \
     -o "$UE_SCHEMA_DIR" \

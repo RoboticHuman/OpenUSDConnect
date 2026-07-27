@@ -12,6 +12,7 @@ from pxr import Usd, UsdGeom
 
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_SET_XFORM_TRS,
@@ -43,6 +44,8 @@ def _read_translate(stage, prim_path):
     for op in xf.GetOrderedXformOps():
         if op.GetAttr().GetName() == "xformOp:translate":
             v = op.Get()
+            if v is None:
+                return None
             return (v[0], v[1], v[2])
     return None
 
@@ -540,6 +543,112 @@ class TestReplayWithClientLayers:
         assert not srv2.edit_layer.GetPrimAtPath("/World/A")
         assert not srv2.edit_layer.GetPrimAtPath("/World/B")
         srv2.store.close()
+
+    def test_replay_preserves_interleaved_writes_within_department(self, tmp_path):
+        """Clients sharing a layer replay in global transaction order."""
+        db = str(tmp_path / "shared-department.db")
+        departments = ["animation"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (3, 0, 0)),
+            department="animation",
+        )
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (3, 0, 0)
+            assert srv2.client_layers["alice"] is srv2.client_layers["bob"]
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+
+class TestDepartmentCompaction:
+    def test_compaction_preserves_weaker_department_after_restart(self, tmp_path):
+        """Muting a stronger department still reveals the weaker opinion."""
+        db = str(tmp_path / "compaction.db")
+        departments = ["animation", "layout"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="layout",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        assert _read_translate(srv1.stage, "/World/Cube") == (2, 0, 0)
+
+        srv1.compact_log()
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)
+            srv2.mute_layer("animation")
+            assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+    def test_delete_tombstones_only_its_department(self, tmp_path):
+        """A department delete must not erase a weaker layer during compaction."""
+        db = str(tmp_path / "delete-compaction.db")
+        departments = ["animation", "layout"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="layout",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            [{"k": K_DELETE_PRIM, "prim": "/World/Cube"}],
+            department="animation",
+        )
+        assert _read_translate(srv1.stage, "/World/Cube") == (1, 0, 0)
+
+        srv1.compact_log()
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
+            assert srv2._dept_layers["layout"].GetPrimAtPath("/World/Cube")
+            assert not srv2._dept_layers["animation"].GetPrimAtPath("/World/Cube")
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
 
 
 class TestConcurrentDepartmentWrites:

@@ -15,6 +15,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(_scripts_dir)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from openusdconnect.protocol import make_hello
 from openusdconnect.transport import send_msg
 
 
@@ -26,7 +27,7 @@ def main():
 
     s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
 
-    send_msg(s, {"type": "hello", "role": "emitter", "protocol_version": 1})
+    send_msg(s, make_hello("emitter"))
     send_msg(s, {
         "type": "txn",
         "client_id": "mtlx_ref_emitter",

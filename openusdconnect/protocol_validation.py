@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 from .connectable_attrs import split_qualified_attr
 from .protocol_constants import (
+    ARC_LIST_POSITIONS,
     EVENT_KEYS,
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
@@ -14,6 +17,7 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -21,9 +25,17 @@ from .protocol_constants import (
 )
 
 
-def _is_arc_list_valid(arcs: list | None) -> bool:
+def _is_arc_list_valid(
+    arcs: list | None,
+    *,
+    authored: bool,
+    explicit: bool,
+    references: bool,
+) -> bool:
     """Validate a list of composition arc entries (refs or payloads)."""
     if not isinstance(arcs, list):
+        return False
+    if not authored and (arcs or explicit):
         return False
     for entry in arcs:
         if not isinstance(entry, dict):
@@ -36,7 +48,39 @@ def _is_arc_list_valid(arcs: list | None) -> bool:
             return False
         if pp is not None and (not isinstance(pp, str) or not pp.startswith("/")):
             return False
+        default_position = "explicit" if explicit else "prepended"
+        position = entry.get("list_position", default_position)
+        if position not in ARC_LIST_POSITIONS:
+            return False
+        if explicit != (position == "explicit"):
+            return False
+        for key, default in (("layer_offset", 0.0), ("layer_scale", 1.0)):
+            value = entry.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            if not math.isfinite(value):
+                return False
+        custom_data = entry.get("custom_data_fragment")
+        if custom_data is not None:
+            if not references or not isinstance(custom_data, str) or not custom_data:
+                return False
     return True
+
+
+def _is_arc_event_valid(ev: dict, key: str, *, references: bool) -> bool:
+    arcs = ev.get(key)
+    explicit = ev.get("list_op_explicit", False)
+    if not isinstance(explicit, bool):
+        return False
+    authored = ev.get("list_op_authored", bool(arcs) or explicit)
+    if not isinstance(authored, bool):
+        return False
+    return _is_arc_list_valid(
+        arcs,
+        authored=authored,
+        explicit=explicit,
+        references=references,
+    )
 
 
 def is_quat_valid(q: list[float]) -> bool:
@@ -97,10 +141,33 @@ def validate_event(ev: dict) -> bool:
             return False
         if not all(isinstance(key, str) for key in attrs):
             return False
-    if k == K_SET_REFERENCE and not _is_arc_list_valid(ev.get("refs")):
+    if k == K_SET_SDF_PROPERTY_FIELDS:
+        spec_path = ev.get("spec_path")
+        fields = ev.get("fields")
+        fragment = ev.get("fragment")
+        removed = ev.get("removed")
+        if not isinstance(spec_path, str) or not spec_path.startswith(ev["prim"] + "."):
+            return False
+        if not isinstance(fields, list) or not all(
+            isinstance(field, str) and field for field in fields
+        ):
+            return False
+        if not isinstance(fragment, str) or not isinstance(removed, bool):
+            return False
+        if not removed and (not fields or not fragment):
+            return False
+    if k == K_SET_REFERENCE and not _is_arc_event_valid(
+        ev,
+        "refs",
+        references=True,
+    ):
         return False
     # load_payload and unload_payload require only "prim" (already validated above)
-    if k == K_SET_PAYLOAD and not _is_arc_list_valid(ev.get("payloads")):
+    if k == K_SET_PAYLOAD and not _is_arc_event_valid(
+        ev,
+        "payloads",
+        references=False,
+    ):
         return False
     if k == K_SET_VARIANT_SELECTIONS:
         selections = ev.get("selections")

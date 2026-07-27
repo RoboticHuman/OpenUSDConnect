@@ -132,7 +132,10 @@ union Payload {
 
 table Envelope {
     payload:Payload;
-    schema_version:uint16 = 1;
+    // Zero means absent/unknown. Encoders always write the current non-zero
+    // version so buffers from an incompatible schema cannot inherit a newer
+    // generated-code default.
+    schema_version:uint16 = 0;
 }
 
 root_type Envelope;

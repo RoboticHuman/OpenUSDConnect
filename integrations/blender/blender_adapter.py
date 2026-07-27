@@ -165,7 +165,10 @@ class BlenderAdapter(DCCAdapter):
             scan_fn=self._scan_scene_object,
             alive_fn=self._is_bpy_alive,
         )
-        self._pending_payloads: dict[str, list] = {}  # prim_path -> payload list
+        # Keep authored payload state, not only its current composed projection.
+        # An unloaded payload is absent from UsdPrimCompositionQuery; retaining
+        # the event lets load_payload project it after the mirror stage loads it.
+        self._pending_payloads: dict[str, dict] = {}
         self._needs_axis_conv: bool = needs_conversion(scene_up_axis)
         self._shader_registry = create_default_registry()
         # The dispatcher's mirror stage; needed for unit-aware camera attr
@@ -1811,7 +1814,73 @@ class BlenderAdapter(DCCAdapter):
         if loaded:
             LOG.info("Loaded %d missing textures from %s", loaded, stage.GetRootLayer().identifier)
 
-    def set_reference(self, prim_path: str, refs: list) -> bool:
+    def _composed_asset_arcs(
+        self,
+        prim_path: str,
+        entries: list,
+        *,
+        explicit: bool,
+        payload: bool,
+    ) -> list[dict] | None:
+        """Project the mirror's effective external arcs for native import."""
+        if self.mirror_stage is not None:
+            from pxr import Usd
+
+            prim = self.mirror_stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                query = Usd.PrimCompositionQuery.GetDirectRootLayerArcs(prim)
+                query_filter = query.filter
+                query_filter.arcTypeFilter = (
+                    Usd.PrimCompositionQuery.ArcTypeFilter.Payload
+                    if payload
+                    else Usd.PrimCompositionQuery.ArcTypeFilter.Reference
+                )
+                query.filter = query_filter
+
+                result = []
+                for arc in query.GetCompositionArcs():
+                    target_layer = arc.GetTargetLayer()
+                    asset_path = str(target_layer.resolvedPath or target_layer.realPath)
+                    if not asset_path:
+                        continue
+                    entry = {"asset_path": asset_path}
+                    target_path = arc.GetTargetPrimPath()
+                    if not target_path.isEmpty:
+                        entry["prim_path"] = str(target_path)
+                    result.append(entry)
+                return result
+
+        default_position = "explicit" if explicit else "prepended"
+        introduced = {"explicit"} if explicit else {"added", "prepended", "appended"}
+        if any(
+            entry.get("list_position", default_position) in {"deleted", "ordered"}
+            for entry in entries
+        ):
+            return None
+        return [
+            entry for entry in entries if entry.get("list_position", default_position) in introduced
+        ]
+
+    def set_reference(
+        self,
+        prim_path: str,
+        refs: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
+        refs = self._composed_asset_arcs(
+            prim_path,
+            refs,
+            explicit=list_op_explicit,
+            payload=False,
+        )
+        if refs is None:
+            LOG.error(
+                "BlenderAdapter.set_reference requires a mirror stage for "
+                "delete or reorder list operations",
+            )
+            return False
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.set_reference dry: %s", prim_path)
             return True
@@ -1964,12 +2033,35 @@ class BlenderAdapter(DCCAdapter):
 
         self._registry.clear_imported_ref(prim_path)
 
-    def set_payload(self, prim_path: str, payloads: list) -> bool:
-        self._pending_payloads[prim_path] = payloads
+    def set_payload(
+        self,
+        prim_path: str,
+        payloads: list,
+        *,
+        list_op_authored: bool = True,
+        list_op_explicit: bool = False,
+    ) -> bool:
+        composed_payloads = self._composed_asset_arcs(
+            prim_path,
+            payloads,
+            explicit=list_op_explicit,
+            payload=True,
+        )
+        if composed_payloads is None:
+            LOG.error(
+                "BlenderAdapter.set_payload requires a mirror stage for "
+                "delete or reorder list operations",
+            )
+            return False
+        self._pending_payloads[prim_path] = {
+            "entries": payloads,
+            "list_op_authored": list_op_authored,
+            "list_op_explicit": list_op_explicit,
+        }
         LOG.info(
             "BlenderAdapter: payload arc set on %s (%d entries, unloaded)",
             prim_path,
-            len(payloads),
+            len(composed_payloads),
         )
         return True
 
@@ -1977,7 +2069,22 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             LOG.info("BlenderAdapter.load_payload dry: %s", prim_path)
             return True
-        payloads = self._pending_payloads.get(prim_path, [])
+        pending = self._pending_payloads.get(prim_path)
+        if pending is None:
+            LOG.warning("BlenderAdapter.load_payload: no pending payloads for %s", prim_path)
+            return False
+        payloads = self._composed_asset_arcs(
+            prim_path,
+            pending["entries"],
+            explicit=pending["list_op_explicit"],
+            payload=True,
+        )
+        if payloads is None:
+            LOG.error(
+                "BlenderAdapter.load_payload requires a mirror stage for "
+                "delete or reorder list operations",
+            )
+            return False
         if not payloads:
             LOG.warning("BlenderAdapter.load_payload: no pending payloads for %s", prim_path)
             return False
