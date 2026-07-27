@@ -793,7 +793,7 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 			TArray<uint8> Frame = BuildXformTxnFrame(
 				ClientId, Batch, bIncludeEnsureXformOps);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s) — enqueueing"),
+				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); enqueueing"),
 				*PrimPath, Frame.Num(), Xform.Fields,
 				bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""),
 				bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));

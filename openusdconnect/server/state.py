@@ -29,6 +29,7 @@ from ..emitter import (
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
+    COMPOSED_PROJECTION_KINDS,
     EVENT_KIND_INFO,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -53,7 +54,10 @@ from ..protocol_constants import (
     MSG_RESYNC,
     event_apply_tier,
 )
-from ..sdf_property_delta import merge_property_spec_events
+from ..sdf_property_delta import (
+    composed_property_spec_event,
+    merge_property_spec_events,
+)
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
 from .types import (
@@ -203,37 +207,90 @@ def _metadata_int(metadata: dict, key: str) -> int:
     return value
 
 
-def _is_supported_translate_custom_attr(name: str) -> bool:
-    if name == "xformOpOrder" or name.startswith("xformOp:"):
-        return True
-    return name.startswith(("primvars:", "inputs:", "outputs:", "info:"))
+_VFS_TRANSLATABLE_LAYER_FIELDS = frozenset({
+    "endTimeCode",
+    "framesPerSecond",
+    "metersPerUnit",
+    "startTimeCode",
+    "timeCodesPerSecond",
+    "upAxis",
+})
+_VFS_TRANSLATABLE_PRIM_FIELDS = frozenset({
+    "apiSchemas",
+    "instanceable",
+    "payload",
+    "references",
+    "specifier",
+    "typeName",
+    "variantSelection",
+})
 
 
-def _is_supported_translate_relationship(name: str) -> bool:
-    return name == "material:binding" or name.startswith("material:binding:")
+def _unsupported_vfs_translate_opinions(
+    stage: Usd.Stage,
+    events: list[dict],
+) -> list[str]:
+    """Find authored layer and prim opinions outside the VFS event surface."""
+    layer = stage.GetEditTarget().GetLayer()
+    unsupported: set[str] = set()
 
+    if layer.subLayerPaths:
+        unsupported.add("/:subLayers")
 
-def _unsupported_translate_properties(stage: Usd.Stage) -> list[str]:
-    """Return authored properties that the VFS translator cannot round-trip."""
-    unsupported: list[str] = []
-    for prim in stage.Traverse():
-        prim_path = str(prim.GetPath())
-        for attr in prim.GetAuthoredAttributes():
-            if not attr.IsCustom():
+    for key in layer.pseudoRoot.ListInfoKeys():
+        field = str(key)
+        if field == "customLayerData":
+            for name in layer.customLayerData:
+                if name != "openusdconnect":
+                    unsupported.add(f"/:customLayerData:{name}")
+        elif field not in _VFS_TRANSLATABLE_LAYER_FIELDS:
+            unsupported.add(f"/:{field}")
+
+    emitted_api_schemas: dict[str, set[str]] = {}
+    for event in events:
+        if event.get("k") != K_ENSURE_PRIM:
+            continue
+        emitted_api_schemas.setdefault(event["prim"], set()).update(
+            str(name) for name in event.get("api_schemas", ())
+        )
+
+    def _inspect(path: Sdf.Path) -> None:
+        if path.ContainsPrimVariantSelection():
+            unsupported.add(f"{path}:variantDefinition")
+            return
+        spec = layer.GetObjectAtPath(path)
+        if not isinstance(spec, Sdf.PrimSpec):
+            return
+
+        if spec.specifier == Sdf.SpecifierClass:
+            unsupported.add(f"{path}:specifier=class")
+        if spec.specifier == Sdf.SpecifierOver and spec.typeName:
+            unsupported.add(f"{path}:typeName-on-over")
+
+        for key in spec.ListInfoKeys():
+            field = str(key)
+            if field not in _VFS_TRANSLATABLE_PRIM_FIELDS:
+                unsupported.add(f"{path}:{field}")
                 continue
-            name = attr.GetName()
-            if _is_supported_translate_custom_attr(name):
+            if field != "apiSchemas":
                 continue
-            unsupported.append(f"{prim_path}.{name}")
 
-        for rel in prim.GetRelationships():
-            if not rel.IsAuthored():
+            list_op = spec.GetInfo(key)
+            if (
+                list_op.isExplicit
+                or list_op.addedItems
+                or list_op.appendedItems
+                or list_op.deletedItems
+                or list_op.orderedItems
+            ):
+                unsupported.add(f"{path}:apiSchemas-listOp")
                 continue
-            name = rel.GetName()
-            if _is_supported_translate_relationship(name):
-                continue
-            unsupported.append(f"{prim_path}.{name}")
-    return unsupported
+            authored = {str(name) for name in list_op.prependedItems}
+            if authored != emitted_api_schemas.get(str(path), set()):
+                unsupported.add(f"{path}:apiSchemas")
+
+    layer.Traverse(Sdf.Path.absoluteRootPath, _inspect)
+    return sorted(unsupported)
 
 
 class _WireMetrics:
@@ -933,13 +990,11 @@ class UsdSyncServer:
 
         if p.events:
             # Apply into the target department layer.
-            self.apply_txn(p.events, layer=target_layer)
+            changed_set = set(self.apply_txn(p.events, layer=target_layer))
 
-            # Persist and broadcast all events. Unlike normal txns we
-            # don't filter by changed_set — proposals merge into a
-            # department layer and all events should be visible to
-            # receivers for log consistency. No corrections needed
-            # since no active receiver has the proposal origin.
+            # Persist every authored opinion, but expose only the composed
+            # result to flat live receivers, matching normal transaction
+            # gating.
             records = []
             persist_tuples = []
             for ev in p.events:
@@ -965,8 +1020,22 @@ class UsdSyncServer:
                     )
                 )
             self.append_log_batch(persist_tuples)
-            for rec in records:
-                self.broadcast(rec)
+            for index, rec in enumerate(records):
+                if index in changed_set:
+                    self.broadcast(rec)
+                    continue
+                event = p.events[index]
+                if event.get("k") not in COMPOSED_PROJECTION_KINDS:
+                    continue
+                correction = self.build_correction(event)
+                if correction:
+                    self.broadcast(
+                        {
+                            "type": MSG_EVENT,
+                            "seq": rec["seq"],
+                            "event": correction,
+                        }
+                    )
 
         # Remove proposal layer from session
         with self.stage_lock:
@@ -1426,17 +1495,34 @@ class UsdSyncServer:
             else:
                 latest[key] = (ev, meta, seq)
         elif k == K_SET_CONNECTABLE_CONNECTION:
-            # Connection events carry a partial dict of edges — merge, so a
-            # later event for one input doesn't drop earlier ones.
             existing = latest.get(key)
             if existing:
                 prev = existing[0]
-                prev.setdefault("connections", {}).update(
-                    ev.get("connections", {}),
-                )
+                connections = prev.setdefault("connections", {})
+                disconnections = dict.fromkeys(prev.get("disconnections", ()))
+                for local_attr, connection in ev.get("connections", {}).items():
+                    connections[local_attr] = connection
+                    disconnections.pop(local_attr, None)
+                # Application processes connections before disconnections, so
+                # retain an earlier edge as declaration/type context while the
+                # disconnection remains the final authored state.
+                for local_attr in ev.get("disconnections", ()):
+                    disconnections[local_attr] = None
+                if disconnections:
+                    prev["disconnections"] = list(disconnections)
+                else:
+                    prev.pop("disconnections", None)
                 latest[key] = (prev, meta, seq)
             else:
-                latest[key] = (ev, meta, seq)
+                merged = dict(ev)
+                connections = dict(merged.get("connections", {}))
+                disconnections = dict.fromkeys(merged.get("disconnections", ()))
+                merged["connections"] = connections
+                if disconnections:
+                    merged["disconnections"] = list(disconnections)
+                else:
+                    merged.pop("disconnections", None)
+                latest[key] = (merged, meta, seq)
         elif k == K_SET_VARIANT_SELECTIONS:
             existing = latest.get(key)
             if existing:
@@ -1631,6 +1717,9 @@ class UsdSyncServer:
                     "active": prim.IsActive(),
                 }
 
+            if k == K_SET_SDF_PROPERTY_FIELDS:
+                return composed_property_spec_event(self.stage, ev)
+
         # For event types we can't build corrections for, return None.
         # The sender stays divergent until the next full resync.
         return None
@@ -1776,30 +1865,33 @@ class UsdSyncServer:
                     f"removed {len(removed_paths)} of {len(before_paths)} prims"
                 )
 
-            unsupported_properties = _unsupported_translate_properties(uploaded_stage)
-            if unsupported_properties:
-                shown = ", ".join(unsupported_properties[:10])
-                more = len(unsupported_properties) - 10
-                if more > 0:
-                    shown = f"{shown}, ... (+{more} more)"
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "uploaded snapshot contains authored USD properties outside "
-                        f"the VFS translate event subset: {shown}"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "uploaded VFS snapshot contains authored USD properties "
-                    "that cannot be safely translated"
-                )
-
             emitter = NoticeEmitter(uploaded_stage)
             try:
                 events = emitter.snapshot_events()
             finally:
                 emitter.cleanup()
+
+            unsupported_opinions = _unsupported_vfs_translate_opinions(
+                uploaded_stage,
+                events,
+            )
+            if unsupported_opinions:
+                shown = ", ".join(unsupported_opinions[:10])
+                more = len(unsupported_opinions) - 10
+                if more > 0:
+                    shown = f"{shown}, ... (+{more} more)"
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "uploaded snapshot contains authored layer or prim "
+                        f"opinions outside the VFS translate event surface: {shown}"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains authored layer or prim "
+                    "opinions that cannot be safely translated"
+                )
 
             # Hide prims that existed in the previous composed stage but are absent
             # from the uploaded snapshot. This lets full-file saves express deletes
@@ -2287,7 +2379,26 @@ class UsdSyncServer:
 
         changed_indices = []
         with self.stage_lock:
-            self.stage.SetEditTarget(Usd.EditTarget(target))
+            edit_target = Usd.EditTarget(target)
+            self.stage.SetEditTarget(edit_target)
+            for ev in events:
+                if (
+                    ev.get("k") != K_SET_SDF_PROPERTY_FIELDS
+                    or not ev.get("removed", False)
+                ):
+                    continue
+                event_path = Sdf.Path(ev.get("spec_path", ""))
+                if not event_path.IsAbsolutePath() or not event_path.IsPropertyPath():
+                    continue
+                target_path = edit_target.MapToSpecPath(event_path)
+                if target_path.isEmpty:
+                    continue
+                spec = target.GetPropertyAtPath(target_path)
+                if spec:
+                    ev["fields"] = sorted(
+                        set(ev.get("fields", ()))
+                        | {str(key) for key in spec.ListInfoKeys()}
+                    )
             apply_events(self.stage, events, op_cache=self._op_cache_for(target))
 
             # Single-layer mode: the edit layer is the only unmuted session
@@ -2320,6 +2431,12 @@ class UsdSyncServer:
                 pp = ev.get("prim", "")
                 if not pp:
                     changed_indices.append(i)
+                    continue
+                if k in COMPOSED_PROJECTION_KINDS:
+                    # Department receivers are currently flat composed-stage
+                    # projections. Always replace a local Sdf fragment with an
+                    # authoritative composed correction so weaker opinions,
+                    # dictionary composition, and clears cannot leak through.
                     continue
 
                 cache_key = (pp, k)
@@ -2626,10 +2743,14 @@ class UsdSyncServer:
         All events are replayed regardless of origin — the receiver needs
         its own prior edits (which share its origin) to restore state.
         Origin filtering only applies to live broadcast to prevent echo.
-        Department metadata remains on each record; applying those records
-        to one flat layer does not reproduce department strength ordering.
+        Department metadata remains on ordinary records; applying those
+        records to one flat layer does not reproduce department strength
+        ordering. Event kinds registered as composed projections are replaced
+        on the wire with the server's current composed result, using the
+        persisted record's sequence number. The authored record remains in the
+        store so server restart can reconstruct its department layer.
 
-        Sends binary blobs directly from the store — no re-serialization.
+        Single-layer replay sends binary blobs directly from the store.
         """
         _REPLAY_CHUNK = 65536
         try:
@@ -2637,7 +2758,21 @@ class UsdSyncServer:
             buf_parts: list[bytes] = []
             buf_size = 0
             for blob in blobs:
-                framed = frame_batch([blob])
+                outbound = blob
+                if self.department_priority:
+                    rec = message_to_dict(blob)
+                    event = rec.get("event", {})
+                    if event.get("k") in COMPOSED_PROJECTION_KINDS:
+                        correction = self.build_correction(event)
+                        if correction is not None:
+                            outbound = encode_message(
+                                {
+                                    "type": MSG_EVENT,
+                                    "seq": rec["seq"],
+                                    "event": correction,
+                                }
+                            )
+                framed = frame_batch([outbound])
                 buf_parts.append(framed)
                 buf_size += len(framed)
                 if buf_size >= _REPLAY_CHUNK:

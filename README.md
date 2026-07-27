@@ -133,8 +133,10 @@ uv run openusdconnect-server --port 7200 --base scene.usda \
 Department ordering is preserved by server restart and log compaction. Current
 receivers replay department-tagged records into one local edit layer, however,
 so receiver-side replay does not reconstruct cross-department layer strength.
-Some live event kinds also lack a composed-value correction. The server stage
-remains authoritative; layered receiver replay needs a protocol extension.
+Generic Sdf property edits are projected back as authoritative composed
+corrections during live sync and replay, but some other event kinds still lack
+that correction path. The server stage remains authoritative; fully layered
+receiver replication needs a protocol extension.
 
 If a Hydra renderer such as RenderMan is installed into the shared USD build,
 launch through the renderer-safe wrapper so the Sdr registry can load its plugins:
@@ -163,7 +165,9 @@ uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --f
 
 For write fallback, start the server with `--vfs-write-mode translate`. Full-file
 USD saves are validated by default, rejected when stale or invalid, and converted
-to live events when safe.
+to live events when safe. Custom attributes and relationships are preserved.
+Authored prim or layer fields outside the event surface, including local variant
+definitions, are rejected instead of being silently discarded.
 
 ### Docker
 

@@ -7,7 +7,7 @@ invalidation, write policy, and the browsable multi-file VFS directory.
 import json
 
 import pytest
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdLux
 
 from openusdconnect.protocol_constants import PROTOCOL_VERSION
 from openusdconnect.server import UsdSyncServer
@@ -120,6 +120,35 @@ def _stage_bytes_with_custom_properties() -> bytes:
     prim = stage.DefinePrim("/World", "Xform")
     prim.CreateAttribute("customFoo", Sdf.ValueTypeNames.String, custom=True).Set("bar")
     prim.CreateRelationship("customRel", custom=True).AddTarget(Sdf.Path("/World"))
+    return layer.ExportToString().encode("utf-8")
+
+
+def _stage_bytes_with_unsupported_spec_fields() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/Before", "Xform")
+    prim.SetDocumentation("not represented by the event protocol")
+    prim.SetCustomData({"department": "layout"})
+    stage.SetDefaultPrim(prim)
+    layer.customLayerData = {"pipeline": "test"}
+    return layer.ExportToString().encode("utf-8")
+
+
+def _stage_bytes_with_local_variant_definition() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/World", "Xform")
+    variants = prim.GetVariantSets().AddVariantSet("look")
+    variants.AddVariant("red")
+    variants.SetVariantSelection("red")
+    return layer.ExportToString().encode("utf-8")
+
+
+def _stage_bytes_with_supported_api_schema() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    light = UsdLux.SphereLight.Define(stage, "/World/Light")
+    UsdLux.ShapingAPI.Apply(light.GetPrim())
     return layer.ExportToString().encode("utf-8")
 
 
@@ -497,19 +526,57 @@ class TestWriteTranslate:
         assert srv.get_event_count() == count
         assert translate_vfile_without_validation.read() == before
 
-    def test_custom_properties_are_rejected(self, srv, translate_vfile):
+    def test_custom_properties_are_translated(self, srv, translate_vfile):
         _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
+        count = srv.get_event_count()
+
+        translate_vfile.write(_stage_bytes_with_custom_properties())
+
+        assert srv.get_event_count() > count
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert srv.stage.GetAttributeAtPath("/World.customFoo").Get() == "bar"
+        assert srv.stage.GetRelationshipAtPath("/World.customRel").GetTargets() == [
+            Sdf.Path("/World")
+        ]
+
+        fetched = _open_stage(translate_vfile.read())
+        assert fetched.GetAttributeAtPath("/World.customFoo").Get() == "bar"
+        assert fetched.GetRelationshipAtPath("/World.customRel").GetTargets() == [
+            Sdf.Path("/World")
+        ]
+
+    def test_unsupported_prim_and_layer_fields_are_rejected(self, srv, translate_vfile):
+        _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Xform"}])
         before = translate_vfile.read()
         count = srv.get_event_count()
 
         with pytest.raises(UnsupportedVfsWriteError):
-            translate_vfile.write(_stage_bytes_with_custom_properties())
+            translate_vfile.write(_stage_bytes_with_unsupported_spec_fields())
 
         assert srv.get_event_count() == count
         assert translate_vfile.read() == before
         assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
-        assert "customFoo" in srv.last_vfs_write_analysis["notes"][0]
-        assert "customRel" in srv.last_vfs_write_analysis["notes"][0]
+        notes = srv.last_vfs_write_analysis["notes"][0]
+        assert "/:defaultPrim" in notes
+        assert "/:customLayerData:pipeline" in notes
+        assert "/Before:documentation" in notes
+        assert "/Before:customData" in notes
+
+    def test_local_variant_definitions_are_rejected(self, srv, translate_vfile):
+        count = srv.get_event_count()
+
+        with pytest.raises(UnsupportedVfsWriteError):
+            translate_vfile.write(_stage_bytes_with_local_variant_definition())
+
+        assert srv.get_event_count() == count
+        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
+        assert "variantDefinition" in srv.last_vfs_write_analysis["notes"][0]
+
+    def test_supported_api_schema_is_translated(self, srv, translate_vfile):
+        translate_vfile.write(_stage_bytes_with_supported_api_schema())
+
+        light = srv.stage.GetPrimAtPath("/World/Light")
+        assert light.HasAPI(UsdLux.ShapingAPI)
 
     def test_department_layers_disable_translate(self, dept_srv):
         layer = dept_srv.get_or_create_client_layer("alice", "layout")

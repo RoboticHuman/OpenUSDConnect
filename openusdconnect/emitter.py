@@ -2594,12 +2594,25 @@ class NoticeEmitter:
             if spec.custom:
                 return set(fields)
             if self._channel_owns_property(prim, name):
-                return blocked_values | (
+                result = blocked_values | (
                     set(fields)
                     - _SDF_DECLARATION_FIELDS
                     - _SDF_ATTRIBUTE_VALUE_FIELDS
                     - {"connectionPaths"}
                 )
+                # A bare UsdShade input/output has no value or connection for
+                # the specialized channel to emit. Preserve its declaration so
+                # the port itself is not lost.
+                if (
+                    not result
+                    and name.startswith((USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX))
+                    and not (
+                        set(fields)
+                        & (_SDF_ATTRIBUTE_VALUE_FIELDS | {"connectionPaths"})
+                    )
+                ):
+                    result.update(set(fields) & _SDF_DECLARATION_FIELDS)
+                return result
             if self._sdf_owns_attribute_value(prim, name):
                 return set(fields)
             result = set(fields) - _SDF_DECLARATION_FIELDS - _SDF_ATTRIBUTE_VALUE_FIELDS
@@ -2660,12 +2673,13 @@ class NoticeEmitter:
             )
             if not spec:
                 if previous_fields or previous_local_fields:
+                    removed_fields = sorted(previous_fields | previous_local_fields)
                     events.append(
                         {
                             "k": K_SET_SDF_PROPERTY_FIELDS,
                             "prim": prim_path,
                             "spec_path": event_path_str,
-                            "fields": [],
+                            "fields": removed_fields,
                             "fragment": "",
                             "removed": True,
                         }

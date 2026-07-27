@@ -16,6 +16,7 @@ from openusdconnect import events
 from openusdconnect.adapters import _DISPATCH
 from openusdconnect.protocol_constants import (
     ARC_KINDS,
+    COMPOSED_PROJECTION_KINDS,
     CREATE_KINDS,
     EVENT_KEYS,
     IMPORT_KINDS,
@@ -81,6 +82,7 @@ def test_derived_kind_sets_pin():
     }
     assert ARC_KINDS == {"set_payload", "set_reference", "set_variant_selections"}
     assert IMPORT_KINDS == {"load_payload", "set_reference"}
+    assert COMPOSED_PROJECTION_KINDS == {"set_sdf_property_fields"}
 
 
 def test_stage_sync_kinds_are_structural():

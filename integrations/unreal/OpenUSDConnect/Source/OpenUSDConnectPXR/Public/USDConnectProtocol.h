@@ -36,6 +36,13 @@ namespace OUC
 		{
 			return nullptr;
 		}
+		::flatbuffers::Verifier Verifier(
+			Frame.GetData(),
+			static_cast<size_t>(Frame.Num()));
+		if (!OpenUSDConnect::VerifyEnvelopeBuffer(Verifier))
+		{
+			return nullptr;
+		}
 		const OpenUSDConnect::Envelope* Envelope =
 			OpenUSDConnect::GetEnvelope(Frame.GetData());
 		return Envelope && Envelope->schema_version() == kSchemaVersion

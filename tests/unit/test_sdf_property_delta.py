@@ -8,7 +8,10 @@ from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import K_SET_GPRIM_ATTRS, K_SET_SDF_PROPERTY_FIELDS, MSG_TXN
-from openusdconnect.sdf_property_delta import apply_property_spec_delta
+from openusdconnect.sdf_property_delta import (
+    apply_property_spec_delta,
+    composed_property_spec_event,
+)
 from openusdconnect.server import UsdSyncServer
 
 
@@ -108,7 +111,13 @@ def test_incremental_value_block_samples_metadata_clear_and_removal():
             "k": K_SET_SDF_PROPERTY_FIELDS,
             "prim": "/World/Thing",
             "spec_path": path,
-            "fields": [],
+            "fields": [
+                "custom",
+                "default",
+                "timeSamples",
+                "typeName",
+                "variability",
+            ],
             "fragment": "",
             "removed": True,
         }
@@ -160,6 +169,35 @@ def test_connectable_channel_keeps_value_and_connection_ownership():
     ]
     assert len(metadata) == 1
     assert metadata[0]["fields"] == ["documentation"]
+
+
+def test_bare_usdshade_ports_roundtrip_as_sdf_declarations():
+    source = Usd.Stage.CreateInMemory()
+    shader = UsdShade.Shader.Define(source, "/World/Shader")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("bareInput", Sdf.ValueTypeNames.Float)
+    shader.CreateOutput("bareOutput", Sdf.ValueTypeNames.Token)
+    emitter = NoticeEmitter(source)
+
+    events = emitter.snapshot_events()
+    declaration_paths = {
+        event["spec_path"]
+        for event in _sdf_events(events)
+        if set(event["fields"]) == {"custom", "typeName", "variability"}
+    }
+    assert declaration_paths == {
+        "/World/Shader.inputs:bareInput",
+        "/World/Shader.outputs:bareOutput",
+    }
+
+    target = Usd.Stage.CreateInMemory()
+    apply_events(target, events)
+    target_shader = UsdShade.Shader(target.GetPrimAtPath("/World/Shader"))
+    assert target_shader.GetInput("bareInput")
+    assert target_shader.GetInput("bareInput").GetTypeName() == Sdf.ValueTypeNames.Float
+    assert target_shader.GetOutput("bareOutput")
+    assert target_shader.GetOutput("bareOutput").GetTypeName() == Sdf.ValueTypeNames.Token
+    emitter.cleanup()
 
 
 def test_composed_custom_attribute_emits_only_local_override():
@@ -229,6 +267,96 @@ def test_apply_ignores_fragment_fields_not_named_by_event():
     target_attr = target.GetAttributeAtPath(path)
     assert target_attr.GetDocumentation() == "selected"
     assert target_attr.Get() is None
+
+
+def test_composed_projection_follows_usd_field_resolution():
+    weak = Sdf.Layer.CreateAnonymous("weak.usda")
+    source = Usd.Stage.Open(weak)
+    prim = source.DefinePrim("/World/Thing", "Xform")
+    value = prim.CreateAttribute(
+        "userProperties:value",
+        Sdf.ValueTypeNames.Int,
+        custom=True,
+    )
+    value.Set(1)
+    value.SetCustomData({"weak": 1})
+    samples = prim.CreateAttribute(
+        "userProperties:samples",
+        Sdf.ValueTypeNames.Float,
+        custom=True,
+    )
+    samples.Set(1.0, 1.0)
+    samples.Set(2.0, 2.0)
+    relation = prim.CreateRelationship("userProperties:targets", custom=True)
+    relation.SetTargets([Sdf.Path("/World/A")])
+    declaration = prim.CreateAttribute(
+        "userProperties:declaration",
+        Sdf.ValueTypeNames.Float,
+        custom=True,
+    )
+    declaration.Set(1.0)
+
+    strong = source.GetSessionLayer()
+    source.SetEditTarget(strong)
+    value.Set(Sdf.ValueBlock())
+    value.SetCustomData({"strong": 2})
+    samples.Set(3.0, 3.0)
+    samples.Set(Sdf.ValueBlock(), 4.0)
+    relation.AddTarget(
+        Sdf.Path("/World/B"),
+        Usd.ListPositionFrontOfPrependList,
+    )
+    declaration.SetMetadata("custom", False)
+    declaration.SetDocumentation("strong documentation")
+
+    target = Usd.Stage.CreateInMemory()
+    requests = [
+        ("/World/Thing.userProperties:value", ["default", "customData"]),
+        ("/World/Thing.userProperties:samples", ["timeSamples"]),
+        ("/World/Thing.userProperties:targets", ["targetPaths"]),
+        ("/World/Thing.userProperties:declaration", ["documentation"]),
+    ]
+    corrections = [
+        composed_property_spec_event(
+            source,
+            {
+                "k": K_SET_SDF_PROPERTY_FIELDS,
+                "prim": "/World/Thing",
+                "spec_path": path,
+                "fields": fields,
+                "removed": False,
+            },
+        )
+        for path, fields in requests
+    ]
+    apply_events(target, corrections)
+
+    target_value = target.GetAttributeAtPath(requests[0][0])
+    assert target_value.Get() is None
+    assert isinstance(
+        target.GetRootLayer().GetAttributeAtPath(requests[0][0]).default,
+        Sdf.ValueBlock,
+    )
+    assert target_value.GetCustomData() == {"strong": 2, "weak": 1}
+
+    target_samples = target.GetAttributeAtPath(requests[1][0])
+    assert target_samples.GetTimeSamples() == samples.GetTimeSamples() == [3.0, 4.0]
+    assert target_samples.Get(3.0) == samples.Get(3.0) == 3.0
+    assert target_samples.Get(4.0) is None
+    assert isinstance(
+        target.GetRootLayer().GetAttributeAtPath(requests[1][0]).QueryTimeSample(4.0),
+        Sdf.ValueBlock,
+    )
+
+    target_relation = target.GetRelationshipAtPath(requests[2][0])
+    assert target_relation.GetTargets() == relation.GetTargets() == [
+        Sdf.Path("/World/B"),
+        Sdf.Path("/World/A"),
+    ]
+
+    target_declaration = target.GetAttributeAtPath(requests[3][0])
+    assert target_declaration.GetDocumentation() == "strong documentation"
+    assert target_declaration.IsCustom() is True
 
 
 def test_compaction_merges_fields_and_replays_exact_state(tmp_path):

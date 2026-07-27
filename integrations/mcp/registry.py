@@ -2,7 +2,7 @@
 
 One :class:`ToolRow` per ``K_*`` event kind. Each row's ``build`` assembles a
 single event dict matching the TypedDict in ``openusdconnect.events``. ``tools``
-wraps every row into an MCP tool, and the generic ``usd_send_events`` accepts any
+wraps public rows into MCP tools, and the generic ``usd_send_events`` accepts any
 kind whose key is in this table. The table keys must stay equal to ``EVENT_KEYS``
 (a consistency test enforces it), so adding a new core event kind requires adding
 a row here.
@@ -45,11 +45,12 @@ from openusdconnect.protocol_constants import (
 
 @dataclass(frozen=True)
 class ToolRow:
-    """One event kind exposed as an MCP tool."""
+    """One event kind available to MCP authoring."""
 
     kind: str
     summary: str
     build: Callable[..., dict]
+    expose: bool = True
 
 
 def euler_to_quat_wxyz(euler_deg: list[float], order: str = "XYZ") -> list[float]:
@@ -437,5 +438,6 @@ TOOL_TABLE: dict[str, ToolRow] = {
         "Apply a low-level Sdf property delta. The fragment must be USDA with "
         "the property at spec_path; fields lists the opinions to set or clear.",
         _set_sdf_property_fields,
+        expose=False,
     ),
 }

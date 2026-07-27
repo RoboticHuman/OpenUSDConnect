@@ -13,7 +13,6 @@
 
 # Prerequisites
 *.d
-.DS_Store
 
 # Compiled Object files
 *.slo
@@ -287,6 +286,3 @@ __marimo__/
 
 # Vendored libraries
 vendor/
-
-# Generated Unreal dependencies
-/integrations/unreal/OpenUSDConnect/Source/*/ThirdParty/flatbuffers/

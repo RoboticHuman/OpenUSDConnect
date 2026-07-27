@@ -915,11 +915,17 @@ void ApplySetConnectableConnection(pxr::UsdStageRefPtr& Stage, const Wire::SetCo
 			}
 			if (bIsInput)
 			{
-				if (pxr::UsdShadeInput P = Connectable.GetInput(ToToken(Base))) { P.ClearSources(); }
+				if (pxr::UsdShadeInput P = Connectable.GetInput(ToToken(Base)))
+				{
+					P.DisconnectSource();
+				}
 			}
 			else
 			{
-				if (pxr::UsdShadeOutput P = Connectable.GetOutput(ToToken(Base))) { P.ClearSources(); }
+				if (pxr::UsdShadeOutput P = Connectable.GetOutput(ToToken(Base)))
+				{
+					P.DisconnectSource();
+				}
 			}
 		}
 	}
@@ -1186,7 +1192,12 @@ void ApplySetSdfPropertyFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfPro
 		{
 			pxr::SdfBatchNamespaceEdit Edits;
 			Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
-			TargetLayer->Apply(Edits);
+			if (!TargetLayer->Apply(Edits))
+			{
+				UE_LOG(LogUSDEventApplier, Warning,
+					TEXT("Could not remove Sdf property spec %s"),
+					UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			}
 		}
 		return;
 	}
@@ -1204,7 +1215,13 @@ void ApplySetSdfPropertyFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfPro
 	{
 		pxr::SdfBatchNamespaceEdit Edits;
 		Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
-		TargetLayer->Apply(Edits);
+		if (!TargetLayer->Apply(Edits))
+		{
+			UE_LOG(LogUSDEventApplier, Warning,
+				TEXT("Could not replace Sdf property spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			return;
+		}
 	}
 	if (!TargetLayer->HasSpec(TargetPath))
 	{
@@ -1228,7 +1245,12 @@ void ApplySetSdfPropertyFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfPro
 			if (!IsSelectedField(Field)) Incoming->EraseField(EventPath, Field);
 		}
 		pxr::SdfCreatePrimInLayer(TargetLayer, TargetPath.GetPrimPath());
-		pxr::SdfCopySpec(Incoming, EventPath, TargetLayer, TargetPath);
+		if (!pxr::SdfCopySpec(Incoming, EventPath, TargetLayer, TargetPath))
+		{
+			UE_LOG(LogUSDEventApplier, Warning,
+				TEXT("Could not create Sdf property spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		}
 		return;
 	}
 

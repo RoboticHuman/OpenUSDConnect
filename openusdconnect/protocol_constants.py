@@ -117,6 +117,9 @@ class EventKindInfo:
         empty tuple means strongest-spec check (structural ops), names
         mean a per-attribute check ("meta:X" is a prim metadata field,
         "rel:X" a relationship).
+    composed_projection: department-layer writes must be replaced by an
+        authoritative composed correction instead of broadcasting the
+        authored event directly.
     """
 
     create: bool = False
@@ -125,6 +128,7 @@ class EventKindInfo:
     arc: bool = False
     imports: bool = False
     strength_attrs: tuple[str, ...] | None = None
+    composed_projection: bool = False
 
 
 EVENT_KIND_INFO: dict[str, EventKindInfo] = {
@@ -155,7 +159,11 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_STAGE_METADATA: EventKindInfo(create=True, structural=True, stage_sync=True),
     K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
     K_SET_POINT_INSTANCER: EventKindInfo(),
-    K_SET_SDF_PROPERTY_FIELDS: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_SDF_PROPERTY_FIELDS: EventKindInfo(
+        structural=True,
+        stage_sync=True,
+        composed_projection=True,
+    ),
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)
@@ -164,6 +172,9 @@ STRUCTURAL_EVENT_KINDS = frozenset(
 )
 CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
 STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
+COMPOSED_PROJECTION_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.composed_projection
+)
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
 IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
 

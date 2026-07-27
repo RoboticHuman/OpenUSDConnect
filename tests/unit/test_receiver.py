@@ -380,12 +380,12 @@ class TestPingHandling:
         import openusdconnect.receiver as recv_mod
 
         original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
-        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 4
         try:
             rt.start()
             conn = _accept_and_hello(srv)
             _poll_until(lambda: rt.connected)
-            # Wait ~2 timeouts, then send a ping to reset counter
+            # Each wait is below four timeouts, while their sum is above it.
             time.sleep(0.12)
             _send_ping(conn)
             time.sleep(0.12)

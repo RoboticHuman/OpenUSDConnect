@@ -8,13 +8,15 @@ No DCC needed — headless, runs in CI.
 import time
 
 import pytest
-from pxr import Usd, UsdGeom
+from pxr import Sdf, Usd, UsdGeom
 
+from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_XFORM_TRS,
 )
 from openusdconnect.server import UsdSyncServer
@@ -510,6 +512,84 @@ class TestCorrectionPath:
 
         # Verify method exists and doesn't crash with no receivers
         srv.send_to_origin({"type": "ping"}, "nonexistent-origin")
+
+    def test_sdf_correction_projects_composed_department_state(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
+        strong_layer = srv.get_or_create_client_layer("bob", department="animation")
+        weak_layer = srv.get_or_create_client_layer("alice", department="layout")
+        flat_receiver = Usd.Stage.CreateInMemory()
+
+        strong_stage = Usd.Stage.CreateInMemory()
+        strong_prim = strong_stage.DefinePrim("/World/Thing", "Xform")
+        strong_attr = strong_prim.CreateAttribute(
+            "userProperties:value",
+            Sdf.ValueTypeNames.Int,
+            True,
+        )
+        strong_attr.Set(2)
+        strong_attr.SetCustomData({"strong": 2})
+        strong_emitter = NoticeEmitter(strong_stage)
+        strong_events = strong_emitter.snapshot_events()
+        strong_generic = next(
+            event for event in strong_events if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+
+        changed = srv.apply_txn(strong_events, layer=strong_layer)
+        assert strong_events.index(strong_generic) not in changed
+        apply_events(
+            flat_receiver,
+            [event for event in strong_events if event["k"] != K_SET_SDF_PROPERTY_FIELDS],
+        )
+        apply_events(flat_receiver, [srv.build_correction(strong_generic)])
+
+        weak_stage = Usd.Stage.CreateInMemory()
+        weak_prim = weak_stage.DefinePrim("/World/Thing", "Xform")
+        weak_attr = weak_prim.CreateAttribute(
+            "userProperties:value",
+            Sdf.ValueTypeNames.Int,
+            True,
+        )
+        weak_attr.Set(1)
+        weak_attr.SetCustomData({"weak": 1})
+        weak_emitter = NoticeEmitter(weak_stage)
+        weak_generic = next(
+            event
+            for event in weak_emitter.snapshot_events()
+            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+
+        assert srv.apply_txn([weak_generic], layer=weak_layer) == []
+        weak_correction = srv.build_correction(weak_generic)
+        apply_events(flat_receiver, [weak_correction])
+
+        path = "/World/Thing.userProperties:value"
+        server_attr = srv.stage.GetAttributeAtPath(path)
+        receiver_attr = flat_receiver.GetAttributeAtPath(path)
+        assert server_attr.Get() == receiver_attr.Get() == 2
+        assert server_attr.GetCustomData() == receiver_attr.GetCustomData() == {
+            "strong": 2,
+            "weak": 1,
+        }
+
+        strong_prim.RemoveProperty("userProperties:value")
+        removed = next(
+            event
+            for event in strong_emitter.build_events_for_dirty()
+            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+        assert removed["removed"] is True
+        assert removed["fields"]
+        assert srv.apply_txn([removed], layer=strong_layer) == []
+
+        revealed_correction = srv.build_correction(removed)
+        apply_events(flat_receiver, [revealed_correction])
+        assert revealed_correction["removed"] is False
+        assert srv.stage.GetAttributeAtPath(path).Get() == 1
+        assert flat_receiver.GetAttributeAtPath(path).Get() == 1
+        assert flat_receiver.GetAttributeAtPath(path).GetCustomData() == {"weak": 1}
+
+        strong_emitter.cleanup()
+        weak_emitter.cleanup()
 
 
 class TestReplayWithClientLayers:

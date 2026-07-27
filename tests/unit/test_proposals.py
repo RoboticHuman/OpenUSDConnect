@@ -129,6 +129,57 @@ class TestProposalApproval:
         srv_with_layers.approve_proposal(pid)
         assert srv_with_layers.get_proposal_layer(pid) is None
 
+    def test_approve_projects_composed_sdf_state(self, srv_with_layers, monkeypatch):
+        from pxr import Sdf, Usd
+
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.emitter import NoticeEmitter
+        from openusdconnect.event_apply import apply_events
+        from openusdconnect.protocol_constants import K_SET_SDF_PROPERTY_FIELDS
+
+        def _events(value):
+            stage = Usd.Stage.CreateInMemory()
+            prim = stage.DefinePrim("/World/Cube", "Xform")
+            prim.CreateAttribute(
+                "userProperties:value",
+                Sdf.ValueTypeNames.Int,
+                custom=True,
+            ).Set(value)
+            emitter = NoticeEmitter(stage)
+            try:
+                return emitter.snapshot_events()
+            finally:
+                emitter.cleanup()
+
+        lighting = srv_with_layers.get_or_create_client_layer("lead", "lighting")
+        srv_with_layers.apply_txn(_events(2), layer=lighting)
+
+        proposal_id = srv_with_layers.create_proposal("bob", "layout", "weak override")
+        _apply_to_proposal(srv_with_layers, proposal_id, _events(1))
+        broadcast = []
+        monkeypatch.setattr(srv_with_layers, "broadcast", broadcast.append)
+
+        assert srv_with_layers.approve_proposal(proposal_id)
+        corrections = [
+            record
+            for record in broadcast
+            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+        ]
+        assert len(corrections) == 1
+        stored_generic = [
+            record
+            for record in map(
+                message_to_dict,
+                srv_with_layers.store.get_from_seq_bin(1),
+            )
+            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+        ]
+        assert corrections[0]["seq"] == stored_generic[-1]["seq"]
+
+        flat = Usd.Stage.CreateInMemory()
+        apply_events(flat, [record["event"] for record in broadcast])
+        assert flat.GetAttributeAtPath("/World/Cube.userProperties:value").Get() == 2
+
 
 def _apply_to_proposal(srv, proposal_id, events):
     """Helper: route events through the real apply_proposal_txn path."""
@@ -184,4 +235,3 @@ class TestProposalTxnRouting:
         assert not prim or not prim.IsValid()
         # And resolving it no longer raises ValueError.
         assert srv_with_layers.reject_proposal(pid)
-

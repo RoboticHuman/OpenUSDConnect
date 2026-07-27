@@ -24,6 +24,7 @@ from ..framing import (
     recv_framed_rfile,
 )
 from ..protocol_constants import (
+    COMPOSED_PROJECTION_KINDS,
     K_LOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
     MSG_EVENT,
@@ -46,6 +47,23 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 _SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
+
+
+def _flush_changed_records(
+    sync_server: UsdSyncServer,
+    records: list[dict],
+    encoded: list[bytes],
+    origin: str | None,
+) -> None:
+    if not records:
+        return
+    sync_server.broadcast_bytes(
+        frame_batch(encoded),
+        records,
+        exclude_origin=origin,
+    )
+    records.clear()
+    encoded.clear()
 
 
 class ConnectionHandler(socketserver.StreamRequestHandler):
@@ -297,32 +315,50 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     layer=self._client_layer,
                 )
 
-                # Broadcast changed events; send corrections for overridden ones.
+                # Broadcast changed events; send corrections for overridden
+                # ones. Flush changed records before a correction so every
+                # receiver observes monotonically ordered sequence numbers.
                 changed_records = []
                 changed_bins = []
+
                 for i, (rec, rec_bin) in enumerate(records):
                     if i in changed_set:
                         changed_records.append(rec)
                         changed_bins.append(rec_bin)
                     else:
+                        _flush_changed_records(
+                            sync_server,
+                            changed_records,
+                            changed_bins,
+                            self._origin,
+                        )
                         correction = sync_server.build_correction(events[i])
                         if correction:
                             correction_rec = {
                                 "type": MSG_EVENT,
-                                "seq": sync_server.assign_seq(),
+                                # The correction is the flat-receiver view of
+                                # this persisted opinion, not a new authored
+                                # event. Reuse its sequence so reconnect does
+                                # not request a non-existent log position.
+                                "seq": rec["seq"],
                                 "event": correction,
                             }
-                            sync_server.send_to_origin(
-                                correction_rec,
-                                self._origin,
-                            )
-                if changed_records:
-                    payload = frame_batch(changed_bins)
-                    sync_server.broadcast_bytes(
-                        payload,
-                        changed_records,
-                        exclude_origin=self._origin,
-                    )
+                            if self._origin:
+                                sync_server.send_to_origin(
+                                    correction_rec,
+                                    self._origin,
+                                )
+                            if events[i].get("k") in COMPOSED_PROJECTION_KINDS:
+                                sync_server.broadcast(
+                                    correction_rec,
+                                    exclude_origin=self._origin,
+                                )
+                _flush_changed_records(
+                    sync_server,
+                    changed_records,
+                    changed_bins,
+                    self._origin,
+                )
 
                 # After load_payload, re-broadcast latest child state so
                 # receivers re-apply authoritative TRS after re-import. Kept

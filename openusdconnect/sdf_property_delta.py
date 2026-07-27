@@ -90,6 +90,32 @@ def _copy_field(target_spec, source_spec, field: str) -> None:
         _clear_field(target_spec, field)
 
 
+def _set_composed_field(spec, field: str, value) -> None:
+    if field == "timeSamples" and isinstance(spec, Sdf.AttributeSpec):
+        _clear_field(spec, field)
+        for time, sample in value.items():
+            spec.SetTimeSample(float(time), sample)
+        return
+    if field == "connectionPaths" and isinstance(spec, Sdf.AttributeSpec):
+        _copy_path_list(spec.connectionPathList, value)
+        return
+    if field == "targetPaths" and isinstance(spec, Sdf.RelationshipSpec):
+        _copy_path_list(spec.targetPathList, value)
+        return
+    spec.SetInfo(field, value)
+
+
+def _composed_declaration_value(prop: Usd.Property, field: str):
+    if field == "custom":
+        return prop.IsCustom()
+    if isinstance(prop, Usd.Attribute):
+        if field == "typeName":
+            return prop.GetTypeName()
+        if field == "variability":
+            return prop.GetVariability()
+    return prop.GetMetadata(field)
+
+
 def _retain_fields(spec, fields) -> None:
     keep = _DECLARATION_FIELDS | set(fields)
     for key in tuple(spec.ListInfoKeys()):
@@ -121,6 +147,80 @@ def serialize_property_spec_fields(
         return scratch.ExportToString()
     finally:
         scratch.Clear()
+
+
+def serialize_composed_property_spec_fields(
+    stage: Usd.Stage,
+    event_path: str | Sdf.Path,
+    fields: set[str] | frozenset[str] | list[str] | tuple[str, ...],
+) -> str | None:
+    """Serialize the composed values of selected fields on one property.
+
+    Department-layer receivers currently maintain a flat projection of the
+    server stage.  When an authored opinion loses strength or is cleared, that
+    projection needs the resulting composed fields rather than the losing local
+    fragment. USD property APIs perform the required declaration, dictionary,
+    and path-list field composition.
+
+    Returns ``None`` when no authored property spec contributes at
+    ``event_path``; callers represent that state with a removed-property event.
+    """
+    event_path = _property_path(event_path)
+    prop = stage.GetPropertyAtPath(event_path)
+    if not prop or not prop.IsValid():
+        return None
+    stack = prop.GetPropertyStack()
+    if not stack:
+        return None
+
+    selected = set(fields)
+    scratch = _scratch_layer("compose")
+    try:
+        source_spec = stack[0]
+        Sdf.CreatePrimInLayer(scratch, event_path.GetPrimPath())
+        if not Sdf.CopySpec(
+            source_spec.layer,
+            source_spec.path,
+            scratch,
+            event_path,
+        ):
+            raise RuntimeError(f"failed to copy composed property spec {event_path}")
+
+        spec = scratch.GetPropertyAtPath(event_path)
+        _retain_fields(spec, selected)
+        declaration_fields = _DECLARATION_FIELDS & {str(key) for key in spec.ListInfoKeys()}
+        for field in declaration_fields:
+            value = _composed_declaration_value(prop, field)
+            if spec.GetInfo(field) != value:
+                _set_composed_field(spec, field, value)
+        for field in selected - declaration_fields:
+            if prop.HasAuthoredMetadata(field):
+                _set_composed_field(spec, field, prop.GetMetadata(field))
+            else:
+                _clear_field(spec, field)
+        return scratch.ExportToString()
+    finally:
+        scratch.Clear()
+
+
+def composed_property_spec_event(stage: Usd.Stage, event: dict) -> dict:
+    """Build a flat-projection event for the property's composed state."""
+    path = _property_path(event["spec_path"])
+    fields = set(str(field) for field in event.get("fields", ()))
+    prop = stage.GetPropertyAtPath(path)
+    if prop and prop.IsValid() and event.get("removed", False):
+        for spec in prop.GetPropertyStack():
+            fields.update(str(key) for key in spec.ListInfoKeys())
+
+    fragment = serialize_composed_property_spec_fields(stage, path, fields)
+    return {
+        "k": event["k"],
+        "prim": event["prim"],
+        "spec_path": str(path),
+        "fields": sorted(fields),
+        "fragment": fragment or "",
+        "removed": fragment is None,
+    }
 
 
 def fragment_authored_fields(fragment: str, spec_path: str | Sdf.Path) -> set[str]:
@@ -226,3 +326,13 @@ def merge_property_spec_events(previous: dict, current: dict) -> dict:
         old_layer.Clear()
         new_layer.Clear()
         output.Clear()
+
+
+__all__ = [
+    "apply_property_spec_delta",
+    "composed_property_spec_event",
+    "fragment_authored_fields",
+    "merge_property_spec_events",
+    "serialize_composed_property_spec_fields",
+    "serialize_property_spec_fields",
+]
