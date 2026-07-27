@@ -15,23 +15,34 @@
 #include "EngineUtils.h"
 #include "Logging/LogMacros.h"
 #include "Stats/Stats.h"
+#include "Async/Async.h"
 #include "Misc/Guid.h"
 #include "Misc/App.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/Crc.h"
 #include "HAL/PlatformProcess.h"
+#include <cstdint>
+
+#if WITH_EDITOR
+#include "ScopedTransaction.h"
+#endif
 
 #if USE_USD_SDK
 #include "USDIncludesStart.h"
+#include "pxr/base/vt/dictionary.h"
 #include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformOp.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdShade/connectableAPI.h"
+#include "pxr/usd/usdShade/material.h"
 #include "pxr/usd/usdShade/shader.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -56,6 +67,117 @@ DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenU
 // Helpers to read TRS/visibility from the pxr stage
 // ---------------------------------------------------------------------------
 #if USE_USD_SDK
+struct FLiveOpenMetadata
+{
+	FString LayerIdentifier;
+	FString Host;
+	int32 Port = 0;
+	int32 SnapshotSeq = 0;
+	int32 ProtocolVersion = 0;
+	int32 Epoch = 0;
+	FString SceneId;
+	FString VfsUrl;
+	bool bRequiresToken = false;
+
+	FString MakeKey() const
+	{
+		return FString::Printf(TEXT("%s|%s|%d|%d|%d"),
+			*LayerIdentifier, *Host, Port, Epoch, SnapshotSeq);
+	}
+};
+
+static bool TryGetLiveDictString(const pxr::VtDictionary& Dict, const char* Key, FString& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (!Value.IsHolding<std::string>()) return false;
+	Out = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
+	return true;
+}
+
+static bool TryGetLiveDictBool(const pxr::VtDictionary& Dict, const char* Key, bool& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (!Value.IsHolding<bool>()) return false;
+	Out = Value.UncheckedGet<bool>();
+	return true;
+}
+
+static bool TryGetLiveDictInt(const pxr::VtDictionary& Dict, const char* Key, int32& Out)
+{
+	const auto It = Dict.find(Key);
+	if (It == Dict.end()) return false;
+	const pxr::VtValue& Value = It->second;
+	if (Value.IsHolding<int>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<int>());
+		return true;
+	}
+	if (Value.IsHolding<int64_t>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<int64_t>());
+		return true;
+	}
+	if (Value.IsHolding<unsigned int>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<unsigned int>());
+		return true;
+	}
+	if (Value.IsHolding<uint64_t>())
+	{
+		Out = static_cast<int32>(Value.UncheckedGet<uint64_t>());
+		return true;
+	}
+	return false;
+}
+
+static bool TryReadLiveOpenMetadata(AUsdStageActor* StageActor, FLiveOpenMetadata& Out)
+{
+	if (!StageActor || !IsValid(StageActor)) return false;
+
+	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
+		StageActor->GetOrOpenUsdStage());
+	if (!PxrStage) return false;
+
+	pxr::SdfLayerHandle RootLayer = PxrStage->GetRootLayer();
+	if (!RootLayer) return false;
+
+	pxr::VtDictionary CustomData = RootLayer->GetCustomLayerData();
+	const auto MetaIt = CustomData.find("openusdconnect");
+	if (MetaIt == CustomData.end()) return false;
+
+	const pxr::VtValue& MetaValue = MetaIt->second;
+	if (!MetaValue.IsHolding<pxr::VtDictionary>()) return false;
+
+	const pxr::VtDictionary& Meta = MetaValue.UncheckedGet<pxr::VtDictionary>();
+	bool bLive = false;
+	if (!TryGetLiveDictBool(Meta, "live", bLive) || !bLive) return false;
+
+	FLiveOpenMetadata Candidate;
+	Candidate.LayerIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
+	TryGetLiveDictString(Meta, "host", Candidate.Host);
+	TryGetLiveDictInt(Meta, "port", Candidate.Port);
+	TryGetLiveDictInt(Meta, "snapshot_seq", Candidate.SnapshotSeq);
+	TryGetLiveDictInt(Meta, "protocol_version", Candidate.ProtocolVersion);
+	TryGetLiveDictInt(Meta, "epoch", Candidate.Epoch);
+	TryGetLiveDictString(Meta, "scene_id", Candidate.SceneId);
+	TryGetLiveDictString(Meta, "vfs_url", Candidate.VfsUrl);
+	TryGetLiveDictBool(Meta, "requires_token", Candidate.bRequiresToken);
+
+	if (Candidate.Host.IsEmpty() || Candidate.Port < 1 || Candidate.Port > 65535)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Warning,
+			TEXT("OpenUSDConnect live metadata is present but has no valid host/port"));
+		return false;
+	}
+
+	Out = Candidate;
+	return true;
+}
+
 static bool ReadXformTrs(
 	pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitXformTrs& OutTrs,
 	bool* bOutFromMatrixOp = nullptr)
@@ -328,6 +450,17 @@ static bool ReadVisibility(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, 
 }
 #endif // USE_USD_SDK
 
+static const TCHAR* OUCAuthConfigSection = TEXT("OpenUSDConnect.Tokens");
+
+static FString MakeAuthConfigKey(const FString& Host, int32 Port, const FString& Department)
+{
+	FString Key = FString::Printf(TEXT("%s:%d:%s"), *Host, Port, *Department);
+	Key.ReplaceInline(TEXT("\\"), TEXT("_"));
+	Key.ReplaceInline(TEXT("/"), TEXT("_"));
+	Key.ReplaceInline(TEXT(" "), TEXT("_"));
+	return Key;
+}
+
 // ---------------------------------------------------------------------------
 // UWorldSubsystem lifecycle
 // ---------------------------------------------------------------------------
@@ -367,46 +500,345 @@ void UUSDConnectSubsystem::Deinitialize()
 
 void UUSDConnectSubsystem::Connect()
 {
-	if (SyncClient)
+	ConnectResolved(false);
+}
+
+void UUSDConnectSubsystem::StopClients()
+{
+	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
+	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+
+	{
+		FScopeLock Lock(&EventQueueCS);
+		EventQueue.Reset();
+	}
+
+	ActiveServerHost.Empty();
+	ActiveServerPort = 0;
+	bActiveReceiverStarted = false;
+	bActiveEmitterStarted = false;
+	bActiveUsingLiveMetadata = false;
+	bDeferredEmitterForToken = false;
+	ActiveSnapshotSeq = 0;
+	ActiveAuthToken.Empty();
+}
+
+void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
+{
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (!Settings) return;
+
+	FString TargetHost = Settings->ServerHost;
+	int32 TargetPort = Settings->ServerPort;
+	int32 ReceiverInitialLastSeq = 0;
+	bool bStartReceiver = true;
+	bool bStartEmitter = true;
+	bool bUsingLiveMetadata = false;
+	bool bTargetRequiresToken = false;
+
+#if USE_USD_SDK
+	if (Settings->bUseLiveMetadataFromStage)
+	{
+		if (AUsdStageActor* StageActor = CachedStageActor.Get())
+		{
+			FLiveOpenMetadata Metadata;
+			if (TryReadLiveOpenMetadata(StageActor, Metadata))
+			{
+				TargetHost = Metadata.Host;
+				TargetPort = Metadata.Port;
+				ReceiverInitialLastSeq = FMath::Max(0, Metadata.SnapshotSeq);
+				bUsingLiveMetadata = true;
+				bTargetRequiresToken = Metadata.bRequiresToken;
+				if (bRespectLiveMetadataAutoStart)
+				{
+					bStartReceiver = Settings->bAutoStartReceiverFromLiveMetadata;
+					bStartEmitter = Settings->bAutoStartEmitterFromLiveMetadata;
+				}
+			}
+		}
+	}
+#endif
+
+	const FString TargetToken = Settings->bPersistAuthTokens
+		? LoadAuthToken(TargetHost, TargetPort, Settings->Department)
+		: FString();
+	const bool bDelayEmitterForToken =
+		bTargetRequiresToken && TargetToken.IsEmpty() && bStartReceiver && bStartEmitter;
+
+	if (!bStartReceiver && !bStartEmitter)
+	{
+		StopClients();
+		ActiveServerHost = TargetHost;
+		ActiveServerPort = TargetPort;
+		bActiveUsingLiveMetadata = bUsingLiveMetadata;
+		ActiveSnapshotSeq = ReceiverInitialLastSeq;
+		ActiveAuthToken = TargetToken;
+		SetStatusMessage(
+			bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
+			TEXT("Live metadata configured; auto-start disabled"));
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("OpenUSDConnect live metadata configured %s:%d, auto-start disabled"),
+			*TargetHost, TargetPort);
+		return;
+	}
+
+	if ((SyncClient || EmitClient) &&
+		ActiveServerHost == TargetHost &&
+		ActiveServerPort == TargetPort &&
+		bActiveReceiverStarted == bStartReceiver &&
+		bActiveEmitterStarted == bStartEmitter)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Warning, TEXT("Already connected"));
+		return;
+	}
+
+	StopClients();
+
+	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"),
+		*TargetHost, TargetPort, *ClientId);
+	if (bUsingLiveMetadata)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("Using USD live metadata; receiver will sync from seq=%d"),
+			ReceiverInitialLastSeq + 1);
+	}
+
+	ActiveServerHost = TargetHost;
+	ActiveServerPort = TargetPort;
+	bActiveReceiverStarted = false;
+	bActiveEmitterStarted = false;
+	bActiveUsingLiveMetadata = bUsingLiveMetadata;
+	bDeferredEmitterForToken = bDelayEmitterForToken;
+	ActiveSnapshotSeq = ReceiverInitialLastSeq;
+	ActiveAuthToken = TargetToken;
+	SetStatusMessage(
+		bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required") : TEXT("connecting"),
+		bDelayEmitterForToken
+			? TEXT("Starting receiver first to obtain auth token")
+			: TEXT("Connecting receiver/emitter"));
+
+	if (bStartReceiver)
+	{
+		SyncClient = MakeShared<FSyncClient>(
+			this, TargetHost, TargetPort,
+			Settings->Department, ClientId, SessionOrigin,
+			Settings->ReconnectDelaySecs, ReceiverInitialLastSeq, TargetToken);
+		if (SyncClient->Start()) { bActiveReceiverStarted = true; }
+		else { SyncClient.Reset(); }
+	}
+
+	if (bStartEmitter && !bDelayEmitterForToken)
+	{
+		EmitClient = MakeShared<FEmitClient>(
+			this, TargetHost, TargetPort,
+			Settings->Department, ClientId, SessionOrigin,
+			Settings->ReconnectDelaySecs, TargetToken);
+		if (EmitClient->Start()) { bActiveEmitterStarted = true; }
+		else { EmitClient.Reset(); }
+	}
+}
+
+void UUSDConnectSubsystem::TryStartDeferredEmitter()
+{
+	if (!bDeferredEmitterForToken || EmitClient || ActiveServerHost.IsEmpty() || ActiveServerPort <= 0)
+	{
 		return;
 	}
 
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
 	if (!Settings) return;
 
-	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"),
-		*Settings->ServerHost, Settings->ServerPort, *ClientId);
+	FString Token = ActiveAuthToken;
+	if (Token.IsEmpty() && Settings->bPersistAuthTokens)
+	{
+		Token = LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department);
+		ActiveAuthToken = Token;
+	}
+	if (Token.IsEmpty()) return;
 
-	// Both threads share the same ClientId and SessionOrigin.
-	// The server uses origin to route corrections; we use it to suppress echo.
-	SyncClient = MakeShared<FSyncClient>(
-		this, Settings->ServerHost, Settings->ServerPort,
-		Settings->Department, ClientId, SessionOrigin,
-		Settings->ReconnectDelaySecs);
-	if (!SyncClient->Start()) { SyncClient.Reset(); return; }
-
-	// Emitter thread — shares the same ClientId/SessionOrigin so the server
-	// can correlate the two connections to the same logical client
+	bDeferredEmitterForToken = false;
 	EmitClient = MakeShared<FEmitClient>(
-		Settings->ServerHost, Settings->ServerPort,
+		this, ActiveServerHost, ActiveServerPort,
 		Settings->Department, ClientId, SessionOrigin,
-		Settings->ReconnectDelaySecs);
-	if (!EmitClient->Start()) { EmitClient.Reset(); }
+		Settings->ReconnectDelaySecs, Token);
+	if (EmitClient->Start())
+	{
+		bActiveEmitterStarted = true;
+		SetStatusMessage(TEXT("connected"), TEXT("Auth token available; emitter started"));
+	}
+	else
+	{
+		EmitClient.Reset();
+		SetStatusMessage(TEXT("error"), TEXT("Failed to start deferred emitter"));
+	}
 }
 
 void UUSDConnectSubsystem::Disconnect()
 {
 	DetachFromStageActor();
-	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
-	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+	StopClients();
 	CachedStageActor = nullptr;
+	LastLiveMetadataKey.Empty();
+	SetStatusMessage(TEXT("not_connected"), TEXT("Disconnected"));
+}
+
+void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
+{
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	if (!Settings || !Settings->bUseLiveMetadataFromStage) return;
+
+#if USE_USD_SDK
+	FLiveOpenMetadata Metadata;
+	if (!TryReadLiveOpenMetadata(Actor, Metadata)) return;
+
+	const FString MetadataKey = Metadata.MakeKey();
+	if (MetadataKey == LastLiveMetadataKey) return;
+
+	LastLiveMetadataKey = MetadataKey;
+	UE_LOG(LogUSDConnectSubsystem, Log,
+		TEXT("Detected OpenUSDConnect live metadata on stage: %s:%d snapshot_seq=%d vfs_url=%s"),
+		*Metadata.Host, Metadata.Port, Metadata.SnapshotSeq, *Metadata.VfsUrl);
+
+	if (Settings->bAutoConnect)
+	{
+		bPendingAutoConnect = false;
+		ConnectResolved(true);
+	}
+#else
+	(void)Actor;
+#endif
 }
 
 bool UUSDConnectSubsystem::IsConnected() const
 {
 	return SyncClient && SyncClient->IsConnected();
+}
+
+FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
+{
+	FUSDConnectStatus Status;
+	Status.EndpointHost = ActiveServerHost;
+	Status.EndpointPort = ActiveServerPort;
+	Status.bUsingLiveMetadata = bActiveUsingLiveMetadata;
+	Status.SnapshotSeq = ActiveSnapshotSeq;
+	Status.bReceiverStarted = bActiveReceiverStarted;
+	Status.bReceiverConnected = SyncClient && SyncClient->IsConnected();
+	Status.bEmitterStarted = bActiveEmitterStarted;
+	Status.bEmitterConnected = EmitClient && EmitClient->IsConnected();
+	{
+		FScopeLock Lock(&StatusCS);
+		Status.AuthState = LastAuthState;
+		Status.LastMessage = LastStatusMessage;
+	}
+	return Status;
+}
+
+FString UUSDConnectSubsystem::LoadAuthToken(
+	const FString& Host,
+	int32 Port,
+	const FString& Department) const
+{
+	FString Token;
+	if (GConfig)
+	{
+		GConfig->GetString(
+			OUCAuthConfigSection,
+			*MakeAuthConfigKey(Host, Port, Department),
+			Token,
+			GGameUserSettingsIni);
+	}
+	return Token;
+}
+
+void UUSDConnectSubsystem::SaveAuthToken(
+	const FString& Host,
+	int32 Port,
+	const FString& Department,
+	const FString& Token) const
+{
+	if (!GConfig || Token.IsEmpty()) return;
+	GConfig->SetString(
+		OUCAuthConfigSection,
+		*MakeAuthConfigKey(Host, Port, Department),
+		*Token,
+		GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+}
+
+void UUSDConnectSubsystem::SetStatusMessage(const FString& AuthState, const FString& Message)
+{
+	FScopeLock Lock(&StatusCS);
+	LastAuthState = AuthState;
+	LastStatusMessage = Message;
+}
+
+void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Token]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientTokenIssued(Token);
+			}
+		});
+		return;
+	}
+
+	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+	ActiveAuthToken = Token;
+	bool bPersisted = false;
+	if (Settings && Settings->bPersistAuthTokens)
+	{
+		SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department, Token);
+		bPersisted = true;
+	}
+	SetStatusMessage(
+		bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
+		bPersisted ? TEXT("Auth token issued and saved") : TEXT("Auth token issued for this session"));
+	if (bDeferredEmitterForToken)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			TEXT("Auth token issued; emitter will start on the next tick"));
+	}
+}
+
+void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientHelloOk(Role);
+			}
+		});
+		return;
+	}
+
+	SetStatusMessage(TEXT("connected"), FString::Printf(TEXT("%s connected"), *Role));
+}
+
+void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientAuthRejected(Role);
+			}
+		});
+		return;
+	}
+
+	SetStatusMessage(TEXT("auth_rejected"), FString::Printf(TEXT("%s auth rejected"), *Role));
 }
 
 void UUSDConnectSubsystem::EnqueueEvent(TArray<uint8>&& RawBytes)
@@ -437,13 +869,6 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	// Perform deferred auto-connect on the first safe tick.
-	if (bPendingAutoConnect)
-	{
-		bPendingAutoConnect = false;
-		Connect();
-	}
-
 	// Attach to stage actor if not already done (handles late spawning / PIE).
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
@@ -454,11 +879,26 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 			AttachToStageActor(StageActor);
 		}
 	}
+	if (StageActor)
+	{
+		RefreshLiveMetadataFromStage(StageActor);
+		QueueInitialMaterializations(StageActor);
+	}
+
+	// Perform deferred auto-connect after stage metadata has had a chance to
+	// override the project-default endpoint.
+	if (bPendingAutoConnect)
+	{
+		bPendingAutoConnect = false;
+		ConnectResolved(true);
+	}
 
 	if (!EventQueue.IsEmpty())
 	{
 		DrainAndApply();
 	}
+
+	TryStartDeferredEmitter();
 
 	// Emit any user edits captured by the USD notice listener since last tick.
 	DrainAndEmit();
@@ -557,6 +997,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 	}
 
 	CachedStageActor = nullptr;
+	LastMaterializedRootLayerIdentifier.Empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -819,6 +1260,81 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 // Materialization (local .mtlx documents for MaterialX rendering)
 // ---------------------------------------------------------------------------
 
+void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
+{
+#if USE_USD_SDK
+	if (!Actor || !IsValid(Actor))
+	{
+		return;
+	}
+
+	pxr::UsdStageRefPtr Stage = static_cast<pxr::UsdStageRefPtr>(Actor->GetOrOpenUsdStage());
+	if (!Stage)
+	{
+		return;
+	}
+
+	pxr::SdfLayerHandle RootLayer = Stage->GetRootLayer();
+	if (!RootLayer)
+	{
+		return;
+	}
+
+	const FString RootIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
+	if (RootIdentifier.IsEmpty() || RootIdentifier == LastMaterializedRootLayerIdentifier)
+	{
+		return;
+	}
+
+	TArray<FString> Materials;
+	for (const pxr::UsdPrim& Prim : Stage->Traverse())
+	{
+		const pxr::UsdShadeMaterial Material(Prim);
+		if (Material && Material.GetSurfaceOutput(pxr::TfToken("mtlx")))
+		{
+			Materials.Add(UTF8_TO_TCHAR(Prim.GetPath().GetText()));
+		}
+	}
+	LastMaterializedRootLayerIdentifier = RootIdentifier;
+
+	if (Materials.IsEmpty())
+	{
+		return;
+	}
+
+	int32 Changed = 0;
+	bSuppressEmit.store(true);
+	{
+#if WITH_EDITOR
+		const FScopedTransaction Transaction(
+			NSLOCTEXT("OpenUSDConnect", "InitialMaterialXRefresh", "Prepare live MaterialX materials"));
+#endif
+
+		for (const FString& Material : Materials)
+		{
+			if (FUSDMaterialXMaterializer::MaterializeMaterial(Actor, Material))
+			{
+				++Changed;
+			}
+		}
+	}
+
+	const FName MaterialXRenderContext(TEXT("mtlx"));
+	const bool bChangedRenderContext = Actor->RenderContext != MaterialXRenderContext;
+	if (bChangedRenderContext)
+	{
+		// The materialization transaction has ended, so its accumulated USD
+		// notices are fully processed before SetRenderContext reloads the stage.
+		Actor->SetRenderContext(MaterialXRenderContext);
+	}
+	bSuppressEmit.store(false);
+
+	UE_LOG(LogUSDConnectSubsystem, Log,
+		TEXT("Initial OpenUSDConnect MaterialX refresh scanned %d material(s), updated %d, render_context=%s"),
+		Materials.Num(), Changed, bChangedRenderContext ? TEXT("mtlx (selected)") : TEXT("mtlx"));
+#endif
+}
+
 void UUSDConnectSubsystem::ProcessPendingMaterializations()
 {
 	if (PendingMaterializePrims.IsEmpty())
@@ -845,6 +1361,16 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 			Materials.Add(MoveTemp(Material));
 		}
 	}
+	if (Materials.IsEmpty())
+	{
+		return;
+	}
+
+	{
+#if WITH_EDITOR
+	const FScopedTransaction Transaction(
+		NSLOCTEXT("OpenUSDConnect", "LiveMaterialXRefresh", "Refresh live MaterialX materials"));
+#endif
 
 	// The session-layer authoring below fires stage notices; suppress our own
 	// listener so they don't loop back into the emit path. The stage actor's
@@ -853,6 +1379,7 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 	for (const FString& Material : Materials)
 	{
 		FUSDMaterialXMaterializer::MaterializeMaterial(StageActor, Material);
+	}
 	}
 	bSuppressEmit.store(false);
 }

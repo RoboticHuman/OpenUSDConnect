@@ -3,6 +3,7 @@
 #include "EmitClient.h"
 
 #include "USDConnectProtocol.h"
+#include "USDConnectSubsystem.h"
 #include "USDWireFraming.h"
 
 #include "Logging/LogMacros.h"
@@ -17,13 +18,15 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDEmit, Log, All);
 using namespace OUC;
 
 // ---------------------------------------------------------------------------
-FEmitClient::FEmitClient(const FString& InHost, int32 InPort,
+FEmitClient::FEmitClient(UUSDConnectSubsystem* InOwner,
+                         const FString& InHost, int32 InPort,
                          const FString& InDepartment,
                          const FString& InClientId,
                          const FString& InSessionOrigin,
-                         float InReconnectDelaySecs)
-	: Host(InHost), Port(InPort), Department(InDepartment)
-	, ClientId(InClientId), SessionOrigin(InSessionOrigin)
+                         float InReconnectDelaySecs,
+                         const FString& InAuthToken)
+	: Owner(InOwner), Host(InHost), Port(InPort), Department(InDepartment)
+	, ClientId(InClientId), SessionOrigin(InSessionOrigin), AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
 	, Socket(nullptr), Thread(nullptr)
 	, bShouldStop(false), bConnected(false)
@@ -78,7 +81,7 @@ uint32 FEmitClient::Run()
 
 		// --- Send HELLO as emitter ---
 		TArray<uint8> HelloFrame =
-			OUC::BuildHelloFrame(TEXT("emitter"), 0, ClientId, SessionOrigin, Department);
+			OUC::BuildHelloFrame(TEXT("emitter"), 0, ClientId, SessionOrigin, Department, AuthToken);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			CloseSocket();
@@ -100,6 +103,7 @@ uint32 FEmitClient::Run()
 			if (PType == OpenUSDConnect::Payload::AuthRejected)
 			{
 				UE_LOG(LogUSDEmit, Error, TEXT("Emitter auth rejected"));
+				if (Owner) { Owner->OnClientAuthRejected(TEXT("emitter")); }
 				CloseSocket();
 				return 0;
 			}
@@ -108,6 +112,15 @@ uint32 FEmitClient::Run()
 				CloseSocket();
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
 				continue;
+			}
+			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
+			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
+			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
+			if (Owner) { Owner->OnClientHelloOk(TEXT("emitter")); }
+			if (!IssuedToken.IsEmpty())
+			{
+				AuthToken = IssuedToken;
+				if (Owner) { Owner->OnClientTokenIssued(IssuedToken); }
 			}
 			UE_LOG(LogUSDEmit, Log, TEXT("Emitter HELLO_OK — ready to send"));
 		}

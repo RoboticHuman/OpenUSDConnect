@@ -12,6 +12,42 @@ class FSyncClient;
 class FEmitClient;
 class AUsdStageActor;
 
+USTRUCT(BlueprintType)
+struct OPENUSDCONNECT_API FUSDConnectStatus
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	FString EndpointHost;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int32 EndpointPort = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bUsingLiveMetadata = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int32 SnapshotSeq = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bReceiverStarted = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bReceiverConnected = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bEmitterStarted = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bEmitterConnected = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	FString AuthState;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	FString LastMessage;
+};
+
 /**
  * World subsystem that manages the OpenUSD Connect two-way sync.
  *
@@ -68,13 +104,34 @@ public:
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	bool IsConnected() const;
 
+	/** Runtime connection/auth status for UI panels or debugging widgets. */
+	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
+	FUSDConnectStatus GetStatus() const;
+
 	/** Called from FSyncClient background thread — pushes a raw BroadcastEvent frame */
 	void EnqueueEvent(TArray<uint8>&& RawBytes);
+
+	/** Called from client background threads when the server issues a TOFU token. */
+	void OnClientTokenIssued(const FString& Token);
+
+	/** Called from client background threads after HELLO_OK. */
+	void OnClientHelloOk(const FString& Role);
+
+	/** Called from client background threads when auth is rejected. */
+	void OnClientAuthRejected(const FString& Role);
 
 private:
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
+	void StopClients();
+	void ConnectResolved(bool bRespectLiveMetadataAutoStart);
+	void RefreshLiveMetadataFromStage(AUsdStageActor* Actor);
+	void TryStartDeferredEmitter();
+	void QueueInitialMaterializations(AUsdStageActor* Actor);
+	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
+	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department, const FString& Token) const;
+	void SetStatusMessage(const FString& AuthState, const FString& Message);
 
 	void DrainAndApply();
 
@@ -147,6 +204,26 @@ private:
 	 * shader inputs instead of the whole network.
 	 */
 	TMap<FString, TSet<FString>> PendingEmitInputs;
+
+	/** Active TCP endpoint for the currently running clients. */
+	FString ActiveServerHost;
+	int32 ActiveServerPort = 0;
+	bool bActiveReceiverStarted = false;
+	bool bActiveEmitterStarted = false;
+	bool bActiveUsingLiveMetadata = false;
+	bool bDeferredEmitterForToken = false;
+	int32 ActiveSnapshotSeq = 0;
+	FString ActiveAuthToken;
+
+	/** Last live metadata key seen on the attached stage root layer. */
+	FString LastLiveMetadataKey;
+
+	/** Root layer identifier last scanned for initial MaterialX materialization. */
+	FString LastMaterializedRootLayerIdentifier;
+
+	mutable FCriticalSection StatusCS;
+	FString LastAuthState = TEXT("not_connected");
+	FString LastStatusMessage;
 
 	/**
 	 * Prims whose material networks changed this tick (received events and

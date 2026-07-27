@@ -48,6 +48,7 @@ never echoes an event back to its origin.
 ### Sync server
 - Authoritative sequencer with atomic, ordered transactions
 - SQLite event log with late-join replay (sync from any sequence) and log compaction
+- WebDAV/UNC live-open endpoint that serves a normal-looking USD snapshot
 - Per-department shared layers with configurable strength ordering
 - Cross-department edit proposals (propose, approve, reject)
 - TOFU (trust-on-first-use) token authentication and per-client rate limiting
@@ -73,9 +74,9 @@ emit/receive event flow.
 
 | Integration | Direction | Notes |
 |---|---|---|
-| **Blender** | bidirectional | Emitter/receiver addon: live transform and material sync (UsdPreviewSurface, MaterialX), Y-up/Z-up conversion, depsgraph auto-tracking |
+| **Blender** | bidirectional | Emitter/receiver addon: live transform and material sync (UsdPreviewSurface, MaterialX), Y-up/Z-up conversion, depsgraph auto-tracking, live-open metadata auto-connect |
 | **usdview** | receive | Live viewer plugin and launcher; RenderMan-safe (Sdr plugin bootstrap) with OpenPBR to standard_surface translation for hdPrman |
-| **Unreal Engine** | bidirectional | Transform/visibility emit; receive-side composition arcs, variants, bindings, and shader networks via `USDStageActor` |
+| **Unreal Engine** | bidirectional | Transform/visibility emit; receive-side composition arcs, variants, bindings, shader networks, and live-open metadata via `USDStageActor` |
 | **MCP server** | author + introspect | Exposes the event protocol as Model Context Protocol tools so an LLM (e.g. Claude) can author USD and inspect scenes |
 | **Dashboard** | admin | Web admin UI: status, client table, prim tree, event log |
 
@@ -103,7 +104,8 @@ git submodule update --init --recursive
   headless use, provided by the DCC for integrations, or by `usd-core` in Docker
 
 Optional features are opt-in dependency groups: `server` (headless `pxr`),
-`dashboard`, `mcp`, `dev` (tests and lint), `profile`.
+`vfs` (WebDAV live-open), `dashboard`, `mcp`, `dev` (tests and lint),
+`profile`.
 
 ### Run the sync server
 ```bash
@@ -112,6 +114,10 @@ uv sync --group server
 
 # Start the server
 uv run openusdconnect-server --port 7200 --base scene.usda
+
+# Serve a browsable live-open snapshot at http://127.0.0.1:7280/usd/scene.usd
+uv sync --group server --group vfs
+uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
 
 # With the admin dashboard (uv sync --group dashboard)
 uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
@@ -128,6 +134,28 @@ launch through the renderer-safe wrapper so the Sdr registry can load its plugin
 uv run python -m integrations.run_server --port 7200 --base scene.usda
 ```
 
+### Live-open VFS
+The VFS endpoint exposes a small virtual directory with `scene.usd` as a
+flattened snapshot and `scene.live.usda` as the composition root. Both contain
+`customLayerData["openusdconnect"]` so plugin-enabled DCCs can import/open the
+file normally, read the live endpoint metadata, and start from the snapshot
+sequence instead of replaying old events.
+
+```powershell
+# Windows WebDAV/UNC form
+\\127.0.0.1@7280\usd\scene.usd
+
+# Map a drive if the Windows WebClient service is available
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+
+# No-admin local bridge: server + VFS + O: drive helper
+uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --force
+```
+
+For write fallback, start the server with `--vfs-write-mode translate`. Full-file
+USD saves are validated by default, rejected when stale or invalid, and converted
+to live events when safe.
+
 ### Docker
 
 The server image uses [`usd-core`](https://pypi.org/project/usd-core/) from PyPI
@@ -138,14 +166,14 @@ for headless OpenUSD support.
 docker build -t openusdconnect-server .
 
 # Run the server
-docker run -p 7200:7200 -v ./scenes:/scenes \
-  openusdconnect-server --port 7200 --base /scenes/scene.usda
+docker run -p 7200:7200 -p 7280:7280 -v ./scenes:/scenes \
+  openusdconnect-server --port 7200 --base /scenes/scene.usda --vfs-port 7280
 
 # Build and run with dashboard support
 docker build --build-arg DASHBOARD=1 -t openusdconnect-server:dashboard .
-docker run -p 7200:7200 -p 8080:8080 -v ./scenes:/scenes \
+docker run -p 7200:7200 -p 7280:7280 -p 8080:8080 -v ./scenes:/scenes \
   openusdconnect-server:dashboard \
-  --port 7200 --base /scenes/scene.usda --dashboard 8080
+  --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard 8080
 ```
 
 Or using Docker Compose:
@@ -162,6 +190,11 @@ uv run python scripts/build_blender_addon.py
 Install the output zip (`dist/usd_connect_blender.zip`) in Blender via
 **Edit > Preferences > Add-ons > Install from Disk**.
 
+For seamless live-open, import `\\127.0.0.1@7280\usd\scene.usd` or
+`O:\scene.usd` with **Import USD (with Prim Tagging)**. The addon reads embedded
+metadata and can auto-start receiver/emitter when the import-panel options are
+enabled.
+
 ### usdview
 ```bash
 uv run python -m integrations.usdview.launcher scene.usda --port 7200
@@ -172,6 +205,8 @@ uv run python -m integrations.usdview.launcher scene.usda --port 7200
 The Unreal integration is a UE5 plugin (with a Python launcher for live edits).
 Requirements, installation, and the two-way sync walkthrough are in the
 [Unreal plugin README](integrations/unreal/OpenUSDConnect/README.md).
+The plugin can also open the VFS snapshot in USD Stage and use its embedded
+metadata for host, port, receiver replay position, and persisted TOFU token reuse.
 
 ### MCP server (LLM authoring)
 ```bash
@@ -183,6 +218,7 @@ running sync server. See [MCP Server Usage](docs/mcp-server-usage.md).
 
 ## Documentation
 - [Blender Addon Usage](docs/blender-addon-usage.md): installation, UI overview, live-sync walkthrough
+- [Live-Open Quickstart](docs/live-open-quickstart.md): WebDAV/UNC live-open and metadata sync
 - [Live Material Editing](docs/live-material-editing.md): material and shader synchronization
 - [Unreal Engine Plugin](integrations/unreal/OpenUSDConnect/README.md): UE5 plugin requirements, install, two-way sync
 - [MCP Server Usage](docs/mcp-server-usage.md): tools, configuration, Claude client setup

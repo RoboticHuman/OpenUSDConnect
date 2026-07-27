@@ -737,7 +737,12 @@ class BlenderAdapter(DCCAdapter):
             else:
                 recipient.data.materials[0] = mat
         self._remove_unused_material_duplicates(mat, material_path)
-        LOG.info("set_material_binding: %s -> %s (%d objects)", prim_path, mat.name, len(recipients))
+        LOG.info(
+            "set_material_binding: %s -> %s (%d objects)",
+            prim_path,
+            mat.name,
+            len(recipients),
+        )
         return True
 
     def _has_own_binding(self, prim_path: str | None) -> bool:

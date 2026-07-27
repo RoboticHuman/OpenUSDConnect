@@ -26,13 +26,14 @@ namespace OUC
 	// Build a complete framed Envelope{Hello} message.
 	//   Role     = "receiver" or "emitter"
 	//   SyncFrom = receiver-side resume point (0 = full replay; emitters pass 0)
-	// TODO(auth): plumb a token here once HelloOk.token is persisted across reconnects.
+	//   Token    = saved TOFU auth token, or empty for first-connect issuance
 	inline TArray<uint8> BuildHelloFrame(
 		const FString& Role,
 		int32          SyncFrom,
 		const FString& ClientId,
 		const FString& SessionOrigin,
-		const FString& Department)
+		const FString& Department,
+		const FString& Token = FString())
 	{
 		flatbuffers::FlatBufferBuilder Builder(512);
 
@@ -44,7 +45,7 @@ namespace OUC
 			Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
 			Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin)),
 			Builder.CreateString(TCHAR_TO_UTF8(*Department)),
-			Builder.CreateString(""));	// empty token = first-connect TOFU
+			Builder.CreateString(TCHAR_TO_UTF8(*Token)));
 
 		Builder.Finish(OpenUSDConnect::CreateEnvelope(
 			Builder, OpenUSDConnect::Payload::Hello, Hello.Union()));

@@ -25,15 +25,18 @@ FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
                          const FString& InDepartment,
                          const FString& InClientId,
                          const FString& InSessionOrigin,
-                         float InReconnectDelaySecs)
+                         float InReconnectDelaySecs,
+                         int32 InInitialLastSeq,
+                         const FString& InAuthToken)
 	: Owner(InOwner)
 	, Host(InHost)
 	, Port(InPort)
 	, Department(InDepartment)
 	, ClientId(InClientId)
 	, SessionOrigin(InSessionOrigin)
+	, AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
-	, LastSeq(0)
+	, LastSeq(InInitialLastSeq)
 	, Socket(nullptr)
 	, Thread(nullptr)
 	, bShouldStop(false)
@@ -127,12 +130,14 @@ uint32 FSyncClient::Run()
 			continue;
 		}
 		bHasAnnouncedFailure = false;
-		UE_LOG(LogUSDConnect, Log,
-			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver)"), *Host, Port);
 
 		// --- Send HELLO ---
+		const int32 SyncFrom = LastSeq > 0 ? LastSeq + 1 : 1;
+		UE_LOG(LogUSDConnect, Log,
+			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"),
+			*Host, Port, SyncFrom);
 		TArray<uint8> HelloFrame =
-			OUC::BuildHelloFrame(TEXT("receiver"), LastSeq, ClientId, SessionOrigin, Department);
+			OUC::BuildHelloFrame(TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department, AuthToken);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to send HELLO"));
@@ -155,6 +160,7 @@ uint32 FSyncClient::Run()
 			if (PType == OpenUSDConnect::Payload::AuthRejected)
 			{
 				UE_LOG(LogUSDConnect, Error, TEXT("OpenUSDConnect: auth rejected by server"));
+				if (Owner) { Owner->OnClientAuthRejected(TEXT("receiver")); }
 				CloseSocket();
 				return 0;
 			}
@@ -165,6 +171,15 @@ uint32 FSyncClient::Run()
 				CloseSocket();
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
 				continue;
+			}
+			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
+			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
+			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
+			if (Owner) { Owner->OnClientHelloOk(TEXT("receiver")); }
+			if (!IssuedToken.IsEmpty())
+			{
+				AuthToken = IssuedToken;
+				if (Owner) { Owner->OnClientTokenIssued(IssuedToken); }
 			}
 			UE_LOG(LogUSDConnect, Log, TEXT("HELLO_OK received — entering receive loop"));
 		}

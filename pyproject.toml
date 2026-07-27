@@ -34,6 +34,10 @@ dashboard = [
 server = [
     "usd-core==26.3",
 ]
+vfs = [
+    "cheroot==10.0.1",
+    "wsgidav==4.3.3",
+]
 mcp = [
     "mcp>=1.2",
 ]
@@ -57,6 +61,7 @@ markers = [
 
 [project.scripts]
 openusdconnect-server = "openusdconnect.server:main"
+openusdconnect-mount-vfs = "openusdconnect.vfs_mount:main"
 
 # --- Ruff (linter + formatter) ---
 # Docs: https://docs.astral.sh/ruff/

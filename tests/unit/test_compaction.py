@@ -542,7 +542,7 @@ class TestCompactionReplayOrder:
         time — the contract strict sequential receivers rely on."""
         import pytest
 
-        pxr = pytest.importorskip("pxr")
+        pytest.importorskip("pxr")
         from pxr import Usd
 
         from openusdconnect.event_apply import apply_events

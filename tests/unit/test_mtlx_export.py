@@ -64,6 +64,11 @@ EVENTS = [
 ]
 
 
+def _require_usd_mtlx_file_format():
+    if Sdf.FileFormat.FindByExtension("mtlx", {"target": "usd"}) is None:
+        pytest.skip("usdMtlx file-format plugin is not registered in this OpenUSD runtime")
+
+
 def _authored_stage():
     stage = Usd.Stage.CreateInMemory()
     stage.DefinePrim("/World", "Xform")
@@ -72,6 +77,7 @@ def _authored_stage():
 
 
 def _roundtrip_material(doc: str, name: str):
+    _require_usd_mtlx_file_format()
     path = os.path.join(tempfile.mkdtemp(), "export.mtlx")
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)

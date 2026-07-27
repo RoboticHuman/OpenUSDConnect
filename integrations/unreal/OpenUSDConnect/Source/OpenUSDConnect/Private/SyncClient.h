@@ -33,7 +33,9 @@ public:
 	            const FString& InDepartment,
 	            const FString& InClientId,
 	            const FString& InSessionOrigin,
-	            float InReconnectDelaySecs);
+	            float InReconnectDelaySecs,
+	            int32 InInitialLastSeq = 0,
+	            const FString& InAuthToken = FString());
 
 	virtual ~FSyncClient();
 
@@ -62,6 +64,7 @@ private:
 	FString Department;
 	FString ClientId;       // shared with FEmitClient
 	FString SessionOrigin;  // shared with FEmitClient — used for echo suppression
+	FString AuthToken;
 	float   ReconnectDelaySecs;
 	int32   LastSeq;        // recv-thread only — no synchronization needed
 

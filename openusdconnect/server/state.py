@@ -8,7 +8,9 @@ TOFU token store, and proposal bookkeeping.  Network handling lives in
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import queue
 import threading
 import time
@@ -17,6 +19,7 @@ from pxr import Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
+    NoticeEmitter,
     read_material_binding,
     read_payloads,
     read_references,
@@ -51,7 +54,15 @@ from ..protocol_constants import (
 )
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
-from .types import ClientInfo, Proposal
+from .types import (
+    AmbiguousVfsWriteError,
+    ClientInfo,
+    InvalidVfsWriteError,
+    Proposal,
+    StaleVfsWriteError,
+    UnsupportedVfsWriteError,
+    VfsWriteAnalysis,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -154,6 +165,69 @@ def _authored_attr_rows(prim) -> list[dict]:
     return rows
 
 
+def _stage_prim_types(stage: Usd.Stage) -> dict[str, str]:
+    return {
+        str(prim.GetPath()): prim.GetTypeName()
+        for prim in stage.Traverse()
+        if str(prim.GetPath()) != "/"
+    }
+
+
+def _stage_live_metadata(stage: Usd.Stage) -> dict | None:
+    layer_data = stage.GetRootLayer().customLayerData or {}
+    if "openusdconnect" not in layer_data:
+        return None
+    metadata = layer_data["openusdconnect"]
+    if not isinstance(metadata, dict):
+        raise InvalidVfsWriteError(
+            "uploaded openusdconnect metadata must be a dictionary"
+        )
+    return metadata
+
+
+def _metadata_int(metadata: dict, key: str) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidVfsWriteError(
+            f"uploaded openusdconnect metadata field {key!r} "
+            "must be a non-negative integer"
+        )
+    return value
+
+
+def _is_supported_translate_custom_attr(name: str) -> bool:
+    if name == "xformOpOrder" or name.startswith("xformOp:"):
+        return True
+    return name.startswith(("primvars:", "inputs:", "outputs:", "info:"))
+
+
+def _is_supported_translate_relationship(name: str) -> bool:
+    return name == "material:binding" or name.startswith("material:binding:")
+
+
+def _unsupported_translate_properties(stage: Usd.Stage) -> list[str]:
+    """Return authored properties that the VFS translator cannot round-trip."""
+    unsupported: list[str] = []
+    for prim in stage.Traverse():
+        prim_path = str(prim.GetPath())
+        for attr in prim.GetAuthoredAttributes():
+            if not attr.IsCustom():
+                continue
+            name = attr.GetName()
+            if _is_supported_translate_custom_attr(name):
+                continue
+            unsupported.append(f"{prim_path}.{name}")
+
+        for rel in prim.GetRelationships():
+            if not rel.IsAuthored():
+                continue
+            name = rel.GetName()
+            if _is_supported_translate_relationship(name):
+                continue
+            unsupported.append(f"{prim_path}.{name}")
+    return unsupported
+
+
 class _WireMetrics:
     """Thread-safe per-event-kind counters of encoded record bytes."""
 
@@ -241,6 +315,11 @@ class UsdSyncServer:
         # compaction. Starts at 1 so a pre-existing uncompacted log gets one
         # compaction on the first tick.
         self._seq_at_last_compact = 1
+        # Virtual-file snapshots are keyed by an epoch plus the latest assigned
+        # sequence. Epoch disambiguates compaction/purge resetting sequence IDs.
+        self._snapshot_epoch = 0
+        self.scene_id = self._make_scene_id(base_usd_path)
+        self.last_vfs_write_analysis: dict | None = None
 
         # TOFU token authentication
         self.require_token = require_token
@@ -346,6 +425,18 @@ class UsdSyncServer:
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
         self._replay_log_into_stage()
+
+    @staticmethod
+    def _make_scene_id(base_usd_path: str | None) -> str:
+        """Readable, stable-ish identifier for the currently hosted stage."""
+        if base_usd_path:
+            label = os.path.splitext(os.path.basename(base_usd_path))[0] or "scene"
+            digest_src = os.path.abspath(base_usd_path)
+        else:
+            label = "scene"
+            digest_src = "in-memory"
+        digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:12]
+        return f"{label}-{digest}"
 
     def shutdown(self):
         """Signal background threads to drain queued work and exit.
@@ -669,10 +760,15 @@ class UsdSyncServer:
         - First connect (no token stored): issues a new token → (True, new_token)
         - Reconnect with valid token: accepted → (True, None)
         - Reconnect with wrong/missing token: rejected → (False, None)
-        - Token not required or no client_id: always accepted → (True, None)
+        - Token not required: always accepted → (True, None)
+        - Token required and no client_id: rejected → (False, None)
         """
-        if not self.require_token or not self.token_store or not client_id:
+        if not self.require_token or not self.token_store:
             return True, None
+
+        if not client_id:
+            LOG.warning("Auth rejected: missing client_id")
+            return False, None
 
         if not self.token_store.has_token(client_id):
             # First connect — issue token (TOFU)
@@ -690,6 +786,16 @@ class UsdSyncServer:
         if not self.token_store:
             return False
         return self.token_store.revoke(client_id)
+
+    def bump_snapshot_epoch(self, reason: str = "") -> None:
+        """Invalidate cached virtual-file snapshots after non-log stage changes."""
+        with self._seq_lock:
+            self._snapshot_epoch += 1
+            epoch = self._snapshot_epoch
+        if reason:
+            LOG.debug("Snapshot epoch bumped to %d (%s)", epoch, reason)
+        else:
+            LOG.debug("Snapshot epoch bumped to %d", epoch)
 
     def get_token_list(self) -> list[dict]:
         """Return all token records for the dashboard."""
@@ -842,6 +948,7 @@ class UsdSyncServer:
             del session.subLayerPaths[idx]
 
         p.status = "approved"
+        self.bump_snapshot_epoch(f"approve_proposal:{proposal_id}")
         LOG.info("Proposal %s approved — merged into %s", proposal_id, p.target_department)
         return True
 
@@ -859,6 +966,7 @@ class UsdSyncServer:
             del session.subLayerPaths[idx]
 
         p.status = "rejected"
+        self.bump_snapshot_epoch(f"reject_proposal:{proposal_id}")
         LOG.info("Proposal %s rejected", proposal_id)
         return True
 
@@ -928,6 +1036,7 @@ class UsdSyncServer:
             self._dept_layers[department] = layer
             self.client_layers[client_id] = layer
             self._reorder_session_sublayers()
+        self.bump_snapshot_epoch(f"create_department_layer:{department}")
         LOG.info("Created shared layer for department %s (client %s)", department, client_id)
         return layer
 
@@ -980,6 +1089,7 @@ class UsdSyncServer:
             return False
         with self.stage_lock:
             self.stage.MuteLayer(layer.identifier)
+        self.bump_snapshot_epoch(f"mute_layer:{key}")
         return True
 
     def unmute_layer(self, key: str) -> bool:
@@ -989,6 +1099,7 @@ class UsdSyncServer:
             return False
         with self.stage_lock:
             self.stage.UnmuteLayer(layer.identifier)
+        self.bump_snapshot_epoch(f"unmute_layer:{key}")
         return True
 
     def merge_layer(self, client_id: str) -> bool:
@@ -1035,6 +1146,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(layer.identifier)
             del session.subLayerPaths[idx]
         self._cleanup_client_refs(client_id)
+        self.bump_snapshot_epoch(f"merge_layer:{client_id}")
         LOG.info("Merged and removed layer for client %s", client_id)
         return True
 
@@ -1051,6 +1163,7 @@ class UsdSyncServer:
             idx = list(session.subLayerPaths).index(layer.identifier)
             del session.subLayerPaths[idx]
         self._cleanup_client_refs(client_id)
+        self.bump_snapshot_epoch(f"delete_layer:{client_id}")
         LOG.info("Deleted layer for client %s", client_id)
         return True
 
@@ -1070,6 +1183,7 @@ class UsdSyncServer:
         with self.stage_lock:
             self.department_priority = list(ordered_departments)
             self._reorder_session_sublayers()
+        self.bump_snapshot_epoch("set_department_priority")
 
     def get_layer_stack_info(self) -> list[dict]:
         """Return ordered layer stack info for the dashboard.
@@ -1370,6 +1484,7 @@ class UsdSyncServer:
         with self._seq_lock:
             self._event_count = len(records)
             self._seq_at_last_compact = self._next_seq
+            self._snapshot_epoch += 1
 
         self.op_cache.clear()
         self._op_cache_layer = None
@@ -1406,6 +1521,7 @@ class UsdSyncServer:
             self._event_count = 0
             self._next_seq = 1
             self._seq_at_last_compact = 1
+            self._snapshot_epoch += 1
         with self.stage_lock:
             self.edit_layer.Clear()
         self.op_cache.clear()
@@ -1470,6 +1586,213 @@ class UsdSyncServer:
             s = self._next_seq
             self._next_seq += 1
             return s
+
+    def get_snapshot_token(self) -> tuple[int, int]:
+        """Return ``(epoch, latest_seq)`` for virtual-file cache keys."""
+        with self._seq_lock:
+            return self._snapshot_epoch, max(0, self._next_seq - 1)
+
+    def replace_from_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        *,
+        client_id: str = "vfs-write",
+        origin: str = "vfs-write",
+        reject_stale: bool = True,
+        reject_ambiguous: bool = True,
+    ) -> int:
+        """Replace the live edit state from a complete uploaded USD snapshot.
+
+        This is the WebDAV write-fallback path. A plain DCC save gives us a
+        complete USD layer, not semantic incremental events, so the server
+        translates it into a full event snapshot, resets the live edit log,
+        broadcasts a resync, then broadcasts the translated events.
+
+        Returns the number of translated events persisted to the event log.
+        """
+        uploaded_meta = _stage_live_metadata(uploaded_stage)
+        if uploaded_meta is None:
+            uploaded_epoch = None
+            uploaded_seq = None
+        else:
+            uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
+            uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
+
+        self.txn_barrier.acquire_exclusive()
+        try:
+            current_epoch, current_seq = self.get_snapshot_token()
+            with self.stage_lock:
+                department_layers = sorted(self._dept_layers)
+                before_types = _stage_prim_types(self.stage)
+            with self.proposals_lock:
+                pending_proposals = sorted(
+                    proposal_id
+                    for proposal_id, proposal in self.proposals.items()
+                    if proposal.status == "pending"
+                )
+
+            uploaded_types = _stage_prim_types(uploaded_stage)
+            before_paths = set(before_types)
+            uploaded_paths = set(uploaded_types)
+            created_paths = sorted(uploaded_paths - before_paths)
+            removed_paths = sorted(
+                before_paths - uploaded_paths,
+                key=lambda p: p.count("/"),
+                reverse=True,
+            )
+            type_changed_paths = sorted(
+                p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
+            )
+
+            notes = []
+            if uploaded_meta is None:
+                notes.append(
+                    "uploaded file has no openusdconnect metadata; accepting as fallback save"
+                )
+
+            def _analysis(status: str, status_notes: list[str], event_counts=None):
+                return VfsWriteAnalysis(
+                    status=status,
+                    current_epoch=current_epoch,
+                    current_seq=current_seq,
+                    uploaded_epoch=uploaded_epoch,
+                    uploaded_seq=uploaded_seq,
+                    before_prim_count=len(before_paths),
+                    uploaded_prim_count=len(uploaded_paths),
+                    created_prims=created_paths,
+                    removed_prims=removed_paths,
+                    type_changed_prims=type_changed_paths,
+                    event_counts=event_counts or {},
+                    notes=status_notes,
+                )
+
+            if department_layers or pending_proposals:
+                details = []
+                if department_layers:
+                    details.append(f"department layers: {', '.join(department_layers)}")
+                if pending_proposals:
+                    details.append(f"pending proposals: {', '.join(pending_proposals)}")
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "translate write fallback is disabled while department "
+                        f"or proposal layers are active ({'; '.join(details)})"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise UnsupportedVfsWriteError(
+                    "VFS translate writes are disabled while department or "
+                    "proposal layers are active"
+                )
+
+            if reject_stale and uploaded_epoch is not None and uploaded_seq is not None:
+                stale = (uploaded_epoch, uploaded_seq) < (current_epoch, current_seq)
+                if stale:
+                    analysis = _analysis(
+                        "stale_rejected",
+                        ["uploaded snapshot is older than the current live server state"],
+                    )
+                    self.last_vfs_write_analysis = analysis.to_dict()
+                    raise StaleVfsWriteError(
+                        "uploaded VFS snapshot is stale: "
+                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
+                        f"server epoch/seq={current_epoch}/{current_seq}"
+                    )
+
+            removed_fraction = len(removed_paths) / max(1, len(before_paths))
+            removes_rootish_prim = any(
+                path.count("/") <= 1 and path != "/Root" for path in removed_paths
+            )
+            ambiguous_destructive = bool(removed_paths) and (
+                not uploaded_paths
+                or removes_rootish_prim
+                or (len(before_paths) >= 10 and removed_fraction >= 0.8)
+            )
+            if reject_ambiguous and ambiguous_destructive:
+                analysis = _analysis(
+                    "ambiguous_rejected",
+                    [
+                        "uploaded snapshot removes a root-level prim or most of the scene; "
+                        "refusing automatic fallback translation"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise AmbiguousVfsWriteError(
+                    "uploaded VFS snapshot looks destructively incomplete; "
+                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
+                )
+
+            unsupported_properties = _unsupported_translate_properties(uploaded_stage)
+            if unsupported_properties:
+                shown = ", ".join(unsupported_properties[:10])
+                more = len(unsupported_properties) - 10
+                if more > 0:
+                    shown = f"{shown}, ... (+{more} more)"
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "uploaded snapshot contains authored USD properties outside "
+                        f"the VFS translate event subset: {shown}"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains authored USD properties "
+                    "that cannot be safely translated"
+                )
+
+            emitter = NoticeEmitter(uploaded_stage)
+            try:
+                events = emitter.snapshot_events()
+            finally:
+                emitter.cleanup()
+
+            # Hide prims that existed in the previous composed stage but are absent
+            # from the uploaded snapshot. This lets full-file saves express deletes
+            # even when the original prim lives in the immutable base layer.
+            for prim_path in removed_paths:
+                events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+
+            event_counts: dict[str, int] = {}
+            for ev in events:
+                kind = ev.get("k", "")
+                if kind:
+                    event_counts[kind] = event_counts.get(kind, 0) + 1
+
+            analysis = _analysis("translated", notes, event_counts)
+
+            self._purge_inner()
+            self.last_vfs_write_analysis = analysis.to_dict()
+            if not events:
+                return 0
+
+            records, changed_set = self.process_txn(
+                events,
+                client_id=client_id,
+                origin=origin,
+            )
+            changed_records = []
+            changed_bins = []
+            for i, (rec, rec_bin) in enumerate(records):
+                if i in changed_set:
+                    changed_records.append(rec)
+                    changed_bins.append(rec_bin)
+            if changed_records:
+                self.broadcast_bytes(
+                    frame_batch(changed_bins),
+                    changed_records,
+                )
+            LOG.info(
+                "Translated VFS snapshot write into %d live events "
+                "(created=%d removed=%d type_changed=%d)",
+                len(events),
+                len(created_paths),
+                len(removed_paths),
+                len(type_changed_paths),
+            )
+            return len(events)
+        finally:
+            self.txn_barrier.release_exclusive()
 
     def append_log(self, rec: dict):
         """Append event record to the event store.

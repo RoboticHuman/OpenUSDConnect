@@ -58,6 +58,11 @@ def _typed(info_id, values):
     return values, types
 
 
+def _require_shader_node(info_id: str) -> None:
+    if not discovery.node_exists(info_id):
+        pytest.skip(f"Sdr registry does not provide {info_id!r}")
+
+
 def test_usd_preview_surface_network_topology(server):
     session = _connect(server)
     try:
@@ -122,6 +127,7 @@ def test_usd_preview_surface_network_topology(server):
 
 
 def test_materialx_standard_surface_topology(server):
+    _require_shader_node("ND_standard_surface_surfaceshader")
     session = _connect(server)
     try:
         out_name = discovery.describe_shader_node("ND_standard_surface_surfaceshader")["outputs"][

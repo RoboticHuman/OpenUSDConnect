@@ -26,6 +26,7 @@ try:
 except ImportError:
     _IDENTITY_4X4 = None
 
+from openusdconnect import token_client
 from openusdconnect.axis_conversion import (
     strip_axis_rotation,
     zup_to_yup_quat,
@@ -106,6 +107,30 @@ _SCENE_PROPS = [
             "description": "Path to the base USD file (.usda/.usd/.usdc)",
             "subtype": "FILE_PATH",
             "default": "",
+        },
+    ),
+    (
+        "usd_connect_live_auto_start_emitter",
+        bpy.props.BoolProperty,
+        {
+            "name": "Auto-start Emitter",
+            "description": (
+                "When imported USD contains OpenUSDConnect metadata, "
+                "start local capture and connect the network emitter"
+            ),
+            "default": True,
+        },
+    ),
+    (
+        "usd_connect_live_auto_start_receiver",
+        bpy.props.BoolProperty,
+        {
+            "name": "Auto-start Receiver",
+            "description": (
+                "When imported USD contains OpenUSDConnect metadata, "
+                "start the receiver from the snapshot sequence"
+            ),
+            "default": True,
         },
     ),
     (
@@ -269,10 +294,21 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             except Exception as e:
                 LOG.warning("USDHook: Could not infer root prim: %s", e)
 
-        tagged = 0
+        # Blender may map a collapsed parent Xform to an Object while mapping
+        # the represented child Mesh/Camera/Light prim to that object's data.
+        # Resolve both forms before tagging so edits target the schema prim,
+        # not the collapsed parent.
+        owners_by_data: dict[int, list] = {}
+        for obj in bpy.data.objects:
+            data = getattr(obj, "data", None)
+            if data is not None:
+                owners_by_data.setdefault(data.as_pointer(), []).append(obj)
+
+        from .blender_adapter import _PROP_USD_IMPORTED
+
+        object_tags: dict[int, tuple[tuple[int, int], object, str, str]] = {}
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
-            # Look up prim type from the stage
             prim_type_name = ""
             if stage:
                 try:
@@ -282,19 +318,39 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                 except Exception:
                     LOG.debug("USDHook: could not look up prim type for %s", prim_path_str)
 
-            from .blender_adapter import _PROP_USD_IMPORTED
-
             for db in data_blocks:
                 if isinstance(db, bpy.types.Object):
-                    db["usd_prim_path"] = prim_path_str
-                    if prim_type_name:
-                        db["usd_type_name"] = prim_type_name
-                    if stage_id:
-                        db["usd_stage_id"] = stage_id
-                    db[_PROP_USD_IMPORTED] = True
-                    tagged += 1
+                    objects = [db]
+                    data_owner = 0
+                else:
+                    try:
+                        owners = owners_by_data.get(db.as_pointer(), [])
+                    except (AttributeError, ReferenceError):
+                        owners = []
+                    objects = owners if len(owners) == 1 else []
+                    data_owner = 1
 
-        LOG.info("USDHook: Tagged %d objects with usd_prim_path", tagged)
+                rank = (prim_path_str.count("/"), data_owner)
+                for obj in objects:
+                    key = obj.as_pointer()
+                    current = object_tags.get(key)
+                    if current is None or rank > current[0]:
+                        object_tags[key] = (
+                            rank,
+                            obj,
+                            prim_path_str,
+                            prim_type_name,
+                        )
+
+        for _, obj, prim_path_str, prim_type_name in object_tags.values():
+            obj["usd_prim_path"] = prim_path_str
+            if prim_type_name:
+                obj["usd_type_name"] = prim_type_name
+            if stage_id:
+                obj["usd_stage_id"] = stage_id
+            obj[_PROP_USD_IMPORTED] = True
+
+        LOG.info("USDHook: Tagged %d objects with usd_prim_path", len(object_tags))
         return True
 
 
@@ -1030,6 +1086,113 @@ def _remove_handler():
         bpy.app.timers.unregister(_timer_tick)
 
 
+def _operator_cancelled(result) -> bool:
+    return isinstance(result, set) and "CANCELLED" in result
+
+
+def _call_required_operator(op, label: str):
+    result = op()
+    if _operator_cancelled(result):
+        raise RuntimeError(f"{label} was cancelled")
+    return result
+
+
+def _wait_for_receiver_handshake(receiver_addon, timeout: float = 2.0) -> None:
+    receiver = getattr(receiver_addon, "_RECEIVER", None)
+    if receiver is None:
+        raise RuntimeError("receiver did not start")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if getattr(receiver, "auth_rejected", False):
+            raise RuntimeError("receiver authentication rejected")
+        if getattr(receiver, "connected", False):
+            return
+        time.sleep(0.02)
+    if getattr(receiver, "auth_rejected", False):
+        raise RuntimeError("receiver authentication rejected")
+    raise RuntimeError("receiver did not connect")
+
+
+def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> bool:
+    scene = context.scene
+    host = (meta.get("host") or "").strip()
+    port = int(meta.get("port") or 0)
+    snapshot_seq = int(meta.get("snapshot_seq") or 0)
+    auto_start_emitter = bool(
+        getattr(scene, "usd_connect_live_auto_start_emitter", True)
+    )
+    auto_start_receiver = bool(
+        getattr(scene, "usd_connect_live_auto_start_receiver", True)
+    )
+    if not host or not (1 <= port <= 65535):
+        raise RuntimeError("live metadata is missing a valid host/port")
+
+    from . import receiver_addon
+
+    if auto_start_receiver and getattr(scene, "usd_connect_recv_running", False):
+        _call_required_operator(bpy.ops.usd_connect.stop_receiver, "stop receiver")
+    if auto_start_emitter and (
+        getattr(scene, "usd_connect_net_emitter_running", False)
+        or _state.sender is not None
+        or _state.author is not None
+    ):
+        _call_required_operator(bpy.ops.usd_connect.disconnect_emitter, "disconnect emitter")
+
+    scene.usd_connect_base_usd_path = local_path
+    scene.usd_connect_emit_host = host
+    scene.usd_connect_emit_port = port
+    scene.usd_connect_recv_host = host
+    scene.usd_connect_recv_port = port
+    scene.usd_connect_recv_last_seq = snapshot_seq
+    if auto_start_receiver or not getattr(scene, "usd_connect_recv_running", False):
+        receiver_addon._LAST_SEQ = snapshot_seq
+        if receiver_addon._DISPATCHER is not None:
+            receiver_addon._DISPATCHER.last_seq = snapshot_seq
+
+    try:
+        if auto_start_emitter:
+            _call_required_operator(bpy.ops.usd_connect.connect_emitter, "connect emitter")
+        if auto_start_receiver:
+            scene.usd_connect_recv_last_seq = snapshot_seq
+            receiver_addon._LAST_SEQ = snapshot_seq
+            if receiver_addon._DISPATCHER is not None:
+                receiver_addon._DISPATCHER.last_seq = snapshot_seq
+            _call_required_operator(bpy.ops.usd_connect.start_receiver, "start receiver")
+            _wait_for_receiver_handshake(receiver_addon)
+    except Exception:
+        receiver = getattr(receiver_addon, "_RECEIVER", None)
+        if receiver is not None and getattr(receiver, "auth_rejected", False):
+            token_client.delete_token(host, port)
+        try:
+            if auto_start_receiver and getattr(scene, "usd_connect_recv_running", False):
+                bpy.ops.usd_connect.stop_receiver()
+        except Exception:
+            LOG.exception("Failed to stop receiver after live auto-start failure")
+        try:
+            if auto_start_emitter and (
+                getattr(scene, "usd_connect_net_emitter_running", False)
+                or _state.sender is not None
+            ):
+                bpy.ops.usd_connect.disconnect_emitter()
+        except Exception:
+            LOG.exception("Failed to disconnect emitter after live auto-start failure")
+        raise
+
+    started = []
+    if auto_start_emitter:
+        started.append("emitter")
+    if auto_start_receiver:
+        started.append(f"receiver from seq={snapshot_seq + 1}")
+    if started:
+        report(
+            {"INFO"},
+            f"Live USD connected to {host}:{port}; started {', '.join(started)}",
+        )
+    else:
+        report({"INFO"}, f"Live USD configured for {host}:{port}; auto-start disabled")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
@@ -1048,17 +1211,27 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             self.report({"ERROR"}, f"OpenUSD 'pxr' not available: {_PXR_IMPORT_ERROR}")
             return {"CANCELLED"}
         try:
-            bpy.ops.wm.usd_import(filepath=self.filepath)
-            context.scene.usd_connect_base_usd_path = self.filepath
+            from . import live_discovery
+
+            local_path, meta = live_discovery.resolve_import_source(self.filepath)
+            bpy.ops.wm.usd_import(filepath=local_path)
+            meta = live_discovery.read_live_metadata(local_path)
+            context.scene.usd_connect_base_usd_path = local_path
             # Apply MaterialX materials that Blender's importer doesn't handle
             from .blender_adapter import BlenderAdapter
 
             adapter = BlenderAdapter()
-            adapter._enrich_materialx_from_import(self.filepath, "", "")
-            self.report({"INFO"}, "USD imported with prim tagging")
+            adapter._enrich_materialx_from_import(local_path, "", "")
         except Exception as e:
             self.report({"ERROR"}, f"USD import failed: {e}")
             return {"CANCELLED"}
+        if meta:
+            try:
+                _auto_connect_live_import(context, local_path, meta, self.report)
+            except Exception as e:
+                self.report({"ERROR"}, f"Live auto-start failed: {e}")
+            return {"FINISHED"}
+        self.report({"INFO"}, "USD imported with prim tagging")
         return {"FINISHED"}
 
 
@@ -1171,11 +1344,25 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 port=scene.usd_connect_emit_port,
                 client_id=STABLE_CLIENT_ID,
                 origin=SESSION_ORIGIN,
+                token=token_client.load_token(
+                    scene.usd_connect_emit_host,
+                    scene.usd_connect_emit_port,
+                ),
+                on_token_issued=lambda token: token_client.save_token(
+                    scene.usd_connect_emit_host,
+                    scene.usd_connect_emit_port,
+                    token,
+                ),
             )
             if not _state.sender.connect():
                 reason = (
                     "auth rejected" if _state.sender.auth_rejected else "could not connect"
                 )
+                if _state.sender.auth_rejected:
+                    token_client.delete_token(
+                        scene.usd_connect_emit_host,
+                        scene.usd_connect_emit_port,
+                    )
                 _state.sender = None
                 self.report({"ERROR"}, f"Connection failed: {reason}")
                 return {"CANCELLED"}

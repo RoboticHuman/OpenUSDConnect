@@ -10,7 +10,7 @@ OpenUSDConnect has four tiers of tests:
 ## Running Tests
 
 ```bash
-uv sync
+uv sync --group server --group vfs
 
 # All tests
 uv run pytest tests/ -v
@@ -28,6 +28,48 @@ uv run pytest tests/integration/ -v
 ```
 
 Unit tests cover protocol validation, USD stage event application, and emitter/adapter roundtrips using the `pxr` (OpenUSD) Python bindings.
+
+## Live-Open And VFS Tests
+
+The WebDAV/UNC live-open path has a focused headless suite:
+
+```bash
+uv run pytest tests/unit/test_vfs.py tests/integration/test_vfs_webdav.py -q
+uv run pytest tests/integration/test_live_discovery.py -q
+```
+
+These cover snapshot metadata, ETag/cache invalidation, read-only/drop/translate
+write modes, WebDAV verbs, virtual directory browsing, composition roots,
+startup cleanup, HTTP snapshot caching, drive-mount helper path generation, and
+the replay contract for receivers started at `snapshot_seq + 1`.
+
+Real Windows WebClient/UNC behavior is opt-in because it depends on local
+Windows service and policy configuration:
+
+```powershell
+$env:OUC_RUN_UNC_SMOKE = "1"
+uv run pytest tests/integration/test_windows_unc_webdav.py -q
+```
+
+For a friendlier workstation diagnostic:
+
+```powershell
+uv run python scripts/check_windows_unc_webdav.py --port 7280
+```
+
+To make the virtual share browseable in normal Windows file pickers:
+
+```powershell
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+uv run python scripts/mount_vfs_share.py unmount --drive O:
+```
+
+For large-scene sizing:
+
+```powershell
+uv run python scripts/bench_vfs_snapshot.py --base D:\path\to\scene.usda
+uv run python scripts/bench_vfs_snapshot.py --synthetic-prims 10000
+```
 
 ## Coverage Report
 

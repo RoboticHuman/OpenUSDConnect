@@ -8,6 +8,11 @@ from integrations.mcp import discovery
 from integrations.mcp.errors import ToolError
 
 
+def _require_materialx_sdr():
+    if not discovery.node_exists("ND_standard_surface_surfaceshader"):
+        pytest.skip("MaterialX Sdr nodes are not registered in this OpenUSD runtime")
+
+
 def test_describe_usd_preview_surface():
     d = discovery.describe_shader_node("UsdPreviewSurface")
     by_name = {i["name"]: i for i in d["inputs"]}
@@ -18,6 +23,7 @@ def test_describe_usd_preview_surface():
 
 
 def test_describe_materialx_standard_surface():
+    _require_materialx_sdr()
     d = discovery.describe_shader_node("ND_standard_surface_surfaceshader")
     assert d["source_type"] == "mtlx"
     by_name = {i["name"]: i for i in d["inputs"]}
@@ -33,9 +39,10 @@ def test_resolve_input_type():
 
 def test_node_exists():
     assert discovery.node_exists("UsdPreviewSurface")
-    assert discovery.node_exists("ND_standard_surface_surfaceshader")
     assert not discovery.node_exists("ND_not_a_real_node")
     assert not discovery.node_exists("")
+    _require_materialx_sdr()
+    assert discovery.node_exists("ND_standard_surface_surfaceshader")
 
 
 def test_describe_unknown_raises():
@@ -45,6 +52,7 @@ def test_describe_unknown_raises():
 
 
 def test_list_mtlx_nodes_filtered():
+    _require_materialx_sdr()
     r = discovery.list_shader_nodes(source_type="mtlx", max=5)
     assert r["count"] > 100
     assert r["returned"] == 5
@@ -52,6 +60,7 @@ def test_list_mtlx_nodes_filtered():
 
 
 def test_list_filter_substring():
+    _require_materialx_sdr()
     r = discovery.list_shader_nodes(filter="standard_surface", source_type="mtlx")
     assert r["count"] >= 1
     assert all("standard_surface" in n["info_id"] for n in r["nodes"])

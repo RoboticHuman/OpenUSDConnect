@@ -17,6 +17,10 @@ from ._convert import to_jsonable
 from .errors import ToolError
 
 _ATTR_SAMPLE = 12  # summarize arrays longer than this in get_prim
+_SCHEMA_HINT = (
+    "Use a USD schema name, e.g. 'UsdGeomMesh', 'Mesh', 'UsdGeomGprim', "
+    "or 'UsdGeomImageable'."
+)
 
 
 def _require_prim(stage: Usd.Stage, path: str) -> Usd.Prim:
@@ -33,7 +37,7 @@ def _resolve_schema_type(is_a: str):
             f"unknown schema type {is_a!r}",
             code="invalid_request",
             field="is_a",
-            hint="Use a USD schema name, e.g. 'UsdGeomMesh', 'Mesh', 'UsdGeomGprim', or 'UsdGeomImageable'.",
+            hint=_SCHEMA_HINT,
         )
     return schema_type
 

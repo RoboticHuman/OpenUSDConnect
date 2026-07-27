@@ -30,7 +30,6 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from openusdconnect.sender import EventSender  # noqa: E402
 
-
 DEFAULT_ASSET = (
     _REPO_ROOT
     / "assets" / "full_assets" / "SubdivisionSurfaces" / "Pyramid" / "Pyramid.usd"

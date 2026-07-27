@@ -63,12 +63,15 @@ except Exception:
 if _is_addon_reload:
     import importlib
 
+    if "live_discovery" in globals():
+        importlib.reload(globals()["live_discovery"])
     importlib.reload(shader_mapper)  # noqa: F821
     importlib.reload(blender_adapter)  # noqa: F821
     importlib.reload(capture)  # noqa: F821
     importlib.reload(receiver_addon)  # noqa: F821
     importlib.reload(ui)  # noqa: F821
 
+from . import live_discovery as live_discovery
 from . import capture
 from . import receiver_addon
 from . import shader_mapper as shader_mapper

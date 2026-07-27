@@ -23,6 +23,7 @@ For development, see [Testing Setup](testing-setup.md) for the debug launcher (`
 The addon adds a **USD Connect** tab in the 3D Viewport sidebar (press `N` to toggle). It has five sections:
 
 ### Import
+- **Auto-start Emitter / Auto-start Receiver** - When the imported file contains OpenUSDConnect metadata, these toggles decide whether import also starts local emit and live receive.
 - **Import USD (with prim tagging)** — Opens a file browser to import a `.usda`/`.usd`/`.usdc` file. All imported objects are tagged with their USD prim paths (`usd_prim_path` and `usd_type_name` custom properties).
 - **Skip Leaf /Geom Prim Paths** — When enabled (default), skips tagging the leaf `/Geom` child prims to reduce noise.
 
@@ -62,7 +63,62 @@ Shared-playhead control (see the Playback synchronization section below).
 
 ## Two-Blender Live Sync Walkthrough
 
-This is the primary workflow: one Blender instance emits changes, another receives them in real time.
+This is the manual workflow: one Blender instance emits changes, another receives them in real time.
+For the newer live-open workflow, see [Live-Open Quickstart](live-open-quickstart.md).
+
+## Live-Open Via Virtual USD File
+
+The addon can import an OpenUSDConnect virtual USD file and configure live
+sync when the file contains `customLayerData["openusdconnect"]`. This is the
+preferred workflow when the server is started with `--vfs-port`.
+
+### Server
+
+```bash
+uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
+```
+
+This exposes:
+
+| Path | Use |
+|------|-----|
+| `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL for diagnostics, launchers, and the local bridge. |
+| `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
+| `O:\scene.usd` | Drive-letter file-picker path after mounting the WebDAV share. |
+
+To mount a browseable drive:
+
+```bash
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```
+
+### Blender
+
+Click **Import USD (with prim tagging)** and choose the normal file path:
+the UNC path when Windows WebClient is available, or `O:\scene.usd` after
+mounting the WebDAV share or no-admin local bridge as a drive.
+
+The addon imports the snapshot first. If live metadata is present, it sets the
+receiver and emitter host/port and seeds the receiver from `snapshot_seq`.
+With **Auto-start Emitter** and **Auto-start Receiver** enabled, import also
+starts the emitter and starts the receiver from `snapshot_seq + 1`. With
+either toggle disabled, use the existing manual start/stop buttons after
+import.
+
+The virtual share is read-only by default. Server operators can opt into
+compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
+translation with `--vfs-write-mode translate`. Drop mode accepts and discards
+saves without validation. Translate mode validates saved content as USD by
+default, parses a full USD save, and broadcasts it as live events; plugin/TCP
+sync remains the preferred interactive authoring path.
+
+If metadata is not present, the import behaves like the existing manual
+workflow. If auto-start fails, the imported snapshot remains open and the
+addon reports the connection error.
+
+When the server is running with `--require-token`, the USD file only says
+that a token is required. It does not contain the token. Blender uses the
+existing TOFU token store for the live emitter and receiver connections.
 
 ### 1. Start the sync server
 

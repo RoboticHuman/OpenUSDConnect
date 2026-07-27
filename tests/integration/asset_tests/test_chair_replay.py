@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from helpers import PROJECT_ROOT, TestHarness
+from helpers import PROJECT_ROOT, TestHarness  # noqa: E402,I001
 
 import bpy  # noqa: E402
 import mathutils  # noqa: E402
@@ -57,7 +57,10 @@ def _check_wood(obj_name):
     if all(abs(bc[i] - _WOOD_RGB[i]) < 0.08 for i in range(3)):
         harness._pass(f"{obj.name} -> {mat.name} brown")
     else:
-        harness._fail(f"{obj.name}/{mat.name}: base color ({bc[0]:.2f},{bc[1]:.2f},{bc[2]:.2f}) not wood brown")
+        harness._fail(
+            f"{obj.name}/{mat.name}: base color "
+            f"({bc[0]:.2f},{bc[1]:.2f},{bc[2]:.2f}) not wood brown"
+        )
 
 
 def _check_upright(obj_name):
@@ -75,7 +78,10 @@ def _check_upright(obj_name):
     if dz <= dx and dz <= dy:
         harness._pass(f"{obj.name} upright (world dims x={dx:.2f} y={dy:.2f} z={dz:.2f})")
     else:
-        harness._fail(f"{obj.name} NOT upright (world dims x={dx:.2f} y={dy:.2f} z={dz:.2f}): tipped")
+        harness._fail(
+            f"{obj.name} NOT upright "
+            f"(world dims x={dx:.2f} y={dy:.2f} z={dz:.2f}): tipped"
+        )
 
 
 _step = 0

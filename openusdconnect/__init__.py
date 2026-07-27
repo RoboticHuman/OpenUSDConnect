@@ -23,7 +23,7 @@ from .events import Event
 from .protocol import make_hello, make_quit, make_txn
 from .receiver import ReceiverThread
 from .sender import EventSender
-from .server import UsdSyncServer, run_server
+from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
 
 __version__ = "0.1.0"
 
@@ -35,8 +35,10 @@ __all__ = [
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
+    "ServerConfig",
     "UsdStageAdapter",
     "UsdSyncServer",
+    "VfsConfig",
     "apply_event",
     "apply_events",
     "atomic_apply",
