@@ -40,7 +40,7 @@ namespace OUC
 		const auto Hello = OpenUSDConnect::CreateHello(
 			Builder,
 			Builder.CreateString(TCHAR_TO_UTF8(*Role)),
-			/*protocol_version=*/1,
+			/*protocol_version=*/kProtocolVersion,
 			SyncFrom,
 			Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
 			Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin)),
@@ -48,7 +48,10 @@ namespace OUC
 			Builder.CreateString(TCHAR_TO_UTF8(*Token)));
 
 		Builder.Finish(OpenUSDConnect::CreateEnvelope(
-			Builder, OpenUSDConnect::Payload::Hello, Hello.Union()));
+			Builder,
+			OpenUSDConnect::Payload::Hello,
+			Hello.Union(),
+			kSchemaVersion));
 
 		return FrameWithLengthPrefix(Builder);
 	}

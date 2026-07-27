@@ -155,6 +155,13 @@ private:
 	// --- Emitter ---
 	TSharedPtr<FEmitClient> EmitClient;
 
+	/**
+	 * Transform prims whose structural xform-op prerequisite has been sent on
+	 * the current emitter connection. Game-thread only.
+	 */
+	TSet<FString> EmittedXformPrims;
+	uint64 LastEmitConnectionGeneration = 0;
+
 	/** Stable client ID shared by both receiver and emitter connections */
 	FString ClientId;
 	/** Random session origin shared by both connections */

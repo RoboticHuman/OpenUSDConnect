@@ -62,12 +62,15 @@ clients to the server.
 |------|----------------|------|
 | `Public/USDConnectSettings.h` | `UUSDConnectSettings` | UDeveloperSettings exposed at *Edit → Project Settings → Plugins → OpenUSD Connect*. |
 | `Public/USDConnectSubsystem.h` | `UUSDConnectSubsystem` | UTickableWorldSubsystem that owns both clients, the event queue, and the stage-actor attachment. |
-| `Private/USDConnectProtocol.h` | `namespace OUC` | **Auto-generated** from `openusdconnect/schema/*.fbs` by `scripts/generate_unreal_protocol.py`. Holds VT offsets, payload-union constants, and FlatBuffers raw-read helpers. `inline constexpr` / inline functions keep it safe under Unreal's Unity Build. Do not edit by hand — regenerate. |
+| `OpenUSDConnectPXR/Public/USDConnectProtocol.h` | `namespace OUC` | Wraps the generated FlatBuffers bindings with framing limits and small Unreal helpers. |
 | `Private/SyncClient.h/.cpp` | `FSyncClient` | Receiver TCP thread. Handles HELLO, framed reads, echo suppression, ping/rate-limit/resync. |
 | `Private/EmitClient.h/.cpp` | `FEmitClient` | Emitter TCP thread. Drains a SPSC SendQueue, peeks for inbound corrections via `HasPendingData`. |
 | `Private/TxnBuilder.h/.cpp` | `BuildXformTxnFrame`, `BuildVisibilityTxnFrame` | FlatBuffers Txn frame builders for the supported emitter event kinds. |
-| `Private/USDEventApplier.h/.cpp` | `FUSDEventApplier::ApplyFrame` | Decodes a BroadcastEvent frame and runs the matching pxr USD operation inside a `pxr::SdfChangeBlock`. |
-| `OpenUSDConnect.uplugin`, `Source/OpenUSDConnect/OpenUSDConnect.Build.cs` | – | Plugin descriptor and module rules. Calls `UnrealBuildTool.Rules.UnrealUSDWrapper.CheckAndSetupUsdSdk(Target, this)` — the official engine helper that wires RTTI/exceptions, `USE_USD_SDK`, and pxr linkage. |
+| `OpenUSDConnectPXR/Private/OpenUSDConnectPXR.cpp` | `IMPLEMENT_MODULE` | Registers the PXR dynamic module with Unreal's module manager. A successful link does not replace this runtime entry point. |
+| `OpenUSDConnectPXR/Public/USDEventApplier.h`, `Private/USDEventApplier.cpp` | `FUSDEventApplier::ApplyFrame` | Decodes a BroadcastEvent frame and runs the matching pxr USD operation inside a `pxr::SdfChangeBlock`. |
+| `OpenUSDConnectPXR/Public/USDStageBridge.h`, `Private/USDStageBridge.cpp` | `FUSDStageBridge` | Keeps direct pxr stage reads and writes out of the no-RTTI UObject module. |
+| `OpenUSDConnectPXR/Public/USDMaterialXMaterializer.h`, `Private/USDMaterialXMaterializer.cpp` | `FUSDMaterialXMaterializer` | Maintains Unreal-local MaterialX documents for inline networks. |
+| `OpenUSDConnect.uplugin`, `Source/*/*.Build.cs` | - | Registers the runtime and PXR modules and their engine dependencies. |
 
 ---
 
@@ -167,18 +170,22 @@ Two independent guards keep changes from bouncing forever:
 
 ## Build configuration
 
-`OpenUSDConnect.Build.cs` does the minimum needed and leans on the engine helper:
+`OpenUSDConnectPXR.Build.cs` configures the USD SDK through the engine helper:
 
 ```csharp
 UnrealBuildTool.Rules.UnrealUSDWrapper.CheckAndSetupUsdSdk(Target, this);
 ```
 
-That call sets `USE_USD_SDK`, RTTI, exception handling, and USD memory-overload
-defines correctly. Do **not** set `bUseRTTI` / `bEnableExceptions` manually here —
-let the helper own those decisions.
+That call configures USD SDK availability and memory-overload definitions.
+`OpenUSDConnectPXR` owns the pxr-facing implementation and enables RTTI,
+matching Unreal Engine's pure C++ USD modules. `OpenUSDConnect` contains the
+UObject subsystem and settings and remains on Unreal's default no-RTTI build.
+Keeping that boundary is required on Clang platforms because Unreal's UObject
+base classes do not export C++ RTTI. Neither module enables C++ exceptions
+because the plugin code does not require them.
 
-`PublicSystemIncludePaths` adds the FlatBuffers headers shipped with the engine at
-`<EngineDirectory>/Source/ThirdParty/flatbuffers/flatbuffers-24.3.25/include/`.
+The PXR module's `PublicSystemIncludePaths` exposes the pinned, plugin-local
+FlatBuffers headers installed by `setup_flatbuffers.py` to both modules.
 
 ---
 

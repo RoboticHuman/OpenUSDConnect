@@ -16,12 +16,12 @@ class AUsdStageActor;
  * compiles even without the USD SDK, though event application will be a
  * no-op in that case.
  *
- * All 19 event kinds apply. Everything is stage-level authoring: what
+ * All event kinds apply. Everything is stage-level authoring: what
  * renders from the result is up to UE's own USD translation (materials per
  * the stage actor's render context, PointInstancers as instanced meshes,
  * gprims and cameras per the USDImporter schema translators).
  */
-class OPENUSDCONNECT_API FUSDEventApplier
+class OPENUSDCONNECTPXR_API FUSDEventApplier
 {
 public:
 	/**
@@ -44,4 +44,24 @@ public:
 	 * close any open block before applying a frame this returns false for.
 	 */
 	static bool FrameUsesChangeBlock(const TArray<uint8>& RawFrame);
+};
+
+/**
+ * Opaque owner for an SdfChangeBlock.
+ *
+ * Keeping this type in the pxr-facing module lets the Unreal subsystem batch
+ * value events without enabling C++ RTTI for its UObject module.
+ */
+class OPENUSDCONNECTPXR_API FUSDEventChangeBlock
+{
+public:
+	FUSDEventChangeBlock();
+	~FUSDEventChangeBlock();
+
+	FUSDEventChangeBlock(const FUSDEventChangeBlock&) = delete;
+	FUSDEventChangeBlock& operator=(const FUSDEventChangeBlock&) = delete;
+
+private:
+	struct FImpl;
+	TUniquePtr<FImpl> Impl;
 };

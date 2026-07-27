@@ -21,7 +21,10 @@ static TArray<uint8> FinishTxnFrame(
 		Builder.CreateVector(Events));
 
 	Builder.Finish(OpenUSDConnect::CreateEnvelope(
-		Builder, OpenUSDConnect::Payload::Txn, Txn.Union()));
+		Builder,
+		OpenUSDConnect::Payload::Txn,
+		Txn.Union(),
+		kSchemaVersion));
 
 	return FrameWithLengthPrefix(Builder);
 }
@@ -29,20 +32,34 @@ static TArray<uint8> FinishTxnFrame(
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetXformTrs}, ...] } }
 // ---------------------------------------------------------------------------
-TArray<uint8> BuildXformTxnFrame(const FString& ClientId, const TArray<FEmitXformTrs>& Xforms)
+TArray<uint8> BuildXformTxnFrame(
+	const FString& ClientId,
+	const TArray<FEmitXformTrs>& Xforms,
+	bool bIncludeEnsureXformOps)
 {
 	if (Xforms.IsEmpty()) return {};
 
-	flatbuffers::FlatBufferBuilder Builder(512 + Xforms.Num() * 128);
+	flatbuffers::FlatBufferBuilder Builder(
+		512 + Xforms.Num() * (bIncludeEnsureXformOps ? 192 : 128));
 
 	std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>> Events;
-	Events.reserve(Xforms.Num());
+	Events.reserve(Xforms.Num() * (bIncludeEnsureXformOps ? 2 : 1));
 
 	for (const FEmitXformTrs& X : Xforms)
 	{
+		const auto Prim = Builder.CreateString(TCHAR_TO_UTF8(*X.PrimPath));
+		if (bIncludeEnsureXformOps)
+		{
+			const auto Ensure = OpenUSDConnect::CreateEnsureXformOps(Builder, Prim);
+			Events.push_back(OpenUSDConnect::CreateEventWrapper(
+				Builder,
+				OpenUSDConnect::EventPayload::EnsureXformOps,
+				Ensure.Union()));
+		}
+
 		const auto Trs = OpenUSDConnect::CreateSetXformTrs(
 			Builder,
-			Builder.CreateString(TCHAR_TO_UTF8(*X.PrimPath)),
+			Prim,
 			X.Fields,
 			Builder.CreateVector(X.T, 3),
 			Builder.CreateVector(X.R, 4),

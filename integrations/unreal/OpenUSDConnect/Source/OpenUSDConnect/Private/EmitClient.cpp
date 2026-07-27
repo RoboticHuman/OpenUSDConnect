@@ -29,7 +29,7 @@ FEmitClient::FEmitClient(UUSDConnectSubsystem* InOwner,
 	, ClientId(InClientId), SessionOrigin(InSessionOrigin), AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
 	, Socket(nullptr), Thread(nullptr)
-	, bShouldStop(false), bConnected(false)
+	, bShouldStop(false), bConnected(false), ConnectionGeneration(0)
 {
 }
 
@@ -125,7 +125,8 @@ uint32 FEmitClient::Run()
 			UE_LOG(LogUSDEmit, Log, TEXT("Emitter HELLO_OK — ready to send"));
 		}
 
-		bConnected.store(true, std::memory_order_relaxed);
+		ConnectionGeneration.fetch_add(1, std::memory_order_relaxed);
+		bConnected.store(true, std::memory_order_release);
 
 		// --- Main loop: drain send queue + poll for incoming messages ---
 		bool bShouldDisconnect = false;
@@ -262,4 +263,3 @@ bool FEmitClient::SendAll(const uint8* Data, int32 Len)
 	}
 	return true;
 }
-

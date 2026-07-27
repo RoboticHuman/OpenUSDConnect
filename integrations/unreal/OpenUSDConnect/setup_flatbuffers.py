@@ -4,7 +4,7 @@ Run once before the first build (header-only, no build step):
 
     python setup_flatbuffers.py
 
-The flatc-generated bindings committed under Source/OpenUSDConnect/Private/
+The flatc-generated bindings committed under Source/OpenUSDConnectPXR/Public/
 Schema pin the exact runtime version they were produced with (the generated
 header carries a static_assert), so the plugin always compiles against this
 vendored copy — never whatever version an engine happens to ship.
@@ -29,7 +29,7 @@ DEFAULT_VERSION = "25.12.19"
 ARCHIVE_URL = "https://github.com/google/flatbuffers/archive/refs/tags/v{version}.zip"
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
-DEST = PLUGIN_ROOT / "Source" / "OpenUSDConnect" / "ThirdParty" / "flatbuffers"
+DEST = PLUGIN_ROOT / "Source" / "OpenUSDConnectPXR" / "ThirdParty" / "flatbuffers"
 
 
 def install(version: str) -> None:

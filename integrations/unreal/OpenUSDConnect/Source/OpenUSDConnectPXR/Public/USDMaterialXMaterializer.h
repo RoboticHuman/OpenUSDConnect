@@ -28,7 +28,7 @@ class AUsdStageActor;
  * input types, and materials already backed by a foreign .mtlx document
  * reference.
  */
-class OPENUSDCONNECT_API FUSDMaterialXMaterializer
+class OPENUSDCONNECTPXR_API FUSDMaterialXMaterializer
 {
 public:
 	/**
