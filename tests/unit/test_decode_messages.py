@@ -93,11 +93,18 @@ class TestDecodeMessages:
             "/World/AfterResync",
         ]
 
-    def test_per_message_decode_errors_are_captured_not_raised(self):
-        result = decode_messages([b"not-a-flatbuffer", _event(1, "/A")])
+    def test_decode_error_stops_at_last_valid_sequence(self):
+        result = decode_messages(
+            [
+                _event(1, "/A"),
+                b"not-a-flatbuffer",
+                _event(2, "/B"),
+            ]
+        )
 
         assert len(result.errors) == 1
         assert [ev["prim"] for ev in result.received] == ["/A"]
+        assert result.last_seq == 1
 
     def test_ignores_unrecognized_message_types(self):
         # A bare event without a wrapping "type" field is silently dropped.

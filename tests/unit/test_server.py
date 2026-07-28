@@ -507,6 +507,49 @@ class TestCompaction:
         rows = (srv.store.get_count(),)
         assert rows[0] == 0
 
+    def test_compaction_replay_drops_only_disconnected_receiver(
+        self,
+        srv,
+        monkeypatch,
+    ):
+        """A failed replay must not prevent healthy receivers from resyncing."""
+        import io
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        self._insert_events(
+            srv,
+            [{"k": "ensure_prim", "prim": "/A", "typeName": "Xform"}],
+        )
+
+        class BrokenRequest:
+            def sendall(self, _payload):
+                raise OSError("receiver disconnected")
+
+        class FakeHandler:
+            def __init__(self, request, address):
+                self.request = request
+                self.client_address = address
+                self.send_lock = threading.Lock()
+
+        healthy_request = io.BytesIO()
+        healthy_request.sendall = healthy_request.write
+        broken = FakeHandler(BrokenRequest(), ("broken", 1))
+        healthy = FakeHandler(healthy_request, ("healthy", 2))
+        srv.receivers.update((broken, healthy))
+
+        # Isolate the synchronous replay performed by compaction from the
+        # asynchronous resync broadcast.
+        monkeypatch.setattr(srv, "broadcast", lambda *_args, **_kwargs: None)
+
+        srv.compact_log()
+
+        assert broken not in srv.receivers
+        assert healthy in srv.receivers
+        healthy_request.seek(0)
+        replayed = message_to_dict(recv_framed_rfile(healthy_request))
+        assert replayed["event"]["prim"] == "/A"
+
     def test_seq_resets_after_compact(self, srv):
         """After compaction, sequence numbers restart from 1."""
         self._insert_events(
@@ -601,6 +644,26 @@ class TestReplay:
             msgs.append(message_to_dict(buf))
         assert len(msgs) == 2
         assert msgs[0]["seq"] == 2
+
+    def test_replay_from_propagates_send_failure(self, srv):
+        seq = srv.assign_seq()
+        srv.append_log(
+            {
+                "type": "event",
+                "seq": seq,
+                "event": {"k": "ensure_prim", "prim": "/P", "typeName": "Xform"},
+            }
+        )
+
+        class BrokenRequest:
+            def sendall(self, _payload):
+                raise OSError("receiver disconnected")
+
+        class FakeHandler:
+            request = BrokenRequest()
+
+        with pytest.raises(OSError, match="receiver disconnected"):
+            srv.replay_from(FakeHandler(), 1)
 
 
 # ---------------------------------------------------------------------------

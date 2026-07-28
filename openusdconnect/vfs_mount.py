@@ -101,7 +101,7 @@ def check_http_endpoint(host: str, port: int, share: str, name: str) -> tuple[bo
         try:
             if conn is not None:
                 conn.close()
-        except Exception:
+        except OSError:
             pass
     if 200 <= resp.status < 300:
         return True, f"HTTP preflight OK: http://{host}:{port}{path}"

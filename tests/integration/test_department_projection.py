@@ -200,3 +200,27 @@ def test_generic_sdf_projection_is_ordered_and_replayable(department_server):
         if late_receiver is not None:
             late_receiver.stop()
             late_receiver.join(timeout=2)
+
+
+def test_replay_failure_unregisters_receiver(department_server, monkeypatch):
+    sync_server, port = department_server
+
+    def _fail_replay(_handler, _seq_start):
+        raise OSError("injected replay failure")
+
+    monkeypatch.setattr(sync_server, "replay_from", _fail_replay)
+    receiver = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="failing-replay",
+        origin="failing-replay-origin",
+    )
+    receiver.start()
+    receiver.join(timeout=5)
+    try:
+        assert not receiver.is_alive()
+        assert _wait_until(lambda: not sync_server.receivers)
+        assert _wait_until(lambda: not sync_server.clients)
+    finally:
+        receiver.stop()
+        receiver.join(timeout=2)

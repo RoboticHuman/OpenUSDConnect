@@ -183,46 +183,53 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             department=self._department,
         )
 
-        # Create per-client layer only when department ordering is enabled.
-        # Without departments, all clients share edit_layer (last-write-wins).
-        self._client_layer = None
-        if role == "emitter" and client_id and sync_server.department_priority:
-            self._client_layer = sync_server.get_or_create_client_layer(
-                client_id,
-                department=self._department,
-            )
-
-        if role == "receiver":
-            sync_from = hello_fb.SyncFrom() or 1
-
-            # If sync_from is beyond the current log tail (e.g., after
-            # compaction reset seq numbers), send resync so the receiver
-            # resets its sequence counter, then replay the full log. Requesting
-            # exactly max_seq + 1 is a valid "start from the live tail" case.
-            max_seq = sync_server.store.get_max_seq()
-            if sync_from > (max_seq + 1) and max_seq > 0:
-                send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
-                sync_from = 1
-
-            # Acquire send_lock first, then add to broadcast set and replay.
-            # The send_lock prevents broadcasts from reaching this receiver
-            # until replay is complete (preserving event ordering). The
-            # broadcast thread never holds both locks simultaneously (it
-            # snapshots under clients_lock, releases it, then acquires
-            # send_lock per target), so no deadlock is possible.
-            with self.send_lock:
-                with sync_server.clients_lock:
-                    sync_server.receivers.add(self)
-                sync_server.replay_from(self, sync_from)
-
-        # Send-only timeout so the broadcast thread isn't blocked
-        # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
-        # aware) so recv stays blocking — settimeout() can't be used
-        # because it would cause spurious TimeoutError in _read_loop.
-        if role == "receiver":
-            _set_send_timeout(self.request, _SEND_TIMEOUT_S)
-        self.request.settimeout(None)
         try:
+            # Create per-client layer only when department ordering is enabled.
+            # Without departments, all clients share edit_layer (last-write-wins).
+            self._client_layer = None
+            if role == "emitter" and client_id and sync_server.department_priority:
+                self._client_layer = sync_server.get_or_create_client_layer(
+                    client_id,
+                    department=self._department,
+                )
+
+            if role == "receiver":
+                sync_from = hello_fb.SyncFrom() or 1
+
+                # If sync_from is beyond the current log tail (e.g., after
+                # compaction reset seq numbers), send resync so the receiver
+                # resets its sequence counter, then replay the full log. Requesting
+                # exactly max_seq + 1 is a valid "start from the live tail" case.
+                max_seq = sync_server.store.get_max_seq()
+                if sync_from > (max_seq + 1) and max_seq > 0:
+                    send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
+                    sync_from = 1
+
+                # Acquire send_lock first, then add to broadcast set and replay.
+                # The send_lock prevents broadcasts from reaching this receiver
+                # until replay is complete (preserving event ordering). The
+                # broadcast thread never holds both locks simultaneously (it
+                # snapshots under clients_lock, releases it, then acquires
+                # send_lock per target), so no deadlock is possible.
+                try:
+                    with self.send_lock:
+                        with sync_server.clients_lock:
+                            sync_server.receivers.add(self)
+                        sync_server.replay_from(self, sync_from)
+                except (OSError, TimeoutError):
+                    LOG.info(
+                        "Receiver disconnected during replay: %s",
+                        self.client_address,
+                    )
+                    return
+
+            # Send-only timeout so the broadcast thread isn't blocked
+            # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
+            # aware) so recv stays blocking because settimeout() would cause
+            # spurious TimeoutError in _read_loop.
+            if role == "receiver":
+                _set_send_timeout(self.request, _SEND_TIMEOUT_S)
+            self.request.settimeout(None)
             self._read_loop(sync_server)
         finally:
             with sync_server.clients_lock:

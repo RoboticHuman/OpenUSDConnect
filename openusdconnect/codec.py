@@ -1285,8 +1285,9 @@ def decode_messages(
 ) -> DecodeResult:
     """Decode a batch of wire messages with sequence dedup and resync handling.
 
-    Per-message decode failures are captured into ``result.errors``
-    rather than raised.
+    The first decode failure is captured in ``result.errors`` rather than
+    raised. Decoding then stops so the caller can apply the valid prefix and
+    request replay from ``result.last_seq + 1`` without skipping later events.
     """
     result = DecodeResult(last_seq=last_seq)
     for raw in raw_messages:
@@ -1294,7 +1295,7 @@ def decode_messages(
             msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
         except Exception as exc:  # noqa: BLE001 — surfaced via result.errors
             result.errors.append(exc)
-            continue
+            break
 
         msg_type = msg.get("type")
         if msg_type == MSG_RESYNC:

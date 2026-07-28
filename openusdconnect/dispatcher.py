@@ -209,13 +209,15 @@ class EventDispatcher:
                 self.on_resync()
         for exc in result.errors:
             LOG.warning("Decode error: %s", exc)
-        self._last_seq = result.last_seq
 
         events = result.received
-        if not events:
-            return 0
+        self._last_seq = result.last_seq
+        applied = self._apply(events) if events else 0
 
-        return self._apply(events)
+        if result.errors:
+            self.receiver.request_replay_from(result.last_seq + 1)
+
+        return applied
 
     def _apply(self, events: list[dict]) -> int:
         """Run the apply pipeline on a pre-decoded batch.

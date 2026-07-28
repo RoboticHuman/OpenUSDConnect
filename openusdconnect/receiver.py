@@ -104,6 +104,8 @@ class ReceiverThread(threading.Thread):
         self.sock: socket.socket | None = None
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
+        self._replay_from: int | None = None
+        self._replay_generation = 0
         self._connected_event = threading.Event()
         self.last_seq: int = 0
         self._queue_overflow = False
@@ -173,8 +175,15 @@ class ReceiverThread(threading.Thread):
         # accepted-socket setting.
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        # Send hello as receiver — use last_seq + 1 for replay on reconnect
-        sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
+        with self._incoming_lock:
+            connection_generation = self._replay_generation
+            sync_from = self._replay_from
+            if sync_from is None:
+                sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
+
+        # Send hello as receiver, normally resuming after the latest queued
+        # sequence. A decode failure can override this with the last sequence
+        # the consumer applied successfully.
         hello = make_hello(
             "receiver",
             sync_from=sync_from,
@@ -214,6 +223,10 @@ class ReceiverThread(threading.Thread):
 
             consecutive_timeouts = 0
 
+            with self._incoming_lock:
+                if connection_generation != self._replay_generation:
+                    return
+
             # Pre-handshake: check for auth/hello_ok messages
             if not self.connected:
                 env = decode_envelope(buf)
@@ -250,6 +263,9 @@ class ReceiverThread(threading.Thread):
                                     LOG.exception(
                                         "ReceiverThread: on_stage_metadata callback failed",
                                     )
+                    with self._incoming_lock:
+                        if connection_generation == self._replay_generation:
+                            self._replay_from = None
                     self.connected = True
                     LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                 continue
@@ -287,10 +303,10 @@ class ReceiverThread(threading.Thread):
             if pt == PayloadType.BroadcastEvent:
                 _, be = resolve_payload(env)
                 seq = be.Seq()
-                if seq > self.last_seq:
-                    self.last_seq = seq
 
             with self._incoming_lock:
+                if connection_generation != self._replay_generation:
+                    return
                 if len(self._incoming) >= self.max_queue:
                     LOG.warning(
                         "ReceiverThread: queue full (%d), disconnecting to replay from server",
@@ -298,7 +314,34 @@ class ReceiverThread(threading.Thread):
                     )
                     self._queue_overflow = True
                     break
+                if pt == PayloadType.BroadcastEvent and seq > self.last_seq:
+                    self.last_seq = seq
                 self._incoming.append(buf)
+
+    def request_replay_from(self, seq_start: int) -> None:
+        """Reconnect and request replay beginning at ``seq_start``.
+
+        Consumers call this after a queued frame fails to decode. Frames queued
+        after the failed frame are discarded, and the connection generation
+        prevents an in-flight read from adding more stale frames.
+        """
+        seq_start = int(seq_start)
+        if seq_start < 1:
+            raise ValueError("replay sequence must be at least 1")
+
+        with self._incoming_lock:
+            self._replay_generation += 1
+            self._replay_from = seq_start
+            self.last_seq = seq_start - 1
+            self._incoming.clear()
+            self._queue_overflow = False
+            sock = self.sock
+
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _close_socket(self):
         """Close the socket, ignoring errors."""

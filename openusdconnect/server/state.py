@@ -1642,9 +1642,21 @@ class UsdSyncServer:
         self.broadcast({"type": MSG_RESYNC, "reason": "compact"})
         with self.clients_lock:
             targets = list(self.receivers)
+        disconnected = []
         for handler in targets:
-            with handler.send_lock:
-                self.replay_from(handler, 1)
+            try:
+                with handler.send_lock:
+                    self.replay_from(handler, 1)
+            except (OSError, TimeoutError):
+                LOG.info(
+                    "Receiver disconnected during compaction replay: %s",
+                    handler.client_address,
+                )
+                disconnected.append(handler)
+        if disconnected:
+            with self.clients_lock:
+                for handler in disconnected:
+                    self.receivers.discard(handler)
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
@@ -2753,33 +2765,30 @@ class UsdSyncServer:
         Single-layer replay sends binary blobs directly from the store.
         """
         _REPLAY_CHUNK = 65536
-        try:
-            blobs = self.store.get_from_seq_bin(seq_start)
-            buf_parts: list[bytes] = []
-            buf_size = 0
-            for blob in blobs:
-                outbound = blob
-                if self.department_priority:
-                    rec = message_to_dict(blob)
-                    event = rec.get("event", {})
-                    if event.get("k") in COMPOSED_PROJECTION_KINDS:
-                        correction = self.build_correction(event)
-                        if correction is not None:
-                            outbound = encode_message(
-                                {
-                                    "type": MSG_EVENT,
-                                    "seq": rec["seq"],
-                                    "event": correction,
-                                }
-                            )
-                framed = frame_batch([outbound])
-                buf_parts.append(framed)
-                buf_size += len(framed)
-                if buf_size >= _REPLAY_CHUNK:
-                    handler.request.sendall(b"".join(buf_parts))
-                    buf_parts.clear()
-                    buf_size = 0
-            if buf_parts:
+        blobs = self.store.get_from_seq_bin(seq_start)
+        buf_parts: list[bytes] = []
+        buf_size = 0
+        for blob in blobs:
+            outbound = blob
+            if self.department_priority:
+                rec = message_to_dict(blob)
+                event = rec.get("event", {})
+                if event.get("k") in COMPOSED_PROJECTION_KINDS:
+                    correction = self.build_correction(event)
+                    if correction is not None:
+                        outbound = encode_message(
+                            {
+                                "type": MSG_EVENT,
+                                "seq": rec["seq"],
+                                "event": correction,
+                            }
+                        )
+            framed = frame_batch([outbound])
+            buf_parts.append(framed)
+            buf_size += len(framed)
+            if buf_size >= _REPLAY_CHUNK:
                 handler.request.sendall(b"".join(buf_parts))
-        except Exception:
-            LOG.exception("Failed to replay events")
+                buf_parts.clear()
+                buf_size = 0
+        if buf_parts:
+            handler.request.sendall(b"".join(buf_parts))

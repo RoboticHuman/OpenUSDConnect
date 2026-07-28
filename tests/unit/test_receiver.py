@@ -233,6 +233,44 @@ class TestReconnection:
 
         _teardown(rt, conn2, srv)
 
+    def test_requested_replay_rewinds_sequence_and_clears_queue(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
+        )
+        rt.start()
+        conn1 = _accept_and_hello(srv)
+        conn2 = None
+        try:
+            _send_event(conn1, 1)
+            _send_event(conn1, 2)
+            assert _poll_until(lambda: rt.last_seq == 2)
+
+            rt.request_replay_from(2)
+            assert rt.last_seq == 1
+            assert len(rt.drain_queue()) == 0
+
+            conn2 = _accept(srv, timeout=2)
+            hello = _recv_hello(conn2)
+            assert hello["sync_from"] == 2
+            send_framed(conn2, encode_message({"type": "hello_ok"}))
+            assert _poll_until(lambda: rt.connected)
+
+            _send_event(conn2, 2)
+            assert _poll_until(lambda: rt.last_seq == 2)
+        finally:
+            conn1.close()
+            if conn2 is not None:
+                _teardown(rt, conn2, srv)
+            else:
+                rt.stop()
+                rt.join(timeout=1)
+                srv.close()
+
     def test_no_reconnect_when_disabled(self):
         """With reconnect=False, thread exits after connection loss."""
         srv, port = _make_server()
