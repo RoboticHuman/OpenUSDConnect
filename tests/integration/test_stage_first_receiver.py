@@ -14,6 +14,7 @@ from pxr import Usd, UsdGeom
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events, atomic_apply
+from openusdconnect.framing import IncompleteRead
 from openusdconnect.protocol import (
     make_hello,
     make_txn,
@@ -109,6 +110,21 @@ def _parse_events_from_bufs(bufs):
 
 class TestStageFirstIntegration:
     """End-to-end: server → network → receiver → stage commit → adapter."""
+
+    def test_protocol_version_mismatch_is_rejected(self, server):
+        sock = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        try:
+            hello = make_hello(
+                "emitter",
+                client_id="old-client",
+                origin="old-client",
+            )
+            hello["protocol_version"] = 1
+            send_msg(sock, hello)
+            with pytest.raises((IncompleteRead, ConnectionError, OSError)):
+                recv_msg(sock)
+        finally:
+            sock.close()
 
     def test_full_pipeline_commit_then_adapter(self, server):
         """Events flow through server, commit to stage, then dispatch to adapter."""

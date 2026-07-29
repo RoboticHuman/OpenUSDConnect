@@ -39,6 +39,7 @@ from . import events as _events
 from .events import Event, register_decoder, register_encoder
 from .generated import messages_generated as _fb
 from .protocol_constants import (
+    ARC_LIST_POSITIONS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -53,6 +54,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -65,6 +67,7 @@ from .protocol_constants import (
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
+    MSG_LAYER_STACK_STATE,
     MSG_PING,
     MSG_PLAYBACK_CLAIMED,
     MSG_PLAYBACK_CONTROL,
@@ -113,11 +116,14 @@ SetConnectableConnection = _fb.SetConnectableConnection
 SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
+SetSdfPropertyFields = _fb.SetSdfPropertyFields
 ClaimPlayback = _fb.ClaimPlayback
 PlaybackClaimed = _fb.PlaybackClaimed
 PlaybackRejected = _fb.PlaybackRejected
 PlaybackControl = _fb.PlaybackControl
 PlaybackState = _fb.PlaybackState
+LogicalLayerState = _fb.LogicalLayerState
+LayerStackState = _fb.LayerStackState
 NamedAttr = _fb.NamedAttr
 AttrValue = _fb.AttrValue
 AttrValueType = _fb.AttrValueType
@@ -127,11 +133,12 @@ ConnectableInputValue = _fb.ConnectableInputValue
 Connection = _fb.Connection
 ConnectableInputValueType = _fb.ConnectableInputValueType
 ArcEntry = _fb.ArcEntry
+ArcListPositionType = _fb.ArcListPosition
 StringPair = _fb.StringPair
 PayloadType = _fb.Payload
 EventPayloadType = _fb.EventPayload
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -155,7 +162,19 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_PLAYBACK_REJECTED: PayloadType.PlaybackRejected,
     MSG_PLAYBACK_CONTROL: PayloadType.PlaybackControl,
     MSG_PLAYBACK_STATE: PayloadType.PlaybackState,
+    MSG_LAYER_STACK_STATE: PayloadType.LayerStackState,
 }
+
+_ARC_POSITION_TO_FB = {
+    "explicit": ArcListPositionType.Explicit,
+    "added": ArcListPositionType.Added,
+    "prepended": ArcListPositionType.Prepended,
+    "appended": ArcListPositionType.Appended,
+    "deleted": ArcListPositionType.Deleted,
+    "ordered": ArcListPositionType.Ordered,
+}
+assert frozenset(_ARC_POSITION_TO_FB) == ARC_LIST_POSITIONS
+_FB_TO_ARC_POSITION = {value: key for key, value in _ARC_POSITION_TO_FB.items()}
 
 _PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
 
@@ -177,6 +196,7 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.PlaybackRejected: PlaybackRejected,
     PayloadType.PlaybackControl: PlaybackControl,
     PayloadType.PlaybackState: PlaybackState,
+    PayloadType.LayerStackState: LayerStackState,
 }
 
 # Stage metadata numeric fields paired with their FB Add* setters.
@@ -224,7 +244,13 @@ _DEFAULT_BUILDER_SIZE = 512
 
 def decode_envelope(buf: bytes | bytearray) -> Envelope:
     """Decode wire bytes to a FlatBuffers Envelope (zero-copy)."""
-    return Envelope.GetRootAs(buf, 0)
+    envelope = Envelope.GetRootAs(buf, 0)
+    version = envelope.SchemaVersion()
+    if version != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported schema version {version}; expected {SCHEMA_VERSION}",
+        )
+    return envelope
 
 
 def resolve_payload(envelope: Envelope):
@@ -316,6 +342,8 @@ def _encode_hello(b, msg):
         _fb.HelloAddDepartment(b, department)
     if token:
         _fb.HelloAddToken(b, token)
+    if msg.get("layered_replay"):
+        _fb.HelloAddLayeredReplay(b, True)
     return _fb.HelloEnd(b)
 
 
@@ -360,6 +388,8 @@ def _encode_hello_ok(b, msg):
         _fb.HelloOkAddToken(b, token)
     if sm_off is not None:
         _fb.HelloOkAddStageMetadata(b, sm_off)
+    if msg.get("layered_replay"):
+        _fb.HelloOkAddLayeredReplay(b, True)
     return _fb.HelloOkEnd(b)
 
 
@@ -391,7 +421,7 @@ def _encode_broadcast_event(b, msg):
     origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
     client_id = b.CreateString(msg["client_id"]) if msg.get("client_id") else None
     client = b.CreateString(msg["client"]) if msg.get("client") else None
-    department = b.CreateString(msg["department"]) if msg.get("department") else None
+    layer_key = b.CreateString(msg["layer_key"]) if msg.get("layer_key") else None
     _fb.BroadcastEventStart(b)
     _fb.BroadcastEventAddSeq(b, msg["seq"])
     _fb.BroadcastEventAddEvent(b, ev_offset)
@@ -401,8 +431,8 @@ def _encode_broadcast_event(b, msg):
         _fb.BroadcastEventAddClientId(b, client_id)
     if client:
         _fb.BroadcastEventAddClient(b, client)
-    if department:
-        _fb.BroadcastEventAddDepartment(b, department)
+    if layer_key:
+        _fb.BroadcastEventAddLayerKey(b, layer_key)
     return _fb.BroadcastEventEnd(b)
 
 
@@ -504,6 +534,39 @@ def _encode_playback_state(b, msg):
     return _fb.PlaybackStateEnd(b)
 
 
+def _encode_layer_stack_state(b, msg):
+    generation = b.CreateString(msg.get("generation", ""))
+    layer_offsets = []
+    for state in msg.get("layers", ()):
+        layer_key = b.CreateString(state["layer_key"])
+        label = (
+            b.CreateString(state["label"])
+            if state.get("label")
+            else None
+        )
+        _fb.LogicalLayerStateStart(b)
+        _fb.LogicalLayerStateAddLayerKey(b, layer_key)
+        if state.get("muted"):
+            _fb.LogicalLayerStateAddMuted(b, True)
+        if label is not None:
+            _fb.LogicalLayerStateAddLabel(b, label)
+        layer_offsets.append(_fb.LogicalLayerStateEnd(b))
+
+    layers = None
+    if layer_offsets:
+        _fb.LayerStackStateStartLayersVector(b, len(layer_offsets))
+        for offset in reversed(layer_offsets):
+            b.PrependUOffsetTRelative(offset)
+        layers = b.EndVector()
+
+    _fb.LayerStackStateStart(b)
+    _fb.LayerStackStateAddGeneration(b, generation)
+    _fb.LayerStackStateAddRevision(b, int(msg.get("revision", 0)))
+    if layers is not None:
+        _fb.LayerStackStateAddLayers(b, layers)
+    return _fb.LayerStackStateEnd(b)
+
+
 _ENCODE_DISPATCH = {
     MSG_HELLO: _encode_hello,
     MSG_HELLO_OK: _encode_hello_ok,
@@ -522,6 +585,7 @@ _ENCODE_DISPATCH = {
     MSG_PLAYBACK_REJECTED: _encode_playback_rejected,
     MSG_PLAYBACK_CONTROL: _encode_playback_control,
     MSG_PLAYBACK_STATE: _encode_playback_state,
+    MSG_LAYER_STACK_STATE: _encode_layer_stack_state,
 }
 
 
@@ -854,16 +918,32 @@ def _encode_set_gprim_attrs(b, ev):
     return _fb.SetGprimAttrsEnd(b)
 
 
-def _encode_arc_entries(b, entries):
+def _encode_arc_entries(b, entries, *, explicit):
     offsets = []
     for entry in entries:
         ap = b.CreateString(entry["asset_path"]) if entry.get("asset_path") else None
         pp = b.CreateString(entry["prim_path"]) if entry.get("prim_path") else None
+        custom_data = (
+            b.CreateString(entry["custom_data_fragment"])
+            if entry.get("custom_data_fragment")
+            else None
+        )
+        position = entry.get(
+            "list_position",
+            "explicit" if explicit else "prepended",
+        )
         _fb.ArcEntryStart(b)
         if ap:
             _fb.ArcEntryAddAssetPath(b, ap)
         if pp:
             _fb.ArcEntryAddPrimPath(b, pp)
+        _fb.ArcEntryAddListPosition(b, _ARC_POSITION_TO_FB[position])
+        if entry.get("layer_offset") is not None:
+            _fb.ArcEntryAddLayerOffset(b, float(entry["layer_offset"]))
+        if entry.get("layer_scale") is not None:
+            _fb.ArcEntryAddLayerScale(b, float(entry["layer_scale"]))
+        if custom_data:
+            _fb.ArcEntryAddCustomDataFragment(b, custom_data)
         offsets.append(_fb.ArcEntryEnd(b))
     return offsets
 
@@ -871,7 +951,9 @@ def _encode_arc_entries(b, entries):
 @register_encoder(K_SET_REFERENCE, fb_tag=EventPayloadType.SetReference, fb_class=SetReference)
 def _encode_set_reference(b, ev):
     prim = b.CreateString(ev["prim"])
-    arc_offsets = _encode_arc_entries(b, ev["refs"])
+    explicit = bool(ev.get("list_op_explicit", False))
+    authored = bool(ev.get("list_op_authored", ev["refs"] or explicit))
+    arc_offsets = _encode_arc_entries(b, ev["refs"], explicit=explicit)
     _fb.SetReferenceStartRefsVector(b, len(arc_offsets))
     for off in reversed(arc_offsets):
         b.PrependUOffsetTRelative(off)
@@ -879,13 +961,17 @@ def _encode_set_reference(b, ev):
     _fb.SetReferenceStart(b)
     _fb.SetReferenceAddPrim(b, prim)
     _fb.SetReferenceAddRefs(b, refs_vec)
+    _fb.SetReferenceAddListOpAuthored(b, authored)
+    _fb.SetReferenceAddListOpExplicit(b, explicit)
     return _fb.SetReferenceEnd(b)
 
 
 @register_encoder(K_SET_PAYLOAD, fb_tag=EventPayloadType.SetPayload, fb_class=SetPayload)
 def _encode_set_payload(b, ev):
     prim = b.CreateString(ev["prim"])
-    arc_offsets = _encode_arc_entries(b, ev["payloads"])
+    explicit = bool(ev.get("list_op_explicit", False))
+    authored = bool(ev.get("list_op_authored", ev["payloads"] or explicit))
+    arc_offsets = _encode_arc_entries(b, ev["payloads"], explicit=explicit)
     _fb.SetPayloadStartPayloadsVector(b, len(arc_offsets))
     for off in reversed(arc_offsets):
         b.PrependUOffsetTRelative(off)
@@ -893,6 +979,8 @@ def _encode_set_payload(b, ev):
     _fb.SetPayloadStart(b)
     _fb.SetPayloadAddPrim(b, prim)
     _fb.SetPayloadAddPayloads(b, payloads_vec)
+    _fb.SetPayloadAddListOpAuthored(b, authored)
+    _fb.SetPayloadAddListOpExplicit(b, explicit)
     return _fb.SetPayloadEnd(b)
 
 
@@ -1160,6 +1248,30 @@ def _encode_set_point_instancer(b, ev):
     return _fb.SetPointInstancerEnd(b)
 
 
+@register_encoder(
+    K_SET_SDF_PROPERTY_FIELDS,
+    fb_tag=EventPayloadType.SetSdfPropertyFields,
+    fb_class=SetSdfPropertyFields,
+)
+def _encode_set_sdf_property_fields(b, ev):
+    prim = b.CreateString(ev["prim"])
+    spec_path = b.CreateString(ev["spec_path"])
+    fragment = b.CreateString(ev.get("fragment", ""))
+    field_offsets = [b.CreateString(field) for field in ev.get("fields", ())]
+    _fb.SetSdfPropertyFieldsStartFieldsVector(b, len(field_offsets))
+    for offset in reversed(field_offsets):
+        b.PrependUOffsetTRelative(offset)
+    fields = b.EndVector()
+
+    _fb.SetSdfPropertyFieldsStart(b)
+    _fb.SetSdfPropertyFieldsAddPrim(b, prim)
+    _fb.SetSdfPropertyFieldsAddSpecPath(b, spec_path)
+    _fb.SetSdfPropertyFieldsAddFields(b, fields)
+    _fb.SetSdfPropertyFieldsAddFragment(b, fragment)
+    _fb.SetSdfPropertyFieldsAddRemoved(b, bool(ev.get("removed", False)))
+    return _fb.SetSdfPropertyFieldsEnd(b)
+
+
 # ===================================================================
 # DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
 # ===================================================================
@@ -1197,10 +1309,24 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
 
 
 @dataclass(slots=True)
+class ReceivedEvent:
+    """One event together with its broadcast routing envelope."""
+
+    seq: int
+    event: Event
+    layer_key: str | None = None
+    origin: str | None = None
+    client_id: str | None = None
+    client: str | None = None
+
+
+@dataclass(slots=True)
 class DecodeResult:
     """Outcome of decoding one batch of wire messages."""
 
     received: list[Event] = field(default_factory=list)
+    received_records: list[ReceivedEvent] = field(default_factory=list)
+    layer_stack_states: list[dict] = field(default_factory=list)
     last_seq: int = 0
     resync_requested: bool = False
     rate_limited_retry_after: float | None = None
@@ -1213,11 +1339,13 @@ def decode_messages(
     last_seq: int = 0,
     numpy_arrays: bool = False,
     clear_on_resync: bool = False,
+    preserve_envelopes: bool = False,
 ) -> DecodeResult:
     """Decode a batch of wire messages with sequence dedup and resync handling.
 
-    Per-message decode failures are captured into ``result.errors``
-    rather than raised.
+    The first decode failure is captured in ``result.errors`` rather than
+    raised. Decoding then stops so the caller can apply the valid prefix and
+    request replay from ``result.last_seq + 1`` without skipping later events.
     """
     result = DecodeResult(last_seq=last_seq)
     for raw in raw_messages:
@@ -1225,7 +1353,7 @@ def decode_messages(
             msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
         except Exception as exc:  # noqa: BLE001 — surfaced via result.errors
             result.errors.append(exc)
-            continue
+            break
 
         msg_type = msg.get("type")
         if msg_type == MSG_RESYNC:
@@ -1233,6 +1361,12 @@ def decode_messages(
             result.resync_requested = True
             if clear_on_resync:
                 result.received.clear()
+                result.received_records.clear()
+                result.layer_stack_states.clear()
+            continue
+
+        if msg_type == MSG_LAYER_STACK_STATE:
+            result.layer_stack_states.append(msg)
             continue
 
         if msg_type == MSG_RATE_LIMITED:
@@ -1252,6 +1386,17 @@ def decode_messages(
         event = msg.get("event")
         if event:
             result.received.append(event)
+            if preserve_envelopes:
+                result.received_records.append(
+                    ReceivedEvent(
+                        seq=seq,
+                        event=event,
+                        layer_key=msg.get("layer_key"),
+                        origin=msg.get("origin"),
+                        client_id=msg.get("client_id"),
+                        client=msg.get("client"),
+                    )
+                )
 
     return result
 
@@ -1284,6 +1429,8 @@ def _dict_hello(h, msg_type):
         v = _str(getter())
         if v:
             msg[key] = v
+    if h.LayeredReplay():
+        msg["layered_replay"] = True
     return msg
 
 
@@ -1297,6 +1444,8 @@ def _dict_hello_ok(h, msg_type):
         meta = _decode_stage_metadata_table(sm)
         if meta:
             msg["stage_metadata"] = meta
+    if h.LayeredReplay():
+        msg["layered_replay"] = True
     return msg
 
 
@@ -1343,6 +1492,25 @@ def _dict_playback_state(ps, msg_type):
     }
 
 
+def _dict_layer_stack_state(state, msg_type):
+    layers = []
+    for index in range(state.LayersLength()):
+        item = state.Layers(index)
+        layers.append(
+            {
+                "layer_key": _str(item.LayerKey()) or "",
+                "label": _str(item.Label()) or "",
+                "muted": bool(item.Muted()),
+            }
+        )
+    return {
+        "type": msg_type,
+        "generation": _str(state.Generation()) or "",
+        "revision": int(state.Revision()),
+        "layers": layers,
+    }
+
+
 def _dict_auth_rejected(h, msg_type):
     return {"type": msg_type, "reason": _str(h.Reason()) or ""}
 
@@ -1366,7 +1534,7 @@ def _dict_broadcast_event(be, msg_type, numpy_arrays=False):
         ("origin", be.Origin),
         ("client_id", be.ClientId),
         ("client", be.Client),
-        ("department", be.Department),
+        ("layer_key", be.LayerKey),
     ]:
         v = _str(getter())
         if v:
@@ -1416,6 +1584,7 @@ _DICT_DECODE_DISPATCH = {
     MSG_PLAYBACK_REJECTED: _dict_playback_rejected,
     MSG_PLAYBACK_CONTROL: _dict_playback_control,
     MSG_PLAYBACK_STATE: _dict_playback_state,
+    MSG_LAYER_STACK_STATE: _dict_layer_stack_state,
 }
 
 
@@ -1568,6 +1737,7 @@ def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
 
 @register_decoder(K_SET_REFERENCE)
 def _dict_set_reference(sr, kind):
+    explicit = sr.ListOpExplicit()
     refs = []
     for i in range(sr.RefsLength()):
         arc = sr.Refs(i)
@@ -1578,12 +1748,30 @@ def _dict_set_reference(sr, kind):
         pp = _str(arc.PrimPath())
         if pp:
             entry["prim_path"] = pp
+        position = _FB_TO_ARC_POSITION[arc.ListPosition()]
+        default_position = "explicit" if explicit else "prepended"
+        if position != default_position:
+            entry["list_position"] = position
+        if arc.LayerOffset() != 0.0:
+            entry["layer_offset"] = arc.LayerOffset()
+        if arc.LayerScale() != 1.0:
+            entry["layer_scale"] = arc.LayerScale()
+        custom_data = _str(arc.CustomDataFragment())
+        if custom_data:
+            entry["custom_data_fragment"] = custom_data
         refs.append(entry)
-    return {"k": kind, "prim": _str(sr.Prim()), "refs": refs}
+    return {
+        "k": kind,
+        "prim": _str(sr.Prim()),
+        "refs": refs,
+        "list_op_authored": sr.ListOpAuthored(),
+        "list_op_explicit": explicit,
+    }
 
 
 @register_decoder(K_SET_PAYLOAD)
 def _dict_set_payload(sp, kind):
+    explicit = sp.ListOpExplicit()
     payloads = []
     for i in range(sp.PayloadsLength()):
         arc = sp.Payloads(i)
@@ -1594,8 +1782,25 @@ def _dict_set_payload(sp, kind):
         pp = _str(arc.PrimPath())
         if pp:
             entry["prim_path"] = pp
+        position = _FB_TO_ARC_POSITION[arc.ListPosition()]
+        default_position = "explicit" if explicit else "prepended"
+        if position != default_position:
+            entry["list_position"] = position
+        if arc.LayerOffset() != 0.0:
+            entry["layer_offset"] = arc.LayerOffset()
+        if arc.LayerScale() != 1.0:
+            entry["layer_scale"] = arc.LayerScale()
+        custom_data = _str(arc.CustomDataFragment())
+        if custom_data:
+            entry["custom_data_fragment"] = custom_data
         payloads.append(entry)
-    return {"k": kind, "prim": _str(sp.Prim()), "payloads": payloads}
+    return {
+        "k": kind,
+        "prim": _str(sp.Prim()),
+        "payloads": payloads,
+        "list_op_authored": sp.ListOpAuthored(),
+        "list_op_explicit": explicit,
+    }
 
 
 @register_decoder(K_LOAD_PAYLOAD)
@@ -1732,3 +1937,15 @@ def _dict_set_connectable_connection(scc, kind):
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
+
+
+@register_decoder(K_SET_SDF_PROPERTY_FIELDS)
+def _dict_set_sdf_property_fields(sss, kind):
+    return {
+        "k": kind,
+        "prim": _str(sss.Prim()),
+        "spec_path": _str(sss.SpecPath()),
+        "fields": [_str(sss.Fields(i)) for i in range(sss.FieldsLength())],
+        "fragment": _str(sss.Fragment()),
+        "removed": bool(sss.Removed()),
+    }

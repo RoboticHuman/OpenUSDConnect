@@ -23,6 +23,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from openusdconnect.codec import message_to_dict
 from openusdconnect.framing import recv_framed
+from openusdconnect.protocol import make_hello
 from openusdconnect.transport import send_msg
 
 SERVER_PORT = 7200
@@ -34,14 +35,15 @@ DB_PATH = "demo_layer_dashboard.db"
 def connect_emitter(port, client_id, origin, department):
     """Connect an emitter socket and send hello."""
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
-    send_msg(s, {
-        "type": "hello",
-        "role": "emitter",
-        "protocol_version": 1,
-        "client_id": client_id,
-        "origin": origin,
-        "department": department,
-    })
+    send_msg(
+        s,
+        make_hello(
+            "emitter",
+            client_id=client_id,
+            origin=origin,
+            department=department,
+        ),
+    )
     # Read hello_ok response
     s.settimeout(2)
     try:

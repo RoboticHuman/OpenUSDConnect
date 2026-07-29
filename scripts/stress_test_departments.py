@@ -41,6 +41,7 @@ from pxr import Usd, UsdGeom
 from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events
 from openusdconnect.framing import recv_framed
+from openusdconnect.protocol import make_hello
 from openusdconnect.transport import send_msg
 
 SERVER_PORT = 7201
@@ -70,21 +71,29 @@ def _recv_one(sock):
 
 def _connect_emitter(port, client_id, department):
     s = socket.create_connection(("127.0.0.1", port), timeout=10)
-    _send(s, {
-        "type": "hello", "role": "emitter", "protocol_version": 1,
-        "client_id": client_id, "origin": f"{client_id}-origin",
-        "department": department,
-    })
+    _send(
+        s,
+        make_hello(
+            "emitter",
+            client_id=client_id,
+            origin=f"{client_id}-origin",
+            department=department,
+        ),
+    )
     _recv_one(s)  # hello_ok
     return s
 
 
 def _connect_receiver(port, client_id):
     s = socket.create_connection(("127.0.0.1", port), timeout=10)
-    _send(s, {
-        "type": "hello", "role": "receiver", "protocol_version": 1,
-        "client_id": client_id, "sync_from": 1,
-    })
+    _send(
+        s,
+        make_hello(
+            "receiver",
+            sync_from=1,
+            client_id=client_id,
+        ),
+    )
     s.settimeout(0.5)
     return s
 

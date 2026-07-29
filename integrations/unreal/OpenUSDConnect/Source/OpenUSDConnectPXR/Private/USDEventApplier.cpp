@@ -13,10 +13,9 @@
 #include "USDIncludesStart.h"
 
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
-#include "pxr/usd/usd/references.h"
-#include "pxr/usd/usd/payloads.h"
 #include "pxr/usd/usd/variantSets.h"
 #include "pxr/usd/usd/namespaceEditor.h"
 #include "pxr/usd/usd/relationship.h"
@@ -33,12 +32,17 @@
 #include "pxr/usd/usdShade/input.h"
 #include "pxr/usd/usdShade/output.h"
 #include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/copyUtils.h"
+#include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/sdf/namespaceEdit.h"
+#include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/sdf/reference.h"
 #include "pxr/usd/sdf/payload.h"
 #include "pxr/usd/sdf/schema.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/sdf/listOp.h"
+#include "pxr/usd/sdf/layerOffset.h"
 #include "pxr/base/gf/vec2d.h"
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
@@ -52,6 +56,20 @@
 
 #include "USDIncludesEnd.h"
 #endif // USE_USD_SDK
+
+struct FUSDEventChangeBlock::FImpl
+{
+#if USE_USD_SDK
+	pxr::SdfChangeBlock ChangeBlock;
+#endif
+};
+
+FUSDEventChangeBlock::FUSDEventChangeBlock()
+	: Impl(MakeUnique<FImpl>())
+{
+}
+
+FUSDEventChangeBlock::~FUSDEventChangeBlock() = default;
 
 DEFINE_LOG_CATEGORY_STATIC(LogUSDEventApplier, Log, All);
 
@@ -88,9 +106,13 @@ void ApplyEnsurePrim(pxr::UsdStageRefPtr& Stage, const Wire::EnsurePrim* Ev)
 	const FString TypeName = ToFString(Ev->type_name());
 	if (PrimPath.IsEmpty()) return;
 
-	pxr::UsdPrim Prim = Stage->DefinePrim(
-		ToSdfPath(PrimPath),
-		TypeName.IsEmpty() ? pxr::TfToken() : ToToken(TypeName));
+	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
+	if (!Prim || !TypeName.IsEmpty())
+	{
+		Prim = Stage->DefinePrim(
+			ToSdfPath(PrimPath),
+			TypeName.IsEmpty() ? pxr::TfToken() : ToToken(TypeName));
+	}
 
 	// Apply API schemas listed in the event
 	if (const auto* Schemas = Ev->api_schemas())
@@ -117,12 +139,16 @@ void ApplyEnsureXformOps(pxr::UsdStageRefPtr& Stage, const Wire::EnsureXformOps*
 	pxr::UsdGeomXformable Xformable(Prim);
 	if (!Xformable) return;
 
-	bool bReset = false;
-	if (!Xformable.GetOrderedXformOps(&bReset).empty()) return;  // already set up
+	const pxr::TfToken TranslateName("xformOp:translate");
+	const pxr::TfToken OrientName("xformOp:orient");
+	const pxr::TfToken ScaleName("xformOp:scale");
 
-	Xformable.AddTranslateOp();
-	Xformable.AddOrientOp();
-	Xformable.AddScaleOp();
+	Prim.CreateAttribute(TranslateName, pxr::SdfValueTypeNames->Double3, false);
+	Prim.CreateAttribute(OrientName, pxr::SdfValueTypeNames->Quatf, false);
+	Prim.CreateAttribute(ScaleName, pxr::SdfValueTypeNames->Float3, false);
+
+	const pxr::VtTokenArray Order{TranslateName, OrientName, ScaleName};
+	Xformable.CreateXformOpOrderAttr().Set(Order);
 }
 
 // ---- SetXformTrs ----------------------------------------------------------
@@ -277,23 +303,78 @@ void ApplySetReference(pxr::UsdStageRefPtr& Stage, const Wire::SetReference* Ev)
 {
 	const FString PrimPath = ToFString(Ev->prim());
 	if (PrimPath.IsEmpty()) return;
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
-	if (!Prim) return;
 
-	pxr::UsdReferences Refs = Prim.GetReferences();
-	Refs.ClearReferences();
+	const pxr::UsdEditTarget EditTarget = Stage->GetEditTarget();
+	const pxr::SdfLayerHandle TargetLayer = EditTarget.GetLayer();
+	const pxr::SdfPath TargetPath = EditTarget.MapToSpecPath(ToSdfPath(PrimPath));
+	if (!TargetLayer || TargetPath.IsEmpty()) return;
+	if (!Ev->list_op_authored())
+	{
+		TargetLayer->EraseField(TargetPath, pxr::SdfFieldKeys->References);
+		return;
+	}
 
+	std::vector<pxr::SdfReference> ExplicitItems;
+	std::vector<pxr::SdfReference> AddedItems;
+	std::vector<pxr::SdfReference> PrependedItems;
+	std::vector<pxr::SdfReference> AppendedItems;
+	std::vector<pxr::SdfReference> DeletedItems;
+	std::vector<pxr::SdfReference> OrderedItems;
 	if (const auto* Arcs = Ev->refs())
 	{
 		for (const Wire::ArcEntry* Arc : *Arcs)
 		{
 			if (!Arc) continue;
 			const FString ArcPrimPath = ToFString(Arc->prim_path());
-			Refs.AddReference(pxr::SdfReference(
+			pxr::VtDictionary CustomData;
+			if (Arc->custom_data_fragment() && !Arc->custom_data_fragment()->str().empty())
+			{
+				const pxr::SdfLayerRefPtr Fragment =
+					pxr::SdfLayer::CreateAnonymous("openusdconnect-reference-custom-data");
+				if (!Fragment->ImportFromString(Arc->custom_data_fragment()->str()))
+				{
+					UE_LOG(LogUSDEventApplier, Warning,
+						TEXT("Invalid reference customData fragment for %s"), *PrimPath);
+					return;
+				}
+				CustomData = Fragment->GetCustomLayerData();
+			}
+			const pxr::SdfReference Item(
 				Arc->asset_path() ? Arc->asset_path()->str() : std::string(),
-				ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath)));
+				ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath),
+				pxr::SdfLayerOffset(Arc->layer_offset(), Arc->layer_scale()),
+				CustomData);
+			switch (Arc->list_position())
+			{
+			case Wire::ArcListPosition::Explicit: ExplicitItems.push_back(Item); break;
+			case Wire::ArcListPosition::Added: AddedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Prepended: PrependedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Appended: AppendedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Deleted: DeletedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Ordered: OrderedItems.push_back(Item); break;
+			default: return;
+			}
 		}
 	}
+
+	pxr::SdfReferenceListOp ListOp;
+	if (Ev->list_op_explicit())
+	{
+		if (!AddedItems.empty() || !PrependedItems.empty() || !AppendedItems.empty() ||
+			!DeletedItems.empty() || !OrderedItems.empty()) return;
+		ListOp.SetExplicitItems(ExplicitItems);
+	}
+	else
+	{
+		if (!ExplicitItems.empty()) return;
+		ListOp.SetAddedItems(AddedItems);
+		ListOp.SetPrependedItems(PrependedItems);
+		ListOp.SetAppendedItems(AppendedItems);
+		ListOp.SetDeletedItems(DeletedItems);
+		ListOp.SetOrderedItems(OrderedItems);
+	}
+	pxr::SdfCreatePrimInLayer(TargetLayer, TargetPath);
+	TargetLayer->SetField(TargetPath, pxr::SdfFieldKeys->References, ListOp);
 }
 
 // ---- SetPayload -----------------------------------------------------------
@@ -301,23 +382,70 @@ void ApplySetPayload(pxr::UsdStageRefPtr& Stage, const Wire::SetPayload* Ev)
 {
 	const FString PrimPath = ToFString(Ev->prim());
 	if (PrimPath.IsEmpty()) return;
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
-	if (!Prim) return;
 
-	pxr::UsdPayloads Payloads = Prim.GetPayloads();
-	Payloads.ClearPayloads();
+	const pxr::UsdEditTarget EditTarget = Stage->GetEditTarget();
+	const pxr::SdfLayerHandle TargetLayer = EditTarget.GetLayer();
+	const pxr::SdfPath TargetPath = EditTarget.MapToSpecPath(ToSdfPath(PrimPath));
+	if (!TargetLayer || TargetPath.IsEmpty()) return;
+	if (!Ev->list_op_authored())
+	{
+		TargetLayer->EraseField(TargetPath, pxr::SdfFieldKeys->Payload);
+		return;
+	}
 
+	std::vector<pxr::SdfPayload> ExplicitItems;
+	std::vector<pxr::SdfPayload> AddedItems;
+	std::vector<pxr::SdfPayload> PrependedItems;
+	std::vector<pxr::SdfPayload> AppendedItems;
+	std::vector<pxr::SdfPayload> DeletedItems;
+	std::vector<pxr::SdfPayload> OrderedItems;
 	if (const auto* Arcs = Ev->payloads())
 	{
 		for (const Wire::ArcEntry* Arc : *Arcs)
 		{
 			if (!Arc) continue;
+			if (Arc->custom_data_fragment() && !Arc->custom_data_fragment()->str().empty())
+			{
+				UE_LOG(LogUSDEventApplier, Warning,
+					TEXT("Payload arc carried reference customData for %s"), *PrimPath);
+				return;
+			}
 			const FString ArcPrimPath = ToFString(Arc->prim_path());
-			Payloads.AddPayload(pxr::SdfPayload(
+			const pxr::SdfPayload Item(
 				Arc->asset_path() ? Arc->asset_path()->str() : std::string(),
-				ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath)));
+				ArcPrimPath.IsEmpty() ? pxr::SdfPath() : ToSdfPath(ArcPrimPath),
+				pxr::SdfLayerOffset(Arc->layer_offset(), Arc->layer_scale()));
+			switch (Arc->list_position())
+			{
+			case Wire::ArcListPosition::Explicit: ExplicitItems.push_back(Item); break;
+			case Wire::ArcListPosition::Added: AddedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Prepended: PrependedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Appended: AppendedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Deleted: DeletedItems.push_back(Item); break;
+			case Wire::ArcListPosition::Ordered: OrderedItems.push_back(Item); break;
+			default: return;
+			}
 		}
 	}
+
+	pxr::SdfPayloadListOp ListOp;
+	if (Ev->list_op_explicit())
+	{
+		if (!AddedItems.empty() || !PrependedItems.empty() || !AppendedItems.empty() ||
+			!DeletedItems.empty() || !OrderedItems.empty()) return;
+		ListOp.SetExplicitItems(ExplicitItems);
+	}
+	else
+	{
+		if (!ExplicitItems.empty()) return;
+		ListOp.SetAddedItems(AddedItems);
+		ListOp.SetPrependedItems(PrependedItems);
+		ListOp.SetAppendedItems(AppendedItems);
+		ListOp.SetDeletedItems(DeletedItems);
+		ListOp.SetOrderedItems(OrderedItems);
+	}
+	pxr::SdfCreatePrimInLayer(TargetLayer, TargetPath);
+	TargetLayer->SetField(TargetPath, pxr::SdfFieldKeys->Payload, ListOp);
 }
 
 // ---- LoadPayload / UnloadPayload ------------------------------------------
@@ -348,7 +476,15 @@ void ApplySetVariantSelections(pxr::UsdStageRefPtr& Stage, const Wire::SetVarian
 		{
 			if (!Pair || !Pair->key() || Pair->key()->size() == 0) continue;
 			pxr::UsdVariantSet VSet = VarSets.GetVariantSet(Pair->key()->str());
-			VSet.SetVariantSelection(Pair->value() ? Pair->value()->str() : std::string());
+			const std::string Value = Pair->value() ? Pair->value()->str() : std::string();
+			if (Value.empty())
+			{
+				VSet.ClearVariantSelection();
+			}
+			else
+			{
+				VSet.SetVariantSelection(Value);
+			}
 		}
 	}
 }
@@ -635,7 +771,14 @@ void ApplySetConnectableInput(pxr::UsdStageRefPtr& Stage, const Wire::SetConnect
 
 	if (!InfoId.IsEmpty() && Prim.IsA<pxr::UsdShadeShader>())
 	{
-		pxr::UsdShadeShader(Prim).CreateIdAttr(pxr::VtValue(ToToken(InfoId)));
+		const pxr::TfToken DesiredId = ToToken(InfoId);
+		const pxr::UsdShadeShader Shader(Prim);
+		pxr::TfToken CurrentId;
+		const pxr::UsdAttribute IdAttr = Shader.GetIdAttr();
+		if (!IdAttr || !IdAttr.Get(&CurrentId) || CurrentId != DesiredId)
+		{
+			Shader.CreateIdAttr(pxr::VtValue(DesiredId));
+		}
 	}
 
 	pxr::UsdShadeConnectableAPI Connectable(Prim);
@@ -772,11 +915,17 @@ void ApplySetConnectableConnection(pxr::UsdStageRefPtr& Stage, const Wire::SetCo
 			}
 			if (bIsInput)
 			{
-				if (pxr::UsdShadeInput P = Connectable.GetInput(ToToken(Base))) { P.ClearSources(); }
+				if (pxr::UsdShadeInput P = Connectable.GetInput(ToToken(Base)))
+				{
+					P.DisconnectSource();
+				}
 			}
 			else
 			{
-				if (pxr::UsdShadeOutput P = Connectable.GetOutput(ToToken(Base))) { P.ClearSources(); }
+				if (pxr::UsdShadeOutput P = Connectable.GetOutput(ToToken(Base)))
+				{
+					P.DisconnectSource();
+				}
 			}
 		}
 	}
@@ -1024,6 +1173,103 @@ void ApplySetPointInstancer(pxr::UsdStageRefPtr& Stage, const Wire::SetPointInst
 	}
 }
 
+// ---- SetSdfPropertyFields ---------------------------------------------------------
+
+void ApplySetSdfPropertyFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfPropertyFields* Ev)
+{
+	if (!Ev || !Ev->spec_path()) return;
+	const pxr::SdfPath EventPath(Ev->spec_path()->str());
+	if (!EventPath.IsAbsolutePath() || !EventPath.IsPropertyPath()) return;
+
+	const pxr::UsdEditTarget EditTarget = Stage->GetEditTarget();
+	const pxr::SdfLayerHandle TargetLayer = EditTarget.GetLayer();
+	const pxr::SdfPath TargetPath = EditTarget.MapToSpecPath(EventPath);
+	if (!TargetLayer || TargetPath.IsEmpty()) return;
+
+	if (Ev->removed())
+	{
+		if (TargetLayer->HasSpec(TargetPath))
+		{
+			pxr::SdfBatchNamespaceEdit Edits;
+			Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
+			if (!TargetLayer->Apply(Edits))
+			{
+				UE_LOG(LogUSDEventApplier, Warning,
+					TEXT("Could not remove Sdf property spec %s"),
+					UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			}
+		}
+		return;
+	}
+
+	if (!Ev->fragment() || !Ev->fields() || Ev->fields()->empty()) return;
+	const pxr::SdfLayerRefPtr Incoming = pxr::SdfLayer::CreateAnonymous("openusdconnect-sdf-delta");
+	if (!Incoming->ImportFromString(Ev->fragment()->str()) || !Incoming->HasSpec(EventPath))
+	{
+		UE_LOG(LogUSDEventApplier, Warning, TEXT("Invalid set_sdf_property_fields fragment for %s"),
+			UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		return;
+	}
+	if (TargetLayer->HasSpec(TargetPath) &&
+		TargetLayer->GetSpecType(TargetPath) != Incoming->GetSpecType(EventPath))
+	{
+		pxr::SdfBatchNamespaceEdit Edits;
+		Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
+		if (!TargetLayer->Apply(Edits))
+		{
+			UE_LOG(LogUSDEventApplier, Warning,
+				TEXT("Could not replace Sdf property spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			return;
+		}
+	}
+	if (!TargetLayer->HasSpec(TargetPath))
+	{
+		static const pxr::TfToken CustomField("custom");
+		static const pxr::TfToken TypeNameField("typeName");
+		static const pxr::TfToken VariabilityField("variability");
+		auto IsSelectedField = [Ev](const pxr::TfToken& Field)
+		{
+			if (Field == CustomField || Field == TypeNameField || Field == VariabilityField)
+			{
+				return true;
+			}
+			for (const ::flatbuffers::String* FieldString : *Ev->fields())
+			{
+				if (FieldString && Field == pxr::TfToken(FieldString->str())) return true;
+			}
+			return false;
+		};
+		for (const pxr::TfToken& Field : Incoming->ListFields(EventPath))
+		{
+			if (!IsSelectedField(Field)) Incoming->EraseField(EventPath, Field);
+		}
+		pxr::SdfCreatePrimInLayer(TargetLayer, TargetPath.GetPrimPath());
+		if (!pxr::SdfCopySpec(Incoming, EventPath, TargetLayer, TargetPath))
+		{
+			UE_LOG(LogUSDEventApplier, Warning,
+				TEXT("Could not create Sdf property spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		}
+		return;
+	}
+
+	for (const ::flatbuffers::String* FieldString : *Ev->fields())
+	{
+		if (!FieldString) continue;
+		const pxr::TfToken Field(FieldString->str());
+		pxr::VtValue Value;
+		if (Incoming->HasField(EventPath, Field, &Value))
+		{
+			TargetLayer->SetField(TargetPath, Field, Value);
+		}
+		else
+		{
+			TargetLayer->EraseField(TargetPath, Field);
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -1041,6 +1287,7 @@ void DispatchEvent(pxr::UsdStageRefPtr& Stage, const Wire::EventWrapper* Wrapper
 	case Wire::EventPayload::SetGprimAttrs:        ApplySetGprimAttrs(Stage, Wrapper->event_as_SetGprimAttrs());               break;
 	case Wire::EventPayload::SetInstanceable:      ApplySetInstanceable(Stage, Wrapper->event_as_SetInstanceable());           break;
 	case Wire::EventPayload::SetPointInstancer:    ApplySetPointInstancer(Stage, Wrapper->event_as_SetPointInstancer());       break;
+	case Wire::EventPayload::SetSdfPropertyFields: ApplySetSdfPropertyFields(Stage, Wrapper->event_as_SetSdfPropertyFields()); break;
 	case Wire::EventPayload::SetReference:         ApplySetReference(Stage, Wrapper->event_as_SetReference());                 break;
 	case Wire::EventPayload::SetPayload:           ApplySetPayload(Stage, Wrapper->event_as_SetPayload());                     break;
 	case Wire::EventPayload::LoadPayload:          ApplyLoadPayload(Stage, Wrapper->event_as_LoadPayload());                   break;
@@ -1072,6 +1319,7 @@ FString GetEventPrim(const Wire::EventWrapper* Wrapper)
 	case Wire::EventPayload::SetGprimAttrs:            return ToFString(Wrapper->event_as_SetGprimAttrs()->prim());
 	case Wire::EventPayload::SetInstanceable:          return ToFString(Wrapper->event_as_SetInstanceable()->prim());
 	case Wire::EventPayload::SetPointInstancer:        return ToFString(Wrapper->event_as_SetPointInstancer()->prim());
+	case Wire::EventPayload::SetSdfPropertyFields:     return ToFString(Wrapper->event_as_SetSdfPropertyFields()->prim());
 	case Wire::EventPayload::SetReference:             return ToFString(Wrapper->event_as_SetReference()->prim());
 	case Wire::EventPayload::SetPayload:               return ToFString(Wrapper->event_as_SetPayload()->prim());
 	case Wire::EventPayload::LoadPayload:              return ToFString(Wrapper->event_as_LoadPayload()->prim());

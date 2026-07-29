@@ -55,6 +55,14 @@ SAMPLE_ARGS: dict[str, dict] = {
         "positions": [[0, 0, 0], [1, 0, 0]],
         "proto_indices": [0, 0],
     },
+    "set_sdf_property_fields": {
+        "prim": "/World/A",
+        "spec_path": "/World/A.userProperties:weight",
+        "fields": ["default"],
+        "fragment": (
+            '#usda 1.0\n\nover "World" { over "A" { custom double userProperties:weight = 1 } }\n'
+        ),
+    },
 }
 
 

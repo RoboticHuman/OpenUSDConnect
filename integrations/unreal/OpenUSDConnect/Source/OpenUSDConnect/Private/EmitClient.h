@@ -49,7 +49,17 @@ public:
 	bool Start();
 	void StopAndWait();
 
-	bool IsConnected() const { return bConnected.load(std::memory_order_relaxed); }
+	bool IsConnected() const { return bConnected.load(std::memory_order_acquire); }
+
+	/**
+	 * Monotonically increasing identifier for each successful HELLO handshake.
+	 * The game thread uses this to replay per-connection structural prerequisites
+	 * before sending value-only transform events to a fresh server session.
+	 */
+	uint64 GetConnectionGeneration() const
+	{
+		return ConnectionGeneration.load(std::memory_order_relaxed);
+	}
 
 	/** Push a complete pre-framed Envelope{Txn} message onto the send queue. */
 	void EnqueueFrame(TArray<uint8>&& Frame);
@@ -73,6 +83,7 @@ private:
 	FRunnableThread* Thread;
 	std::atomic<bool> bShouldStop;
 	std::atomic<bool> bConnected;
+	std::atomic<uint64> ConnectionGeneration;
 
 	TQueue<TArray<uint8>, EQueueMode::Spsc> SendQueue;
 };

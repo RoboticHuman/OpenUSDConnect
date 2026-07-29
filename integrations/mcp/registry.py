@@ -2,7 +2,7 @@
 
 One :class:`ToolRow` per ``K_*`` event kind. Each row's ``build`` assembles a
 single event dict matching the TypedDict in ``openusdconnect.events``. ``tools``
-wraps every row into an MCP tool, and the generic ``usd_send_events`` accepts any
+wraps public rows into MCP tools, and the generic ``usd_send_events`` accepts any
 kind whose key is in this table. The table keys must stay equal to ``EVENT_KEYS``
 (a consistency test enforces it), so adding a new core event kind requires adding
 a row here.
@@ -32,6 +32,7 @@ from openusdconnect.protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
+    K_SET_SDF_PROPERTY_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -44,11 +45,12 @@ from openusdconnect.protocol_constants import (
 
 @dataclass(frozen=True)
 class ToolRow:
-    """One event kind exposed as an MCP tool."""
+    """One event kind available to MCP authoring."""
 
     kind: str
     summary: str
     build: Callable[..., dict]
+    expose: bool = True
 
 
 def euler_to_quat_wxyz(euler_deg: list[float], order: str = "XYZ") -> list[float]:
@@ -152,12 +154,32 @@ def _set_gprim_attrs(
     return ev
 
 
-def _set_reference(prim: str, refs: list[dict]) -> dict:
-    return {"k": K_SET_REFERENCE, "prim": prim, "refs": refs}
+def _set_reference(
+    prim: str,
+    refs: list[dict],
+    list_op_authored: bool | None = None,
+    list_op_explicit: bool = False,
+) -> dict:
+    ev = {"k": K_SET_REFERENCE, "prim": prim, "refs": refs}
+    if list_op_authored is not None:
+        ev["list_op_authored"] = list_op_authored
+    if list_op_explicit:
+        ev["list_op_explicit"] = True
+    return ev
 
 
-def _set_payload(prim: str, payloads: list[dict]) -> dict:
-    return {"k": K_SET_PAYLOAD, "prim": prim, "payloads": payloads}
+def _set_payload(
+    prim: str,
+    payloads: list[dict],
+    list_op_authored: bool | None = None,
+    list_op_explicit: bool = False,
+) -> dict:
+    ev = {"k": K_SET_PAYLOAD, "prim": prim, "payloads": payloads}
+    if list_op_authored is not None:
+        ev["list_op_authored"] = list_op_authored
+    if list_op_explicit:
+        ev["list_op_explicit"] = True
+    return ev
 
 
 def _load_payload(prim: str) -> dict:
@@ -280,6 +302,23 @@ def _set_point_instancer(
     return ev
 
 
+def _set_sdf_property_fields(
+    prim: str,
+    spec_path: str,
+    fields: list[str],
+    fragment: str = "",
+    removed: bool = False,
+) -> dict:
+    return {
+        "k": K_SET_SDF_PROPERTY_FIELDS,
+        "prim": prim,
+        "spec_path": spec_path,
+        "fields": list(fields),
+        "fragment": fragment,
+        "removed": bool(removed),
+    }
+
+
 TOOL_TABLE: dict[str, ToolRow] = {
     K_ENSURE_PRIM: ToolRow(
         K_ENSURE_PRIM,
@@ -326,15 +365,16 @@ TOOL_TABLE: dict[str, ToolRow] = {
     ),
     K_SET_REFERENCE: ToolRow(
         K_SET_REFERENCE,
-        "Set reference composition arcs. refs=[{asset_path, prim_path?}]; omit "
-        "prim_path to use the referenced layer's default prim. A .mtlx asset_path "
-        "imports a MaterialX document.",
+        "Replace the current edit target's reference list op. Arc entries accept "
+        "asset_path, prim_path, list_position, layer_offset, layer_scale, and "
+        "reference custom_data_fragment. Omit prim_path to use the default prim.",
         _set_reference,
     ),
     K_SET_PAYLOAD: ToolRow(
         K_SET_PAYLOAD,
-        "Set payload composition arcs (unloaded by default). payloads=[{asset_path, "
-        "prim_path?}]. Follow with load_payload to materialize.",
+        "Replace the current edit target's payload list op (unloaded by default). "
+        "Arc entries accept asset_path, prim_path, list_position, layer_offset, "
+        "and layer_scale. Follow with load_payload to materialize.",
         _set_payload,
     ),
     K_LOAD_PAYLOAD: ToolRow(K_LOAD_PAYLOAD, "Load a prim's payload children.", _load_payload),
@@ -392,5 +432,12 @@ TOOL_TABLE: dict[str, ToolRow] = {
         "scales, velocities, ids, etc. Only provided arrays are authored. "
         "Optional time selects a time sample.",
         _set_point_instancer,
+    ),
+    K_SET_SDF_PROPERTY_FIELDS: ToolRow(
+        K_SET_SDF_PROPERTY_FIELDS,
+        "Apply a low-level Sdf property delta. The fragment must be USDA with "
+        "the property at spec_path; fields lists the opinions to set or clear.",
+        _set_sdf_property_fields,
+        expose=False,
     ),
 }

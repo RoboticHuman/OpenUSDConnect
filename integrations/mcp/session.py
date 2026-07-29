@@ -122,6 +122,7 @@ class ConnectionSession:
             origin=f"{self._origin_base}-recv",
             token=recv_token,
             on_playback_state=self._on_playback_state,
+            layered_replay=True,
         )
         self.receiver.start()
         self.dispatcher = EventDispatcher(
@@ -160,6 +161,8 @@ class ConnectionSession:
             self.receiver.stop()
         if self.sender is not None:
             self.sender.disconnect()
+        if self.dispatcher is not None:
+            self.dispatcher.close()
         self.sender = None
         self.receiver = None
         self.dispatcher = None

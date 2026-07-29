@@ -20,13 +20,11 @@ from ..codec import (
 from ..framing import (
     IncompleteRead,
     MessageTooLarge,
-    frame_batch,
     recv_framed_rfile,
 )
 from ..protocol_constants import (
     K_LOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
-    MSG_EVENT,
     MSG_HELLO_OK,
     MSG_PLAYBACK_CLAIMED,
     MSG_PLAYBACK_REJECTED,
@@ -34,6 +32,7 @@ from ..protocol_constants import (
     MSG_PROPOSAL_CREATED,
     MSG_RATE_LIMITED,
     MSG_RESYNC,
+    PROTOCOL_VERSION,
 )
 from ..transport import send_msg
 from ._sock_utils import _set_keepalive, _set_send_timeout
@@ -90,6 +89,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             LOG.warning("Failed to parse hello message: %s", e)
             return
 
+        protocol_version = hello_fb.ProtocolVersion()
+        if protocol_version != PROTOCOL_VERSION:
+            LOG.warning(
+                "Rejected client protocol version %s from %s; expected %s",
+                protocol_version,
+                self.client_address,
+                PROTOCOL_VERSION,
+            )
+            return
+
         role_raw = hello_fb.Role()
         role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
         client_id_raw = hello_fb.ClientId()
@@ -100,6 +109,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
         dept_raw = hello_fb.Department()
         self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
+        self._layered_replay = bool(hello_fb.LayeredReplay())
         token_raw = hello_fb.Token()
         hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
         self._client_id = client_id
@@ -126,6 +136,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         hello_ok = {"type": MSG_HELLO_OK}
         if issued_token:
             hello_ok["token"] = issued_token
+        if role == "receiver" and self._layered_replay:
+            hello_ok["layered_replay"] = True
         stage_meta = sync_server.get_stage_metadata_payload()
         if stage_meta:
             hello_ok["stage_metadata"] = stage_meta
@@ -154,46 +166,58 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             department=self._department,
         )
 
-        # Create per-client layer only when department ordering is enabled.
-        # Without departments, all clients share edit_layer (last-write-wins).
-        self._client_layer = None
-        if role == "emitter" and client_id and sync_server.department_priority:
-            self._client_layer = sync_server.get_or_create_client_layer(
-                client_id,
-                department=self._department,
-            )
-
-        if role == "receiver":
-            sync_from = hello_fb.SyncFrom() or 1
-
-            # If sync_from is beyond the current log tail (e.g., after
-            # compaction reset seq numbers), send resync so the receiver
-            # resets its sequence counter, then replay the full log. Requesting
-            # exactly max_seq + 1 is a valid "start from the live tail" case.
-            max_seq = sync_server.store.get_max_seq()
-            if sync_from > (max_seq + 1) and max_seq > 0:
-                send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
-                sync_from = 1
-
-            # Acquire send_lock first, then add to broadcast set and replay.
-            # The send_lock prevents broadcasts from reaching this receiver
-            # until replay is complete (preserving event ordering). The
-            # broadcast thread never holds both locks simultaneously (it
-            # snapshots under clients_lock, releases it, then acquires
-            # send_lock per target), so no deadlock is possible.
-            with self.send_lock:
-                with sync_server.clients_lock:
-                    sync_server.receivers.add(self)
-                sync_server.replay_from(self, sync_from)
-
-        # Send-only timeout so the broadcast thread isn't blocked
-        # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
-        # aware) so recv stays blocking — settimeout() can't be used
-        # because it would cause spurious TimeoutError in _read_loop.
-        if role == "receiver":
-            _set_send_timeout(self.request, _SEND_TIMEOUT_S)
-        self.request.settimeout(None)
         try:
+            # Create per-client layer only when department ordering is enabled.
+            # Without departments, all clients share edit_layer (last-write-wins).
+            self._client_layer = None
+            if role == "emitter" and client_id and sync_server.department_priority:
+                self._client_layer = sync_server.get_or_create_client_layer(
+                    client_id,
+                    department=self._department,
+                )
+
+            if role == "receiver":
+                sync_from = hello_fb.SyncFrom() or 1
+
+                # If sync_from is beyond the current log tail (e.g., after
+                # compaction reset seq numbers), send resync so the receiver
+                # resets its sequence counter, then replay the full log. Requesting
+                # exactly max_seq + 1 is a valid "start from the live tail" case.
+                max_seq = sync_server.store.get_max_seq()
+                if sync_from > (max_seq + 1) and max_seq > 0:
+                    send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
+                    sync_from = 1
+
+                # Acquire send_lock first, then add to broadcast set and replay.
+                # The send_lock prevents broadcasts from reaching this receiver
+                # until replay is complete (preserving event ordering). The
+                # broadcast thread never holds both locks simultaneously (it
+                # snapshots under clients_lock, releases it, then acquires
+                # send_lock per target), so no deadlock is possible.
+                try:
+                    with self.send_lock:
+                        with sync_server.clients_lock:
+                            sync_server.receivers.add(self)
+                        if self._layered_replay:
+                            send_msg(
+                                self.request,
+                                sync_server.get_layer_stack_state(),
+                            )
+                        sync_server.replay_from(self, sync_from)
+                except (OSError, TimeoutError):
+                    LOG.info(
+                        "Receiver disconnected during replay: %s",
+                        self.client_address,
+                    )
+                    return
+
+            # Send-only timeout so the broadcast thread isn't blocked
+            # indefinitely by one slow receiver. Uses SO_SNDTIMEO (platform-
+            # aware) so recv stays blocking because settimeout() would cause
+            # spurious TimeoutError in _read_loop.
+            if role == "receiver":
+                _set_send_timeout(self.request, _SEND_TIMEOUT_S)
+            self.request.settimeout(None)
             self._read_loop(sync_server)
         finally:
             with sync_server.clients_lock:
@@ -286,32 +310,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     layer=self._client_layer,
                 )
 
-                # Broadcast changed events; send corrections for overridden ones.
-                changed_records = []
-                changed_bins = []
-                for i, (rec, rec_bin) in enumerate(records):
-                    if i in changed_set:
-                        changed_records.append(rec)
-                        changed_bins.append(rec_bin)
-                    else:
-                        correction = sync_server.build_correction(events[i])
-                        if correction:
-                            correction_rec = {
-                                "type": MSG_EVENT,
-                                "seq": sync_server.assign_seq(),
-                                "event": correction,
-                            }
-                            sync_server.send_to_origin(
-                                correction_rec,
-                                self._origin,
-                            )
-                if changed_records:
-                    payload = frame_batch(changed_bins)
-                    sync_server.broadcast_bytes(
-                        payload,
-                        changed_records,
-                        exclude_origin=self._origin,
-                    )
+                sync_server.broadcast_transaction_views(
+                    records,
+                    changed_set,
+                    events,
+                    exclude_origin=self._origin,
+                )
 
                 # After load_payload, re-broadcast latest child state so
                 # receivers re-apply authoritative TRS after re-import. Kept

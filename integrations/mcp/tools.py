@@ -151,6 +151,8 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
     # -- per-kind authoring tools (table-driven) --------------------------
 
     for kind, row in TOOL_TABLE.items():
+        if not row.expose:
+            continue
         mcp.add_tool(_make_kind_tool(row, _author), name=f"usd_{kind}", description=row.summary)
 
     # -- introspection (mirror-backed) ------------------------------------

@@ -8,12 +8,17 @@ No DCC needed — headless, runs in CI.
 import time
 
 import pytest
-from pxr import Usd, UsdGeom
+from pxr import Sdf, Usd, UsdGeom
 
+from openusdconnect.codec import message_to_dict
+from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_STAGE_METADATA,
     K_SET_XFORM_TRS,
 )
 from openusdconnect.server import UsdSyncServer
@@ -29,7 +34,7 @@ def _make_server(tmp_path, department_priority=None):
 
 def _emit_events(srv, client_id, events, department=None):
     """Simulate an emitter through the production txn path: create layer,
-    apply, persist (records carry the sender's department for replay)."""
+    apply, persist (records carry the portable layer key for replay)."""
     layer = srv.get_or_create_client_layer(client_id, department=department)
     srv.process_txn(events, client_id=client_id, layer=layer)
 
@@ -43,6 +48,8 @@ def _read_translate(stage, prim_path):
     for op in xf.GetOrderedXformOps():
         if op.GetAttr().GetName() == "xformOp:translate":
             v = op.Get()
+            if v is None:
+                return None
             return (v[0], v[1], v[2])
     return None
 
@@ -60,6 +67,21 @@ def _make_trs_events(prim_path, t):
 
 
 class TestLayerIsolation:
+    def test_department_policy_persists_only_logical_layer_target(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation"])
+
+        _emit_events(
+            srv,
+            "animator",
+            [{"k": K_ENSURE_PRIM, "prim": "/World/Cube", "typeName": "Cube"}],
+            department="animation",
+        )
+
+        _seq, encoded = srv.store.get_all_asc()[0]
+        record = message_to_dict(encoded)
+        assert record["layer_key"] == "department:animation"
+        assert "department" not in record
+
     def test_separate_layers_isolation(self, tmp_path):
         """Two departments editing different prims — both visible in composed stage."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
@@ -112,8 +134,53 @@ class TestLayerIsolation:
         # Data still intact
         assert _read_translate(srv.stage, "/World/Cube") == (1, 2, 3)
 
+    def test_stage_metadata_uses_shared_session_layer(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation"])
+
+        _emit_events(
+            srv,
+            "animator",
+            [{"k": K_SET_STAGE_METADATA, "upAxis": "Z"}],
+            department="animation",
+        )
+
+        assert UsdGeom.GetStageUpAxis(srv.stage) == "Z"
+        assert srv.stage.GetSessionLayer().pseudoRoot.GetInfo("upAxis") == "Z"
+        department = srv.client_layers["animator"]
+        assert not department.pseudoRoot.HasInfo("upAxis")
+        assert srv.stage.GetEditTarget().GetLayer().identifier == department.identifier
+        _seq, encoded = srv.store.get_all_asc()[0]
+        assert "layer_key" not in message_to_dict(encoded)
+
 
 class TestDepartmentOrdering:
+    def test_configured_departments_materialize_on_first_use(self, tmp_path):
+        srv = _make_server(
+            tmp_path,
+            department_priority=["animation", "layout"],
+        )
+
+        assert [
+            item["layer_key"]
+            for item in srv.get_layer_stack_state()["layers"]
+        ] == ["default"]
+
+        srv.get_or_create_client_layer("layout-artist", "layout")
+        assert [
+            item["layer_key"]
+            for item in srv.get_layer_stack_state()["layers"]
+        ] == ["department:layout", "default"]
+
+        srv.get_or_create_client_layer("animator", "animation")
+        assert [
+            item["layer_key"]
+            for item in srv.get_layer_stack_state()["layers"]
+        ] == [
+            "department:animation",
+            "department:layout",
+            "default",
+        ]
+
     def test_no_departments_last_write_wins(self, tmp_path):
         """Without departments, all clients share edit_layer (last write wins)."""
         srv = _make_server(tmp_path)
@@ -171,6 +238,33 @@ class TestDepartmentOrdering:
 
         # Bob (animation dept) is stronger than anon (shared edit_layer)
         assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
+
+    def test_unlisted_department_is_weaker_than_configured_priority(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation"])
+
+        _emit_events(srv, "anon", _make_trs_events("/World/Cube", (1, 0, 0)))
+        _emit_events(
+            srv,
+            "fx-artist",
+            _make_trs_events("/World/Cube", (3, 0, 0)),
+            department="fx",
+        )
+        _emit_events(
+            srv,
+            "animator",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+
+        state = srv.get_layer_stack_state()
+        assert [item["layer_key"] for item in state["layers"]] == [
+            "department:animation",
+            "department:fx",
+            "default",
+        ]
+        assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
+        assert srv.mute_layer("animation")
+        assert _read_translate(srv.stage, "/World/Cube") == (3, 0, 0)
 
 
 class TestSharedDepartmentLayer:
@@ -267,6 +361,11 @@ class TestLayerLifecycle:
 
         srv.delete_layer("alice")
         assert "alice" not in srv.client_layers
+        assert srv.resolve_layer("animation") is None
+        assert [
+            item["layer_key"]
+            for item in srv.get_layer_stack_state()["layers"]
+        ] == ["default"]
         assert _read_translate(srv.stage, "/World/Cube") is None
 
     def test_merge_to_base(self, tmp_path):
@@ -508,6 +607,84 @@ class TestCorrectionPath:
         # Verify method exists and doesn't crash with no receivers
         srv.send_to_origin({"type": "ping"}, "nonexistent-origin")
 
+    def test_sdf_correction_projects_composed_department_state(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
+        strong_layer = srv.get_or_create_client_layer("bob", department="animation")
+        weak_layer = srv.get_or_create_client_layer("alice", department="layout")
+        flat_receiver = Usd.Stage.CreateInMemory()
+
+        strong_stage = Usd.Stage.CreateInMemory()
+        strong_prim = strong_stage.DefinePrim("/World/Thing", "Xform")
+        strong_attr = strong_prim.CreateAttribute(
+            "userProperties:value",
+            Sdf.ValueTypeNames.Int,
+            True,
+        )
+        strong_attr.Set(2)
+        strong_attr.SetCustomData({"strong": 2})
+        strong_emitter = NoticeEmitter(strong_stage)
+        strong_events = strong_emitter.snapshot_events()
+        strong_generic = next(
+            event for event in strong_events if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+
+        changed = srv.apply_txn(strong_events, layer=strong_layer)
+        assert strong_events.index(strong_generic) not in changed
+        apply_events(
+            flat_receiver,
+            [event for event in strong_events if event["k"] != K_SET_SDF_PROPERTY_FIELDS],
+        )
+        apply_events(flat_receiver, [srv.build_correction(strong_generic)])
+
+        weak_stage = Usd.Stage.CreateInMemory()
+        weak_prim = weak_stage.DefinePrim("/World/Thing", "Xform")
+        weak_attr = weak_prim.CreateAttribute(
+            "userProperties:value",
+            Sdf.ValueTypeNames.Int,
+            True,
+        )
+        weak_attr.Set(1)
+        weak_attr.SetCustomData({"weak": 1})
+        weak_emitter = NoticeEmitter(weak_stage)
+        weak_generic = next(
+            event
+            for event in weak_emitter.snapshot_events()
+            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+
+        assert srv.apply_txn([weak_generic], layer=weak_layer) == []
+        weak_correction = srv.build_correction(weak_generic)
+        apply_events(flat_receiver, [weak_correction])
+
+        path = "/World/Thing.userProperties:value"
+        server_attr = srv.stage.GetAttributeAtPath(path)
+        receiver_attr = flat_receiver.GetAttributeAtPath(path)
+        assert server_attr.Get() == receiver_attr.Get() == 2
+        assert server_attr.GetCustomData() == receiver_attr.GetCustomData() == {
+            "strong": 2,
+            "weak": 1,
+        }
+
+        strong_prim.RemoveProperty("userProperties:value")
+        removed = next(
+            event
+            for event in strong_emitter.build_events_for_dirty()
+            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        )
+        assert removed["removed"] is True
+        assert removed["fields"]
+        assert srv.apply_txn([removed], layer=strong_layer) == []
+
+        revealed_correction = srv.build_correction(removed)
+        apply_events(flat_receiver, [revealed_correction])
+        assert revealed_correction["removed"] is False
+        assert srv.stage.GetAttributeAtPath(path).Get() == 1
+        assert flat_receiver.GetAttributeAtPath(path).Get() == 1
+        assert flat_receiver.GetAttributeAtPath(path).GetCustomData() == {"weak": 1}
+
+        strong_emitter.cleanup()
+        weak_emitter.cleanup()
+
 
 class TestReplayWithClientLayers:
     def test_replay_routes_to_client_layers(self, tmp_path):
@@ -535,11 +712,218 @@ class TestReplayWithClientLayers:
 
         # Opinions landed in the department layers themselves, not the
         # shared fallback: replay preserves layer topology and strength.
-        assert srv2._dept_layers["layout"].GetPrimAtPath("/World/A")
-        assert srv2._dept_layers["animation"].GetPrimAtPath("/World/B")
+        assert srv2.resolve_layer("layout").GetPrimAtPath("/World/A")
+        assert srv2.resolve_layer("animation").GetPrimAtPath("/World/B")
         assert not srv2.edit_layer.GetPrimAtPath("/World/A")
         assert not srv2.edit_layer.GetPrimAtPath("/World/B")
         srv2.store.close()
+
+    def test_replay_preserves_interleaved_writes_within_department(self, tmp_path):
+        """Clients sharing a layer replay in global transaction order."""
+        db = str(tmp_path / "shared-department.db")
+        departments = ["animation"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (3, 0, 0)),
+            department="animation",
+        )
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (3, 0, 0)
+            assert srv2.client_layers["alice"] is srv2.client_layers["bob"]
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+    def test_replay_restores_unlisted_departments_without_configured_priority(
+        self,
+        tmp_path,
+    ):
+        db = str(tmp_path / "unlisted-departments.db")
+        srv1 = UsdSyncServer(log_path=db)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="layout",
+        )
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db)
+        try:
+            assert srv2._ordered_department_names() == ["animation", "layout"]
+            assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
+            assert srv2.mute_layer("animation")
+            assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+    def test_post_restart_record_uses_the_layer_that_received_the_opinion(
+        self,
+        tmp_path,
+    ):
+        db = str(tmp_path / "restart-target.db")
+        srv1 = UsdSyncServer(
+            log_path=db,
+            department_priority=["animation"],
+        )
+        _emit_events(
+            srv1,
+            "artist",
+            [{"k": K_ENSURE_PRIM, "prim": "/World/Old", "typeName": "Xform"}],
+            department="animation",
+        )
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db)
+        try:
+            animation = srv2.resolve_layer("animation")
+            records, _changed = srv2.process_txn(
+                [
+                    {
+                        "k": K_ENSURE_PRIM,
+                        "prim": "/World/New",
+                        "typeName": "Xform",
+                    }
+                ],
+                client_id="artist",
+            )
+            record = message_to_dict(records[0][1])
+
+            assert record["layer_key"] == "default"
+            assert srv2.edit_layer.GetPrimAtPath("/World/New")
+            assert not animation.GetPrimAtPath("/World/New")
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+    def test_replay_restores_stage_metadata_through_session_layer(self, tmp_path):
+        db = str(tmp_path / "stage-metadata.db")
+        departments = ["animation"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "animator",
+            [
+                {"k": K_SET_STAGE_METADATA, "upAxis": "Z"},
+                {"k": K_SET_STAGE_METADATA, "metersPerUnit": 0.01},
+            ],
+            department="animation",
+        )
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            session = srv2.stage.GetSessionLayer()
+            assert UsdGeom.GetStageUpAxis(srv2.stage) == "Z"
+            assert UsdGeom.GetStageMetersPerUnit(srv2.stage) == pytest.approx(0.01)
+            assert session.pseudoRoot.GetInfo("upAxis") == "Z"
+            assert session.pseudoRoot.GetInfo("metersPerUnit") == pytest.approx(0.01)
+            assert srv2.resolve_layer("animation") is None
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+
+class TestDepartmentCompaction:
+    def test_compaction_preserves_weaker_department_after_restart(self, tmp_path):
+        """Muting a stronger department still reveals the weaker opinion."""
+        db = str(tmp_path / "compaction.db")
+        departments = ["animation", "layout"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="layout",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        assert _read_translate(srv1.stage, "/World/Cube") == (2, 0, 0)
+
+        srv1.compact_log()
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)
+            srv2.mute_layer("animation")
+            assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
+
+    def test_delete_tombstones_only_its_department(self, tmp_path):
+        """A department delete must not erase a weaker layer during compaction."""
+        db = str(tmp_path / "delete-compaction.db")
+        departments = ["animation", "layout"]
+        srv1 = UsdSyncServer(log_path=db, department_priority=departments)
+        _emit_events(
+            srv1,
+            "alice",
+            _make_trs_events("/World/Cube", (1, 0, 0)),
+            department="layout",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            _make_trs_events("/World/Cube", (2, 0, 0)),
+            department="animation",
+        )
+        _emit_events(
+            srv1,
+            "bob",
+            [{"k": K_DELETE_PRIM, "prim": "/World/Cube"}],
+            department="animation",
+        )
+        assert _read_translate(srv1.stage, "/World/Cube") == (1, 0, 0)
+
+        srv1.compact_log()
+        srv1.shutdown()
+        srv1.store.close()
+
+        srv2 = UsdSyncServer(log_path=db, department_priority=departments)
+        try:
+            assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
+            assert srv2.resolve_layer("layout").GetPrimAtPath("/World/Cube")
+            assert not srv2.resolve_layer("animation").GetPrimAtPath(
+                "/World/Cube"
+            )
+        finally:
+            srv2.shutdown()
+            srv2.store.close()
 
 
 class TestConcurrentDepartmentWrites:

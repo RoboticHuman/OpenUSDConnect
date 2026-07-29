@@ -20,6 +20,8 @@ THIRD_PARTY_INCLUDES_END
 namespace OUC
 {
 	inline constexpr uint32 kMaxFrameSize = 16 * 1024 * 1024;  // 16 MiB
+	inline constexpr uint16 kSchemaVersion = 3;
+	inline constexpr int32 kProtocolVersion = 3;
 
 	inline FString ToFString(const ::flatbuffers::String* S)
 	{
@@ -34,7 +36,18 @@ namespace OUC
 		{
 			return nullptr;
 		}
-		return OpenUSDConnect::GetEnvelope(Frame.GetData());
+		::flatbuffers::Verifier Verifier(
+			Frame.GetData(),
+			static_cast<size_t>(Frame.Num()));
+		if (!OpenUSDConnect::VerifyEnvelopeBuffer(Verifier))
+		{
+			return nullptr;
+		}
+		const OpenUSDConnect::Envelope* Envelope =
+			OpenUSDConnect::GetEnvelope(Frame.GetData());
+		return Envelope && Envelope->schema_version() == kSchemaVersion
+			? Envelope
+			: nullptr;
 	}
 
 	inline OpenUSDConnect::Payload GetEnvelopePayloadType(const TArray<uint8>& Frame)

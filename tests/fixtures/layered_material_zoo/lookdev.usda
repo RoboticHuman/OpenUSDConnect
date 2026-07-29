@@ -1,0 +1,144 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Matte"
+        {
+            token outputs:surface.connect = </World/Looks/Matte/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.65, 0.08, 0.04)
+                float inputs:metallic = 0
+                float inputs:roughness = 0.65 (
+                    customData = {
+                        string owner = "lookdev"
+                    }
+                    documentation = "Baseline matte roughness"
+                )
+                token outputs:surface
+            }
+        }
+
+        def Material "Metal"
+        {
+            token outputs:surface.connect = </World/Looks/Metal/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.83, 0.56, 0.18)
+                float inputs:metallic = 1
+                float inputs:roughness = 0.28
+                token outputs:surface
+            }
+        }
+
+        def Material "Textured"
+        {
+            token outputs:surface.connect = </World/Looks/Textured/Surface.outputs:surface>
+
+            def Shader "Primvar"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "Texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../../../assets/test_assets/MaterialXTest/textures/brass_color.jpg@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </World/Looks/Textured/Primvar.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Textured/Texture.outputs:rgb>
+                float inputs:metallic = 0.15
+                float inputs:roughness = 0.42
+                token outputs:surface
+            }
+        }
+
+        def Material "MaterialX"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/MaterialX/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.08, 0.24, 0.72)
+                float inputs:metalness = 0.1
+                float inputs:specular_roughness = 0.32
+                token outputs:out
+            }
+        }
+
+        def NodeGraph "TransportProbe"
+        {
+            token[] inputs:labels = ["base", "coat"]
+            float inputs:unused
+            token outputs:result
+            custom rel userProperties:source = </World/Looks/Textured/Texture>
+        }
+    }
+
+    def Sphere "MatteBall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Matte>
+        double3 xformOp:translate = (-3, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "MetalBall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Metal>
+        double3 xformOp:translate = (-1, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "TexturedBall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Textured>
+        double3 xformOp:translate = (1, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "MaterialXBall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/MaterialX>
+        double3 xformOp:translate = (3, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Ground" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Matte>
+        double3 xformOp:scale = (8, 0.1, 2)
+        double3 xformOp:translate = (0, -0.1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+}

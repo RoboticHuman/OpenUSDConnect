@@ -107,7 +107,8 @@ class TestProposalApproval:
         assert p.status == "approved"
 
         # Opinions should now be in the animation layer
-        anim_layer = srv_with_layers._dept_layers["animation"]
+        anim_layer = srv_with_layers.resolve_layer("animation")
+        assert anim_layer is not None
         spec = anim_layer.GetPrimAtPath("/World/KeyLight")
         assert spec is not None
 
@@ -118,8 +119,7 @@ class TestProposalApproval:
         session = srv_with_layers.stage.GetSessionLayer()
         assert p.layer.identifier not in list(session.subLayerPaths)
 
-    def test_approve_without_target_layer_fails(self, srv):
-        # No layers created yet, so target department has no layer
+    def test_approve_without_materialized_target_layer_fails(self, srv):
         pid = srv.create_proposal("alice", "lighting", "test")
         assert not srv.approve_proposal(pid)
 
@@ -128,6 +128,67 @@ class TestProposalApproval:
         assert srv_with_layers.get_proposal_layer(pid) is not None
         srv_with_layers.approve_proposal(pid)
         assert srv_with_layers.get_proposal_layer(pid) is None
+
+    def test_approve_projects_composed_sdf_state(self, srv_with_layers, monkeypatch):
+        from pxr import Sdf, Usd
+
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.emitter import NoticeEmitter
+        from openusdconnect.event_apply import apply_events
+        from openusdconnect.protocol_constants import K_SET_SDF_PROPERTY_FIELDS
+
+        def _events(value):
+            stage = Usd.Stage.CreateInMemory()
+            prim = stage.DefinePrim("/World/Cube", "Xform")
+            prim.CreateAttribute(
+                "userProperties:value",
+                Sdf.ValueTypeNames.Int,
+                custom=True,
+            ).Set(value)
+            emitter = NoticeEmitter(stage)
+            try:
+                return emitter.snapshot_events()
+            finally:
+                emitter.cleanup()
+
+        lighting = srv_with_layers.get_or_create_client_layer("lead", "lighting")
+        srv_with_layers.apply_txn(_events(2), layer=lighting)
+
+        proposal_id = srv_with_layers.create_proposal("bob", "layout", "weak override")
+        _apply_to_proposal(srv_with_layers, proposal_id, _events(1))
+        broadcast = []
+        monkeypatch.setattr(
+            srv_with_layers,
+            "broadcast",
+            lambda record, **_kwargs: broadcast.append(record),
+        )
+        # The composed correction is a flat-receiver projection.
+        monkeypatch.setattr(
+            srv_with_layers,
+            "_receiver_audience_presence",
+            lambda: (True, False),
+        )
+
+        assert srv_with_layers.approve_proposal(proposal_id)
+        corrections = [
+            record
+            for record in broadcast
+            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+        ]
+        assert len(corrections) == 1
+        stored_generic = [
+            record
+            for record in map(
+                message_to_dict,
+                srv_with_layers.store.get_from_seq_bin(1),
+            )
+            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+        ]
+        assert corrections[0]["seq"] == stored_generic[-1]["seq"]
+
+        flat = Usd.Stage.CreateInMemory()
+        apply_events(flat, [record["event"] for record in broadcast])
+        assert flat.GetAttributeAtPath("/World/Cube.userProperties:value").Get() == 2
 
 
 def _apply_to_proposal(srv, proposal_id, events):
@@ -145,8 +206,8 @@ class TestProposalTxnRouting:
 
         # Opinions land in proposal layer, not in any department layer
         assert layer.GetPrimAtPath("/World/SpotLight") is not None
-        for dept_layer in srv_with_layers._dept_layers.values():
-            assert dept_layer.GetPrimAtPath("/World/SpotLight") is None
+        for collaboration_layer in srv_with_layers.layer_stack.managed_layers:
+            assert collaboration_layer.GetPrimAtPath("/World/SpotLight") is None
 
     def test_proposal_events_not_in_composed_stage(self, srv_with_layers):
         """Muted proposal layer opinions should not be visible on composed stage."""
@@ -173,7 +234,7 @@ class TestProposalTxnRouting:
         _apply_to_proposal(srv_with_layers, pid, [
             {"k": "ensure_prim", "prim": "/World/RimLight", "typeName": "Xform"},
         ])
-        # A new department's first client triggers _reorder_session_sublayers.
+        # A new department's first client updates the managed layer stack.
         srv_with_layers.get_or_create_client_layer("carol", "lighting")
 
         layer = srv_with_layers.proposals[pid].layer
@@ -184,4 +245,3 @@ class TestProposalTxnRouting:
         assert not prim or not prim.IsValid()
         # And resolving it no longer raises ValueError.
         assert srv_with_layers.reject_proposal(pid)
-

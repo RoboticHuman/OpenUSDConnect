@@ -10,7 +10,8 @@ running an emitter alongside a receiver needs:
   5. Commit stage-affecting events to the mirror stage atomically (if any)
   6. Dispatch every non-skipped event to the adapter
   7. Invalidate emitter diff caches against the mutated stage
-  8. Notify ``on_imported`` for newly-imported prim paths
+  8. Remember reference and payload dependencies
+  9. Notify ``on_imported`` for newly-imported prim paths
 
 Integrations call ``drain_and_apply()`` from their own tick / idle / event
 loop callback.
@@ -18,31 +19,78 @@ loop callback.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
-from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from .codec import decode_messages
 from .protocol_constants import (
     ARC_KINDS,
     IMPORT_KINDS,
+    K_DELETE_PRIM,
+    K_LOAD_PAYLOAD,
+    K_RENAME_PRIM,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
+    SHARED_STAGE_KINDS,
     STAGE_SYNC_KINDS,
 )
+from .sdf_arc_state import canonical_arc_state, clear_arc_state, read_arc_state
 
 if TYPE_CHECKING:
-    from pxr import Usd
+    from pxr import Sdf, Usd
 
     from .adapters import DCCAdapter
+    from .codec import ReceivedEvent
     from .emitter import NoticeEmitter
+    from .logical_layers import LogicalLayerRouter
     from .receiver import ReceiverThread
 
 LOG = logging.getLogger(__name__)
+
+
+class AssetDependencyRefreshResult(TypedDict):
+    status: Literal["refreshed", "still_missing", "not_tracked", "no_stage"]
+    reapplied: int
+    affected_prims: list[str]
+    pending: list[str]
+
+
+@dataclass(slots=True)
+class _TrackedAssetEvent:
+    event: dict
+    edit_target: Usd.EditTarget
+    dependencies: tuple[tuple[str, str, str], ...]
+
+
+def _asset_paths(event: dict) -> tuple[str, ...]:
+    kind = event.get("k")
+    entries = event.get("refs", ()) if kind == K_SET_REFERENCE else event.get("payloads", ())
+    explicit = bool(event.get("list_op_explicit", False))
+    default_position = "explicit" if explicit else "prepended"
+    introduced = {"explicit"} if explicit else {"added", "prepended", "appended"}
+    return tuple(
+        path
+        for entry in entries
+        if entry.get("list_position", default_position) in introduced
+        if (path := str(entry.get("asset_path", "")))
+    )
+
+
+def _path_is_at_or_below(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _renamed_path(path: str, old_root: str, new_name: str) -> str:
+    parent = old_root.rsplit("/", 1)[0]
+    new_root = f"{parent}/{new_name}" if parent else f"/{new_name}"
+    return new_root + path[len(old_root) :]
 
 
 # STAGE_SYNC_KINDS / IMPORT_KINDS / ARC_KINDS are derived from the
@@ -130,6 +178,9 @@ class EventDispatcher:
         self.on_applied = on_applied
         self.on_applied_events = on_applied_events
         self._last_seq = 0
+        self._asset_stage = None
+        self._asset_events: dict[tuple[str, str], _TrackedAssetEvent] = {}
+        self._layer_router: LogicalLayerRouter | None = None
 
     @property
     def last_seq(self) -> int:
@@ -138,6 +189,11 @@ class EventDispatcher:
     @last_seq.setter
     def last_seq(self, value: int) -> None:
         self._last_seq = value
+
+    @property
+    def layer_router(self) -> LogicalLayerRouter | None:
+        """Receiver-local logical-layer router, or ``None`` for flat replay."""
+        return self._layer_router
 
     def drain_and_apply(self) -> int:
         """Drain the receiver queue and run the apply pipeline.
@@ -148,25 +204,150 @@ class EventDispatcher:
         bufs = self.receiver.drain_queue()
         if not bufs:
             return 0
+        self._sync_layer_router()
 
         # Decode geometry to numpy (zero-copy bulk) rather than per-element
         # Python lists — the list path is ~100x slower to decode+apply for
         # heavy meshes. Adapters that need plain sequences normalize at their
         # own boundary.
         result = decode_messages(
-            bufs, last_seq=self._last_seq, numpy_arrays=True, clear_on_resync=True
+            bufs,
+            last_seq=self._last_seq,
+            numpy_arrays=True,
+            clear_on_resync=True,
+            preserve_envelopes=self._layer_router is not None,
         )
-        if result.resync_requested and self.on_resync is not None:
-            self.on_resync()
+        if result.resync_requested:
+            self._clear_asset_dependencies()
+            if self._layer_router is not None:
+                self._layer_router.clear()
+            if self.on_resync is not None:
+                self.on_resync()
         for exc in result.errors:
             LOG.warning("Decode error: %s", exc)
+
         self._last_seq = result.last_seq
+        if self._layer_router is not None:
+            self._bind_layer_router()
+            for state in result.layer_stack_states:
+                self._layer_router.apply_state(state)
+            applied = (
+                self._apply_layered(result.received_records)
+                if result.received_records
+                else 0
+            )
+        else:
+            events = result.received
+            applied = self._apply(events) if events else 0
 
-        events = result.received
-        if not events:
-            return 0
+        if result.errors:
+            self.receiver.request_replay_from(result.last_seq + 1)
 
-        return self._apply(events)
+        return applied
+
+    def bind_layered_stage(self, stage: Usd.Stage) -> None:
+        """Rebind managed receiver layers after an integration swaps stages."""
+        if self._layer_router is None:
+            return
+        self._layer_router.bind(stage)
+
+    def close(self) -> None:
+        """Release receiver-owned USD layers from their bound stage."""
+        if self._layer_router is not None:
+            self._layer_router.close()
+
+    def _sync_layer_router(self) -> None:
+        """Match the local router to the receiver's negotiated capability."""
+        active = bool(getattr(self.receiver, "layered_replay_active", False))
+        if active and self._layer_router is None:
+            from .logical_layers import LogicalLayerRouter
+
+            self._layer_router = LogicalLayerRouter()
+        elif not active and self._layer_router is not None:
+            self._layer_router.close()
+            self._layer_router = None
+
+    def _bind_layer_router(self) -> Usd.Stage:
+        router = self._layer_router
+        if router is None:
+            raise RuntimeError("layered replay was not negotiated")
+        stage = self.adapter.targets_stage()
+        if stage is None:
+            raise RuntimeError(
+                "layered replay requires an adapter backed by a Usd.Stage",
+            )
+        router.bind(stage)
+        return stage
+
+    def _apply_layered(self, records: list[ReceivedEvent]) -> int:
+        """Apply authored records to their receiver-local logical layers."""
+        from pxr import Usd
+
+        router = self._layer_router
+        if router is None:
+            raise RuntimeError("layered replay was not negotiated")
+        stage = self._bind_layer_router()
+        events = [record.event for record in records]
+        routed = []
+        for record in records:
+            if record.event.get("k") in SHARED_STAGE_KINDS:
+                layer = None
+            else:
+                if not record.layer_key:
+                    raise ValueError(
+                        "layered replay record is missing its collaboration "
+                        "layer key"
+                    )
+                layer = router.layer_for(record.layer_key)
+            routed.append((layer, record.event))
+        layers = {
+            layer.identifier: layer
+            for layer, _event in routed
+            if layer is not None
+        }
+
+        def _apply_run(run, edit_target=None):
+            self.adapter.apply_events(run)
+            if self.emitter is not None:
+                for event in run:
+                    self.emitter.invalidate_for_event(event)
+            self._observe_asset_dependencies(run, edit_target=edit_target)
+
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            with router.writable(layers.values()):
+                start = 0
+                while start < len(routed):
+                    layer = routed[start][0]
+                    end = start + 1
+                    while end < len(routed) and routed[end][0] is layer:
+                        end += 1
+                    run = [event for _layer, event in routed[start:end]]
+                    if layer is None:
+                        edit_target = Usd.EditTarget(stage.GetSessionLayer())
+                        with Usd.EditContext(stage, edit_target):
+                            _apply_run(run, edit_target)
+                    else:
+                        edit_target = Usd.EditTarget(layer)
+                        with Usd.EditContext(stage, edit_target):
+                            _apply_run(run, edit_target)
+                    start = end
+
+            if self.on_imported is not None:
+                imported = [
+                    event["prim"]
+                    for event in events
+                    if event.get("k") in IMPORT_KINDS and event.get("prim")
+                ]
+                if imported:
+                    self.on_imported(imported)
+            if self.on_applied_events is not None:
+                self.on_applied_events(events)
+            if self.on_applied is not None:
+                applied = [event["prim"] for event in events if event.get("prim")]
+                if applied:
+                    self.on_applied(applied)
+        return len(events)
 
     def _apply(self, events: list[dict]) -> int:
         """Run the apply pipeline on a pre-decoded batch.
@@ -193,15 +374,15 @@ class EventDispatcher:
             # mirror don't need the separate commit — apply_events on
             # the adapter already covers the same stage.
             adapter_handles_mirror = (
-                self.mirror_stage is not None
-                and self.adapter.targets_stage() is self.mirror_stage
+                self.mirror_stage is not None and self.adapter.targets_stage() is self.mirror_stage
             )
 
             # 1. Mirror commit — atomic batch into the dispatcher's
             #    separate USD stage.
             if self.mirror_stage is not None and not adapter_handles_mirror:
                 stage_events = [
-                    ev for i, ev in enumerate(events)
+                    ev
+                    for i, ev in enumerate(events)
                     if i not in stage_skip and ev.get("k") in STAGE_SYNC_KINDS
                 ]
                 if stage_events:
@@ -212,9 +393,7 @@ class EventDispatcher:
             # 2. Adapter dispatch — every non-skipped event. Reached
             #    after the mirror commit so adapters can rely on the
             #    mirror reflecting the events about to apply.
-            non_skipped = [
-                ev for i, ev in enumerate(events) if i not in adapter_skip
-            ]
+            non_skipped = [ev for i, ev in enumerate(events) if i not in adapter_skip]
             if non_skipped:
                 self.adapter.apply_events(non_skipped)
 
@@ -229,7 +408,13 @@ class EventDispatcher:
                         continue
                     self.emitter.invalidate_for_event(ev)
 
-            # 4. Post-import callback — fires for events that brought
+            # 4. Remember current composition dependencies. This runs after
+            #    both stage and adapter application succeed and retains only
+            #    the small reference/payload events needed for explicit
+            #    receiver-local refreshes.
+            self._observe_asset_dependencies(events)
+
+            # 5. Post-import callback: fires for events that brought
             #    new content into the consumer (load_payload,
             #    set_reference) so the integration can run post-import
             #    work (cache warmup, viewport refresh, etc.).
@@ -237,9 +422,7 @@ class EventDispatcher:
                 imported = [
                     ev["prim"]
                     for i, ev in enumerate(events)
-                    if i not in adapter_skip
-                    and ev.get("k") in IMPORT_KINDS
-                    and ev.get("prim")
+                    if i not in adapter_skip and ev.get("k") in IMPORT_KINDS and ev.get("prim")
                 ]
                 if imported:
                     self.on_imported(imported)
@@ -253,6 +436,384 @@ class EventDispatcher:
                     self.on_applied(applied)
 
         return len(events)
+
+    def _asset_dependency_stage(self) -> Usd.Stage | None:
+        stage = self.mirror_stage or self.adapter.targets_stage()
+        if stage is not self._asset_stage:
+            self._asset_stage = stage
+            self._asset_events.clear()
+        return stage
+
+    @staticmethod
+    def _resolve_asset(
+        stage: Usd.Stage,
+        anchor_layer: Sdf.Layer,
+        authored_path: str,
+    ) -> tuple[str, str]:
+        """Return ``(identifier, resolved_path)`` in the stage's resolver context."""
+        from pxr import Ar, Sdf
+
+        context = stage.GetPathResolverContext()
+        try:
+            with Ar.ResolverContextBinder(context):
+                identifier = Sdf.ComputeAssetPathRelativeToLayer(
+                    anchor_layer,
+                    authored_path,
+                )
+                layer_identifier, _arguments = Sdf.Layer.SplitIdentifier(identifier)
+                resolved = Ar.GetResolver().Resolve(layer_identifier)
+            return identifier, resolved.GetPathString()
+        except Exception as exc:  # noqa: BLE001 - resolver plugins define their own errors
+            LOG.warning("Asset resolver rejected %r: %s", authored_path, exc)
+            return authored_path, ""
+
+    def _clear_asset_dependencies(self) -> None:
+        self._asset_events.clear()
+
+    @staticmethod
+    def _tracked_asset_event_is_current(
+        stage: Usd.Stage,
+        tracked: _TrackedAssetEvent,
+    ) -> bool:
+        from pxr import Sdf
+
+        event = tracked.event
+        layer = tracked.edit_target.GetLayer()
+        if not stage.HasLocalLayer(layer):
+            return False
+        spec_path = tracked.edit_target.MapToSpecPath(Sdf.Path(event.get("prim", "")))
+        if spec_path.isEmpty:
+            return False
+
+        kind = event.get("k")
+        key = "refs" if kind == K_SET_REFERENCE else "payloads"
+        arc_attr = "referenceList" if kind == K_SET_REFERENCE else "payloadList"
+        current = read_arc_state(layer, spec_path, arc_attr)
+        expected = canonical_arc_state(
+            event.get(key, []),
+            authored=event.get("list_op_authored"),
+            explicit=bool(event.get("list_op_explicit", False)),
+            references=kind == K_SET_REFERENCE,
+        )
+        return current == expected
+
+    def _discard_stale_asset_events(self, stage: Usd.Stage) -> None:
+        for key, tracked in tuple(self._asset_events.items()):
+            if not self._tracked_asset_event_is_current(stage, tracked):
+                self._asset_events.pop(key)
+
+    def _observe_asset_dependencies(
+        self,
+        events: list[dict],
+        *,
+        edit_target: Usd.EditTarget | None = None,
+    ) -> None:
+        stage = self._asset_dependency_stage()
+        if stage is None:
+            return
+
+        edit_target = edit_target or stage.GetEditTarget()
+        anchor_layer = edit_target.GetLayer()
+        resolved_in_batch: dict[str, tuple[str, str]] = {}
+        for event in events:
+            kind = event.get("k")
+            prim_path = event.get("prim", "")
+
+            if kind == K_DELETE_PRIM:
+                for key in tuple(self._asset_events):
+                    if _path_is_at_or_below(key[1], prim_path):
+                        self._asset_events.pop(key)
+                continue
+
+            if kind == K_RENAME_PRIM:
+                new_name = event.get("new_name", "")
+                if not new_name:
+                    continue
+                moved: list[tuple[tuple[str, str], _TrackedAssetEvent]] = []
+                for key, tracked in tuple(self._asset_events.items()):
+                    if not _path_is_at_or_below(key[1], prim_path):
+                        continue
+                    self._asset_events.pop(key)
+                    new_prim = _renamed_path(key[1], prim_path, new_name)
+                    moved_event = copy.deepcopy(tracked.event)
+                    moved_event["prim"] = new_prim
+                    moved.append(
+                        (
+                            (key[0], new_prim),
+                            _TrackedAssetEvent(
+                                event=moved_event,
+                                edit_target=tracked.edit_target,
+                                dependencies=tracked.dependencies,
+                            ),
+                        )
+                    )
+                self._asset_events.update(moved)
+                continue
+
+            if kind not in (K_SET_REFERENCE, K_SET_PAYLOAD):
+                continue
+
+            key = (kind, prim_path)
+            entries_key = "refs" if kind == K_SET_REFERENCE else "payloads"
+            state = canonical_arc_state(
+                event.get(entries_key, []),
+                authored=event.get("list_op_authored"),
+                explicit=bool(event.get("list_op_explicit", False)),
+                references=kind == K_SET_REFERENCE,
+            )
+            tracked_event = copy.deepcopy(event)
+            tracked_event[entries_key] = state["entries"]
+            tracked_event["list_op_authored"] = state["list_op_authored"]
+            tracked_event["list_op_explicit"] = state["list_op_explicit"]
+            dependencies: list[tuple[str, str, str]] = []
+            for authored_path in _asset_paths(tracked_event):
+                resolved = resolved_in_batch.get(authored_path)
+                if resolved is None:
+                    resolved = self._resolve_asset(
+                        stage,
+                        anchor_layer,
+                        authored_path,
+                    )
+                    resolved_in_batch[authored_path] = resolved
+                identifier, resolved_path = resolved
+                dependencies.append((authored_path, identifier, resolved_path))
+
+            if dependencies:
+                self._asset_events[key] = _TrackedAssetEvent(
+                    event=tracked_event,
+                    edit_target=edit_target,
+                    dependencies=tuple(dependencies),
+                )
+            else:
+                self._asset_events.pop(key, None)
+
+    @property
+    def pending_asset_dependencies(self) -> tuple[str, ...]:
+        """Authored paths of unresolved reference/payload dependencies."""
+        stage = self._asset_dependency_stage()
+        if stage is not None:
+            self._discard_stale_asset_events(stage)
+        return tuple(
+            sorted(
+                {
+                    authored_path
+                    for tracked in self._asset_events.values()
+                    for authored_path, _identifier, resolved_path in tracked.dependencies
+                    if not resolved_path
+                }
+            )
+        )
+
+    @staticmethod
+    def _asset_path_matches(requested: str | None, *candidates: str) -> bool:
+        if requested is None:
+            return True
+        normalized = requested.replace("\\", "/")
+        return any(candidate.replace("\\", "/") == normalized for candidate in candidates)
+
+    def refresh_asset_dependency(
+        self,
+        asset_path: str | None = None,
+    ) -> AssetDependencyRefreshResult:
+        """Refresh resolver state and retry matching unresolved composition arcs.
+
+        Call this synchronously from the integration's USD/main thread after an
+        asset becomes available. The retry is receiver-local: it does not send
+        an event to the server or advance ``last_seq``. With ``asset_path=None``,
+        every currently pending dependency is considered. Resolver contexts
+        refresh as a unit, so any other tracked arc whose resolved path changes
+        during the refresh is reapplied as well.
+        """
+        stage = self._asset_dependency_stage()
+        if stage is None:
+            return {
+                "status": "no_stage",
+                "reapplied": 0,
+                "affected_prims": [],
+                "pending": [],
+            }
+
+        self._discard_stale_asset_events(stage)
+        tracked = [
+            event
+            for event in self._asset_events.values()
+            if any(
+                (
+                    not resolved_path
+                    if asset_path is None
+                    else self._asset_path_matches(
+                        asset_path,
+                        authored_path,
+                        identifier,
+                        resolved_path,
+                    )
+                )
+                for authored_path, identifier, resolved_path in event.dependencies
+            )
+        ]
+        if not tracked:
+            return {
+                "status": "not_tracked",
+                "reapplied": 0,
+                "affected_prims": [],
+                "pending": list(self.pending_asset_dependencies),
+            }
+
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            return self._refresh_asset_dependency_suppressed(
+                stage,
+                asset_path,
+                tracked,
+            )
+
+    def _refresh_asset_dependency_suppressed(
+        self,
+        stage: Usd.Stage,
+        asset_path: str | None,
+        tracked: list[_TrackedAssetEvent],
+    ) -> AssetDependencyRefreshResult:
+        from pxr import Ar, Usd
+
+        from .event_apply import apply_events, atomic_apply
+
+        # RefreshContext must run while its context is unbound. A conforming
+        # custom resolver may emit ResolverChanged here, allowing USD to update
+        # dependencies that were already composed successfully. The dispatcher
+        # emitter is suppressed around this entire method because that notice
+        # can synchronously recompose the stage.
+        Ar.GetResolver().RefreshContext(stage.GetPathResolverContext())
+
+        ready: list[_TrackedAssetEvent] = []
+        explicitly_selected = {id(event) for event in tracked}
+        resolved_in_refresh: dict[tuple[str, str], tuple[str, str]] = {}
+        refreshed_dependencies: dict[
+            int,
+            tuple[tuple[str, str, str], ...],
+        ] = {}
+        for event in self._asset_events.values():
+            event_ready = False
+            dependencies: list[tuple[str, str, str]] = []
+            for authored_path, old_identifier, old_resolved_path in event.dependencies:
+                selected = id(event) in explicitly_selected and (
+                    not old_resolved_path
+                    if asset_path is None
+                    else self._asset_path_matches(
+                        asset_path,
+                        authored_path,
+                        old_identifier,
+                        old_resolved_path,
+                    )
+                )
+
+                anchor_layer = event.edit_target.GetLayer()
+                cache_key = (anchor_layer.identifier, authored_path)
+                resolved = resolved_in_refresh.get(cache_key)
+                if resolved is None:
+                    resolved = self._resolve_asset(
+                        stage,
+                        anchor_layer,
+                        authored_path,
+                    )
+                    resolved_in_refresh[cache_key] = resolved
+                identifier, resolved_path = resolved
+                dependencies.append((authored_path, identifier, resolved_path))
+                if (selected and resolved_path) or resolved_path != old_resolved_path:
+                    event_ready = True
+            refreshed_dependencies[id(event)] = tuple(dependencies)
+            if event_ready:
+                ready.append(event)
+
+        if not ready:
+            for event in self._asset_events.values():
+                event.dependencies = refreshed_dependencies[id(event)]
+            return {
+                "status": "still_missing",
+                "reapplied": 0,
+                "affected_prims": [],
+                "pending": list(self.pending_asset_dependencies),
+            }
+
+        replays: list[tuple[_TrackedAssetEvent, list[dict]]] = []
+        adapter_events: list[dict] = []
+        for tracked_event in ready:
+            event = tracked_event.event
+            local_events = [event]
+            adapter_events.append(event)
+            if event.get("k") == K_SET_PAYLOAD:
+                prim = stage.GetPrimAtPath(event.get("prim", ""))
+                if prim and prim.IsLoaded():
+                    load_event = {"k": K_LOAD_PAYLOAD, "prim": event["prim"]}
+                    local_events.append(load_event)
+                    adapter_events.append(load_event)
+            replays.append((tracked_event, local_events))
+
+        adapter_handles_stage = self.adapter.targets_stage() is stage
+        # A dependency can have been received while any local layer or mapped
+        # edit target was active. Preserve that authored location during the
+        # retry instead of writing a duplicate arc into today's edit target.
+        # Snapshot every affected layer before mutating any of them so a stage
+        # adapter failure rolls the complete multi-layer replay back.
+        with ExitStack() as transaction:
+            snapshotted_layers: set[str] = set()
+            for tracked_event, _local_events in replays:
+                layer = tracked_event.edit_target.GetLayer()
+                if layer.identifier in snapshotted_layers:
+                    continue
+                with Usd.EditContext(stage, tracked_event.edit_target):
+                    transaction.enter_context(atomic_apply(stage))
+                snapshotted_layers.add(layer.identifier)
+
+            for tracked_event, local_events in replays:
+                with Usd.EditContext(stage, tracked_event.edit_target):
+                    # Assigning the same SdfListOp is a no-op, so it cannot
+                    # make Pcp retry an asset that was missing when the
+                    # opinion was first authored. Clear the tracked opinion
+                    # immediately before restoring its exact state.
+                    arc_event = local_events[0]
+                    clear_arc_state(
+                        stage,
+                        arc_event["prim"],
+                        arc_attr=(
+                            "referenceList" if arc_event["k"] == K_SET_REFERENCE else "payloadList"
+                        ),
+                    )
+                    if adapter_handles_stage:
+                        self.adapter.apply_events(local_events)
+                    else:
+                        apply_events(stage, local_events)
+
+        # DCC adapters consume the same events only after the mirror stage has
+        # committed. They do not expose USD edit targets themselves.
+        if not adapter_handles_stage:
+            self.adapter.apply_events(adapter_events)
+
+        for tracked_event, local_events in replays:
+            if self.emitter is not None:
+                with Usd.EditContext(stage, tracked_event.edit_target):
+                    for event in local_events:
+                        self.emitter.invalidate_for_event(event)
+            tracked_event.dependencies = refreshed_dependencies[id(tracked_event)]
+
+        imported = [
+            event["prim"]
+            for event in adapter_events
+            if event.get("k") in IMPORT_KINDS and event.get("prim")
+        ]
+        if imported and self.on_imported is not None:
+            self.on_imported(imported)
+        if self.on_applied_events is not None:
+            self.on_applied_events(adapter_events)
+        affected = sorted({event["prim"] for event in adapter_events if event.get("prim")})
+        if affected and self.on_applied is not None:
+            self.on_applied(affected)
+
+        return {
+            "status": "refreshed",
+            "reapplied": len(replays),
+            "affected_prims": affected,
+            "pending": list(self.pending_asset_dependencies),
+        }
 
     def _compute_stage_skip(self, events: list[dict]) -> set[int]:
         """Find arc events whose composed state already matches the stage.
@@ -293,30 +854,30 @@ class EventDispatcher:
 
     def _arc_changed(self, ev: dict, kind: str) -> bool:
         """Return True if an arc event differs from the mirror stage."""
-        from .emitter import (
-            read_payloads,
-            read_references,
-            read_variant_selections,
-        )
+        from pxr import Sdf
+
+        from .emitter import read_variant_selections
 
         prim_path = ev.get("prim", "")
 
-        def _norm(arcs):
-            return [(p.replace("\\", "/"), r) for p, r in arcs]
-
-        if kind == K_SET_REFERENCE:
-            current = _norm(read_references(self.mirror_stage, prim_path))
-            incoming = _norm(
-                [(e.get("asset_path", ""), e.get("prim_path", "")) for e in ev.get("refs", [])]
+        if kind in (K_SET_REFERENCE, K_SET_PAYLOAD):
+            references = kind == K_SET_REFERENCE
+            entries_key = "refs" if references else "payloads"
+            arc_attr = "referenceList" if references else "payloadList"
+            edit_target = self.mirror_stage.GetEditTarget()
+            spec_path = edit_target.MapToSpecPath(Sdf.Path(prim_path))
+            if spec_path.isEmpty:
+                return True
+            current = read_arc_state(
+                edit_target.GetLayer(),
+                spec_path,
+                arc_attr,
             )
-            return current != incoming
-        if kind == K_SET_PAYLOAD:
-            current = _norm(read_payloads(self.mirror_stage, prim_path))
-            incoming = _norm(
-                [
-                    (e.get("asset_path", ""), e.get("prim_path", ""))
-                    for e in ev.get("payloads", [])
-                ]
+            incoming = canonical_arc_state(
+                ev.get(entries_key, []),
+                authored=ev.get("list_op_authored"),
+                explicit=bool(ev.get("list_op_explicit", False)),
+                references=references,
             )
             return current != incoming
         if kind == K_SET_VARIANT_SELECTIONS:
@@ -328,6 +889,7 @@ class EventDispatcher:
 
 __all__ = [
     "ARC_KINDS",
+    "AssetDependencyRefreshResult",
     "EventDispatcher",
     "IMPORT_KINDS",
     "STAGE_SYNC_KINDS",

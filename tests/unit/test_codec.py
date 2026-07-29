@@ -4,6 +4,7 @@ Tests encode_message → decode via zero-copy API and message_to_dict for
 all message types and all 17 event kinds.
 """
 
+import flatbuffers
 import numpy as np
 import pytest
 
@@ -18,6 +19,7 @@ from openusdconnect.codec import (
     resolve_event,
     resolve_payload,
 )
+from openusdconnect.generated import messages_generated as _fb
 
 # ===================================================================
 # Helper
@@ -43,10 +45,28 @@ class TestSchemaVersion:
         env = decode_envelope(buf)
         assert env.SchemaVersion() == SCHEMA_VERSION
 
-    def test_version_is_one(self):
+    def test_version_is_two(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 1
+        assert SCHEMA_VERSION == 3
+
+    @pytest.mark.parametrize("version", [0, 1])
+    def test_incompatible_version_is_rejected(self, version):
+        builder = flatbuffers.Builder(32)
+        _fb.PingStart(builder)
+        ping = _fb.PingEnd(builder)
+        _fb.EnvelopeStart(builder)
+        _fb.EnvelopeAddPayloadType(builder, _fb.Payload.Ping)
+        _fb.EnvelopeAddPayload(builder, ping)
+        _fb.EnvelopeAddSchemaVersion(builder, version)
+        envelope = _fb.EnvelopeEnd(builder)
+        builder.Finish(envelope)
+
+        with pytest.raises(
+            ValueError,
+            match=rf"unsupported schema version {version}",
+        ):
+            decode_envelope(bytes(builder.Output()))
 
 
 class TestPing:
@@ -66,7 +86,7 @@ class TestHello:
         msg = {
             "type": "hello",
             "role": "emitter",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "sync_from": 42,
             "client_id": "c1",
             "origin": "blender-1",
@@ -86,7 +106,7 @@ class TestHello:
         msg = {
             "type": "hello",
             "role": "emitter",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "client_id": "c1",
             "origin": "o1",
         }
@@ -96,7 +116,7 @@ class TestHello:
         assert mt == "hello"
         # FlatBuffers returns bytes for strings
         assert hello.Role() in (b"emitter", "emitter")
-        assert hello.ProtocolVersion() == 2
+        assert hello.ProtocolVersion() == 3
 
 
 class TestHelloOk:
@@ -382,6 +402,48 @@ class TestSetReference:
         d = _txn_roundtrip(ev)
         assert d["refs"][0] == {"asset_path": "./chair.usd", "prim_path": "/Model"}
         assert d["refs"][1] == {"asset_path": "./table.usd"}
+        assert d["list_op_authored"] is True
+        assert d["list_op_explicit"] is False
+
+    def test_rich_list_op_roundtrip(self):
+        fragment = "#usda 1.0\n(\n    customLayerData = { int rank = 7 }\n)\n"
+        ev = {
+            "k": "set_reference",
+            "prim": "/World/Asset",
+            "refs": [
+                {
+                    "asset_path": "./added.usd",
+                    "prim_path": "/Model",
+                    "list_position": "added",
+                    "layer_offset": 7.0,
+                    "layer_scale": 2.0,
+                    "custom_data_fragment": fragment,
+                },
+                {
+                    "asset_path": "./deleted.usd",
+                    "list_position": "deleted",
+                },
+                {
+                    "prim_path": "/Internal",
+                    "list_position": "ordered",
+                },
+            ],
+            "list_op_authored": True,
+            "list_op_explicit": False,
+        }
+
+        assert _txn_roundtrip(ev) == ev
+
+    def test_explicit_empty_roundtrip(self):
+        ev = {
+            "k": "set_reference",
+            "prim": "/World/Asset",
+            "refs": [],
+            "list_op_authored": True,
+            "list_op_explicit": True,
+        }
+
+        assert _txn_roundtrip(ev) == ev
 
 
 class TestSetPayload:
@@ -393,6 +455,27 @@ class TestSetPayload:
         }
         d = _txn_roundtrip(ev)
         assert d["payloads"][0]["asset_path"] == "./heavy.usda"
+        assert d["list_op_authored"] is True
+        assert d["list_op_explicit"] is False
+
+    def test_offset_and_list_position_roundtrip(self):
+        ev = {
+            "k": "set_payload",
+            "prim": "/World/Asset",
+            "payloads": [
+                {
+                    "asset_path": "./heavy.usda",
+                    "prim_path": "/Root",
+                    "list_position": "appended",
+                    "layer_offset": -3.5,
+                    "layer_scale": 0.5,
+                }
+            ],
+            "list_op_authored": True,
+            "list_op_explicit": False,
+        }
+
+        assert _txn_roundtrip(ev) == ev
 
 
 class TestLoadUnloadPayload:

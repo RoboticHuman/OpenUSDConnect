@@ -10,6 +10,14 @@ This is the smallest possible DCC integration in the project — usdview
 already owns a live `Usd.Stage`, so the core `UsdStageAdapter` plugs in
 unchanged. No DCC-native object mapping, no emitter (receive-only).
 
+The integration negotiates layered replay. It maps each opaque collaboration
+layer key to a receiver-owned anonymous layer, composes those layers in the
+advertised strong-to-weak order, and tracks live mute changes. Department
+assignment is a server policy that currently selects those logical layers; it
+is not part of the receiver's composition logic. Unrelated session sublayers
+retain their relative order and offsets. If the server does not acknowledge
+the capability, the receiver falls back to the existing flat replay path.
+
 ## Quick start
 
 ```bash
@@ -84,6 +92,31 @@ usdview some_scene.usda
 Without `OPENUSDCONNECT_HOST` set, the menu is present but won't
 auto-connect — pick **Connect to OpenUSDConnect…** from the menu and
 enter the host/port.
+
+## Refreshing a late asset dependency
+
+Variant definitions remain in referenced or payloaded assets; OpenUSDConnect
+replicates the local selection opinion. If a shared asset was unavailable when
+its composition event arrived, make it available through the receiver's normal
+asset resolver and retry it from usdview's Python console:
+
+```python
+from integrations.usdview.connection import refresh_asset_dependency
+
+refresh_asset_dependency("asset:Character/{$VERSION}/Character.usda")
+# Omit the argument to retry every currently unresolved dependency.
+```
+
+The retry refreshes the stage's resolver context and locally reapplies matching
+composition events that resolve. Passing an explicit identifier also refreshes
+an already-resolved dependency whose custom-resolver mapping changed. It does
+not send anything to the server or advance the receiver sequence. Reapplication
+uses the edit target that originally received the arc and abandons stale
+tracking if that local opinion has since changed. The reapplied event preserves
+the complete authored list op, including list position, layer offset and scale,
+and reference custom data. Custom resolvers must be installed and configured in
+the usdview process. Since a resolver context refresh is context-wide, other
+tracked arcs whose resolution changes in the same refresh are updated too.
 
 ## Environment variables
 

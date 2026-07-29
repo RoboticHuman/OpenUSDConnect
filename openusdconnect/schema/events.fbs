@@ -1,5 +1,5 @@
 // OpenUSDConnect event schema — FlatBuffers IDL
-// Covers all 19 event kinds for USD scene synchronization.
+// Covers all event kinds for USD scene synchronization.
 
 namespace OpenUSDConnect;
 
@@ -55,9 +55,24 @@ table NamedAttr {
 // Composition arc entries
 // ---------------------------------------------------------------------------
 
+enum ArcListPosition : byte {
+    Explicit,
+    Added,
+    Prepended,
+    Appended,
+    Deleted,
+    Ordered,
+}
+
 table ArcEntry {
     asset_path:string;
     prim_path:string;
+    list_position:ArcListPosition = Prepended;
+    layer_offset:double;
+    layer_scale:double = 1.0;
+    // USDA layer fragment whose customLayerData is the reference customData.
+    // Empty for payloads and references without custom data.
+    custom_data_fragment:string;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,11 +184,15 @@ table SetGprimAttrs {
 table SetReference {
     prim:string;
     refs:[ArcEntry];
+    list_op_authored:bool;
+    list_op_explicit:bool;
 }
 
 table SetPayload {
     prim:string;
     payloads:[ArcEntry];
+    list_op_authored:bool;
+    list_op_explicit:bool;
 }
 
 table LoadPayload {
@@ -235,6 +254,18 @@ table SetPointInstancer {
     inactive_ids:[long];            // resolved inactiveIds prim metadata (uniform)
 }
 
+// Exact field deltas for property state that specialized events do not carry.
+// `fragment` is a USDA layer containing the property at `spec_path` with
+// declaration fields plus the fields named by `fields`. A named field absent
+// from the fragment is cleared. `removed` deletes the property spec.
+table SetSdfPropertyFields {
+    prim:string;
+    spec_path:string;
+    fields:[string];
+    fragment:string;
+    removed:bool = false;
+}
+
 // Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
 // metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional —
 // absent = "field not authored", present = "apply this value". upAxis is a
@@ -272,6 +303,7 @@ union EventPayload {
     SetStageMetadata,
     SetInstanceable,
     SetPointInstancer,
+    SetSdfPropertyFields,
 }
 
 table EventWrapper {

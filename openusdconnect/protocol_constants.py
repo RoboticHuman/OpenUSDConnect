@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 3
 
 # Message type constants
 MSG_HELLO = "hello"
@@ -24,6 +25,7 @@ MSG_PLAYBACK_CLAIMED = "playback_claimed"
 MSG_PLAYBACK_REJECTED = "playback_rejected"
 MSG_PLAYBACK_CONTROL = "playback_control"
 MSG_PLAYBACK_STATE = "playback_state"
+MSG_LAYER_STACK_STATE = "layer_stack_state"
 
 # Event kind constants - use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -45,6 +47,19 @@ K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
 K_SET_STAGE_METADATA = "set_stage_metadata"
 K_SET_INSTANCEABLE = "set_instanceable"
 K_SET_POINT_INSTANCER = "set_point_instancer"
+K_SET_SDF_PROPERTY_FIELDS = "set_sdf_property_fields"
+
+# Sdf list-op buckets carried by reference and payload arc entries.
+ARC_LIST_POSITIONS = frozenset(
+    {
+        "explicit",
+        "added",
+        "prepended",
+        "appended",
+        "deleted",
+        "ordered",
+    }
+)
 
 # Array/relationship fields carried by a SetPointInstancer event, in wire
 # bitmask order. Authoritative list: the codec, adapter dispatch, and
@@ -77,6 +92,15 @@ STAGE_METADATA_KEYS = (
 PRIMVAR_PREFIX = "primvars:"
 REL_MATERIAL_BINDING = "material:binding"
 
+
+class EventTarget(StrEnum):
+    """Destination domain for an event's effect."""
+
+    COLLABORATION_LAYER = "collaboration_layer"
+    SESSION_LAYER = "session_layer"
+    STAGE_STATE = "stage_state"
+
+
 @dataclass(frozen=True)
 class EventKindInfo:
     """Classification flags for one event kind.
@@ -104,6 +128,12 @@ class EventKindInfo:
         empty tuple means strongest-spec check (structural ops), names
         mean a per-attribute check ("meta:X" is a prim metadata field,
         "rel:X" a relationship).
+    composed_projection: department-layer writes must be replaced by an
+        authoritative composed correction instead of broadcasting the
+        authored event directly.
+    target: whether the event authors into a collaboration layer, authors
+        shared stage metadata into the primary session layer, or changes
+        non-authored stage state such as payload load rules.
     """
 
     create: bool = False
@@ -112,6 +142,8 @@ class EventKindInfo:
     arc: bool = False
     imports: bool = False
     strength_attrs: tuple[str, ...] | None = None
+    composed_projection: bool = False
+    target: EventTarget = EventTarget.COLLABORATION_LAYER
 
 
 EVENT_KIND_INFO: dict[str, EventKindInfo] = {
@@ -129,8 +161,17 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         structural=True, stage_sync=True, arc=True, imports=True,
     ),
     K_SET_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, arc=True),
-    K_LOAD_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, imports=True),
-    K_UNLOAD_PAYLOAD: EventKindInfo(structural=True, stage_sync=True),
+    K_LOAD_PAYLOAD: EventKindInfo(
+        structural=True,
+        stage_sync=True,
+        imports=True,
+        target=EventTarget.STAGE_STATE,
+    ),
+    K_UNLOAD_PAYLOAD: EventKindInfo(
+        structural=True,
+        stage_sync=True,
+        target=EventTarget.STAGE_STATE,
+    ),
     K_SET_VARIANT_SELECTIONS: EventKindInfo(
         structural=True, stage_sync=True, arc=True,
     ),
@@ -139,9 +180,19 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     ),
     K_SET_CONNECTABLE_INPUT: EventKindInfo(structural=True, stage_sync=True),
     K_SET_CONNECTABLE_CONNECTION: EventKindInfo(structural=True, stage_sync=True),
-    K_SET_STAGE_METADATA: EventKindInfo(create=True, structural=True, stage_sync=True),
+    K_SET_STAGE_METADATA: EventKindInfo(
+        create=True,
+        structural=True,
+        stage_sync=True,
+        target=EventTarget.SESSION_LAYER,
+    ),
     K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
     K_SET_POINT_INSTANCER: EventKindInfo(),
+    K_SET_SDF_PROPERTY_FIELDS: EventKindInfo(
+        structural=True,
+        stage_sync=True,
+        composed_projection=True,
+    ),
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)
@@ -150,6 +201,22 @@ STRUCTURAL_EVENT_KINDS = frozenset(
 )
 CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
 STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
+COMPOSED_PROJECTION_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.composed_projection
+)
+COLLABORATION_LAYER_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items()
+    if i.target == EventTarget.COLLABORATION_LAYER
+)
+SESSION_LAYER_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items()
+    if i.target == EventTarget.SESSION_LAYER
+)
+STAGE_RUNTIME_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items()
+    if i.target == EventTarget.STAGE_STATE
+)
+SHARED_STAGE_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
 IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
 

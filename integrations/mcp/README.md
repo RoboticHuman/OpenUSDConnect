@@ -3,7 +3,8 @@
 Exposes the OpenUSDConnect event protocol as MCP tools so Claude can author USD
 scenes (meshes, references/payloads, transforms, instancing, and
 UsdPreviewSurface / MaterialX shader networks) and stream them to the sync
-server. Network client only — no protocol changes.
+server. Network client only; scene authoring uses the core event protocol, and
+the local USD mirror negotiates the optional logical-layer replay capability.
 
 ## Quick start
 

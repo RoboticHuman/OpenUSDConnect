@@ -42,6 +42,13 @@ REFERENCES_ENVIRONMENT = _REPO_ROOT / "assets/test_assets/References/utils/Envir
 LIGHT_TYPES = ["DistantLight", "SphereLight", "RectLight", "DiskLight", "DomeLight"]
 
 
+def _open_shared_base_receiver(source):
+    session = Sdf.Layer.CreateAnonymous("usdconnect-test-receiver-session")
+    stage = Usd.Stage.Open(source.GetRootLayer(), session)
+    stage.SetEditTarget(Usd.EditTarget(session))
+    return stage
+
+
 @pytest.fixture
 def stage():
     return Usd.Stage.CreateInMemory()
@@ -308,7 +315,7 @@ class TestMockAdapterLight:
 class TestRealAssetReplication:
     """E2E using the USD-WG StandardShaderBall asset (5 RectLights in a Y-up
     studio rig). Verifies that mutating a real light's intensity and translating
-    its parent Xform replicates faithfully to an empty destination stage."""
+    its parent Xform replicates faithfully to a receiver sharing the base asset."""
 
     LIGHT_PATH = "/standard_shader_ball_scene/lights/emitterLeft/light"
     EMITTER_XFORM_PATH = "/standard_shader_ball_scene/lights/emitterLeft"
@@ -347,21 +354,16 @@ class TestRealAssetReplication:
 
         events = em.build_events_for_dirty()
 
-        ensure = [
-            e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH
-        ]
         sci = [
             e for e in events
             if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.LIGHT_PATH
         ]
-        assert ensure
-        assert ensure[0]["typeName"] == "RectLight"
+        assert not [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH]
         assert sci
         assert sci[0]["info_id"] == ""
         assert sci[0]["inputs"]["intensity"] == pytest.approx(15.0)
 
-        # Apply to a fresh destination stage and verify.
-        dst = Usd.Stage.CreateInMemory()
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
         dst_light = UsdLux.RectLight(dst.GetPrimAtPath(self.LIGHT_PATH))
         assert dst_light.GetIntensityAttr().Get() == pytest.approx(15.0)
@@ -397,8 +399,8 @@ class TestRealAssetReplication:
         src_world = src_xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         src_t, _, _ = decompose_trs_from_matrix(src_world)
 
-        # Apply to a fresh destination stage and verify identical world TRS.
-        dst = Usd.Stage.CreateInMemory()
+        # Apply over the same base stage and verify identical world TRS.
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
         dst_xf = UsdGeom.Xformable(dst.GetPrimAtPath(self.EMITTER_XFORM_PATH))
         dst_world = dst_xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
@@ -426,6 +428,7 @@ class TestRealAssetReplication:
             e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.LIGHT_PATH
         ]
         assert ensure
+        assert ensure[0]["typeName"] == ""
         assert "ShapingAPI" in ensure[0]["api_schemas"]
 
         # The set_connectable_input event must carry the shaping cone angle.
@@ -437,7 +440,7 @@ class TestRealAssetReplication:
         assert sci[0]["inputs"].get("shaping:cone:angle") == pytest.approx(30.0)
 
         # Receiver: ShapingAPI must be applied AND the cone angle must be set.
-        dst = Usd.Stage.CreateInMemory()
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
         dst_prim = dst.GetPrimAtPath(self.LIGHT_PATH)
         assert dst_prim.HasAPI(UsdLux.ShapingAPI)
@@ -463,7 +466,7 @@ class TestRealAssetReplication:
         light.GetIntensityAttr().Set(20.0)
 
         events = em.build_events_for_dirty()
-        dst = Usd.Stage.CreateInMemory()
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
 
         dst_light = UsdLux.RectLight(dst.GetPrimAtPath(self.LIGHT_PATH))
@@ -537,27 +540,18 @@ class TestRealAssetShapingAPIReplication:
 
         events = em.build_events_for_dirty()
 
-        # The ensure_prim event for the spot must carry ShapingAPI.
-        ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.SPOT_PATH]
-        assert ensure
-        assert ensure[0]["typeName"] == "SphereLight"
-        assert "ShapingAPI" in ensure[0]["api_schemas"]
+        # The API and unchanged light inputs come from the shared base.
+        assert not [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == self.SPOT_PATH]
 
-        # set_connectable_input must carry both the SphereLight inputs
-        # (intensity, radius) AND the ShapingAPI inputs (shaping:cone:angle,
-        # shaping:focus) — they share the connectable interface.
         sci = [
             e for e in events
             if e["k"] == K_SET_CONNECTABLE_INPUT and e["prim"] == self.SPOT_PATH
         ]
         assert sci
         inputs = sci[0]["inputs"]
-        assert "intensity" in inputs
-        assert "shaping:cone:angle" in inputs
-        assert inputs["shaping:cone:angle"] == pytest.approx(180.0)
+        assert inputs == {"intensity": pytest.approx(original_intensity + 0.5)}
 
-        # Receiver gets the typed schema + the applied ShapingAPI + values.
-        dst = Usd.Stage.CreateInMemory()
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
         dst_prim = dst.GetPrimAtPath(self.SPOT_PATH)
         assert dst_prim.GetTypeName() == "SphereLight"
@@ -587,7 +581,7 @@ class TestRealAssetShapingAPIReplication:
         assert sci
         assert sci[0]["inputs"].get("shaping:cone:angle") == pytest.approx(45.0)
 
-        dst = Usd.Stage.CreateInMemory()
+        dst = _open_shared_base_receiver(src)
         apply_events(dst, events)
         dst_prim = dst.GetPrimAtPath(self.SPOT_PATH)
         assert dst_prim.HasAPI(UsdLux.ShapingAPI)

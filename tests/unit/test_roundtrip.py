@@ -1396,8 +1396,8 @@ class TestLIVERPS:
         # V=99 should beat R=50
         assert abs(prim.GetAttribute("radius").Get() - 99.0) < 1e-6
 
-    def test_emitter_sends_composed_value_not_variant(self):
-        """Emitter sends the composed radius (local=1), not the variant opinion (10)."""
+    def test_emitter_does_not_flatten_weaker_composed_value(self):
+        """Session emission leaves root-layer radius composition intact."""
         stage = Usd.Stage.Open(self._fixture("liverps_sphere.usda"))
         session = stage.GetSessionLayer()
         stage.SetEditTarget(Usd.EditTarget(session))
@@ -1409,9 +1409,7 @@ class TestLIVERPS:
         gprim_evs = [
             e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Sphere"
         ]
-        assert len(gprim_evs) == 1
-        # Local opinion (1.0) wins over variant "big" (10.0)
-        assert abs(gprim_evs[0]["attrs"]["radius"] - 1.0) < 1e-6
+        assert gprim_evs == []
 
     def test_emitter_no_gprim_event_when_composed_unchanged(self):
         """Variant switch that doesn't change composed value emits no gprim attr event."""

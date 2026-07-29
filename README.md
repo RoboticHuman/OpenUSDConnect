@@ -58,8 +58,11 @@ never echoes an event back to its origin.
 ### USD coverage
 - **Transforms**: translate / orient / scale with quaternion rotation; partial TRS updates
 - **Geometry**: meshes, curves, points; typed attributes, primvars and interpolation; visibility
+- **Custom property data**: exact Sdf field deltas for locally authored custom attributes, relationships, and metadata not represented by specialized events
 - **Materials and shaders**: UsdPreviewSurface and MaterialX (`ND_*`) networks, nested NodeGraphs, per-purpose bindings
-- **Composition**: references, payloads (load/unload), variant selections
+- **Composition**: exact reference and payload list-op opinions, including
+  offsets, scales, reference custom data, payload load/unload, and variant
+  selections
 - **Instancing**: native scenegraph instancing and `UsdGeomPointInstancer`
 - **Cameras and lights**: `UsdGeomCamera`; `UsdLux` lights with applied API schemas (Shaping, Shadow, and others)
 - **Stage metadata**: units (`metersPerUnit`, `upAxis`) and timeline (fps, time codes, range)
@@ -127,6 +130,36 @@ uv run openusdconnect-server --port 7200 --base scene.usda \
   --departments animation,lighting,fx --require-token
 ```
 
+Department assignment is server policy built on a logical collaboration-layer
+contract. Each authored opinion carries an opaque, portable `layer_key`, while
+the advertised layer stack defines strength through strongest-to-weakest order
+and mute state. The current policy maps a department such as `animation` to
+`department:animation` and maps department-less clients to the `default`
+logical layer.
+
+USD-native receivers (currently usdview and the MCP mirror) negotiate layered
+replay and map those layer keys to receiver-owned anonymous `Sdf.Layer`
+objects. Server anonymous layer identifiers never cross the wire. The managed
+layers form an ordered block at the strong end of the receiver's session
+sublayers; unrelated sublayers retain their relative order and offsets.
+Live reorder and mute changes are applied without moving authored opinions.
+On restart, configured department order comes from `--departments`; unlisted
+departments are reconstructed in persisted replay order before the weakest
+`default` layer. Runtime reorder and mute controls are not yet persisted.
+Stage metadata is authored once in the shared session layer, and payload
+load/unload records remain stage runtime state rather than layer opinions.
+
+Blender, Unreal, and receivers that do not negotiate this capability keep the
+existing flat composed projection. Generic Sdf property edits are projected
+back as authoritative composed corrections during live sync and replay, but
+some other event kinds still lack that flat correction path. The server stage
+remains authoritative for those clients.
+
+The dashboard's department-layer merge and delete actions are still
+server-local lifecycle operations. They do not rewrite the authored log or
+replicate as durable layer operations, so they are not yet covered by layered
+replay or server restart.
+
 If a Hydra renderer such as RenderMan is installed into the shared USD build,
 launch through the renderer-safe wrapper so the Sdr registry can load its plugins:
 
@@ -154,7 +187,9 @@ uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --f
 
 For write fallback, start the server with `--vfs-write-mode translate`. Full-file
 USD saves are validated by default, rejected when stale or invalid, and converted
-to live events when safe.
+to live events when safe. Custom attributes and relationships are preserved.
+Authored prim or layer fields outside the event surface, including local variant
+definitions, are rejected instead of being silently discarded.
 
 ### Docker
 

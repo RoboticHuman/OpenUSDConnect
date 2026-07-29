@@ -95,6 +95,8 @@ def _install_bpy_mock():
 
 _bpy_mock = _install_bpy_mock()
 
+from openusdconnect import emitter as _core_emitter_before_blender_import
+
 
 # ---------------------------------------------------------------------------
 # Mock Blender objects
@@ -203,6 +205,7 @@ class MockDepsgraphUpdate:
 # ---------------------------------------------------------------------------
 # Import the module under test (after bpy mock is installed)
 # ---------------------------------------------------------------------------
+from integrations.blender.blender_adapter import BlenderAdapter
 from integrations.blender.capture import BlenderStageAuthor
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.protocol_constants import (
@@ -249,6 +252,18 @@ def _get_events(author, emitter, updates):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_source_import_keeps_core_module_identity():
+    import importlib
+
+    import integrations.blender as blender_package
+
+    emitter_module = sys.modules["openusdconnect.emitter"]
+    assert emitter_module is _core_emitter_before_blender_import
+
+    importlib.reload(blender_package)
+    assert sys.modules["openusdconnect.emitter"] is emitter_module
 
 
 class TestAutoTrack:
@@ -317,11 +332,12 @@ class TestAutoTrack:
 
         ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         ensure_paths = [e["prim"] for e in ensures]
-        assert "/World" in ensure_paths
+        # /World is defined by the shared base layer. The session layer only
+        # authors its transform override, so it must not redefine the base prim.
+        assert "/World" not in ensure_paths
         assert "/World/Group" in ensure_paths
         assert "/World/Group/NewCube" in ensure_paths
         # Parent before child
-        assert ensure_paths.index("/World") < ensure_paths.index("/World/Group")
         assert ensure_paths.index("/World/Group") < ensure_paths.index("/World/Group/NewCube")
         assert obj["usd_prim_path"] == "/World/Group/NewCube"
 
@@ -599,3 +615,93 @@ class TestMapperReverseReads:
         node = MagicMock()
         node.attribute_name = "displayColor"
         assert mapper.read_all_inputs(node) == {"varname": "displayColor"}
+
+
+class TestBlenderAssetArcProjection:
+    @staticmethod
+    def _make_asset(tmp_path, name):
+        from pxr import Usd
+
+        path = tmp_path / f"{name}.usda"
+        stage = Usd.Stage.CreateNew(str(path))
+        stage.DefinePrim(f"/{name}", "Xform")
+        stage.GetRootLayer().defaultPrim = name
+        stage.GetRootLayer().Save()
+        return str(path)
+
+    def test_reference_projection_uses_composed_list_op(self, tmp_path):
+        from pxr import Sdf, Usd
+
+        asset_a = self._make_asset(tmp_path, "A")
+        asset_b = self._make_asset(tmp_path, "B")
+        nested_asset = self._make_asset(tmp_path, "Nested")
+        asset_b_stage = Usd.Stage.Open(asset_b)
+        asset_b_stage.GetPrimAtPath("/B").GetReferences().AddReference(nested_asset)
+        asset_b_stage.GetRootLayer().Save()
+        root = Sdf.Layer.CreateAnonymous("root")
+        weak = Sdf.Layer.CreateAnonymous("weak")
+        root.subLayerPaths.append(weak.identifier)
+        stage = Usd.Stage.Open(root)
+
+        with Usd.EditContext(stage, weak):
+            prim = stage.DefinePrim("/World", "Xform")
+            prim.GetReferences().AddReference(asset_a)
+            prim.GetReferences().AddReference(asset_b)
+        strong_spec = Sdf.CreatePrimInLayer(root, "/World")
+        strong_op = Sdf.ReferenceListOp()
+        strong_op.deletedItems = [Sdf.Reference(asset_a)]
+        strong_op.orderedItems = [Sdf.Reference(asset_b)]
+        strong_spec.SetInfo("references", strong_op)
+
+        adapter = BlenderAdapter(mirror_stage=stage)
+        result = adapter._composed_asset_arcs(
+            "/World",
+            [
+                {"asset_path": asset_a, "list_position": "deleted"},
+                {"asset_path": asset_b, "list_position": "ordered"},
+            ],
+            explicit=False,
+            payload=False,
+        )
+
+        assert result == [{"asset_path": asset_b, "prim_path": "/B"}]
+        assert isinstance(result[0]["asset_path"], str)
+
+    def test_unloaded_payload_is_reprojected_when_loaded(self, tmp_path):
+        from pxr import Sdf, Usd
+
+        asset = self._make_asset(tmp_path, "Payload")
+        nested_asset = self._make_asset(tmp_path, "NestedPayload")
+        asset_stage = Usd.Stage.Open(asset)
+        asset_stage.GetPrimAtPath("/Payload").GetPayloads().AddPayload(nested_asset)
+        asset_stage.GetRootLayer().Save()
+        root = Sdf.Layer.CreateAnonymous("root")
+        spec = Sdf.CreatePrimInLayer(root, "/World")
+        spec.specifier = Sdf.SpecifierDef
+        payload_op = Sdf.PayloadListOp()
+        payload_op.prependedItems = [Sdf.Payload(asset)]
+        spec.SetInfo("payload", payload_op)
+        stage = Usd.Stage.Open(root, load=Usd.Stage.LoadNone)
+        adapter = BlenderAdapter(mirror_stage=stage)
+        event_entries = [{"asset_path": asset}]
+
+        assert (
+            adapter._composed_asset_arcs(
+                "/World",
+                event_entries,
+                explicit=False,
+                payload=True,
+            )
+            == []
+        )
+
+        assert adapter.set_payload("/World", event_entries)
+        assert adapter._pending_payloads["/World"]["entries"] == event_entries
+
+        stage.Load("/World")
+        assert adapter._composed_asset_arcs(
+            "/World",
+            adapter._pending_payloads["/World"]["entries"],
+            explicit=False,
+            payload=True,
+        ) == [{"asset_path": asset, "prim_path": "/Payload"}]

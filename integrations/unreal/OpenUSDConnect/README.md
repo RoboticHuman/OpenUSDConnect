@@ -18,7 +18,7 @@ Unreal's USD Stage editor → Blender sees it.
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
 | FlatBuffers headers | Header-only. Run `python setup_flatbuffers.py` once from the plugin folder — it downloads the runtime headers matching the committed flatc-generated protocol bindings (the generated code pins the exact version via a `static_assert`, so engine-shipped copies are not used). |
 
-**Development note:** the protocol bindings under `Source/OpenUSDConnect/Private/Schema/`
+**Development note:** the protocol bindings under `Source/OpenUSDConnectPXR/Public/Schema/`
 are generated from the repo's FlatBuffers schemas and committed, so plugin *users*
 never need the compiler. Changing the schemas requires `flatc` — available from the
 official scoop repo (`scoop install main/flatc`) — and one run of
@@ -29,6 +29,10 @@ in lockstep with the `flatc` version used to regenerate.
 ---
 
 ## Installation
+
+The plugin package and project entry are identical on Windows and macOS. It
+contains two internal runtime modules, but only `OpenUSDConnect` is enabled in
+the project. Linux follows the same layout but has not been validated here.
 
 1. **Copy the plugin folder** into your project:
    ```
@@ -52,10 +56,19 @@ in lockstep with the `flatc` version used to regenerate.
    }
    ```
 
-3. **Regenerate project files** — right-click the `.uproject` → *Generate Visual Studio project files*.
+3. **Regenerate project files** using the platform's normal Unreal workflow.
+   On Windows, right-click the `.uproject` and choose *Generate Visual Studio
+   project files*. On macOS, generate Xcode project files or build the editor
+   target directly with UnrealBuildTool.
 
-4. **Build** the editor target (Development Editor) from Visual Studio or via
-   `Engine/Build/BatchFiles/Build.bat <ProjectName>Editor Win64 Development -Project=<path-to-.uproject>`.
+4. **Build** the editor target in Development configuration:
+   ```
+   # Windows
+   Engine/Build/BatchFiles/Build.bat <ProjectName>Editor Win64 Development -Project=<path-to-.uproject>
+
+   # macOS
+   Engine/Build/BatchFiles/Mac/Build.sh <ProjectName>Editor Mac Development -Project=<path-to-.uproject>
+   ```
 
 ---
 

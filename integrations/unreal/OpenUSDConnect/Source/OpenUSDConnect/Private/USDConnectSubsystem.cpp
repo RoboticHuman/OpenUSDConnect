@@ -7,6 +7,7 @@
 #include "USDConnectSettings.h"
 #include "USDEventApplier.h"
 #include "USDMaterialXMaterializer.h"
+#include "USDStageBridge.h"
 #include "USDConnectProtocol.h"
 #include "TxnBuilder.h"
 
@@ -21,41 +22,9 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Crc.h"
 #include "HAL/PlatformProcess.h"
-#include <cstdint>
 
 #if WITH_EDITOR
 #include "ScopedTransaction.h"
-#endif
-
-#if USE_USD_SDK
-#include "USDIncludesStart.h"
-#include "pxr/base/vt/dictionary.h"
-#include "pxr/usd/sdf/changeBlock.h"
-#include "pxr/usd/sdf/layer.h"
-#include "pxr/usd/sdf/valueTypeName.h"
-#include "pxr/usd/usd/stage.h"
-#include "pxr/usd/usd/prim.h"
-#include "pxr/usd/usd/primRange.h"
-#include "pxr/usd/usd/timeCode.h"
-#include "pxr/usd/usdGeom/xformable.h"
-#include "pxr/usd/usdGeom/xformOp.h"
-#include "pxr/usd/usdGeom/imageable.h"
-#include "pxr/usd/usdGeom/tokens.h"
-#include "pxr/usd/usdShade/connectableAPI.h"
-#include "pxr/usd/usdShade/material.h"
-#include "pxr/usd/usdShade/shader.h"
-#include "pxr/usd/sdf/assetPath.h"
-#include "pxr/base/gf/matrix4d.h"
-#include "pxr/base/gf/transform.h"
-#include "pxr/base/gf/vec2f.h"
-#include "pxr/base/gf/vec3d.h"
-#include "pxr/base/gf/vec3f.h"
-#include "pxr/base/gf/vec4f.h"
-#include "pxr/base/gf/quatd.h"
-#include "pxr/base/gf/quatf.h"
-#include "pxr/base/vt/array.h"
-#include "pxr/base/vt/value.h"
-#include "USDIncludesEnd.h"
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogUSDConnectSubsystem, Log, All);
@@ -64,392 +33,8 @@ DECLARE_STATS_GROUP(TEXT("OpenUSDConnect"), STATGROUP_OpenUSDConnect, STATCAT_Ad
 DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenUSDConnect);
 
 // ---------------------------------------------------------------------------
-// Helpers to read TRS/visibility from the pxr stage
+// Authentication helpers
 // ---------------------------------------------------------------------------
-#if USE_USD_SDK
-struct FLiveOpenMetadata
-{
-	FString LayerIdentifier;
-	FString Host;
-	int32 Port = 0;
-	int32 SnapshotSeq = 0;
-	int32 ProtocolVersion = 0;
-	int32 Epoch = 0;
-	FString SceneId;
-	FString VfsUrl;
-	bool bRequiresToken = false;
-
-	FString MakeKey() const
-	{
-		return FString::Printf(TEXT("%s|%s|%d|%d|%d"),
-			*LayerIdentifier, *Host, Port, Epoch, SnapshotSeq);
-	}
-};
-
-static bool TryGetLiveDictString(const pxr::VtDictionary& Dict, const char* Key, FString& Out)
-{
-	const auto It = Dict.find(Key);
-	if (It == Dict.end()) return false;
-	const pxr::VtValue& Value = It->second;
-	if (!Value.IsHolding<std::string>()) return false;
-	Out = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
-	return true;
-}
-
-static bool TryGetLiveDictBool(const pxr::VtDictionary& Dict, const char* Key, bool& Out)
-{
-	const auto It = Dict.find(Key);
-	if (It == Dict.end()) return false;
-	const pxr::VtValue& Value = It->second;
-	if (!Value.IsHolding<bool>()) return false;
-	Out = Value.UncheckedGet<bool>();
-	return true;
-}
-
-static bool TryGetLiveDictInt(const pxr::VtDictionary& Dict, const char* Key, int32& Out)
-{
-	const auto It = Dict.find(Key);
-	if (It == Dict.end()) return false;
-	const pxr::VtValue& Value = It->second;
-	if (Value.IsHolding<int>())
-	{
-		Out = static_cast<int32>(Value.UncheckedGet<int>());
-		return true;
-	}
-	if (Value.IsHolding<int64_t>())
-	{
-		Out = static_cast<int32>(Value.UncheckedGet<int64_t>());
-		return true;
-	}
-	if (Value.IsHolding<unsigned int>())
-	{
-		Out = static_cast<int32>(Value.UncheckedGet<unsigned int>());
-		return true;
-	}
-	if (Value.IsHolding<uint64_t>())
-	{
-		Out = static_cast<int32>(Value.UncheckedGet<uint64_t>());
-		return true;
-	}
-	return false;
-}
-
-static bool TryReadLiveOpenMetadata(AUsdStageActor* StageActor, FLiveOpenMetadata& Out)
-{
-	if (!StageActor || !IsValid(StageActor)) return false;
-
-	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
-		StageActor->GetOrOpenUsdStage());
-	if (!PxrStage) return false;
-
-	pxr::SdfLayerHandle RootLayer = PxrStage->GetRootLayer();
-	if (!RootLayer) return false;
-
-	pxr::VtDictionary CustomData = RootLayer->GetCustomLayerData();
-	const auto MetaIt = CustomData.find("openusdconnect");
-	if (MetaIt == CustomData.end()) return false;
-
-	const pxr::VtValue& MetaValue = MetaIt->second;
-	if (!MetaValue.IsHolding<pxr::VtDictionary>()) return false;
-
-	const pxr::VtDictionary& Meta = MetaValue.UncheckedGet<pxr::VtDictionary>();
-	bool bLive = false;
-	if (!TryGetLiveDictBool(Meta, "live", bLive) || !bLive) return false;
-
-	FLiveOpenMetadata Candidate;
-	Candidate.LayerIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
-	TryGetLiveDictString(Meta, "host", Candidate.Host);
-	TryGetLiveDictInt(Meta, "port", Candidate.Port);
-	TryGetLiveDictInt(Meta, "snapshot_seq", Candidate.SnapshotSeq);
-	TryGetLiveDictInt(Meta, "protocol_version", Candidate.ProtocolVersion);
-	TryGetLiveDictInt(Meta, "epoch", Candidate.Epoch);
-	TryGetLiveDictString(Meta, "scene_id", Candidate.SceneId);
-	TryGetLiveDictString(Meta, "vfs_url", Candidate.VfsUrl);
-	TryGetLiveDictBool(Meta, "requires_token", Candidate.bRequiresToken);
-
-	if (Candidate.Host.IsEmpty() || Candidate.Port < 1 || Candidate.Port > 65535)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Warning,
-			TEXT("OpenUSDConnect live metadata is present but has no valid host/port"));
-		return false;
-	}
-
-	Out = Candidate;
-	return true;
-}
-
-static bool ReadXformTrs(
-	pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitXformTrs& OutTrs,
-	bool* bOutFromMatrixOp = nullptr)
-{
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
-	if (!Prim)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Verbose,
-			TEXT("ReadXformTrs(%s): no prim at path"), *PrimPath);
-		return false;
-	}
-
-	pxr::UsdGeomXformable Xformable(Prim);
-	if (!Xformable)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Verbose,
-			TEXT("ReadXformTrs(%s): prim is not Xformable (typeName=%s)"),
-			*PrimPath, UTF8_TO_TCHAR(Prim.GetTypeName().GetText()));
-		return false;
-	}
-
-	bool bResetXformStack = false;
-	std::vector<pxr::UsdGeomXformOp> Ops = Xformable.GetOrderedXformOps(&bResetXformStack);
-	if (Ops.empty())
-	{
-		UE_LOG(LogUSDConnectSubsystem, Verbose,
-			TEXT("ReadXformTrs(%s): Xformable has no ordered xform ops — nothing to emit"),
-			*PrimPath);
-		return false;
-	}
-
-	pxr::UsdTimeCode Time = pxr::UsdTimeCode::Default();
-	OutTrs.PrimPath = PrimPath;
-	OutTrs.Fields   = 0;
-
-	for (auto& Op : Ops)
-	{
-		const auto OpType = Op.GetOpType();
-		if (OpType == pxr::UsdGeomXformOp::TypeTranslate)
-		{
-			pxr::GfVec3d T(0, 0, 0);
-			Op.Get(&T, Time);
-			OutTrs.T[0] = (float)T[0];
-			OutTrs.T[1] = (float)T[1];
-			OutTrs.T[2] = (float)T[2];
-			OutTrs.Fields |= 1;
-		}
-		else if (OpType == pxr::UsdGeomXformOp::TypeOrient)
-		{
-			pxr::GfQuatf R(1, 0, 0, 0);
-			Op.Get(&R, Time);
-			OutTrs.R[0] = R.GetReal();
-			auto Im = R.GetImaginary();
-			OutTrs.R[1] = Im[0]; OutTrs.R[2] = Im[1]; OutTrs.R[3] = Im[2];
-			OutTrs.Fields |= 2;
-		}
-		else if (OpType == pxr::UsdGeomXformOp::TypeScale)
-		{
-			pxr::GfVec3f S(1, 1, 1);
-			Op.Get(&S, Time);
-			OutTrs.S[0] = S[0]; OutTrs.S[1] = S[1]; OutTrs.S[2] = S[2];
-			OutTrs.Fields |= 4;
-		}
-		else if (OpType == pxr::UsdGeomXformOp::TypeTransform)
-		{
-			// The engine's component write-back collapses op stacks into a
-			// single matrix op (UnrealToUsd::ConvertXformable). Component
-			// transforms are shear-free, so decompose back to full TRS.
-			pxr::GfMatrix4d Matrix(1.0);
-			Op.Get(&Matrix, Time);
-			const pxr::GfTransform Decomposed(Matrix);
-
-			const pxr::GfVec3d T = Decomposed.GetTranslation();
-			OutTrs.T[0] = (float)T[0]; OutTrs.T[1] = (float)T[1]; OutTrs.T[2] = (float)T[2];
-			const pxr::GfQuatd R = Decomposed.GetRotation().GetQuat().GetNormalized();
-			OutTrs.R[0] = (float)R.GetReal();
-			const pxr::GfVec3d Im = R.GetImaginary();
-			OutTrs.R[1] = (float)Im[0]; OutTrs.R[2] = (float)Im[1]; OutTrs.R[3] = (float)Im[2];
-			const pxr::GfVec3d S = Decomposed.GetScale();
-			OutTrs.S[0] = (float)S[0]; OutTrs.S[1] = (float)S[1]; OutTrs.S[2] = (float)S[2];
-
-			OutTrs.Fields |= 7;
-			if (bOutFromMatrixOp)
-			{
-				*bOutFromMatrixOp = true;
-			}
-		}
-	}
-	return OutTrs.Fields != 0;
-}
-
-// Rewrite a matrix-collapsed prim back to the canonical translate/orient/scale
-// op stack with the decomposed values. The composed transform is identical, so
-// the stage actor's component sync sees no change — but per-op attribute edits
-// (USD Stage panel) work again and the wire keeps TRS semantics.
-static void RestoreCanonicalXformOps(
-	pxr::UsdStageRefPtr& Stage, const FString& PrimPath, const FEmitXformTrs& Trs)
-{
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
-	if (!Prim)
-	{
-		return;
-	}
-
-	// Only reshape prims that carried canonical ops before the engine
-	// collapsed them — foreign matrix-native prims keep their authored shape.
-	const pxr::UsdAttribute Translate = Prim.GetAttribute(pxr::TfToken("xformOp:translate"));
-	const pxr::UsdAttribute Orient    = Prim.GetAttribute(pxr::TfToken("xformOp:orient"));
-	if ((!Translate || !Translate.HasAuthoredValue()) && (!Orient || !Orient.HasAuthoredValue()))
-	{
-		return;
-	}
-
-	pxr::SdfChangeBlock ChangeBlock;
-
-	Prim.CreateAttribute(
-			pxr::TfToken("xformOp:translate"), pxr::SdfValueTypeNames->Double3, false)
-		.Set(pxr::GfVec3d(Trs.T[0], Trs.T[1], Trs.T[2]));
-	Prim.CreateAttribute(
-			pxr::TfToken("xformOp:orient"), pxr::SdfValueTypeNames->Quatf, false)
-		.Set(pxr::GfQuatf(Trs.R[0], pxr::GfVec3f(Trs.R[1], Trs.R[2], Trs.R[3])));
-	Prim.CreateAttribute(
-			pxr::TfToken("xformOp:scale"), pxr::SdfValueTypeNames->Float3, false)
-		.Set(pxr::GfVec3f(Trs.S[0], Trs.S[1], Trs.S[2]));
-
-	pxr::VtTokenArray Order{
-		pxr::TfToken("xformOp:translate"),
-		pxr::TfToken("xformOp:orient"),
-		pxr::TfToken("xformOp:scale"),
-	};
-	pxr::UsdGeomXformable(Prim).CreateXformOpOrderAttr().Set(Order);
-}
-
-// Map a shader-input VtValue onto the typed wire slots. Values arrive as their
-// declared USD type (read from the stage, not JSON), so no cross-slot routing
-// is needed — unhandled types (arrays, matrices) are skipped by returning false.
-static bool ConvertVtValueToWire(const pxr::VtValue& Value, FEmitConnectableValue& Out)
-{
-	using OpenUSDConnect::ConnectableInputValueType;
-
-	if (Value.IsHolding<float>())
-	{
-		Out.ValueType   = ConnectableInputValueType::ScalarFloat;
-		Out.ScalarFloat = Value.UncheckedGet<float>();
-	}
-	else if (Value.IsHolding<double>())
-	{
-		Out.ValueType   = ConnectableInputValueType::ScalarFloat;
-		Out.ScalarFloat = static_cast<float>(Value.UncheckedGet<double>());
-	}
-	else if (Value.IsHolding<int>())
-	{
-		Out.ValueType = ConnectableInputValueType::ScalarInt;
-		Out.ScalarInt = Value.UncheckedGet<int>();
-	}
-	else if (Value.IsHolding<bool>())
-	{
-		Out.ValueType   = ConnectableInputValueType::ScalarBool;
-		Out.bScalarBool = Value.UncheckedGet<bool>();
-	}
-	else if (Value.IsHolding<pxr::TfToken>())
-	{
-		Out.ValueType    = ConnectableInputValueType::ScalarString;
-		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::TfToken>().GetText());
-	}
-	else if (Value.IsHolding<std::string>())
-	{
-		Out.ValueType    = ConnectableInputValueType::ScalarString;
-		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<std::string>().c_str());
-	}
-	else if (Value.IsHolding<pxr::SdfAssetPath>())
-	{
-		Out.ValueType    = ConnectableInputValueType::ScalarString;
-		Out.ScalarString = UTF8_TO_TCHAR(Value.UncheckedGet<pxr::SdfAssetPath>().GetAssetPath().c_str());
-	}
-	else if (Value.IsHolding<pxr::GfVec2f>())
-	{
-		const pxr::GfVec2f V = Value.UncheckedGet<pxr::GfVec2f>();
-		Out.ValueType = ConnectableInputValueType::FloatArray;
-		Out.Floats    = {V[0], V[1]};
-	}
-	else if (Value.IsHolding<pxr::GfVec3f>())
-	{
-		const pxr::GfVec3f V = Value.UncheckedGet<pxr::GfVec3f>();
-		Out.ValueType = ConnectableInputValueType::FloatArray;
-		Out.Floats    = {V[0], V[1], V[2]};
-	}
-	else if (Value.IsHolding<pxr::GfVec4f>())
-	{
-		const pxr::GfVec4f V = Value.UncheckedGet<pxr::GfVec4f>();
-		Out.ValueType = ConnectableInputValueType::FloatArray;
-		Out.Floats    = {V[0], V[1], V[2], V[3]};
-	}
-	else
-	{
-		return false;
-	}
-	return true;
-}
-
-// Read the authored values of specific "inputs:*" attributes on a UsdShade
-// connectable prim (Shader, Material, NodeGraph, or light container).
-static bool ReadConnectableInputs(
-	pxr::UsdStageRefPtr& Stage,
-	const FString& PrimPath,
-	const TSet<FString>& InputAttrNames,
-	FEmitConnectableInput& Out)
-{
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
-	if (!Prim || !pxr::UsdShadeConnectableAPI(Prim))
-	{
-		return false;
-	}
-
-	Out.PrimPath = PrimPath;
-	if (pxr::UsdShadeShader Shader{Prim})
-	{
-		pxr::TfToken IdToken;
-		Shader.GetIdAttr().Get(&IdToken);
-		Out.InfoId = UTF8_TO_TCHAR(IdToken.GetText());
-	}
-
-	for (const FString& AttrName : InputAttrNames)
-	{
-		pxr::UsdAttribute Attr = Prim.GetAttribute(pxr::TfToken(TCHAR_TO_UTF8(*AttrName)));
-		pxr::VtValue Value;
-		if (!Attr || !Attr.Get(&Value, pxr::UsdTimeCode::Default()))
-		{
-			continue;
-		}
-
-		FEmitConnectableValue Wire;
-		Wire.Name     = AttrName.RightChop(7);	  // strip "inputs:" — wire names are bare
-		Wire.TypeName = UTF8_TO_TCHAR(Attr.GetTypeName().GetAsToken().GetText());
-		if (!ConvertVtValueToWire(Value, Wire))
-		{
-			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("ReadConnectableInputs(%s): skipping %s — unhandled value type %s"),
-				*PrimPath, *AttrName, UTF8_TO_TCHAR(Value.GetTypeName().c_str()));
-			continue;
-		}
-		Out.Inputs.Add(MoveTemp(Wire));
-	}
-	return Out.Inputs.Num() > 0;
-}
-
-static bool ReadVisibility(pxr::UsdStageRefPtr& Stage, const FString& PrimPath, FEmitVisibility& OutVis)
-{
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(pxr::SdfPath(TCHAR_TO_UTF8(*PrimPath)));
-	if (!Prim)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Verbose,
-			TEXT("ReadVisibility(%s): no prim at path"), *PrimPath);
-		return false;
-	}
-
-	pxr::UsdGeomImageable Imageable(Prim);
-	if (!Imageable)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Verbose,
-			TEXT("ReadVisibility(%s): prim is not Imageable"), *PrimPath);
-		return false;
-	}
-
-	pxr::TfToken VisToken;
-	Imageable.GetVisibilityAttr().Get(&VisToken, pxr::UsdTimeCode::Default());
-	OutVis.PrimPath = PrimPath;
-	OutVis.bVisible = (VisToken != pxr::UsdGeomTokens->invisible);
-	return true;
-}
-#endif // USE_USD_SDK
-
 static const TCHAR* OUCAuthConfigSection = TEXT("OpenUSDConnect.Tokens");
 
 static FString MakeAuthConfigKey(const FString& Host, int32 Port, const FString& Department)
@@ -507,6 +92,8 @@ void UUSDConnectSubsystem::StopClients()
 {
 	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
 	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+	EmittedXformPrims.Reset();
+	LastEmitConnectionGeneration = 0;
 
 	{
 		FScopeLock Lock(&EventQueueCS);
@@ -536,13 +123,12 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	bool bUsingLiveMetadata = false;
 	bool bTargetRequiresToken = false;
 
-#if USE_USD_SDK
 	if (Settings->bUseLiveMetadataFromStage)
 	{
 		if (AUsdStageActor* StageActor = CachedStageActor.Get())
 		{
-			FLiveOpenMetadata Metadata;
-			if (TryReadLiveOpenMetadata(StageActor, Metadata))
+			FUSDLiveOpenMetadata Metadata;
+			if (FUSDStageBridge::ReadLiveOpenMetadata(StageActor, Metadata))
 			{
 				TargetHost = Metadata.Host;
 				TargetPort = Metadata.Port;
@@ -557,7 +143,6 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 			}
 		}
 	}
-#endif
 
 	const FString TargetToken = Settings->bPersistAuthTokens
 		? LoadAuthToken(TargetHost, TargetPort, Settings->Department)
@@ -687,9 +272,8 @@ void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
 	if (!Settings || !Settings->bUseLiveMetadataFromStage) return;
 
-#if USE_USD_SDK
-	FLiveOpenMetadata Metadata;
-	if (!TryReadLiveOpenMetadata(Actor, Metadata)) return;
+	FUSDLiveOpenMetadata Metadata;
+	if (!FUSDStageBridge::ReadLiveOpenMetadata(Actor, Metadata)) return;
 
 	const FString MetadataKey = Metadata.MakeKey();
 	if (MetadataKey == LastLiveMetadataKey) return;
@@ -704,9 +288,6 @@ void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 		bPendingAutoConnect = false;
 		ConnectResolved(true);
 	}
-#else
-	(void)Actor;
-#endif
 }
 
 bool UUSDConnectSubsystem::IsConnected() const
@@ -996,6 +577,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 		PendingEmitInputs.Reset();
 	}
 
+	EmittedXformPrims.Reset();
 	CachedStageActor = nullptr;
 	LastMaterializedRootLayerIdentifier.Empty();
 }
@@ -1054,30 +636,26 @@ void UUSDConnectSubsystem::DrainAndApply()
 
 	bSuppressEmit.store(true);
 	{
-#if USE_USD_SDK
 		// Contiguous value events share one SdfChangeBlock so their notices
 		// fire as a single batch — the stage actor's per-notice component
 		// resync dominates replay throughput. Structural events cannot apply
 		// inside a block (UsdStage::DefinePrim and composition-arc edits need
 		// the stage to recompose immediately), so the run's block closes
 		// before one applies and a fresh block opens for the next value run.
-		TUniquePtr<pxr::SdfChangeBlock> RunBlock;
-#endif
+		TUniquePtr<FUSDEventChangeBlock> RunBlock;
 		for (TArray<uint8>& Frame : Chunk)
 		{
-#if USE_USD_SDK
 			if (FUSDEventApplier::FrameUsesChangeBlock(Frame))
 			{
 				if (!RunBlock)
 				{
-					RunBlock = MakeUnique<pxr::SdfChangeBlock>();
+					RunBlock = MakeUnique<FUSDEventChangeBlock>();
 				}
 			}
 			else
 			{
 				RunBlock.Reset();
 			}
-#endif
 			FString TouchedPrim;
 			OpenUSDConnect::EventPayload EventKind = OpenUSDConnect::EventPayload::NONE;
 			FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind);
@@ -1138,6 +716,23 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	if (!EmitClient || !EmitClient->IsConnected()) return;
 	if (bSuppressEmit.load()) return;
 
+	const uint64 ConnectionGeneration = EmitClient->GetConnectionGeneration();
+	if (ConnectionGeneration != LastEmitConnectionGeneration)
+	{
+		// A replacement server has no guarantee that it saw prerequisites from
+		// the previous TCP connection. Requeue the current values and make their
+		// first transaction on this connection self-contained.
+		{
+			FScopeLock Lock(&PendingEmitPathsCS);
+			for (const FString& PrimPath : EmittedXformPrims)
+			{
+				PendingEmitPaths.Add(PrimPath);
+			}
+		}
+		EmittedXformPrims.Reset();
+		LastEmitConnectionGeneration = ConnectionGeneration;
+	}
+
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor)) return;
 
@@ -1178,35 +773,34 @@ void UUSDConnectSubsystem::DrainAndEmit()
 
 void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath)
 {
-#if USE_USD_SDK
-	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
-		StageActor->GetOrOpenUsdStage());
-	if (!PxrStage) return;
-
 	// Try to read and emit TRS
 	{
 		FEmitXformTrs Xform;
 		bool bFromMatrixOp = false;
-		if (ReadXformTrs(PxrStage, PrimPath, Xform, &bFromMatrixOp))
+		if (FUSDStageBridge::ReadXformTrs(StageActor, PrimPath, Xform, &bFromMatrixOp))
 		{
 			if (bFromMatrixOp)
 			{
 				// Suppress our own listener: the restore fires notices, but
 				// it re-authors the exact values being emitted below.
 				bSuppressEmit.store(true);
-				RestoreCanonicalXformOps(PxrStage, PrimPath, Xform);
+				FUSDStageBridge::RestoreCanonicalXformOps(StageActor, PrimPath, Xform);
 				bSuppressEmit.store(false);
 			}
 
 			TArray<FEmitXformTrs> Batch = { Xform };
-			TArray<uint8> Frame = BuildXformTxnFrame(ClientId, Batch);
+			const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(PrimPath);
+			TArray<uint8> Frame = BuildXformTxnFrame(
+				ClientId, Batch, bIncludeEnsureXformOps);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s) — enqueueing"),
+				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); enqueueing"),
 				*PrimPath, Frame.Num(), Xform.Fields,
-				bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""));
+				bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""),
+				bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));
 			if (Frame.Num() > 0)
 			{
 				EmitClient->EnqueueFrame(MoveTemp(Frame));
+				EmittedXformPrims.Add(PrimPath);
 			}
 		}
 	}
@@ -1214,7 +808,7 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 	// Try to read and emit visibility
 	{
 		FEmitVisibility Vis;
-		if (ReadVisibility(PxrStage, PrimPath, Vis))
+		if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Vis))
 		{
 			TArray<FEmitVisibility> Batch = { Vis };
 			TArray<uint8> Frame = BuildVisibilityTxnFrame(ClientId, Batch);
@@ -1227,19 +821,13 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 			}
 		}
 	}
-#endif
 }
 
 void UUSDConnectSubsystem::EmitConnectableInputs(
 	AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames)
 {
-#if USE_USD_SDK
-	pxr::UsdStageRefPtr PxrStage = static_cast<pxr::UsdStageRefPtr>(
-		StageActor->GetOrOpenUsdStage());
-	if (!PxrStage) return;
-
 	FEmitConnectableInput Event;
-	if (!ReadConnectableInputs(PxrStage, PrimPath, InputAttrNames, Event))
+	if (!FUSDStageBridge::ReadConnectableInputs(StageActor, PrimPath, InputAttrNames, Event))
 	{
 		return;
 	}
@@ -1253,7 +841,6 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 	{
 		EmitClient->EnqueueFrame(MoveTemp(Frame));
 	}
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,39 +849,17 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 
 void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
 {
-#if USE_USD_SDK
-	if (!Actor || !IsValid(Actor))
+	FString RootIdentifier;
+	TArray<FString> Materials;
+	if (!FUSDStageBridge::ReadMaterialXMaterials(Actor, RootIdentifier, Materials))
 	{
 		return;
 	}
-
-	pxr::UsdStageRefPtr Stage = static_cast<pxr::UsdStageRefPtr>(Actor->GetOrOpenUsdStage());
-	if (!Stage)
-	{
-		return;
-	}
-
-	pxr::SdfLayerHandle RootLayer = Stage->GetRootLayer();
-	if (!RootLayer)
-	{
-		return;
-	}
-
-	const FString RootIdentifier = UTF8_TO_TCHAR(RootLayer->GetIdentifier().c_str());
 	if (RootIdentifier.IsEmpty() || RootIdentifier == LastMaterializedRootLayerIdentifier)
 	{
 		return;
 	}
 
-	TArray<FString> Materials;
-	for (const pxr::UsdPrim& Prim : Stage->Traverse())
-	{
-		const pxr::UsdShadeMaterial Material(Prim);
-		if (Material && Material.GetSurfaceOutput(pxr::TfToken("mtlx")))
-		{
-			Materials.Add(UTF8_TO_TCHAR(Prim.GetPath().GetText()));
-		}
-	}
 	LastMaterializedRootLayerIdentifier = RootIdentifier;
 
 	if (Materials.IsEmpty())
@@ -1332,7 +897,6 @@ void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
 	UE_LOG(LogUSDConnectSubsystem, Log,
 		TEXT("Initial OpenUSDConnect MaterialX refresh scanned %d material(s), updated %d, render_context=%s"),
 		Materials.Num(), Changed, bChangedRenderContext ? TEXT("mtlx (selected)") : TEXT("mtlx"));
-#endif
 }
 
 void UUSDConnectSubsystem::ProcessPendingMaterializations()

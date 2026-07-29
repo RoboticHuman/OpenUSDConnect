@@ -17,11 +17,13 @@ table Hello {
     origin:string;            // session-level id for echo suppression
     department:string;
     token:string;             // TOFU auth token
+    layered_replay:bool;      // receiver can reconstruct the logical authored-layer stack
 }
 
 table HelloOk {
     token:string;             // issued token (if newly registered)
     stage_metadata:SetStageMetadata;  // snapshot of stage-level metadata (units + timeline)
+    layered_replay:bool;      // server accepted logical-layer replay for this receiver
 }
 
 table AuthRejected {
@@ -40,7 +42,7 @@ table BroadcastEvent {
     origin:string;
     client_id:string;
     client:string;              // address key e.g. "127.0.0.1:1234"
-    department:string;          // sender's department; drives replay layer routing
+    layer_key:string;           // portable collaboration layer receiving this authored opinion
 }
 
 table Resync {}
@@ -107,6 +109,22 @@ table PlaybackState {
 }
 
 // ---------------------------------------------------------------------------
+// Layered replay control
+// ---------------------------------------------------------------------------
+
+table LogicalLayerState {
+    layer_key:string;
+    muted:bool;
+    label:string;               // presentation only; never used as identity
+}
+
+table LayerStackState {
+    generation:string;          // process-local revision domain
+    revision:ulong;
+    layers:[LogicalLayerState];  // strongest to weakest
+}
+
+// ---------------------------------------------------------------------------
 // Top-level envelope
 // ---------------------------------------------------------------------------
 
@@ -128,11 +146,15 @@ union Payload {
     PlaybackRejected,
     PlaybackControl,
     PlaybackState,
+    LayerStackState,
 }
 
 table Envelope {
     payload:Payload;
-    schema_version:uint16 = 1;
+    // Zero means absent/unknown. Encoders always write the current non-zero
+    // version so buffers from an incompatible schema cannot inherit a newer
+    // generated-code default.
+    schema_version:uint16 = 0;
 }
 
 root_type Envelope;

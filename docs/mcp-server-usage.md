@@ -9,8 +9,11 @@ stream them to the sync server, which fans them out to every connected DCC
 
 The MCP is a network **client** built on the core library (`EventSender` +
 `ReceiverThread` + `EventDispatcher` + `UsdStageAdapter`), the same shape as the
-`usdview` integration. It introduces **no** protocol changes: every event kind
-it sends already exists in `openusdconnect`.
+`usdview` integration. Every scene event it sends uses the core protocol. Its
+USD mirror also negotiates the optional layered-replay capability so authored
+logical-layer opinions retain their server strength ordering during live sync
+and replay. Departments remain the server policy that assigns clients to those
+logical layers.
 
 ## Install
 
@@ -57,7 +60,7 @@ Flags (CLI) override environment variables override defaults.
 |---|---|---|---|
 | `OPENUSDCONNECT_HOST` | `--host` | `127.0.0.1` | Sync server host |
 | `OPENUSDCONNECT_PORT` | `--port` | `7200` | Sync server port |
-| `OPENUSDCONNECT_CLIENT_ID` | `--client-id` | `<user>-<host>-mcp` | Per-client layer id |
+| `OPENUSDCONNECT_CLIENT_ID` | `--client-id` | `<user>-<host>-mcp` | Client identity |
 | `OPENUSDCONNECT_DEPARTMENT` | `--department` | _(none)_ | Layer-ordering department |
 | `OPENUSDCONNECT_MIRROR` | `--no-mirror` | on | In-memory mirror for introspection |
 | `OPENUSDCONNECT_AUTO_CONNECT` | — | on | Auto-connect on first authoring tool |

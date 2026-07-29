@@ -204,6 +204,14 @@ def _stage_bytes_with_custom_property() -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
+def _stage_bytes_with_unsupported_prim_metadata() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/Before", "Xform")
+    prim.SetDocumentation("not represented by the event protocol")
+    return layer.ExportToString().encode("utf-8")
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -492,13 +500,30 @@ class TestWriteDrop:
         _, _, after_data = client.get(_file_path())
         assert after_data == before_data
 
-    def test_put_custom_property_rejected_in_translate_mode(self, vfs_translate):
+    def test_put_custom_property_translated_in_translate_mode(self, vfs_translate):
         srv, client = vfs_translate
         _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
         before_count = srv.get_event_count()
-        _, _, before_data = client.get(_file_path())
 
         status, _, _ = client.put(_file_path(), _stage_bytes_with_custom_property())
+        assert status == 204
+
+        assert srv.get_event_count() > before_count
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert srv.stage.GetAttributeAtPath("/World.customFoo").Get() == "bar"
+        _, _, after_data = client.get(_file_path())
+        assert _open_stage(after_data).GetAttributeAtPath("/World.customFoo").Get() == "bar"
+
+    def test_put_unsupported_prim_metadata_rejected_in_translate_mode(self, vfs_translate):
+        srv, client = vfs_translate
+        _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Xform"}])
+        before_count = srv.get_event_count()
+        _, _, before_data = client.get(_file_path())
+
+        status, _, _ = client.put(
+            _file_path(),
+            _stage_bytes_with_unsupported_prim_metadata(),
+        )
         assert status == 409
 
         assert srv.get_event_count() == before_count

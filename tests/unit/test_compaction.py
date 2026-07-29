@@ -229,12 +229,28 @@ class TestCompaction:
     def test_set_reference_latest_wins(self, tmp_path):
         """Multiple set_reference for same prim keeps only the last."""
         srv = _make_server(tmp_path)
+        latest = {
+            "k": K_SET_REFERENCE,
+            "prim": "/World/A",
+            "refs": [
+                {
+                    "asset_path": "new.usda",
+                    "prim_path": "/Model",
+                    "list_position": "appended",
+                    "layer_offset": 7.0,
+                    "layer_scale": 2.0,
+                    "custom_data_fragment": "#usda 1.0\n",
+                }
+            ],
+            "list_op_authored": True,
+            "list_op_explicit": False,
+        }
         _inject_events(
             srv,
             [
                 {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
                 {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "old.usda"}]},
-                {"k": K_SET_REFERENCE, "prim": "/World/A", "refs": [{"asset_path": "new.usda"}]},
+                latest,
             ],
         )
 
@@ -243,7 +259,7 @@ class TestCompaction:
 
         refs = [e for e in events if e["k"] == K_SET_REFERENCE]
         assert len(refs) == 1
-        assert refs[0]["refs"][0]["asset_path"] == "new.usda"
+        assert refs[0] == latest
 
     def test_timed_events_compact_per_sample(self, tmp_path):
         """Events at distinct time samples must not collapse into each other
@@ -487,6 +503,99 @@ class TestCompactionReplayOrder:
         conns = [e for e in events if e["k"] == K_SET_CONNECTABLE_CONNECTION]
         assert len(conns) == 1
         assert set(conns[0]["connections"]) == {"inputs:base_color", "inputs:roughness"}
+
+    def test_connection_disconnection_survives_compaction(self, tmp_path):
+        from pxr import Usd, UsdShade
+
+        from openusdconnect.event_apply import apply_events
+
+        srv = _make_server(tmp_path)
+        edge = {
+            "source_prim": "/World/Looks/M/Surface",
+            "source_attr": "outputs:surface",
+        }
+        _inject_events(
+            srv,
+            [
+                {
+                    "k": K_ENSURE_PRIM,
+                    "prim": "/World/Looks/M",
+                    "typeName": "Material",
+                },
+                {
+                    "k": K_ENSURE_PRIM,
+                    "prim": "/World/Looks/M/Surface",
+                    "typeName": "Shader",
+                },
+                {
+                    "k": K_SET_CONNECTABLE_CONNECTION,
+                    "prim": "/World/Looks/M",
+                    "connections": {"outputs:surface": edge},
+                },
+                {
+                    "k": K_SET_CONNECTABLE_CONNECTION,
+                    "prim": "/World/Looks/M",
+                    "connections": {},
+                    "disconnections": ["outputs:surface"],
+                },
+            ],
+        )
+
+        srv.compact_log()
+        events = _read_log(srv)
+        connection = next(
+            event for event in events if event["k"] == K_SET_CONNECTABLE_CONNECTION
+        )
+        assert connection["connections"] == {"outputs:surface": edge}
+        assert connection["disconnections"] == ["outputs:surface"]
+
+        replay = Usd.Stage.CreateInMemory()
+        apply_events(replay, events)
+        output = UsdShade.Material(replay.GetPrimAtPath("/World/Looks/M")).GetSurfaceOutput()
+        assert output
+        assert output.GetAttr().HasAuthoredConnections()
+        assert not output.HasConnectedSource()
+
+    def test_reconnection_cancels_compacted_disconnection(self, tmp_path):
+        srv = _make_server(tmp_path)
+        first = {
+            "source_prim": "/World/Looks/M/First",
+            "source_attr": "outputs:surface",
+        }
+        second = {
+            "source_prim": "/World/Looks/M/Second",
+            "source_attr": "outputs:surface",
+        }
+        _inject_events(
+            srv,
+            [
+                {
+                    "k": K_SET_CONNECTABLE_CONNECTION,
+                    "prim": "/World/Looks/M",
+                    "connections": {"outputs:surface": first},
+                },
+                {
+                    "k": K_SET_CONNECTABLE_CONNECTION,
+                    "prim": "/World/Looks/M",
+                    "connections": {},
+                    "disconnections": ["outputs:surface"],
+                },
+                {
+                    "k": K_SET_CONNECTABLE_CONNECTION,
+                    "prim": "/World/Looks/M",
+                    "connections": {"outputs:surface": second},
+                },
+            ],
+        )
+
+        srv.compact_log()
+        connection = next(
+            event
+            for event in _read_log(srv)
+            if event["k"] == K_SET_CONNECTABLE_CONNECTION
+        )
+        assert connection["connections"] == {"outputs:surface": second}
+        assert "disconnections" not in connection
 
     def test_binding_purposes_survive_independently(self, tmp_path):
         srv = _make_server(tmp_path)

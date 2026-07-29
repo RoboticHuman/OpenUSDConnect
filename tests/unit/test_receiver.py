@@ -17,13 +17,13 @@ def _make_server():
     return srv, srv.getsockname()[1]
 
 
-def _accept_and_hello(srv, timeout=2):
+def _accept_and_hello(srv, timeout=2, hello_ok=None):
     """Accept one connection, consume hello, send hello_ok. Return conn."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
     conn.settimeout(timeout)
     recv_framed(conn)  # consume hello
-    send_framed(conn, encode_message({"type": "hello_ok"}))
+    send_framed(conn, encode_message(hello_ok or {"type": "hello_ok"}))
     return conn
 
 
@@ -112,6 +112,46 @@ class TestReceiverThread:
             _poll_until(lambda: rt.connected)
             assert rt.connected
             assert rt.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_negotiates_layered_replay(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            layered_replay=True,
+        )
+        rt.start()
+        conn = _accept(srv)
+        try:
+            hello = _recv_hello(conn)
+            assert hello["layered_replay"] is True
+            send_framed(
+                conn,
+                encode_message(
+                    {"type": "hello_ok", "layered_replay": True},
+                ),
+            )
+            assert _poll_until(lambda: rt.connected)
+            assert rt.layered_replay_active is True
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_unacknowledged_layered_replay_falls_back_to_flat(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            layered_replay=True,
+        )
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            assert _poll_until(lambda: rt.connected)
+            assert rt.layered_replay_active is False
         finally:
             _teardown(rt, conn, srv)
 
@@ -232,6 +272,44 @@ class TestReconnection:
         assert hello["sync_from"] == 11
 
         _teardown(rt, conn2, srv)
+
+    def test_requested_replay_rewinds_sequence_and_clears_queue(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
+        )
+        rt.start()
+        conn1 = _accept_and_hello(srv)
+        conn2 = None
+        try:
+            _send_event(conn1, 1)
+            _send_event(conn1, 2)
+            assert _poll_until(lambda: rt.last_seq == 2)
+
+            rt.request_replay_from(2)
+            assert rt.last_seq == 1
+            assert len(rt.drain_queue()) == 0
+
+            conn2 = _accept(srv, timeout=2)
+            hello = _recv_hello(conn2)
+            assert hello["sync_from"] == 2
+            send_framed(conn2, encode_message({"type": "hello_ok"}))
+            assert _poll_until(lambda: rt.connected)
+
+            _send_event(conn2, 2)
+            assert _poll_until(lambda: rt.last_seq == 2)
+        finally:
+            conn1.close()
+            if conn2 is not None:
+                _teardown(rt, conn2, srv)
+            else:
+                rt.stop()
+                rt.join(timeout=1)
+                srv.close()
 
     def test_no_reconnect_when_disabled(self):
         """With reconnect=False, thread exits after connection loss."""
@@ -380,12 +458,12 @@ class TestPingHandling:
         import openusdconnect.receiver as recv_mod
 
         original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
-        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
+        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 4
         try:
             rt.start()
             conn = _accept_and_hello(srv)
             _poll_until(lambda: rt.connected)
-            # Wait ~2 timeouts, then send a ping to reset counter
+            # Each wait is below four timeouts, while their sum is above it.
             time.sleep(0.12)
             _send_ping(conn)
             time.sleep(0.12)
