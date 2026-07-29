@@ -17,13 +17,13 @@ def _make_server():
     return srv, srv.getsockname()[1]
 
 
-def _accept_and_hello(srv, timeout=2):
+def _accept_and_hello(srv, timeout=2, hello_ok=None):
     """Accept one connection, consume hello, send hello_ok. Return conn."""
     srv.settimeout(timeout)
     conn, _ = srv.accept()
     conn.settimeout(timeout)
     recv_framed(conn)  # consume hello
-    send_framed(conn, encode_message({"type": "hello_ok"}))
+    send_framed(conn, encode_message(hello_ok or {"type": "hello_ok"}))
     return conn
 
 
@@ -112,6 +112,46 @@ class TestReceiverThread:
             _poll_until(lambda: rt.connected)
             assert rt.connected
             assert rt.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_negotiates_layered_replay(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            layered_replay=True,
+        )
+        rt.start()
+        conn = _accept(srv)
+        try:
+            hello = _recv_hello(conn)
+            assert hello["layered_replay"] is True
+            send_framed(
+                conn,
+                encode_message(
+                    {"type": "hello_ok", "layered_replay": True},
+                ),
+            )
+            assert _poll_until(lambda: rt.connected)
+            assert rt.layered_replay_active is True
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_unacknowledged_layered_replay_falls_back_to_flat(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            layered_replay=True,
+        )
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            assert _poll_until(lambda: rt.connected)
+            assert rt.layered_replay_active is False
         finally:
             _teardown(rt, conn, srv)
 

@@ -38,6 +38,7 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
+    SHARED_STAGE_KINDS,
     STAGE_SYNC_KINDS,
 )
 from .sdf_arc_state import canonical_arc_state, clear_arc_state, read_arc_state
@@ -46,7 +47,9 @@ if TYPE_CHECKING:
     from pxr import Sdf, Usd
 
     from .adapters import DCCAdapter
+    from .codec import ReceivedEvent
     from .emitter import NoticeEmitter
+    from .logical_layers import LogicalLayerRouter
     from .receiver import ReceiverThread
 
 LOG = logging.getLogger(__name__)
@@ -177,6 +180,7 @@ class EventDispatcher:
         self._last_seq = 0
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str], _TrackedAssetEvent] = {}
+        self._layer_router: LogicalLayerRouter | None = None
 
     @property
     def last_seq(self) -> int:
@@ -185,6 +189,11 @@ class EventDispatcher:
     @last_seq.setter
     def last_seq(self, value: int) -> None:
         self._last_seq = value
+
+    @property
+    def layer_router(self) -> LogicalLayerRouter | None:
+        """Receiver-local logical-layer router, or ``None`` for flat replay."""
+        return self._layer_router
 
     def drain_and_apply(self) -> int:
         """Drain the receiver queue and run the apply pipeline.
@@ -195,29 +204,150 @@ class EventDispatcher:
         bufs = self.receiver.drain_queue()
         if not bufs:
             return 0
+        self._sync_layer_router()
 
         # Decode geometry to numpy (zero-copy bulk) rather than per-element
         # Python lists — the list path is ~100x slower to decode+apply for
         # heavy meshes. Adapters that need plain sequences normalize at their
         # own boundary.
         result = decode_messages(
-            bufs, last_seq=self._last_seq, numpy_arrays=True, clear_on_resync=True
+            bufs,
+            last_seq=self._last_seq,
+            numpy_arrays=True,
+            clear_on_resync=True,
+            preserve_envelopes=self._layer_router is not None,
         )
         if result.resync_requested:
             self._clear_asset_dependencies()
+            if self._layer_router is not None:
+                self._layer_router.clear()
             if self.on_resync is not None:
                 self.on_resync()
         for exc in result.errors:
             LOG.warning("Decode error: %s", exc)
 
-        events = result.received
         self._last_seq = result.last_seq
-        applied = self._apply(events) if events else 0
+        if self._layer_router is not None:
+            self._bind_layer_router()
+            for state in result.layer_stack_states:
+                self._layer_router.apply_state(state)
+            applied = (
+                self._apply_layered(result.received_records)
+                if result.received_records
+                else 0
+            )
+        else:
+            events = result.received
+            applied = self._apply(events) if events else 0
 
         if result.errors:
             self.receiver.request_replay_from(result.last_seq + 1)
 
         return applied
+
+    def bind_layered_stage(self, stage: Usd.Stage) -> None:
+        """Rebind managed receiver layers after an integration swaps stages."""
+        if self._layer_router is None:
+            return
+        self._layer_router.bind(stage)
+
+    def close(self) -> None:
+        """Release receiver-owned USD layers from their bound stage."""
+        if self._layer_router is not None:
+            self._layer_router.close()
+
+    def _sync_layer_router(self) -> None:
+        """Match the local router to the receiver's negotiated capability."""
+        active = bool(getattr(self.receiver, "layered_replay_active", False))
+        if active and self._layer_router is None:
+            from .logical_layers import LogicalLayerRouter
+
+            self._layer_router = LogicalLayerRouter()
+        elif not active and self._layer_router is not None:
+            self._layer_router.close()
+            self._layer_router = None
+
+    def _bind_layer_router(self) -> Usd.Stage:
+        router = self._layer_router
+        if router is None:
+            raise RuntimeError("layered replay was not negotiated")
+        stage = self.adapter.targets_stage()
+        if stage is None:
+            raise RuntimeError(
+                "layered replay requires an adapter backed by a Usd.Stage",
+            )
+        router.bind(stage)
+        return stage
+
+    def _apply_layered(self, records: list[ReceivedEvent]) -> int:
+        """Apply authored records to their receiver-local logical layers."""
+        from pxr import Usd
+
+        router = self._layer_router
+        if router is None:
+            raise RuntimeError("layered replay was not negotiated")
+        stage = self._bind_layer_router()
+        events = [record.event for record in records]
+        routed = []
+        for record in records:
+            if record.event.get("k") in SHARED_STAGE_KINDS:
+                layer = None
+            else:
+                if not record.layer_key:
+                    raise ValueError(
+                        "layered replay record is missing its collaboration "
+                        "layer key"
+                    )
+                layer = router.layer_for(record.layer_key)
+            routed.append((layer, record.event))
+        layers = {
+            layer.identifier: layer
+            for layer, _event in routed
+            if layer is not None
+        }
+
+        def _apply_run(run, edit_target=None):
+            self.adapter.apply_events(run)
+            if self.emitter is not None:
+                for event in run:
+                    self.emitter.invalidate_for_event(event)
+            self._observe_asset_dependencies(run, edit_target=edit_target)
+
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            with router.writable(layers.values()):
+                start = 0
+                while start < len(routed):
+                    layer = routed[start][0]
+                    end = start + 1
+                    while end < len(routed) and routed[end][0] is layer:
+                        end += 1
+                    run = [event for _layer, event in routed[start:end]]
+                    if layer is None:
+                        edit_target = Usd.EditTarget(stage.GetSessionLayer())
+                        with Usd.EditContext(stage, edit_target):
+                            _apply_run(run, edit_target)
+                    else:
+                        edit_target = Usd.EditTarget(layer)
+                        with Usd.EditContext(stage, edit_target):
+                            _apply_run(run, edit_target)
+                    start = end
+
+            if self.on_imported is not None:
+                imported = [
+                    event["prim"]
+                    for event in events
+                    if event.get("k") in IMPORT_KINDS and event.get("prim")
+                ]
+                if imported:
+                    self.on_imported(imported)
+            if self.on_applied_events is not None:
+                self.on_applied_events(events)
+            if self.on_applied is not None:
+                applied = [event["prim"] for event in events if event.get("prim")]
+                if applied:
+                    self.on_applied(applied)
+        return len(events)
 
     def _apply(self, events: list[dict]) -> int:
         """Run the apply pipeline on a pre-decoded batch.

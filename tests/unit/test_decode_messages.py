@@ -15,19 +15,46 @@ def _event(seq: int, prim: str = "/World/Cube") -> bytes:
     )
 
 
-def test_broadcast_event_department_roundtrip():
+def test_broadcast_event_layer_routing_roundtrip():
     buf = encode_message(
         {
             "type": "event",
             "seq": 7,
             "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
-            "department": "fx",
+            "layer_key": "department:fx",
         }
     )
-    assert message_to_dict(buf)["department"] == "fx"
+    decoded = message_to_dict(buf)
+    assert decoded["layer_key"] == "department:fx"
 
     without = message_to_dict(_event(8))
-    assert "department" not in without
+    assert "layer_key" not in without
+
+
+def test_layer_stack_state_roundtrip():
+    message = {
+        "type": "layer_stack_state",
+        "generation": "server-process",
+        "revision": 4,
+        "layers": [
+            {
+                "layer_key": "department:animation",
+                "label": "Animation",
+                "muted": False,
+            },
+            {
+                "layer_key": "department:layout",
+                "label": "Layout",
+                "muted": True,
+            },
+            {
+                "layer_key": "default",
+                "label": "Default",
+                "muted": True,
+            },
+        ],
+    }
+    assert message_to_dict(encode_message(message)) == message
 
 
 class TestDecodeMessages:
@@ -42,6 +69,56 @@ class TestDecodeMessages:
 
         assert [ev["prim"] for ev in result.received] == ["/World/A", "/World/B"]
         assert result.last_seq == 2
+
+    def test_preserves_routing_envelopes_on_request(self):
+        routed = encode_message(
+            {
+                "type": "event",
+                "seq": 3,
+                "event": {
+                    "k": "ensure_prim",
+                    "prim": "/World/A",
+                    "typeName": "Xform",
+                },
+                "layer_key": "department:animation",
+                "origin": "blender-a",
+                "client_id": "artist-a",
+                "client": "127.0.0.1:1234",
+            }
+        )
+        result = decode_messages([routed], preserve_envelopes=True)
+
+        assert len(result.received_records) == 1
+        record = result.received_records[0]
+        assert record.seq == 3
+        assert record.event is result.received[0]
+        assert record.layer_key == "department:animation"
+        assert record.origin == "blender-a"
+        assert record.client_id == "artist-a"
+        assert record.client == "127.0.0.1:1234"
+
+    def test_collects_layer_stack_control_state(self):
+        state = {
+            "type": "layer_stack_state",
+            "generation": "server-process",
+            "revision": 2,
+            "layers": [
+                {
+                    "layer_key": "department:animation",
+                    "label": "Animation",
+                    "muted": False,
+                },
+                {
+                    "layer_key": "default",
+                    "label": "Default",
+                    "muted": False,
+                },
+            ],
+        }
+        result = decode_messages([encode_message(state)])
+
+        assert result.received == []
+        assert result.layer_stack_states == [state]
 
     def test_threads_last_seq_in_and_out(self):
         first = decode_messages([_event(1, "/A"), _event(2, "/B")])

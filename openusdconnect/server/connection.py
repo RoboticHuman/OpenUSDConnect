@@ -20,14 +20,11 @@ from ..codec import (
 from ..framing import (
     IncompleteRead,
     MessageTooLarge,
-    frame_batch,
     recv_framed_rfile,
 )
 from ..protocol_constants import (
-    COMPOSED_PROJECTION_KINDS,
     K_LOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
-    MSG_EVENT,
     MSG_HELLO_OK,
     MSG_PLAYBACK_CLAIMED,
     MSG_PLAYBACK_REJECTED,
@@ -47,23 +44,6 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 _SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
-
-
-def _flush_changed_records(
-    sync_server: UsdSyncServer,
-    records: list[dict],
-    encoded: list[bytes],
-    origin: str | None,
-) -> None:
-    if not records:
-        return
-    sync_server.broadcast_bytes(
-        frame_batch(encoded),
-        records,
-        exclude_origin=origin,
-    )
-    records.clear()
-    encoded.clear()
 
 
 class ConnectionHandler(socketserver.StreamRequestHandler):
@@ -129,6 +109,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
         dept_raw = hello_fb.Department()
         self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
+        self._layered_replay = bool(hello_fb.LayeredReplay())
         token_raw = hello_fb.Token()
         hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
         self._client_id = client_id
@@ -155,6 +136,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         hello_ok = {"type": MSG_HELLO_OK}
         if issued_token:
             hello_ok["token"] = issued_token
+        if role == "receiver" and self._layered_replay:
+            hello_ok["layered_replay"] = True
         stage_meta = sync_server.get_stage_metadata_payload()
         if stage_meta:
             hello_ok["stage_metadata"] = stage_meta
@@ -215,6 +198,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     with self.send_lock:
                         with sync_server.clients_lock:
                             sync_server.receivers.add(self)
+                        if self._layered_replay:
+                            send_msg(
+                                self.request,
+                                sync_server.get_layer_stack_state(),
+                            )
                         sync_server.replay_from(self, sync_from)
                 except (OSError, TimeoutError):
                     LOG.info(
@@ -322,49 +310,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     layer=self._client_layer,
                 )
 
-                # Broadcast changed events; send corrections for overridden
-                # ones. Flush changed records before a correction so every
-                # receiver observes monotonically ordered sequence numbers.
-                changed_records = []
-                changed_bins = []
-
-                for i, (rec, rec_bin) in enumerate(records):
-                    if i in changed_set:
-                        changed_records.append(rec)
-                        changed_bins.append(rec_bin)
-                    else:
-                        _flush_changed_records(
-                            sync_server,
-                            changed_records,
-                            changed_bins,
-                            self._origin,
-                        )
-                        correction = sync_server.build_correction(events[i])
-                        if correction:
-                            correction_rec = {
-                                "type": MSG_EVENT,
-                                # The correction is the flat-receiver view of
-                                # this persisted opinion, not a new authored
-                                # event. Reuse its sequence so reconnect does
-                                # not request a non-existent log position.
-                                "seq": rec["seq"],
-                                "event": correction,
-                            }
-                            if self._origin:
-                                sync_server.send_to_origin(
-                                    correction_rec,
-                                    self._origin,
-                                )
-                            if events[i].get("k") in COMPOSED_PROJECTION_KINDS:
-                                sync_server.broadcast(
-                                    correction_rec,
-                                    exclude_origin=self._origin,
-                                )
-                _flush_changed_records(
-                    sync_server,
-                    changed_records,
-                    changed_bins,
-                    self._origin,
+                sync_server.broadcast_transaction_views(
+                    records,
+                    changed_set,
+                    events,
+                    exclude_origin=self._origin,
                 )
 
                 # After load_payload, re-broadcast latest child state so

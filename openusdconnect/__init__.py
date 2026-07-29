@@ -10,6 +10,7 @@ from .adapters import (
 )
 from .codec import (
     DecodeResult,
+    ReceivedEvent,
     decode_envelope,
     decode_messages,
     encode_message,
@@ -35,6 +36,7 @@ __all__ = [
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
+    "ReceivedEvent",
     "ServerConfig",
     "UsdStageAdapter",
     "UsdSyncServer",

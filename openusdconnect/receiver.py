@@ -82,6 +82,7 @@ class ReceiverThread(threading.Thread):
         on_playback_state: Callable[[dict], None] | None = None,
         on_playback_claimed: Callable[[dict], None] | None = None,
         on_playback_rejected: Callable[[dict], None] | None = None,
+        layered_replay: bool = False,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -93,6 +94,8 @@ class ReceiverThread(threading.Thread):
         self.client_id = client_id
         self.origin = origin
         self.token = token
+        self.layered_replay = bool(layered_replay)
+        self.layered_replay_active = False
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
         self._on_playback_state = on_playback_state
@@ -190,6 +193,7 @@ class ReceiverThread(threading.Thread):
             client_id=self.client_id,
             origin=self.origin,
             token=self.token,
+            layered_replay=self.layered_replay,
         )
         send_msg(self.sock, hello)
         self.auth_rejected = False
@@ -243,6 +247,14 @@ class ReceiverThread(threading.Thread):
 
                 if pt == PayloadType.HelloOk:
                     _, ho = resolve_payload(env)
+                    self.layered_replay_active = bool(
+                        self.layered_replay and ho.LayeredReplay()
+                    )
+                    if self.layered_replay and not self.layered_replay_active:
+                        LOG.info(
+                            "ReceiverThread: server did not negotiate layered replay; "
+                            "using flat replay",
+                        )
                     issued = ho.Token()
                     if issued:
                         if isinstance(issued, bytes):

@@ -10,6 +10,7 @@ import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.codec import message_to_dict
+from openusdconnect.protocol_constants import SHARED_STAGE_KINDS
 from openusdconnect.server import TokenBucket, UsdSyncServer
 
 
@@ -49,6 +50,7 @@ class TestAppendLog:
             "type": "event",
             "seq": 1,
             "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+            "layer_key": "default",
         }
         srv.append_log(rec)
 
@@ -64,6 +66,7 @@ class TestAppendLog:
                     "type": "event",
                     "seq": i + 1,
                     "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                    "layer_key": "default",
                 }
             )
         rows = (srv.store.get_count(),)
@@ -105,6 +108,55 @@ class TestApplyTxn:
         prim = srv.stage.GetPrimAtPath("/World/Cube")
         assert prim.IsValid()
         assert prim.GetTypeName() == "Cube"
+
+
+# ---------------------------------------------------------------------------
+# process_txn routing
+# ---------------------------------------------------------------------------
+
+
+class TestProcessTxnRouting:
+    def test_record_uses_actual_edit_target_instead_of_cached_client_layer(
+        self,
+        srv,
+    ):
+        animation = srv.get_or_create_client_layer(
+            "artist",
+            department="animation",
+        )
+
+        records, _changed = srv.process_txn(
+            [{"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"}],
+            client_id="artist",
+            layer=srv.edit_layer,
+        )
+        record = message_to_dict(records[0][1])
+
+        assert record["layer_key"] == "default"
+        assert srv.edit_layer.GetPrimAtPath("/World/New")
+        assert not animation.GetPrimAtPath("/World/New")
+
+    def test_unmanaged_collaboration_target_fails_before_authoring(self, srv):
+        unmanaged = Sdf.Layer.CreateAnonymous("unmanaged")
+
+        with pytest.raises(
+            ValueError,
+            match="not a managed collaboration layer",
+        ):
+            srv.process_txn(
+                [
+                    {
+                        "k": "ensure_prim",
+                        "prim": "/World/Rejected",
+                        "typeName": "Xform",
+                    }
+                ],
+                client_id="artist",
+                layer=unmanaged,
+            )
+
+        assert not unmanaged.GetPrimAtPath("/World/Rejected")
+        assert srv.store.get_count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +260,8 @@ class TestCompaction:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
+            if ev["k"] not in SHARED_STAGE_KINDS:
+                rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)
 
@@ -341,6 +395,60 @@ class TestCompaction:
         load_events = [e for e in events if e["k"] in ("load_payload", "unload_payload")]
         assert len(load_events) == 1
         assert load_events[0]["k"] == "unload_payload"
+
+    def test_load_rules_compact_in_global_runtime_scope(self, srv):
+        from openusdconnect.codec import encode_message
+
+        latest = {}
+        srv._merge_event(
+            latest,
+            1,
+            encode_message(
+                {
+                    "type": "event",
+                    "seq": 1,
+                    "event": {"k": "load_payload", "prim": "/A"},
+                }
+            ),
+        )
+        srv._merge_event(
+            latest,
+            2,
+            encode_message(
+                {
+                    "type": "event",
+                    "seq": 2,
+                    "event": {"k": "unload_payload", "prim": "/A"},
+                }
+            ),
+        )
+
+        assert [entry[0]["k"] for entry in latest.values()] == ["unload_payload"]
+
+    def test_stage_metadata_compaction_merges_sparse_fields(self, srv):
+        self._insert_events(
+            srv,
+            [{"k": "set_stage_metadata", "upAxis": "Z"}],
+        )
+        self._insert_events(
+            srv,
+            [{"k": "set_stage_metadata", "metersPerUnit": 0.01}],
+        )
+
+        srv.compact_log()
+
+        events = [
+            message_to_dict(record)["event"]
+            for _seq, record in srv.store.get_all_asc()
+        ]
+        metadata = [event for event in events if event["k"] == "set_stage_metadata"]
+        assert metadata == [
+            {
+                "k": "set_stage_metadata",
+                "upAxis": "Z",
+                "metersPerUnit": 0.01,
+            }
+        ]
 
     def test_variant_selections_latest_wins(self, srv):
         """Only the latest variant selection per prim survives compaction."""
@@ -510,7 +618,6 @@ class TestCompaction:
     def test_compaction_replay_drops_only_disconnected_receiver(
         self,
         srv,
-        monkeypatch,
     ):
         """A failed replay must not prevent healthy receivers from resyncing."""
         import io
@@ -538,17 +645,72 @@ class TestCompaction:
         healthy = FakeHandler(healthy_request, ("healthy", 2))
         srv.receivers.update((broken, healthy))
 
-        # Isolate the synchronous replay performed by compaction from the
-        # asynchronous resync broadcast.
-        monkeypatch.setattr(srv, "broadcast", lambda *_args, **_kwargs: None)
-
         srv.compact_log()
 
         assert broken not in srv.receivers
         assert healthy in srv.receivers
         healthy_request.seek(0)
+        resync = message_to_dict(recv_framed_rfile(healthy_request))
         replayed = message_to_dict(recv_framed_rfile(healthy_request))
+        assert resync["type"] == "resync"
         assert replayed["event"]["prim"] == "/A"
+
+    def test_compaction_drains_queued_broadcast_before_resync(self, srv):
+        import io
+        import time
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        self._insert_events(
+            srv,
+            [{"k": "ensure_prim", "prim": "/A", "typeName": "Xform"}],
+        )
+
+        class FakeHandler:
+            def __init__(self):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("slow", 1)
+                self.send_lock = threading.Lock()
+
+        handler = FakeHandler()
+        handler.send_lock.acquire()
+        srv.receivers.add(handler)
+        srv.broadcast(
+            {
+                "type": "event",
+                "seq": 99,
+                "event": {
+                    "k": "ensure_prim",
+                    "prim": "/Queued",
+                    "typeName": "Xform",
+                },
+            }
+        )
+
+        deadline = time.monotonic() + 2
+        while srv._broadcast_queue.qsize() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert srv._broadcast_queue.qsize() == 0
+
+        compact = threading.Thread(target=srv.compact_log)
+        compact.start()
+        try:
+            assert compact.is_alive()
+        finally:
+            handler.send_lock.release()
+        compact.join(timeout=5)
+        assert not compact.is_alive()
+
+        handler.request.seek(0)
+        size = len(handler.request.getvalue())
+        messages = []
+        while handler.request.tell() < size:
+            messages.append(message_to_dict(recv_framed_rfile(handler.request)))
+
+        assert messages[0]["seq"] == 99
+        assert messages[1]["type"] == "resync"
+        assert messages[2]["event"]["prim"] == "/A"
 
     def test_seq_resets_after_compact(self, srv):
         """After compaction, sequence numbers restart from 1."""
@@ -586,6 +748,7 @@ class TestReplay:
                 "type": "event",
                 "seq": seq,
                 "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                "layer_key": "default",
             }
             srv.append_log(rec)
 
@@ -622,6 +785,7 @@ class TestReplay:
                     "type": "event",
                     "seq": seq,
                     "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                    "layer_key": "default",
                 }
             )
 
@@ -652,6 +816,7 @@ class TestReplay:
                 "type": "event",
                 "seq": seq,
                 "event": {"k": "ensure_prim", "prim": "/P", "typeName": "Xform"},
+                "layer_key": "default",
             }
         )
 
@@ -733,6 +898,92 @@ class TestBroadcast:
         srv._broadcast_queue.join()  # wait for async broadcast thread
         assert h not in srv.receivers
 
+    def test_broadcast_targets_negotiated_receiver_audience(self, srv):
+        import io
+
+        class FakeHandler:
+            def __init__(self, layered):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("fake", int(layered))
+                self.send_lock = threading.Lock()
+                self._layered_replay = layered
+
+        flat = FakeHandler(False)
+        layered = FakeHandler(True)
+        srv.receivers.update((flat, layered))
+        message = {
+            "type": "event",
+            "seq": 1,
+            "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+        }
+
+        srv.broadcast(message, audience="layered")
+        srv._broadcast_queue.join()
+        assert flat.request.getvalue() == b""
+        assert layered.request.getvalue()
+
+        flat.request.seek(0)
+        flat.request.truncate()
+        layered.request.seek(0)
+        layered.request.truncate()
+        srv.broadcast(message, audience="flat")
+        srv._broadcast_queue.join()
+        assert flat.request.getvalue()
+        assert layered.request.getvalue() == b""
+
+    def test_layered_transaction_skips_flat_wire_but_not_listeners(
+        self,
+        srv,
+        monkeypatch,
+    ):
+        import io
+
+        class LayeredHandler:
+            def __init__(self):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("layered", 1)
+                self.send_lock = threading.Lock()
+                self._layered_replay = True
+
+        layered = LayeredHandler()
+        srv.receivers.add(layered)
+        observed = []
+        srv.add_event_listener(observed.append)
+
+        audiences = []
+        send_to_all = srv._send_to_all
+
+        def _record_audience(
+            payload,
+            exclude_origin=None,
+            target_origin=None,
+            audience="all",
+        ):
+            audiences.append(audience)
+            return send_to_all(
+                payload,
+                exclude_origin=exclude_origin,
+                target_origin=target_origin,
+                audience=audience,
+            )
+
+        monkeypatch.setattr(srv, "_send_to_all", _record_audience)
+        event = {
+            "k": "ensure_prim",
+            "prim": "/LayeredOnly",
+            "typeName": "Xform",
+        }
+        records, changed = srv.process_txn([event])
+
+        srv.broadcast_transaction_views(records, changed, [event])
+        srv._broadcast_queue.join()
+
+        assert audiences == ["layered"]
+        assert observed == [records[0][0]]
+        assert layered.request.getvalue()
+
 
 # ---------------------------------------------------------------------------
 # DB resume
@@ -753,6 +1004,7 @@ class TestDBResume:
                     "type": "event",
                     "seq": seq,
                     "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                    "layer_key": "default",
                 }
             )
         s1.store.close()
@@ -777,7 +1029,14 @@ class TestDBResume:
         s1.apply_txn(events)
         for ev in events:
             seq = s1.assign_seq()
-            s1.append_log({"type": "event", "seq": seq, "event": ev})
+            s1.append_log(
+                {
+                    "type": "event",
+                    "seq": seq,
+                    "event": ev,
+                    "layer_key": "default",
+                }
+            )
         s1.store.close()
 
         # Second server: stage should be restored from log
@@ -1483,6 +1742,8 @@ class TestCompactionWithEditLayer:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
+            if ev["k"] not in SHARED_STAGE_KINDS:
+                rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)
 
@@ -1581,7 +1842,14 @@ class TestGetByPrimPrefix:
             ev["typeName"] = "Xform"
         elif kind == "set_visibility":
             ev["visible"] = True
-        srv.append_log({"type": "event", "seq": seq, "event": ev})
+        srv.append_log(
+            {
+                "type": "event",
+                "seq": seq,
+                "event": ev,
+                "layer_key": "default",
+            }
+        )
 
     def test_filters_by_prefix_and_kind(self, srv):
         self._append(srv, 1, "ensure_prim", "/World/Asset/A")

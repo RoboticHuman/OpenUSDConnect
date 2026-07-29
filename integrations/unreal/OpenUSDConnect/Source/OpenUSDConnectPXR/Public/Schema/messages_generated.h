@@ -153,6 +153,12 @@ struct PlaybackControlBuilder;
 struct PlaybackState;
 struct PlaybackStateBuilder;
 
+struct LogicalLayerState;
+struct LogicalLayerStateBuilder;
+
+struct LayerStackState;
+struct LayerStackStateBuilder;
+
 struct Envelope;
 struct EnvelopeBuilder;
 
@@ -492,11 +498,12 @@ enum class Payload : uint8_t {
   PlaybackRejected = 15,
   PlaybackControl = 16,
   PlaybackState = 17,
+  LayerStackState = 18,
   MIN = NONE,
-  MAX = PlaybackState
+  MAX = LayerStackState
 };
 
-inline const Payload (&EnumValuesPayload())[18] {
+inline const Payload (&EnumValuesPayload())[19] {
   static const Payload values[] = {
     Payload::NONE,
     Payload::Hello,
@@ -515,13 +522,14 @@ inline const Payload (&EnumValuesPayload())[18] {
     Payload::PlaybackClaimed,
     Payload::PlaybackRejected,
     Payload::PlaybackControl,
-    Payload::PlaybackState
+    Payload::PlaybackState,
+    Payload::LayerStackState
   };
   return values;
 }
 
 inline const char * const *EnumNamesPayload() {
-  static const char * const names[19] = {
+  static const char * const names[20] = {
     "NONE",
     "Hello",
     "HelloOk",
@@ -540,13 +548,14 @@ inline const char * const *EnumNamesPayload() {
     "PlaybackRejected",
     "PlaybackControl",
     "PlaybackState",
+    "LayerStackState",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNamePayload(Payload e) {
-  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::PlaybackState)) return "";
+  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::LayerStackState)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesPayload()[index];
 }
@@ -621,6 +630,10 @@ template<> struct PayloadTraits<OpenUSDConnect::PlaybackControl> {
 
 template<> struct PayloadTraits<OpenUSDConnect::PlaybackState> {
   static const Payload enum_value = Payload::PlaybackState;
+};
+
+template<> struct PayloadTraits<OpenUSDConnect::LayerStackState> {
+  static const Payload enum_value = Payload::LayerStackState;
 };
 
 template <bool B = false>
@@ -3544,7 +3557,8 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_CLIENT_ID = 10,
     VT_ORIGIN = 12,
     VT_DEPARTMENT = 14,
-    VT_TOKEN = 16
+    VT_TOKEN = 16,
+    VT_LAYERED_REPLAY = 18
   };
   const ::flatbuffers::String *role() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ROLE);
@@ -3567,6 +3581,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *token() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TOKEN);
   }
+  bool layered_replay() const {
+    return GetField<uint8_t>(VT_LAYERED_REPLAY, 0) != 0;
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3582,6 +3599,7 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(department()) &&
            VerifyOffset(verifier, VT_TOKEN) &&
            verifier.VerifyString(token()) &&
+           VerifyField<uint8_t>(verifier, VT_LAYERED_REPLAY, 1) &&
            verifier.EndTable();
   }
 };
@@ -3611,6 +3629,9 @@ struct HelloBuilder {
   void add_token(::flatbuffers::Offset<::flatbuffers::String> token) {
     fbb_.AddOffset(Hello::VT_TOKEN, token);
   }
+  void add_layered_replay(bool layered_replay) {
+    fbb_.AddElement<uint8_t>(Hello::VT_LAYERED_REPLAY, static_cast<uint8_t>(layered_replay), 0);
+  }
   explicit HelloBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3630,7 +3651,8 @@ inline ::flatbuffers::Offset<Hello> CreateHello(
     ::flatbuffers::Offset<::flatbuffers::String> client_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> origin = 0,
     ::flatbuffers::Offset<::flatbuffers::String> department = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> token = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> token = 0,
+    bool layered_replay = false) {
   HelloBuilder builder_(_fbb);
   builder_.add_token(token);
   builder_.add_department(department);
@@ -3639,6 +3661,7 @@ inline ::flatbuffers::Offset<Hello> CreateHello(
   builder_.add_sync_from(sync_from);
   builder_.add_protocol_version(protocol_version);
   builder_.add_role(role);
+  builder_.add_layered_replay(layered_replay);
   return builder_.Finish();
 }
 
@@ -3655,7 +3678,8 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
     const char *client_id = nullptr,
     const char *origin = nullptr,
     const char *department = nullptr,
-    const char *token = nullptr) {
+    const char *token = nullptr,
+    bool layered_replay = false) {
   auto role__ = role ? _fbb.CreateString(role) : 0;
   auto client_id__ = client_id ? _fbb.CreateString(client_id) : 0;
   auto origin__ = origin ? _fbb.CreateString(origin) : 0;
@@ -3669,7 +3693,8 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
       client_id__,
       origin__,
       department__,
-      token__);
+      token__,
+      layered_replay);
 }
 
 struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3677,13 +3702,17 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TOKEN = 4,
-    VT_STAGE_METADATA = 6
+    VT_STAGE_METADATA = 6,
+    VT_LAYERED_REPLAY = 8
   };
   const ::flatbuffers::String *token() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TOKEN);
   }
   const OpenUSDConnect::SetStageMetadata *stage_metadata() const {
     return GetPointer<const OpenUSDConnect::SetStageMetadata *>(VT_STAGE_METADATA);
+  }
+  bool layered_replay() const {
+    return GetField<uint8_t>(VT_LAYERED_REPLAY, 0) != 0;
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -3692,6 +3721,7 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(token()) &&
            VerifyOffset(verifier, VT_STAGE_METADATA) &&
            verifier.VerifyTable(stage_metadata()) &&
+           VerifyField<uint8_t>(verifier, VT_LAYERED_REPLAY, 1) &&
            verifier.EndTable();
   }
 };
@@ -3705,6 +3735,9 @@ struct HelloOkBuilder {
   }
   void add_stage_metadata(::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata) {
     fbb_.AddOffset(HelloOk::VT_STAGE_METADATA, stage_metadata);
+  }
+  void add_layered_replay(bool layered_replay) {
+    fbb_.AddElement<uint8_t>(HelloOk::VT_LAYERED_REPLAY, static_cast<uint8_t>(layered_replay), 0);
   }
   explicit HelloOkBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -3720,10 +3753,12 @@ struct HelloOkBuilder {
 inline ::flatbuffers::Offset<HelloOk> CreateHelloOk(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> token = 0,
-    ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0) {
+    ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
+    bool layered_replay = false) {
   HelloOkBuilder builder_(_fbb);
   builder_.add_stage_metadata(stage_metadata);
   builder_.add_token(token);
+  builder_.add_layered_replay(layered_replay);
   return builder_.Finish();
 }
 
@@ -3735,12 +3770,14 @@ struct HelloOk::Traits {
 inline ::flatbuffers::Offset<HelloOk> CreateHelloOkDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *token = nullptr,
-    ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0) {
+    ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
+    bool layered_replay = false) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
   return OpenUSDConnect::CreateHelloOk(
       _fbb,
       token__,
-      stage_metadata);
+      stage_metadata,
+      layered_replay);
 }
 
 struct AuthRejected FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3897,7 +3934,7 @@ struct BroadcastEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ORIGIN = 8,
     VT_CLIENT_ID = 10,
     VT_CLIENT = 12,
-    VT_DEPARTMENT = 14
+    VT_LAYER_KEY = 14
   };
   int32_t seq() const {
     return GetField<int32_t>(VT_SEQ, 0);
@@ -3914,8 +3951,8 @@ struct BroadcastEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *client() const {
     return GetPointer<const ::flatbuffers::String *>(VT_CLIENT);
   }
-  const ::flatbuffers::String *department() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_DEPARTMENT);
+  const ::flatbuffers::String *layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -3929,8 +3966,8 @@ struct BroadcastEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(client_id()) &&
            VerifyOffset(verifier, VT_CLIENT) &&
            verifier.VerifyString(client()) &&
-           VerifyOffset(verifier, VT_DEPARTMENT) &&
-           verifier.VerifyString(department()) &&
+           VerifyOffset(verifier, VT_LAYER_KEY) &&
+           verifier.VerifyString(layer_key()) &&
            verifier.EndTable();
   }
 };
@@ -3954,8 +3991,8 @@ struct BroadcastEventBuilder {
   void add_client(::flatbuffers::Offset<::flatbuffers::String> client) {
     fbb_.AddOffset(BroadcastEvent::VT_CLIENT, client);
   }
-  void add_department(::flatbuffers::Offset<::flatbuffers::String> department) {
-    fbb_.AddOffset(BroadcastEvent::VT_DEPARTMENT, department);
+  void add_layer_key(::flatbuffers::Offset<::flatbuffers::String> layer_key) {
+    fbb_.AddOffset(BroadcastEvent::VT_LAYER_KEY, layer_key);
   }
   explicit BroadcastEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -3975,9 +4012,9 @@ inline ::flatbuffers::Offset<BroadcastEvent> CreateBroadcastEvent(
     ::flatbuffers::Offset<::flatbuffers::String> origin = 0,
     ::flatbuffers::Offset<::flatbuffers::String> client_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> client = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> department = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0) {
   BroadcastEventBuilder builder_(_fbb);
-  builder_.add_department(department);
+  builder_.add_layer_key(layer_key);
   builder_.add_client(client);
   builder_.add_client_id(client_id);
   builder_.add_origin(origin);
@@ -3998,11 +4035,11 @@ inline ::flatbuffers::Offset<BroadcastEvent> CreateBroadcastEventDirect(
     const char *origin = nullptr,
     const char *client_id = nullptr,
     const char *client = nullptr,
-    const char *department = nullptr) {
+    const char *layer_key = nullptr) {
   auto origin__ = origin ? _fbb.CreateString(origin) : 0;
   auto client_id__ = client_id ? _fbb.CreateString(client_id) : 0;
   auto client__ = client ? _fbb.CreateString(client) : 0;
-  auto department__ = department ? _fbb.CreateString(department) : 0;
+  auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
   return OpenUSDConnect::CreateBroadcastEvent(
       _fbb,
       seq,
@@ -4010,7 +4047,7 @@ inline ::flatbuffers::Offset<BroadcastEvent> CreateBroadcastEventDirect(
       origin__,
       client_id__,
       client__,
-      department__);
+      layer_key__);
 }
 
 struct Resync FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -4726,6 +4763,175 @@ inline ::flatbuffers::Offset<PlaybackState> CreatePlaybackStateDirect(
       leader_client_id__);
 }
 
+struct LogicalLayerState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LogicalLayerStateBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_LAYER_KEY = 4,
+    VT_MUTED = 6,
+    VT_LABEL = 8
+  };
+  const ::flatbuffers::String *layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
+  }
+  bool muted() const {
+    return GetField<uint8_t>(VT_MUTED, 0) != 0;
+  }
+  const ::flatbuffers::String *label() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LABEL);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_LAYER_KEY) &&
+           verifier.VerifyString(layer_key()) &&
+           VerifyField<uint8_t>(verifier, VT_MUTED, 1) &&
+           VerifyOffset(verifier, VT_LABEL) &&
+           verifier.VerifyString(label()) &&
+           verifier.EndTable();
+  }
+};
+
+struct LogicalLayerStateBuilder {
+  typedef LogicalLayerState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_layer_key(::flatbuffers::Offset<::flatbuffers::String> layer_key) {
+    fbb_.AddOffset(LogicalLayerState::VT_LAYER_KEY, layer_key);
+  }
+  void add_muted(bool muted) {
+    fbb_.AddElement<uint8_t>(LogicalLayerState::VT_MUTED, static_cast<uint8_t>(muted), 0);
+  }
+  void add_label(::flatbuffers::Offset<::flatbuffers::String> label) {
+    fbb_.AddOffset(LogicalLayerState::VT_LABEL, label);
+  }
+  explicit LogicalLayerStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LogicalLayerState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LogicalLayerState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LogicalLayerState> CreateLogicalLayerState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0,
+    bool muted = false,
+    ::flatbuffers::Offset<::flatbuffers::String> label = 0) {
+  LogicalLayerStateBuilder builder_(_fbb);
+  builder_.add_label(label);
+  builder_.add_layer_key(layer_key);
+  builder_.add_muted(muted);
+  return builder_.Finish();
+}
+
+struct LogicalLayerState::Traits {
+  using type = LogicalLayerState;
+  static auto constexpr Create = CreateLogicalLayerState;
+};
+
+inline ::flatbuffers::Offset<LogicalLayerState> CreateLogicalLayerStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *layer_key = nullptr,
+    bool muted = false,
+    const char *label = nullptr) {
+  auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
+  auto label__ = label ? _fbb.CreateString(label) : 0;
+  return OpenUSDConnect::CreateLogicalLayerState(
+      _fbb,
+      layer_key__,
+      muted,
+      label__);
+}
+
+struct LayerStackState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LayerStackStateBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_GENERATION = 4,
+    VT_REVISION = 6,
+    VT_LAYERS = 8
+  };
+  const ::flatbuffers::String *generation() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GENERATION);
+  }
+  uint64_t revision() const {
+    return GetField<uint64_t>(VT_REVISION, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>> *layers() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>> *>(VT_LAYERS);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_GENERATION) &&
+           verifier.VerifyString(generation()) &&
+           VerifyField<uint64_t>(verifier, VT_REVISION, 8) &&
+           VerifyOffset(verifier, VT_LAYERS) &&
+           verifier.VerifyVector(layers()) &&
+           verifier.VerifyVectorOfTables(layers()) &&
+           verifier.EndTable();
+  }
+};
+
+struct LayerStackStateBuilder {
+  typedef LayerStackState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_generation(::flatbuffers::Offset<::flatbuffers::String> generation) {
+    fbb_.AddOffset(LayerStackState::VT_GENERATION, generation);
+  }
+  void add_revision(uint64_t revision) {
+    fbb_.AddElement<uint64_t>(LayerStackState::VT_REVISION, revision, 0);
+  }
+  void add_layers(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>>> layers) {
+    fbb_.AddOffset(LayerStackState::VT_LAYERS, layers);
+  }
+  explicit LayerStackStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LayerStackState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LayerStackState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LayerStackState> CreateLayerStackState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> generation = 0,
+    uint64_t revision = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>>> layers = 0) {
+  LayerStackStateBuilder builder_(_fbb);
+  builder_.add_revision(revision);
+  builder_.add_layers(layers);
+  builder_.add_generation(generation);
+  return builder_.Finish();
+}
+
+struct LayerStackState::Traits {
+  using type = LayerStackState;
+  static auto constexpr Create = CreateLayerStackState;
+};
+
+inline ::flatbuffers::Offset<LayerStackState> CreateLayerStackStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *generation = nullptr,
+    uint64_t revision = 0,
+    const std::vector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>> *layers = nullptr) {
+  auto generation__ = generation ? _fbb.CreateString(generation) : 0;
+  auto layers__ = layers ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::LogicalLayerState>>(*layers) : 0;
+  return OpenUSDConnect::CreateLayerStackState(
+      _fbb,
+      generation__,
+      revision,
+      layers__);
+}
+
 struct Envelope FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef EnvelopeBuilder Builder;
   struct Traits;
@@ -4791,6 +4997,9 @@ struct Envelope FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const OpenUSDConnect::PlaybackState *payload_as_PlaybackState() const {
     return payload_type() == OpenUSDConnect::Payload::PlaybackState ? static_cast<const OpenUSDConnect::PlaybackState *>(payload()) : nullptr;
+  }
+  const OpenUSDConnect::LayerStackState *payload_as_LayerStackState() const {
+    return payload_type() == OpenUSDConnect::Payload::LayerStackState ? static_cast<const OpenUSDConnect::LayerStackState *>(payload()) : nullptr;
   }
   uint16_t schema_version() const {
     return GetField<uint16_t>(VT_SCHEMA_VERSION, 0);
@@ -4872,6 +5081,10 @@ template<> inline const OpenUSDConnect::PlaybackControl *Envelope::payload_as<Op
 
 template<> inline const OpenUSDConnect::PlaybackState *Envelope::payload_as<OpenUSDConnect::PlaybackState>() const {
   return payload_as_PlaybackState();
+}
+
+template<> inline const OpenUSDConnect::LayerStackState *Envelope::payload_as<OpenUSDConnect::LayerStackState>() const {
+  return payload_as_LayerStackState();
 }
 
 struct EnvelopeBuilder {
@@ -5090,6 +5303,10 @@ inline bool VerifyPayload(::flatbuffers::VerifierTemplate<B> &verifier, const vo
     }
     case Payload::PlaybackState: {
       auto ptr = reinterpret_cast<const OpenUSDConnect::PlaybackState *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case Payload::LayerStackState: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::LayerStackState *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

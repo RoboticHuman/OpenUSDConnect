@@ -82,6 +82,7 @@ def start(
         client_id=_client_id,
         origin=_origin,
         token=token,
+        layered_replay=True,
     )
     _receiver.start()
 
@@ -124,6 +125,7 @@ def _on_stage_replaced() -> None:
         from openusdconnect.adapters import UsdStageAdapter
 
         _dispatcher.adapter = UsdStageAdapter(_stage)
+        _dispatcher.bind_layered_stage(_stage)
         if _translate_openpbr:
             from integrations.openpbr_translate import translate_openpbr_materials
 
@@ -228,6 +230,8 @@ def stop() -> None:
         _receiver.stop()
         _receiver = None
 
+    if _dispatcher is not None:
+        _dispatcher.close()
     _dispatcher = None
     _usdview_api = None
     _stage = None

@@ -86,3 +86,15 @@ def test_decode_failure_applies_prefix_and_requests_replay():
     assert dispatcher.drain_and_apply() == 1
     assert dispatcher.last_seq == 2
     assert "/World/B" in adapter._prims
+
+
+def test_unnegotiated_layered_request_uses_flat_dispatch():
+    receiver = _QueuedReceiver([_event(1, "/World/A")])
+    receiver.layered_replay = True
+    receiver.layered_replay_active = False
+    adapter = MockAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter)
+
+    assert dispatcher.drain_and_apply() == 1
+    assert dispatcher.layer_router is None
+    assert "/World/A" in adapter._prims

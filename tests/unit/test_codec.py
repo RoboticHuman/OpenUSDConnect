@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_version_is_two(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 2
+        assert SCHEMA_VERSION == 3
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -86,7 +86,7 @@ class TestHello:
         msg = {
             "type": "hello",
             "role": "emitter",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "sync_from": 42,
             "client_id": "c1",
             "origin": "blender-1",
@@ -106,7 +106,7 @@ class TestHello:
         msg = {
             "type": "hello",
             "role": "emitter",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "client_id": "c1",
             "origin": "o1",
         }
@@ -116,7 +116,7 @@ class TestHello:
         assert mt == "hello"
         # FlatBuffers returns bytes for strings
         assert hello.Role() in (b"emitter", "emitter")
-        assert hello.ProtocolVersion() == 2
+        assert hello.ProtocolVersion() == 3
 
 
 class TestHelloOk:

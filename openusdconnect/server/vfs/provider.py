@@ -626,9 +626,9 @@ class VirtualStageFileSet:
         srv = self._server
         if layer is srv.edit_layer or layer.identifier == srv.edit_layer.identifier:
             return "edit"
-        for dept, dept_layer in getattr(srv, "_dept_layers", {}).items():
-            if layer is dept_layer or layer.identifier == dept_layer.identifier:
-                return f"department:{dept}"
+        department = srv.department_for_layer(layer)
+        if department:
+            return f"department:{department}"
         return "overlay"
 
     def _name_for_layer(self, layer: Sdf.Layer, used: set[str]) -> str:
@@ -637,10 +637,9 @@ class VirtualStageFileSet:
             candidate = "server-edits.usda"
         else:
             candidate = ""
-            for dept, dept_layer in getattr(srv, "_dept_layers", {}).items():
-                if layer is dept_layer or layer.identifier == dept_layer.identifier:
-                    candidate = f"dept-{_safe_stem(dept, 'department')}.usda"
-                    break
+            department = srv.department_for_layer(layer)
+            if department:
+                candidate = f"dept-{_safe_stem(department, 'department')}.usda"
             if not candidate:
                 digest = hashlib.sha1(layer.identifier.encode("utf-8")).hexdigest()[:8]
                 candidate = f"{_safe_stem(layer.identifier, 'layer')}-{digest}.usda"

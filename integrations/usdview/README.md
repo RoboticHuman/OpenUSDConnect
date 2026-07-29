@@ -10,6 +10,14 @@ This is the smallest possible DCC integration in the project — usdview
 already owns a live `Usd.Stage`, so the core `UsdStageAdapter` plugs in
 unchanged. No DCC-native object mapping, no emitter (receive-only).
 
+The integration negotiates layered replay. It maps each opaque collaboration
+layer key to a receiver-owned anonymous layer, composes those layers in the
+advertised strong-to-weak order, and tracks live mute changes. Department
+assignment is a server policy that currently selects those logical layers; it
+is not part of the receiver's composition logic. Unrelated session sublayers
+retain their relative order and offsets. If the server does not acknowledge
+the capability, the receiver falls back to the existing flat replay path.
+
 ## Quick start
 
 ```bash

@@ -1,5 +1,6 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.connectable_attrs import (
     SIDE_INPUT,
     SIDE_OUTPUT,
@@ -14,19 +15,26 @@ from openusdconnect.protocol import (
     make_txn,
 )
 from openusdconnect.protocol_constants import (
+    COLLABORATION_LAYER_KINDS,
+    EVENT_KEYS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
+    K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_STAGE_METADATA,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
+    K_UNLOAD_PAYLOAD,
     MSG_HELLO,
     MSG_QUIT,
     MSG_TXN,
     PROTOCOL_VERSION,
+    SESSION_LAYER_KINDS,
+    STAGE_RUNTIME_KINDS,
 )
 from openusdconnect.protocol_validation import (
     clamp_fields,
@@ -90,8 +98,13 @@ class TestMessageConstruction:
         assert "sync_from" not in msg
 
     def test_make_hello_receiver_with_sync(self):
-        msg = make_hello("receiver", sync_from=5)
+        msg = make_hello("receiver", sync_from=5, layered_replay=True)
         assert msg["sync_from"] == 5
+        assert msg["layered_replay"] is True
+
+    def test_hello_ok_layered_replay_roundtrip(self):
+        msg = {"type": "hello_ok", "layered_replay": True}
+        assert message_to_dict(encode_message(msg)) == msg
 
     def test_make_txn(self):
         events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo", "typeName": "Xform"}]
@@ -103,6 +116,24 @@ class TestMessageConstruction:
     def test_make_quit(self):
         msg = make_quit()
         assert msg["type"] == MSG_QUIT
+
+
+def test_every_event_kind_has_one_target_domain():
+    domains = (
+        COLLABORATION_LAYER_KINDS,
+        SESSION_LAYER_KINDS,
+        STAGE_RUNTIME_KINDS,
+    )
+
+    assert set().union(*domains) == EVENT_KEYS
+    assert all(
+        not domains[left] & domains[right]
+        for left in range(len(domains))
+        for right in range(left + 1, len(domains))
+    )
+    assert K_ENSURE_PRIM in COLLABORATION_LAYER_KINDS
+    assert K_SET_STAGE_METADATA in SESSION_LAYER_KINDS
+    assert {K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD} <= STAGE_RUNTIME_KINDS
 
 
 class TestValidateEvent:

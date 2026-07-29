@@ -107,7 +107,8 @@ class TestProposalApproval:
         assert p.status == "approved"
 
         # Opinions should now be in the animation layer
-        anim_layer = srv_with_layers._dept_layers["animation"]
+        anim_layer = srv_with_layers.resolve_layer("animation")
+        assert anim_layer is not None
         spec = anim_layer.GetPrimAtPath("/World/KeyLight")
         assert spec is not None
 
@@ -118,8 +119,7 @@ class TestProposalApproval:
         session = srv_with_layers.stage.GetSessionLayer()
         assert p.layer.identifier not in list(session.subLayerPaths)
 
-    def test_approve_without_target_layer_fails(self, srv):
-        # No layers created yet, so target department has no layer
+    def test_approve_without_materialized_target_layer_fails(self, srv):
         pid = srv.create_proposal("alice", "lighting", "test")
         assert not srv.approve_proposal(pid)
 
@@ -157,7 +157,17 @@ class TestProposalApproval:
         proposal_id = srv_with_layers.create_proposal("bob", "layout", "weak override")
         _apply_to_proposal(srv_with_layers, proposal_id, _events(1))
         broadcast = []
-        monkeypatch.setattr(srv_with_layers, "broadcast", broadcast.append)
+        monkeypatch.setattr(
+            srv_with_layers,
+            "broadcast",
+            lambda record, **_kwargs: broadcast.append(record),
+        )
+        # The composed correction is a flat-receiver projection.
+        monkeypatch.setattr(
+            srv_with_layers,
+            "_receiver_audience_presence",
+            lambda: (True, False),
+        )
 
         assert srv_with_layers.approve_proposal(proposal_id)
         corrections = [
@@ -196,8 +206,8 @@ class TestProposalTxnRouting:
 
         # Opinions land in proposal layer, not in any department layer
         assert layer.GetPrimAtPath("/World/SpotLight") is not None
-        for dept_layer in srv_with_layers._dept_layers.values():
-            assert dept_layer.GetPrimAtPath("/World/SpotLight") is None
+        for collaboration_layer in srv_with_layers.layer_stack.managed_layers:
+            assert collaboration_layer.GetPrimAtPath("/World/SpotLight") is None
 
     def test_proposal_events_not_in_composed_stage(self, srv_with_layers):
         """Muted proposal layer opinions should not be visible on composed stage."""
@@ -224,7 +234,7 @@ class TestProposalTxnRouting:
         _apply_to_proposal(srv_with_layers, pid, [
             {"k": "ensure_prim", "prim": "/World/RimLight", "typeName": "Xform"},
         ])
-        # A new department's first client triggers _reorder_session_sublayers.
+        # A new department's first client updates the managed layer stack.
         srv_with_layers.get_or_create_client_layer("carol", "lighting")
 
         layer = srv_with_layers.proposals[pid].layer

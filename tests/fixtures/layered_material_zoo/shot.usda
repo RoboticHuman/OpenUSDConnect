@@ -1,0 +1,31 @@
+#usda 1.0
+
+over "World"
+{
+    over "Looks"
+    {
+        over "Matte"
+        {
+            over "Surface"
+            {
+                color3f inputs:diffuseColor = (0.06, 0.48, 0.16)
+            }
+        }
+
+        over "Metal"
+        {
+            over "Surface"
+            {
+                float inputs:roughness = 0.08
+            }
+        }
+
+        over "MaterialX"
+        {
+            over "Surface"
+            {
+                color3f inputs:base_color = (0.55, 0.08, 0.72)
+            }
+        }
+    }
+}

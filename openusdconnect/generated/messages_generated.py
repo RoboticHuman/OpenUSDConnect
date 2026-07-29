@@ -81,6 +81,7 @@ class Payload(object):
     PlaybackRejected = 15
     PlaybackControl = 16
     PlaybackState = 17
+    LayerStackState = 18
 
 
 class AttrValue(object):
@@ -2651,8 +2652,15 @@ class Hello(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # Hello
+    def LayeredReplay(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def HelloStart(builder):
-    builder.StartObject(7)
+    builder.StartObject(8)
 
 def HelloAddRole(builder, role):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(role), 0)
@@ -2674,6 +2682,9 @@ def HelloAddDepartment(builder, department):
 
 def HelloAddToken(builder, token):
     builder.PrependUOffsetTRelativeSlot(6, flatbuffers.number_types.UOffsetTFlags.py_type(token), 0)
+
+def HelloAddLayeredReplay(builder, layeredReplay):
+    builder.PrependBoolSlot(7, layeredReplay, 0)
 
 def HelloEnd(builder):
     return builder.EndObject()
@@ -2715,14 +2726,24 @@ class HelloOk(object):
             return obj
         return None
 
+    # HelloOk
+    def LayeredReplay(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def HelloOkStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def HelloOkAddToken(builder, token):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(token), 0)
 
 def HelloOkAddStageMetadata(builder, stageMetadata):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(stageMetadata), 0)
+
+def HelloOkAddLayeredReplay(builder, layeredReplay):
+    builder.PrependBoolSlot(2, layeredReplay, 0)
 
 def HelloOkEnd(builder):
     return builder.EndObject()
@@ -2898,7 +2919,7 @@ class BroadcastEvent(object):
         return None
 
     # BroadcastEvent
-    def Department(self):
+    def LayerKey(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
@@ -2922,8 +2943,8 @@ def BroadcastEventAddClientId(builder, clientId):
 def BroadcastEventAddClient(builder, client):
     builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(client), 0)
 
-def BroadcastEventAddDepartment(builder, department):
-    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(department), 0)
+def BroadcastEventAddLayerKey(builder, layerKey):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
 
 def BroadcastEventEnd(builder):
     return builder.EndObject()
@@ -3428,6 +3449,138 @@ def PlaybackStateAddLeaderClientId(builder, leaderClientId):
     builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(leaderClientId), 0)
 
 def PlaybackStateEnd(builder):
+    return builder.EndObject()
+
+
+
+class LogicalLayerState(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = LogicalLayerState()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsLogicalLayerState(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # LogicalLayerState
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # LogicalLayerState
+    def LayerKey(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # LogicalLayerState
+    def Muted(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+    # LogicalLayerState
+    def Label(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def LogicalLayerStateStart(builder):
+    builder.StartObject(3)
+
+def LogicalLayerStateAddLayerKey(builder, layerKey):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
+
+def LogicalLayerStateAddMuted(builder, muted):
+    builder.PrependBoolSlot(1, muted, 0)
+
+def LogicalLayerStateAddLabel(builder, label):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(label), 0)
+
+def LogicalLayerStateEnd(builder):
+    return builder.EndObject()
+
+
+
+class LayerStackState(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = LayerStackState()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsLayerStackState(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # LayerStackState
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # LayerStackState
+    def Generation(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # LayerStackState
+    def Revision(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+    # LayerStackState
+    def Layers(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            x = self._tab.Vector(o)
+            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
+            x = self._tab.Indirect(x)
+            obj = LogicalLayerState()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # LayerStackState
+    def LayersLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # LayerStackState
+    def LayersIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        return o == 0
+
+def LayerStackStateStart(builder):
+    builder.StartObject(3)
+
+def LayerStackStateAddGeneration(builder, generation):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(generation), 0)
+
+def LayerStackStateAddRevision(builder, revision):
+    builder.PrependUint64Slot(1, revision, 0)
+
+def LayerStackStateAddLayers(builder, layers):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(layers), 0)
+
+def LayerStackStateStartLayersVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def LayerStackStateEnd(builder):
     return builder.EndObject()
 
 
