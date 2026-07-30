@@ -311,6 +311,17 @@ class TestReconnection:
                 rt.join(timeout=1)
                 srv.close()
 
+    def test_requested_replay_closes_current_socket(self):
+        rt = ReceiverThread()
+        sock = socket.socket()
+        rt.sock = sock
+        try:
+            rt.request_replay_from(1)
+            assert sock.fileno() == -1
+            assert rt.sock is None
+        finally:
+            sock.close()
+
     def test_no_reconnect_when_disabled(self):
         """With reconnect=False, thread exits after connection loss."""
         srv, port = _make_server()

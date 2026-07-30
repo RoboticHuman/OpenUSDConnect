@@ -105,6 +105,7 @@ class ReceiverThread(threading.Thread):
         self._reconnect_max_delay = reconnect_max_delay
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
+        self._socket_lock = threading.Lock()
         self._incoming: deque = deque()
         self._incoming_lock = threading.Lock()
         self._replay_from: int | None = None
@@ -169,14 +170,20 @@ class ReceiverThread(threading.Thread):
     def _connect_and_recv(self):
         """Single connection attempt: connect, handshake, read until EOF/error."""
         LOG.info("ReceiverThread connecting to %s:%s", self.host, self.port)
-        self.sock = socket.create_connection(
+        sock = socket.create_connection(
             (self.host, self.port),
             timeout=self.socket_timeout,
         )
-        self.sock.settimeout(self.socket_timeout)
+        with self._socket_lock:
+            self.sock = sock
+        sock.settimeout(self.socket_timeout)
         # Hello/acks are small; Nagle would delay them. Matches the server's
         # accepted-socket setting.
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        if self._stop_event.is_set():
+            self._close_socket(sock)
+            return
 
         with self._incoming_lock:
             connection_generation = self._replay_generation
@@ -195,13 +202,13 @@ class ReceiverThread(threading.Thread):
             token=self.token,
             layered_replay=self.layered_replay,
         )
-        send_msg(self.sock, hello)
+        send_msg(sock, hello)
         self.auth_rejected = False
 
         consecutive_timeouts = 0
         while not self._stop_event.is_set():
             try:
-                buf = recv_framed(self.sock)
+                buf = recv_framed(sock)
             except TimeoutError:
                 consecutive_timeouts += 1
                 if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
@@ -347,22 +354,26 @@ class ReceiverThread(threading.Thread):
             self.last_seq = seq_start - 1
             self._incoming.clear()
             self._queue_overflow = False
-            sock = self.sock
+        self._close_socket()
 
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+    def _close_socket(self, sock: socket.socket | None = None) -> None:
+        """Detach and close a socket, ignoring shutdown and close errors."""
+        with self._socket_lock:
+            if sock is None:
+                sock = self.sock
+            if self.sock is sock:
+                self.sock = None
 
-    def _close_socket(self):
-        """Close the socket, ignoring errors."""
+        if sock is None:
+            return
         try:
-            if self.sock:
-                self.sock.close()
+            sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        self.sock = None
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def drain_queue(self) -> deque:
         """Drain all queued raw FlatBuffers messages. Thread-safe, call from main thread."""
@@ -374,9 +385,4 @@ class ReceiverThread(threading.Thread):
     def stop(self):
         """Request clean shutdown."""
         self._stop_event.set()
-        sock = self.sock  # Local ref avoids TOCTOU with _close_socket()
-        if sock:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        self._close_socket()
