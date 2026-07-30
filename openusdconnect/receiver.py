@@ -357,7 +357,7 @@ class ReceiverThread(threading.Thread):
         self._close_socket()
 
     def _close_socket(self, sock: socket.socket | None = None) -> None:
-        """Detach and close a socket, ignoring shutdown and close errors."""
+        """Detach and close a socket, logging cleanup errors at debug level."""
         with self._socket_lock:
             if sock is None:
                 sock = self.sock
@@ -369,11 +369,14 @@ class ReceiverThread(threading.Thread):
         try:
             sock.shutdown(socket.SHUT_RDWR)
         except OSError:
-            pass
+            LOG.debug(
+                "ReceiverThread: socket shutdown failed during close",
+                exc_info=True,
+            )
         try:
             sock.close()
         except OSError:
-            pass
+            LOG.debug("ReceiverThread: socket close failed", exc_info=True)
 
     def drain_queue(self) -> deque:
         """Drain all queued raw FlatBuffers messages. Thread-safe, call from main thread."""

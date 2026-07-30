@@ -1,5 +1,6 @@
 """Tests for ReceiverThread."""
 
+import logging
 import socket
 import time
 
@@ -321,6 +322,25 @@ class TestReconnection:
             assert rt.sock is None
         finally:
             sock.close()
+
+    def test_close_socket_logs_cleanup_errors(self, caplog):
+        class BrokenSocket:
+            def shutdown(self, _how):
+                raise OSError("shutdown failed")
+
+            def close(self):
+                raise OSError("close failed")
+
+        rt = ReceiverThread()
+        sock = BrokenSocket()
+        rt.sock = sock
+
+        with caplog.at_level(logging.DEBUG, logger="openusdconnect.receiver"):
+            rt._close_socket()
+
+        assert rt.sock is None
+        assert "socket shutdown failed during close" in caplog.text
+        assert "socket close failed" in caplog.text
 
     def test_no_reconnect_when_disabled(self):
         """With reconnect=False, thread exits after connection loss."""
