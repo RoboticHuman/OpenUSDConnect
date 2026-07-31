@@ -11,6 +11,7 @@ import pytest
 collect_ignore_glob = ["test_bishop.py", "test_teapot_*.py", "test_two_*.py",
                        "test_vehicles.py", "test_camera_scene.py",
                        "test_playback_*.py", "test_chair_replay.py",
+                       "test_material_zoo_replay.py",
                        "test_headless_time_samples_to_blender.py",
                        "diag_*.py"]
 

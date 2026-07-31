@@ -10,6 +10,7 @@ Usage:
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -239,6 +240,133 @@ def test_chair_backlog_replay(blender_exe, tmp_path):
             print(r.stderr[-500:])
         assert "SUCCESS" in r.stdout, (
             f"chair backlog replay did not print SUCCESS.\nLast output: {r.stdout[-800:]}"
+        )
+    finally:
+        stop_server(server)
+
+
+def _verify_material_zoo_stage_receiver(base_path, port, event_count):
+    """Exercise the network/stage path used by the usdview integration."""
+    from pxr import Usd, UsdShade
+
+    from openusdconnect.adapters import UsdStageAdapter
+    from openusdconnect.dispatcher import EventDispatcher
+    from openusdconnect.receiver import ReceiverThread
+
+    stage = Usd.Stage.Open(base_path)
+    assert stage is not None, f"Could not open Material Zoo base stage: {base_path}"
+    stage.SetEditTarget(stage.GetSessionLayer())
+    receiver = ReceiverThread(
+        host="127.0.0.1",
+        port=port,
+        sync_from=1,
+        reconnect=False,
+        client_id="material-zoo-stage-receiver",
+        origin="material-zoo-stage-receiver",
+        layered_replay=True,
+    )
+    receiver.start()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
+    try:
+        deadline = time.monotonic() + 30.0
+        while dispatcher.last_seq < event_count and time.monotonic() < deadline:
+            dispatcher.drain_and_apply()
+            time.sleep(0.02)
+
+        assert dispatcher.last_seq >= event_count, (
+            f"stage receiver stopped at sequence {dispatcher.last_seq}/{event_count}"
+        )
+        key_paths = (
+            "/World/Chair/Seat",
+            "/World/WoodBall2",
+            "/World/OpenPBRTest",
+            "/World/Bishop",
+            "/World/Looks/Wood",
+            "/World/Looks/WoodUV",
+        )
+        missing = [path for path in key_paths if not stage.GetPrimAtPath(path)]
+        assert not missing, f"stage receiver is missing Material Zoo prims: {missing}"
+
+        def _bound_material(prim_path):
+            material, _relationship = UsdShade.MaterialBindingAPI(
+                stage.GetPrimAtPath(prim_path)
+            ).ComputeBoundMaterial()
+            return str(material.GetPath()) if material else ""
+
+        assert _bound_material("/World/Chair/Seat") == "/World/Looks/Wood"
+        assert _bound_material("/World/WoodBall2") == "/World/Looks/WoodUV"
+        sphere_translate = stage.GetPrimAtPath("/World/Sphere").GetAttribute(
+            "xformOp:translate"
+        ).Get()
+        assert tuple(sphere_translate) == (0.0, 1.5, 0.0)
+    finally:
+        receiver.stop()
+        receiver.join(timeout=2.0)
+        dispatcher.close()
+
+
+def test_material_zoo_backlog_replay(blender_exe, tmp_path, free_port):
+    """The committed Material Zoo fixture replays onto a base-scene Blender.
+
+    This is the network/DCC companion to tests/visual/test_material_zoo.py:
+    the same semantic event fixture is first sequenced by a real server, then
+    consumed from seq=1 by the packaged Blender addon after it imports only
+    test_scene.usda.
+    """
+    from integrations.visualtest.replay import load_events
+    from openusdconnect.sender import EventSender
+
+    port = free_port
+    base_path = os.path.join(PROJECT_ROOT, "test_scene.usda")
+    fixture_path = os.path.join(
+        PROJECT_ROOT,
+        "tests",
+        "visual",
+        "fixtures",
+        "material_zoo.jsonl",
+    )
+    events = load_events(
+        fixture_path,
+        subst={"{REPO}": PROJECT_ROOT.replace("\\", "/")},
+    )
+    server = start_server(tmp_path, port, base_path=base_path)
+    try:
+        sender = EventSender(
+            host="127.0.0.1",
+            port=port,
+            client_id="material-zoo-fixture",
+            role="emitter",
+            origin="material-zoo-fixture",
+        )
+        assert sender.connect(), "Material Zoo EventSender failed to connect"
+        try:
+            assert sender.send_events(events), "Material Zoo fixture transaction failed"
+        finally:
+            sender.disconnect()
+
+        _verify_material_zoo_stage_receiver(base_path, port, len(events))
+
+        script = os.path.join(SCRIPTS_DIR, "test_material_zoo_replay.py")
+        result = run_blender(
+            blender_exe,
+            script,
+            port,
+            ["--expected-seq", str(len(events))],
+            timeout=180,
+            background=False,
+        )
+        print("\n=== test_material_zoo_replay.py stdout ===")
+        print(result.stdout[-5000:] if len(result.stdout) > 5000 else result.stdout)
+        if result.stderr:
+            print("=== stderr ===")
+            print(result.stderr[-1000:])
+        assert result.returncode == 0, (
+            f"Material Zoo Blender process exited with {result.returncode}.\n"
+            f"Last stderr: {result.stderr[-1500:]}"
+        )
+        assert "SUCCESS" in result.stdout, (
+            "Material Zoo backlog replay did not print SUCCESS.\n"
+            f"Last output: {result.stdout[-1500:]}"
         )
     finally:
         stop_server(server)

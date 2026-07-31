@@ -89,6 +89,57 @@ def _autoconnect(usdviewApi) -> None:
     connection.start(usdviewApi, host, port, token=token)
 
 
+def _configure_presented_view(usdviewApi) -> None:
+    """Apply optional camera and scene-light settings after replay settles."""
+    camera_path = os.environ.get("OPENUSDCONNECT_CAMERA_PATH", "")
+    use_scene_lights = os.environ.get("OPENUSDCONNECT_SCENE_LIGHTS") == "1"
+    if not camera_path and not use_scene_lights:
+        return
+
+    from pxr import UsdGeom
+    from pxr.Usdviewq.qt import QtCore
+
+    expected_seq = int(os.environ.get("OPENUSDCONNECT_EXPECTED_SEQ", "0"))
+    timer = QtCore.QTimer(usdviewApi.qMainWindow)
+    usdviewApi.qMainWindow._openusdconnect_presentation_timer = timer
+    attempts = 0
+
+    def poll() -> None:
+        nonlocal attempts
+        attempts += 1
+        stage = usdviewApi.dataModel.stage
+        status = connection.status()
+        if stage is None or int(status.get("last_seq", 0)) < expected_seq:
+            if attempts >= 1200:
+                timer.stop()
+                LOG.error("Timed out waiting for replay sequence %d", expected_seq)
+            return
+
+        camera_prim = stage.GetPrimAtPath(camera_path) if camera_path else None
+        if camera_path and not (camera_prim and camera_prim.IsA(UsdGeom.Camera)):
+            return
+
+        settings = usdviewApi.dataModel.viewSettings
+        if use_scene_lights:
+            settings.enableSceneMaterials = True
+            settings.enableSceneLights = True
+            settings.ambientLightOnly = False
+            settings.domeLightEnabled = False
+            settings.domeLightTexturesVisible = True
+        if camera_prim:
+            settings.cameraPrim = camera_prim
+        timer.stop()
+        LOG.info(
+            "Presentation ready at seq=%d camera=%s scene_lights=%s",
+            status.get("last_seq", 0),
+            camera_path or "<unchanged>",
+            use_scene_lights,
+        )
+
+    timer.timeout.connect(poll)
+    timer.start(100)
+
+
 class UsdConnectContainer(PluginContainer):
     def registerPlugins(self, plugRegistry, usdviewApi):
         self._usdviewApi = usdviewApi
@@ -122,6 +173,7 @@ class UsdConnectContainer(PluginContainer):
             from pxr.Usdviewq.qt import QtCore
 
             QtCore.QTimer.singleShot(100, lambda: _autoconnect(self._usdviewApi))
+        _configure_presented_view(self._usdviewApi)
 
 
 Tf.Type.Define(UsdConnectContainer)

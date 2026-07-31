@@ -30,19 +30,27 @@ def _wait_for_server(port, timeout=5):
     raise RuntimeError(f"Server not ready on port {port} after {timeout}s")
 
 
-def start_server(tmp_path, port):
-    """Start the sync server and return the subprocess."""
+def start_server(tmp_path, port, *, base_path=None):
+    """Start the sync server and return the subprocess.
+
+    ``base_path`` configures the authoritative base stage used by receivers.
+    Most integration tests build their scene entirely from events and leave it
+    unset; stage-first replay tests pass the same base imported by the DCC.
+    """
     db_path = str(tmp_path / f"events_{port}.db")
+    command = [
+        sys.executable,
+        "-m",
+        "openusdconnect.server",
+        "--port",
+        str(port),
+        "--log",
+        db_path,
+    ]
+    if base_path is not None:
+        command.extend(["--base", os.fspath(base_path)])
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "openusdconnect.server",
-            "--port",
-            str(port),
-            "--log",
-            db_path,
-        ],
+        command,
         cwd=PROJECT_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

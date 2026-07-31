@@ -119,6 +119,9 @@ def launch_usdview(
     extra_args: Sequence[str] = (),
     usdview_exe: str | os.PathLike | None = None,
     renderman: bool = False,
+    camera_path: str | None = None,
+    expected_seq: int = 0,
+    scene_lights: bool = False,
 ) -> subprocess.Popen:
     """Spawn usdview with the OpenUSDConnect plugin discovered and auto-connecting.
 
@@ -149,6 +152,12 @@ def launch_usdview(
     env["OPENUSDCONNECT_PORT"] = str(port)
     if token:
         env["OPENUSDCONNECT_TOKEN"] = token
+    if camera_path:
+        env["OPENUSDCONNECT_CAMERA_PATH"] = camera_path
+    if expected_seq > 0:
+        env["OPENUSDCONNECT_EXPECTED_SEQ"] = str(expected_seq)
+    if scene_lights:
+        env["OPENUSDCONNECT_SCENE_LIGHTS"] = "1"
 
     exe = Path(usdview_exe) if usdview_exe else find_usdview()
 
@@ -208,6 +217,22 @@ def main(argv: list[str] | None = None) -> int:
         "default Storm-only behavior. Pass your own --renderer to override which "
         "delegate it starts in while keeping RenderMan available in the menu.",
     )
+    parser.add_argument(
+        "--camera",
+        default=None,
+        help="Select this streamed UsdGeomCamera after replay catches up.",
+    )
+    parser.add_argument(
+        "--expected-seq",
+        type=int,
+        default=0,
+        help="Wait for this replay sequence before applying camera/view settings.",
+    )
+    parser.add_argument(
+        "--scene-lights",
+        action="store_true",
+        help="Use streamed scene lights/materials and disable usdview's default dome/headlight.",
+    )
     parser.epilog = (
         "Any arguments not recognized above are forwarded verbatim to usdview "
         "(e.g. --quitAfterStartup, --norender, --renderer Storm)."
@@ -222,6 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         extra_args=unknown,
         usdview_exe=args.usdview,
         renderman=args.renderman,
+        camera_path=args.camera,
+        expected_seq=args.expected_seq,
+        scene_lights=args.scene_lights,
     )
     return proc.wait()
 

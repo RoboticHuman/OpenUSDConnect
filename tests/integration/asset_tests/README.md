@@ -27,6 +27,22 @@ The pytest wrapper handles server start/stop automatically.
 Alternatively, set `BLENDER_EXE` env var or create `blender.test.cfg` to avoid
 `--blender` on every invocation (see `tests/conftest.py`).
 
+## Live Material Zoo comparison
+
+Launch usdview and Blender against the same temporary server and authoritative
+`test_scene.usda`, then stream the committed Material Zoo fixture plus a shared
+camera and StinsonBeach IBL:
+
+```bash
+uv run python scripts/run_material_zoo.py --show --renderman
+```
+
+`--show` is shorthand for `--viewers usdview blender`. Pass only one viewer when
+needed, for example `--viewers blender`, and use `--no-presentation` to omit the
+comparison camera/IBL. Both applications stay open until they are closed or the
+runner receives Ctrl+C. The base USD file is hash-checked before and after event
+publication; neither integration imports a reconstructed Material Zoo file.
+
 ## Running manually (for debugging)
 
 Start a server, then run Blender directly with the test script:
@@ -53,6 +69,7 @@ rm -f test_asset.db*
 | `test_teapot_variants.py` | Teapot | Payload loading, default variant material (Ceramic), primvar-connected Base Color, variant switch Utah↔Fancy with material rebinding, **interleaved live editing with value retention across variant round-trips** |
 | `test_two_teapots.py` | Teapot ×2 | Path-based material identity (two Ceramics with different `usd_material_path`), node tree integrity, parent-context object naming |
 | `test_vehicles.py` | Vehicles 4WD | 6 material bindings across mesh parts, external material file references |
+| `test_material_zoo_replay.py` | Material Zoo semantic fixture | Real server backlog replay through the stage receiver used by usdview and then onto imported `test_scene.usda` in Blender; collapsed parent-Xform transforms, chair material inheritance, WoodBall2 texture graph, OpenPBR binding, and referenced Bishop import |
 
 ## Adding a New Test
 

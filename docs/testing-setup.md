@@ -285,6 +285,29 @@ The addon is automatically rebuilt before running. Each test starts its own serv
 | `test_two_teapots_identity` | Teapot ×2 | Path-based material identity — two references get separate Ceramic materials with different `usd_material_path` tags, node tree integrity, parent-context object naming |
 | `test_vehicles_multi_binding` | Vehicles 4WD | 6 material bindings across mesh parts from external material file references |
 | `test_camera_scene` | intent-vfx teapotScene_camera | UsdGeomCamera replicates as a `bpy.types.Camera` object with correct `lens`/`clip_start`/`clip_end`/`type` after the metersPerUnit-aware unit conversion, then is promoted to the active scene camera |
+| `test_material_zoo_backlog_replay` | Material Zoo event fixture | Both a USD-native stage receiver and Blender independently load `test_scene.usda`, replay the server backlog, and verify transforms, material bindings, texture graphs, OpenPBR translation, and referenced geometry |
+
+### Inspecting the Material Zoo replay
+
+To watch the committed Material Zoo fixture arrive through the real server in
+both usdview and Blender:
+
+```bash
+uv run python scripts/run_material_zoo.py --show --renderman
+```
+
+Both applications independently open the unchanged `test_scene.usda` base and
+receive the same Material Zoo events through their OpenUSDConnect integrations.
+The comparison camera and StinsonBeach IBL dome are also sent as events; the
+runner does not reconstruct a USD file for either application to import.
+
+Use `--viewers usdview` or `--viewers blender` to launch only one application,
+and `--no-presentation` to omit the camera and IBL events. The runner keeps its
+viewers open until you press Ctrl+C. The corresponding automated E2E test is:
+
+```bash
+uv run pytest tests/integration/asset_tests/test_assets.py::test_material_zoo_backlog_replay --asset-tests -v
+```
 
 ### Adding new asset tests
 
