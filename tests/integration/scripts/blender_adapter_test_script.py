@@ -1129,6 +1129,83 @@ def test_set_gprim_attrs_camera_full_roundtrip(r):
     r.ok(name)
 
 
+def test_set_gprim_attrs_camera_receive_only_uses_scene_units(r):
+    """Receive-only adapters use hello metadata stored on the Blender scene."""
+    name = "test_set_gprim_attrs_camera_receive_only_uses_scene_units"
+    _clear_scene()
+    scene = bpy.context.scene
+    previous_scale = scene.unit_settings.scale_length
+    try:
+        scene.unit_settings.scale_length = 1.0
+        adapter = BlenderAdapter()
+        adapter.ensure_prim("/World/Cam", "Camera")
+        adapter.set_gprim_attrs(
+            "/World/Cam",
+            {
+                "focalLength": 0.85,
+                "horizontalAperture": 0.36,
+                "verticalAperture": 0.24,
+                "clippingRange": [0.1, 1000.0],
+            },
+        )
+        cam = _find_by_prim(adapter, "/World/Cam").data
+        cases = [
+            ("lens", cam.lens, 85.0),
+            ("sensor_width", cam.sensor_width, 36.0),
+            ("sensor_height", cam.sensor_height, 24.0),
+            ("clip_start", cam.clip_start, 0.1),
+            ("clip_end", cam.clip_end, 1000.0),
+        ]
+        for field, got, want in cases:
+            if abs(got - want) > 1e-3:
+                r.fail(name, f"{field}={got}, expected {want}")
+                return
+    finally:
+        scene.unit_settings.scale_length = previous_scale
+    r.ok(name)
+
+
+def test_collapsed_import_parent_xform_alias_receives_early_event(r):
+    """A base Xform collapsed into its Geom object still receives parent TRS.
+
+    The material-zoo fixture intentionally sends these edits before its later
+    ensure_prim events because the prims already exist in test_scene.usda.
+    """
+    name = "test_collapsed_import_parent_xform_alias_receives_early_event"
+    _clear_scene()
+    from integrations.blender.capture import USD_CONNECT_Hook, _ensure_scene_props
+
+    _ensure_scene_props()
+    registered_here = not hasattr(bpy.types, USD_CONNECT_Hook.__name__)
+    if registered_here:
+        bpy.utils.register_class(USD_CONNECT_Hook)
+    try:
+        bpy.ops.wm.usd_import(filepath=os.path.join(project_root, "test_scene.usda"))
+        adapter = BlenderAdapter()
+        parent_obj = _find_by_prim(adapter, "/World/Sphere")
+        geom_obj = _find_by_prim(adapter, "/World/Sphere/Geom")
+        if parent_obj is None or parent_obj is not geom_obj:
+            r.fail(name, "collapsed parent and Geom paths did not resolve to one object")
+            return
+        before_count = len(bpy.data.objects)
+        if not adapter.set_xform_trs("/World/Sphere", t=[0.0, 1.5, 0.0]):
+            r.fail(name, "parent transform event was not applied")
+            return
+        if tuple(round(float(value), 6) for value in geom_obj.location) != (0.0, 1.5, 0.0):
+            r.fail(name, f"collapsed object location={tuple(geom_obj.location)}")
+            return
+        if not adapter.ensure_prim("/World/Sphere", "Xform"):
+            r.fail(name, "ensure_prim rejected collapsed parent alias")
+            return
+        if len(bpy.data.objects) != before_count:
+            r.fail(name, "ensure_prim created a duplicate parent Empty")
+            return
+    finally:
+        if registered_here:
+            bpy.utils.unregister_class(USD_CONNECT_Hook)
+    r.ok(name)
+
+
 def test_set_gprim_attrs_camera_orthographic(r):
     """projection=orthographic sets Blender camera.type to ORTHO."""
     name = "test_set_gprim_attrs_camera_orthographic"
@@ -1531,6 +1608,8 @@ def main():
         test_set_reference_missing_file,
         test_ensure_prim_camera_creates_camera_object,
         test_set_gprim_attrs_camera_full_roundtrip,
+        test_set_gprim_attrs_camera_receive_only_uses_scene_units,
+        test_collapsed_import_parent_xform_alias_receives_early_event,
         test_set_gprim_attrs_camera_orthographic,
         test_set_gprim_attrs_camera_fstop_zero_disables_dof,
         test_capture_authors_camera_attrs_to_stage,

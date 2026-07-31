@@ -38,6 +38,23 @@ from .shader_mapper import create_default_registry
 
 # Custom property marking objects imported via bpy.ops.wm.usd_import.
 _PROP_USD_IMPORTED = "_usd_imported"
+# Additional USD prim paths Blender collapsed onto the same object.
+_PROP_USD_PRIM_ALIASES = "_usd_prim_path_aliases"
+
+
+def _object_prim_paths(obj) -> tuple[str, ...]:
+    """Return the primary and collapsed-import alias paths for ``obj``."""
+    primary = obj.get("usd_prim_path", "")
+    aliases = obj.get(_PROP_USD_PRIM_ALIASES, ())
+    if not isinstance(aliases, (list, tuple)):
+        aliases = ()
+    return tuple(
+        dict.fromkeys(
+            path
+            for path in (primary, *aliases)
+            if isinstance(path, str) and path
+        )
+    )
 
 
 def apply_stage_metadata_to_scene(
@@ -173,8 +190,9 @@ class BlenderAdapter(DCCAdapter):
         self._shader_registry = create_default_registry()
         # The dispatcher's mirror stage; needed for unit-aware camera attr
         # conversion (metersPerUnit). Re-bound by the receiver glue whenever
-        # the dispatcher's mirror_stage changes. Defaults to None — without
-        # a stage, _stage_meters_per_unit falls back to USD's 0.01 default.
+        # the dispatcher's mirror_stage changes. In receive-only mode there is
+        # no mirror stage, so _stage_meters_per_unit reads the Blender scene
+        # scale populated by the server's hello stage-metadata snapshot.
         self.mirror_stage = mirror_stage
         # DomeLight bookkeeping. Blender has exactly one World per scene, so
         # multiple USD DomeLights map to a last-wins policy: the most recent
@@ -198,17 +216,18 @@ class BlenderAdapter(DCCAdapter):
         # knows about objects that persist from a previous session.
         if BPY_AVAILABLE:
             for obj in bpy.data.objects:
-                pp = obj.get("usd_prim_path")
-                if pp:
+                paths = _object_prim_paths(obj)
+                for pp in paths:
                     self._registry.register(pp, obj)
-                    if obj.get("usd_type_name") == "Reference":
-                        ref_asset = obj.get("usd_ref_asset", "")
-                        if ref_asset:
-                            self._registry.set_imported_ref(
-                                pp,
-                                ref_asset,
-                                obj.get("usd_ref_prim", ""),
-                            )
+                primary = paths[0] if paths else ""
+                if primary and obj.get("usd_type_name") == "Reference":
+                    ref_asset = obj.get("usd_ref_asset", "")
+                    if ref_asset:
+                        self._registry.set_imported_ref(
+                            primary,
+                            ref_asset,
+                            obj.get("usd_ref_prim", ""),
+                        )
 
     @staticmethod
     def _is_bpy_alive(obj) -> bool:
@@ -225,7 +244,7 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             return None
         for obj in bpy.data.objects:
-            if obj.get("usd_prim_path") == prim_path:
+            if prim_path in _object_prim_paths(obj):
                 return obj
         return None
 
@@ -652,10 +671,23 @@ class BlenderAdapter(DCCAdapter):
         return True
 
     def _stage_meters_per_unit(self) -> float:
-        """Stage metersPerUnit; USD default (0.01) when no mirror stage is bound."""
-        if self.mirror_stage is None:
-            return 0.01
-        return float(UsdGeom.GetStageMetersPerUnit(self.mirror_stage))
+        """Return stage units for camera conversion in every receiver mode.
+
+        Capture mode has a mirror USD stage. Receive-only mode does not, but
+        the receiver's hello callback applies the authoritative
+        ``metersPerUnit`` value to ``Scene.unit_settings.scale_length`` before
+        replay. Falling back to USD's 0.01 unconditionally made meter-based
+        cameras use a far clip 100x too short.
+        """
+        if self.mirror_stage is not None:
+            return float(UsdGeom.GetStageMetersPerUnit(self.mirror_stage))
+        if BPY_AVAILABLE:
+            scene = getattr(bpy.context, "scene", None)
+            if scene is not None:
+                scale = float(scene.unit_settings.scale_length)
+                if scale > 0.0:
+                    return scale
+        return 0.01
 
     def _apply_mesh_topology(self, obj, attrs: dict) -> None:
         """Build Blender mesh geometry from USD mesh topology attributes."""

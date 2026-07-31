@@ -304,9 +304,10 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             if data is not None:
                 owners_by_data.setdefault(data.as_pointer(), []).append(obj)
 
-        from .blender_adapter import _PROP_USD_IMPORTED
+        from .blender_adapter import _PROP_USD_IMPORTED, _PROP_USD_PRIM_ALIASES
 
         object_tags: dict[int, tuple[tuple[int, int], object, str, str]] = {}
+        object_paths: dict[int, set[str]] = {}
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
             prim_type_name = ""
@@ -323,16 +324,15 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                     objects = [db]
                     data_owner = 0
                 else:
-                    try:
-                        owners = owners_by_data.get(db.as_pointer(), [])
-                    except (AttributeError, ReferenceError):
-                        owners = []
+                    as_pointer = getattr(db, "as_pointer", None)
+                    owners = owners_by_data.get(as_pointer(), []) if as_pointer else []
                     objects = owners if len(owners) == 1 else []
                     data_owner = 1
 
                 rank = (prim_path_str.count("/"), data_owner)
                 for obj in objects:
                     key = obj.as_pointer()
+                    object_paths.setdefault(key, set()).add(prim_path_str)
                     current = object_tags.get(key)
                     if current is None or rank > current[0]:
                         object_tags[key] = (
@@ -344,6 +344,22 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
 
         for _, obj, prim_path_str, prim_type_name in object_tags.values():
             obj["usd_prim_path"] = prim_path_str
+            # Blender commonly collapses a parent Xform and its single typed
+            # child onto one Object. Keep the deepest typed path as primary for
+            # geometry/material events, but preserve every other importer path
+            # as an alias so parent transform events find that same Object.
+            # Reference/payload imports are remapped later by BlenderAdapter;
+            # their file-internal paths must not persist as scene aliases.
+            if not USD_CONNECT_Hook._skip_root_inference:
+                aliases = sorted(
+                    path
+                    for path in object_paths.get(obj.as_pointer(), set())
+                    if path != prim_path_str
+                )
+                if aliases:
+                    obj[_PROP_USD_PRIM_ALIASES] = aliases
+                elif _PROP_USD_PRIM_ALIASES in obj:
+                    del obj[_PROP_USD_PRIM_ALIASES]
             if prim_type_name:
                 obj["usd_type_name"] = prim_type_name
             if stage_id:
