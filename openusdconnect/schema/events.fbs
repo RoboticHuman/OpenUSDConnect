@@ -254,13 +254,24 @@ table SetPointInstancer {
     inactive_ids:[long];            // resolved inactiveIds prim metadata (uniform)
 }
 
-// Exact field deltas for property state that specialized events do not carry.
-// `fragment` is a USDA layer containing the property at `spec_path` with
-// declaration fields plus the fields named by `fields`. A named field absent
-// from the fragment is cleared. `removed` deletes the property spec.
-table SetSdfPropertyFields {
+enum SdfSpecKind : byte {
+    Layer,
+    Prim,
+    Attribute,
+    Relationship,
+    VariantSet,
+    Variant,
+}
+
+// Exact field deltas for authored Sdf specs that specialized events do not
+// carry. `spec_path` is the exact path in the authored layer, including
+// variant selections. `fragment` is a USDA layer fragment containing the
+// declaration and named fields. A named field absent from it is cleared.
+// `removed` deletes the spec.
+table SetSdfSpecFields {
     prim:string;
     spec_path:string;
+    spec_kind:SdfSpecKind;
     fields:[string];
     fragment:string;
     removed:bool = false;
@@ -303,7 +314,7 @@ union EventPayload {
     SetStageMetadata,
     SetInstanceable,
     SetPointInstancer,
-    SetSdfPropertyFields,
+    SetSdfSpecFields,
 }
 
 table EventWrapper {

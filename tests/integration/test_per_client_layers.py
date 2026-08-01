@@ -17,7 +17,7 @@ from openusdconnect.protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_XFORM_TRS,
 )
@@ -160,22 +160,16 @@ class TestDepartmentOrdering:
             department_priority=["animation", "layout"],
         )
 
-        assert [
-            item["layer_key"]
-            for item in srv.get_layer_stack_state()["layers"]
-        ] == ["default"]
+        assert [item["layer_key"] for item in srv.get_layer_stack_state()["layers"]] == ["default"]
 
         srv.get_or_create_client_layer("layout-artist", "layout")
-        assert [
-            item["layer_key"]
-            for item in srv.get_layer_stack_state()["layers"]
-        ] == ["department:layout", "default"]
+        assert [item["layer_key"] for item in srv.get_layer_stack_state()["layers"]] == [
+            "department:layout",
+            "default",
+        ]
 
         srv.get_or_create_client_layer("animator", "animation")
-        assert [
-            item["layer_key"]
-            for item in srv.get_layer_stack_state()["layers"]
-        ] == [
+        assert [item["layer_key"] for item in srv.get_layer_stack_state()["layers"]] == [
             "department:animation",
             "department:layout",
             "default",
@@ -362,10 +356,7 @@ class TestLayerLifecycle:
         srv.delete_layer("alice")
         assert "alice" not in srv.client_layers
         assert srv.resolve_layer("animation") is None
-        assert [
-            item["layer_key"]
-            for item in srv.get_layer_stack_state()["layers"]
-        ] == ["default"]
+        assert [item["layer_key"] for item in srv.get_layer_stack_state()["layers"]] == ["default"]
         assert _read_translate(srv.stage, "/World/Cube") is None
 
     def test_merge_to_base(self, tmp_path):
@@ -425,8 +416,9 @@ class TestLayerStackInfo:
         """All department-less clients group onto one shared card, flagged
         shared; the communal layer refuses merge."""
         srv = _make_server(tmp_path, department_priority=["animation"])
-        _emit_events(srv, "anim-01", _make_trs_events("/World/A", (1, 2, 3)),
-                     department="animation")
+        _emit_events(
+            srv, "anim-01", _make_trs_events("/World/A", (1, 2, 3)), department="animation"
+        )
         _emit_events(srv, "loose-01", _make_trs_events("/World/B", (4, 5, 6)))
         _emit_events(srv, "loose-02", _make_trs_events("/World/C", (7, 8, 9)))
 
@@ -625,14 +617,14 @@ class TestCorrectionPath:
         strong_emitter = NoticeEmitter(strong_stage)
         strong_events = strong_emitter.snapshot_events()
         strong_generic = next(
-            event for event in strong_events if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+            event for event in strong_events if event["k"] == K_SET_SDF_SPEC_FIELDS
         )
 
         changed = srv.apply_txn(strong_events, layer=strong_layer)
         assert strong_events.index(strong_generic) not in changed
         apply_events(
             flat_receiver,
-            [event for event in strong_events if event["k"] != K_SET_SDF_PROPERTY_FIELDS],
+            [event for event in strong_events if event["k"] != K_SET_SDF_SPEC_FIELDS],
         )
         apply_events(flat_receiver, [srv.build_correction(strong_generic)])
 
@@ -647,9 +639,7 @@ class TestCorrectionPath:
         weak_attr.SetCustomData({"weak": 1})
         weak_emitter = NoticeEmitter(weak_stage)
         weak_generic = next(
-            event
-            for event in weak_emitter.snapshot_events()
-            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+            event for event in weak_emitter.snapshot_events() if event["k"] == K_SET_SDF_SPEC_FIELDS
         )
 
         assert srv.apply_txn([weak_generic], layer=weak_layer) == []
@@ -660,16 +650,20 @@ class TestCorrectionPath:
         server_attr = srv.stage.GetAttributeAtPath(path)
         receiver_attr = flat_receiver.GetAttributeAtPath(path)
         assert server_attr.Get() == receiver_attr.Get() == 2
-        assert server_attr.GetCustomData() == receiver_attr.GetCustomData() == {
-            "strong": 2,
-            "weak": 1,
-        }
+        assert (
+            server_attr.GetCustomData()
+            == receiver_attr.GetCustomData()
+            == {
+                "strong": 2,
+                "weak": 1,
+            }
+        )
 
         strong_prim.RemoveProperty("userProperties:value")
         removed = next(
             event
             for event in strong_emitter.build_events_for_dirty()
-            if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+            if event["k"] == K_SET_SDF_SPEC_FIELDS
         )
         assert removed["removed"] is True
         assert removed["fields"]
@@ -684,6 +678,75 @@ class TestCorrectionPath:
 
         strong_emitter.cleanup()
         weak_emitter.cleanup()
+
+    def test_sdf_correction_projects_prim_layer_and_variant_specs(self, tmp_path):
+        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
+        strong_layer = srv.get_or_create_client_layer("bob", department="animation")
+        weak_layer = srv.get_or_create_client_layer("alice", department="layout")
+        flat_receiver = Usd.Stage.CreateInMemory()
+
+        def _source(label, variant_name):
+            stage = Usd.Stage.CreateInMemory()
+            stage.GetRootLayer().customLayerData = {label: True}
+            thing = stage.DefinePrim("/World/Thing", "Xform")
+            thing.SetDocumentation(label)
+            thing.SetCustomData({label: True, "shared": label})
+            variants = thing.GetVariantSets().AddVariantSet("look")
+            variants.AddVariant(variant_name)
+            variants.SetVariantSelection(variant_name)
+            with variants.GetVariantEditContext():
+                child = stage.DefinePrim(f"/World/Thing/{label.title()}", "Scope")
+                child.SetDocumentation(f"{label} variant")
+            variants.ClearVariantSelection()
+            emitter = NoticeEmitter(stage)
+            return stage, emitter, emitter.snapshot_events()
+
+        def _apply_flat_view(events, changed_indices):
+            for index, event in enumerate(events):
+                if event["k"] == K_SET_SDF_SPEC_FIELDS:
+                    apply_events(flat_receiver, [srv.build_correction(event)])
+                elif index in changed_indices:
+                    apply_events(flat_receiver, [event])
+
+        strong_stage, strong_emitter, strong_events = _source("strong", "blue")
+        weak_stage, weak_emitter, weak_events = _source("weak", "red")
+        try:
+            changed = srv.apply_txn(strong_events, layer=strong_layer)
+            _apply_flat_view(strong_events, changed)
+            changed = srv.apply_txn(weak_events, layer=weak_layer)
+            _apply_flat_view(weak_events, changed)
+
+            thing = flat_receiver.GetPrimAtPath("/World/Thing")
+            assert flat_receiver.GetRootLayer().customLayerData == {
+                "strong": True,
+                "weak": True,
+            }
+            assert thing.GetDocumentation() == "strong"
+            assert dict(flat_receiver.GetRootLayer().GetPrimAtPath("/World/Thing").customData) == {
+                "shared": "strong",
+                "strong": True,
+                "weak": True,
+            }
+            variants = thing.GetVariantSets().GetVariantSet("look")
+            assert variants.GetVariantNames() == ["blue", "red"]
+            variants.SetVariantSelection("blue")
+            assert flat_receiver.GetPrimAtPath("/World/Thing/Strong")
+            variants.SetVariantSelection("red")
+            assert flat_receiver.GetPrimAtPath("/World/Thing/Weak")
+
+            variant_set = strong_stage.GetRootLayer().GetObjectAtPath(
+                "/World/Thing{look=}",
+            )
+            variant_set.RemoveVariant(variant_set.variants["blue"])
+            removed = strong_emitter.build_events_for_dirty()
+            changed = srv.apply_txn(removed, layer=strong_layer)
+            _apply_flat_view(removed, changed)
+            assert variants.GetVariantNames() == ["red"]
+        finally:
+            strong_emitter.cleanup()
+            weak_emitter.cleanup()
+            srv.shutdown()
+            srv.store.close()
 
 
 class TestReplayWithClientLayers:
@@ -918,9 +981,7 @@ class TestDepartmentCompaction:
         try:
             assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
             assert srv2.resolve_layer("layout").GetPrimAtPath("/World/Cube")
-            assert not srv2.resolve_layer("animation").GetPrimAtPath(
-                "/World/Cube"
-            )
+            assert not srv2.resolve_layer("animation").GetPrimAtPath("/World/Cube")
         finally:
             srv2.shutdown()
             srv2.store.close()

@@ -18,6 +18,12 @@ is not part of the receiver's composition logic. Unrelated session sublayers
 retain their relative order and offsets. If the server does not acknowledge
 the capability, the receiver falls back to the existing flat replay path.
 
+Authored fields from the sender's current edit-target layer are preserved as
+exact Sdf spec deltas. This includes custom properties, relationships, prim and
+layer metadata, and local variant definitions, including inactive variants.
+The protocol does not yet reproduce arbitrary client-authored sublayer graphs
+or route transactions to layers outside the managed collaboration block.
+
 ## Quick start
 
 ```bash
@@ -95,10 +101,12 @@ enter the host/port.
 
 ## Refreshing a late asset dependency
 
-Variant definitions remain in referenced or payloaded assets; OpenUSDConnect
-replicates the local selection opinion. If a shared asset was unavailable when
-its composition event arrived, make it available through the receiver's normal
-asset resolver and retry it from usdview's Python console:
+Variant definitions supplied by referenced or payloaded assets remain in those
+assets; OpenUSDConnect replicates the local selection opinion. Locally authored
+variant definitions in the synchronized edit target use exact Sdf spec deltas.
+If a shared asset was unavailable when its composition event arrived, make it
+available through the receiver's normal asset resolver and retry it from
+usdview's Python console:
 
 ```python
 from integrations.usdview.connection import refresh_asset_dependency

@@ -25,7 +25,7 @@ from openusdconnect.events import (
     SetPayload,
     SetPointInstancer,
     SetReference,
-    SetSdfPropertyFields,
+    SetSdfSpecFields,
     SetStageMetadata,
     SetVariantSelections,
     SetVisibility,
@@ -182,11 +182,12 @@ _CASES: list[tuple[str, Event]] = [
         ),
     ),
     (
-        "set_sdf_property_fields",
-        SetSdfPropertyFields(
-            k="set_sdf_property_fields",
+        "set_sdf_spec_fields",
+        SetSdfSpecFields(
+            k="set_sdf_spec_fields",
             prim="/World/Thing",
             spec_path="/World/Thing.userProperties:value",
+            spec_kind="attribute",
             fields=["default"],
             fragment='#usda 1.0\n\nover "World" {}\n',
             removed=False,
@@ -207,9 +208,7 @@ def test_all_event_kinds_have_typeddicts():
     """Every K_* in EVENT_KEYS must have a TypedDict + example in _CASES."""
     covered = {kind for kind, _ in _CASES}
     missing = EVENT_KEYS - covered
-    assert not missing, (
-        f"Event kinds in EVENT_KEYS lack a TypedDict + example: {sorted(missing)}"
-    )
+    assert not missing, f"Event kinds in EVENT_KEYS lack a TypedDict + example: {sorted(missing)}"
 
 
 class TestRoundtrip:

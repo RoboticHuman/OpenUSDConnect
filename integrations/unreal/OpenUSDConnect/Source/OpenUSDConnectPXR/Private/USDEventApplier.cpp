@@ -39,6 +39,8 @@
 #include "pxr/usd/sdf/reference.h"
 #include "pxr/usd/sdf/payload.h"
 #include "pxr/usd/sdf/schema.h"
+#include "pxr/usd/sdf/variantSetSpec.h"
+#include "pxr/usd/sdf/variantSpec.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/sdf/listOp.h"
@@ -1173,99 +1175,258 @@ void ApplySetPointInstancer(pxr::UsdStageRefPtr& Stage, const Wire::SetPointInst
 	}
 }
 
-// ---- SetSdfPropertyFields ---------------------------------------------------------
+// ---- SetSdfSpecFields -------------------------------------------------------------
 
-void ApplySetSdfPropertyFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfPropertyFields* Ev)
+void ApplySetSdfSpecFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfSpecFields* Ev)
 {
-	if (!Ev || !Ev->spec_path()) return;
+	if (!Ev || !Ev->prim() || !Ev->spec_path()) return;
 	const pxr::SdfPath EventPath(Ev->spec_path()->str());
-	if (!EventPath.IsAbsolutePath() || !EventPath.IsPropertyPath()) return;
-
-	const pxr::UsdEditTarget EditTarget = Stage->GetEditTarget();
-	const pxr::SdfLayerHandle TargetLayer = EditTarget.GetLayer();
-	const pxr::SdfPath TargetPath = EditTarget.MapToSpecPath(EventPath);
-	if (!TargetLayer || TargetPath.IsEmpty()) return;
-
-	if (Ev->removed())
+	if (!EventPath.IsAbsolutePath()) return;
+	const Wire::SdfSpecKind Kind = Ev->spec_kind();
+	auto ExpectedSpecType = [](Wire::SdfSpecKind SpecKind)
 	{
-		if (TargetLayer->HasSpec(TargetPath))
+		switch (SpecKind)
 		{
-			pxr::SdfBatchNamespaceEdit Edits;
-			Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
-			if (!TargetLayer->Apply(Edits))
+		case Wire::SdfSpecKind::Layer:        return pxr::SdfSpecTypePseudoRoot;
+		case Wire::SdfSpecKind::Prim:         return pxr::SdfSpecTypePrim;
+		case Wire::SdfSpecKind::Attribute:    return pxr::SdfSpecTypeAttribute;
+		case Wire::SdfSpecKind::Relationship: return pxr::SdfSpecTypeRelationship;
+		case Wire::SdfSpecKind::VariantSet:   return pxr::SdfSpecTypeVariantSet;
+		case Wire::SdfSpecKind::Variant:      return pxr::SdfSpecTypeVariant;
+		}
+		return pxr::SdfSpecTypeUnknown;
+	};
+	const pxr::SdfSpecType ExpectedType = ExpectedSpecType(Kind);
+	const auto VariantSelection = EventPath.GetVariantSelection();
+	const bool IsValidPath =
+		(Kind == Wire::SdfSpecKind::Layer && EventPath == pxr::SdfPath::AbsoluteRootPath()) ||
+		(Kind == Wire::SdfSpecKind::Prim && EventPath.IsPrimPath()) ||
+		((Kind == Wire::SdfSpecKind::Attribute || Kind == Wire::SdfSpecKind::Relationship) &&
+			EventPath.IsPropertyPath()) ||
+		(Kind == Wire::SdfSpecKind::VariantSet && EventPath.IsPrimVariantSelectionPath() &&
+			VariantSelection.second.empty()) ||
+		(Kind == Wire::SdfSpecKind::Variant && EventPath.IsPrimVariantSelectionPath() &&
+			!VariantSelection.second.empty());
+	if (!IsValidPath || ExpectedType == pxr::SdfSpecTypeUnknown)
+	{
+		UE_LOG(LogUSDEventApplier, Warning, TEXT("Invalid Sdf spec kind or path: %s"),
+			UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		return;
+	}
+	const pxr::SdfPath ExpectedPrimPath = Kind == Wire::SdfSpecKind::Layer
+		? pxr::SdfPath::AbsoluteRootPath()
+		: EventPath.GetPrimPath().StripAllVariantSelections();
+	if (Ev->prim()->str() != ExpectedPrimPath.GetString())
+	{
+		UE_LOG(LogUSDEventApplier, Warning, TEXT("Sdf spec routing prim does not match %s"),
+			UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		return;
+	}
+
+	const pxr::SdfLayerHandle TargetLayer = Stage->GetEditTarget().GetLayer();
+	if (!TargetLayer) return;
+
+	auto RemoveSpec = [TargetLayer, ExpectedSpecType](
+		const pxr::SdfPath& Path,
+		Wire::SdfSpecKind SpecKind)
+	{
+		if (SpecKind == Wire::SdfSpecKind::Layer) return false;
+		if (!TargetLayer->HasSpec(Path)) return true;
+		if (TargetLayer->GetSpecType(Path) != ExpectedSpecType(SpecKind)) return true;
+		if (SpecKind == Wire::SdfSpecKind::Variant)
+		{
+			const pxr::SdfVariantSpecHandle Variant = pxr::TfDynamic_cast<pxr::SdfVariantSpecHandle>(
+				TargetLayer->GetObjectAtPath(Path));
+			if (Variant && Variant->GetOwner()) Variant->GetOwner()->RemoveVariant(Variant);
+			return true;
+		}
+		if (SpecKind == Wire::SdfSpecKind::VariantSet)
+		{
+			const pxr::SdfVariantSetSpecHandle VariantSet =
+				pxr::TfDynamic_cast<pxr::SdfVariantSetSpecHandle>(
+					TargetLayer->GetObjectAtPath(Path));
+			if (!VariantSet) return true;
+			const pxr::SdfSpecHandle Owner = VariantSet->GetOwner();
+			if (const pxr::SdfPrimSpecHandle Prim =
+				pxr::TfDynamic_cast<pxr::SdfPrimSpecHandle>(Owner))
+			{
+				Prim->RemoveVariantSet(VariantSet->GetName());
+			}
+			else if (const pxr::SdfVariantSpecHandle Variant =
+				pxr::TfDynamic_cast<pxr::SdfVariantSpecHandle>(Owner))
+			{
+				Variant->GetVariantSets().erase(VariantSet->GetName());
+			}
+			return true;
+		}
+		pxr::SdfBatchNamespaceEdit Edits;
+		Edits.Add(pxr::SdfNamespaceEdit::Remove(Path));
+		return TargetLayer->Apply(Edits);
+	};
+
+	if (Kind == Wire::SdfSpecKind::Layer && Ev->fields())
+	{
+		for (const ::flatbuffers::String* FieldString : *Ev->fields())
+		{
+			if (FieldString &&
+				(FieldString->str() == "subLayers" ||
+				 FieldString->str() == "subLayerOffsets"))
 			{
 				UE_LOG(LogUSDEventApplier, Warning,
-					TEXT("Could not remove Sdf property spec %s"),
-					UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+					TEXT("set_sdf_spec_fields cannot author sublayer topology"));
+				return;
 			}
+		}
+	}
+	if (Ev->removed())
+	{
+		if (!RemoveSpec(EventPath, Kind))
+		{
+			UE_LOG(LogUSDEventApplier, Warning, TEXT("Could not remove Sdf spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
 		}
 		return;
 	}
 
-	if (!Ev->fragment() || !Ev->fields() || Ev->fields()->empty()) return;
-	const pxr::SdfLayerRefPtr Incoming = pxr::SdfLayer::CreateAnonymous("openusdconnect-sdf-delta");
+	if (!Ev->fragment() || !Ev->fields()) return;
+	const pxr::SdfLayerRefPtr Incoming = pxr::SdfLayer::CreateAnonymous(
+		"openusdconnect-sdf-spec-delta");
 	if (!Incoming->ImportFromString(Ev->fragment()->str()) || !Incoming->HasSpec(EventPath))
 	{
-		UE_LOG(LogUSDEventApplier, Warning, TEXT("Invalid set_sdf_property_fields fragment for %s"),
+		UE_LOG(LogUSDEventApplier, Warning, TEXT("Invalid set_sdf_spec_fields fragment for %s"),
 			UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
 		return;
 	}
-	if (TargetLayer->HasSpec(TargetPath) &&
-		TargetLayer->GetSpecType(TargetPath) != Incoming->GetSpecType(EventPath))
+	if (Incoming->GetSpecType(EventPath) != ExpectedType)
 	{
+		UE_LOG(LogUSDEventApplier, Warning, TEXT("Sdf fragment kind does not match %s"),
+			UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+		return;
+	}
+
+	if (TargetLayer->HasSpec(EventPath) &&
+		TargetLayer->GetSpecType(EventPath) != ExpectedType)
+	{
+		if (Kind != Wire::SdfSpecKind::Attribute && Kind != Wire::SdfSpecKind::Relationship)
+		{
+			UE_LOG(LogUSDEventApplier, Warning, TEXT("Could not replace Sdf spec %s"),
+				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			return;
+		}
 		pxr::SdfBatchNamespaceEdit Edits;
-		Edits.Add(pxr::SdfNamespaceEdit::Remove(TargetPath));
+		Edits.Add(pxr::SdfNamespaceEdit::Remove(EventPath));
 		if (!TargetLayer->Apply(Edits))
 		{
-			UE_LOG(LogUSDEventApplier, Warning,
-				TEXT("Could not replace Sdf property spec %s"),
+			UE_LOG(LogUSDEventApplier, Warning, TEXT("Could not replace Sdf property spec %s"),
 				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
 			return;
 		}
 	}
-	if (!TargetLayer->HasSpec(TargetPath))
+
+	const bool WasMissing = !TargetLayer->HasSpec(EventPath);
+	if (WasMissing)
 	{
-		static const pxr::TfToken CustomField("custom");
-		static const pxr::TfToken TypeNameField("typeName");
-		static const pxr::TfToken VariabilityField("variability");
-		auto IsSelectedField = [Ev](const pxr::TfToken& Field)
+		if (Kind == Wire::SdfSpecKind::Attribute || Kind == Wire::SdfSpecKind::Relationship)
 		{
-			if (Field == CustomField || Field == TypeNameField || Field == VariabilityField)
+			static const pxr::TfToken CustomField("custom");
+			static const pxr::TfToken TypeNameField("typeName");
+			static const pxr::TfToken VariabilityField("variability");
+			auto IsSelectedField = [Ev, Kind](const pxr::TfToken& Field)
 			{
-				return true;
-			}
-			for (const ::flatbuffers::String* FieldString : *Ev->fields())
+				if (Field == CustomField || Field == VariabilityField ||
+					(Kind == Wire::SdfSpecKind::Attribute && Field == TypeNameField))
+				{
+					return true;
+				}
+				for (const ::flatbuffers::String* FieldString : *Ev->fields())
+				{
+					if (FieldString && Field == pxr::TfToken(FieldString->str())) return true;
+				}
+				return false;
+			};
+			for (const pxr::TfToken& Field : Incoming->ListFields(EventPath))
 			{
-				if (FieldString && Field == pxr::TfToken(FieldString->str())) return true;
+				if (!IsSelectedField(Field)) Incoming->EraseField(EventPath, Field);
 			}
-			return false;
-		};
-		for (const pxr::TfToken& Field : Incoming->ListFields(EventPath))
-		{
-			if (!IsSelectedField(Field)) Incoming->EraseField(EventPath, Field);
+			pxr::SdfCreatePrimInLayer(TargetLayer, EventPath.GetParentPath());
+			if (!pxr::SdfCopySpec(Incoming, EventPath, TargetLayer, EventPath))
+			{
+				UE_LOG(LogUSDEventApplier, Warning, TEXT("Could not create Sdf spec %s"),
+					UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			}
+			return;
 		}
-		pxr::SdfCreatePrimInLayer(TargetLayer, TargetPath.GetPrimPath());
-		if (!pxr::SdfCopySpec(Incoming, EventPath, TargetLayer, TargetPath))
+		if (Kind == Wire::SdfSpecKind::Prim)
 		{
-			UE_LOG(LogUSDEventApplier, Warning,
-				TEXT("Could not create Sdf property spec %s"),
-				UTF8_TO_TCHAR(Ev->spec_path()->c_str()));
+			pxr::SdfCreatePrimInLayer(TargetLayer, EventPath);
 		}
-		return;
+		else if (Kind == Wire::SdfSpecKind::Variant)
+		{
+			const auto Selection = EventPath.GetVariantSelection();
+			pxr::SdfCreateVariantInLayer(
+				TargetLayer,
+				EventPath.GetPrimPath(),
+				Selection.first,
+				Selection.second);
+		}
+		else if (Kind == Wire::SdfSpecKind::VariantSet)
+		{
+			const auto Selection = EventPath.GetVariantSelection();
+			const pxr::SdfPrimSpecHandle Owner = pxr::SdfCreatePrimInLayer(
+				TargetLayer,
+				EventPath.GetPrimPath());
+			if (Owner)
+			{
+				pxr::SdfVariantSetSpec::New(Owner, Selection.first);
+			}
+		}
 	}
 
+	if (WasMissing &&
+		(Kind == Wire::SdfSpecKind::Prim || Kind == Wire::SdfSpecKind::Variant))
+	{
+		static const pxr::TfToken SpecifierField("specifier");
+		pxr::VtValue Value;
+		if (Incoming->HasField(EventPath, SpecifierField, &Value))
+		{
+			TargetLayer->SetField(EventPath, SpecifierField, Value);
+		}
+	}
 	for (const ::flatbuffers::String* FieldString : *Ev->fields())
 	{
 		if (!FieldString) continue;
 		const pxr::TfToken Field(FieldString->str());
 		pxr::VtValue Value;
+		if (Kind == Wire::SdfSpecKind::Layer && Field == pxr::SdfFieldKeys->CustomLayerData)
+		{
+			static const std::string ReservedKey("openusdconnect");
+			pxr::VtDictionary Data;
+			if (Incoming->HasField(EventPath, Field, &Value) &&
+				Value.IsHolding<pxr::VtDictionary>())
+			{
+				Data = Value.UncheckedGet<pxr::VtDictionary>();
+			}
+			Data.erase(ReservedKey);
+			pxr::VtValue CurrentValue;
+			if (TargetLayer->HasField(EventPath, Field, &CurrentValue) &&
+				CurrentValue.IsHolding<pxr::VtDictionary>())
+			{
+				const pxr::VtDictionary& Current =
+					CurrentValue.UncheckedGet<pxr::VtDictionary>();
+				const auto Reserved = Current.find(ReservedKey);
+				if (Reserved != Current.end()) Data[ReservedKey] = Reserved->second;
+			}
+			if (Data.empty()) TargetLayer->EraseField(EventPath, Field);
+			else TargetLayer->SetField(EventPath, Field, pxr::VtValue(Data));
+			continue;
+		}
 		if (Incoming->HasField(EventPath, Field, &Value))
 		{
-			TargetLayer->SetField(TargetPath, Field, Value);
+			TargetLayer->SetField(EventPath, Field, Value);
 		}
 		else
 		{
-			TargetLayer->EraseField(TargetPath, Field);
+			TargetLayer->EraseField(EventPath, Field);
 		}
 	}
 }
@@ -1287,7 +1448,7 @@ void DispatchEvent(pxr::UsdStageRefPtr& Stage, const Wire::EventWrapper* Wrapper
 	case Wire::EventPayload::SetGprimAttrs:        ApplySetGprimAttrs(Stage, Wrapper->event_as_SetGprimAttrs());               break;
 	case Wire::EventPayload::SetInstanceable:      ApplySetInstanceable(Stage, Wrapper->event_as_SetInstanceable());           break;
 	case Wire::EventPayload::SetPointInstancer:    ApplySetPointInstancer(Stage, Wrapper->event_as_SetPointInstancer());       break;
-	case Wire::EventPayload::SetSdfPropertyFields: ApplySetSdfPropertyFields(Stage, Wrapper->event_as_SetSdfPropertyFields()); break;
+	case Wire::EventPayload::SetSdfSpecFields:     ApplySetSdfSpecFields(Stage, Wrapper->event_as_SetSdfSpecFields());         break;
 	case Wire::EventPayload::SetReference:         ApplySetReference(Stage, Wrapper->event_as_SetReference());                 break;
 	case Wire::EventPayload::SetPayload:           ApplySetPayload(Stage, Wrapper->event_as_SetPayload());                     break;
 	case Wire::EventPayload::LoadPayload:          ApplyLoadPayload(Stage, Wrapper->event_as_LoadPayload());                   break;
@@ -1319,7 +1480,7 @@ FString GetEventPrim(const Wire::EventWrapper* Wrapper)
 	case Wire::EventPayload::SetGprimAttrs:            return ToFString(Wrapper->event_as_SetGprimAttrs()->prim());
 	case Wire::EventPayload::SetInstanceable:          return ToFString(Wrapper->event_as_SetInstanceable()->prim());
 	case Wire::EventPayload::SetPointInstancer:        return ToFString(Wrapper->event_as_SetPointInstancer()->prim());
-	case Wire::EventPayload::SetSdfPropertyFields:     return ToFString(Wrapper->event_as_SetSdfPropertyFields()->prim());
+	case Wire::EventPayload::SetSdfSpecFields:         return ToFString(Wrapper->event_as_SetSdfSpecFields()->prim());
 	case Wire::EventPayload::SetReference:             return ToFString(Wrapper->event_as_SetReference()->prim());
 	case Wire::EventPayload::SetPayload:               return ToFString(Wrapper->event_as_SetPayload()->prim());
 	case Wire::EventPayload::LoadPayload:              return ToFString(Wrapper->event_as_LoadPayload()->prim());

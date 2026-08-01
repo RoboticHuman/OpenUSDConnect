@@ -54,7 +54,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -79,6 +79,7 @@ from .protocol_constants import (
     MSG_RESYNC,
     MSG_TXN,
     POINT_INSTANCER_FIELDS,
+    SDF_SPEC_KINDS,
 )
 
 # Re-export generated classes so consumers import from codec, not generated path.
@@ -116,7 +117,7 @@ SetConnectableConnection = _fb.SetConnectableConnection
 SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
-SetSdfPropertyFields = _fb.SetSdfPropertyFields
+SetSdfSpecFields = _fb.SetSdfSpecFields
 ClaimPlayback = _fb.ClaimPlayback
 PlaybackClaimed = _fb.PlaybackClaimed
 PlaybackRejected = _fb.PlaybackRejected
@@ -137,8 +138,9 @@ ArcListPositionType = _fb.ArcListPosition
 StringPair = _fb.StringPair
 PayloadType = _fb.Payload
 EventPayloadType = _fb.EventPayload
+SdfSpecKindType = _fb.SdfSpecKind
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -175,6 +177,17 @@ _ARC_POSITION_TO_FB = {
 }
 assert frozenset(_ARC_POSITION_TO_FB) == ARC_LIST_POSITIONS
 _FB_TO_ARC_POSITION = {value: key for key, value in _ARC_POSITION_TO_FB.items()}
+
+_SDF_SPEC_KIND_TO_FB = {
+    "layer": SdfSpecKindType.Layer,
+    "prim": SdfSpecKindType.Prim,
+    "attribute": SdfSpecKindType.Attribute,
+    "relationship": SdfSpecKindType.Relationship,
+    "variant_set": SdfSpecKindType.VariantSet,
+    "variant": SdfSpecKindType.Variant,
+}
+assert tuple(_SDF_SPEC_KIND_TO_FB) == SDF_SPEC_KINDS
+_FB_TO_SDF_SPEC_KIND = {value: key for key, value in _SDF_SPEC_KIND_TO_FB.items()}
 
 _PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
 
@@ -223,7 +236,10 @@ _PI_ARRAYS = {
     "velocities": (_fb.SetPointInstancerAddVelocities, "Velocities", 3, np.float32),
     "accelerations": (_fb.SetPointInstancerAddAccelerations, "Accelerations", 3, np.float32),
     "angular_velocities": (
-        _fb.SetPointInstancerAddAngularVelocities, "AngularVelocities", 3, np.float32,
+        _fb.SetPointInstancerAddAngularVelocities,
+        "AngularVelocities",
+        3,
+        np.float32,
     ),
     "ids": (_fb.SetPointInstancerAddIds, "Ids", None, np.int64),
     "invisible_ids": (_fb.SetPointInstancerAddInvisibleIds, "InvisibleIds", None, np.int64),
@@ -539,11 +555,7 @@ def _encode_layer_stack_state(b, msg):
     layer_offsets = []
     for state in msg.get("layers", ()):
         layer_key = b.CreateString(state["layer_key"])
-        label = (
-            b.CreateString(state["label"])
-            if state.get("label")
-            else None
-        )
+        label = b.CreateString(state["label"]) if state.get("label") else None
         _fb.LogicalLayerStateStart(b)
         _fb.LogicalLayerStateAddLayerKey(b, layer_key)
         if state.get("muted"):
@@ -1047,15 +1059,32 @@ def _encode_set_material_binding(b, ev):
 # The emitting language's literal type must not leak into the wire: a JSON
 # "1" or "[1, 1, 1]" for a float-typed input encodes as float, so receivers
 # can trust that the payload slot matches the declared type.
-_FLOAT_WIRE_TYPES = frozenset({
-    "float", "double",
-    "color3f", "float3", "normal3f", "point3f", "vector3f",
-    "color3d", "double3", "normal3d", "point3d", "vector3d",
-    "float2", "texCoord2f", "double2",
-    "float4", "color4f", "double4",
-    "matrix2d", "matrix3d", "matrix4d",
-    "float[]",
-})
+_FLOAT_WIRE_TYPES = frozenset(
+    {
+        "float",
+        "double",
+        "color3f",
+        "float3",
+        "normal3f",
+        "point3f",
+        "vector3f",
+        "color3d",
+        "double3",
+        "normal3d",
+        "point3d",
+        "vector3d",
+        "float2",
+        "texCoord2f",
+        "double2",
+        "float4",
+        "color4f",
+        "double4",
+        "matrix2d",
+        "matrix3d",
+        "matrix4d",
+        "float[]",
+    }
+)
 
 
 @register_encoder(
@@ -1090,17 +1119,16 @@ def _encode_set_connectable_input(b, ev):
         string_vec = None
         if isinstance(value, str):
             str_off = b.CreateString(value)
-        elif as_seq is not None and len(as_seq) > 0 and all(
-            isinstance(v, str) for v in as_seq
-        ):
+        elif as_seq is not None and len(as_seq) > 0 and all(isinstance(v, str) for v in as_seq):
             str_offs = [b.CreateString(v) for v in as_seq]
             _fb.ConnectableInputValueStartStringArrayVector(b, len(str_offs))
             for off in reversed(str_offs):
                 b.PrependUOffsetTRelative(off)
             string_vec = b.EndVector()
-        elif as_seq is not None and not float_declared and all(
-            isinstance(v, (int, np.integer)) and not isinstance(v, bool)
-            for v in as_seq
+        elif (
+            as_seq is not None
+            and not float_declared
+            and all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) for v in as_seq)
         ):
             int_vec = _create_int_vector(b, [int(v) for v in as_seq])
         elif as_seq is not None:
@@ -1249,27 +1277,28 @@ def _encode_set_point_instancer(b, ev):
 
 
 @register_encoder(
-    K_SET_SDF_PROPERTY_FIELDS,
-    fb_tag=EventPayloadType.SetSdfPropertyFields,
-    fb_class=SetSdfPropertyFields,
+    K_SET_SDF_SPEC_FIELDS,
+    fb_tag=EventPayloadType.SetSdfSpecFields,
+    fb_class=SetSdfSpecFields,
 )
-def _encode_set_sdf_property_fields(b, ev):
+def _encode_set_sdf_spec_fields(b, ev):
     prim = b.CreateString(ev["prim"])
     spec_path = b.CreateString(ev["spec_path"])
     fragment = b.CreateString(ev.get("fragment", ""))
     field_offsets = [b.CreateString(field) for field in ev.get("fields", ())]
-    _fb.SetSdfPropertyFieldsStartFieldsVector(b, len(field_offsets))
+    _fb.SetSdfSpecFieldsStartFieldsVector(b, len(field_offsets))
     for offset in reversed(field_offsets):
         b.PrependUOffsetTRelative(offset)
     fields = b.EndVector()
 
-    _fb.SetSdfPropertyFieldsStart(b)
-    _fb.SetSdfPropertyFieldsAddPrim(b, prim)
-    _fb.SetSdfPropertyFieldsAddSpecPath(b, spec_path)
-    _fb.SetSdfPropertyFieldsAddFields(b, fields)
-    _fb.SetSdfPropertyFieldsAddFragment(b, fragment)
-    _fb.SetSdfPropertyFieldsAddRemoved(b, bool(ev.get("removed", False)))
-    return _fb.SetSdfPropertyFieldsEnd(b)
+    _fb.SetSdfSpecFieldsStart(b)
+    _fb.SetSdfSpecFieldsAddPrim(b, prim)
+    _fb.SetSdfSpecFieldsAddSpecPath(b, spec_path)
+    _fb.SetSdfSpecFieldsAddSpecKind(b, _SDF_SPEC_KIND_TO_FB[ev["spec_kind"]])
+    _fb.SetSdfSpecFieldsAddFields(b, fields)
+    _fb.SetSdfSpecFieldsAddFragment(b, fragment)
+    _fb.SetSdfSpecFieldsAddRemoved(b, bool(ev.get("removed", False)))
+    return _fb.SetSdfSpecFieldsEnd(b)
 
 
 # ===================================================================
@@ -1849,9 +1878,7 @@ def _dict_set_connectable_input(sci, kind):
         elif vt == ConnectableInputValueType.IntArray:
             inputs[name] = [civ.IntArray(j) for j in range(civ.IntArrayLength())]
         elif vt == ConnectableInputValueType.StringArray:
-            inputs[name] = [
-                _str(civ.StringArray(j)) for j in range(civ.StringArrayLength())
-            ]
+            inputs[name] = [_str(civ.StringArray(j)) for j in range(civ.StringArrayLength())]
         elif vt == ConnectableInputValueType.ScalarString:
             inputs[name] = _str(civ.ScalarString())
         elif vt == ConnectableInputValueType.ScalarBool:
@@ -1939,12 +1966,13 @@ def _dict_set_connectable_connection(scc, kind):
     return ev
 
 
-@register_decoder(K_SET_SDF_PROPERTY_FIELDS)
-def _dict_set_sdf_property_fields(sss, kind):
+@register_decoder(K_SET_SDF_SPEC_FIELDS)
+def _dict_set_sdf_spec_fields(sss, kind):
     return {
         "k": kind,
         "prim": _str(sss.Prim()),
         "spec_path": _str(sss.SpecPath()),
+        "spec_kind": _FB_TO_SDF_SPEC_KIND[sss.SpecKind()],
         "fields": [_str(sss.Fields(i)) for i in range(sss.FieldsLength())],
         "fragment": _str(sss.Fragment()),
         "removed": bool(sss.Removed()),

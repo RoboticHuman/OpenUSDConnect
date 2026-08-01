@@ -37,7 +37,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -89,20 +89,27 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     },
     K_ENSURE_XFORM_OPS: lambda ev: {"prim_path": ev["prim"]},
     K_SET_XFORM_TRS: lambda ev: {
-        "prim_path": ev["prim"], **_time_kwarg(ev), **_trs_kwargs(ev),
+        "prim_path": ev["prim"],
+        **_time_kwarg(ev),
+        **_trs_kwargs(ev),
     },
     K_DELETE_PRIM: lambda ev: {"prim_path": ev["prim"]},
     K_DEACTIVATE_PRIM: lambda ev: {"prim_path": ev["prim"], "active": ev["active"]},
     K_RENAME_PRIM: lambda ev: {"prim_path": ev["prim"], "new_name": ev["new_name"]},
     K_SET_VISIBILITY: lambda ev: {
-        "prim_path": ev["prim"], "visible": ev["visible"], **_time_kwarg(ev),
+        "prim_path": ev["prim"],
+        "visible": ev["visible"],
+        **_time_kwarg(ev),
     },
     K_SET_GPRIM_ATTRS: lambda ev: {
-        "prim_path": ev["prim"], "attrs": ev["attrs"], **_time_kwarg(ev),
+        "prim_path": ev["prim"],
+        "attrs": ev["attrs"],
+        **_time_kwarg(ev),
     },
-    K_SET_SDF_PROPERTY_FIELDS: lambda ev: {
+    K_SET_SDF_SPEC_FIELDS: lambda ev: {
         "prim_path": ev["prim"],
         "spec_path": ev["spec_path"],
+        "spec_kind": ev["spec_kind"],
         "fields": ev.get("fields", []),
         "fragment": ev.get("fragment", ""),
         "removed": bool(ev.get("removed", False)),
@@ -142,7 +149,8 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
     },
     K_SET_STAGE_METADATA: lambda ev: {k: ev[k] for k in STAGE_METADATA_KEYS if k in ev},
     K_SET_INSTANCEABLE: lambda ev: {
-        "prim_path": ev["prim"], "instanceable": ev["instanceable"],
+        "prim_path": ev["prim"],
+        "instanceable": ev["instanceable"],
     },
     K_SET_POINT_INSTANCER: lambda ev: {
         "prim_path": ev["prim"],
@@ -266,14 +274,18 @@ class DCCAdapter(ABC):
 
     @abstractmethod
     def set_gprim_attrs(
-        self, prim_path: str, attrs: dict, time: float | None = None,
+        self,
+        prim_path: str,
+        attrs: dict,
+        time: float | None = None,
     ) -> bool:
         raise NotImplementedError
 
-    def set_sdf_property_fields(
+    def set_sdf_spec_fields(
         self,
         prim_path: str,
         spec_path: str,
+        spec_kind: str,
         fields: list[str],
         fragment: str,
         removed: bool = False,
@@ -282,7 +294,7 @@ class DCCAdapter(ABC):
 
         DCC-backed adapters keep this as a no-op because the dispatcher
         applies the event to their mirror stage. Stage-backed adapters
-        override it and apply the property delta directly.
+        override it and apply the spec delta directly.
         """
         return True
 
@@ -325,7 +337,10 @@ class DCCAdapter(ABC):
 
     @abstractmethod
     def set_material_binding(
-        self, prim_path: str, material_path: str, material_purpose: str = "",
+        self,
+        prim_path: str,
+        material_path: str,
+        material_purpose: str = "",
     ) -> bool:
         """Bind or unbind a material to a prim.
 
@@ -631,7 +646,10 @@ class UsdStageAdapter(DCCAdapter):
         return True
 
     def set_visibility(
-        self, prim_path: str, visible: bool, time: float | None = None,
+        self,
+        prim_path: str,
+        visible: bool,
+        time: float | None = None,
     ) -> bool:
         ev: dict = {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible}
         if time is not None:
@@ -640,7 +658,10 @@ class UsdStageAdapter(DCCAdapter):
         return True
 
     def set_gprim_attrs(
-        self, prim_path: str, attrs: dict, time: float | None = None,
+        self,
+        prim_path: str,
+        attrs: dict,
+        time: float | None = None,
     ) -> bool:
         ev: dict = {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs}
         if time is not None:
@@ -648,10 +669,11 @@ class UsdStageAdapter(DCCAdapter):
         _apply_event_to_stage(self.stage, ev)
         return True
 
-    def set_sdf_property_fields(
+    def set_sdf_spec_fields(
         self,
         prim_path: str,
         spec_path: str,
+        spec_kind: str,
         fields: list[str],
         fragment: str,
         removed: bool = False,
@@ -659,9 +681,10 @@ class UsdStageAdapter(DCCAdapter):
         _apply_event_to_stage(
             self.stage,
             {
-                "k": K_SET_SDF_PROPERTY_FIELDS,
+                "k": K_SET_SDF_SPEC_FIELDS,
                 "prim": prim_path,
                 "spec_path": spec_path,
+                "spec_kind": spec_kind,
                 "fields": fields,
                 "fragment": fragment,
                 "removed": removed,
@@ -728,7 +751,10 @@ class UsdStageAdapter(DCCAdapter):
         return True
 
     def set_material_binding(
-        self, prim_path: str, material_path: str, material_purpose: str = "",
+        self,
+        prim_path: str,
+        material_path: str,
+        material_purpose: str = "",
     ) -> bool:
         ev = {
             "k": K_SET_MATERIAL_BINDING,
@@ -918,7 +944,9 @@ class MockAdapter(DCCAdapter):
             fields_set.append("s")
         LOG.info(
             "MockAdapter: applied TRS to %s fields=%s time=%s",
-            prim_path, fields_set, time,
+            prim_path,
+            fields_set,
+            time,
         )
         return True
 
@@ -948,7 +976,10 @@ class MockAdapter(DCCAdapter):
         return True
 
     def set_visibility(
-        self, prim_path: str, visible: bool, time: float | None = None,
+        self,
+        prim_path: str,
+        visible: bool,
+        time: float | None = None,
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
@@ -959,12 +990,17 @@ class MockAdapter(DCCAdapter):
             p.setdefault("visibility_samples", {})[time] = visible
         LOG.info(
             "MockAdapter: set visible=%s on prim %s time=%s",
-            visible, prim_path, time,
+            visible,
+            prim_path,
+            time,
         )
         return True
 
     def set_gprim_attrs(
-        self, prim_path: str, attrs: dict, time: float | None = None,
+        self,
+        prim_path: str,
+        attrs: dict,
+        time: float | None = None,
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
@@ -975,7 +1011,9 @@ class MockAdapter(DCCAdapter):
             p.setdefault("gprim_attr_samples", {}).setdefault(time, {}).update(attrs)
         LOG.info(
             "MockAdapter: set gprim attrs %s on prim %s time=%s",
-            attrs, prim_path, time,
+            attrs,
+            prim_path,
+            time,
         )
         return True
 
@@ -1033,7 +1071,10 @@ class MockAdapter(DCCAdapter):
         return True
 
     def set_material_binding(
-        self, prim_path: str, material_path: str, material_purpose: str = "",
+        self,
+        prim_path: str,
+        material_path: str,
+        material_purpose: str = "",
     ) -> bool:
         p = self._prims.get(prim_path)
         if p is None:
@@ -1043,7 +1084,9 @@ class MockAdapter(DCCAdapter):
         bindings[material_purpose] = material_path
         LOG.info(
             "MockAdapter: set material binding %s [%s] -> %s",
-            prim_path, material_purpose or "allPurpose", material_path,
+            prim_path,
+            material_purpose or "allPurpose",
+            material_path,
         )
         return True
 
@@ -1064,13 +1107,11 @@ class MockAdapter(DCCAdapter):
             p.setdefault("connectable_inputs", {}).update(inputs)
             p.setdefault("connectable_input_types", {}).update(input_types)
         else:
-            (
-                p.setdefault("connectable_input_samples", {})
-                .setdefault(time, {})
-                .update(inputs)
-            )
+            (p.setdefault("connectable_input_samples", {}).setdefault(time, {}).update(inputs))
         LOG.info(
-            "MockAdapter: set connectable input on %s time=%s", prim_path, time,
+            "MockAdapter: set connectable input on %s time=%s",
+            prim_path,
+            time,
         )
         return True
 
@@ -1160,7 +1201,9 @@ class MockAdapter(DCCAdapter):
             p.setdefault("point_instancer_samples", {}).setdefault(time, {}).update(present)
         LOG.info(
             "MockAdapter: point instancer %s fields=%s time=%s",
-            prim_path, sorted(present), time,
+            prim_path,
+            sorted(present),
+            time,
         )
         return True
 

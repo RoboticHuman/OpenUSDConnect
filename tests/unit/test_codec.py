@@ -45,10 +45,10 @@ class TestSchemaVersion:
         env = decode_envelope(buf)
         assert env.SchemaVersion() == SCHEMA_VERSION
 
-    def test_version_is_two(self):
+    def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):

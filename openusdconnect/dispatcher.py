@@ -36,6 +36,7 @@ from .protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     SHARED_STAGE_KINDS,
@@ -102,11 +103,11 @@ def _renamed_path(path: str, old_root: str, new_name: str) -> str:
 def _stage_sync_scope(events: list[dict]) -> list[str] | None:
     """Every prim path a stage-sync batch may author on, for the scoped
     atomic_apply backup. Returns None when the batch writes outside prim
-    scopes (stage metadata), forcing the full-layer snapshot.
+    scopes or addresses exact Sdf specs, forcing the full-layer snapshot.
     """
     paths: list[str] = []
     for ev in events:
-        if ev.get("k") == K_SET_STAGE_METADATA:
+        if ev.get("k") in (K_SET_STAGE_METADATA, K_SET_SDF_SPEC_FIELDS):
             return None
         prim = ev.get("prim")
         if not prim:

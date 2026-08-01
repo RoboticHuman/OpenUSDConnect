@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 # Message type constants
 MSG_HELLO = "hello"
@@ -47,7 +47,23 @@ K_SET_CONNECTABLE_CONNECTION = "set_connectable_connection"
 K_SET_STAGE_METADATA = "set_stage_metadata"
 K_SET_INSTANCEABLE = "set_instanceable"
 K_SET_POINT_INSTANCER = "set_point_instancer"
-K_SET_SDF_PROPERTY_FIELDS = "set_sdf_property_fields"
+K_SET_SDF_SPEC_FIELDS = "set_sdf_spec_fields"
+
+SDF_SPEC_KIND_LAYER = "layer"
+SDF_SPEC_KIND_PRIM = "prim"
+SDF_SPEC_KIND_ATTRIBUTE = "attribute"
+SDF_SPEC_KIND_RELATIONSHIP = "relationship"
+SDF_SPEC_KIND_VARIANT_SET = "variant_set"
+SDF_SPEC_KIND_VARIANT = "variant"
+SDF_SPEC_KINDS = (
+    SDF_SPEC_KIND_LAYER,
+    SDF_SPEC_KIND_PRIM,
+    SDF_SPEC_KIND_ATTRIBUTE,
+    SDF_SPEC_KIND_RELATIONSHIP,
+    SDF_SPEC_KIND_VARIANT_SET,
+    SDF_SPEC_KIND_VARIANT,
+)
+SDF_LAYER_TOPOLOGY_FIELDS = frozenset({"subLayers", "subLayerOffsets"})
 
 # Sdf list-op buckets carried by reference and payload arc entries.
 ARC_LIST_POSITIONS = frozenset(
@@ -158,7 +174,10 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_VISIBILITY: EventKindInfo(strength_attrs=("visibility",)),
     K_SET_GPRIM_ATTRS: EventKindInfo(),
     K_SET_REFERENCE: EventKindInfo(
-        structural=True, stage_sync=True, arc=True, imports=True,
+        structural=True,
+        stage_sync=True,
+        arc=True,
+        imports=True,
     ),
     K_SET_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, arc=True),
     K_LOAD_PAYLOAD: EventKindInfo(
@@ -173,10 +192,14 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         target=EventTarget.STAGE_STATE,
     ),
     K_SET_VARIANT_SELECTIONS: EventKindInfo(
-        structural=True, stage_sync=True, arc=True,
+        structural=True,
+        stage_sync=True,
+        arc=True,
     ),
     K_SET_MATERIAL_BINDING: EventKindInfo(
-        structural=True, stage_sync=True, strength_attrs=("rel:material:binding",),
+        structural=True,
+        stage_sync=True,
+        strength_attrs=("rel:material:binding",),
     ),
     K_SET_CONNECTABLE_INPUT: EventKindInfo(structural=True, stage_sync=True),
     K_SET_CONNECTABLE_CONNECTION: EventKindInfo(structural=True, stage_sync=True),
@@ -188,7 +211,7 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     ),
     K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
     K_SET_POINT_INSTANCER: EventKindInfo(),
-    K_SET_SDF_PROPERTY_FIELDS: EventKindInfo(
+    K_SET_SDF_SPEC_FIELDS: EventKindInfo(
         structural=True,
         stage_sync=True,
         composed_projection=True,
@@ -196,25 +219,20 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)
-STRUCTURAL_EVENT_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items() if i.structural
-)
+STRUCTURAL_EVENT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.structural)
 CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
 STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
 COMPOSED_PROJECTION_KINDS = frozenset(
     k for k, i in EVENT_KIND_INFO.items() if i.composed_projection
 )
 COLLABORATION_LAYER_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items()
-    if i.target == EventTarget.COLLABORATION_LAYER
+    k for k, i in EVENT_KIND_INFO.items() if i.target == EventTarget.COLLABORATION_LAYER
 )
 SESSION_LAYER_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items()
-    if i.target == EventTarget.SESSION_LAYER
+    k for k, i in EVENT_KIND_INFO.items() if i.target == EventTarget.SESSION_LAYER
 )
 STAGE_RUNTIME_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items()
-    if i.target == EventTarget.STAGE_STATE
+    k for k, i in EVENT_KIND_INFO.items() if i.target == EventTarget.STAGE_STATE
 )
 SHARED_STAGE_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
@@ -230,5 +248,6 @@ def event_apply_tier(kind: str) -> int:
     if kind in STRUCTURAL_EVENT_KINDS:
         return 1
     return 2
+
 
 TRS_FIELDS = frozenset({"t", "r", "s"})

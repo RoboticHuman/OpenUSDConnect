@@ -34,7 +34,7 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -183,9 +183,7 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
                 # the local over needed to hold these xform opinions.
                 layer_spec = Sdf.CreatePrimInLayer(layer, prim_path)
             for attr_name, type_name in _XFORM_OP_SPECS:
-                if not layer_spec.GetAttributeAtPath(
-                    Sdf.Path(prim_path).AppendProperty(attr_name)
-                ):
+                if not layer_spec.GetAttributeAtPath(Sdf.Path(prim_path).AppendProperty(attr_name)):
                     Sdf.AttributeSpec(layer_spec, attr_name, type_name)
 
             if not layer_spec.GetAttributeAtPath(path_order):
@@ -235,9 +233,7 @@ def _ensure_primvar_attr(
     return pv.GetAttr()
 
 
-def _set_gprim_attr(
-    prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME_DEFAULT
-) -> None:
+def _set_gprim_attr(prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME_DEFAULT) -> None:
     """Set a single attribute on a typed gprim, coercing to the schema-defined type.
 
     Numpy arrays take a zero-copy ``Vt.*Array.FromNumpy`` path; Python lists are
@@ -433,9 +429,7 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
         pi.CreatePositionsAttr().Set(_vec3f_array(ev["positions"]), tc)
     if "orientations" in fields:
         wire = np.asarray(ev["orientations"], dtype=np.float32).reshape(-1, 4)
-        pi.CreateOrientationsfAttr().Set(
-            Vt.QuatfArray.FromNumpy(wire[:, [1, 2, 3, 0]]), tc
-        )
+        pi.CreateOrientationsfAttr().Set(Vt.QuatfArray.FromNumpy(wire[:, [1, 2, 3, 0]]), tc)
     if "scales" in fields:
         pi.CreateScalesAttr().Set(_vec3f_array(ev["scales"]), tc)
     if "velocities" in fields:
@@ -461,11 +455,11 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
         )
 
 
-@register_applier(K_SET_SDF_PROPERTY_FIELDS)
-def _apply_set_sdf_property_fields(stage: Usd.Stage, ev: dict) -> None:
-    from .sdf_property_delta import apply_property_spec_delta
+@register_applier(K_SET_SDF_SPEC_FIELDS)
+def _apply_set_sdf_spec_fields(stage: Usd.Stage, ev: dict) -> None:
+    from .sdf_spec_delta import apply_spec_delta
 
-    apply_property_spec_delta(stage, ev)
+    apply_spec_delta(stage, ev)
 
 
 @register_applier(K_SET_STAGE_METADATA)
@@ -883,7 +877,13 @@ def apply_event(stage: Usd.Stage, ev: Event) -> None:
         spec.apply(stage, ev)
 
 
-def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
+def apply_events(
+    stage: Usd.Stage,
+    events: list[Event],
+    op_cache=None,
+    *,
+    prevalidated: bool = False,
+) -> None:
     """Apply a list of events to a USD stage.
 
     Ordering: within a segment, callers may pass events in any order. delete_prim
@@ -906,9 +906,19 @@ def apply_events(stage: Usd.Stage, events: list[Event], op_cache=None) -> None:
     (translate_op, orient_op, scale_op).  Pass a persistent cache
     (e.g. ``cachetools.LRUCache``) to avoid repeated ``find_op`` lookups
     across calls.
+
+    *prevalidated* is for callers that already validated every exact Sdf
+    event in the larger transaction before splitting it into apply runs.
     """
     if op_cache is None:
         op_cache = {}
+
+    if not prevalidated:
+        from .sdf_spec_delta import validate_spec_delta
+
+        for event in events:
+            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+                validate_spec_delta(event)
 
     def _apply_segment(segment: list) -> None:
         # A prim must exist before anything authors on it: prim-creating kinds
@@ -1019,9 +1029,7 @@ class _ScopedAtomicApply:
         self._created_roots: list = []
 
     def _covered(self, path: Sdf.Path) -> bool:
-        return any(
-            path.HasPrefix(p) for p in (*self._saved, *self._created_roots)
-        )
+        return any(path.HasPrefix(p) for p in (*self._saved, *self._created_roots))
 
     def __enter__(self):
         self._backup = Sdf.Layer.CreateAnonymous("txn-backup")

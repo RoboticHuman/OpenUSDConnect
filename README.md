@@ -150,10 +150,22 @@ Stage metadata is authored once in the shared session layer, and payload
 load/unload records remain stage runtime state rather than layer opinions.
 
 Blender, Unreal, and receivers that do not negotiate this capability keep the
-existing flat composed projection. Generic Sdf property edits are projected
-back as authoritative composed corrections during live sync and replay, but
-some other event kinds still lack that flat correction path. The server stage
-remains authoritative for those clients.
+existing flat composed projection. Generic Sdf spec edits are returned as
+authoritative composed corrections during live sync and replay. Corrections
+use OpenUSD's layer-stack flattening, which preserves composition arcs and
+produces the same composed stage from one layer. The server stage remains
+authoritative for specialized events without an equivalent flat correction.
+
+Layered replay covers OpenUSDConnect's managed collaboration layers. It does
+not transmit arbitrary client-authored sublayer graphs, sublayer offsets, or
+edit-target changes outside that block. Relative asset identifiers require a
+compatible receiver resolver context and layer anchor.
+
+Incremental emission is driven by `Usd.Notice.ObjectsChanged`. Normal USD
+authoring APIs and Sdf edits that affect stage composition produce this notice.
+Direct Sdf edits that do not affect composition, such as edits inside an
+inactive variant, require a full emitter snapshot. Use USD authoring APIs and
+variant edit contexts for incremental live edits.
 
 The dashboard's department-layer merge and delete actions are still
 server-local lifecycle operations. They do not rewrite the authored log or
@@ -187,9 +199,10 @@ uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --f
 
 For write fallback, start the server with `--vfs-write-mode translate`. Full-file
 USD saves are validated by default, rejected when stale or invalid, and converted
-to live events when safe. Custom attributes and relationships are preserved.
-Authored prim or layer fields outside the event surface, including local variant
-definitions, are rejected instead of being silently discarded.
+to live events when safe. Custom attributes, relationships, prim and layer
+metadata, and local variant definitions are preserved. Authored sublayer
+topology is rejected because it cannot be mapped safely into the managed
+collaboration layer stack.
 
 ### Docker
 

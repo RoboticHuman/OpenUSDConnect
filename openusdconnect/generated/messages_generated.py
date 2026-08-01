@@ -38,6 +38,15 @@ class ConnectableInputValueType(object):
     StringArray = 7
 
 
+class SdfSpecKind(object):
+    Layer = 0
+    Prim = 1
+    Attribute = 2
+    Relationship = 3
+    VariantSet = 4
+    Variant = 5
+
+
 class EventPayload(object):
     NONE = 0
     EnsurePrim = 1
@@ -59,7 +68,7 @@ class EventPayload(object):
     SetStageMetadata = 17
     SetInstanceable = 18
     SetPointInstancer = 19
-    SetSdfPropertyFields = 20
+    SetSdfSpecFields = 20
 
 
 class Payload(object):
@@ -2358,94 +2367,104 @@ def SetPointInstancerEnd(builder):
 
 
 
-class SetSdfPropertyFields(object):
+class SetSdfSpecFields(object):
     __slots__ = ['_tab']
 
     @classmethod
     def GetRootAs(cls, buf, offset=0):
         n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = SetSdfPropertyFields()
+        x = SetSdfSpecFields()
         x.Init(buf, n + offset)
         return x
 
     @classmethod
-    def GetRootAsSetSdfPropertyFields(cls, buf, offset=0):
+    def GetRootAsSetSdfSpecFields(cls, buf, offset=0):
         """This method is deprecated. Please switch to GetRootAs."""
         return cls.GetRootAs(buf, offset)
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def Prim(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def SpecPath(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetSdfPropertyFields
-    def Fields(self, j):
+    # SetSdfSpecFields
+    def SpecKind(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int8Flags, o + self._tab.Pos)
+        return 0
+
+    # SetSdfSpecFields
+    def Fields(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         if o != 0:
             a = self._tab.Vector(o)
             return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
         return ""
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def FieldsLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def FieldsIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
         return o == 0
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def Fragment(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
-    # SetSdfPropertyFields
+    # SetSdfSpecFields
     def Removed(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         if o != 0:
             return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
         return False
 
-def SetSdfPropertyFieldsStart(builder):
-    builder.StartObject(5)
+def SetSdfSpecFieldsStart(builder):
+    builder.StartObject(6)
 
-def SetSdfPropertyFieldsAddPrim(builder, prim):
+def SetSdfSpecFieldsAddPrim(builder, prim):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(prim), 0)
 
-def SetSdfPropertyFieldsAddSpecPath(builder, specPath):
+def SetSdfSpecFieldsAddSpecPath(builder, specPath):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(specPath), 0)
 
-def SetSdfPropertyFieldsAddFields(builder, fields):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(fields), 0)
+def SetSdfSpecFieldsAddSpecKind(builder, specKind):
+    builder.PrependInt8Slot(2, specKind, 0)
 
-def SetSdfPropertyFieldsStartFieldsVector(builder, numElems):
+def SetSdfSpecFieldsAddFields(builder, fields):
+    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(fields), 0)
+
+def SetSdfSpecFieldsStartFieldsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def SetSdfPropertyFieldsAddFragment(builder, fragment):
-    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(fragment), 0)
+def SetSdfSpecFieldsAddFragment(builder, fragment):
+    builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(fragment), 0)
 
-def SetSdfPropertyFieldsAddRemoved(builder, removed):
-    builder.PrependBoolSlot(4, removed, 0)
+def SetSdfSpecFieldsAddRemoved(builder, removed):
+    builder.PrependBoolSlot(5, removed, 0)
 
-def SetSdfPropertyFieldsEnd(builder):
+def SetSdfSpecFieldsEnd(builder):
     return builder.EndObject()
 
 

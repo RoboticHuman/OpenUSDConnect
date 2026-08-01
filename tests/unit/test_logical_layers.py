@@ -148,12 +148,8 @@ def test_router_preserves_unrelated_session_layers_and_composes_strength():
 
 def test_router_revisions_are_scoped_to_server_generation():
     router = LogicalLayerRouter(Usd.Stage.CreateInMemory())
-    assert router.apply_state(
-        _state(4, [(_STRONG_LAYER, "Strong", False)])
-    )
-    assert not router.apply_state(
-        _state(3, [(_WEAK_LAYER, "Review Overrides", False)])
-    )
+    assert router.apply_state(_state(4, [(_STRONG_LAYER, "Strong", False)]))
+    assert not router.apply_state(_state(3, [(_WEAK_LAYER, "Review Overrides", False)]))
     assert router.layer_keys == (_STRONG_LAYER,)
 
     assert router.apply_state(
@@ -170,9 +166,7 @@ def test_router_rebinds_owned_layers_without_leaking_into_old_stage():
     first = Usd.Stage.CreateInMemory()
     second = Usd.Stage.CreateInMemory()
     router = LogicalLayerRouter(first)
-    router.apply_state(
-        _state(1, [(_STRONG_LAYER, "Strong", False)])
-    )
+    router.apply_state(_state(1, [(_STRONG_LAYER, "Strong", False)]))
     _set_int(first, router, _STRONG_LAYER, 7)
 
     router.bind(second)
@@ -187,17 +181,13 @@ def test_router_rebinds_owned_layers_without_leaking_into_old_stage():
 def test_removed_layer_key_does_not_restore_stale_opinions_when_reused():
     stage = Usd.Stage.CreateInMemory()
     router = LogicalLayerRouter(stage)
-    router.apply_state(
-        _state(1, [(_STRONG_LAYER, "Strong", False)])
-    )
+    router.apply_state(_state(1, [(_STRONG_LAYER, "Strong", False)]))
     original = router.layer_for(_STRONG_LAYER)
     _set_int(stage, router, _STRONG_LAYER, 7)
 
     router.apply_state(_state(2, [(_BASE_LAYER, "Base", False)]))
     assert original.identifier not in stage.GetSessionLayer().subLayerPaths
-    assert not stage.GetAttributeAtPath(
-        "/World/Thing.userProperties:value"
-    )
+    assert not stage.GetAttributeAtPath("/World/Thing.userProperties:value")
 
     router.apply_state(
         _state(
@@ -210,9 +200,7 @@ def test_removed_layer_key_does_not_restore_stale_opinions_when_reused():
     )
     replacement = router.layer_for(_STRONG_LAYER)
     assert replacement is not original
-    assert not replacement.GetPropertyAtPath(
-        "/World/Thing.userProperties:value"
-    )
+    assert not replacement.GetPropertyAtPath("/World/Thing.userProperties:value")
 
 
 class _LayeredQueue:
@@ -247,9 +235,10 @@ def _property_event(seq: int, layer_key: str, value: int) -> bytes:
             "seq": seq,
             "layer_key": layer_key,
             "event": {
-                "k": "set_sdf_property_fields",
+                "k": "set_sdf_spec_fields",
                 "prim": "/World/Thing",
                 "spec_path": "/World/Thing.userProperties:value",
+                "spec_kind": "attribute",
                 "fields": ["default"],
                 "fragment": fragment.ExportToString(),
                 "removed": False,
@@ -393,11 +382,9 @@ def test_dispatcher_keeps_stage_runtime_events_outside_logical_layers():
     dispatcher = EventDispatcher(receiver=receiver, adapter=adapter)
 
     assert dispatcher.drain_and_apply() == 3
-    logical_layer_identifier = dispatcher.layer_router.layer_for(
-        _STRONG_LAYER
-    ).identifier
+    logical_layer_identifier = dispatcher.layer_router.layer_for(_STRONG_LAYER).identifier
     assert adapter.targets == [
-        (logical_layer_identifier, ["set_sdf_property_fields"]),
+        (logical_layer_identifier, ["set_sdf_spec_fields"]),
         (session_id, [K_LOAD_PAYLOAD, K_SET_STAGE_METADATA]),
     ]
     assert stage.GetSessionLayer().pseudoRoot.GetInfo("upAxis") == "Z"
