@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
+import pytest
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events, ensure_canonical_ops
 from openusdconnect.protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
+    K_SET_CONNECTABLE_CONNECTION,
+    K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
@@ -470,6 +473,282 @@ def test_session_override_syncs_against_shared_base_without_replaying_it(tmp_pat
     assert UsdGeom.Sphere(target.GetPrimAtPath("/World/Ref/Geom")).GetRadiusAttr().Get() == 6.0
     assert target.GetSessionLayer().GetPrimAtPath("/World/Ref/Geom").specifier == Sdf.SpecifierOver
     emitter.cleanup()
+
+
+def test_masked_connectable_default_emits_current_edit_target_opinion():
+    weak = Sdf.Layer.CreateAnonymous("weak-material")
+    weak_stage = Usd.Stage.Open(weak)
+    weak_shader = UsdShade.Shader.Define(weak_stage, "/Surface")
+    weak_shader.CreateIdAttr("UsdPreviewSurface")
+    weak_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.2)
+
+    strong = Sdf.Layer.CreateAnonymous("strong-material")
+    strong.subLayerPaths = [weak.identifier]
+    stage = Usd.Stage.Open(strong)
+    stage.SetEditTarget(Usd.EditTarget(strong))
+    shader = UsdShade.Shader(stage.GetPrimAtPath("/Surface"))
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.8)
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+
+    initial = emitter.snapshot_events()
+    initial_input = next(
+        event
+        for event in initial
+        if event["k"] == K_SET_CONNECTABLE_INPUT and event["prim"] == "/Surface"
+    )
+    assert initial_input["inputs"]["roughness"] == pytest.approx(0.2)
+
+    shader.GetInput("roughness").Set(0.3)
+    changed = emitter.build_events_for_dirty()
+    update = next(
+        event
+        for event in changed
+        if event["k"] == K_SET_CONNECTABLE_INPUT and event["prim"] == "/Surface"
+    )
+    assert update["inputs"]["roughness"] == pytest.approx(0.3)
+    assert shader.GetInput("roughness").Get() == pytest.approx(0.8)
+
+    shader.GetInput("roughness").GetAttr().Clear()
+    cleared = emitter.build_events_for_dirty()
+    exact_clear = next(
+        event
+        for event in cleared
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
+        and event["spec_path"] == "/Surface.inputs:roughness"
+    )
+    assert "default" in exact_clear["fields"]
+
+    target = Usd.Stage.CreateInMemory()
+    apply_events(target, [*initial, *changed, *cleared])
+    assert target.GetAttributeAtPath("/Surface.inputs:roughness").Get() is None
+    emitter.cleanup()
+
+
+def test_connectable_input_does_not_materialize_composed_shader_id():
+    base = Sdf.Layer.CreateAnonymous("base-material")
+    base_stage = Usd.Stage.Open(base)
+    base_shader = UsdShade.Shader.Define(base_stage, "/Surface")
+    base_shader.CreateIdAttr("UsdPreviewSurface")
+
+    local = Sdf.Layer.CreateAnonymous("local-material")
+    local.subLayerPaths = [base.identifier]
+    stage = Usd.Stage.Open(local)
+    shader = UsdShade.Shader(stage.GetPrimAtPath("/Surface"))
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.4)
+    emitter = NoticeEmitter(stage)
+
+    event = next(
+        event
+        for event in emitter.snapshot_events()
+        if event["k"] == K_SET_CONNECTABLE_INPUT and event["prim"] == "/Surface"
+    )
+
+    assert event["info_id"] == ""
+    assert event["inputs"]["roughness"] == pytest.approx(0.4)
+    emitter.cleanup()
+
+
+def test_masked_connectable_connection_emits_current_edit_target_opinion():
+    weak = Sdf.Layer.CreateAnonymous("weak-network")
+    weak_stage = Usd.Stage.Open(weak)
+    for name in ("A", "B", "C", "Surface"):
+        shader = UsdShade.Shader.Define(weak_stage, f"/{name}")
+        shader.CreateIdAttr("TestNode")
+        if name != "Surface":
+            shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+    weak_surface = UsdShade.Shader(weak_stage.GetPrimAtPath("/Surface"))
+    weak_surface.CreateInput("color", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+        UsdShade.Shader(weak_stage.GetPrimAtPath("/A")).GetOutput("out")
+    )
+
+    strong = Sdf.Layer.CreateAnonymous("strong-network")
+    strong.subLayerPaths = [weak.identifier]
+    stage = Usd.Stage.Open(strong)
+    stage.SetEditTarget(Usd.EditTarget(strong))
+    surface = UsdShade.Shader(stage.GetPrimAtPath("/Surface"))
+    surface.GetInput("color").ConnectToSource(
+        UsdShade.Shader(stage.GetPrimAtPath("/B")).GetOutput("out")
+    )
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+
+    initial = emitter.snapshot_events()
+    initial_connection = next(
+        event
+        for event in initial
+        if event["k"] == K_SET_CONNECTABLE_CONNECTION and event["prim"] == "/Surface"
+    )
+    assert initial_connection["connections"]["inputs:color"]["source_prim"] == "/A"
+
+    surface.GetInput("color").ConnectToSource(
+        UsdShade.Shader(stage.GetPrimAtPath("/C")).GetOutput("out")
+    )
+    changed = emitter.build_events_for_dirty()
+    update = next(
+        event
+        for event in changed
+        if event["k"] == K_SET_CONNECTABLE_CONNECTION and event["prim"] == "/Surface"
+    )
+    assert update["connections"]["inputs:color"]["source_prim"] == "/C"
+    composed_source, _name, _type = surface.GetInput("color").GetConnectedSource()
+    assert composed_source.GetPath() == Sdf.Path("/B")
+
+    surface.GetInput("color").DisconnectSource()
+    disconnected = emitter.build_events_for_dirty()
+    disconnect = next(
+        event
+        for event in disconnected
+        if event["k"] == K_SET_CONNECTABLE_CONNECTION and event["prim"] == "/Surface"
+    )
+    assert disconnect["disconnections"] == ["inputs:color"]
+
+    surface.GetInput("color").ClearSources()
+    cleared = emitter.build_events_for_dirty()
+    exact_clear = next(
+        event
+        for event in cleared
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
+        and event["spec_path"] == "/Surface.inputs:color"
+    )
+    assert "connectionPaths" in exact_clear["fields"]
+    composed_source, _name, _type = surface.GetInput("color").GetConnectedSource()
+    assert composed_source.GetPath() == Sdf.Path("/B")
+
+    target_weak = Sdf.Layer.CreateAnonymous("target-weak-network")
+    target_strong = Sdf.Layer.CreateAnonymous("target-strong-network")
+    target_strong.subLayerPaths = [target_weak.identifier]
+    target = Usd.Stage.Open(target_strong)
+    for name in ("A", "B", "C", "Surface"):
+        target_shader = UsdShade.Shader.Define(target, f"/{name}")
+        target_shader.CreateIdAttr("TestNode")
+        if name != "Surface":
+            target_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+    target_surface = UsdShade.Shader(target.GetPrimAtPath("/Surface"))
+    target_surface.CreateInput("color", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+        UsdShade.Shader(target.GetPrimAtPath("/B")).GetOutput("out")
+    )
+    target.SetEditTarget(Usd.EditTarget(target_weak))
+
+    apply_events(target, [*initial, *changed])
+    target_local = target_weak.GetAttributeAtPath("/Surface.inputs:color")
+    assert target_local.connectionPathList.explicitItems == [
+        Sdf.Path("/C.outputs:out")
+    ]
+
+    apply_events(target, disconnected)
+    assert target_local.HasInfo("connectionPaths")
+    assert target_local.connectionPathList.isExplicit
+    assert target_local.connectionPathList.explicitItems == []
+
+    apply_events(target, cleared)
+    assert not target_local.HasInfo("connectionPaths")
+    target_source, _name, _type = target_surface.GetInput("color").GetConnectedSource()
+    assert target_source.GetPath() == Sdf.Path("/B")
+    emitter.cleanup()
+
+
+def test_multi_source_connection_uses_sdf_delta_for_exact_state():
+    source = Usd.Stage.CreateInMemory()
+    for name in ("A", "B", "Surface"):
+        shader = UsdShade.Shader.Define(source, f"/{name}")
+        shader.CreateIdAttr("TestNode")
+        if name != "Surface":
+            shader.CreateOutput("out", Sdf.ValueTypeNames.Float)
+    UsdShade.Shader(source.GetPrimAtPath("/Surface")).CreateInput(
+        "value",
+        Sdf.ValueTypeNames.Float,
+    )
+    input_spec = source.GetRootLayer().GetAttributeAtPath("/Surface.inputs:value")
+    input_spec.connectionPathList.explicitItems = [
+        Sdf.Path("/A.outputs:out"),
+        Sdf.Path("/B.outputs:out"),
+    ]
+    emitter = NoticeEmitter(source)
+
+    events = emitter.snapshot_events()
+    exact = next(
+        event
+        for event in events
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
+        and event["spec_path"] == "/Surface.inputs:value"
+    )
+    assert "connectionPaths" in exact["fields"]
+
+    target = Usd.Stage.CreateInMemory()
+    apply_events(target, events)
+    assert target.GetAttributeAtPath("/Surface.inputs:value").GetConnections() == [
+        Sdf.Path("/A.outputs:out"),
+        Sdf.Path("/B.outputs:out"),
+    ]
+    emitter.cleanup()
+
+
+def test_connectable_overrides_apply_before_weaker_prim_definitions():
+    lookdev_layer = Sdf.Layer.CreateAnonymous("lookdev-material")
+    lookdev = Usd.Stage.Open(lookdev_layer)
+    source_shader = UsdShade.Shader.Define(lookdev, "/Source")
+    source_shader.CreateIdAttr("TestNode")
+    source_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+    surface = UsdShade.Shader.Define(lookdev, "/Surface")
+    surface.CreateIdAttr("UsdPreviewSurface")
+    surface.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.28)
+    surface.CreateInput("color", Sdf.ValueTypeNames.Color3f)
+    lookdev_emitter = NoticeEmitter(lookdev)
+    lookdev_events = lookdev_emitter.snapshot_events()
+
+    shot_layer = Sdf.Layer.CreateAnonymous("shot-material")
+    source_root = Sdf.Layer.CreateAnonymous("source-root")
+    source_root.subLayerPaths = [shot_layer.identifier, lookdev_layer.identifier]
+    source = Usd.Stage.Open(source_root)
+    source.SetEditTarget(Usd.EditTarget(shot_layer))
+    shot_surface = UsdShade.Shader(source.GetPrimAtPath("/Surface"))
+    shot_source = UsdShade.Shader(source.GetPrimAtPath("/Source"))
+    shot_surface.GetInput("roughness").Set(0.08)
+    shot_surface.GetInput("color").ConnectToSource(shot_source.GetOutput("out"))
+    shot_emitter = NoticeEmitter(source)
+    shot_events = shot_emitter.snapshot_events()
+
+    assert any(
+        event["k"] == K_SET_CONNECTABLE_INPUT
+        and event["prim"] == "/Surface"
+        and event["inputs"].get("roughness") == pytest.approx(0.08)
+        for event in shot_events
+    )
+    assert any(
+        event["k"] == K_SET_SDF_SPEC_FIELDS
+        and event["spec_path"] == "/Surface.inputs:color"
+        and "connectionPaths" in event["fields"]
+        for event in shot_events
+    )
+
+    target_shot = Sdf.Layer.CreateAnonymous("target-shot-material")
+    target_lookdev = Sdf.Layer.CreateAnonymous("target-lookdev-material")
+    target_root = Sdf.Layer.CreateAnonymous("target-root")
+    target_root.subLayerPaths = [target_shot.identifier, target_lookdev.identifier]
+    target = Usd.Stage.Open(target_root)
+    target.SetEditTarget(Usd.EditTarget(target_shot))
+    apply_events(target, shot_events)
+
+    target_shot_prim = target_shot.GetPrimAtPath("/Surface")
+    assert target_shot_prim.specifier == Sdf.SpecifierOver
+    assert not target_shot_prim.typeName
+    assert target_shot.GetAttributeAtPath("/Surface.inputs:roughness").default == (
+        pytest.approx(0.08)
+    )
+    assert target_shot.GetAttributeAtPath(
+        "/Surface.inputs:color"
+    ).connectionPathList.explicitItems == [Sdf.Path("/Source.outputs:out")]
+
+    target.SetEditTarget(Usd.EditTarget(target_lookdev))
+    apply_events(target, lookdev_events)
+    target_surface = UsdShade.Shader(target.GetPrimAtPath("/Surface"))
+    assert target_surface.GetInput("roughness").Get() == pytest.approx(0.08)
+    connected, _name, _type = target_surface.GetInput("color").GetConnectedSource()
+    assert connected.GetPath() == Sdf.Path("/Source")
+
+    shot_emitter.cleanup()
+    lookdev_emitter.cleanup()
 
 
 def test_api_schema_override_does_not_define_referenced_child(tmp_path):

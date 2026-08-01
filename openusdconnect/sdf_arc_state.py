@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from pxr import Sdf
+from pxr import Ar, Sdf, Usd
 
+from .asset_paths import (
+    stabilize_layer_asset_paths,
+    transport_asset_identifier,
+    value_contains_asset_path,
+)
 from .protocol_constants import ARC_LIST_POSITIONS
 
 _LIST_OP_FIELDS = (
@@ -15,12 +20,25 @@ _LIST_OP_FIELDS = (
 )
 
 
-def serialize_reference_custom_data(custom_data: dict) -> str:
+def serialize_reference_custom_data(
+    custom_data: dict,
+    *,
+    source_layer: Sdf.Layer | None = None,
+    expression_variables: dict | None = None,
+    resolver_context: Ar.ResolverContext | None = None,
+) -> str:
     """Serialize an Sdf reference customData dictionary without type loss."""
     if not custom_data:
         return ""
     layer = Sdf.Layer.CreateAnonymous("openusdconnect-reference-custom-data")
     layer.customLayerData = custom_data
+    if source_layer is not None and value_contains_asset_path(custom_data):
+        stabilize_layer_asset_paths(
+            layer,
+            source_layer,
+            expression_variables=expression_variables,
+            resolver_context=resolver_context,
+        )
     return layer.ExportToString()
 
 
@@ -127,6 +145,9 @@ def read_arc_state(
     arc_attr: str,
     *,
     absolute_asset_paths: bool = False,
+    expression_variables: dict | None = None,
+    resolver_context: Ar.ResolverContext | None = None,
+    source_stage: Usd.Stage | None = None,
 ) -> dict:
     """Read an exact reference or payload list op from one PrimSpec."""
     path = spec_path if isinstance(spec_path, Sdf.Path) else Sdf.Path(spec_path)
@@ -139,6 +160,9 @@ def read_arc_state(
             "list_op_authored": False,
             "list_op_explicit": False,
         }
+    if source_stage is not None:
+        expression_variables = source_stage.GetMetadata("expressionVariables")
+        resolver_context = source_stage.GetPathResolverContext()
 
     list_op = getattr(spec, arc_attr)
     entries: list[dict] = []
@@ -148,7 +172,12 @@ def read_arc_state(
             entry: dict = {}
             if item.assetPath:
                 asset_path = (
-                    layer.ComputeAbsolutePath(item.assetPath)
+                    transport_asset_identifier(
+                        layer,
+                        item.assetPath,
+                        expression_variables=expression_variables,
+                        resolver_context=resolver_context,
+                    )
                     if absolute_asset_paths
                     else item.assetPath
                 )
@@ -164,6 +193,9 @@ def read_arc_state(
             if references and item.customData:
                 entry["custom_data_fragment"] = serialize_reference_custom_data(
                     item.customData,
+                    source_layer=layer if absolute_asset_paths else None,
+                    expression_variables=expression_variables,
+                    resolver_context=resolver_context,
                 )
             entries.append(entry)
 

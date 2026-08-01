@@ -5,8 +5,9 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable
 
-from pxr import Sdf, Usd
+from pxr import Ar, Sdf, Usd
 
+from .asset_paths import stabilize_layer_asset_paths, value_contains_asset_path
 from .protocol_constants import (
     SDF_LAYER_TOPOLOGY_FIELDS,
     SDF_SPEC_KIND_ATTRIBUTE,
@@ -19,6 +20,7 @@ from .protocol_constants import (
 )
 
 _PROPERTY_DECLARATION_FIELDS = frozenset({"custom", "typeName", "variability"})
+_ASSET_FREE_FIELDS = _PROPERTY_DECLARATION_FIELDS | frozenset({"documentation", "specifier"})
 _REQUIRED_FIELDS = {
     SDF_SPEC_KIND_LAYER: frozenset(),
     SDF_SPEC_KIND_PRIM: frozenset({"specifier"}),
@@ -161,6 +163,15 @@ def _field_value(source_spec, field: str):
     return value
 
 
+def _fields_contain_asset_paths(spec, fields: Iterable[str]) -> bool:
+    for field in fields:
+        if field in _ASSET_FREE_FIELDS or not spec.HasInfo(field):
+            continue
+        if value_contains_asset_path(_field_value(spec, field)):
+            return True
+    return False
+
+
 def _set_composed_field(spec, field: str, value) -> None:
     if field == "timeSamples" and isinstance(spec, Sdf.AttributeSpec):
         _clear_field(spec, field)
@@ -193,6 +204,30 @@ def _composed_property_field_value(prop: Usd.Property, field: str):
         value.explicitItems = prop.GetTargets()
         return value
     return prop.GetMetadata(field)
+
+
+def _composed_asset_source_layer(
+    prop: Usd.Property,
+    stack,
+    fields: Iterable[str],
+) -> tuple[bool, Sdf.Layer | None]:
+    source_layer = None
+    found = False
+    for field in fields:
+        if field in _ASSET_FREE_FIELDS or not prop.HasAuthoredMetadata(field):
+            continue
+        value = _composed_property_field_value(prop, field)
+        if not value_contains_asset_path(value):
+            continue
+        found = True
+        sources = [spec for spec in stack if spec.HasInfo(field)]
+        if not sources or (isinstance(value, dict) and len(sources) > 1):
+            return True, None
+        field_layer = sources[0].layer
+        if source_layer is not None and source_layer != field_layer:
+            return True, None
+        source_layer = field_layer
+    return found, source_layer
 
 
 def _prepare_copy_destination(layer: Sdf.Layer, path: Sdf.Path, kind: str) -> None:
@@ -275,6 +310,9 @@ def serialize_spec_fields(
     spec_path: str | Sdf.Path,
     spec_kind: str,
     fields: Iterable[str],
+    *,
+    expression_variables: dict | None = None,
+    resolver_context: Ar.ResolverContext | None = None,
 ) -> str:
     """Serialize selected fields and required declaration data to USDA."""
     spec_path = _spec_path(spec_path, spec_kind)
@@ -299,6 +337,13 @@ def serialize_spec_fields(
         )
         if spec_kind == SDF_SPEC_KIND_VARIANT_SET and not target_spec.variants:
             Sdf.VariantSpec(target_spec, _FRAGMENT_VARIANT_NAME)
+        if _fields_contain_asset_paths(source_spec, selected):
+            stabilize_layer_asset_paths(
+                scratch,
+                source_layer,
+                expression_variables=expression_variables,
+                resolver_context=resolver_context,
+            )
         return scratch.ExportToString()
     finally:
         scratch.Clear()
@@ -354,13 +399,74 @@ def serialize_composed_property_spec_fields(
                 )
             else:
                 _clear_field(spec, field)
+        asset_fields = [
+            str(field)
+            for field in spec.ListInfoKeys()
+            if value_contains_asset_path(_field_value(spec, str(field)))
+        ]
+        if asset_fields:
+            _found, source_layer = _composed_asset_source_layer(
+                prop,
+                stack,
+                asset_fields,
+            )
+            if source_layer is None:
+                flattened = stage.Flatten()
+                return serialize_spec_fields(
+                    flattened,
+                    event_path,
+                    spec_kind,
+                    selected,
+                )
+            stabilize_layer_asset_paths(
+                scratch,
+                source_layer,
+                resolver_context=stage.GetPathResolverContext(),
+                use_evaluated_paths=True,
+            )
         return scratch.ExportToString()
     finally:
         scratch.Clear()
 
 
+def composed_property_spec_requires_flattening(stage: Usd.Stage, event: dict) -> bool:
+    """Return whether a flat property correction needs USD layer flattening."""
+    requested_kind = event["spec_kind"]
+    if requested_kind not in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
+        return False
+    path = _spec_path(event["spec_path"], requested_kind)
+    if path.ContainsPrimVariantSelection():
+        return True
+
+    prop = stage.GetPropertyAtPath(path)
+    if not prop or not prop.IsValid():
+        return False
+    stack = prop.GetPropertyStack()
+    if not stack:
+        return False
+
+    composed_kind = spec_kind_for_object(stack[0])
+    fields = set(str(field) for field in event.get("fields", ()))
+    if composed_kind != requested_kind or event.get("removed", False):
+        fields.update(
+            str(key)
+            for spec in stack
+            if spec_kind_for_object(spec) == composed_kind
+            for key in spec.ListInfoKeys()
+        )
+
+    found, source_layer = _composed_asset_source_layer(prop, stack, fields)
+    return found and source_layer is None
+
+
 def composed_property_spec_event(stage: Usd.Stage, event: dict) -> dict | None:
     """Build a flat-projection event for a property's composed state."""
+    if composed_property_spec_requires_flattening(stage, event):
+        return composed_layer_spec_event(
+            stage.Flatten(),
+            event,
+        )
+
     requested_kind = event["spec_kind"]
     if requested_kind not in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
         return None
@@ -588,6 +694,7 @@ __all__ = [
     "apply_spec_delta",
     "composed_layer_spec_event",
     "composed_property_spec_event",
+    "composed_property_spec_requires_flattening",
     "event_prim_path",
     "fragment_authored_fields",
     "merge_spec_events",

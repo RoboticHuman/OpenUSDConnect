@@ -176,9 +176,22 @@ class TestConnectableInputOnLights:
 
 
 class TestSafetyFix:
-    """B9: an empty info_id with a missing prim must NOT author a phantom Shader."""
+    """B9: an empty info_id must not author a phantom Shader definition."""
 
-    def test_missing_prim_skips_safely(self, stage):
+    def test_missing_prim_without_inputs_remains_absent(self, stage):
+        apply_event(
+            stage,
+            {
+                "k": K_SET_CONNECTABLE_INPUT,
+                "prim": "/Missing",
+                "info_id": "",
+                "inputs": {},
+                "input_types": {},
+            },
+        )
+        assert not stage.GetPrimAtPath("/Missing")
+
+    def test_missing_prim_authors_untyped_override(self, stage):
         apply_event(
             stage,
             {
@@ -189,9 +202,12 @@ class TestSafetyFix:
                 "input_types": {"intensity": "float"},
             },
         )
-        # No phantom def authored.
         p = stage.GetPrimAtPath("/Missing")
-        assert not p or not p.IsValid()
+        assert p.IsValid()
+        assert not p.GetTypeName()
+        spec = stage.GetRootLayer().GetPrimAtPath("/Missing")
+        assert spec.specifier == Sdf.SpecifierOver
+        assert stage.GetAttributeAtPath("/Missing.inputs:intensity").Get() == pytest.approx(1.0)
 
     def test_missing_prim_with_info_id_creates_shader(self, stage):
         """Backwards compat: legacy shader fallback path still works when

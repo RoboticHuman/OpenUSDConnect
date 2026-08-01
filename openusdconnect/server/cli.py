@@ -14,6 +14,8 @@ import signal
 import threading
 from dataclasses import dataclass
 
+from pxr import Ar
+
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
 
@@ -44,6 +46,7 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 7200
     base_usd_path: str | None = None
+    resolver_context: Ar.ResolverContext | None = None
     log_path: str = "usd_events.db"
     compact: bool = False
     export_diff: str | None = None
@@ -89,11 +92,28 @@ def _validate_vfs_name(name: str) -> str:
     return name
 
 
+def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | None:
+    if not values:
+        return None
+    configurations: list[tuple[str, str]] = []
+    for value in values:
+        if not value:
+            raise ValueError("--resolver-context values must be non-empty")
+        scheme, separator, configuration = value.partition(":")
+        is_windows_path = len(scheme) == 1 and configuration.startswith(("/", "\\"))
+        if separator and not is_windows_path:
+            configurations.append((scheme, configuration))
+        else:
+            configurations.append(("", value))
+    return Ar.GetResolver().CreateContextFromStrings(configurations)
+
+
 def run_server(config: ServerConfig | None = None):
     """Start the server (blocking)."""
     config = config or ServerConfig()
     sync_server = UsdSyncServer(
         base_usd_path=config.base_usd_path,
+        resolver_context=config.resolver_context,
         log_path=config.log_path,
         op_cache_size=config.op_cache_size,
         department_priority=config.department_priority,
@@ -225,6 +245,8 @@ def run_server(config: ServerConfig | None = None):
     LOG.info("Event log: %s", config.log_path)
     if config.base_usd_path:
         LOG.info("Base USD: %s", config.base_usd_path)
+    if config.resolver_context is not None:
+        LOG.info("Using an explicit asset resolver context")
     if config.export_diff:
         LOG.info("Will export diff to %s on shutdown", config.export_diff)
     try:
@@ -243,6 +265,16 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7200)
     ap.add_argument("--base", default=None, help="Base USD file to load")
+    ap.add_argument(
+        "--resolver-context",
+        action="append",
+        default=None,
+        metavar="[SCHEME:]CONFIG",
+        help=(
+            "Create the server stage's ArResolverContext from this configuration. "
+            "May be specified more than once for multiple resolvers."
+        ),
+    )
     ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
     ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
     ap.add_argument(
@@ -426,6 +458,7 @@ def main(argv: list[str] | None = None):
             host=args.host,
             port=args.port,
             base_usd_path=args.base,
+            resolver_context=_create_resolver_context(args.resolver_context),
             log_path=args.log,
             compact=args.compact,
             export_diff=args.export_diff,

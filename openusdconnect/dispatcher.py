@@ -612,6 +612,22 @@ class EventDispatcher:
         normalized = requested.replace("\\", "/")
         return any(candidate.replace("\\", "/") == normalized for candidate in candidates)
 
+    @staticmethod
+    def _refresh_resolver_context_suppressed(stage: Usd.Stage) -> None:
+        from pxr import Ar
+
+        Ar.GetResolver().RefreshContext(stage.GetPathResolverContext())
+
+    def refresh_resolver_context(self) -> bool:
+        """Refresh the receiving stage's bound asset resolver context."""
+        stage = self._asset_dependency_stage()
+        if stage is None:
+            return False
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            self._refresh_resolver_context_suppressed(stage)
+        return True
+
     def refresh_asset_dependency(
         self,
         asset_path: str | None = None,
@@ -634,34 +650,34 @@ class EventDispatcher:
                 "pending": [],
             }
 
-        self._discard_stale_asset_events(stage)
-        tracked = [
-            event
-            for event in self._asset_events.values()
-            if any(
-                (
-                    not resolved_path
-                    if asset_path is None
-                    else self._asset_path_matches(
-                        asset_path,
-                        authored_path,
-                        identifier,
-                        resolved_path,
-                    )
-                )
-                for authored_path, identifier, resolved_path in event.dependencies
-            )
-        ]
-        if not tracked:
-            return {
-                "status": "not_tracked",
-                "reapplied": 0,
-                "affected_prims": [],
-                "pending": list(self.pending_asset_dependencies),
-            }
-
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
+            self._refresh_resolver_context_suppressed(stage)
+            self._discard_stale_asset_events(stage)
+            tracked = [
+                event
+                for event in self._asset_events.values()
+                if any(
+                    (
+                        not resolved_path
+                        if asset_path is None
+                        else self._asset_path_matches(
+                            asset_path,
+                            authored_path,
+                            identifier,
+                            resolved_path,
+                        )
+                    )
+                    for authored_path, identifier, resolved_path in event.dependencies
+                )
+            ]
+            if not tracked:
+                return {
+                    "status": "not_tracked",
+                    "reapplied": 0,
+                    "affected_prims": [],
+                    "pending": list(self.pending_asset_dependencies),
+                }
             return self._refresh_asset_dependency_suppressed(
                 stage,
                 asset_path,
@@ -674,16 +690,9 @@ class EventDispatcher:
         asset_path: str | None,
         tracked: list[_TrackedAssetEvent],
     ) -> AssetDependencyRefreshResult:
-        from pxr import Ar, Usd
+        from pxr import Usd
 
         from .event_apply import apply_events, atomic_apply
-
-        # RefreshContext must run while its context is unbound. A conforming
-        # custom resolver may emit ResolverChanged here, allowing USD to update
-        # dependencies that were already composed successfully. The dispatcher
-        # emitter is suppressed around this entire method because that notice
-        # can synchronously recompose the stage.
-        Ar.GetResolver().RefreshContext(stage.GetPathResolverContext())
 
         ready: list[_TrackedAssetEvent] = []
         explicitly_selected = {id(event) for event in tracked}

@@ -6,6 +6,7 @@ import openusdconnect.server.cli as server_cli
 from openusdconnect.server.cli import (
     ServerConfig,
     VfsConfig,
+    _create_resolver_context,
     _default_advertise_host,
     _host_for_url,
     _normalize_vfs_share,
@@ -44,6 +45,29 @@ def test_validate_vfs_name_accepts_file_name():
 def test_validate_vfs_name_rejects_paths(name):
     with pytest.raises(ValueError, match="vfs-name"):
         _validate_vfs_name(name)
+
+
+def test_create_resolver_context_combines_primary_and_uri_configuration(monkeypatch):
+    class Resolver:
+        def CreateContextFromStrings(self, configurations):
+            return configurations
+
+    monkeypatch.setattr(server_cli.Ar, "GetResolver", Resolver)
+
+    result = _create_resolver_context(
+        ["/show/config.json", "asset:/show/versions.json", r"C:\show\config.json"]
+    )
+
+    assert result == [
+        ("", "/show/config.json"),
+        ("asset", "/show/versions.json"),
+        ("", r"C:\show\config.json"),
+    ]
+
+
+def test_create_resolver_context_rejects_empty_configuration():
+    with pytest.raises(ValueError, match="non-empty"):
+        _create_resolver_context([""])
 
 
 def test_server_config_disables_vfs_by_default():

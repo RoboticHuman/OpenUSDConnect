@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import bisect
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade
 
+from .asset_paths import transport_asset_identifier, value_contains_asset_path
 from .connectable_attrs import (
     USDSHADE_INPUT_PREFIX,
     USDSHADE_OUTPUT_PREFIX,
@@ -330,7 +331,10 @@ def _values_equal(a, b) -> bool:
     return a == b
 
 
-def _usd_value_to_python(val):
+def _usd_value_to_python(
+    val,
+    asset_path_transform: Callable[[str], str] | None = None,
+):
     """Convert a USD attribute value to a codec-friendly Python type.
 
     Handles scalars, GfVec types, and VtArrays (including arrays of vectors).
@@ -345,11 +349,10 @@ def _usd_value_to_python(val):
     # Simple scalars
     if isinstance(val, (int, float, bool, str)):
         return val
-    # Sdf.AssetPath → prefer the resolved absolute path so the receiver
-    # doesn't have to recover the source layer's anchor to make sense of
-    # a bare relative string.  Falls back to the authored form when the
-    # source layer's resolver couldn't resolve (e.g. in-memory stages).
     if isinstance(val, Sdf.AssetPath):
+        if asset_path_transform is not None:
+            identifier = val.evaluatedPath or val.authoredPath or val.path
+            return asset_path_transform(identifier)
         return val.resolvedPath or val.path
     # GfVec types → list of floats (small, not worth numpy overhead)
     for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
@@ -376,6 +379,10 @@ def _usd_value_to_python(val):
     # Detected by type name ending in "Array" — no shared base class in pxr.
     # Convert to numpy directly — pxr VtArrays support the buffer protocol.
     type_name = type(val).__name__
+    if isinstance(val, Sdf.AssetPathArray):
+        return [
+            _usd_value_to_python(elem, asset_path_transform=asset_path_transform) for elem in val
+        ]
     if type_name.endswith("Array"):
         try:
             return np.array(val)
@@ -383,7 +390,10 @@ def _usd_value_to_python(val):
             # Fallback for exotic array types — iterate element-by-element
             result = []
             for elem in val:
-                converted = _usd_value_to_python(elem)
+                converted = _usd_value_to_python(
+                    elem,
+                    asset_path_transform=asset_path_transform,
+                )
                 if converted is None:
                     return None
                 result.append(converted)
@@ -398,6 +408,33 @@ def _usd_value_to_python(val):
             return coerce(val)
         except (TypeError, ValueError):
             continue
+    return None
+
+
+def _usd_value_to_transport_python(
+    stage: Usd.Stage,
+    source_layer: Sdf.Layer,
+    value,
+):
+    if not value_contains_asset_path(value):
+        return _usd_value_to_python(value)
+    expression_variables = stage.GetMetadata("expressionVariables")
+    resolver_context = stage.GetPathResolverContext()
+    return _usd_value_to_python(
+        value,
+        asset_path_transform=lambda identifier: transport_asset_identifier(
+            source_layer,
+            identifier,
+            expression_variables=expression_variables,
+            resolver_context=resolver_context,
+        ),
+    )
+
+
+def _attribute_default_source_layer(attr: Usd.Attribute) -> Sdf.Layer | None:
+    for spec in attr.GetPropertyStack():
+        if isinstance(spec, Sdf.AttributeSpec) and spec.HasDefaultValue():
+            return spec.layer
     return None
 
 
@@ -549,7 +586,12 @@ def _read_composition_arcs(stage, prim_path, arc_attr):
             # them: receivers compose onto stages with different (often
             # in-memory) anchors. Internal references (empty path) and
             # already-absolute paths pass through unchanged.
-            asset_path = spec.layer.ComputeAbsolutePath(item.assetPath)
+            asset_path = transport_asset_identifier(
+                spec.layer,
+                item.assetPath,
+                expression_variables=stage.GetMetadata("expressionVariables"),
+                resolver_context=stage.GetPathResolverContext(),
+            )
             result.append((asset_path, str(item.primPath)))
     return result
 
@@ -634,6 +676,7 @@ def _read_edit_target_arc_state(stage, prim_path, arc_attr):
         spec_path,
         arc_attr,
         absolute_asset_paths=True,
+        source_stage=stage,
     )
 
 
@@ -847,6 +890,117 @@ def read_usdshade_connectable(stage, prim_path):
     return container_kind, info_id, inputs, input_types, connections
 
 
+def _connection_from_local_spec(stage: Usd.Stage, spec: Sdf.AttributeSpec):
+    list_op = spec.GetInfo("connectionPaths")
+    paths = list(list_op.ApplyOperations([]) or ())
+    if not paths:
+        return None
+    if not list_op.isExplicit or len(paths) > 1:
+        LOG.debug(
+            "Projecting the first source of UsdShade connection %s through the "
+            "specialized event; its Sdf field delta carries the complete list op",
+            spec.path,
+        )
+
+    path = paths[0]
+    if not path.IsAbsolutePath():
+        path = path.MakeAbsolutePath(spec.path.GetPrimPath())
+    path = stage.GetEditTarget().GetMapFunction().MapSourceToTarget(path)
+    if path.isEmpty:
+        LOG.debug(
+            "UsdShade connection %s has no specialized stage-path projection",
+            spec.path,
+        )
+        return None
+    path = path.StripAllVariantSelections()
+    source_attr = ConnectableAttr.from_qualified_name(str(path.name))
+    if source_attr is None:
+        LOG.debug(
+            "UsdShade connection source %s has no specialized representation",
+            path,
+        )
+        return None
+    return {
+        "source_prim": str(path.GetPrimPath()),
+        "source_attr": source_attr.qualified_name,
+    }
+
+
+def _connection_spec_needs_sdf(spec: Sdf.AttributeSpec) -> bool:
+    list_op = spec.GetInfo("connectionPaths")
+    paths = list(list_op.ApplyOperations([]) or ())
+    if not list_op.isExplicit or len(paths) > 1:
+        return True
+    return bool(paths and ConnectableAttr.from_qualified_name(str(paths[0].name)) is None)
+
+
+def _property_spec_is_untyped_over(spec: Sdf.PropertySpec) -> bool:
+    owner = spec.owner
+    if isinstance(owner, Sdf.VariantSpec):
+        owner = owner.primSpec
+    return owner.specifier == Sdf.SpecifierOver and not owner.typeName
+
+
+def _read_edit_target_usdshade_connectable(
+    stage: Usd.Stage,
+    prim_path: str,
+    property_sources: dict[str, dict[str, Sdf.PropertySpec]],
+):
+    """Read UsdShade opinions owned by the current edit-target layer."""
+    prim = stage.GetPrimAtPath(prim_path)
+    container_kind = _connectable_kind(prim)
+    if not container_kind:
+        return "", "", {}, {}, {}
+
+    if container_kind == "shader":
+        shader = UsdShade.Shader(prim)
+        composed_info_id = shader.GetIdAttr().Get() or ""
+        info_id = ""
+        local_id = property_sources.get("info:id", {}).get("default")
+        if local_id is not None and local_id.HasDefaultValue():
+            value = local_id.default
+            if not isinstance(value, Sdf.ValueBlock):
+                info_id = str(value)
+        if not composed_info_id and not info_id:
+            return "", "", {}, {}, {}
+    else:
+        info_id = ""
+
+    inputs: dict = {}
+    input_types: dict = {}
+    connections: dict = {}
+    for qualified_name, field_sources in property_sources.items():
+        port = ConnectableAttr.from_qualified_name(qualified_name)
+        if port is None:
+            continue
+
+        connection_source = field_sources.get("connectionPaths")
+        if isinstance(connection_source, Sdf.AttributeSpec):
+            connections[qualified_name] = _connection_from_local_spec(
+                stage,
+                connection_source,
+            )
+
+        if not port.is_input:
+            continue
+        value_source = field_sources.get("default")
+        if not isinstance(value_source, Sdf.AttributeSpec) or not value_source.HasDefaultValue():
+            continue
+        value = value_source.default
+        if isinstance(value, Sdf.ValueBlock):
+            continue
+        converted = _usd_value_to_transport_python(
+            stage,
+            value_source.layer,
+            value,
+        )
+        if converted is not None:
+            inputs[port.base_name] = converted
+            input_types[port.base_name] = str(value_source.typeName)
+
+    return container_kind, info_id, inputs, input_types, connections
+
+
 # ---------------------------------------------------------------------------
 # PrimChannel - snapshot/diff/emit pipeline for one prim state slice
 # ---------------------------------------------------------------------------
@@ -890,6 +1044,10 @@ class PrimChannel:
     # Composition arcs and load state arrive as resync notices, not ordinary
     # info-only attr changes. Such channels can skip pure attr-only cycles.
     reads_on_resync_only: bool = False
+
+    # Only channels that need exact edit-target property specs pay for the
+    # local-source-aware read path.
+    uses_local_property_sources: bool = False
 
     def applies_to(self, prim) -> bool:
         """Does this channel apply to this prim at all? Cheap predicate."""
@@ -1067,9 +1225,25 @@ class ConnectableChannel(PrimChannel):
     cache_key = _C_CONNECTABLE
     watched_attrs = ("info:id",)
     watched_prefixes = (USDSHADE_INPUT_PREFIX, USDSHADE_OUTPUT_PREFIX)
+    uses_local_property_sources = True
 
     def read(self, stage, prim_path):
         kind, info_id, inputs, types, conns = read_usdshade_connectable(stage, prim_path)
+        if not kind:
+            return None
+        return {
+            "info_id": info_id,
+            "inputs": inputs,
+            "types": types,
+            "connections": conns,
+        }
+
+    def read_local(self, stage, prim_path, property_sources):
+        kind, info_id, inputs, types, conns = _read_edit_target_usdshade_connectable(
+            stage,
+            prim_path,
+            property_sources,
+        )
         if not kind:
             return None
         return {
@@ -1092,11 +1266,14 @@ class ConnectableChannel(PrimChannel):
         # use the same connectable path with an empty id.
         info_id_changed = bool(info_id) and info_id != cached.get("info_id")
 
-        new_conns: dict = {}
-        removed_conns: list = []
-        if current["connections"] != last_conns:
-            new_conns = {k: v for k, v in current["connections"].items() if v != last_conns.get(k)}
-            removed_conns = [k for k in last_conns if k not in current["connections"]]
+        changed_conns = {
+            name: value
+            for name, value in current["connections"].items()
+            if name not in last_conns or value != last_conns[name]
+        }
+        new_conns = {name: value for name, value in changed_conns.items() if value is not None}
+        removed_conns = [name for name in last_conns if name not in current["connections"]]
+        removed_conns.extend(name for name, value in changed_conns.items() if value is None)
 
         inputs_emit = changed_inputs or info_id_changed
         conns_emit = new_conns or removed_conns
@@ -1547,9 +1724,11 @@ def _resync_connectable_cache(emitter, prim_path):
     Used by both connectable input and connection invalidators since they
     share one read and one cache entry now.
     """
-    kind, info_id, inputs, types, connections = read_usdshade_connectable(
+    _fields, property_sources = emitter._local_property_state(prim_path)
+    kind, info_id, inputs, types, connections = _read_edit_target_usdshade_connectable(
         emitter.stage,
         prim_path,
+        property_sources,
     )
     if kind:
         emitter._prim_cache.setdefault(prim_path, {})[_C_CONNECTABLE] = {
@@ -1595,16 +1774,8 @@ def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
     # Default-time path: refresh just the attrs this event mutated so a
     # local edit back to the server's value doesn't re-emit. Bounded by
     # the size of ev["attrs"]; no full prim scan.
-    prim = emitter.stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
     last_attrs = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_GPRIM_ATTRS, {})
-    for name in ev.get("attrs", {}):
-        attr = prim.GetAttribute(name)
-        if attr and attr.IsValid():
-            val = _usd_value_to_python(attr.Get())
-            if val is not None:
-                last_attrs[name] = val
+    last_attrs.update(ev.get("attrs", {}))
 
 
 def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
@@ -2412,10 +2583,14 @@ class NoticeEmitter:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
+            _fields, property_sources = self._local_property_state(cp)
             for channel in self._channels:
                 if not channel.applies_to(child):
                     continue
-                current = channel.read(stage, cp)
+                if channel.uses_local_property_sources:
+                    current = channel.read_local(stage, cp, property_sources)
+                else:
+                    current = channel.read(stage, cp)
                 if current is None:
                     continue
                 pc[channel.cache_key] = current
@@ -2425,7 +2600,25 @@ class NoticeEmitter:
             for attr in child.GetAttributes():
                 name = attr.GetName()
                 if attr.IsAuthored() and self._attr_filter(name):
-                    val = _usd_value_to_python(attr.Get())
+                    value_source = property_sources.get(name, {}).get("default")
+                    if (
+                        isinstance(value_source, Sdf.AttributeSpec)
+                        and value_source.HasDefaultValue()
+                    ):
+                        value = value_source.default
+                        source_layer = value_source.layer
+                    else:
+                        value = attr.Get()
+                        source_layer = self.stage.GetEditTarget().GetLayer()
+                        if value_contains_asset_path(value):
+                            source_layer = _attribute_default_source_layer(attr)
+                            if source_layer is None:
+                                continue
+                    val = _usd_value_to_transport_python(
+                        self.stage,
+                        source_layer,
+                        value,
+                    )
                     if val is not None:
                         gprim_snapshot[name] = val
             if gprim_snapshot:
@@ -2781,6 +2974,18 @@ class NoticeEmitter:
                     and not (set(fields) & (_SDF_ATTRIBUTE_VALUE_FIELDS | {"connectionPaths"}))
                 ):
                     result.update(set(fields) & _SDF_DECLARATION_FIELDS)
+                connection_source = field_sources.get("connectionPaths")
+                # An untyped over can arrive before its weaker defining prim.
+                # Its exact field preserves the edge without inventing port types.
+                if (
+                    "connectionPaths" in fields
+                    and isinstance(connection_source, Sdf.AttributeSpec)
+                    and (
+                        _connection_spec_needs_sdf(connection_source)
+                        or _property_spec_is_untyped_over(connection_source)
+                    )
+                ):
+                    result.add("connectionPaths")
                 return result
             if self._sdf_owns_attribute_value(prim, name):
                 return set(fields)
@@ -2923,6 +3128,8 @@ class NoticeEmitter:
         candidates.update(key for key in self._sdf_spec_fields if _scan_mode(Sdf.Path(key[1])))
 
         events: list[dict] = []
+        expression_variables = self.stage.GetMetadata("expressionVariables")
+        resolver_context = self.stage.GetPathResolverContext()
         for spec_kind, path_string in candidates:
             key = (spec_kind, path_string)
             path = Sdf.Path(path_string)
@@ -2997,6 +3204,8 @@ class NoticeEmitter:
                             path,
                             spec_kind,
                             fields,
+                            expression_variables=expression_variables,
+                            resolver_context=resolver_context,
                         ),
                         "removed": False,
                     }
@@ -3666,7 +3875,14 @@ class NoticeEmitter:
                 current = channel.read_scoped(self.stage, prim_path, dirty_attrs)
                 partial = current is not None
             if current is None:
-                current = channel.read(self.stage, prim_path)
+                if channel.uses_local_property_sources:
+                    current = channel.read_local(
+                        self.stage,
+                        prim_path,
+                        local_property_sources,
+                    )
+                else:
+                    current = channel.read(self.stage, prim_path)
             if current is None:
                 continue
             _emit_channel_events(channel, prim_path, current, pc, events, partial)
@@ -3746,7 +3962,22 @@ class NoticeEmitter:
             attr = prim.GetAttribute(attr_name)
             if not attr or not attr.IsValid():
                 continue
-            val = _usd_value_to_python(attr.Get())
+            value_source = local_property_sources.get(attr_name, {}).get("default")
+            if isinstance(value_source, Sdf.AttributeSpec) and value_source.HasDefaultValue():
+                value = value_source.default
+                source_layer = value_source.layer
+            else:
+                value = attr.Get()
+                source_layer = self.stage.GetEditTarget().GetLayer()
+                if value_contains_asset_path(value):
+                    source_layer = _attribute_default_source_layer(attr)
+                    if source_layer is None:
+                        continue
+            val = _usd_value_to_transport_python(
+                self.stage,
+                source_layer,
+                value,
+            )
             if val is None:
                 continue
             if not _values_equal(val, last_attrs.get(attr_name)):
@@ -4079,11 +4310,20 @@ class NoticeEmitter:
                 and not self._sdf_owns_attribute_value(prim, n)
             ]
         events: list[dict] = []
+
+        def _convert(value):
+            return _usd_value_to_transport_python(self.stage, layer, value)
+
         for name in attr_names:
             attr = prim.GetAttribute(name)
             if not attr or not attr.IsValid() or not _has_layer_samples(layer, attr):
                 continue
-            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(name), layer)
+            new_cache, dirty = _diff_time_samples(
+                attr,
+                ts_cache.get(name),
+                layer,
+                convert=_convert,
+            )
             if dirty:
                 primvar_meta, attr_interp = _attr_event_metadata(prim, name, attr)
                 for t, val in dirty:
@@ -4114,6 +4354,10 @@ class NoticeEmitter:
         if not kind:
             return []
         info_id = UsdShade.Shader(prim).GetIdAttr().Get() or "" if kind == "shader" else ""
+
+        def _convert(value):
+            return _usd_value_to_transport_python(self.stage, layer, value)
+
         events: list[dict] = []
         for inp in UsdShade.ConnectableAPI(prim).GetInputs():
             attr = inp.GetAttr()
@@ -4126,7 +4370,12 @@ class NoticeEmitter:
             if not full_scan and cache_key not in dirty_attr_names:
                 continue
             type_name = str(attr.GetTypeName())
-            new_cache, dirty = _diff_time_samples(attr, ts_cache.get(cache_key), layer)
+            new_cache, dirty = _diff_time_samples(
+                attr,
+                ts_cache.get(cache_key),
+                layer,
+                convert=_convert,
+            )
             for t, val in dirty:
                 events.append(
                     {

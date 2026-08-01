@@ -1,0 +1,241 @@
+"""Asset identifiers copied between USD layers."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from contextlib import nullcontext
+
+from pxr import Ar, Sdf
+
+LOG = logging.getLogger(__name__)
+
+
+def value_contains_asset_path(value) -> bool:
+    """Return whether an Sdf field value contains an asset identifier."""
+    if isinstance(value, Sdf.AssetPath):
+        return True
+    if isinstance(value, Sdf.Reference):
+        return bool(value.assetPath) or value_contains_asset_path(value.customData)
+    if isinstance(value, Sdf.Payload):
+        return bool(value.assetPath)
+    if isinstance(value, dict):
+        return any(value_contains_asset_path(item) for item in value.values())
+
+    if isinstance(value, Sdf.AssetPathArray):
+        return True
+    if isinstance(value, (Sdf.ReferenceListOp, Sdf.PayloadListOp)):
+        return any(
+            value_contains_asset_path(item)
+            for bucket in (
+                value.explicitItems,
+                value.addedItems,
+                value.prependedItems,
+                value.appendedItems,
+                value.deletedItems,
+                value.orderedItems,
+            )
+            for item in bucket
+        )
+    if isinstance(value, (list, tuple)):
+        return any(value_contains_asset_path(item) for item in value)
+    return False
+
+
+def _evaluate_asset_expression(
+    identifier: str,
+    expression_variables: dict | None,
+) -> tuple[str, bool]:
+    if not Sdf.VariableExpression.IsExpression(identifier):
+        return identifier, True
+
+    expression = Sdf.VariableExpression(identifier)
+    errors = expression.GetErrors()
+    if errors:
+        LOG.warning("Invalid asset-path expression %r: %s", identifier, "; ".join(errors))
+        return identifier, False
+
+    result = expression.Evaluate(expression_variables or {})
+    if result.errors or not isinstance(result.value, str):
+        detail = "; ".join(result.errors) or "expression did not evaluate to a string"
+        LOG.warning("Could not evaluate asset-path expression %r: %s", identifier, detail)
+        return identifier, False
+    return result.value, True
+
+
+def transport_asset_identifier(
+    source_layer: Sdf.Layer,
+    identifier: str,
+    *,
+    expression_variables: dict | None = None,
+    resolver_context: Ar.ResolverContext | None = None,
+) -> str:
+    """Return an identifier that keeps its meaning when authored elsewhere."""
+    if not identifier:
+        return ""
+    evaluated, can_anchor = _evaluate_asset_expression(identifier, expression_variables)
+    if source_layer.anonymous or not can_anchor:
+        return evaluated
+    binder = (
+        Ar.ResolverContextBinder(resolver_context)
+        if resolver_context is not None
+        else nullcontext()
+    )
+    with binder:
+        return source_layer.ComputeAbsolutePath(evaluated)
+
+
+def _transform_asset_paths(
+    value,
+    transform: Callable[[str], str],
+    *,
+    use_evaluated_paths: bool,
+):
+    if isinstance(value, Sdf.AssetPath):
+        identifier = (
+            value.evaluatedPath or value.path
+            if use_evaluated_paths
+            else value.authoredPath or value.path
+        )
+        return Sdf.AssetPath(transform(identifier))
+    if isinstance(value, Sdf.Reference):
+        return Sdf.Reference(
+            transform(value.assetPath) if value.assetPath else "",
+            value.primPath,
+            value.layerOffset,
+            customData=_transform_asset_paths(
+                value.customData,
+                transform,
+                use_evaluated_paths=use_evaluated_paths,
+            ),
+        )
+    if isinstance(value, Sdf.Payload):
+        return Sdf.Payload(
+            transform(value.assetPath) if value.assetPath else "",
+            value.primPath,
+            value.layerOffset,
+        )
+    if isinstance(value, dict):
+        return {
+            key: _transform_asset_paths(
+                item,
+                transform,
+                use_evaluated_paths=use_evaluated_paths,
+            )
+            for key, item in value.items()
+        }
+
+    if isinstance(value, Sdf.AssetPathArray):
+        return type(value)(
+            [
+                _transform_asset_paths(
+                    item,
+                    transform,
+                    use_evaluated_paths=use_evaluated_paths,
+                )
+                for item in value
+            ]
+        )
+    if isinstance(value, (Sdf.ReferenceListOp, Sdf.PayloadListOp)):
+        result = type(value)()
+        if value.isExplicit:
+            result.explicitItems = [
+                _transform_asset_paths(
+                    item,
+                    transform,
+                    use_evaluated_paths=use_evaluated_paths,
+                )
+                for item in value.explicitItems
+            ]
+            return result
+        for bucket in (
+            "addedItems",
+            "prependedItems",
+            "appendedItems",
+            "deletedItems",
+            "orderedItems",
+        ):
+            setattr(
+                result,
+                bucket,
+                [
+                    _transform_asset_paths(
+                        item,
+                        transform,
+                        use_evaluated_paths=use_evaluated_paths,
+                    )
+                    for item in getattr(value, bucket)
+                ],
+            )
+        return result
+    if isinstance(value, list):
+        return [
+            _transform_asset_paths(
+                item,
+                transform,
+                use_evaluated_paths=use_evaluated_paths,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _transform_asset_paths(
+                item,
+                transform,
+                use_evaluated_paths=use_evaluated_paths,
+            )
+            for item in value
+        )
+    return value
+
+
+def stabilize_layer_asset_paths(
+    layer: Sdf.Layer,
+    source_layer: Sdf.Layer,
+    *,
+    expression_variables: dict | None = None,
+    resolver_context: Ar.ResolverContext | None = None,
+    use_evaluated_paths: bool = False,
+) -> None:
+    """Re-anchor every asset value in *layer* to its owning source layer."""
+
+    def _transform(identifier: str) -> str:
+        return transport_asset_identifier(
+            source_layer,
+            identifier,
+            expression_variables=expression_variables,
+        )
+
+    binder = (
+        Ar.ResolverContextBinder(resolver_context)
+        if resolver_context is not None
+        else nullcontext()
+    )
+    # Bind once for the whole fragment; asset arrays may contain many paths.
+    with binder:
+        specs = []
+        layer.Traverse(
+            Sdf.Path.absoluteRootPath,
+            lambda path: specs.append(layer.GetObjectAtPath(path)),
+        )
+        for spec in specs:
+            if spec is None:
+                continue
+            for field in tuple(spec.ListInfoKeys()):
+                value = spec.GetInfo(field)
+                if value_contains_asset_path(value):
+                    spec.SetInfo(
+                        field,
+                        _transform_asset_paths(
+                            value,
+                            _transform,
+                            use_evaluated_paths=use_evaluated_paths,
+                        ),
+                    )
+
+
+__all__ = [
+    "stabilize_layer_asset_paths",
+    "transport_asset_identifier",
+    "value_contains_asset_path",
+]

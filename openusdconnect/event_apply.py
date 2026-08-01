@@ -622,9 +622,9 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
     Shader, NodeGraph, Material, and UsdLux lights all expose interface
     inputs through ConnectableAPI. When ``info_id`` is non-empty, the
     target is treated as a Shader (creating one if absent for the legacy
-    Sdr-shader fallback path). When ``info_id`` is empty, the prim must
-    already exist — we never author a phantom ``def Shader`` opinion on
-    top of a real SphereLight/NodeGraph/Material spec on a weaker layer.
+    Sdr-shader fallback path). When ``info_id`` is empty and the composed prim
+    is not available yet, an untyped ``over`` carries the input opinion without
+    claiming the weaker prim's schema type.
     """
     info_id = ev.get("info_id", "")
     if info_id:
@@ -639,9 +639,9 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
     else:
         prim = stage.GetPrimAtPath(ev["prim"])
         if not prim or not prim.IsValid():
-            # Connectable input arrived before its ensure_prim; should not
-            # happen given the create-before-modify apply order. Skip safely.
-            return
+            if not ev.get("inputs"):
+                return
+            prim = stage.OverridePrim(ev["prim"])
 
     connectable = UsdShade.ConnectableAPI(prim)
     inputs = ev.get("inputs", {})

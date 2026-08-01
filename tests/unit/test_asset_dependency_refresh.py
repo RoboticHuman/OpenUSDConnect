@@ -193,6 +193,42 @@ def test_pending_dependencies_follow_namespace_and_arc_lifecycle(tmp_path):
     assert dispatcher.pending_asset_dependencies == ()
 
 
+def test_untracked_asset_refresh_still_refreshes_resolver_context(tmp_path, monkeypatch):
+    stage = _stage_with_search_context(tmp_path)
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=UsdStageAdapter(stage),
+    )
+    refreshed = []
+    monkeypatch.setattr(
+        dispatcher,
+        "_refresh_resolver_context_suppressed",
+        refreshed.append,
+    )
+
+    result = dispatcher.refresh_asset_dependency("asset:Texture/latest.tx")
+
+    assert result["status"] == "not_tracked"
+    assert refreshed == [stage]
+
+
+def test_explicit_resolver_context_refresh_needs_no_tracked_arc(tmp_path, monkeypatch):
+    stage = _stage_with_search_context(tmp_path)
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=UsdStageAdapter(stage),
+    )
+    refreshed = []
+    monkeypatch.setattr(
+        dispatcher,
+        "_refresh_resolver_context_suppressed",
+        refreshed.append,
+    )
+
+    assert dispatcher.refresh_resolver_context()
+    assert refreshed == [stage]
+
+
 def test_refresh_does_not_overwrite_newer_local_arc_authoring(tmp_path):
     asset_directory = tmp_path / "resolver-root"
     asset_directory.mkdir()

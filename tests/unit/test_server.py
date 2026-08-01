@@ -7,7 +7,7 @@ sequence assignment, event log, compaction, replay, apply_txn, edit layer, etc.
 import threading
 
 import pytest
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Ar, Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import SHARED_STAGE_KINDS
@@ -88,6 +88,47 @@ class TestStageCreation:
             UsdSyncServer(
                 base_usd_path=str(tmp_path / "nonexistent.usda"),
                 log_path=str(tmp_path / "err.db"),
+            )
+
+    def test_in_memory_stage_uses_explicit_resolver_context(self, tmp_path):
+        context = Ar.DefaultResolverContext([str(tmp_path / "assets")])
+        server = UsdSyncServer(
+            log_path=str(tmp_path / "context.db"),
+            resolver_context=context,
+        )
+        try:
+            assert server.stage.GetPathResolverContext() == Ar.ResolverContext(context)
+        finally:
+            server.shutdown()
+            server.store.close()
+
+    def test_accepts_caller_owned_stage(self, tmp_path):
+        stage = Usd.Stage.CreateInMemory("caller-owned.usda")
+        stage.DefinePrim("/Scene", "Xform")
+        server = UsdSyncServer(
+            log_path=str(tmp_path / "caller.db"),
+            stage=stage,
+        )
+        try:
+            assert server.stage is stage
+            assert server.stage.GetPrimAtPath("/Scene")
+        finally:
+            server.shutdown()
+            server.store.close()
+
+    def test_rejects_ambiguous_stage_sources(self, tmp_path):
+        stage = Usd.Stage.CreateInMemory("caller-owned.usda")
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            UsdSyncServer(
+                base_usd_path=str(tmp_path / "scene.usda"),
+                log_path=str(tmp_path / "ambiguous.db"),
+                stage=stage,
+            )
+        with pytest.raises(ValueError, match="already owns"):
+            UsdSyncServer(
+                log_path=str(tmp_path / "context.db"),
+                stage=stage,
+                resolver_context=Ar.DefaultResolverContext([]),
             )
 
 

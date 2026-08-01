@@ -15,7 +15,7 @@ import queue
 import threading
 import time
 
-from pxr import Sdf, Usd, UsdGeom, UsdUtils
+from pxr import Ar, Sdf, Usd, UsdGeom, UsdUtils
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
@@ -64,6 +64,7 @@ from ..sdf_spec_delta import (
     SDF_SPEC_KIND_RELATIONSHIP,
     composed_layer_spec_event,
     composed_property_spec_event,
+    composed_property_spec_requires_flattening,
     merge_spec_events,
 )
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
@@ -98,12 +99,14 @@ _DEPARTMENT_LAYER_KEY_PREFIX = "department:"
 def _needs_flattened_spec_projection(event: dict) -> bool:
     if event.get("k") != K_SET_SDF_SPEC_FIELDS:
         return False
-    if event.get("spec_kind") not in (
-        SDF_SPEC_KIND_ATTRIBUTE,
-        SDF_SPEC_KIND_RELATIONSHIP,
-    ):
-        return True
-    return Sdf.Path(event.get("spec_path", "")).ContainsPrimVariantSelection()
+    return (
+        event.get("spec_kind")
+        not in (
+            SDF_SPEC_KIND_ATTRIBUTE,
+            SDF_SPEC_KIND_RELATIONSHIP,
+        )
+        or Sdf.Path(event.get("spec_path", "")).ContainsPrimVariantSelection()
+    )
 
 
 def _layer_key_for_department(department: str | None) -> str:
@@ -309,13 +312,30 @@ class UsdSyncServer:
         wire_metrics: bool = False,
         compact_interval: float = 0,
         reclaim_interval: float = 0,
+        stage: Usd.Stage | None = None,
+        resolver_context: Ar.ResolverContext | None = None,
     ):
-        if base_usd_path:
-            self.stage = Usd.Stage.Open(base_usd_path)
+        if stage is not None and base_usd_path:
+            raise ValueError("stage and base_usd_path are mutually exclusive")
+        if stage is not None and resolver_context is not None:
+            raise ValueError("a supplied stage already owns its resolver context")
+
+        if stage is not None:
+            self.stage = stage
+        elif base_usd_path:
+            self.stage = (
+                Usd.Stage.Open(base_usd_path, resolver_context)
+                if resolver_context is not None
+                else Usd.Stage.Open(base_usd_path)
+            )
             if self.stage is None:
                 raise RuntimeError(f"Failed to open base USD: {base_usd_path}")
         else:
-            self.stage = Usd.Stage.CreateInMemory()
+            self.stage = (
+                Usd.Stage.CreateInMemory("openusdconnect-server.usda", resolver_context)
+                if resolver_context is not None
+                else Usd.Stage.CreateInMemory()
+            )
             self.stage.DefinePrim("/Root", "Xform")
 
         self.stage_lock = threading.RLock()
@@ -1711,11 +1731,23 @@ class UsdSyncServer:
                 tag="openusdconnect-flat-projection.usda",
             )
 
+    def _flattened_stage_layer_for_property_event(
+        self,
+        event: dict,
+    ) -> Sdf.Layer | None:
+        if event.get("k") != K_SET_SDF_SPEC_FIELDS or _needs_flattened_spec_projection(event):
+            return None
+        with self.stage_lock:
+            if not composed_property_spec_requires_flattening(self.stage, event):
+                return None
+            return self.stage.Flatten()
+
     def build_correction(
         self,
         ev: dict,
         *,
         composed_layer: Sdf.Layer | None = None,
+        flattened_stage_layer: Sdf.Layer | None = None,
     ) -> dict | None:
         """Build a correction event with the composed value for an overridden event.
 
@@ -1729,13 +1761,18 @@ class UsdSyncServer:
 
         with self.stage_lock:
             if k == K_SET_SDF_SPEC_FIELDS:
-                if composed_layer is not None:
-                    return composed_layer_spec_event(composed_layer, ev)
                 if _needs_flattened_spec_projection(ev):
+                    layer = (
+                        composed_layer
+                        if composed_layer is not None
+                        else self._flatten_layer_stack_for_projection()
+                    )
                     return composed_layer_spec_event(
-                        self._flatten_layer_stack_for_projection(),
+                        layer,
                         ev,
                     )
+                if flattened_stage_layer is not None:
+                    return composed_layer_spec_event(flattened_stage_layer, ev)
                 return composed_property_spec_event(self.stage, ev)
 
             prim = self.stage.GetPrimAtPath(pp)
@@ -2161,6 +2198,7 @@ class UsdSyncServer:
         flat_records: list[dict] = []
         flat_bytes: list[bytes] = []
         projection_layer: Sdf.Layer | None = None
+        flattened_stage_layer: Sdf.Layer | None = None
 
         def _flush_flat() -> None:
             if not flat_records:
@@ -2188,9 +2226,12 @@ class UsdSyncServer:
             _flush_flat()
             if projection_layer is None and _needs_flattened_spec_projection(event):
                 projection_layer = self._flatten_layer_stack_for_projection()
+            if flattened_stage_layer is None:
+                flattened_stage_layer = self._flattened_stage_layer_for_property_event(event)
             correction = self.build_correction(
                 event,
                 composed_layer=projection_layer,
+                flattened_stage_layer=flattened_stage_layer,
             )
             if correction is None:
                 continue
@@ -3001,6 +3042,7 @@ class UsdSyncServer:
         buf_parts: list[bytes] = []
         buf_size = 0
         projection_layer: Sdf.Layer | None = None
+        flattened_stage_layer: Sdf.Layer | None = None
         for blob in blobs:
             outbound = blob
             if len(self.layer_stack.layer_keys) > 1 and not getattr(
@@ -3013,9 +3055,14 @@ class UsdSyncServer:
                 if event.get("k") in COMPOSED_PROJECTION_KINDS:
                     if projection_layer is None and _needs_flattened_spec_projection(event):
                         projection_layer = self._flatten_layer_stack_for_projection()
+                    if flattened_stage_layer is None:
+                        flattened_stage_layer = self._flattened_stage_layer_for_property_event(
+                            event
+                        )
                     correction = self.build_correction(
                         event,
                         composed_layer=projection_layer,
+                        flattened_stage_layer=flattened_stage_layer,
                     )
                     if correction is not None:
                         outbound = encode_message(

@@ -128,6 +128,10 @@ uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
 # With per-department layers and authentication
 uv run openusdconnect-server --port 7200 --base scene.usda \
   --departments animation,lighting,fx --require-token
+
+# Configure a custom URI resolver context (repeat for multiple resolvers)
+uv run openusdconnect-server --port 7200 --base scene.usda \
+  --resolver-context asset:/show/config/versions.json
 ```
 
 Department assignment is server policy built on a logical collaboration-layer
@@ -158,8 +162,16 @@ authoritative for specialized events without an equivalent flat correction.
 
 Layered replay covers OpenUSDConnect's managed collaboration layers. It does
 not transmit arbitrary client-authored sublayer graphs, sublayer offsets, or
-edit-target changes outside that block. Relative asset identifiers require a
-compatible receiver resolver context and layer anchor.
+edit-target changes outside that block.
+
+Document-anchored asset identifiers (`./` and `../`) copied from file-backed
+layers are re-anchored through their owning `Sdf.Layer`; the resolver's
+`resolvedPath` is never used as the wire value. Bare search-path identifiers,
+custom URIs, and database identifiers remain under the receiving process's
+`ArResolver` and stage context. Every endpoint must load the required resolver
+plugin and compatible local configuration. Relative values authored in
+anonymous source layers have no document anchor and remain relative, so those
+integrations must provide a resolvable identifier or local resolver policy.
 
 Incremental emission is driven by `Usd.Notice.ObjectsChanged`. Normal USD
 authoring APIs and Sdf edits that affect stage composition produce this notice.
