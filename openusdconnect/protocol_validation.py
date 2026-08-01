@@ -17,10 +17,13 @@ from .protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
+    SDF_LAYER_TOPOLOGY_FIELDS,
+    SDF_SPEC_KIND_LAYER,
+    SDF_SPEC_KINDS,
     TRS_FIELDS,
 )
 
@@ -141,20 +144,33 @@ def validate_event(ev: dict) -> bool:
             return False
         if not all(isinstance(key, str) for key in attrs):
             return False
-    if k == K_SET_SDF_PROPERTY_FIELDS:
+    if k == K_SET_SDF_SPEC_FIELDS:
         spec_path = ev.get("spec_path")
+        spec_kind = ev.get("spec_kind")
         fields = ev.get("fields")
         fragment = ev.get("fragment")
         removed = ev.get("removed")
-        if not isinstance(spec_path, str) or not spec_path.startswith(ev["prim"] + "."):
+        if (
+            not isinstance(spec_path, str)
+            or not spec_path.startswith("/")
+            or spec_kind not in SDF_SPEC_KINDS
+        ):
+            return False
+        if spec_kind == SDF_SPEC_KIND_LAYER and (spec_path != "/" or ev["prim"] != "/"):
+            return False
+        if spec_kind != SDF_SPEC_KIND_LAYER and ev["prim"] == "/":
             return False
         if not isinstance(fields, list) or not all(
             isinstance(field, str) and field for field in fields
         ):
             return False
+        if spec_kind == SDF_SPEC_KIND_LAYER and SDF_LAYER_TOPOLOGY_FIELDS & set(fields):
+            return False
         if not isinstance(fragment, str) or not isinstance(removed, bool):
             return False
-        if not removed and (not fields or not fragment):
+        if removed and spec_kind == SDF_SPEC_KIND_LAYER:
+            return False
+        if not removed and not fragment:
             return False
     if k == K_SET_REFERENCE and not _is_arc_event_valid(
         ev,

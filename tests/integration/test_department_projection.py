@@ -11,7 +11,7 @@ from pxr import Sdf, Usd
 from openusdconnect.codec import message_to_dict
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
-from openusdconnect.protocol_constants import K_SET_SDF_PROPERTY_FIELDS, MSG_EVENT
+from openusdconnect.protocol_constants import K_SET_SDF_SPEC_FIELDS, MSG_EVENT
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
@@ -50,6 +50,26 @@ def _custom_attribute_events(value, custom_data):
     )
     attr.Set(value)
     attr.SetCustomData(custom_data)
+    emitter = NoticeEmitter(stage)
+    try:
+        return emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+
+def _variant_events(label, variant_name):
+    stage = Usd.Stage.CreateInMemory()
+    stage.GetRootLayer().customLayerData = {label: True}
+    thing = stage.DefinePrim("/World/Thing", "Xform")
+    thing.SetDocumentation(label)
+    thing.SetCustomData({label: True, "shared": label})
+    variants = thing.GetVariantSets().AddVariantSet("look")
+    variants.AddVariant(variant_name)
+    variants.SetVariantSelection(variant_name)
+    with variants.GetVariantEditContext():
+        child = stage.DefinePrim(f"/World/Thing/{label.title()}", "Scope")
+        child.SetDocumentation(f"{label} variant")
+    variants.ClearVariantSelection()
     emitter = NoticeEmitter(stage)
     try:
         return emitter.snapshot_events()
@@ -153,7 +173,7 @@ def test_generic_sdf_projection_is_ordered_and_replayable(department_server):
             msg
             for msg in own_messages
             if msg.get("type") == MSG_EVENT
-            and msg["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+            and msg["event"]["k"] == K_SET_SDF_SPEC_FIELDS
             and msg["seq"] == max_seq
         ]
         assert len(own_generic) == 1
@@ -182,12 +202,12 @@ def test_generic_sdf_projection_is_ordered_and_replayable(department_server):
         stored_generic = {
             record["seq"]
             for record in (message_to_dict(blob) for blob in sync_server.store.get_from_seq_bin(1))
-            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
         }
         replay_generic = {
             record["seq"]
             for record in replay_records
-            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
         }
         assert replay_generic == stored_generic
     finally:
@@ -197,6 +217,95 @@ def test_generic_sdf_projection_is_ordered_and_replayable(department_server):
         observer.join(timeout=2)
         weak_origin.stop()
         weak_origin.join(timeout=2)
+        if late_receiver is not None:
+            late_receiver.stop()
+            late_receiver.join(timeout=2)
+
+
+def test_prim_layer_and_variant_projection_is_live_and_replayable(department_server):
+    sync_server, port = department_server
+    observer = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="observer",
+        origin="observer-origin",
+    )
+    animation = EventSender(
+        "127.0.0.1",
+        port,
+        client_id="animator",
+        origin="animation-origin",
+        department="animation",
+    )
+    layout = EventSender(
+        "127.0.0.1",
+        port,
+        client_id="layout",
+        origin="layout-origin",
+        department="layout",
+    )
+    late_receiver = None
+
+    def _assert_projection(records):
+        stage = Usd.Stage.CreateInMemory()
+        apply_events(stage, [record["event"] for record in records])
+        thing = stage.GetPrimAtPath("/World/Thing")
+        assert stage.GetRootLayer().customLayerData == {
+            "strong": True,
+            "weak": True,
+        }
+        assert thing.GetDocumentation() == "strong"
+        assert dict(stage.GetRootLayer().GetPrimAtPath("/World/Thing").customData) == {
+            "shared": "strong",
+            "strong": True,
+            "weak": True,
+        }
+        variants = thing.GetVariantSets().GetVariantSet("look")
+        assert variants.GetVariantNames() == ["blue", "red"]
+        variants.SetVariantSelection("blue")
+        assert stage.GetPrimAtPath("/World/Thing/Strong")
+        variants.SetVariantSelection("red")
+        assert stage.GetPrimAtPath("/World/Thing/Weak")
+
+    observer.start()
+    try:
+        assert _wait_until(lambda: observer.connected)
+        assert animation.connect()
+        assert layout.connect()
+        assert animation.send_events(_variant_events("strong", "blue"))
+        assert layout.send_events(_variant_events("weak", "red"))
+        assert _wait_until(
+            lambda: (
+                sync_server.resolve_layer("layout")
+                and sync_server.resolve_layer("layout").GetObjectAtPath("/World/Thing{look=red}")
+                and sync_server.stage.GetPrimAtPath("/World/Thing")
+                and sync_server.stage.GetPrimAtPath("/World/Thing").GetDocumentation() == "strong"
+            )
+        )
+        max_seq = sync_server.store.get_max_seq()
+        live_messages = _drain_through(observer, max_seq)
+        live_records = [msg for msg in live_messages if msg.get("type") == MSG_EVENT]
+        _assert_projection(live_records)
+
+        observer.stop()
+        observer.join(timeout=2)
+        late_receiver = ReceiverThread(
+            port=port,
+            reconnect=False,
+            client_id="late-observer",
+            origin="late-origin",
+            sync_from=1,
+        )
+        late_receiver.start()
+        assert _wait_until(lambda: late_receiver.connected)
+        replay_messages = _drain_through(late_receiver, max_seq)
+        replay_records = [msg for msg in replay_messages if msg.get("type") == MSG_EVENT]
+        _assert_projection(replay_records)
+    finally:
+        animation.disconnect()
+        layout.disconnect()
+        observer.stop()
+        observer.join(timeout=2)
         if late_receiver is not None:
             late_receiver.stop()
             late_receiver.join(timeout=2)

@@ -1,9 +1,17 @@
 """Tests for EventDispatcher callbacks."""
 
+import pytest
+from pxr import Sdf, Usd
+
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import encode_message
-from openusdconnect.dispatcher import EventDispatcher
-from openusdconnect.protocol_constants import K_ENSURE_PRIM, K_SET_VISIBILITY
+from openusdconnect.dispatcher import EventDispatcher, _stage_sync_scope
+from openusdconnect.protocol_constants import (
+    K_ENSURE_PRIM,
+    K_SET_SDF_SPEC_FIELDS,
+    K_SET_VISIBILITY,
+)
+from openusdconnect.sdf_spec_delta import serialize_spec_fields
 
 
 class _NullReceiver:
@@ -98,3 +106,45 @@ def test_unnegotiated_layered_request_uses_flat_dispatch():
     assert dispatcher.drain_and_apply() == 1
     assert dispatcher.layer_router is None
     assert "/World/A" in adapter._prims
+
+
+def test_sdf_spec_batches_use_full_layer_atomic_rollback():
+    source = Usd.Stage.CreateInMemory()
+    source.GetRootLayer().documentation = "incoming"
+    valid = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/",
+        "spec_path": "/",
+        "spec_kind": "layer",
+        "fields": ["documentation"],
+        "fragment": serialize_spec_fields(
+            source.GetRootLayer(),
+            Sdf.Path.absoluteRootPath,
+            "layer",
+            ["documentation"],
+        ),
+        "removed": False,
+    }
+    invalid = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/World",
+        "spec_path": "/World",
+        "spec_kind": "prim",
+        "fields": ["documentation"],
+        "fragment": "",
+        "removed": False,
+    }
+    assert _stage_sync_scope([valid]) is None
+
+    mirror = Usd.Stage.CreateInMemory()
+    mirror.GetRootLayer().documentation = "original"
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=MockAdapter(),
+        mirror_stage=mirror,
+    )
+
+    with pytest.raises(ValueError, match="valid Sdf fragment"):
+        dispatcher._apply([valid, invalid])
+
+    assert mirror.GetRootLayer().documentation == "original"

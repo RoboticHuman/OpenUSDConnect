@@ -32,7 +32,7 @@ from openusdconnect.protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -302,17 +302,19 @@ def _set_point_instancer(
     return ev
 
 
-def _set_sdf_property_fields(
+def _set_sdf_spec_fields(
     prim: str,
     spec_path: str,
+    spec_kind: str,
     fields: list[str],
     fragment: str = "",
     removed: bool = False,
 ) -> dict:
     return {
-        "k": K_SET_SDF_PROPERTY_FIELDS,
+        "k": K_SET_SDF_SPEC_FIELDS,
         "prim": prim,
         "spec_path": spec_path,
+        "spec_kind": spec_kind,
         "fields": list(fields),
         "fragment": fragment,
         "removed": bool(removed),
@@ -433,11 +435,11 @@ TOOL_TABLE: dict[str, ToolRow] = {
         "Optional time selects a time sample.",
         _set_point_instancer,
     ),
-    K_SET_SDF_PROPERTY_FIELDS: ToolRow(
-        K_SET_SDF_PROPERTY_FIELDS,
-        "Apply a low-level Sdf property delta. The fragment must be USDA with "
-        "the property at spec_path; fields lists the opinions to set or clear.",
-        _set_sdf_property_fields,
+    K_SET_SDF_SPEC_FIELDS: ToolRow(
+        K_SET_SDF_SPEC_FIELDS,
+        "Apply a low-level Sdf spec delta. The fragment must contain the exact "
+        "spec_path; fields lists the opinions to set or clear.",
+        _set_sdf_spec_fields,
         expose=False,
     ),
 }

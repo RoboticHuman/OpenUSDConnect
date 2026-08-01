@@ -123,14 +123,20 @@ def _stage_bytes_with_custom_properties() -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
-def _stage_bytes_with_unsupported_spec_fields() -> bytes:
+def _stage_bytes_with_generic_spec_fields() -> bytes:
     layer = Sdf.Layer.CreateAnonymous(".usda")
     stage = Usd.Stage.Open(layer)
     prim = stage.DefinePrim("/Before", "Xform")
-    prim.SetDocumentation("not represented by the event protocol")
+    prim.SetDocumentation("preserved documentation")
     prim.SetCustomData({"department": "layout"})
     stage.SetDefaultPrim(prim)
     layer.customLayerData = {"pipeline": "test"}
+    class_spec = Sdf.CreatePrimInLayer(layer, "/_Class")
+    class_spec.specifier = Sdf.SpecifierClass
+    class_spec.typeName = "Scope"
+    typed_over = Sdf.CreatePrimInLayer(layer, "/Before/TypedOver")
+    typed_over.specifier = Sdf.SpecifierOver
+    typed_over.typeName = "Scope"
     return layer.ExportToString().encode("utf-8")
 
 
@@ -139,8 +145,18 @@ def _stage_bytes_with_local_variant_definition() -> bytes:
     stage = Usd.Stage.Open(layer)
     prim = stage.DefinePrim("/World", "Xform")
     variants = prim.GetVariantSets().AddVariantSet("look")
-    variants.AddVariant("red")
+    for name in ("red", "blue"):
+        variants.AddVariant(name)
+        variants.SetVariantSelection(name)
+        with variants.GetVariantEditContext():
+            stage.DefinePrim("/World/Child", "Scope").SetDocumentation(name)
     variants.SetVariantSelection("red")
+    return layer.ExportToString().encode("utf-8")
+
+
+def _stage_bytes_with_sublayer() -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    layer.subLayerPaths = ["asset.usda"]
     return layer.ExportToString().encode("utf-8")
 
 
@@ -457,10 +473,12 @@ class TestWriteTranslate:
         )
         assert srv.stage.GetPrimAtPath("/World/Old")
 
-        uploaded = _stage_bytes([
-            ("/World", "Xform"),
-            ("/World/New", "Sphere"),
-        ])
+        uploaded = _stage_bytes(
+            [
+                ("/World", "Xform"),
+                ("/World/New", "Sphere"),
+            ]
+        )
         translate_vfile.write(uploaded)
 
         assert srv.get_event_count() > 0
@@ -545,32 +563,41 @@ class TestWriteTranslate:
             Sdf.Path("/World")
         ]
 
-    def test_unsupported_prim_and_layer_fields_are_rejected(self, srv, translate_vfile):
+    def test_generic_prim_and_layer_fields_are_translated(self, srv, translate_vfile):
         _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Xform"}])
-        before = translate_vfile.read()
         count = srv.get_event_count()
 
-        with pytest.raises(UnsupportedVfsWriteError):
-            translate_vfile.write(_stage_bytes_with_unsupported_spec_fields())
+        translate_vfile.write(_stage_bytes_with_generic_spec_fields())
 
-        assert srv.get_event_count() == count
-        assert translate_vfile.read() == before
-        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
-        notes = srv.last_vfs_write_analysis["notes"][0]
-        assert "/:defaultPrim" in notes
-        assert "/:customLayerData:pipeline" in notes
-        assert "/Before:documentation" in notes
-        assert "/Before:customData" in notes
+        assert srv.get_event_count() > count
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert srv.edit_layer.defaultPrim == "Before"
+        assert srv.edit_layer.customLayerData == {"pipeline": "test"}
+        before = srv.edit_layer.GetPrimAtPath("/Before")
+        assert before.documentation == "preserved documentation"
+        assert dict(before.customData) == {"department": "layout"}
+        assert srv.edit_layer.GetPrimAtPath("/_Class").specifier == Sdf.SpecifierClass
+        typed_over = srv.edit_layer.GetPrimAtPath("/Before/TypedOver")
+        assert typed_over.specifier == Sdf.SpecifierOver
+        assert typed_over.typeName == "Scope"
 
-    def test_local_variant_definitions_are_rejected(self, srv, translate_vfile):
+    def test_local_variant_definitions_are_translated(self, srv, translate_vfile):
+        translate_vfile.write(_stage_bytes_with_local_variant_definition())
+
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert srv.edit_layer.GetPrimAtPath("/World{look=red}Child").documentation == "red"
+        assert srv.edit_layer.GetPrimAtPath("/World{look=blue}Child").documentation == "blue"
+        assert srv.stage.GetPrimAtPath("/World/Child").GetDocumentation() == "red"
+
+    def test_sublayer_topology_is_rejected(self, srv, translate_vfile):
         count = srv.get_event_count()
 
-        with pytest.raises(UnsupportedVfsWriteError):
-            translate_vfile.write(_stage_bytes_with_local_variant_definition())
+        with pytest.raises(UnsupportedVfsWriteError, match="sublayer topology"):
+            translate_vfile.write(_stage_bytes_with_sublayer())
 
         assert srv.get_event_count() == count
         assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
-        assert "variantDefinition" in srv.last_vfs_write_analysis["notes"][0]
+        assert "sublayer topology" in srv.last_vfs_write_analysis["notes"][0]
 
     def test_supported_api_schema_is_translated(self, srv, translate_vfile):
         translate_vfile.write(_stage_bytes_with_supported_api_schema())

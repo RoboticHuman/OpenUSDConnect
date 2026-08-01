@@ -134,9 +134,10 @@ def _property_events(value):
 def _property_clear_events():
     return [
         {
-            "k": "set_sdf_property_fields",
+            "k": "set_sdf_spec_fields",
             "prim": "/World/Thing",
             "spec_path": _PROPERTY_PATH,
+            "spec_kind": "attribute",
             "fields": ["default"],
             "fragment": "",
             "removed": True,

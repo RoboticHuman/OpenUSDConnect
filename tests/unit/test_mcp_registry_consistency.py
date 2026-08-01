@@ -7,7 +7,7 @@ Mirrors ``test_event_registry_consistency``: adding a core event kind makes
 from __future__ import annotations
 
 from integrations.mcp.registry import TOOL_TABLE
-from openusdconnect.protocol_constants import EVENT_KEYS, K_SET_SDF_PROPERTY_FIELDS
+from openusdconnect.protocol_constants import EVENT_KEYS, K_SET_SDF_SPEC_FIELDS
 
 
 def test_tool_table_covers_every_event_kind():
@@ -29,4 +29,4 @@ def test_no_orphan_rows():
 
 
 def test_low_level_sdf_transport_is_not_a_dedicated_public_tool():
-    assert TOOL_TABLE[K_SET_SDF_PROPERTY_FIELDS].expose is False
+    assert TOOL_TABLE[K_SET_SDF_SPEC_FIELDS].expose is False

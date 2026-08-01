@@ -93,8 +93,8 @@ struct SetInstanceableBuilder;
 struct SetPointInstancer;
 struct SetPointInstancerBuilder;
 
-struct SetSdfPropertyFields;
-struct SetSdfPropertyFieldsBuilder;
+struct SetSdfSpecFields;
+struct SetSdfSpecFieldsBuilder;
 
 struct SetStageMetadata;
 struct SetStageMetadataBuilder;
@@ -303,6 +303,48 @@ inline const char *EnumNameConnectableInputValueType(ConnectableInputValueType e
   return EnumNamesConnectableInputValueType()[index];
 }
 
+enum class SdfSpecKind : int8_t {
+  Layer = 0,
+  Prim = 1,
+  Attribute = 2,
+  Relationship = 3,
+  VariantSet = 4,
+  Variant = 5,
+  MIN = Layer,
+  MAX = Variant
+};
+
+inline const SdfSpecKind (&EnumValuesSdfSpecKind())[6] {
+  static const SdfSpecKind values[] = {
+    SdfSpecKind::Layer,
+    SdfSpecKind::Prim,
+    SdfSpecKind::Attribute,
+    SdfSpecKind::Relationship,
+    SdfSpecKind::VariantSet,
+    SdfSpecKind::Variant
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesSdfSpecKind() {
+  static const char * const names[7] = {
+    "Layer",
+    "Prim",
+    "Attribute",
+    "Relationship",
+    "VariantSet",
+    "Variant",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameSdfSpecKind(SdfSpecKind e) {
+  if (::flatbuffers::IsOutRange(e, SdfSpecKind::Layer, SdfSpecKind::Variant)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesSdfSpecKind()[index];
+}
+
 enum class EventPayload : uint8_t {
   NONE = 0,
   EnsurePrim = 1,
@@ -324,9 +366,9 @@ enum class EventPayload : uint8_t {
   SetStageMetadata = 17,
   SetInstanceable = 18,
   SetPointInstancer = 19,
-  SetSdfPropertyFields = 20,
+  SetSdfSpecFields = 20,
   MIN = NONE,
-  MAX = SetSdfPropertyFields
+  MAX = SetSdfSpecFields
 };
 
 inline const EventPayload (&EnumValuesEventPayload())[21] {
@@ -351,7 +393,7 @@ inline const EventPayload (&EnumValuesEventPayload())[21] {
     EventPayload::SetStageMetadata,
     EventPayload::SetInstanceable,
     EventPayload::SetPointInstancer,
-    EventPayload::SetSdfPropertyFields
+    EventPayload::SetSdfSpecFields
   };
   return values;
 }
@@ -378,14 +420,14 @@ inline const char * const *EnumNamesEventPayload() {
     "SetStageMetadata",
     "SetInstanceable",
     "SetPointInstancer",
-    "SetSdfPropertyFields",
+    "SetSdfSpecFields",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameEventPayload(EventPayload e) {
-  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::SetSdfPropertyFields)) return "";
+  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::SetSdfSpecFields)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesEventPayload()[index];
 }
@@ -470,8 +512,8 @@ template<> struct EventPayloadTraits<OpenUSDConnect::SetPointInstancer> {
   static const EventPayload enum_value = EventPayload::SetPointInstancer;
 };
 
-template<> struct EventPayloadTraits<OpenUSDConnect::SetSdfPropertyFields> {
-  static const EventPayload enum_value = EventPayload::SetSdfPropertyFields;
+template<> struct EventPayloadTraits<OpenUSDConnect::SetSdfSpecFields> {
+  static const EventPayload enum_value = EventPayload::SetSdfSpecFields;
 };
 
 template <bool B = false>
@@ -3116,21 +3158,25 @@ inline ::flatbuffers::Offset<SetPointInstancer> CreateSetPointInstancerDirect(
       inactive_ids__);
 }
 
-struct SetSdfPropertyFields FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef SetSdfPropertyFieldsBuilder Builder;
+struct SetSdfSpecFields FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SetSdfSpecFieldsBuilder Builder;
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PRIM = 4,
     VT_SPEC_PATH = 6,
-    VT_FIELDS = 8,
-    VT_FRAGMENT = 10,
-    VT_REMOVED = 12
+    VT_SPEC_KIND = 8,
+    VT_FIELDS = 10,
+    VT_FRAGMENT = 12,
+    VT_REMOVED = 14
   };
   const ::flatbuffers::String *prim() const {
     return GetPointer<const ::flatbuffers::String *>(VT_PRIM);
   }
   const ::flatbuffers::String *spec_path() const {
     return GetPointer<const ::flatbuffers::String *>(VT_SPEC_PATH);
+  }
+  OpenUSDConnect::SdfSpecKind spec_kind() const {
+    return static_cast<OpenUSDConnect::SdfSpecKind>(GetField<int8_t>(VT_SPEC_KIND, 0));
   }
   const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *fields() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_FIELDS);
@@ -3148,6 +3194,7 @@ struct SetSdfPropertyFields FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
            verifier.VerifyString(prim()) &&
            VerifyOffset(verifier, VT_SPEC_PATH) &&
            verifier.VerifyString(spec_path()) &&
+           VerifyField<int8_t>(verifier, VT_SPEC_KIND, 1) &&
            VerifyOffset(verifier, VT_FIELDS) &&
            verifier.VerifyVector(fields()) &&
            verifier.VerifyVectorOfStrings(fields()) &&
@@ -3158,61 +3205,67 @@ struct SetSdfPropertyFields FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
   }
 };
 
-struct SetSdfPropertyFieldsBuilder {
-  typedef SetSdfPropertyFields Table;
+struct SetSdfSpecFieldsBuilder {
+  typedef SetSdfSpecFields Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
   void add_prim(::flatbuffers::Offset<::flatbuffers::String> prim) {
-    fbb_.AddOffset(SetSdfPropertyFields::VT_PRIM, prim);
+    fbb_.AddOffset(SetSdfSpecFields::VT_PRIM, prim);
   }
   void add_spec_path(::flatbuffers::Offset<::flatbuffers::String> spec_path) {
-    fbb_.AddOffset(SetSdfPropertyFields::VT_SPEC_PATH, spec_path);
+    fbb_.AddOffset(SetSdfSpecFields::VT_SPEC_PATH, spec_path);
+  }
+  void add_spec_kind(OpenUSDConnect::SdfSpecKind spec_kind) {
+    fbb_.AddElement<int8_t>(SetSdfSpecFields::VT_SPEC_KIND, static_cast<int8_t>(spec_kind), 0);
   }
   void add_fields(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> fields) {
-    fbb_.AddOffset(SetSdfPropertyFields::VT_FIELDS, fields);
+    fbb_.AddOffset(SetSdfSpecFields::VT_FIELDS, fields);
   }
   void add_fragment(::flatbuffers::Offset<::flatbuffers::String> fragment) {
-    fbb_.AddOffset(SetSdfPropertyFields::VT_FRAGMENT, fragment);
+    fbb_.AddOffset(SetSdfSpecFields::VT_FRAGMENT, fragment);
   }
   void add_removed(bool removed) {
-    fbb_.AddElement<uint8_t>(SetSdfPropertyFields::VT_REMOVED, static_cast<uint8_t>(removed), 0);
+    fbb_.AddElement<uint8_t>(SetSdfSpecFields::VT_REMOVED, static_cast<uint8_t>(removed), 0);
   }
-  explicit SetSdfPropertyFieldsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+  explicit SetSdfSpecFieldsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ::flatbuffers::Offset<SetSdfPropertyFields> Finish() {
+  ::flatbuffers::Offset<SetSdfSpecFields> Finish() {
     const auto end = fbb_.EndTable(start_);
-    auto o = ::flatbuffers::Offset<SetSdfPropertyFields>(end);
+    auto o = ::flatbuffers::Offset<SetSdfSpecFields>(end);
     return o;
   }
 };
 
-inline ::flatbuffers::Offset<SetSdfPropertyFields> CreateSetSdfPropertyFields(
+inline ::flatbuffers::Offset<SetSdfSpecFields> CreateSetSdfSpecFields(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> prim = 0,
     ::flatbuffers::Offset<::flatbuffers::String> spec_path = 0,
+    OpenUSDConnect::SdfSpecKind spec_kind = OpenUSDConnect::SdfSpecKind::Layer,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> fields = 0,
     ::flatbuffers::Offset<::flatbuffers::String> fragment = 0,
     bool removed = false) {
-  SetSdfPropertyFieldsBuilder builder_(_fbb);
+  SetSdfSpecFieldsBuilder builder_(_fbb);
   builder_.add_fragment(fragment);
   builder_.add_fields(fields);
   builder_.add_spec_path(spec_path);
   builder_.add_prim(prim);
   builder_.add_removed(removed);
+  builder_.add_spec_kind(spec_kind);
   return builder_.Finish();
 }
 
-struct SetSdfPropertyFields::Traits {
-  using type = SetSdfPropertyFields;
-  static auto constexpr Create = CreateSetSdfPropertyFields;
+struct SetSdfSpecFields::Traits {
+  using type = SetSdfSpecFields;
+  static auto constexpr Create = CreateSetSdfSpecFields;
 };
 
-inline ::flatbuffers::Offset<SetSdfPropertyFields> CreateSetSdfPropertyFieldsDirect(
+inline ::flatbuffers::Offset<SetSdfSpecFields> CreateSetSdfSpecFieldsDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *prim = nullptr,
     const char *spec_path = nullptr,
+    OpenUSDConnect::SdfSpecKind spec_kind = OpenUSDConnect::SdfSpecKind::Layer,
     const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *fields = nullptr,
     const char *fragment = nullptr,
     bool removed = false) {
@@ -3220,10 +3273,11 @@ inline ::flatbuffers::Offset<SetSdfPropertyFields> CreateSetSdfPropertyFieldsDir
   auto spec_path__ = spec_path ? _fbb.CreateString(spec_path) : 0;
   auto fields__ = fields ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*fields) : 0;
   auto fragment__ = fragment ? _fbb.CreateString(fragment) : 0;
-  return OpenUSDConnect::CreateSetSdfPropertyFields(
+  return OpenUSDConnect::CreateSetSdfSpecFields(
       _fbb,
       prim__,
       spec_path__,
+      spec_kind,
       fields__,
       fragment__,
       removed);
@@ -3418,8 +3472,8 @@ struct EventWrapper FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const OpenUSDConnect::SetPointInstancer *event_as_SetPointInstancer() const {
     return event_type() == OpenUSDConnect::EventPayload::SetPointInstancer ? static_cast<const OpenUSDConnect::SetPointInstancer *>(event()) : nullptr;
   }
-  const OpenUSDConnect::SetSdfPropertyFields *event_as_SetSdfPropertyFields() const {
-    return event_type() == OpenUSDConnect::EventPayload::SetSdfPropertyFields ? static_cast<const OpenUSDConnect::SetSdfPropertyFields *>(event()) : nullptr;
+  const OpenUSDConnect::SetSdfSpecFields *event_as_SetSdfSpecFields() const {
+    return event_type() == OpenUSDConnect::EventPayload::SetSdfSpecFields ? static_cast<const OpenUSDConnect::SetSdfSpecFields *>(event()) : nullptr;
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -3507,8 +3561,8 @@ template<> inline const OpenUSDConnect::SetPointInstancer *EventWrapper::event_a
   return event_as_SetPointInstancer();
 }
 
-template<> inline const OpenUSDConnect::SetSdfPropertyFields *EventWrapper::event_as<OpenUSDConnect::SetSdfPropertyFields>() const {
-  return event_as_SetSdfPropertyFields();
+template<> inline const OpenUSDConnect::SetSdfSpecFields *EventWrapper::event_as<OpenUSDConnect::SetSdfSpecFields>() const {
+  return event_as_SetSdfSpecFields();
 }
 
 struct EventWrapperBuilder {
@@ -5210,8 +5264,8 @@ inline bool VerifyEventPayload(::flatbuffers::VerifierTemplate<B> &verifier, con
       auto ptr = reinterpret_cast<const OpenUSDConnect::SetPointInstancer *>(obj);
       return verifier.VerifyTable(ptr);
     }
-    case EventPayload::SetSdfPropertyFields: {
-      auto ptr = reinterpret_cast<const OpenUSDConnect::SetSdfPropertyFields *>(obj);
+    case EventPayload::SetSdfSpecFields: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::SetSdfSpecFields *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

@@ -25,6 +25,7 @@ from openusdconnect.protocol_constants import (
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -148,6 +149,21 @@ class TestValidateEvent:
 
     def test_unknown_key(self):
         assert not validate_event({"k": "unknown_key", "prim": "/Foo"})
+
+    def test_sdf_layer_fields_exclude_sublayer_topology(self):
+        event = {
+            "k": K_SET_SDF_SPEC_FIELDS,
+            "prim": "/",
+            "spec_path": "/",
+            "spec_kind": "layer",
+            "fields": ["documentation"],
+            "fragment": "#usda 1.0\n",
+            "removed": False,
+        }
+        assert validate_event(event)
+        for field in ("subLayers", "subLayerOffsets"):
+            event["fields"] = [field]
+            assert not validate_event(event)
 
     def test_set_xform_trs_valid(self):
         ev = {

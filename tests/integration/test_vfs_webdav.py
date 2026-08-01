@@ -204,11 +204,11 @@ def _stage_bytes_with_custom_property() -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
-def _stage_bytes_with_unsupported_prim_metadata() -> bytes:
+def _stage_bytes_with_prim_metadata() -> bytes:
     layer = Sdf.Layer.CreateAnonymous(".usda")
     stage = Usd.Stage.Open(layer)
     prim = stage.DefinePrim("/Before", "Xform")
-    prim.SetDocumentation("not represented by the event protocol")
+    prim.SetDocumentation("preserved by exact Sdf spec translation")
     return layer.ExportToString().encode("utf-8")
 
 
@@ -514,22 +514,28 @@ class TestWriteDrop:
         _, _, after_data = client.get(_file_path())
         assert _open_stage(after_data).GetAttributeAtPath("/World.customFoo").Get() == "bar"
 
-    def test_put_unsupported_prim_metadata_rejected_in_translate_mode(self, vfs_translate):
+    def test_put_prim_metadata_translated_in_translate_mode(self, vfs_translate):
         srv, client = vfs_translate
         _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Xform"}])
         before_count = srv.get_event_count()
-        _, _, before_data = client.get(_file_path())
 
         status, _, _ = client.put(
             _file_path(),
-            _stage_bytes_with_unsupported_prim_metadata(),
+            _stage_bytes_with_prim_metadata(),
         )
-        assert status == 409
+        assert status == 204
 
-        assert srv.get_event_count() == before_count
-        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
+        assert srv.get_event_count() > before_count
+        assert srv.last_vfs_write_analysis["status"] == "translated"
+        assert (
+            srv.stage.GetPrimAtPath("/Before").GetDocumentation()
+            == "preserved by exact Sdf spec translation"
+        )
         _, _, after_data = client.get(_file_path())
-        assert after_data == before_data
+        assert (
+            _open_stage(after_data).GetPrimAtPath("/Before").GetDocumentation()
+            == "preserved by exact Sdf spec translation"
+        )
 
     def test_put_invalid_usd_can_bypass_validation_in_translate_mode(
         self, vfs_translate_without_validation

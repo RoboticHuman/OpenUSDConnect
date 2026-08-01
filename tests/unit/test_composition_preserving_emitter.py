@@ -11,7 +11,7 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_SET_GPRIM_ATTRS,
     K_SET_REFERENCE,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -166,7 +166,7 @@ def test_removing_descendant_override_reveals_referenced_value(tmp_path):
     assert [
         event
         for event in clear_events
-        if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
         and event["spec_path"] == "/World/Ref/Geom.radius"
         and event["removed"]
     ]
@@ -203,7 +203,7 @@ def test_clearing_descendant_xform_value_reveals_referenced_value(tmp_path):
     assert [
         event
         for event in clear_events
-        if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
         and event["spec_path"] == "/World/Ref/Geom.xformOp:translate"
         and event["fields"] == ["default"]
     ]
@@ -234,7 +234,7 @@ def test_schema_value_block_roundtrips_over_shared_base():
     block_events = [
         event
         for event in events
-        if event["k"] == K_SET_SDF_PROPERTY_FIELDS and event["spec_path"] == "/Sphere.radius"
+        if event["k"] == K_SET_SDF_SPEC_FIELDS and event["spec_path"] == "/Sphere.radius"
     ]
     assert len(block_events) == 1
     assert block_events[0]["fields"] == ["default"]
@@ -268,7 +268,7 @@ def test_channel_value_block_uses_sdf_fields_without_value_overwrite():
     assert [
         event
         for event in events
-        if event["k"] == K_SET_SDF_PROPERTY_FIELDS
+        if event["k"] == K_SET_SDF_SPEC_FIELDS
         and event["spec_path"] == "/Sphere.visibility"
         and event["fields"] == ["default"]
     ]
@@ -305,13 +305,16 @@ def test_active_local_variant_custom_property_roundtrips():
     target = Usd.Stage.CreateInMemory()
 
     initial = emitter.snapshot_events()
-    assert K_ENSURE_PRIM in _event_kinds(initial, "/World/VariantSphere")
-    assert [
-        event
+    assert K_ENSURE_PRIM not in _event_kinds(initial, "/World/VariantSphere")
+    variant_properties = {
+        event["spec_path"]
         for event in initial
-        if event["k"] == K_SET_SDF_PROPERTY_FIELDS
-        and event["spec_path"] == "/World/VariantSphere.user:weight"
-    ]
+        if event["k"] == K_SET_SDF_SPEC_FIELDS and event["spec_kind"] == "attribute"
+    }
+    assert variant_properties == {
+        "/World{choice=A}VariantSphere.user:weight",
+        "/World{choice=B}VariantSphere.user:weight",
+    }
     apply_events(target, initial)
     assert target.GetPrimAtPath("/World/VariantSphere").GetAttribute("user:weight").Get() == 1.25
 
@@ -334,19 +337,20 @@ def test_direct_over_does_not_hide_active_variant_definition():
     emitter = NoticeEmitter(source)
 
     events = emitter.snapshot_events()
-    ensure = [
+    assert not [
         event
         for event in events
         if event["k"] == K_ENSURE_PRIM and event["prim"] == "/World/VariantSphere"
     ]
-    assert ensure == [
-        {
-            "k": K_ENSURE_PRIM,
-            "prim": "/World/VariantSphere",
-            "typeName": "Sphere",
-            "api_schemas": [],
-        }
-    ]
+    exact_prims = {
+        event["spec_path"]
+        for event in events
+        if event["k"] == K_SET_SDF_SPEC_FIELDS and event["spec_kind"] == "prim"
+    }
+    assert {
+        "/World/VariantSphere",
+        "/World{choice=A}VariantSphere",
+    } <= exact_prims
 
     target = Usd.Stage.CreateInMemory()
     apply_events(target, events)
@@ -372,11 +376,13 @@ def test_variant_switch_reauthors_changed_definition_type():
 
     variants.SetVariantSelection("cube")
     events = emitter.build_events_for_dirty()
+    assert not [
+        event for event in events if event["k"] == K_ENSURE_PRIM and event["prim"] == "/World/Shape"
+    ]
     assert {
-        "k": K_ENSURE_PRIM,
-        "prim": "/World/Shape",
-        "typeName": "Cube",
-        "api_schemas": [],
+        "k": K_SET_VARIANT_SELECTIONS,
+        "prim": "/World",
+        "selections": {"shape": "cube"},
     } in events
 
     apply_events(target, events)

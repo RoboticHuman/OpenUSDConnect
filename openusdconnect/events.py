@@ -325,17 +325,26 @@ class SetPointInstancer(TypedDict):
     time: NotRequired[float]
 
 
-class SetSdfPropertyFields(TypedDict):
-    """Delta for selected fields on one Sdf property spec.
+class SetSdfSpecFields(TypedDict):
+    """Delta for selected fields on one exact authored Sdf spec.
 
-    ``fragment`` contains declaration data plus the fields listed in
-    ``fields``. A listed field absent from the fragment is cleared.
-    ``removed=True`` removes the property spec and ignores the fragment.
+    ``spec_path`` may contain variant selections. ``fragment`` is a USDA layer
+    fragment containing declaration data plus the fields listed in ``fields``.
+    A listed field absent from the fragment is cleared. ``removed=True``
+    removes the spec and ignores the fragment.
     """
 
-    k: Literal["set_sdf_property_fields"]
+    k: Literal["set_sdf_spec_fields"]
     prim: str
     spec_path: str
+    spec_kind: Literal[
+        "layer",
+        "prim",
+        "attribute",
+        "relationship",
+        "variant_set",
+        "variant",
+    ]
     fields: list[str]
     fragment: str
     removed: bool
@@ -365,7 +374,7 @@ Event = (
     | SetStageMetadata
     | SetInstanceable
     | SetPointInstancer
-    | SetSdfPropertyFields
+    | SetSdfSpecFields
 )
 
 
@@ -379,11 +388,11 @@ class EventSpec:
     """Everything dispatch needs to know about one event kind."""
 
     kind: str
-    fb_tag: int | None = None        # FlatBuffers union tag (EventPayloadType.*)
-    fb_class: type | None = None     # generated FlatBuffers table class
-    encode: Callable | None = None   # (builder, ev_dict) -> int offset
-    decode: Callable | None = None   # (fb_obj, kind) -> ev_dict
-    apply: Callable | None = None    # (stage, ev_dict) -> None
+    fb_tag: int | None = None  # FlatBuffers union tag (EventPayloadType.*)
+    fb_class: type | None = None  # generated FlatBuffers table class
+    encode: Callable | None = None  # (builder, ev_dict) -> int offset
+    decode: Callable | None = None  # (fb_obj, kind) -> ev_dict
+    apply: Callable | None = None  # (stage, ev_dict) -> None
 
 
 _REGISTRY: dict[str, EventSpec] = {}
@@ -492,7 +501,7 @@ __all__ = [
     "SetStageMetadata",
     "SetInstanceable",
     "SetPointInstancer",
-    "SetSdfPropertyFields",
+    "SetSdfSpecFields",
     "Event",
     "EventSpec",
     "register_encoder",

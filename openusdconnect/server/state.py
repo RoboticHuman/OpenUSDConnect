@@ -15,7 +15,7 @@ import queue
 import threading
 import time
 
-from pxr import Sdf, Usd, UsdGeom
+from pxr import Sdf, Usd, UsdGeom, UsdUtils
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
@@ -44,7 +44,7 @@ from ..protocol_constants import (
     K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
     K_SET_POINT_INSTANCER,
-    K_SET_SDF_PROPERTY_FIELDS,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
@@ -59,9 +59,12 @@ from ..protocol_constants import (
     STAGE_METADATA_KEYS,
     event_apply_tier,
 )
-from ..sdf_property_delta import (
+from ..sdf_spec_delta import (
+    SDF_SPEC_KIND_ATTRIBUTE,
+    SDF_SPEC_KIND_RELATIONSHIP,
+    composed_layer_spec_event,
     composed_property_spec_event,
-    merge_property_spec_events,
+    merge_spec_events,
 )
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
@@ -92,6 +95,17 @@ _DEFAULT_LAYER_KEY = "default"
 _DEPARTMENT_LAYER_KEY_PREFIX = "department:"
 
 
+def _needs_flattened_spec_projection(event: dict) -> bool:
+    if event.get("k") != K_SET_SDF_SPEC_FIELDS:
+        return False
+    if event.get("spec_kind") not in (
+        SDF_SPEC_KIND_ATTRIBUTE,
+        SDF_SPEC_KIND_RELATIONSHIP,
+    ):
+        return True
+    return Sdf.Path(event.get("spec_path", "")).ContainsPrimVariantSelection()
+
+
 def _layer_key_for_department(department: str | None) -> str:
     if not department:
         return _DEFAULT_LAYER_KEY
@@ -103,7 +117,7 @@ def _department_for_layer_key(layer_key: str) -> str | None:
     if layer_key == _DEFAULT_LAYER_KEY:
         return None
     if layer_key.startswith(_DEPARTMENT_LAYER_KEY_PREFIX):
-        department = layer_key[len(_DEPARTMENT_LAYER_KEY_PREFIX):]
+        department = layer_key[len(_DEPARTMENT_LAYER_KEY_PREFIX) :]
         if department:
             return department
     return None
@@ -155,8 +169,16 @@ def _abbrev_scalar(value) -> str:
 
 
 _PI_ARRAY_ATTRS = (
-    "protoIndices", "positions", "orientations", "orientationsf", "scales",
-    "velocities", "accelerations", "angularVelocities", "ids", "invisibleIds",
+    "protoIndices",
+    "positions",
+    "orientations",
+    "orientationsf",
+    "scales",
+    "velocities",
+    "accelerations",
+    "angularVelocities",
+    "ids",
+    "invisibleIds",
 )
 
 
@@ -169,9 +191,7 @@ def _point_instancer_summary(prim) -> dict:
     """
     pi = UsdGeom.PointInstancer(prim)
     proto_rel = pi.GetPrototypesRel()
-    targets = (
-        [t.pathString for t in proto_rel.GetTargets()] if proto_rel else []
-    )
+    targets = [t.pathString for t in proto_rel.GetTargets()] if proto_rel else []
     proto_indices = pi.GetProtoIndicesAttr()
     if proto_indices and proto_indices.HasAuthoredValue():
         sample_value = proto_indices.Get()
@@ -231,9 +251,7 @@ def _stage_live_metadata(stage: Usd.Stage) -> dict | None:
         return None
     metadata = layer_data["openusdconnect"]
     if not isinstance(metadata, dict):
-        raise InvalidVfsWriteError(
-            "uploaded openusdconnect metadata must be a dictionary"
-        )
+        raise InvalidVfsWriteError("uploaded openusdconnect metadata must be a dictionary")
     return metadata
 
 
@@ -241,96 +259,9 @@ def _metadata_int(metadata: dict, key: str) -> int:
     value = metadata.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise InvalidVfsWriteError(
-            f"uploaded openusdconnect metadata field {key!r} "
-            "must be a non-negative integer"
+            f"uploaded openusdconnect metadata field {key!r} must be a non-negative integer"
         )
     return value
-
-
-_VFS_TRANSLATABLE_LAYER_FIELDS = frozenset({
-    "endTimeCode",
-    "framesPerSecond",
-    "metersPerUnit",
-    "startTimeCode",
-    "timeCodesPerSecond",
-    "upAxis",
-})
-_VFS_TRANSLATABLE_PRIM_FIELDS = frozenset({
-    "apiSchemas",
-    "instanceable",
-    "payload",
-    "references",
-    "specifier",
-    "typeName",
-    "variantSelection",
-})
-
-
-def _unsupported_vfs_translate_opinions(
-    stage: Usd.Stage,
-    events: list[dict],
-) -> list[str]:
-    """Find authored layer and prim opinions outside the VFS event surface."""
-    layer = stage.GetEditTarget().GetLayer()
-    unsupported: set[str] = set()
-
-    if layer.subLayerPaths:
-        unsupported.add("/:subLayers")
-
-    for key in layer.pseudoRoot.ListInfoKeys():
-        field = str(key)
-        if field == "customLayerData":
-            for name in layer.customLayerData:
-                if name != "openusdconnect":
-                    unsupported.add(f"/:customLayerData:{name}")
-        elif field not in _VFS_TRANSLATABLE_LAYER_FIELDS:
-            unsupported.add(f"/:{field}")
-
-    emitted_api_schemas: dict[str, set[str]] = {}
-    for event in events:
-        if event.get("k") != K_ENSURE_PRIM:
-            continue
-        emitted_api_schemas.setdefault(event["prim"], set()).update(
-            str(name) for name in event.get("api_schemas", ())
-        )
-
-    def _inspect(path: Sdf.Path) -> None:
-        if path.ContainsPrimVariantSelection():
-            unsupported.add(f"{path}:variantDefinition")
-            return
-        spec = layer.GetObjectAtPath(path)
-        if not isinstance(spec, Sdf.PrimSpec):
-            return
-
-        if spec.specifier == Sdf.SpecifierClass:
-            unsupported.add(f"{path}:specifier=class")
-        if spec.specifier == Sdf.SpecifierOver and spec.typeName:
-            unsupported.add(f"{path}:typeName-on-over")
-
-        for key in spec.ListInfoKeys():
-            field = str(key)
-            if field not in _VFS_TRANSLATABLE_PRIM_FIELDS:
-                unsupported.add(f"{path}:{field}")
-                continue
-            if field != "apiSchemas":
-                continue
-
-            list_op = spec.GetInfo(key)
-            if (
-                list_op.isExplicit
-                or list_op.addedItems
-                or list_op.appendedItems
-                or list_op.deletedItems
-                or list_op.orderedItems
-            ):
-                unsupported.add(f"{path}:apiSchemas-listOp")
-                continue
-            authored = {str(name) for name in list_op.prependedItems}
-            if authored != emitted_api_schemas.get(str(path), set()):
-                unsupported.add(f"{path}:apiSchemas")
-
-    layer.Traverse(Sdf.Path.absoluteRootPath, _inspect)
-    return sorted(unsupported)
 
 
 class _WireMetrics:
@@ -349,8 +280,7 @@ class _WireMetrics:
     def snapshot(self) -> dict:
         with self._lock:
             kinds = {
-                k: {"count": self._counts[k], "bytes": self._bytes[k]}
-                for k in sorted(self._counts)
+                k: {"count": self._counts[k], "bytes": self._bytes[k]} for k in sorted(self._counts)
             }
         return {
             "kinds": kinds,
@@ -483,9 +413,7 @@ class UsdSyncServer:
         self.txn_burst = txn_burst
 
         # Opt-in wire traffic diagnostics (--wire-metrics)
-        self.wire_metrics: _WireMetrics | None = (
-            _WireMetrics() if wire_metrics else None
-        )
+        self.wire_metrics: _WireMetrics | None = _WireMetrics() if wire_metrics else None
 
         # Periodic compaction (--compact-interval; 0 = disabled). Runtime
         # adjustable via set_compact_interval. compact_log itself is safe
@@ -571,7 +499,8 @@ class UsdSyncServer:
 
     def _start_compaction_thread(self):
         self._compact_thread = threading.Thread(
-            target=self._compaction_loop, daemon=True,
+            target=self._compaction_loop,
+            daemon=True,
         )
         self._compact_thread.start()
 
@@ -658,7 +587,9 @@ class UsdSyncServer:
             }
 
     def claim_playback(
-        self, client_id: str, initial_time: float | None = None,
+        self,
+        client_id: str,
+        initial_time: float | None = None,
     ) -> tuple[bool, str]:
         """Grant the playback-leader role if vacant.
 
@@ -829,9 +760,7 @@ class UsdSyncServer:
             else:
                 layer_key = rec.get("layer_key") or ""
                 if not layer_key:
-                    raise ValueError(
-                        "persisted collaboration opinion is missing layer_key"
-                    )
+                    raise ValueError("persisted collaboration opinion is missing layer_key")
                 layer, _added = self.layer_stack.ensure_layer(
                     layer_key,
                     label=_label_for_layer_key(layer_key),
@@ -1207,12 +1136,9 @@ class UsdSyncServer:
         unlisted_keys = [
             layer_key
             for layer_key in self.layer_stack.layer_keys
-            if layer_key != _DEFAULT_LAYER_KEY
-            and layer_key not in priority_set
+            if layer_key != _DEFAULT_LAYER_KEY and layer_key not in priority_set
         ]
-        return self.layer_stack.set_order(
-            [*priority_keys, *unlisted_keys, _DEFAULT_LAYER_KEY]
-        )
+        return self.layer_stack.set_order([*priority_keys, *unlisted_keys, _DEFAULT_LAYER_KEY])
 
     def _ordered_department_names(self) -> list[str]:
         """Return department policy entries in composed strength order."""
@@ -1243,11 +1169,7 @@ class UsdSyncServer:
     def department_for_layer(self, layer: Sdf.Layer) -> str | None:
         """Return department policy metadata for a managed layer."""
         layer_key = self.layer_stack.key_for_layer(layer)
-        return (
-            _department_for_layer_key(layer_key)
-            if layer_key is not None
-            else None
-        )
+        return _department_for_layer_key(layer_key) if layer_key is not None else None
 
     def mute_layer(self, key: str) -> bool:
         """Mute a layer by client_id or department — opinions hidden but preserved."""
@@ -1395,19 +1317,10 @@ class UsdSyncServer:
         with self.stage_lock:
             muted = set(self.stage.GetMutedLayers())
             layer_keys = self.layer_stack.layer_keys
-            layers = {
-                layer_key: self.layer_stack.layer_for(layer_key)
-                for layer_key in layer_keys
-            }
-            labels = {
-                layer_key: self.layer_stack.label_for(layer_key)
-                for layer_key in layer_keys
-            }
+            layers = {layer_key: self.layer_stack.layer_for(layer_key) for layer_key in layer_keys}
+            labels = {layer_key: self.layer_stack.label_for(layer_key) for layer_key in layer_keys}
             client_keys = dict(self._client_layer_keys)
-            authored = {
-                layer_key: not layers[layer_key].empty
-                for layer_key in layer_keys
-            }
+            authored = {layer_key: not layers[layer_key].empty for layer_key in layer_keys}
 
         clients_by_key: dict[str, list[str]] = {}
         for client_id, layer_key in client_keys.items():
@@ -1508,10 +1421,10 @@ class UsdSyncServer:
                 ev.get("time"),
                 layer_scope,
             )
-        elif k == K_SET_SDF_PROPERTY_FIELDS:
+        elif k == K_SET_SDF_SPEC_FIELDS:
             key = (
                 prim,
-                f"{k}:{ev.get('spec_path') or ''}",
+                (f"{k}:{ev.get('spec_kind') or ''}:{ev.get('spec_path') or ''}"),
                 None,
                 layer_scope,
             )
@@ -1641,20 +1554,14 @@ class UsdSyncServer:
             existing = latest.get(key)
             if existing:
                 prev = existing[0]
-                prev.update(
-                    {
-                        field: ev[field]
-                        for field in STAGE_METADATA_KEYS
-                        if field in ev
-                    }
-                )
+                prev.update({field: ev[field] for field in STAGE_METADATA_KEYS if field in ev})
                 latest[key] = (prev, meta, seq)
             else:
                 latest[key] = (ev, meta, seq)
-        elif k == K_SET_SDF_PROPERTY_FIELDS:
+        elif k == K_SET_SDF_SPEC_FIELDS:
             existing = latest.get(key)
             if existing:
-                latest[key] = (merge_property_spec_events(existing[0], ev), meta, seq)
+                latest[key] = (merge_spec_events(existing[0], ev), meta, seq)
             else:
                 latest[key] = (ev, meta, seq)
         elif k == K_ENSURE_PRIM:
@@ -1797,7 +1704,19 @@ class UsdSyncServer:
         LOG.info("Purged event log and reset authored collaboration layers")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
 
-    def build_correction(self, ev: dict) -> dict | None:
+    def _flatten_layer_stack_for_projection(self) -> Sdf.Layer:
+        with self.stage_lock:
+            return UsdUtils.FlattenLayerStack(
+                self.stage,
+                tag="openusdconnect-flat-projection.usda",
+            )
+
+    def build_correction(
+        self,
+        ev: dict,
+        *,
+        composed_layer: Sdf.Layer | None = None,
+    ) -> dict | None:
         """Build a correction event with the composed value for an overridden event.
 
         Returns a new event dict with the server's authoritative composed
@@ -1809,6 +1728,16 @@ class UsdSyncServer:
             return None
 
         with self.stage_lock:
+            if k == K_SET_SDF_SPEC_FIELDS:
+                if composed_layer is not None:
+                    return composed_layer_spec_event(composed_layer, ev)
+                if _needs_flattened_spec_projection(ev):
+                    return composed_layer_spec_event(
+                        self._flatten_layer_stack_for_projection(),
+                        ev,
+                    )
+                return composed_property_spec_event(self.stage, ev)
+
             prim = self.stage.GetPrimAtPath(pp)
             if not prim or not prim.IsValid():
                 return None
@@ -1841,9 +1770,6 @@ class UsdSyncServer:
                     "prim": pp,
                     "active": prim.IsActive(),
                 }
-
-            if k == K_SET_SDF_PROPERTY_FIELDS:
-                return composed_property_spec_event(self.stage, ev)
 
         # For event types we can't build corrections for, return None.
         # The sender stays divergent until the next full resync.
@@ -1967,6 +1893,19 @@ class UsdSyncServer:
                         f"server epoch/seq={current_epoch}/{current_seq}"
                     )
 
+            if uploaded_stage.GetEditTarget().GetLayer().subLayerPaths:
+                analysis = _analysis(
+                    "unsupported_rejected",
+                    [
+                        "uploaded snapshot contains sublayer topology, which cannot "
+                        "be mapped into the managed collaboration layer stack"
+                    ],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains unsupported sublayer topology"
+                )
+
             removed_fraction = len(removed_paths) / max(1, len(before_paths))
             removes_rootish_prim = any(
                 path.count("/") <= 1 and path != "/Root" for path in removed_paths
@@ -1995,28 +1934,6 @@ class UsdSyncServer:
                 events = emitter.snapshot_events()
             finally:
                 emitter.cleanup()
-
-            unsupported_opinions = _unsupported_vfs_translate_opinions(
-                uploaded_stage,
-                events,
-            )
-            if unsupported_opinions:
-                shown = ", ".join(unsupported_opinions[:10])
-                more = len(unsupported_opinions) - 10
-                if more > 0:
-                    shown = f"{shown}, ... (+{more} more)"
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "uploaded snapshot contains authored layer or prim "
-                        f"opinions outside the VFS translate event surface: {shown}"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "uploaded VFS snapshot contains authored layer or prim "
-                    "opinions that cannot be safely translated"
-                )
 
             # Hide prims that existed in the previous composed stage but are absent
             # from the uploaded snapshot. This lets full-file saves express deletes
@@ -2225,9 +2142,7 @@ class UsdSyncServer:
         if len(records) != len(events):
             raise ValueError("transaction record and event counts differ")
 
-        has_flat_receivers, has_layered_receivers = (
-            self._receiver_audience_presence()
-        )
+        has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
         if has_layered_receivers:
             authored_records = [record for record, _encoded in records]
             authored_bytes = [encoded for _record, encoded in records]
@@ -2245,6 +2160,7 @@ class UsdSyncServer:
 
         flat_records: list[dict] = []
         flat_bytes: list[bytes] = []
+        projection_layer: Sdf.Layer | None = None
 
         def _flush_flat() -> None:
             if not flat_records:
@@ -2270,7 +2186,12 @@ class UsdSyncServer:
                 continue
 
             _flush_flat()
-            correction = self.build_correction(event)
+            if projection_layer is None and _needs_flattened_spec_projection(event):
+                projection_layer = self._flatten_layer_stack_for_projection()
+            correction = self.build_correction(
+                event,
+                composed_layer=projection_layer,
+            )
             if correction is None:
                 continue
             correction_record = {
@@ -2661,6 +2582,11 @@ class UsdSyncServer:
         subsequent checks for the same prim+kind.
         """
         from ..event_apply import apply_events
+        from ..sdf_spec_delta import validate_spec_delta
+
+        for event in events:
+            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+                validate_spec_delta(event)
 
         target = layer or self.edit_layer
 
@@ -2668,31 +2594,22 @@ class UsdSyncServer:
         with self.stage_lock:
             edit_target = Usd.EditTarget(target)
             session_target = Usd.EditTarget(self.stage.GetSessionLayer())
-            has_layer_opinions = any(
-                ev.get("k") not in SHARED_STAGE_KINDS for ev in events
-            )
+            has_layer_opinions = any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events)
             target_was_muted = self.stage.IsLayerMuted(target.identifier)
             was_muted = has_layer_opinions and target_was_muted
             if was_muted:
                 self.stage.UnmuteLayer(target.identifier)
             try:
                 for ev in events:
-                    if (
-                        ev.get("k") != K_SET_SDF_PROPERTY_FIELDS
-                        or not ev.get("removed", False)
-                    ):
+                    if ev.get("k") != K_SET_SDF_SPEC_FIELDS or not ev.get("removed", False):
                         continue
                     event_path = Sdf.Path(ev.get("spec_path", ""))
-                    if not event_path.IsAbsolutePath() or not event_path.IsPropertyPath():
+                    if not event_path.IsAbsolutePath():
                         continue
-                    target_path = edit_target.MapToSpecPath(event_path)
-                    if target_path.isEmpty:
-                        continue
-                    spec = target.GetPropertyAtPath(target_path)
+                    spec = target.GetObjectAtPath(event_path)
                     if spec:
                         ev["fields"] = sorted(
-                            set(ev.get("fields", ()))
-                            | {str(key) for key in spec.ListInfoKeys()}
+                            set(ev.get("fields", ())) | {str(key) for key in spec.ListInfoKeys()}
                         )
 
                 start = 0
@@ -2700,9 +2617,7 @@ class UsdSyncServer:
                     shared = events[start].get("k") in SHARED_STAGE_KINDS
                     end = start + 1
                     while (
-                        end < len(events)
-                        and (events[end].get("k") in SHARED_STAGE_KINDS)
-                        == shared
+                        end < len(events) and (events[end].get("k") in SHARED_STAGE_KINDS) == shared
                     ):
                         end += 1
                     run = events[start:end]
@@ -2713,6 +2628,7 @@ class UsdSyncServer:
                         self.stage,
                         run,
                         op_cache=self._op_cache_for(run_layer),
+                        prevalidated=True,
                     )
                     start = end
             finally:
@@ -2819,13 +2735,8 @@ class UsdSyncServer:
         """
         target_layer = layer or self.edit_layer
         layer_key = self.layer_stack.key_for_layer(target_layer)
-        if (
-            layer_key is None
-            and any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events)
-        ):
-            raise ValueError(
-                "transaction target is not a managed collaboration layer"
-            )
+        if layer_key is None and any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events):
+            raise ValueError("transaction target is not a managed collaboration layer")
 
         changed = self.apply_txn(events, layer=target_layer)
         changed_set = set(changed)
@@ -3006,9 +2917,7 @@ class UsdSyncServer:
                 "isInstanceable": prim.IsInstanceable(),
                 "isInstance": prim.IsInstance(),
                 "isInstanceProxy": prim.IsInstanceProxy(),
-                "prototype": (
-                    prototype.GetPath().pathString if prototype else None
-                ),
+                "prototype": (prototype.GetPath().pathString if prototype else None),
             }
             if prim.IsA(UsdGeom.PointInstancer):
                 detail["pointInstancer"] = _point_instancer_summary(prim)
@@ -3091,6 +3000,7 @@ class UsdSyncServer:
         blobs = self.store.get_from_seq_bin(seq_start)
         buf_parts: list[bytes] = []
         buf_size = 0
+        projection_layer: Sdf.Layer | None = None
         for blob in blobs:
             outbound = blob
             if len(self.layer_stack.layer_keys) > 1 and not getattr(
@@ -3101,7 +3011,12 @@ class UsdSyncServer:
                 rec = message_to_dict(blob)
                 event = rec.get("event", {})
                 if event.get("k") in COMPOSED_PROJECTION_KINDS:
-                    correction = self.build_correction(event)
+                    if projection_layer is None and _needs_flattened_spec_projection(event):
+                        projection_layer = self._flatten_layer_stack_for_projection()
+                    correction = self.build_correction(
+                        event,
+                        composed_layer=projection_layer,
+                    )
                     if correction is not None:
                         outbound = encode_message(
                             {

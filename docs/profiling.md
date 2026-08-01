@@ -118,14 +118,15 @@ py-spy record --pid <BLENDER_PID> --output blender_profile.svg
 | `--native` (C++ stacks) | Administrator required | Works | Works |
 | Overhead | ~1-5% | ~1-5% | ~1-5% |
 
-## Sdf property field deltas
+## Sdf spec field deltas
 
-Use the focused benchmark for custom-property and metadata deltas:
+Use the focused benchmark for generic Sdf fields, emitter notices, inactive
+variant edits, and full authored-layer snapshots:
 
 ```bash
-uv run python scripts/benchmark_sdf_property_delta.py
+uv run python scripts/benchmark_sdf_spec_delta.py
 ```
 
 Run `stress_test_departments.py` as well. The focused benchmark measures the
-generic Sdf field path; the stress test guards the existing transform and
-transport paths.
+generic Sdf path and the specialized transform path in-process; the stress
+test guards transport, persistence, and department composition under load.

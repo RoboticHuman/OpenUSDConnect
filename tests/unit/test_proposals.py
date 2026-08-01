@@ -24,21 +24,27 @@ def srv_with_layers(srv):
 
     layer_a = srv.get_or_create_client_layer("alice", "layout")
     srv.stage.SetEditTarget(Usd.EditTarget(layer_a))
-    apply_events(srv.stage, [
-        {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"},
-        {"k": "ensure_xform_ops", "prim": "/World/Cube"},
-        {"k": "set_xform_trs", "prim": "/World/Cube",
-         "fields": ["t"], "t": [1.0, 0.0, 0.0]},
-    ], op_cache=srv._op_cache_for(layer_a))
+    apply_events(
+        srv.stage,
+        [
+            {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"},
+            {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+            {"k": "set_xform_trs", "prim": "/World/Cube", "fields": ["t"], "t": [1.0, 0.0, 0.0]},
+        ],
+        op_cache=srv._op_cache_for(layer_a),
+    )
 
     layer_b = srv.get_or_create_client_layer("bob", "animation")
     srv.stage.SetEditTarget(Usd.EditTarget(layer_b))
-    apply_events(srv.stage, [
-        {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"},
-        {"k": "ensure_xform_ops", "prim": "/World/Cube"},
-        {"k": "set_xform_trs", "prim": "/World/Cube",
-         "fields": ["t"], "t": [5.0, 3.0, 0.0]},
-    ], op_cache=srv._op_cache_for(layer_b))
+    apply_events(
+        srv.stage,
+        [
+            {"k": "ensure_prim", "prim": "/World/Cube", "typeName": "Xform"},
+            {"k": "ensure_xform_ops", "prim": "/World/Cube"},
+            {"k": "set_xform_trs", "prim": "/World/Cube", "fields": ["t"], "t": [5.0, 3.0, 0.0]},
+        ],
+        op_cache=srv._op_cache_for(layer_b),
+    )
 
     return srv
 
@@ -96,8 +102,12 @@ class TestProposalApproval:
         events = [
             {"k": "ensure_prim", "prim": "/World/KeyLight", "typeName": "Xform"},
             {"k": "ensure_xform_ops", "prim": "/World/KeyLight"},
-            {"k": "set_xform_trs", "prim": "/World/KeyLight",
-             "fields": ["t"], "t": [10.0, 8.0, -5.0]},
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/KeyLight",
+                "fields": ["t"],
+                "t": [10.0, 8.0, -5.0],
+            },
         ]
         _apply_to_proposal(srv_with_layers, pid, events)
 
@@ -135,7 +145,7 @@ class TestProposalApproval:
         from openusdconnect.codec import message_to_dict
         from openusdconnect.emitter import NoticeEmitter
         from openusdconnect.event_apply import apply_events
-        from openusdconnect.protocol_constants import K_SET_SDF_PROPERTY_FIELDS
+        from openusdconnect.protocol_constants import K_SET_SDF_SPEC_FIELDS
 
         def _events(value):
             stage = Usd.Stage.CreateInMemory()
@@ -171,9 +181,7 @@ class TestProposalApproval:
 
         assert srv_with_layers.approve_proposal(proposal_id)
         corrections = [
-            record
-            for record in broadcast
-            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+            record for record in broadcast if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
         ]
         assert len(corrections) == 1
         stored_generic = [
@@ -182,7 +190,7 @@ class TestProposalApproval:
                 message_to_dict,
                 srv_with_layers.store.get_from_seq_bin(1),
             )
-            if record["event"]["k"] == K_SET_SDF_PROPERTY_FIELDS
+            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
         ]
         assert corrections[0]["seq"] == stored_generic[-1]["seq"]
 
@@ -200,9 +208,13 @@ def _apply_to_proposal(srv, proposal_id, events):
 class TestProposalTxnRouting:
     def test_proposal_layer_receives_events(self, srv_with_layers):
         pid = srv_with_layers.create_proposal("alice", "lighting", "light fix")
-        layer = _apply_to_proposal(srv_with_layers, pid, [
-            {"k": "ensure_prim", "prim": "/World/SpotLight", "typeName": "Xform"},
-        ])
+        layer = _apply_to_proposal(
+            srv_with_layers,
+            pid,
+            [
+                {"k": "ensure_prim", "prim": "/World/SpotLight", "typeName": "Xform"},
+            ],
+        )
 
         # Opinions land in proposal layer, not in any department layer
         assert layer.GetPrimAtPath("/World/SpotLight") is not None
@@ -212,9 +224,13 @@ class TestProposalTxnRouting:
     def test_proposal_events_not_in_composed_stage(self, srv_with_layers):
         """Muted proposal layer opinions should not be visible on composed stage."""
         pid = srv_with_layers.create_proposal("alice", "lighting", "test")
-        layer = _apply_to_proposal(srv_with_layers, pid, [
-            {"k": "ensure_prim", "prim": "/World/HiddenPrim", "typeName": "Xform"},
-        ])
+        layer = _apply_to_proposal(
+            srv_with_layers,
+            pid,
+            [
+                {"k": "ensure_prim", "prim": "/World/HiddenPrim", "typeName": "Xform"},
+            ],
+        )
 
         # Prim exists in proposal layer but NOT on composed stage (muted)
         assert layer.GetPrimAtPath("/World/HiddenPrim") is not None
@@ -222,18 +238,25 @@ class TestProposalTxnRouting:
         assert not prim or not prim.IsValid()
 
     def test_apply_proposal_txn_unknown_returns_false(self, srv_with_layers):
-        assert not srv_with_layers.apply_proposal_txn("nonexistent", [
-            {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"},
-        ])
+        assert not srv_with_layers.apply_proposal_txn(
+            "nonexistent",
+            [
+                {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"},
+            ],
+        )
 
     def test_proposal_survives_session_reorder(self, srv_with_layers):
         """A reorder mid-proposal must keep the proposal layer attached —
         else approve/reject raise and proposal edits have no layer to land in.
         """
         pid = srv_with_layers.create_proposal("alice", "lighting", "rim")
-        _apply_to_proposal(srv_with_layers, pid, [
-            {"k": "ensure_prim", "prim": "/World/RimLight", "typeName": "Xform"},
-        ])
+        _apply_to_proposal(
+            srv_with_layers,
+            pid,
+            [
+                {"k": "ensure_prim", "prim": "/World/RimLight", "typeName": "Xform"},
+            ],
+        )
         # A new department's first client updates the managed layer stack.
         srv_with_layers.get_or_create_client_layer("carol", "lighting")
 
