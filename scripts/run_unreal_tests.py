@@ -20,6 +20,7 @@ from integrations.unreal.test_harness import (  # noqa: E402
     run_unreal_e2e,
     temporary_run_directory,
 )
+from openusdconnect.cli_common import positive_seconds  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Keep the generated project, stage, logs, and results in this directory",
     )
-    parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--timeout", type=positive_seconds, default=240.0)
     parser.add_argument(
         "--list-engines",
         action="store_true",
@@ -117,6 +118,7 @@ def _run(args) -> int:
         print(json.dumps(result.result, indent=2, sort_keys=True))
         print(f"Project: {result.project}")
         print(f"Unreal log: {result.unreal_log}")
+        print(f"Unreal console log: {result.unreal_console_log}")
         print(f"Server log: {result.server_log}")
 
     if args.work_dir:

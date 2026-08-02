@@ -213,5 +213,5 @@ Log LogUSDEmit               Verbose
 Log LogUSDEventApplier       Verbose
 ```
 
-The server-side `--dashboard 8080` web UI is invaluable for confirming events are
+The server-side `--dashboard-port 8080` web UI is invaluable for confirming events are
 flowing through the server when debugging client-side silence.

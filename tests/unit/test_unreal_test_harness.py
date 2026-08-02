@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,9 @@ from pxr import Gf, Sdf, Usd
 
 from integrations.unreal.test_harness import (
     UnrealTestError,
+    _editor_command,
     _engine_fingerprint,
+    _ensure_flatbuffers_headers,
     _plugin_fingerprint,
     create_scenario,
     create_test_project,
@@ -282,6 +285,71 @@ def test_engine_fingerprint_distinguishes_builds_and_installations(tmp_path):
     modules = first.editor.parent / "UnrealEditor.modules"
     modules.write_text('{"BuildId":"new-build"}\n', encoding="utf-8")
     assert _engine_fingerprint(first) != fingerprint
+
+
+def test_flatbuffers_headers_are_bootstrapped_once(tmp_path, monkeypatch):
+    plugin = tmp_path / "OpenUSDConnect"
+    setup_script = plugin / "setup_flatbuffers.py"
+    setup_script.parent.mkdir(parents=True)
+    setup_script.write_text("# test setup\n", encoding="utf-8")
+    header = (
+        plugin / "Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/include/flatbuffers/flatbuffers.h"
+    )
+    calls = []
+
+    def run_setup(command, **kwargs):
+        calls.append((command, kwargs))
+        header.parent.mkdir(parents=True)
+        header.write_text("// flatbuffers\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "installed", "")
+
+    monkeypatch.setattr("integrations.unreal.test_harness.subprocess.run", run_setup)
+
+    _ensure_flatbuffers_headers(plugin)
+    _ensure_flatbuffers_headers(plugin)
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == str(setup_script)
+    assert calls[0][1]["cwd"] == plugin
+
+
+def test_flatbuffers_bootstrap_reports_missing_setup_script(tmp_path):
+    with pytest.raises(UnrealTestError, match="setup script was not found"):
+        _ensure_flatbuffers_headers(tmp_path / "OpenUSDConnect")
+
+
+def test_unattended_editor_command_keeps_rendering_enabled(tmp_path):
+    engine = inspect_engine(
+        _fake_macos_engine(tmp_path / "UE_5.8"),
+        platform_name="darwin",
+    )
+    project = tmp_path / "Project.uproject"
+    unreal_log = tmp_path / "unreal.log"
+
+    command = _editor_command(engine, project, unreal_log, interactive=False)
+
+    assert command[0] == str(engine.editor_cmd)
+    assert "-unattended" in command
+    assert "-nullrhi" not in command
+    assert f"-abslog={unreal_log}" in command
+
+
+def test_interactive_editor_command_uses_gui_without_unattended(tmp_path):
+    engine = inspect_engine(
+        _fake_macos_engine(tmp_path / "UE_5.8"),
+        platform_name="darwin",
+    )
+
+    command = _editor_command(
+        engine,
+        tmp_path / "Project.uproject",
+        tmp_path / "unreal.log",
+        interactive=True,
+    )
+
+    assert command[0] == str(engine.editor)
+    assert "-unattended" not in command
+    assert "-nullrhi" not in command
 
 
 def test_scenario_expected_layers_cover_material_updates(tmp_path):

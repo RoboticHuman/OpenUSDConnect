@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 from tests.helpers import start_server
 
 
-def test_server_terminates_cleanly(tmp_path, free_port):
+def test_server_terminates_promptly(tmp_path, free_port):
     proc = start_server(tmp_path, free_port)
     proc.terminate()
     try:
@@ -17,4 +18,7 @@ def test_server_terminates_cleanly(tmp_path, free_port):
         proc.wait(timeout=5)
         raise AssertionError("server did not terminate within 5 seconds") from None
 
-    assert return_code == 0
+    # On Windows Popen.terminate() calls TerminateProcess with exit code 1;
+    # POSIX delivers SIGTERM, which the server handles as a clean shutdown.
+    expected_return_code = 1 if os.name == "nt" else 0
+    assert return_code == expected_return_code
