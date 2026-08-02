@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypedDict
@@ -142,15 +142,14 @@ class EventDispatcher:
             adapter: Where to dispatch events.  Use ``UsdStageAdapter``
                 when the integration's scene representation IS a
                 ``Usd.Stage``; subclass ``DCCAdapter`` otherwise.
-            mirror_stage: Optional separate USD stage that should reflect
-                stage-affecting events.  Provide one when the adapter's
-                scene representation is NOT itself a ``Usd.Stage`` and
-                the integration also runs an emitter — the mirror is what
-                the emitter watches.  Leave ``None`` when the adapter
-                already writes to the stage (no separate mirror needed).
+            mirror_stage: Optional separate USD stage that receives
+                stage-affecting events. Layered replay uses it to compose
+                authored layer opinions before projecting their result into
+                a non-USD adapter. Leave ``None`` when the adapter already
+                writes to the target stage.
             emitter: Optional ``NoticeEmitter`` to suppress during apply
-                and invalidate after.  Required to avoid feedback loops
-                whenever the integration also emits.
+                and invalidate after. Use it when the emitter observes the
+                stage mutated by this dispatcher.
             on_imported: Called with the list of prim paths that just
                 imported new content (load_payload, set_reference).  Use
                 for post-import work (seed caches, refresh viewport).
@@ -180,7 +179,7 @@ class EventDispatcher:
         self.on_applied_events = on_applied_events
         self._last_seq = 0
         self._asset_stage = None
-        self._asset_events: dict[tuple[str, str], _TrackedAssetEvent] = {}
+        self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LogicalLayerRouter | None = None
 
     @property
@@ -220,8 +219,6 @@ class EventDispatcher:
         )
         if result.resync_requested:
             self._clear_asset_dependencies()
-            if self._layer_router is not None:
-                self._layer_router.clear()
             if self.on_resync is not None:
                 self.on_resync()
         for exc in result.errors:
@@ -229,13 +226,10 @@ class EventDispatcher:
 
         self._last_seq = result.last_seq
         if self._layer_router is not None:
-            self._bind_layer_router()
-            for state in result.layer_stack_states:
-                self._layer_router.apply_state(state)
-            applied = (
-                self._apply_layered(result.received_records)
-                if result.received_records
-                else 0
+            applied = self._apply_layered(
+                result.received_records,
+                layer_stack_states=result.layer_stack_states,
+                reset_layers=result.resync_requested,
             )
         else:
             events = result.received
@@ -272,50 +266,87 @@ class EventDispatcher:
         router = self._layer_router
         if router is None:
             raise RuntimeError("layered replay was not negotiated")
-        stage = self.adapter.targets_stage()
+        stage = self.mirror_stage or self.adapter.targets_stage()
         if stage is None:
             raise RuntimeError(
-                "layered replay requires an adapter backed by a Usd.Stage",
+                "layered replay requires a Usd.Stage mirror",
             )
         router.bind(stage)
         return stage
 
-    def _apply_layered(self, records: list[ReceivedEvent]) -> int:
+    def _apply_layered(
+        self,
+        records: list[ReceivedEvent],
+        *,
+        layer_stack_states: Sequence[dict] = (),
+        reset_layers: bool = False,
+    ) -> int:
         """Apply authored records to their receiver-local logical layers."""
         from pxr import Usd
+
+        from .adapters import UsdStageAdapter
+        from .composed_projection import ComposedChangeProjection
 
         router = self._layer_router
         if router is None:
             raise RuntimeError("layered replay was not negotiated")
         stage = self._bind_layer_router()
         events = [record.event for record in records]
-        routed = []
-        for record in records:
-            if record.event.get("k") in SHARED_STAGE_KINDS:
-                layer = None
-            else:
-                if not record.layer_key:
-                    raise ValueError(
-                        "layered replay record is missing its collaboration "
-                        "layer key"
-                    )
-                layer = router.layer_for(record.layer_key)
-            routed.append((layer, record.event))
-        layers = {
-            layer.identifier: layer
-            for layer, _event in routed
-            if layer is not None
+        adapter_stage = self.adapter.targets_stage()
+        projects_to_native = adapter_stage is not stage
+        stage_adapter = UsdStageAdapter(stage) if projects_to_native else self.adapter
+        local_origin = getattr(self.receiver, "origin", None)
+        same_origin_paths = {
+            str(record.event["prim"])
+            for record in records
+            if local_origin and record.origin == local_origin and record.event.get("prim")
         }
+        stack_paths, stack_arc_paths = (
+            router.authored_projection_candidates()
+            if reset_layers or layer_stack_states
+            else ((), ())
+        )
+        projection = (
+            ComposedChangeProjection(
+                stage,
+                events,
+                extra_scene_paths=stack_paths,
+                extra_arc_candidates=stack_arc_paths,
+                reapply_composed_paths=same_origin_paths,
+                reset=reset_layers,
+            )
+            if projects_to_native
+            else None
+        )
 
         def _apply_run(run, edit_target=None):
-            self.adapter.apply_events(run)
+            stage_adapter.apply_events(run)
             if self.emitter is not None:
                 for event in run:
                     self.emitter.invalidate_for_event(event)
             self._observe_asset_dependencies(run, edit_target=edit_target)
 
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        projected: list[dict] = []
         with suppress_ctx:
+            if reset_layers:
+                router.clear()
+            for state in layer_stack_states:
+                router.apply_state(state)
+
+            routed = []
+            for record in records:
+                if record.event.get("k") in SHARED_STAGE_KINDS:
+                    layer = None
+                else:
+                    if not record.layer_key:
+                        raise ValueError(
+                            "layered replay record is missing its collaboration layer key"
+                        )
+                    layer = router.layer_for(record.layer_key)
+                routed.append((layer, record.event))
+            layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
+
             with router.writable(layers.values()):
                 start = 0
                 while start < len(routed):
@@ -334,21 +365,27 @@ class EventDispatcher:
                             _apply_run(run, edit_target)
                     start = end
 
+            if projection is not None:
+                projected = projection.build_events()
+                if projected:
+                    self.adapter.apply_events(projected)
+
+            adapter_events = projected if projection is not None else events
             if self.on_imported is not None:
                 imported = [
                     event["prim"]
-                    for event in events
+                    for event in adapter_events
                     if event.get("k") in IMPORT_KINDS and event.get("prim")
                 ]
                 if imported:
                     self.on_imported(imported)
-            if self.on_applied_events is not None:
-                self.on_applied_events(events)
+            if self.on_applied_events is not None and adapter_events:
+                self.on_applied_events(adapter_events)
             if self.on_applied is not None:
-                applied = [event["prim"] for event in events if event.get("prim")]
+                applied = [event["prim"] for event in adapter_events if event.get("prim")]
                 if applied:
                     self.on_applied(applied)
-        return len(events)
+        return len(projected) if projection is not None else len(events)
 
     def _apply(self, events: list[dict]) -> int:
         """Run the apply pipeline on a pre-decoded batch.
@@ -503,6 +540,20 @@ class EventDispatcher:
             if not self._tracked_asset_event_is_current(stage, tracked):
                 self._asset_events.pop(key)
 
+    @staticmethod
+    def _asset_event_key(
+        edit_target: Usd.EditTarget,
+        event: dict,
+    ) -> tuple[str, str, str]:
+        from pxr import Sdf
+
+        spec_path = edit_target.MapToSpecPath(Sdf.Path(event.get("prim", "")))
+        return (
+            str(event.get("k", "")),
+            edit_target.GetLayer().identifier,
+            str(spec_path),
+        )
+
     def _observe_asset_dependencies(
         self,
         events: list[dict],
@@ -521,31 +572,49 @@ class EventDispatcher:
             prim_path = event.get("prim", "")
 
             if kind == K_DELETE_PRIM:
-                for key in tuple(self._asset_events):
-                    if _path_is_at_or_below(key[1], prim_path):
+                from pxr import Sdf
+
+                spec_path = edit_target.MapToSpecPath(Sdf.Path(prim_path))
+                for key, tracked in tuple(self._asset_events.items()):
+                    tracked_path = tracked.edit_target.MapToSpecPath(
+                        Sdf.Path(tracked.event.get("prim", "")),
+                    )
+                    if tracked.edit_target.GetLayer() == anchor_layer and _path_is_at_or_below(
+                        str(tracked_path), str(spec_path)
+                    ):
                         self._asset_events.pop(key)
                 continue
 
             if kind == K_RENAME_PRIM:
+                from pxr import Sdf
+
                 new_name = event.get("new_name", "")
                 if not new_name:
                     continue
-                moved: list[tuple[tuple[str, str], _TrackedAssetEvent]] = []
+                spec_path = edit_target.MapToSpecPath(Sdf.Path(prim_path))
+                moved: list[tuple[tuple[str, str, str], _TrackedAssetEvent]] = []
                 for key, tracked in tuple(self._asset_events.items()):
-                    if not _path_is_at_or_below(key[1], prim_path):
+                    tracked_path = tracked.edit_target.MapToSpecPath(
+                        Sdf.Path(tracked.event.get("prim", "")),
+                    )
+                    if tracked.edit_target.GetLayer() != anchor_layer or not _path_is_at_or_below(
+                        str(tracked_path), str(spec_path)
+                    ):
                         continue
                     self._asset_events.pop(key)
-                    new_prim = _renamed_path(key[1], prim_path, new_name)
+                    old_prim = tracked.event.get("prim", "")
+                    new_prim = _renamed_path(old_prim, prim_path, new_name)
                     moved_event = copy.deepcopy(tracked.event)
                     moved_event["prim"] = new_prim
+                    moved_tracked = _TrackedAssetEvent(
+                        event=moved_event,
+                        edit_target=tracked.edit_target,
+                        dependencies=tracked.dependencies,
+                    )
                     moved.append(
                         (
-                            (key[0], new_prim),
-                            _TrackedAssetEvent(
-                                event=moved_event,
-                                edit_target=tracked.edit_target,
-                                dependencies=tracked.dependencies,
-                            ),
+                            self._asset_event_key(tracked.edit_target, moved_event),
+                            moved_tracked,
                         )
                     )
                 self._asset_events.update(moved)
@@ -554,7 +623,7 @@ class EventDispatcher:
             if kind not in (K_SET_REFERENCE, K_SET_PAYLOAD):
                 continue
 
-            key = (kind, prim_path)
+            key = self._asset_event_key(edit_target, event)
             entries_key = "refs" if kind == K_SET_REFERENCE else "payloads"
             state = canonical_arc_state(
                 event.get(entries_key, []),
@@ -759,6 +828,15 @@ class EventDispatcher:
             replays.append((tracked_event, local_events))
 
         adapter_handles_stage = self.adapter.targets_stage() is stage
+        projection = None
+        if not adapter_handles_stage:
+            from .composed_projection import ComposedChangeProjection
+
+            projection = ComposedChangeProjection(
+                stage,
+                adapter_events,
+                reapply_all_composed=True,
+            )
         # A dependency can have been received while any local layer or mapped
         # edit target was active. Preserve that authored location during the
         # retry instead of writing a duplicate arc into today's edit target.
@@ -796,7 +874,10 @@ class EventDispatcher:
         # DCC adapters consume the same events only after the mirror stage has
         # committed. They do not expose USD edit targets themselves.
         if not adapter_handles_stage:
-            self.adapter.apply_events(adapter_events)
+            assert projection is not None
+            adapter_events = projection.build_events()
+            if adapter_events:
+                self.adapter.apply_events(adapter_events)
 
         for tracked_event, local_events in replays:
             if self.emitter is not None:
@@ -866,7 +947,7 @@ class EventDispatcher:
         """Return True if an arc event differs from the mirror stage."""
         from pxr import Sdf
 
-        from .emitter import read_variant_selections
+        from .usd_state import read_variant_selections
 
         prim_path = ev.get("prim", "")
 

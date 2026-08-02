@@ -64,6 +64,7 @@ def _draw_emitter_section(layout, scene):
     col = box.column(align=True)
     col.prop(scene, "usd_connect_emit_host")
     col.prop(scene, "usd_connect_emit_port")
+    col.prop(scene, "usd_connect_department")
     col.prop(scene, "usd_connect_emit_hz")
 
     col = box.column(align=True)
@@ -85,6 +86,7 @@ def _draw_receiver_section(layout, scene):
     col = box.column(align=True)
     col.prop(scene, "usd_connect_recv_host")
     col.prop(scene, "usd_connect_recv_port")
+    col.prop(scene, "usd_connect_department")
 
     row = box.row()
     if scene.usd_connect_recv_running:
@@ -95,7 +97,7 @@ def _draw_receiver_section(layout, scene):
     else:
         row.operator("usd_connect.start_receiver", icon="PLAY")
         if hasattr(scene, "usd_connect_recv_last_seq") and scene.usd_connect_recv_last_seq > 0:
-            box.label(text=f"Will sync from seq: {scene.usd_connect_recv_last_seq + 1}")
+            box.label(text=f"Last applied seq: {scene.usd_connect_recv_last_seq}")
             box.operator("usd_connect.reset_receiver_seq", icon="LOOP_BACK")
 
 

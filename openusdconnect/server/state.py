@@ -20,18 +20,16 @@ from pxr import Ar, Sdf, Usd, UsdGeom, UsdUtils
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
     NoticeEmitter,
-    read_material_binding,
     read_payloads,
     read_references,
     read_stage_metadata,
-    read_variant_selections,
 )
 from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
     COLLABORATION_LAYER_KINDS,
-    COMPOSED_PROJECTION_KINDS,
     EVENT_KIND_INFO,
+    FLAT_RECEIVER_PROJECTION_KINDS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -67,6 +65,7 @@ from ..sdf_spec_delta import (
     composed_property_spec_requires_flattening,
     merge_spec_events,
 )
+from ..usd_state import read_material_binding, read_variant_selections
 from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
 from .layer_stack import CollaborationLayerStack
@@ -2168,11 +2167,12 @@ class UsdSyncServer:
     ) -> None:
         """Deliver one authored transaction to layered and flat receivers.
 
-        Layered receivers always get the persisted authored records. Flat
-        receivers retain the existing composed-view behavior: winning records
-        pass through, while overridden generic Sdf edits become authoritative
-        composed corrections. Corrections sent back to the originating flat
-        receiver repair a locally-authored weak opinion.
+        Layered receivers always get every persisted authored record, including
+        records from their own origin, because omitting one would leave their
+        reconstructed layer stack incomplete. Flat receivers retain the
+        existing composed-view behavior and origin echo suppression: winning
+        records pass through, while overridden generic Sdf edits become
+        authoritative composed corrections.
         """
         if not records:
             return
@@ -2186,7 +2186,6 @@ class UsdSyncServer:
             self.broadcast_bytes(
                 frame_batch(authored_bytes),
                 authored_records,
-                exclude_origin=exclude_origin,
                 audience=_AUDIENCE_LAYERED,
                 notify_listeners=False,
             )
@@ -2248,7 +2247,7 @@ class UsdSyncServer:
                     exclude_origin,
                     audience=_AUDIENCE_FLAT,
                 )
-            if event.get("k") in COMPOSED_PROJECTION_KINDS:
+            if event.get("k") in FLAT_RECEIVER_PROJECTION_KINDS:
                 if has_flat_receivers:
                     self.broadcast(
                         correction_record,
@@ -2715,7 +2714,7 @@ class UsdSyncServer:
                 if not pp:
                     changed_indices.append(i)
                     continue
-                if k in COMPOSED_PROJECTION_KINDS:
+                if k in FLAT_RECEIVER_PROJECTION_KINDS:
                     # Flat receivers need an authoritative composed correction
                     # so weaker opinions, dictionary composition, and clears
                     # cannot leak through.
@@ -3052,7 +3051,7 @@ class UsdSyncServer:
             ):
                 rec = message_to_dict(blob)
                 event = rec.get("event", {})
-                if event.get("k") in COMPOSED_PROJECTION_KINDS:
+                if event.get("k") in FLAT_RECEIVER_PROJECTION_KINDS:
                     if projection_layer is None and _needs_flattened_spec_projection(event):
                         projection_layer = self._flatten_layer_stack_for_projection()
                     if flattened_stage_layer is None:

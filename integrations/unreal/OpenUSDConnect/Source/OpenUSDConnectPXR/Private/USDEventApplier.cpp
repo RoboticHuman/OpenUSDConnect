@@ -17,7 +17,6 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usd/variantSets.h"
-#include "pxr/usd/usd/namespaceEditor.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformOp.h"
@@ -240,11 +239,14 @@ void ApplyRenamePrim(pxr::UsdStageRefPtr& Stage, const Wire::RenamePrim* Ev)
 	const FString NewName  = ToFString(Ev->new_name());
 	if (PrimPath.IsEmpty() || NewName.IsEmpty()) return;
 
-	pxr::UsdPrim Prim = Stage->GetPrimAtPath(ToSdfPath(PrimPath));
-	if (!Prim) return;
+	const pxr::UsdEditTarget EditTarget = Stage->GetEditTarget();
+	const pxr::SdfPath SpecPath = EditTarget.MapToSpecPath(ToSdfPath(PrimPath));
+	const pxr::SdfLayerHandle Layer = EditTarget.GetLayer();
+	if (SpecPath.IsEmpty() || !Layer || !Layer->GetPrimAtPath(SpecPath)) return;
 
-	pxr::UsdNamespaceEditor Editor(Stage);
-	if (!Editor.RenamePrim(Prim, ToToken(NewName)) || !Editor.ApplyEdits())
+	pxr::SdfBatchNamespaceEdit Edits;
+	Edits.Add(pxr::SdfNamespaceEdit::Rename(SpecPath, ToToken(NewName)));
+	if (!Layer->Apply(Edits))
 	{
 		UE_LOG(LogUSDEventApplier, Warning,
 			TEXT("RenamePrim: could not rename %s to %s"), *PrimPath, *NewName);

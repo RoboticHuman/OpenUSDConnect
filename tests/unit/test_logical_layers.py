@@ -11,30 +11,14 @@ from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.logical_layers import LogicalLayerRouter
 from openusdconnect.protocol_constants import K_LOAD_PAYLOAD, K_SET_STAGE_METADATA
 
-_STRONG_LAYER = "collaboration:strong"
-_WEAK_LAYER = "review:overrides"
-_BASE_LAYER = "base"
-
-
-def _state(
-    revision: int,
-    layers: list[tuple[str, str, bool]],
-    *,
-    generation: str = "server-a",
-) -> dict:
-    return {
-        "type": "layer_stack_state",
-        "generation": generation,
-        "revision": revision,
-        "layers": [
-            {
-                "layer_key": layer_key,
-                "label": label,
-                "muted": muted,
-            }
-            for layer_key, label, muted in layers
-        ],
-    }
+from .layered_replay_test_support import (
+    _BASE_LAYER,
+    _STRONG_LAYER,
+    _WEAK_LAYER,
+    _LayeredQueue,
+    _property_event,
+    _state,
+)
 
 
 def _set_int(
@@ -201,50 +185,6 @@ def test_removed_layer_key_does_not_restore_stale_opinions_when_reused():
     replacement = router.layer_for(_STRONG_LAYER)
     assert replacement is not original
     assert not replacement.GetPropertyAtPath("/World/Thing.userProperties:value")
-
-
-class _LayeredQueue:
-    layered_replay = True
-    layered_replay_active = True
-
-    def __init__(self, messages):
-        self.messages = list(messages)
-        self.replay_requests = []
-
-    def drain_queue(self):
-        messages = self.messages
-        self.messages = []
-        return messages
-
-    def request_replay_from(self, seq_start):
-        self.replay_requests.append(seq_start)
-
-
-def _property_event(seq: int, layer_key: str, value: int) -> bytes:
-    fragment = Sdf.Layer.CreateAnonymous("property-fragment")
-    prim = Sdf.CreatePrimInLayer(fragment, "/World/Thing")
-    attr = Sdf.AttributeSpec(
-        prim,
-        "userProperties:value",
-        Sdf.ValueTypeNames.Int,
-    )
-    attr.default = value
-    return encode_message(
-        {
-            "type": "event",
-            "seq": seq,
-            "layer_key": layer_key,
-            "event": {
-                "k": "set_sdf_spec_fields",
-                "prim": "/World/Thing",
-                "spec_path": "/World/Thing.userProperties:value",
-                "spec_kind": "attribute",
-                "fields": ["default"],
-                "fragment": fragment.ExportToString(),
-                "removed": False,
-            },
-        }
-    )
 
 
 def test_dispatcher_routes_authored_records_and_clears_layers_on_resync():

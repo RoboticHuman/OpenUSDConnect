@@ -11,18 +11,16 @@ from __future__ import annotations
 
 import bisect
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import NamedTuple
 
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .asset_paths import transport_asset_identifier, value_contains_asset_path
 from .connectable_attrs import (
     USDSHADE_INPUT_PREFIX,
     USDSHADE_OUTPUT_PREFIX,
     ConnectableAttr,
-    input_attr,
-    output_attr,
 )
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
@@ -63,6 +61,18 @@ from .sdf_spec_delta import (
     serialize_spec_fields,
     spec_kind_for_object,
 )
+from .usd_state import (
+    POINT_INSTANCER_QUAT_ATTRS,
+    POINT_INSTANCER_USD_TO_WIRE,
+    attribute_event_metadata,
+    connectable_kind,
+    point_instancer_value_to_wire,
+    read_material_binding,
+    read_point_instancer,
+    read_usdshade_connectable,
+    usd_value_to_python,
+    values_equal,
+)
 from .xform_decompose import (
     as_matrix,
     decompose_trs_batch,
@@ -83,6 +93,7 @@ _TRS_FIELD_TO_OP_NAME = {
     "r": "xformOp:orient",
     "s": "xformOp:scale",
 }
+_TRS_OP_NAME_TO_FIELD = {name: field for field, name in _TRS_FIELD_TO_OP_NAME.items()}
 
 # Canonical xform-op type → wire-event TRS field. Non-canonical op types
 # (RotateXYZ, Transform, pivots) replicate through the decomposed sample
@@ -246,10 +257,10 @@ DEFAULT_REPLICATED_API_SCHEMAS = frozenset({
     # UsdHydra: marks a GenerativeProcedural prim for Hydra evaluation; without
     # it a replicated procedural loses its imaging type and never resolves.
     "HydraGenerativeProceduralAPI",
-    # NOTE: LightAPI is built-in for typed UsdLux lights — replicating it
+    # NOTE: LightAPI is built-in for typed UsdLux lights, so replicating it
     # would add a redundant authored opinion. Excluded by design.
     # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.
-    # NOTE: MotionAPI (motion-blur sampling) is render-time, not viewport —
+    # NOTE: MotionAPI (motion-blur sampling) is render-time, not viewport;
     # users who need it call register_replicated_api_schema("MotionAPI").
 })
 
@@ -319,108 +330,16 @@ def _make_attr_filter(channels):
     return _filter
 
 
-def _values_equal(a, b) -> bool:
-    """Compare two attribute values, handling numpy arrays."""
-    import numpy as np
-
-    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
-        try:
-            return np.array_equal(a, b)
-        except (TypeError, ValueError):
-            return False
-    return a == b
-
-
-def _usd_value_to_python(
-    val,
-    asset_path_transform: Callable[[str], str] | None = None,
-):
-    """Convert a USD attribute value to a codec-friendly Python type.
-
-    Handles scalars, GfVec types, and VtArrays (including arrays of vectors).
-    VtArrays are converted to numpy arrays (zero-copy when possible) so the
-    codec can use CreateNumpyVector for bulk encoding.
-    Returns None for unsupported types so the caller can skip them.
-    """
-    import numpy as np
-
-    if val is None:
-        return None
-    # Simple scalars
-    if isinstance(val, (int, float, bool, str)):
-        return val
-    if isinstance(val, Sdf.AssetPath):
-        if asset_path_transform is not None:
-            identifier = val.evaluatedPath or val.authoredPath or val.path
-            return asset_path_transform(identifier)
-        return val.resolvedPath or val.path
-    # GfVec types → list of floats (small, not worth numpy overhead)
-    for vec_type in (Gf.Vec2d, Gf.Vec2f, Gf.Vec3d, Gf.Vec3f, Gf.Vec4d, Gf.Vec4f):
-        if isinstance(val, vec_type):
-            return [float(v) for v in val]
-    # Quaternion → [w, x, y, z]; matches the wire format for xformOp:orient.
-    for quat_type in (Gf.Quatf, Gf.Quatd, Gf.Quath):
-        if isinstance(val, quat_type):
-            im = val.GetImaginary()
-            return [float(val.GetReal()), float(im[0]), float(im[1]), float(im[2])]
-    # GfMatrix types → row-major flat list; the wire reuses FloatArray and
-    # the receiver reconstructs from the type_name (matrix4d/matrix4f/etc.).
-    for matrix_type in (
-        Gf.Matrix2d,
-        Gf.Matrix2f,
-        Gf.Matrix3d,
-        Gf.Matrix3f,
-        Gf.Matrix4d,
-        Gf.Matrix4f,
-    ):
-        if isinstance(val, matrix_type):
-            return [float(c) for row in val for c in row]
-    # VtArray types (Vec3fArray, IntArray, FloatArray, etc.)
-    # Detected by type name ending in "Array" — no shared base class in pxr.
-    # Convert to numpy directly — pxr VtArrays support the buffer protocol.
-    type_name = type(val).__name__
-    if isinstance(val, Sdf.AssetPathArray):
-        return [
-            _usd_value_to_python(elem, asset_path_transform=asset_path_transform) for elem in val
-        ]
-    if type_name.endswith("Array"):
-        try:
-            return np.array(val)
-        except (TypeError, ValueError):
-            # Fallback for exotic array types — iterate element-by-element
-            result = []
-            for elem in val:
-                converted = _usd_value_to_python(
-                    elem,
-                    asset_path_transform=asset_path_transform,
-                )
-                if converted is None:
-                    return None
-                result.append(converted)
-            return result
-    # Pxr value types that have a Python numeric equivalent
-    if type_name in ("Half",):
-        return float(val)
-    # Numeric coercion only — never fall through to str() which would produce
-    # unrecoverable representations like "Vt.Vec3fArray(...)"
-    for coerce in (float, int):
-        try:
-            return coerce(val)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
 def _usd_value_to_transport_python(
     stage: Usd.Stage,
     source_layer: Sdf.Layer,
     value,
 ):
     if not value_contains_asset_path(value):
-        return _usd_value_to_python(value)
+        return usd_value_to_python(value)
     expression_variables = stage.GetMetadata("expressionVariables")
     resolver_context = stage.GetPathResolverContext()
-    return _usd_value_to_python(
+    return usd_value_to_python(
         value,
         asset_path_transform=lambda identifier: transport_asset_identifier(
             source_layer,
@@ -436,6 +355,65 @@ def _attribute_default_source_layer(attr: Usd.Attribute) -> Sdf.Layer | None:
         if isinstance(spec, Sdf.AttributeSpec) and spec.HasDefaultValue():
             return spec.layer
     return None
+
+
+def _local_canonical_trs(
+    composed: dict[str, list[float]],
+    prim: Usd.Prim,
+    property_sources: dict[str, dict[str, Sdf.PropertySpec]],
+    dirty_attrs: set[str] | None,
+) -> dict[str, list[float]]:
+    """Replace canonical TRS components with current edit-target values.
+
+    A stronger layer can mask an opinion authored in the emitter's edit
+    target. The wire must carry that authored value, while components with no
+    local opinion may keep their composed values because local-ownership
+    filtering removes them before emission.
+    """
+    result = composed
+    candidates = (
+        _TRS_FIELD_TO_OP_NAME.items()
+        if dirty_attrs is None
+        else (
+            (_TRS_OP_NAME_TO_FIELD[attr_name], attr_name)
+            for attr_name in dirty_attrs
+            if attr_name in _TRS_OP_NAME_TO_FIELD
+        )
+    )
+    for field, attr_name in candidates:
+        source = property_sources.get(attr_name, {}).get("default")
+        if source is None or not source.HasInfo("default"):
+            continue
+        attr = prim.GetAttribute(attr_name)
+        property_stack = attr.GetPropertyStack(Usd.TimeCode.Default())
+        if property_stack and property_stack[0] == source:
+            continue
+        composed_source = next(
+            (spec for spec in property_stack if spec.HasInfo("default")),
+            None,
+        )
+        if composed_source == source:
+            continue
+        value = source.GetInfo("default")
+        if isinstance(value, Sdf.ValueBlock):
+            continue
+        converted = usd_value_to_python(value)
+        if converted is not None:
+            if result is composed:
+                result = dict(composed)
+            result[field] = converted
+    return result
+
+
+def _direct_edit_target_is_strongest(stage: Usd.Stage) -> bool:
+    """Whether direct opinions in the edit target cannot be layer-masked."""
+    edit_target = stage.GetEditTarget()
+    if not edit_target.GetMapFunction().isIdentity:
+        return False
+    layer = edit_target.GetLayer()
+    if layer == stage.GetSessionLayer():
+        return True
+    return layer == stage.GetRootLayer() and stage.GetSessionLayer().empty
 
 
 # PrimResyncType enum for classifying resync notices. Not available in all
@@ -468,7 +446,7 @@ def _prim_path_from_notice_path(path_str: str) -> str | None:
 
 def _value_hash(val) -> int:
     """Stable per-sample fingerprint. Caller must pass values already converted
-    via ``_usd_value_to_python`` — exotic pxr types aren't supported here.
+    via ``usd_value_to_python``; exotic pxr types aren't supported here.
     """
     import numpy as np
 
@@ -488,7 +466,7 @@ def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None, conver
     on first encounter (every authored sample is reported dirty).
     ``dirty`` lists ``(time, python_value)`` pairs that were added or
     whose hashed value changed. ``convert`` overrides the value converter
-    (default ``_usd_value_to_python``).
+    (default ``usd_value_to_python``).
 
     When ``layer`` is given, the times and values come from that layer
     directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
@@ -507,7 +485,7 @@ def _diff_time_samples(attr, cached: dict[float, int] | None, layer=None, conver
     if not times:
         return {}, []
     if convert is None:
-        convert = _usd_value_to_python
+        convert = usd_value_to_python
     new_cache: dict[float, int] = {}
     dirty: list[tuple[float, object]] = []
     is_first = cached is None
@@ -701,195 +679,6 @@ def read_payloads(stage, prim_path):
     return _read_composition_arcs(stage, prim_path, "payloadList")
 
 
-def read_variant_selections(stage, prim_path):
-    """Read variant selections on a prim.
-
-    Returns a dict mapping variant set name -> selected variant name,
-    or empty dict if no variant sets or no selections.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return {}
-    vsets = prim.GetVariantSets()
-    result = {}
-    for name in vsets.GetNames():
-        sel = vsets.GetVariantSelection(name)
-        if sel:
-            result[name] = sel
-    return result
-
-
-_MATERIAL_BINDING_PURPOSE_RELS = (
-    ("", REL_MATERIAL_BINDING),
-    ("preview", REL_MATERIAL_BINDING + ":preview"),
-    ("full", REL_MATERIAL_BINDING + ":full"),
-)
-
-
-def read_material_binding(stage, prim_path):
-    """Read all authored material binding targets keyed by purpose.
-
-    Returns a dict ``{purpose: target_path}`` over the three USD purposes
-    (allPurpose as ``""``, ``"preview"``, ``"full"``). Unauthored slots
-    are absent from the dict; an authored-but-empty binding maps to ``""``.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return {}
-    result: dict[str, str] = {}
-    for purpose, rel_name in _MATERIAL_BINDING_PURPOSE_RELS:
-        rel = prim.GetRelationship(rel_name)
-        if not rel or not rel.IsValid() or not rel.IsAuthored():
-            continue
-        targets = rel.GetTargets()
-        result[purpose] = str(targets[0]) if targets else ""
-    return result
-
-
-def _attr_event_metadata(prim, attr_name: str, attr) -> tuple[dict, dict]:
-    """Return ``(primvar_meta, attr_interp)`` entries for one attribute.
-
-    Each dict either holds one ``{attr_name: ...}`` entry or is empty.
-    Callers merge per-attr results into the wire event's bundled
-    ``primvar_meta`` / ``attr_interp`` dicts.
-    """
-    primvar_meta: dict = {}
-    attr_interp: dict = {}
-    if attr_name.startswith(PRIMVAR_PREFIX):
-        pv = UsdGeom.PrimvarsAPI(prim).GetPrimvar(attr_name[len(PRIMVAR_PREFIX) :])
-        if pv:
-            meta: dict = {"typeName": str(attr.GetTypeName())}
-            if pv.HasAuthoredInterpolation():
-                meta["interpolation"] = str(pv.GetInterpolation())
-            primvar_meta[attr_name] = meta
-    else:
-        interp = attr.GetMetadata("interpolation")
-        if interp:
-            attr_interp[attr_name] = str(interp)
-    return primvar_meta, attr_interp
-
-
-def _connectable_kind(prim) -> str:
-    """Return the wire-protocol ``container_kind`` label for ``prim``.
-
-    Three buckets, checked in priority order:
-
-      - ``"shader"`` — prim ``IsA`` ``UsdShade.Shader`` (typed schema).
-      - ``"nodegraph"`` — prim ``IsA`` ``UsdShade.NodeGraph``. ``UsdShade.Material``
-        derives from ``NodeGraph``, so Materials land here too.
-      - ``"light"`` — prim ``HasAPI`` ``UsdLux.LightAPI``. Typed UsdLux lights
-        (``SphereLight``, ``RectLight``, ``DomeLight``, …) carry it built-in;
-        ``MeshLightAPI`` / ``VolumeLightAPI`` pull a ``Mesh``/``Volume`` prim
-        into this bucket too.
-
-    Returns ``""`` for prims that don't match any of the three checks.
-    Other USD prims can still expose ``UsdShade.ConnectableAPI`` (anything
-    with a registered ``UsdShadeConnectableAPIBehavior``) — those aren't
-    replicated and intentionally return ``""``.
-    """
-    if not prim or not prim.IsValid():
-        return ""
-    if prim.IsA(UsdShade.Shader):
-        return "shader"
-    if prim.IsA(UsdShade.NodeGraph):
-        return "nodegraph"
-    if prim.HasAPI(UsdLux.LightAPI):
-        return "light"
-    return ""
-
-
-def _connected_source_attr(src) -> ConnectableAttr:
-    """Return the protocol attribute reference for a UsdShade connection source.
-
-    Uses `sourceType` to choose `inputs:` vs `outputs:` so we cover the
-    NodeGraph interface-forwarding case where the source is itself an
-    input.
-    """
-    if src.sourceType == UsdShade.AttributeType.Output:
-        return output_attr(src.sourceName)
-    return input_attr(src.sourceName)
-
-
-def read_usdshade_connectable(stage, prim_path):
-    """Read interface data from a UsdShade.ConnectableAPI-bearing prim.
-
-    Polymorphic over Shader, NodeGraph, Material (Material inherits
-    NodeGraph in UsdShade), and UsdLux lights (LightAPI is a UsdShade
-    connectable container).  Reads authored input values, their USD
-    types, and any authored connections — on inputs AND outputs.
-
-    Returns (container_kind, info_id, inputs, input_types, connections):
-      - container_kind: "" if the prim doesn't bear an interface, otherwise
-        "shader", "nodegraph" (covers Material), or "light".
-      - info_id: info:id for Shader prims, "" for NodeGraph/Material/Light
-        which carry no info:id by design.
-      - inputs/input_types: keyed by the input's base name (no namespace
-        prefix), since these are direct values, not connection edges.
-      - connections: keyed by namespace-qualified local attribute name
-        ("inputs:foo" or "outputs:bar") and valued by
-        {"source_prim", "source_attr"} where source_attr is similarly
-        qualified.  Mirrors USD's .connect authoring shape.  Inputs that
-        have a connection are excluded from `inputs` since their value
-        comes from the source, not direct authoring.
-
-    Callers gate on `container_kind` to distinguish "no interface here"
-    from "interface present but nothing authored yet".
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    container_kind = _connectable_kind(prim)
-    if not container_kind:
-        return "", "", {}, {}, {}
-
-    if container_kind == "shader":
-        shader = UsdShade.Shader(prim)
-        info_id = shader.GetIdAttr().Get() or ""
-        if not info_id:
-            return "", "", {}, {}, {}
-        connectable = shader
-    else:
-        # NodeGraph (covers Material) and Light containers share
-        # ConnectableAPI for input/output enumeration.
-        info_id = ""
-        connectable = UsdShade.ConnectableAPI(prim)
-
-    inputs = {}
-    input_types = {}
-    connections = {}
-
-    for inp in connectable.GetInputs():
-        if not inp.GetAttr().IsAuthored():
-            continue
-        name = inp.GetBaseName()
-        sources, _ = inp.GetConnectedSources()
-        if sources:
-            connections[input_attr(name).qualified_name] = {
-                "source_prim": str(sources[0].source.GetPath()),
-                "source_attr": _connected_source_attr(sources[0]).qualified_name,
-            }
-            continue
-        val = _usd_value_to_python(inp.Get())
-        if val is not None:
-            inputs[name] = val
-            input_types[name] = str(inp.GetAttr().GetTypeName())
-
-    # Output-side authored connections: NodeGraph/Material output ports
-    # that bubble internal shader values up to consumers outside.  Shaders
-    # generally don't author connections on their outputs, but the check
-    # is uniform so we read them either way.
-    for outp in connectable.GetOutputs():
-        if not outp.GetAttr().HasAuthoredConnections():
-            continue
-        sources, _ = outp.GetConnectedSources()
-        if not sources:
-            continue
-        connections[output_attr(outp.GetBaseName()).qualified_name] = {
-            "source_prim": str(sources[0].source.GetPath()),
-            "source_attr": _connected_source_attr(sources[0]).qualified_name,
-        }
-
-    return container_kind, info_id, inputs, input_types, connections
-
-
 def _connection_from_local_spec(stage: Usd.Stage, spec: Sdf.AttributeSpec):
     list_op = spec.GetInfo("connectionPaths")
     paths = list(list_op.ApplyOperations([]) or ())
@@ -948,7 +737,7 @@ def _read_edit_target_usdshade_connectable(
 ):
     """Read UsdShade opinions owned by the current edit-target layer."""
     prim = stage.GetPrimAtPath(prim_path)
-    container_kind = _connectable_kind(prim)
+    container_kind = connectable_kind(prim)
     if not container_kind:
         return "", "", {}, {}, {}
 
@@ -1259,7 +1048,7 @@ class ConnectableChannel(PrimChannel):
         last_conns = cached.get("connections", {})
 
         changed_inputs = {
-            n: v for n, v in current["inputs"].items() if not _values_equal(v, last_inputs.get(n))
+            n: v for n, v in current["inputs"].items() if not values_equal(v, last_inputs.get(n))
         }
         info_id = current["info_id"]
         # Only shaders carry a meaningful info:id. Lights and node graphs
@@ -1404,7 +1193,7 @@ def read_camera_attrs(stage, prim_path):
     for name in _CAMERA_ATTR_NAMES:
         attr = prim.GetAttribute(name)
         if attr and attr.IsValid() and attr.IsAuthored():
-            val = _usd_value_to_python(attr.Get())
+            val = usd_value_to_python(attr.Get())
             if val is not None:
                 attrs[name] = val
     return attrs
@@ -1428,7 +1217,7 @@ class CameraAttrsChannel(PrimChannel):
 
     def diff(self, current, cached):
         cached = cached or {}
-        changed = {n: v for n, v in current.items() if not _values_equal(v, cached.get(n))}
+        changed = {n: v for n, v in current.items() if not values_equal(v, cached.get(n))}
         return changed if changed else None
 
     def to_event(self, prim_path, diff):
@@ -1457,85 +1246,11 @@ class InstanceableChannel(PrimChannel):
         return {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": diff}
 
 
-# UsdGeomPointInstancer attr name -> wire field name. orientationsf is read
-# in preference to orientations when authored; both map to the same wire
-# field (float32 wxyz rows).
-_PI_USD_TO_WIRE = {
-    "protoIndices": "proto_indices",
-    "positions": "positions",
-    "orientations": "orientations",
-    "orientationsf": "orientations",
-    "scales": "scales",
-    "velocities": "velocities",
-    "accelerations": "accelerations",
-    "angularVelocities": "angular_velocities",
-    "ids": "ids",
-    "invisibleIds": "invisible_ids",
-}
-
-_PI_QUAT_ATTRS = frozenset({"orientations", "orientationsf"})
-
-
-def _quat_array_to_wire(value):
-    """VtQuat*Array (numpy xyzw rows) to float32 wxyz rows."""
-    import numpy as np
-
-    return np.asarray(value)[:, [3, 0, 1, 2]].astype(np.float32, copy=False)
-
-
-def read_point_instancer(stage, prim_path, only=None):
-    """Read prototypes rel targets + default-time arrays from a PointInstancer.
-
-    Returns ``{wire_field: value}`` with orientations as float32 wxyz rows,
-    or ``None`` if the prim is not a ``UsdGeom.PointInstancer``. Arrays
-    authored only as time samples have no default opinion and are omitted;
-    the per-time sample path carries those. ``only`` restricts the read to
-    a set of USD property names (plus ``"prototypes"``) so a single-array
-    edit does not pay for re-reading every other bulk array.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.PointInstancer):
-        return None
-    pi = UsdGeom.PointInstancer(prim)
-    state: dict = {}
-    if only is None or "prototypes" in only:
-        targets = pi.GetPrototypesRel().GetTargets()
-        if targets:
-            state["prototypes"] = [str(t) for t in targets]
-    if (only is None or "inactiveIds" in only) and prim.HasAuthoredMetadata("inactiveIds"):
-        list_op = prim.GetMetadata("inactiveIds")
-        state["inactive_ids"] = [int(i) for i in list_op.ApplyOperations([])]
-
-    orient_f = pi.GetOrientationsfAttr()
-    quat_attr = "orientationsf" if orient_f and orient_f.IsAuthored() else "orientations"
-    if only is not None and only & _PI_QUAT_ATTRS:
-        # A dirty mark on either quat attr reads the resolved one.
-        only = set(only) | {quat_attr}
-    for usd_name, wire_name in _PI_USD_TO_WIRE.items():
-        if usd_name in _PI_QUAT_ATTRS and usd_name != quat_attr:
-            continue
-        if only is not None and usd_name not in only:
-            continue
-        attr = prim.GetAttribute(usd_name)
-        if not attr or not attr.IsValid() or not attr.IsAuthored():
-            continue
-        val = attr.Get()
-        if val is None:
-            continue
-        if usd_name in _PI_QUAT_ATTRS:
-            wire = _quat_array_to_wire(val)
-        else:
-            wire = _usd_value_to_python(val)
-        if wire is not None:
-            state[wire_name] = wire
-    return state
-
-
 class PointInstancerChannel(PrimChannel):
     """UsdGeomPointInstancer prototypes + per-instance array replication."""
 
     cache_key = _C_POINT_INSTANCER
-    watched_attrs = tuple(_PI_USD_TO_WIRE) + ("prototypes", "inactiveIds")
+    watched_attrs = tuple(POINT_INSTANCER_USD_TO_WIRE) + ("prototypes", "inactiveIds")
     # velocities/accelerations/ids also exist on UsdGeomPoints; per-prim
     # exclusion keeps them flowing generically for non-PointInstancer prims.
     filter_attrs = ()
@@ -1551,7 +1266,7 @@ class PointInstancerChannel(PrimChannel):
 
     def diff(self, current, cached):
         cached = cached or {}
-        changed = {n: v for n, v in current.items() if not _values_equal(v, cached.get(n))}
+        changed = {n: v for n, v in current.items() if not values_equal(v, cached.get(n))}
         return changed if changed else None
 
     def to_event(self, prim_path, diff):
@@ -1612,10 +1327,9 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
 # change the server already knows about (a feedback loop).
 #
 # Each entry maps an event kind to a callable that re-syncs the affected
-# channel from the emitter's stage.  Only stage-affecting kinds need
-# entries; kinds that mutate DCC objects directly (TRS, visibility,
-# gprim attrs) are absorbed by the depsgraph's normal write-back path,
-# and ``suppressed()`` keeps them from echoing.
+# cache from the emitter's stage or the applied event payload. The dispatcher
+# invokes these while emission is suppressed, so the next local observation
+# starts from the applied state instead of echoing it back to the server.
 
 
 def _invalidate_ensure_prim(emitter, prim_path, _ev):
@@ -3249,8 +2963,12 @@ class NoticeEmitter:
             current_definition = self._local_definition_spec(self._local_prim_specs(prim_path))
             if previous and previous.specifier != Sdf.SpecifierOver and current_definition is None:
                 return "remove_local_definition"
-            if not prim.IsActive() and prim_path in self._known_prims:
-                return "deactivate"
+            if not prim.IsActive():
+                local_spec = self._local_prim_spec(prim_path)
+                if prim_path in self._known_prims or (
+                    local_spec is not None and local_spec.HasInfo("active")
+                ):
+                    return "deactivate"
             return "dirty"
         if prim_path in self._known_prims:
             return "delete"
@@ -3902,10 +3620,17 @@ class NoticeEmitter:
         # matrix decompose snapshot, which is only worth computing for prims
         # with authored xform ops. Materials/Shaders/Scopes skip it.
         xf = UsdGeom.Xformable(prim)
-        has_xform = xf and xf.GetXformOpOrderAttr().IsAuthored()
+        has_xform = xf.GetXformOpOrderAttr().IsAuthored()
 
         if has_xform:
             snap = self.snapshot_prim(prim_path)
+            if not _direct_edit_target_is_strongest(self.stage):
+                snap = _local_canonical_trs(
+                    snap,
+                    prim,
+                    local_property_sources,
+                    dirty_attrs,
+                )
             last_trs = pc.get(_C_TRS, {})
             fields = []
             payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
@@ -3980,9 +3705,9 @@ class NoticeEmitter:
             )
             if val is None:
                 continue
-            if not _values_equal(val, last_attrs.get(attr_name)):
+            if not values_equal(val, last_attrs.get(attr_name)):
                 changed_attrs[attr_name] = val
-                pvm, ai = _attr_event_metadata(prim, attr_name, attr)
+                pvm, ai = attribute_event_metadata(prim, attr_name, attr)
                 primvar_meta.update(pvm)
                 attr_interp.update(ai)
 
@@ -4325,7 +4050,7 @@ class NoticeEmitter:
                 convert=_convert,
             )
             if dirty:
-                primvar_meta, attr_interp = _attr_event_metadata(prim, name, attr)
+                primvar_meta, attr_interp = attribute_event_metadata(prim, name, attr)
                 for t, val in dirty:
                     ev_out: dict = {
                         "k": K_SET_GPRIM_ATTRS,
@@ -4350,7 +4075,7 @@ class NoticeEmitter:
         full_scan,
         layer,
     ) -> list[dict]:
-        kind = _connectable_kind(prim)
+        kind = connectable_kind(prim)
         if not kind:
             return []
         info_id = UsdShade.Shader(prim).GetIdAttr().Get() or "" if kind == "shader" else ""
@@ -4402,7 +4127,7 @@ class NoticeEmitter:
         if not prim.IsA(UsdGeom.PointInstancer):
             return []
         by_time: dict[float, dict] = {}
-        for usd_name, wire_name in _PI_USD_TO_WIRE.items():
+        for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
             if not full_scan and usd_name not in dirty_attr_names:
                 continue
             attr = prim.GetAttribute(usd_name)
@@ -4410,8 +4135,8 @@ class NoticeEmitter:
                 continue
             new_cache, dirty = _diff_time_samples(attr, ts_cache.get(usd_name), layer)
             for t, val in dirty:
-                if usd_name in _PI_QUAT_ATTRS:
-                    val = _quat_array_to_wire(val)
+                if usd_name in POINT_INSTANCER_QUAT_ATTRS:
+                    val = point_instancer_value_to_wire(wire_name, val)
                     if val is None:
                         continue
                 by_time.setdefault(float(t), {})[wire_name] = val

@@ -134,6 +134,6 @@ def xform_sample_value(val):
     """
     if isinstance(val, (Gf.Matrix4d, Gf.Matrix4f)):
         return np.array(val)
-    from .emitter import _usd_value_to_python
+    from .usd_state import usd_value_to_python
 
-    return _usd_value_to_python(val)
+    return usd_value_to_python(val)

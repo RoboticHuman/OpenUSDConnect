@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 from pxr import Usd, UsdShade
 
-from .emitter import read_usdshade_connectable
+from .usd_state import read_usdshade_connectable
 
 # mtlx nodedef identifiers end in the node's output type: ND_<category>_<type>.
 _MTLX_TYPE_SUFFIXES = frozenset({

@@ -252,6 +252,11 @@ the receiver/emitter host and port, and seeds the receiver from
 **Auto-start Receiver** checkboxes are enabled, it also starts live emit and
 receive from `snapshot_seq + 1`.
 
+This snapshot continuation uses flat replay. The snapshot contains the
+composed scene at `snapshot_seq`, but not the logical identity of every
+historical collaboration-layer opinion. Layered replay remains available when
+Blender is configured from the original base USD rather than a live snapshot.
+
 If live auto-start fails, the imported snapshot stays open and Blender
 reports the connection error. When either checkbox is disabled, the manual
 start/stop buttons remain available and use the metadata-populated host,

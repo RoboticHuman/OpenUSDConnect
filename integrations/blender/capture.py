@@ -179,6 +179,15 @@ _SCENE_PROPS = [
         },
     ),
     (
+        "usd_connect_department",
+        bpy.props.StringProperty,
+        {
+            "name": "Department",
+            "description": "Optional collaboration department used by both network connections",
+            "default": "",
+        },
+    ),
+    (
         "usd_connect_emit_hz",
         bpy.props.FloatProperty,
         {
@@ -490,13 +499,28 @@ class BlenderStageAuthor:
         """Check if prim_path is under a known unloaded payload root."""
         return any(prim_path.startswith(root + "/") for root in self._unloaded_payload_roots)
 
+    @staticmethod
+    def _is_imported_object(obj) -> bool:
+        from .blender_adapter import _PROP_USD_IMPORTED
+
+        original = getattr(obj, "original", obj)
+        return bool(original.get(_PROP_USD_IMPORTED, False))
+
+    def _ensure_local_prim(self, prim_path: str, obj, type_name: str):
+        """Create a definition for local objects or an override for imported ones."""
+        prim = self.stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid():
+            return prim
+
+        if self._is_imported_object(obj):
+            return self.stage.OverridePrim(prim_path)
+        return self.stage.DefinePrim(prim_path, type_name)
+
     def _ensure_ancestors_on_stage(self, obj):
-        """Ensure all ancestor prims exist on the local stage with xform ops.
+        """Ensure missing ancestor namespace specs exist on the local stage.
 
         Walks from obj.parent upward collecting ancestors that haven't been
-        tracked yet (not in _prim_refs), then defines/ensures them top-down.
-        This handles both missing prims AND prims that exist on the base
-        layer but lack canonical xform ops.
+        tracked yet (not in _prim_refs), then authors them top-down.
         """
         ancestors = []
         ancestor = obj.parent
@@ -509,17 +533,15 @@ class BlenderStageAuthor:
             ancestors.append((ancestor, pp))
             ancestor = ancestor.parent
 
-        # Define/ensure top-down — skip prims that already exist via
-        # composition (payload/reference children can't be redefined).
+        # Existing ancestors retain their authored transforms. Their own
+        # depsgraph updates handle actual edits.
         for anc_obj, anc_path in reversed(ancestors):
-            prim = self.stage.GetPrimAtPath(anc_path)
-            if prim and prim.IsValid():
-                pass  # already exists (composed or defined)
-            else:
-                tn = anc_obj.get("usd_type_name", "Xform")
-                self.stage.DefinePrim(anc_path, tn)
-            self._ensure_xform_ops(anc_path)
-            self._author_xform(anc_path, anc_obj)
+            existed = bool(self.stage.GetPrimAtPath(anc_path))
+            tn = anc_obj.get("usd_type_name", "Xform")
+            self._ensure_local_prim(anc_path, anc_obj, tn)
+            if not existed and not self._is_imported_object(anc_obj):
+                self._ensure_xform_ops(anc_path)
+                self._author_xform(anc_path, anc_obj)
             self._prim_refs[anc_path] = anc_obj
 
     def _ensure_xform_ops(self, prim_path: str):
@@ -736,7 +758,7 @@ class BlenderStageAuthor:
 
         prim = self.stage.GetPrimAtPath(shader_path)
         if not prim or not prim.IsValid():
-            prim = self.stage.DefinePrim(shader_path, "Shader")
+            prim = self.stage.OverridePrim(shader_path)
             if not prim or not prim.IsValid():
                 return
 
@@ -825,6 +847,8 @@ class BlenderStageAuthor:
                 prim = self.stage.GetPrimAtPath(prim_path)
                 if prim and prim.IsValid():
                     prim.SetActive(False)
+                else:
+                    self.stage.OverridePrim(prim_path).SetActive(False)
                 LOG.info("Object deleted: deactivating prim %s", prim_path)
 
     def on_depsgraph_update(self, updates: list):
@@ -880,7 +904,7 @@ class BlenderStageAuthor:
             if not prim or not prim.IsValid():
                 obj_orig = getattr(obj, "original", obj)
                 tn = type_name if type_name else obj_orig.get("usd_type_name", "Xform")
-                self.stage.DefinePrim(prim_path, tn)
+                self._ensure_local_prim(prim_path, obj_orig, tn)
 
             # ALWAYS ensure canonical xform ops before authoring
             self._ensure_xform_ops(prim_path)
@@ -1145,9 +1169,9 @@ def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> b
 
     from . import receiver_addon
 
-    if auto_start_receiver and getattr(scene, "usd_connect_recv_running", False):
+    if getattr(scene, "usd_connect_recv_running", False):
         _call_required_operator(bpy.ops.usd_connect.stop_receiver, "stop receiver")
-    if auto_start_emitter and (
+    if (
         getattr(scene, "usd_connect_net_emitter_running", False)
         or _state.sender is not None
         or _state.author is not None
@@ -1159,20 +1183,15 @@ def _auto_connect_live_import(context, local_path: str, meta: dict, report) -> b
     scene.usd_connect_emit_port = port
     scene.usd_connect_recv_host = host
     scene.usd_connect_recv_port = port
+    scene.usd_connect_department = str(meta.get("department") or "")
     scene.usd_connect_recv_last_seq = snapshot_seq
-    if auto_start_receiver or not getattr(scene, "usd_connect_recv_running", False):
-        receiver_addon._LAST_SEQ = snapshot_seq
-        if receiver_addon._DISPATCHER is not None:
-            receiver_addon._DISPATCHER.last_seq = snapshot_seq
+    receiver_addon._discard_replay_state()
+    receiver_addon._LAST_SEQ = snapshot_seq
 
     try:
         if auto_start_emitter:
             _call_required_operator(bpy.ops.usd_connect.connect_emitter, "connect emitter")
         if auto_start_receiver:
-            scene.usd_connect_recv_last_seq = snapshot_seq
-            receiver_addon._LAST_SEQ = snapshot_seq
-            if receiver_addon._DISPATCHER is not None:
-                receiver_addon._DISPATCHER.last_seq = snapshot_seq
             _call_required_operator(bpy.ops.usd_connect.start_receiver, "start receiver")
             _wait_for_receiver_handshake(receiver_addon)
     except Exception:
@@ -1360,6 +1379,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 port=scene.usd_connect_emit_port,
                 client_id=STABLE_CLIENT_ID,
                 origin=SESSION_ORIGIN,
+                department=scene.usd_connect_department or None,
                 token=token_client.load_token(
                     scene.usd_connect_emit_host,
                     scene.usd_connect_emit_port,

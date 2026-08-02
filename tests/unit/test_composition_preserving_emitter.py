@@ -475,6 +475,59 @@ def test_session_override_syncs_against_shared_base_without_replaying_it(tmp_pat
     emitter.cleanup()
 
 
+def test_masked_canonical_transform_emits_current_edit_target_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Thing", "Xform")
+    _, _, translate, _, _ = ensure_canonical_ops(stage, "/World/Thing")
+    translate.Set(Gf.Vec3d(0.0))
+
+    strong = Sdf.Layer.CreateAnonymous("strong-transform")
+    weak = Sdf.Layer.CreateAnonymous("weak-transform")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+    weak_target = Usd.EditTarget(weak)
+    with Usd.EditContext(stage, weak_target):
+        translate.Set(Gf.Vec3d(1.0, 0.0, 0.0))
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        translate.Set(Gf.Vec3d(2.0, 0.0, 0.0))
+
+    stage.SetEditTarget(weak_target)
+    emitter = NoticeEmitter(stage)
+    initial = emitter.snapshot_events()
+    initial_trs = next(event for event in initial if event["k"] == K_SET_XFORM_TRS)
+    assert initial_trs["t"] == pytest.approx([1.0, 0.0, 0.0])
+
+    translate.Set(Gf.Vec3d(3.0, 0.0, 0.0))
+    changed = emitter.build_events_for_dirty()
+    changed_trs = next(event for event in changed if event["k"] == K_SET_XFORM_TRS)
+    assert changed_trs["t"] == pytest.approx([3.0, 0.0, 0.0])
+    assert translate.Get() == Gf.Vec3d(2.0, 0.0, 0.0)
+    emitter.cleanup()
+
+
+def test_session_layer_masks_root_transform_without_changing_emitted_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Thing", "Xform")
+    _, _, translate, _, _ = ensure_canonical_ops(stage, "/World/Thing")
+    translate.Set(Gf.Vec3d(1.0, 0.0, 0.0))
+
+    root_target = stage.GetEditTarget()
+    with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
+        translate.Set(Gf.Vec3d(2.0, 0.0, 0.0))
+
+    stage.SetEditTarget(root_target)
+    emitter = NoticeEmitter(stage)
+    emitter.snapshot_events()
+
+    translate.Set(Gf.Vec3d(3.0, 0.0, 0.0))
+    changed = emitter.build_events_for_dirty()
+
+    changed_trs = next(event for event in changed if event["k"] == K_SET_XFORM_TRS)
+    assert changed_trs["t"] == pytest.approx([3.0, 0.0, 0.0])
+    assert translate.Get() == Gf.Vec3d(2.0, 0.0, 0.0)
+    emitter.cleanup()
+
+
 def test_masked_connectable_default_emits_current_edit_target_opinion():
     weak = Sdf.Layer.CreateAnonymous("weak-material")
     weak_stage = Usd.Stage.Open(weak)

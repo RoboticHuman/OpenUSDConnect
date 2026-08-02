@@ -181,6 +181,31 @@ class TestRenameDetection:
         assert "/World/OldName" not in emitter._known_prims
         assert "/World/NewName" in emitter._known_prims
 
+    def test_rename_emits_updates_for_path_bearing_properties(self):
+        stage, emitter = _make_stage_and_emitter()
+        source = stage.DefinePrim("/World/Source", "Xform")
+        consumer = stage.DefinePrim("/World/Consumer", "Xform")
+        consumer.CreateRelationship("target").SetTargets([source.GetPath()])
+        emitter.build_events_for_dirty()
+
+        editor = Usd.NamespaceEditor(stage)
+        assert editor.RenamePrim(source, "Renamed")
+        assert editor.ApplyEdits()
+        events = emitter.build_events_for_dirty()
+
+        target = Usd.Stage.CreateInMemory()
+        target_source = target.DefinePrim("/World/Source", "Xform")
+        target_consumer = target.DefinePrim("/World/Consumer", "Xform")
+        target_consumer.CreateRelationship("target").SetTargets(
+            [target_source.GetPath()],
+        )
+        for event in events:
+            apply_event(target, event)
+
+        assert target.GetRelationshipAtPath("/World/Consumer.target").GetTargets() == [
+            Sdf.Path("/World/Renamed")
+        ]
+
     def test_rename_updates_trs_cache(self):
         stage, emitter = _make_stage_and_emitter()
 

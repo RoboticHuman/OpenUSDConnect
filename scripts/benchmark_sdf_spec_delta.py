@@ -9,8 +9,16 @@ import time
 
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
+from openusdconnect.composed_projection import ComposedChangeProjection
 from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.protocol_constants import K_SET_SDF_SPEC_FIELDS, K_SET_XFORM_TRS
+from openusdconnect.event_apply import apply_events
+from openusdconnect.logical_layers import LogicalLayerRouter
+from openusdconnect.protocol_constants import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_SDF_SPEC_FIELDS,
+    K_SET_XFORM_TRS,
+)
 from openusdconnect.sdf_spec_delta import (
     SDF_SPEC_KIND_ATTRIBUTE,
     apply_spec_delta,
@@ -38,6 +46,8 @@ def main() -> None:
     parser.add_argument("--array-size", type=int, default=10_000)
     parser.add_argument("--spec-count", type=int, default=10_000)
     parser.add_argument("--snapshot-iterations", type=int, default=5)
+    parser.add_argument("--projection-prims", type=int, default=1_000)
+    parser.add_argument("--projection-iterations", type=int, default=3)
     args = parser.parse_args()
 
     source = Usd.Stage.CreateInMemory()
@@ -196,6 +206,163 @@ def main() -> None:
     )
     snapshot_emitter.cleanup()
 
+    projection_stage = Usd.Stage.CreateInMemory()
+    projection_path = "/World/Thing"
+    apply_events(
+        projection_stage,
+        [
+            {"k": K_ENSURE_PRIM, "prim": projection_path, "typeName": "Xform"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": projection_path},
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": projection_path,
+                "fields": ["t"],
+                "t": [0.0, 0.0, 0.0],
+            },
+        ],
+    )
+    projection_iteration = 0
+
+    def _project_transform_change() -> None:
+        nonlocal projection_iteration
+        projection_iteration += 1
+        event = {
+            "k": K_SET_XFORM_TRS,
+            "prim": projection_path,
+            "fields": ["t"],
+            "t": [float(projection_iteration), 0.0, 0.0],
+        }
+        projection = ComposedChangeProjection(projection_stage, [event])
+        apply_events(projection_stage, [event])
+        projected = projection.build_events()
+        if not any(item["k"] == K_SET_XFORM_TRS for item in projected):
+            raise RuntimeError("composed transform benchmark produced no projection")
+
+    projection_transform_timing = _measure(
+        _project_transform_change,
+        args.iterations,
+    )
+
+    masked_stage = Usd.Stage.CreateInMemory()
+    masked_router = LogicalLayerRouter(masked_stage)
+    strong_key = "benchmark:strong"
+    weak_key = "benchmark:weak"
+    masked_router.apply_state(
+        {
+            "type": "layer_stack_state",
+            "generation": "benchmark",
+            "revision": 1,
+            "layers": [
+                {"layer_key": strong_key, "label": "Strong", "muted": False},
+                {"layer_key": weak_key, "label": "Weak", "muted": False},
+            ],
+        }
+    )
+    for layer_key, value in ((strong_key, 2.0), (weak_key, 1.0)):
+        with Usd.EditContext(masked_stage, masked_router.edit_target_for(layer_key)):
+            apply_events(
+                masked_stage,
+                [
+                    {"k": K_ENSURE_PRIM, "prim": projection_path, "typeName": "Xform"},
+                    {"k": K_ENSURE_XFORM_OPS, "prim": projection_path},
+                    {
+                        "k": K_SET_XFORM_TRS,
+                        "prim": projection_path,
+                        "fields": ["t"],
+                        "t": [value, 0.0, 0.0],
+                    },
+                ],
+            )
+    masked_stage.SetEditTarget(masked_router.edit_target_for(weak_key))
+    masked_iteration = 0
+
+    def _project_masked_transform() -> None:
+        nonlocal masked_iteration
+        masked_iteration += 1
+        event = {
+            "k": K_SET_XFORM_TRS,
+            "prim": projection_path,
+            "fields": ["t"],
+            "t": [float(masked_iteration + 2), 0.0, 0.0],
+        }
+        projection = ComposedChangeProjection(masked_stage, [event])
+        apply_events(masked_stage, [event])
+        if projection.build_events():
+            raise RuntimeError("masked transform benchmark produced a native projection")
+
+    projection_masked_timing = _measure(
+        _project_masked_transform,
+        args.iterations,
+    )
+
+    reorder_stage = Usd.Stage.CreateInMemory()
+    reorder_router = LogicalLayerRouter(reorder_stage)
+    reorder_router.apply_state(
+        {
+            "type": "layer_stack_state",
+            "generation": "benchmark",
+            "revision": 1,
+            "layers": [
+                {"layer_key": strong_key, "label": "Strong", "muted": False},
+                {"layer_key": weak_key, "label": "Weak", "muted": False},
+            ],
+        }
+    )
+    for index in range(args.projection_prims):
+        prim_path = f"/World/Prim_{index:05d}"
+        for layer_key, value in ((strong_key, 2.0), (weak_key, 1.0)):
+            with Usd.EditContext(reorder_stage, reorder_router.edit_target_for(layer_key)):
+                apply_events(
+                    reorder_stage,
+                    [
+                        {"k": K_ENSURE_PRIM, "prim": prim_path, "typeName": "Xform"},
+                        {"k": K_ENSURE_XFORM_OPS, "prim": prim_path},
+                        {
+                            "k": K_SET_XFORM_TRS,
+                            "prim": prim_path,
+                            "fields": ["t"],
+                            "t": [value, 0.0, 0.0],
+                        },
+                    ],
+                )
+    reorder_revision = 1
+    weak_first = False
+
+    def _project_layer_reorder() -> None:
+        nonlocal reorder_revision, weak_first
+        paths, arcs = reorder_router.authored_projection_candidates()
+        projection = ComposedChangeProjection(
+            reorder_stage,
+            [],
+            extra_scene_paths=paths,
+            extra_arc_candidates=arcs,
+        )
+        reorder_revision += 1
+        weak_first = not weak_first
+        keys = (weak_key, strong_key) if weak_first else (strong_key, weak_key)
+        reorder_router.apply_state(
+            {
+                "type": "layer_stack_state",
+                "generation": "benchmark",
+                "revision": reorder_revision,
+                "layers": [{"layer_key": key, "label": key, "muted": False} for key in keys],
+            }
+        )
+        projected = projection.build_events()
+        changed = sum(item["k"] == K_SET_XFORM_TRS for item in projected)
+        if changed != args.projection_prims:
+            raise RuntimeError(
+                f"layer reorder benchmark projected {changed} transforms; "
+                f"expected {args.projection_prims}"
+            )
+
+    projection_reorder_timing = _measure(
+        _project_layer_reorder,
+        args.projection_iterations,
+    )
+    masked_router.close()
+    reorder_router.close()
+
     print(f"array elements: {args.array_size}")
     print(f"metadata fragment: {len(metadata_fragment.encode())} bytes")
     print(f"full fragment: {len(full_fragment.encode())} bytes")
@@ -209,6 +376,10 @@ def main() -> None:
     print(f"snapshot specs: {args.spec_count}")
     print(f"snapshot events: {snapshot_event_count}")
     _print_timing("full snapshot", snapshot_timing)
+    _print_timing("native transform projection", projection_transform_timing)
+    _print_timing("masked transform projection", projection_masked_timing)
+    print(f"layer reorder prims: {args.projection_prims}")
+    _print_timing("native layer reorder projection", projection_reorder_timing)
 
 
 if __name__ == "__main__":

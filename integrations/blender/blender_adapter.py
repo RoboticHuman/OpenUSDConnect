@@ -1678,7 +1678,7 @@ class BlenderAdapter(DCCAdapter):
         try:
             from pxr import Usd, UsdShade
 
-            from openusdconnect.emitter import (
+            from openusdconnect.usd_state import (
                 read_material_binding,
                 read_usdshade_connectable,
             )
@@ -2174,15 +2174,20 @@ class BlenderAdapter(DCCAdapter):
         import tempfile
 
         try:
-            from pxr import Usd
+            from pxr import Sdf, Usd
         except ImportError:
             return None
 
-        try:
-            stage = Usd.Stage.Open(asset_path)
-        except Exception:
+        root_layer = Sdf.Layer.FindOrOpen(asset_path)
+        if root_layer is None:
             LOG.debug("Could not open %s for variant stage", asset_path)
             return None
+        session_layer = Sdf.Layer.CreateAnonymous("openusdconnect-variant")
+        stage = Usd.Stage.Open(root_layer, session_layer)
+        if stage is None:
+            LOG.debug("Could not open %s for variant stage", asset_path)
+            return None
+        stage.SetEditTarget(Usd.EditTarget(session_layer))
 
         root_path = prim_path_ref or str(stage.GetDefaultPrim().GetPath())
         prim = stage.GetPrimAtPath(root_path)
@@ -2334,6 +2339,8 @@ class BlenderAdapter(DCCAdapter):
         Mirrors the handshake-time snapshot path so a leader's mid-session
         units/timeline change reaches followers immediately.
         """
+        if upAxis is not None:
+            self._needs_axis_conv = needs_conversion(upAxis)
         if not BPY_AVAILABLE:
             return True
         apply_stage_metadata_to_scene(

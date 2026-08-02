@@ -61,30 +61,43 @@ def _timecode(ev: dict) -> Usd.TimeCode:
     return Usd.TimeCode(float(t))
 
 
-def get_or_define_prim(stage: Usd.Stage, prim_path: str, type_name: str = "Xform") -> Usd.Prim:
+def get_or_define_prim(
+    stage: Usd.Stage,
+    prim_path: str,
+    type_name: str = "Xform",
+    *,
+    ensure_local_definition: bool = False,
+) -> Usd.Prim:
     """Get existing prim or define a new one. Idempotent.
 
-    When the prim already exists on the composed stage but the current
-    edit target layer has no spec for it, a 'def' spec is created in the
-    edit target so the prim survives if stronger layers are muted or
-    removed.  Without this, the edit target would only get an 'over'
-    on the first attribute write, which is invisible without a 'def'
-    elsewhere.
+    Existing composed prims are returned without changing their ownership.
+    ``ensure_local_definition`` is reserved for ``ensure_prim`` events, which
+    represent an authored local definition and therefore create or update its
+    def spec.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        prim = stage.DefinePrim(prim_path, type_name)
-    else:
-        # Prim exists on composed stage — ensure a def spec exists
-        # in the current edit target layer (DefinePrim is a no-op if
-        # the prim already exists, so we go through Sdf directly).
-        layer = stage.GetEditTarget().GetLayer()
-        if not layer.GetPrimAtPath(prim_path):
-            spec = Sdf.CreatePrimInLayer(layer, prim_path)
-            if spec:
-                spec.specifier = Sdf.SpecifierDef
-                if type_name:
-                    spec.typeName = type_name
+        return stage.DefinePrim(prim_path, type_name)
+    if not ensure_local_definition:
+        return prim
+
+    edit_target = stage.GetEditTarget()
+    spec_path = edit_target.MapToSpecPath(Sdf.Path(prim_path))
+    if spec_path.isEmpty:
+        raise ValueError(f"Edit target cannot map prim path {prim_path!r}")
+
+    layer = edit_target.GetLayer()
+    spec = layer.GetPrimAtPath(spec_path)
+    needs_definition = spec is None or spec.specifier != Sdf.SpecifierDef
+    needs_type = bool(type_name) and (spec is None or spec.typeName != type_name)
+    if needs_definition or needs_type:
+        with Sdf.ChangeBlock():
+            if spec is None:
+                spec = Sdf.CreatePrimInLayer(layer, spec_path)
+            spec.specifier = Sdf.SpecifierDef
+            if needs_type:
+                spec.typeName = type_name
+        prim = stage.GetPrimAtPath(prim_path)
     return prim
 
 
@@ -335,11 +348,20 @@ def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
 
 @register_applier(K_RENAME_PRIM)
 def _apply_rename_prim(stage: Usd.Stage, ev: dict) -> None:
-    prim = stage.GetPrimAtPath(ev["prim"])
-    if prim and prim.IsValid():
-        editor = Usd.NamespaceEditor(stage)
-        editor.RenamePrim(prim, ev["new_name"])
-        editor.ApplyEdits()
+    new_name = ev["new_name"]
+    if not Sdf.Path.IsValidIdentifier(new_name):
+        raise ValueError(f"invalid prim name {new_name!r}")
+
+    edit_target = stage.GetEditTarget()
+    spec_path = edit_target.MapToSpecPath(Sdf.Path(ev["prim"]))
+    layer = edit_target.GetLayer()
+    if spec_path.isEmpty or layer.GetPrimAtPath(spec_path) is None:
+        return
+
+    edits = Sdf.BatchNamespaceEdit()
+    edits.Add(Sdf.NamespaceEdit.Rename(spec_path, new_name))
+    if not layer.Apply(edits):
+        raise RuntimeError(f"failed to rename Sdf prim spec {spec_path}")
 
 
 @register_applier(K_SET_VISIBILITY)
@@ -655,13 +677,13 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
 def _resolve_shader_port_type(prim: Usd.Prim, attr: ConnectableAttr):
     """Resolve a Shader input/output type from its Sdr NodeDef.
 
-    Returns None when the prim is not a registered Shader node; connection
-    application then falls back to the connected source's type, then Token.
+    Untyped overrides may carry ``info:id`` without redundantly authoring a
+    Shader type opinion. Returns None when no registered node can be resolved.
     """
-    if not prim or not prim.IsA(UsdShade.Shader):
+    if not prim or not prim.IsValid():
         return None
-    shader = UsdShade.Shader(prim)
-    shader_id = shader.GetIdAttr().Get() if shader.GetIdAttr() else ""
+    id_attr = prim.GetAttribute("info:id")
+    shader_id = id_attr.Get() if id_attr and id_attr.IsValid() else ""
     if not shader_id:
         return None
     node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
@@ -805,14 +827,15 @@ def _apply_api_schemas(prim: Usd.Prim, names: list[str]) -> None:
 @register_applier(K_ENSURE_PRIM)
 def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
     type_name = ev["typeName"]
-    if type_name:
-        # DefinePrim also updates an existing local definition's typeName,
-        # which is required when an active variant changes the prim type.
-        prim = stage.DefinePrim(ev["prim"], type_name)
-    else:
-        prim = stage.GetPrimAtPath(ev["prim"])
-    if not prim or not prim.IsValid():
-        prim = get_or_define_prim(stage, ev["prim"], type_name)
+    ensure_definition = bool(type_name) or not ev.get("api_schemas")
+    prim = stage.GetPrimAtPath(ev["prim"])
+    if ensure_definition or not prim or not prim.IsValid():
+        prim = get_or_define_prim(
+            stage,
+            ev["prim"],
+            type_name,
+            ensure_local_definition=ensure_definition,
+        )
     _apply_api_schemas(prim, ev.get("api_schemas", []))
 
 

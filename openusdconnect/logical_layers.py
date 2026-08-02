@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pxr import Sdf, Usd
 
 from ._managed_sublayers import replace_managed_sublayers
+from .protocol_constants import K_SET_PAYLOAD, K_SET_REFERENCE
 
 
 class LogicalLayerRouter:
@@ -114,6 +115,52 @@ class LogicalLayerRouter:
     def edit_target_for(self, layer_key: str) -> Usd.EditTarget:
         return Usd.EditTarget(self.layer_for(layer_key))
 
+    def authored_projection_candidates(
+        self,
+    ) -> tuple[tuple[Sdf.Path, ...], tuple[tuple[str, str], ...]]:
+        """Scene paths and composition arcs authored in managed layers."""
+        paths: set[Sdf.Path] = set()
+        arcs: set[tuple[str, str]] = set()
+
+        def _visit(layer: Sdf.Layer, path: Sdf.Path) -> None:
+            scene_path = path.StripAllVariantSelections()
+            if scene_path != Sdf.Path.absoluteRootPath:
+                paths.add(scene_path)
+            if not path.IsPrimPath():
+                return
+            spec = layer.GetPrimAtPath(path)
+            if spec is None:
+                return
+            scene_prim_path = str(scene_path)
+            if spec.HasInfo("references"):
+                arcs.add((scene_prim_path, K_SET_REFERENCE))
+            if spec.HasInfo("payload"):
+                arcs.add((scene_prim_path, K_SET_PAYLOAD))
+
+        for layer in self._layers.values():
+            layer.Traverse(
+                Sdf.Path.absoluteRootPath,
+                lambda path, layer=layer: _visit(layer, path),
+            )
+        scene_paths = tuple(
+            sorted(
+                paths,
+                key=lambda path: (
+                    len(path.GetPrefixes()),
+                    str(path),
+                ),
+            )
+        )
+        return scene_paths, tuple(sorted(arcs))
+
+    def authored_scene_paths(self) -> tuple[Sdf.Path, ...]:
+        """Composed-namespace paths authored in any managed layer."""
+        return self.authored_projection_candidates()[0]
+
+    def authored_arc_paths(self) -> tuple[tuple[str, str], ...]:
+        """Prim paths with authored reference or payload list operations."""
+        return self.authored_projection_candidates()[1]
+
     def clear(self) -> None:
         """Clear authored receiver state while retaining the advertised stack."""
         for layer in self._layers.values():
@@ -146,10 +193,7 @@ class LogicalLayerRouter:
         if stage is None:
             return
 
-        active_layers = [
-            self._layers[layer_key]
-            for layer_key in self._layer_keys
-        ]
+        active_layers = [self._layers[layer_key] for layer_key in self._layer_keys]
         active_ids = [layer.identifier for layer in active_layers]
         all_ids = self._managed_identifiers()
 

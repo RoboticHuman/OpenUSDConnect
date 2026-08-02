@@ -30,6 +30,8 @@ from openusdconnect.protocol_constants import (
     K_RENAME_PRIM,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
+    K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_VARIANT_SELECTIONS,
@@ -88,6 +90,96 @@ class TestApplyEvent:
         apply_event(stage, {"k": K_ENSURE_PRIM, "prim": "/World/New", "typeName": "Xform"})
         prim = stage.GetPrimAtPath("/World/New")
         assert prim.IsValid()
+
+    def test_ensure_prim_authors_definition_when_stronger_prim_exists(self):
+        stage = Usd.Stage.CreateInMemory()
+        strong = Sdf.Layer.CreateAnonymous("strong")
+        weak = Sdf.Layer.CreateAnonymous("weak")
+        stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+        with Usd.EditContext(stage, Usd.EditTarget(strong)):
+            stage.DefinePrim("/World/Thing", "Cube")
+        with Usd.EditContext(stage, Usd.EditTarget(weak)):
+            apply_event(
+                stage,
+                {
+                    "k": K_ENSURE_PRIM,
+                    "prim": "/World/Thing",
+                    "typeName": "Sphere",
+                },
+            )
+
+        weak_spec = weak.GetPrimAtPath("/World/Thing")
+        assert weak_spec.specifier == Sdf.SpecifierDef
+        assert weak_spec.typeName == "Sphere"
+
+        with Usd.EditContext(stage, Usd.EditTarget(strong)):
+            stage.RemovePrim("/World/Thing")
+        assert stage.GetPrimAtPath("/World/Thing").GetTypeName() == "Sphere"
+
+    def test_ensure_untyped_prim_authors_definition_when_stronger_prim_exists(self):
+        stage = Usd.Stage.CreateInMemory()
+        strong = Sdf.Layer.CreateAnonymous("strong")
+        weak = Sdf.Layer.CreateAnonymous("weak")
+        stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+        with Usd.EditContext(stage, Usd.EditTarget(strong)):
+            stage.DefinePrim("/World/Thing", "Scope")
+        with Usd.EditContext(stage, Usd.EditTarget(weak)):
+            apply_event(
+                stage,
+                {
+                    "k": K_ENSURE_PRIM,
+                    "prim": "/World/Thing",
+                    "typeName": "",
+                },
+            )
+
+        weak_spec = weak.GetPrimAtPath("/World/Thing")
+        assert weak_spec.specifier == Sdf.SpecifierDef
+        assert not weak_spec.typeName
+
+        with Usd.EditContext(stage, Usd.EditTarget(strong)):
+            stage.RemovePrim("/World/Thing")
+        assert stage.GetPrimAtPath("/World/Thing").IsValid()
+
+    def test_value_events_keep_composed_prim_as_local_override(self):
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/World/Thing", "Sphere")
+        variants = prim.GetVariantSets().AddVariantSet("model")
+        variants.AddVariant("A")
+        variants.AddVariant("B")
+        variants.SetVariantSelection("A")
+        session = stage.GetSessionLayer()
+
+        with Usd.EditContext(stage, Usd.EditTarget(session)):
+            apply_events(
+                stage,
+                [
+                    {
+                        "k": K_SET_VARIANT_SELECTIONS,
+                        "prim": "/World/Thing",
+                        "selections": {"model": "B"},
+                    },
+                    {
+                        "k": K_SET_INSTANCEABLE,
+                        "prim": "/World/Thing",
+                        "instanceable": True,
+                    },
+                    {
+                        "k": K_SET_MATERIAL_BINDING,
+                        "prim": "/World/Thing",
+                        "material_path": "/World/Looks/Material",
+                    },
+                ],
+            )
+
+        spec = session.GetPrimAtPath("/World/Thing")
+        assert spec.specifier == Sdf.SpecifierOver
+        assert (
+            stage.GetPrimAtPath("/World/Thing").GetVariantSet("model").GetVariantSelection() == "B"
+        )
+        assert stage.GetPrimAtPath("/World/Thing").IsInstanceable()
 
     def test_ensure_xform_ops(self, stage):
         stage.DefinePrim("/World/Sphere", "Xform")
@@ -180,6 +272,34 @@ class TestApplyEvent:
         apply_event(stage, {"k": K_RENAME_PRIM, "prim": "/World/OldName", "new_name": "NewName"})
         assert stage.GetPrimAtPath("/World/NewName").IsValid()
         assert not stage.GetPrimAtPath("/World/OldName").IsValid()
+
+    def test_rename_prim_only_moves_current_edit_target_definition(self):
+        stage = Usd.Stage.CreateInMemory()
+        strong = Sdf.Layer.CreateAnonymous("strong")
+        weak = Sdf.Layer.CreateAnonymous("weak")
+        stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+        for layer, value in ((strong, 2), (weak, 1)):
+            with Usd.EditContext(stage, Usd.EditTarget(layer)):
+                prim = stage.DefinePrim("/World/Thing", "Xform")
+                prim.CreateAttribute("value", Sdf.ValueTypeNames.Int).Set(value)
+
+        with Usd.EditContext(stage, Usd.EditTarget(weak)):
+            apply_event(
+                stage,
+                {
+                    "k": K_RENAME_PRIM,
+                    "prim": "/World/Thing",
+                    "new_name": "Moved",
+                },
+            )
+
+        assert strong.GetPrimAtPath("/World/Thing") is not None
+        assert strong.GetPrimAtPath("/World/Moved") is None
+        assert weak.GetPrimAtPath("/World/Thing") is None
+        assert weak.GetPrimAtPath("/World/Moved") is not None
+        assert stage.GetAttributeAtPath("/World/Thing.value").Get() == 2
+        assert stage.GetAttributeAtPath("/World/Moved.value").Get() == 1
 
     def test_rename_preserves_transform(self, stage):
         stage.DefinePrim("/World/OldName", "Xform")

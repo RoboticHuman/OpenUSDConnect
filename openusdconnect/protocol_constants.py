@@ -117,6 +117,14 @@ class EventTarget(StrEnum):
     STAGE_STATE = "stage_state"
 
 
+class NativeProjectionMode(StrEnum):
+    """How a layered receiver maps an event into a non-USD adapter."""
+
+    PROJECT = "project"
+    DIRECT = "direct"
+    FIELD_ROUTED = "field_routed"
+
+
 @dataclass(frozen=True)
 class EventKindInfo:
     """Classification flags for one event kind.
@@ -144,77 +152,125 @@ class EventKindInfo:
         empty tuple means strongest-spec check (structural ops), names
         mean a per-attribute check ("meta:X" is a prim metadata field,
         "rel:X" a relationship).
-    composed_projection: department-layer writes must be replaced by an
-        authoritative composed correction instead of broadcasting the
-        authored event directly.
+    flat_receiver_projection: server-side flat receivers need an authoritative
+        composed property correction instead of the authored layer opinion.
+    native_projection: how a layered receiver maps the event into a non-USD
+        adapter after applying it to the receiver-owned USD mirror.
     target: whether the event authors into a collaboration layer, authors
         shared stage metadata into the primary session layer, or changes
         non-authored stage state such as payload load rules.
     """
 
+    native_projection: NativeProjectionMode
     create: bool = False
     structural: bool = False
     stage_sync: bool = False
     arc: bool = False
     imports: bool = False
     strength_attrs: tuple[str, ...] | None = None
-    composed_projection: bool = False
+    flat_receiver_projection: bool = False
     target: EventTarget = EventTarget.COLLABORATION_LAYER
 
 
 EVENT_KIND_INFO: dict[str, EventKindInfo] = {
-    K_ENSURE_PRIM: EventKindInfo(create=True, structural=True, strength_attrs=()),
-    K_ENSURE_XFORM_OPS: EventKindInfo(structural=True, strength_attrs=()),
+    K_ENSURE_PRIM: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        create=True,
+        structural=True,
+        strength_attrs=(),
+    ),
+    K_ENSURE_XFORM_OPS: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        structural=True,
+        strength_attrs=(),
+    ),
     K_SET_XFORM_TRS: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
         strength_attrs=("xformOp:translate", "xformOp:orient", "xformOp:scale"),
     ),
-    K_DELETE_PRIM: EventKindInfo(strength_attrs=()),
-    K_DEACTIVATE_PRIM: EventKindInfo(strength_attrs=("meta:active",)),
-    K_RENAME_PRIM: EventKindInfo(strength_attrs=()),
-    K_SET_VISIBILITY: EventKindInfo(strength_attrs=("visibility",)),
-    K_SET_GPRIM_ATTRS: EventKindInfo(),
+    K_DELETE_PRIM: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        strength_attrs=(),
+    ),
+    K_DEACTIVATE_PRIM: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        strength_attrs=("meta:active",),
+    ),
+    K_RENAME_PRIM: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        strength_attrs=(),
+    ),
+    K_SET_VISIBILITY: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        strength_attrs=("visibility",),
+    ),
+    K_SET_GPRIM_ATTRS: EventKindInfo(native_projection=NativeProjectionMode.PROJECT),
     K_SET_REFERENCE: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
         structural=True,
         stage_sync=True,
         arc=True,
         imports=True,
     ),
-    K_SET_PAYLOAD: EventKindInfo(structural=True, stage_sync=True, arc=True),
+    K_SET_PAYLOAD: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        structural=True,
+        stage_sync=True,
+        arc=True,
+    ),
     K_LOAD_PAYLOAD: EventKindInfo(
+        native_projection=NativeProjectionMode.DIRECT,
         structural=True,
         stage_sync=True,
         imports=True,
         target=EventTarget.STAGE_STATE,
     ),
     K_UNLOAD_PAYLOAD: EventKindInfo(
+        native_projection=NativeProjectionMode.DIRECT,
         structural=True,
         stage_sync=True,
         target=EventTarget.STAGE_STATE,
     ),
     K_SET_VARIANT_SELECTIONS: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
         structural=True,
         stage_sync=True,
         arc=True,
     ),
     K_SET_MATERIAL_BINDING: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
         structural=True,
         stage_sync=True,
         strength_attrs=("rel:material:binding",),
     ),
-    K_SET_CONNECTABLE_INPUT: EventKindInfo(structural=True, stage_sync=True),
-    K_SET_CONNECTABLE_CONNECTION: EventKindInfo(structural=True, stage_sync=True),
+    K_SET_CONNECTABLE_INPUT: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        structural=True,
+        stage_sync=True,
+    ),
+    K_SET_CONNECTABLE_CONNECTION: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
+        structural=True,
+        stage_sync=True,
+    ),
     K_SET_STAGE_METADATA: EventKindInfo(
+        native_projection=NativeProjectionMode.DIRECT,
         create=True,
         structural=True,
         stage_sync=True,
         target=EventTarget.SESSION_LAYER,
     ),
-    K_SET_INSTANCEABLE: EventKindInfo(structural=True, stage_sync=True),
-    K_SET_POINT_INSTANCER: EventKindInfo(),
-    K_SET_SDF_SPEC_FIELDS: EventKindInfo(
+    K_SET_INSTANCEABLE: EventKindInfo(
+        native_projection=NativeProjectionMode.PROJECT,
         structural=True,
         stage_sync=True,
-        composed_projection=True,
+    ),
+    K_SET_POINT_INSTANCER: EventKindInfo(native_projection=NativeProjectionMode.PROJECT),
+    K_SET_SDF_SPEC_FIELDS: EventKindInfo(
+        native_projection=NativeProjectionMode.FIELD_ROUTED,
+        structural=True,
+        stage_sync=True,
+        flat_receiver_projection=True,
     ),
 }
 
@@ -222,8 +278,19 @@ EVENT_KEYS = frozenset(EVENT_KIND_INFO)
 STRUCTURAL_EVENT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.structural)
 CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
 STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
-COMPOSED_PROJECTION_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items() if i.composed_projection
+FLAT_RECEIVER_PROJECTION_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.flat_receiver_projection
+)
+NATIVE_PROJECTED_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.native_projection == NativeProjectionMode.PROJECT
+)
+NATIVE_DIRECT_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.native_projection == NativeProjectionMode.DIRECT
+)
+NATIVE_FIELD_ROUTED_KINDS = frozenset(
+    k
+    for k, i in EVENT_KIND_INFO.items()
+    if i.native_projection == NativeProjectionMode.FIELD_ROUTED
 )
 COLLABORATION_LAYER_KINDS = frozenset(
     k for k, i in EVENT_KIND_INFO.items() if i.target == EventTarget.COLLABORATION_LAYER

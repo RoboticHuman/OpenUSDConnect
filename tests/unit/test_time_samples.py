@@ -282,7 +282,7 @@ def test_emitter_emits_single_sample_attrs():
 
 def test_emitter_emits_orient_quaternion_samples():
     """Regression: orient (Gf.Quatf) time samples used to be silently dropped
-    because _usd_value_to_python returned None for quaternions. Now it
+    because usd_value_to_python returned None for quaternions. Now it
     returns [w, x, y, z] and the emit path produces one SetXformTRS event
     per (orient sample) carrying the quat in the wire form.
     """

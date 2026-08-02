@@ -75,8 +75,9 @@ def test_pi_mapping_tables_agree():
     same wire fields; a field added to one module but not the others fails
     here instead of silently not replicating."""
     from openusdconnect.codec import _PI_ARRAYS, _PI_BITS
-    from openusdconnect.emitter import _PI_USD_TO_WIRE, _PI_WIRE_TO_USD
+    from openusdconnect.emitter import _PI_WIRE_TO_USD
     from openusdconnect.protocol_constants import POINT_INSTANCER_FIELDS
+    from openusdconnect.usd_state import POINT_INSTANCER_USD_TO_WIRE
 
     arrays = set(POINT_INSTANCER_FIELDS) - {"prototypes"}
     # inactive_ids is prim metadata: a wire array, but not a USD attribute,
@@ -84,9 +85,9 @@ def test_pi_mapping_tables_agree():
     attrs = arrays - {"inactive_ids"}
     assert set(_PI_BITS) == set(POINT_INSTANCER_FIELDS)
     assert set(_PI_ARRAYS) == arrays
-    assert set(_PI_USD_TO_WIRE.values()) == attrs
+    assert set(POINT_INSTANCER_USD_TO_WIRE.values()) == attrs
     assert set(_PI_WIRE_TO_USD) == attrs
-    assert set(_PI_WIRE_TO_USD.values()) <= set(_PI_USD_TO_WIRE)
+    assert set(_PI_WIRE_TO_USD.values()) <= set(POINT_INSTANCER_USD_TO_WIRE)
 
 
 # ---------------------------------------------------------------------------

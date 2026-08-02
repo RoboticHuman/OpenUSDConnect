@@ -10,6 +10,8 @@ import tempfile
 import types
 from unittest.mock import MagicMock
 
+from pxr import Sdf
+
 
 # ---------------------------------------------------------------------------
 # Mock bpy so capture.py can be imported outside Blender
@@ -205,7 +207,7 @@ class MockDepsgraphUpdate:
 # ---------------------------------------------------------------------------
 # Import the module under test (after bpy mock is installed)
 # ---------------------------------------------------------------------------
-from integrations.blender.blender_adapter import BlenderAdapter
+from integrations.blender.blender_adapter import _PROP_USD_IMPORTED, BlenderAdapter
 from integrations.blender.capture import BlenderStageAuthor
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.protocol_constants import (
@@ -332,14 +334,70 @@ class TestAutoTrack:
 
         ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         ensure_paths = [e["prim"] for e in ensures]
-        # /World is defined by the shared base layer. The session layer only
-        # authors its transform override, so it must not redefine the base prim.
+        # /World is supplied by the shared base and remains untouched locally.
         assert "/World" not in ensure_paths
+        world_spec = author.delta_layer.GetPrimAtPath("/World")
+        assert world_spec.specifier == Sdf.SpecifierOver
+        assert not world_spec.properties
         assert "/World/Group" in ensure_paths
         assert "/World/Group/NewCube" in ensure_paths
         # Parent before child
         assert ensure_paths.index("/World/Group") < ensure_paths.index("/World/Group/NewCube")
         assert obj["usd_prim_path"] == "/World/Group/NewCube"
+
+    def test_remote_imported_descendant_authors_overrides(self):
+        world = MockBlenderObject("World", prim_path="/World", obj_type="EMPTY")
+        asset = MockBlenderObject(
+            "Asset",
+            prim_path="/World/Asset",
+            type_name="Xform",
+            obj_type="EMPTY",
+        )
+        geom = MockBlenderObject(
+            "Geom",
+            prim_path="/World/Asset/Geom",
+            type_name="Xform",
+            obj_type="EMPTY",
+        )
+        mesh = MockBlenderObject(
+            "Mesh",
+            loc=(1, 0, 0),
+            prim_path="/World/Asset/Geom/Mesh",
+            type_name="Mesh",
+        )
+        for obj in (asset, geom, mesh):
+            obj[_PROP_USD_IMPORTED] = True
+        asset.parent = world
+        geom.parent = asset
+        mesh.parent = geom
+        sys.modules["bpy"].data.objects = _BlenderObjectList([world, asset, geom, mesh])
+        author, emitter = _make_author_and_emitter()
+        author._prim_refs.update(
+            {
+                "/World/Asset": asset,
+                "/World/Asset/Geom": geom,
+                "/World/Asset/Geom/Mesh": mesh,
+            }
+        )
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(mesh)])
+
+        for path in ("/World/Asset", "/World/Asset/Geom", "/World/Asset/Geom/Mesh"):
+            spec = author.delta_layer.GetPrimAtPath(path)
+            assert spec is not None
+            assert spec.specifier == Sdf.SpecifierOver
+            assert not spec.typeName
+        for path in ("/World/Asset", "/World/Asset/Geom"):
+            assert author.delta_layer.GetAttributeAtPath(f"{path}.xformOpOrder") is None
+        assert not [event for event in events if event["k"] == K_ENSURE_PRIM]
+        trs = [
+            event
+            for event in events
+            if event["k"] == K_SET_XFORM_TRS
+            and event["prim"] == "/World/Asset/Geom/Mesh"
+        ]
+        assert len(trs) == 1
+        assert trs[0]["t"] == [1.0, 0.0, 0.0]
 
     def test_auto_track_disambiguates_collision(self):
         world = self._make_world_parent()
@@ -442,6 +500,24 @@ class TestDeletionDetection:
         assert deact[0]["prim"] == "/World/Cube"
         assert deact[0]["active"] is False
 
+    def test_deleted_remote_object_authors_active_override(self):
+        obj = MockBlenderObject("Remote", prim_path="/World/Remote")
+        obj[_PROP_USD_IMPORTED] = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([obj])
+        author, emitter = _make_author_and_emitter()
+        author._prim_refs["/World/Remote"] = obj
+
+        obj._deleted = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([])
+        events = _get_events(author, emitter, [])
+
+        spec = author.delta_layer.GetPrimAtPath("/World/Remote")
+        assert spec.specifier == Sdf.SpecifierOver
+        assert not spec.typeName
+        assert [event for event in events if event["k"] == K_DEACTIVATE_PRIM] == [
+            {"k": K_DEACTIVATE_PRIM, "prim": "/World/Remote", "active": False}
+        ]
+
 
 class TestFeedbackGuard:
     """Test that _applying_remote blocks event generation."""
@@ -538,6 +614,9 @@ class TestReverseShaderAuthoring:
         # A str would be "string" by heuristic; Sdr knows UsdUVTexture.file is asset.
         assert str(inp.GetAttr().GetTypeName()) == "asset"
         assert inp.Get().path == "D:/new.png"
+        spec = author.delta_layer.GetPrimAtPath(path)
+        assert spec.specifier == Sdf.SpecifierOver
+        assert not spec.typeName
 
     def test_heuristic_types_for_unknown_shader(self):
         from pxr import UsdShade
@@ -705,3 +784,159 @@ class TestBlenderAssetArcProjection:
             explicit=False,
             payload=True,
         ) == [{"asset_path": asset, "prim_path": "/Payload"}]
+
+    def test_variant_export_does_not_modify_cached_source_layer(self, tmp_path):
+        from pxr import Sdf, Usd
+
+        asset_path = tmp_path / "variants.usda"
+        source = Usd.Stage.CreateNew(str(asset_path))
+        asset = source.DefinePrim("/Asset", "Xform")
+        source.SetDefaultPrim(asset)
+        variants = asset.GetVariantSets().AddVariantSet("model")
+        for name in ("A", "B"):
+            variants.AddVariant(name)
+            variants.SetVariantSelection(name)
+            with variants.GetVariantEditContext():
+                asset.CreateAttribute("selection", Sdf.ValueTypeNames.String).Set(name)
+        variants.SetVariantSelection("A")
+        source.GetRootLayer().Save()
+        source_text = source.GetRootLayer().ExportToString()
+
+        adapter = BlenderAdapter()
+        export_path = adapter._create_variant_stage(
+            str(asset_path),
+            "/Asset",
+            {"model": "B"},
+        )
+
+        assert export_path is not None
+        assert source.GetRootLayer().ExportToString() == source_text
+        exported = Usd.Stage.Open(export_path)
+        exported_asset = exported.GetPrimAtPath("/Asset")
+        assert exported_asset.GetAttribute("selection").Get() == "B"
+
+
+def test_receiver_mirror_has_an_independent_session_layer(monkeypatch):
+    from pxr import Usd
+
+    from integrations.blender import capture, receiver_addon
+
+    base_path = _make_temp_usda()
+    author = BlenderStageAuthor(base_usd_path=base_path)
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(receiver_addon, "_MIRROR_STAGE", None)
+    monkeypatch.setattr(receiver_addon, "_MIRROR_SOURCE", "")
+
+    mirror = receiver_addon._ensure_mirror_stage(reset=True)
+
+    assert mirror is not author.stage
+    assert mirror.GetRootLayer() is author.stage.GetRootLayer()
+    assert mirror.GetSessionLayer() is not author.stage.GetSessionLayer()
+    assert mirror.GetEditTarget().GetLayer() is mirror.GetSessionLayer()
+    with Usd.EditContext(author.stage, author.stage.GetSessionLayer()):
+        author.stage.DefinePrim("/LocalOnly", "Xform")
+    assert not mirror.GetPrimAtPath("/LocalOnly")
+    mirror.DefinePrim("/ReceiverOnly", "Xform")
+    assert not author.stage.GetPrimAtPath("/ReceiverOnly")
+
+
+def test_receiver_rebuilds_logical_layers_from_full_replay():
+    from integrations.blender import receiver_addon
+
+    plan = receiver_addon._replay_plan(
+        last_seq=42,
+        mirror_reusable=False,
+        live_metadata=None,
+    )
+
+    assert plan.sync_from == 1
+    assert plan.baseline_seq == 0
+    assert plan.layered_replay is True
+
+
+def test_receiver_resumes_after_flattened_live_snapshot():
+    from integrations.blender import receiver_addon
+
+    plan = receiver_addon._replay_plan(
+        last_seq=91,
+        mirror_reusable=False,
+        live_metadata={"snapshot_seq": 17},
+    )
+
+    assert plan.sync_from == 18
+    assert plan.baseline_seq == 17
+    assert plan.layered_replay is False
+
+
+def test_receiver_reuses_retained_mirror_state():
+    from integrations.blender import receiver_addon
+
+    plan = receiver_addon._replay_plan(
+        last_seq=42,
+        mirror_reusable=True,
+        live_metadata=None,
+    )
+
+    assert plan.sync_from == 43
+    assert plan.baseline_seq == 42
+    assert plan.layered_replay is True
+
+
+def test_receiver_discards_retained_replay_state(monkeypatch):
+    from integrations.blender import receiver_addon
+
+    dispatcher = MagicMock()
+    monkeypatch.setattr(receiver_addon, "_DISPATCHER", dispatcher)
+    monkeypatch.setattr(receiver_addon, "_ADAPTER", object())
+    monkeypatch.setattr(receiver_addon, "_MIRROR_STAGE", object())
+    monkeypatch.setattr(receiver_addon, "_MIRROR_SOURCE", "/old/base.usda")
+    monkeypatch.setattr(receiver_addon, "_MIRROR_ENDPOINT", ("127.0.0.1", 7200))
+    monkeypatch.setattr(receiver_addon, "_MIRROR_LAYERED_REPLAY", True)
+    monkeypatch.setattr(receiver_addon, "_pending_seed_paths", {"/World"})
+    monkeypatch.setattr(receiver_addon, "_pending_shader_seed_paths", {"/Material"})
+
+    receiver_addon._discard_replay_state()
+
+    dispatcher.close.assert_called_once_with()
+    assert receiver_addon._DISPATCHER is None
+    assert receiver_addon._ADAPTER is None
+    assert receiver_addon._MIRROR_STAGE is None
+    assert receiver_addon._MIRROR_SOURCE == ""
+    assert receiver_addon._MIRROR_ENDPOINT is None
+    assert receiver_addon._MIRROR_LAYERED_REPLAY is None
+    assert receiver_addon._pending_seed_paths == set()
+    assert receiver_addon._pending_shader_seed_paths == set()
+
+
+def test_receiver_thread_cleanup_tolerates_unstarted_thread():
+    from integrations.blender import receiver_addon
+
+    receiver = MagicMock()
+    receiver.join.side_effect = RuntimeError("cannot join thread before it is started")
+
+    receiver_addon._stop_receiver_thread(receiver)
+
+    receiver.stop.assert_called_once_with()
+    receiver.join.assert_called_once_with(timeout=2.0)
+
+
+def test_receiver_sequence_persistence_tolerates_released_scene():
+    from integrations.blender import receiver_addon
+
+    class ReleasedScene:
+        def __setattr__(self, name, value):
+            raise ReferenceError("Blender scene has been removed")
+
+    receiver_addon._store_last_sequence(ReleasedScene(), 42)
+
+
+def test_receiver_stage_metadata_updates_adapter_axis_conversion(monkeypatch):
+    from integrations.blender import blender_adapter
+
+    monkeypatch.setattr(blender_adapter, "BPY_AVAILABLE", False)
+    adapter = BlenderAdapter(scene_up_axis="Y")
+    assert adapter._needs_axis_conv is True
+
+    adapter.set_stage_metadata(upAxis="Z")
+
+    assert adapter._needs_axis_conv is False

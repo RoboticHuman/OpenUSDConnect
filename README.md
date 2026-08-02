@@ -34,14 +34,16 @@ flowchart LR
         SQ["sequencer"] --> LOG[("SQLite event log")]
     end
     LOG -- "broadcast + late-join replay" --> MS
-    subgraph B["every other client"]
+    subgraph B["receiving side"]
         MS["mirror USD stage"] -- "DCCAdapter" --> N["native scene"]
     end
 ```
 
 The boxes are roles, not machines: a bidirectional client runs both halves
-at once, emitting its own edits while applying everyone else's. The server
-never echoes an event back to its origin.
+at once. Flat receivers suppress ordinary origin echoes. Layered receivers
+also replay their own authored records into an independent mirror so its
+reconstructed layer stack remains complete; the emitter's authoring stage is
+not used as that mirror.
 
 ## Features
 
@@ -141,28 +143,41 @@ and mute state. The current policy maps a department such as `animation` to
 `department:animation` and maps department-less clients to the `default`
 logical layer.
 
-USD-native receivers (currently usdview and the MCP mirror) negotiate layered
-replay and map those layer keys to receiver-owned anonymous `Sdf.Layer`
-objects. Server anonymous layer identifiers never cross the wire. The managed
+USD-native receivers and Blender sessions opened from an ordinary base USD
+negotiate layered replay. Portable layer keys map to receiver-owned anonymous
+`Sdf.Layer` objects; server layer identifiers never cross the wire. The managed
 layers form an ordered block at the strong end of the receiver's session
-sublayers; unrelated sublayers retain their relative order and offsets.
-Live reorder and mute changes are applied without moving authored opinions.
+sublayers, while unrelated sublayers retain their order and offsets. Reorder
+and mute changes alter composition without moving authored opinions.
+
+Blender reconstructs the stack in a separate USD mirror and projects only the
+resulting composed scene changes into Blender. An edit echoed to its author is
+also projected when needed, so a representable weak local edit is retained in
+its layer while the viewport returns to the stronger composed value. Prim
+lifecycle, transforms, geometry values, references and payloads, variants,
+material bindings, shader inputs and connections, visibility, and
+instanceability use this path.
+
+Flattened live-open snapshots resume flat replay from `snapshot_seq + 1` because
+they do not contain enough identity to reconstruct the historical logical layer
+stack. Unreal and receivers that do not negotiate layered replay also retain the
+flat composed-projection path.
+
 On restart, configured department order comes from `--departments`; unlisted
 departments are reconstructed in persisted replay order before the weakest
-`default` layer. Runtime reorder and mute controls are not yet persisted.
-Stage metadata is authored once in the shared session layer, and payload
-load/unload records remain stage runtime state rather than layer opinions.
-
-Blender, Unreal, and receivers that do not negotiate this capability keep the
-existing flat composed projection. Generic Sdf spec edits are returned as
-authoritative composed corrections during live sync and replay. Corrections
-use OpenUSD's layer-stack flattening, which preserves composition arcs and
-produces the same composed stage from one layer. The server stage remains
-authoritative for specialized events without an equivalent flat correction.
+`default` layer. Runtime reorder and mute controls are not yet persisted. Stage
+metadata is authored once in the shared session layer, and payload load/unload
+records remain stage runtime state rather than layer opinions.
 
 Layered replay covers OpenUSDConnect's managed collaboration layers. It does
 not transmit arbitrary client-authored sublayer graphs, sublayer offsets, or
 edit-target changes outside that block.
+
+Native DCC projection is limited by the adapter event contract. Clearing a
+property reveals and projects a weaker or schema fallback when one exists.
+Arbitrary Sdf-only fields, API-schema removal, and property removal with no
+representable fallback remain preserved in the USD mirror but may not alter the
+native scene.
 
 Document-anchored asset identifiers (`./` and `../`) copied from file-backed
 layers are re-anchored through their owning `Sdf.Layer`; the resolver's

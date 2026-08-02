@@ -7,7 +7,9 @@ on the main thread via bpy.app.timers.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from dataclasses import dataclass
 
 try:
     import bpy
@@ -19,7 +21,6 @@ except Exception:
     BoolProperty = FloatProperty = IntProperty = StringProperty = None  # type: ignore[assignment]
 
 from openusdconnect import token_client
-from openusdconnect.codec import decode_messages
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
 
@@ -31,6 +32,10 @@ LOG = logging.getLogger(__name__)
 _RECEIVER: ReceiverThread | None = None
 _DISPATCHER: EventDispatcher | None = None
 _ADAPTER: BlenderAdapter | None = None
+_MIRROR_STAGE = None
+_MIRROR_SOURCE = ""
+_MIRROR_ENDPOINT: tuple[str, int] | None = None
+_MIRROR_LAYERED_REPLAY: bool | None = None
 _QUEUE_TIMER_REGISTERED = False
 # Prim paths that need emitter cache seeding after view_layer.update().
 _pending_seed_paths: set[str] = set()
@@ -68,6 +73,8 @@ def _ensure_scene_props():
         S.usd_connect_recv_running = BoolProperty(name="Receiver Running", default=False)
     if not hasattr(S, "usd_connect_recv_last_seq"):
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
+    if not hasattr(S, "usd_connect_department"):
+        S.usd_connect_department = StringProperty(name="Department", default="")
     # Playback synchronization state — populated from server messages.
     if not hasattr(S, "usd_connect_playback_is_leader"):
         S.usd_connect_playback_is_leader = BoolProperty(
@@ -99,15 +106,109 @@ def _ensure_adapter():
     if _ADAPTER is not None:
         return _ADAPTER
     up_axis = "Y"  # default — most USD scenes are Y-up
+    source_stage = _MIRROR_STAGE
+    if source_stage is None:
+        cap = _get_capture_mod()
+        if cap is not None and getattr(cap, "_state", None) is not None:
+            author = getattr(cap._state, "author", None)
+            source_stage = author.stage if author is not None else None
+    if source_stage is not None:
+        from pxr import UsdGeom
+
+        up_axis = UsdGeom.GetStageUpAxis(source_stage)
+    _ADAPTER = BlenderAdapter(scene_up_axis=up_axis)
+    return _ADAPTER
+
+
+def _configured_base_path() -> str:
     cap = _get_capture_mod()
     if cap is not None and getattr(cap, "_state", None) is not None:
         author = getattr(cap._state, "author", None)
         if author is not None:
-            from pxr import UsdGeom
+            return os.path.abspath(author.base_usd_path)
+    scene = bpy.context.scene
+    path = str(getattr(scene, "usd_connect_base_usd_path", "") or "").strip()
+    return os.path.abspath(bpy.path.abspath(path)) if path else ""
 
-            up_axis = UsdGeom.GetStageUpAxis(author.stage)
-    _ADAPTER = BlenderAdapter(scene_up_axis=up_axis)
-    return _ADAPTER
+
+@dataclass(frozen=True, slots=True)
+class _ReplayPlan:
+    sync_from: int
+    baseline_seq: int
+    layered_replay: bool
+
+
+def _live_snapshot_metadata(source: str) -> dict | None:
+    if not source:
+        return None
+    from .live_discovery import read_live_metadata
+
+    return read_live_metadata(source)
+
+
+def _replay_plan(
+    *,
+    last_seq: int,
+    mirror_reusable: bool,
+    live_metadata: dict | None,
+) -> _ReplayPlan:
+    if mirror_reusable:
+        return _ReplayPlan(
+            sync_from=max(1, last_seq + 1),
+            baseline_seq=max(0, last_seq),
+            layered_replay=live_metadata is None,
+        )
+    if live_metadata is not None:
+        snapshot_seq = max(0, int(live_metadata.get("snapshot_seq") or 0))
+        return _ReplayPlan(
+            sync_from=snapshot_seq + 1,
+            baseline_seq=snapshot_seq,
+            layered_replay=False,
+        )
+    return _ReplayPlan(sync_from=1, baseline_seq=0, layered_replay=True)
+
+
+def _ensure_mirror_stage(*, reset: bool = False):
+    """Return a receiver-owned stage with an independent session layer."""
+    global _MIRROR_SOURCE, _MIRROR_STAGE
+
+    source = _configured_base_path()
+    if not reset and _MIRROR_STAGE is not None and source == _MIRROR_SOURCE:
+        return _MIRROR_STAGE
+
+    from pxr import Sdf, Usd
+
+    if source:
+        root_layer = Sdf.Layer.FindOrOpen(source)
+        if root_layer is None:
+            raise RuntimeError(f"Failed to open receiver base USD layer: {source}")
+        stage = Usd.Stage.Open(root_layer)
+        if stage is None:
+            raise RuntimeError(f"Failed to open receiver USD stage: {source}")
+    else:
+        stage = Usd.Stage.CreateInMemory()
+
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    _MIRROR_SOURCE = source
+    _MIRROR_STAGE = stage
+    return stage
+
+
+def _discard_replay_state() -> None:
+    """Release retained replay state before changing the receiver baseline."""
+    global _ADAPTER, _DISPATCHER, _MIRROR_ENDPOINT, _MIRROR_LAYERED_REPLAY
+    global _MIRROR_SOURCE, _MIRROR_STAGE
+
+    if _DISPATCHER is not None:
+        _DISPATCHER.close()
+    _DISPATCHER = None
+    _ADAPTER = None
+    _MIRROR_STAGE = None
+    _MIRROR_SOURCE = ""
+    _MIRROR_ENDPOINT = None
+    _MIRROR_LAYERED_REPLAY = None
+    _pending_seed_paths.clear()
+    _pending_shader_seed_paths.clear()
 
 
 def _set_applying_remote(value: bool):
@@ -116,10 +217,24 @@ def _set_applying_remote(value: bool):
     _APPLYING_REMOTE = value
     cap = _get_capture_mod()
     if cap is not None:
-        try:
-            cap.set_emitter_feedback_guard(value)
-        except Exception:
-            pass
+        cap.set_emitter_feedback_guard(value)
+
+
+def _stop_receiver_thread(receiver: ReceiverThread) -> None:
+    """Stop a receiver and tolerate joining a thread that never started."""
+    receiver.stop()
+    try:
+        receiver.join(timeout=2.0)
+    except RuntimeError:
+        LOG.debug("Receiver thread could not be joined", exc_info=True)
+
+
+def _store_last_sequence(scene, value: int) -> None:
+    """Persist replay progress when the Blender scene is still writable."""
+    try:
+        scene.usd_connect_recv_last_seq = value
+    except (AttributeError, ReferenceError, RuntimeError):
+        LOG.debug("Could not persist receiver sequence", exc_info=True)
 
 
 def _seed_shader_maps(author, adapter, prim_path: str):
@@ -217,7 +332,10 @@ def _on_stage_metadata(meta: dict) -> None:
         return
 
     def _apply():
-        apply_stage_metadata_to_scene(bpy.context.scene, **meta)
+        if _ADAPTER is not None:
+            _ADAPTER.set_stage_metadata(**meta)
+        else:
+            apply_stage_metadata_to_scene(bpy.context.scene, **meta)
         return None
 
     try:
@@ -329,28 +447,25 @@ def _on_resync() -> None:
     """Reset the adapter so all caches (including _imported_refs) are clean."""
     global _ADAPTER
     LOG.info("Server requested resync — resetting adapter")
+    _pending_seed_paths.clear()
+    _pending_shader_seed_paths.clear()
+    mirror_stage = _ensure_mirror_stage(reset=True)
     _ADAPTER = None
     if _DISPATCHER is not None:
         _DISPATCHER.adapter = _ensure_adapter()
+        _DISPATCHER.mirror_stage = mirror_stage
+        _DISPATCHER.adapter.mirror_stage = mirror_stage
 
 
 def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
-    """Construct an EventDispatcher wired to the current capture state."""
-    cap = _get_capture_mod()
-    mirror_stage = None
-    emitter = None
-    if cap is not None and getattr(cap, "_state", None) is not None:
-        author = getattr(cap._state, "author", None)
-        if author is not None:
-            mirror_stage = author.stage
-            emitter = cap._state.notice_emitter
+    """Construct a dispatcher over the receiver-owned layered USD mirror."""
+    mirror_stage = _ensure_mirror_stage()
     adapter = _ensure_adapter()
     adapter.mirror_stage = mirror_stage
     return EventDispatcher(
         receiver=receiver,
         adapter=adapter,
         mirror_stage=mirror_stage,
-        emitter=emitter,
         on_imported=_on_imported,
         on_resync=_on_resync,
         on_applied=_on_applied,
@@ -358,18 +473,7 @@ def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
 
 
 def _drain_and_process() -> int:
-    """Run one drain-and-apply cycle through the dispatcher.
-
-    Returns the count of events applied.  Lazily constructs the
-    dispatcher if a receiver exists but the dispatcher does not (used
-    by test scripts that bypass the start_receiver operator).  Re-binds
-    mirror_stage and emitter on every call so capture toggling
-    mid-session is picked up.
-
-    The 5 phases (Parse, Skip-detect, Stage commit, Adapter dispatch,
-    Cache invalidation) all run inside ``EventDispatcher.drain_and_apply``
-    — see the per-phase commentary in ``openusdconnect/dispatcher.py``.
-    """
+    """Apply one queued batch through the receiver's layered USD mirror."""
     global _LAST_SEQ, _DISPATCHER
     if _RECEIVER is None:
         return 0
@@ -377,14 +481,11 @@ def _drain_and_process() -> int:
         _DISPATCHER = _build_dispatcher(_RECEIVER)
         _DISPATCHER.last_seq = _LAST_SEQ
 
-    cap = _get_capture_mod()
-    if cap is not None and cap._state.author is not None:
-        _DISPATCHER.mirror_stage = cap._state.author.stage
-        _DISPATCHER.emitter = cap._state.notice_emitter
-    else:
-        _DISPATCHER.mirror_stage = None
-        _DISPATCHER.emitter = None
-    _DISPATCHER.adapter.mirror_stage = _DISPATCHER.mirror_stage
+    mirror_stage = _ensure_mirror_stage()
+    if mirror_stage is not _DISPATCHER.mirror_stage:
+        _DISPATCHER.mirror_stage = mirror_stage
+        _DISPATCHER.bind_layered_stage(mirror_stage)
+    _DISPATCHER.adapter.mirror_stage = mirror_stage
 
     _DISPATCHER.last_seq = _LAST_SEQ
     applied = _DISPATCHER.drain_and_apply()
@@ -393,31 +494,7 @@ def _drain_and_process() -> int:
 
 
 def _process_queue_timer():
-    """Drain receiver queue on Blender main thread.
-
-    Stage-first architecture (5 phases inside ``EventDispatcher.drain_and_apply``):
-      Phase 1 — Parse FlatBuffers frames into event list
-      Phase 2 — Collect skip decisions (unchanged arcs) from pre-commit state.
-                arc_changed reads pre-commit state to avoid unnecessary
-                re-imports.  Unchanged arcs are excluded from stage commit too —
-                ClearReferences() followed by re-adding identical references
-                triggers recomposition even when the final state is identical.
-      Phase 3 — Commit all stage-affecting events to the emitter's USD stage
-                atomically.  If atomic_apply raises, the adapter is never
-                touched — Blender stays untouched on a failed batch.
-      Phase 4 — Dispatch to BlenderAdapter (only after stage commit succeeds).
-                Stage idempotence and DCC idempotence are not identical: a USD
-                stage arc can already match before Blender has imported the
-                corresponding objects, so adapter dispatch is only skipped when
-                composed children are already present in the DCC scene.
-      Phase 5 — Invalidate emitter caches against the now-mutated stage so the
-                local Blender does not re-emit an event it just received
-                (feedback-loop guard).
-
-    Post-tick work (viewport refresh, post-import seeding) runs here in this
-    function, still under the ``_set_applying_remote`` guard so the depsgraph
-    handler doesn't echo received changes back to the server.
-    """
+    """Apply queued events and refresh Blender under the feedback guard."""
     if _RECEIVER is None:
         return None  # Unregister timer
 
@@ -459,23 +536,32 @@ def _process_queue_timer():
     finally:
         _set_applying_remote(False)
 
-    try:
-        scene = bpy.context.scene
-        if scene:
-            scene.usd_connect_recv_last_seq = _LAST_SEQ
-    except (AttributeError, RuntimeError):
-        pass
+    scene = bpy.context.scene
+    if scene:
+        _store_last_sequence(scene, _LAST_SEQ)
 
     return 0.01  # Run again in 10ms
+
+
+def _unregister_queue_timer() -> None:
+    global _QUEUE_TIMER_REGISTERED
+    if (
+        BPY_AVAILABLE
+        and _QUEUE_TIMER_REGISTERED
+        and bpy.app.timers.is_registered(_process_queue_timer)
+    ):
+        bpy.app.timers.unregister(_process_queue_timer)
+    _QUEUE_TIMER_REGISTERED = False
 
 
 class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
     bl_idname = "usd_connect.start_receiver"
     bl_label = "Start Receiver"
-    bl_description = "Connect to sync server and start receiving transform events"
+    bl_description = "Connect to the sync server and receive scene edits"
 
     def execute(self, context):
         global _RECEIVER, _DISPATCHER, _QUEUE_TIMER_REGISTERED, _LAST_SEQ, _ADAPTER
+        global _MIRROR_ENDPOINT, _MIRROR_LAYERED_REPLAY
         if _RECEIVER is not None:
             self.report({"INFO"}, "Receiver already running")
             return {"CANCELLED"}
@@ -487,12 +573,29 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
         if _LAST_SEQ == 0 and hasattr(scene, "usd_connect_recv_last_seq"):
             _LAST_SEQ = scene.usd_connect_recv_last_seq
 
-        # Request replay from last known sequence + 1 (or 1 if never connected)
-        sync_from = _LAST_SEQ + 1 if _LAST_SEQ > 0 else 1
+        source = _configured_base_path()
+        live_metadata = _live_snapshot_metadata(source)
+        layered_replay = live_metadata is None
+        mirror_reusable = (
+            _MIRROR_STAGE is not None
+            and _MIRROR_SOURCE == source
+            and _MIRROR_ENDPOINT == (host, port)
+            and _MIRROR_LAYERED_REPLAY is layered_replay
+            and _DISPATCHER is not None
+        )
+        plan = _replay_plan(
+            last_seq=_LAST_SEQ,
+            mirror_reusable=mirror_reusable,
+            live_metadata=live_metadata,
+        )
 
-        # Full replay — reset adapter so all caches (including _imported_refs) are clean
-        if sync_from == 1:
+        if not mirror_reusable:
+            if _DISPATCHER is not None:
+                _DISPATCHER.close()
+                _DISPATCHER = None
+            _LAST_SEQ = plan.baseline_seq
             _ADAPTER = None
+            _ensure_mirror_stage(reset=True)
 
         try:
             from . import STABLE_CLIENT_ID
@@ -500,28 +603,44 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             _RECEIVER = ReceiverThread(
                 host=host,
                 port=port,
-                sync_from=sync_from,
+                sync_from=plan.sync_from,
                 client_id=STABLE_CLIENT_ID,
                 origin=_ORIGIN,
+                department=scene.usd_connect_department or None,
                 token=token_client.load_token(host, port),
                 on_token_issued=lambda token: token_client.save_token(host, port, token),
                 on_stage_metadata=_on_stage_metadata,
                 on_playback_state=_on_playback_state,
                 on_playback_claimed=_on_playback_claimed,
                 on_playback_rejected=_on_playback_rejected,
+                layered_replay=plan.layered_replay,
             )
             _RECEIVER.start()
-            _DISPATCHER = _build_dispatcher(_RECEIVER)
+            if _DISPATCHER is None:
+                _DISPATCHER = _build_dispatcher(_RECEIVER)
+            else:
+                _DISPATCHER.receiver = _RECEIVER
             _DISPATCHER.last_seq = _LAST_SEQ
+            _MIRROR_ENDPOINT = (host, port)
+            _MIRROR_LAYERED_REPLAY = plan.layered_replay
             if not _QUEUE_TIMER_REGISTERED:
                 bpy.app.timers.register(_process_queue_timer, first_interval=0.01)
                 _QUEUE_TIMER_REGISTERED = True
             scene.usd_connect_recv_running = True
-            self.report({"INFO"}, f"Receiver started ({host}:{port}), sync from seq={sync_from}")
-        except Exception as e:
+            self.report(
+                {"INFO"},
+                f"Receiver started ({host}:{port}), sync from seq={plan.sync_from}",
+            )
+        except Exception as exc:
+            LOG.exception("Failed to start receiver")
             if _RECEIVER is not None and getattr(_RECEIVER, "auth_rejected", False):
                 token_client.delete_token(host, port)
-            self.report({"ERROR"}, f"Failed to start receiver: {e}")
+            if _RECEIVER is not None:
+                _stop_receiver_thread(_RECEIVER)
+                _RECEIVER = None
+            _unregister_queue_timer()
+            scene.usd_connect_recv_running = False
+            self.report({"ERROR"}, f"Failed to start receiver: {exc}")
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -531,39 +650,13 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
     bl_label = "Stop Receiver"
 
     def execute(self, context):
-        global _RECEIVER, _DISPATCHER, _QUEUE_TIMER_REGISTERED, _LAST_SEQ
+        global _RECEIVER
         if _RECEIVER is not None:
-            # Grab reference and null out global FIRST to stop timer from processing
             receiver = _RECEIVER
-            _RECEIVER = None  # Timer will exit on next tick
-            _DISPATCHER = None
-
-            # Stop receiver thread (stops adding to queue)
-            receiver.stop()
-            try:
-                receiver.join(timeout=2.0)
-            except Exception:
-                pass
-
-            # NOW drain any remaining queued events (thread dead, timer stopped) —
-            # decode/dedup so _LAST_SEQ matches the receiver's perspective; events
-            # are not applied (the user clicked stop).
-            remaining = receiver.drain_queue()
-            if remaining:
-                result = decode_messages(remaining, last_seq=_LAST_SEQ, clear_on_resync=True)
-                for exc in result.errors:
-                    LOG.exception(
-                        "Error parsing received message at stop",
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
-                _LAST_SEQ = result.last_seq
-
-            # Persist to scene property
-            try:
-                context.scene.usd_connect_recv_last_seq = _LAST_SEQ
-            except Exception:
-                pass
-        _QUEUE_TIMER_REGISTERED = False
+            _RECEIVER = None
+            _stop_receiver_thread(receiver)
+            _store_last_sequence(context.scene, _LAST_SEQ)
+        _unregister_queue_timer()
         context.scene.usd_connect_recv_running = False
         self.report({"INFO"}, f"Receiver stopped at seq={_LAST_SEQ}")
         return {"FINISHED"}
@@ -690,21 +783,16 @@ class USD_CONNECT_OT_playback_set_time(bpy.types.Operator):
 
 class USD_CONNECT_OT_reset_receiver_seq(bpy.types.Operator):
     bl_idname = "usd_connect.reset_receiver_seq"
-    bl_label = "Reset Seq"
-    bl_description = "Reset sequence counter to force full replay on next connect"
+    bl_label = "Rebuild Replay"
+    bl_description = "Discard retained receiver state and rebuild from the configured USD base"
 
     def execute(self, context):
-        global _LAST_SEQ, _ADAPTER
+        global _LAST_SEQ
         _LAST_SEQ = 0
-        _ADAPTER = None
-        if _DISPATCHER is not None:
-            _DISPATCHER.last_seq = 0
-            _DISPATCHER.adapter = _ensure_adapter()
-        try:
-            context.scene.usd_connect_recv_last_seq = 0
-        except Exception:
-            pass
-        self.report({"INFO"}, "Receiver sequence reset to 0")
+        _discard_replay_state()
+        _ensure_mirror_stage(reset=True)
+        _store_last_sequence(context.scene, 0)
+        self.report({"INFO"}, "Receiver replay state reset")
         return {"FINISHED"}
 
 
@@ -730,12 +818,13 @@ def register():
 
 
 def unregister():
-    global _RECEIVER, _DISPATCHER, _QUEUE_TIMER_REGISTERED
+    global _RECEIVER
     if _RECEIVER is not None:
-        _RECEIVER.stop()
+        receiver = _RECEIVER
         _RECEIVER = None
-    _DISPATCHER = None
-    _QUEUE_TIMER_REGISTERED = False
+        _stop_receiver_thread(receiver)
+    _discard_replay_state()
+    _unregister_queue_timer()
     if BPY_AVAILABLE:
         if _frame_change_to_playback_control in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.remove(_frame_change_to_playback_control)
@@ -756,5 +845,9 @@ def unregister():
         if hasattr(bpy.types.Scene, prop_name):
             try:
                 delattr(bpy.types.Scene, prop_name)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError):
+                LOG.debug(
+                    "Could not unregister Blender scene property %s",
+                    prop_name,
+                    exc_info=True,
+                )

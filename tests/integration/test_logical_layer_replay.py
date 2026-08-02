@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pxr import Sdf, Usd, UsdShade
 
-from openusdconnect.adapters import UsdStageAdapter
+from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.receiver import ReceiverThread
@@ -116,6 +116,41 @@ class _LayeredClient:
         return attr.Get() if attr and attr.IsValid() else None
 
 
+class _NativeLayeredClient:
+    def __init__(self, port, client_id, department):
+        self.stage = Usd.Stage.CreateInMemory()
+        self.adapter = MockAdapter()
+        self.receiver = ReceiverThread(
+            port=port,
+            reconnect=False,
+            client_id=client_id,
+            origin=f"{client_id}-origin",
+            department=department,
+            layered_replay=True,
+        )
+        self.dispatcher = EventDispatcher(
+            receiver=self.receiver,
+            adapter=self.adapter,
+            mirror_stage=self.stage,
+        )
+        self.receiver.start()
+
+    def close(self):
+        self.receiver.stop()
+        self.receiver.join(timeout=2)
+        self.dispatcher.close()
+
+    def pump_until(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.dispatcher.drain_and_apply()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        self.dispatcher.drain_and_apply()
+        return bool(predicate())
+
+
 def _property_events(value):
     stage = Usd.Stage.CreateInMemory()
     prim = stage.DefinePrim("/World/Thing", "Xform")
@@ -142,6 +177,19 @@ def _property_clear_events():
             "fragment": "",
             "removed": True,
         }
+    ]
+
+
+def _xform_events(value):
+    return [
+        {"k": "ensure_prim", "prim": "/World/Thing", "typeName": "Xform"},
+        {"k": "ensure_xform_ops", "prim": "/World/Thing"},
+        {
+            "k": "set_xform_trs",
+            "prim": "/World/Thing",
+            "fields": ["t"],
+            "t": [value, 0.0, 0.0],
+        },
     ]
 
 
@@ -282,6 +330,55 @@ def test_live_late_join_compaction_reorder_and_muting(tmp_path):
         client.close()
         if late is not None:
             late.close()
+        server.close()
+
+
+def test_native_receiver_projects_composed_department_state(tmp_path):
+    server = _RunningServer(
+        tmp_path / "native-layered-replay.db",
+        ["animation", "layout"],
+    )
+    client = _NativeLayeredClient(server.port, "layout-artist", "layout")
+    animation = None
+    layout = None
+    try:
+        assert client.pump_until(lambda: client.receiver.connected)
+        animation = _sender(server.port, "animator", "animation")
+        layout = _sender(server.port, "layout-artist", "layout")
+
+        assert animation.send_events(_xform_events(2.0))
+        assert layout.send_events(_xform_events(1.0))
+        assert client.pump_until(
+            lambda: (
+                client.adapter.get_trs("/World/Thing").get("t") == pytest.approx([2.0, 0.0, 0.0])
+            )
+        )
+
+        client.adapter.set_xform_trs("/World/Thing", t=[3.0, 0.0, 0.0])
+        assert layout.send_events(_xform_events(3.0))
+        expected_seq = len(_xform_events(2.0)) + 2 * len(_xform_events(1.0))
+        assert client.pump_until(lambda: client.dispatcher.last_seq == expected_seq)
+        assert client.adapter.get_trs("/World/Thing")["t"] == pytest.approx([2.0, 0.0, 0.0])
+
+        server.sync.set_department_priority(["layout", "animation"])
+        assert client.pump_until(
+            lambda: (
+                client.adapter.get_trs("/World/Thing").get("t") == pytest.approx([3.0, 0.0, 0.0])
+            )
+        )
+
+        assert server.sync.mute_layer("layout")
+        assert client.pump_until(
+            lambda: (
+                client.adapter.get_trs("/World/Thing").get("t") == pytest.approx([2.0, 0.0, 0.0])
+            )
+        )
+    finally:
+        if animation is not None:
+            animation.disconnect()
+        if layout is not None:
+            layout.disconnect()
+        client.close()
         server.close()
 
 

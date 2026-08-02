@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from pxr import Usd, UsdGeom, UsdShade
 
-from openusdconnect.emitter import read_usdshade_connectable
 from openusdconnect.protocol_constants import STAGE_METADATA_KEYS
+from openusdconnect.usd_state import read_usdshade_connectable
 from openusdconnect.xform_decompose import as_matrix, decompose_trs_from_matrix
 
 from ._convert import to_jsonable

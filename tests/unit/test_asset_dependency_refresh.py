@@ -193,6 +193,49 @@ def test_pending_dependencies_follow_namespace_and_arc_lifecycle(tmp_path):
     assert dispatcher.pending_asset_dependencies == ()
 
 
+def test_pending_dependencies_are_scoped_to_their_authored_layer(tmp_path):
+    asset_directory = tmp_path / "resolver-root"
+    asset_directory.mkdir()
+    stage = _stage_with_search_context(asset_directory)
+    strong = Sdf.Layer.CreateAnonymous("strong")
+    weak = Sdf.Layer.CreateAnonymous("weak")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=UsdStageAdapter(stage),
+    )
+
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        dispatcher._apply([_arc_event(K_SET_REFERENCE, "/World/Asset", "strong.usda")])
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        dispatcher._apply([_arc_event(K_SET_REFERENCE, "/World/Asset", "weak.usda")])
+
+    assert dispatcher.pending_asset_dependencies == ("strong.usda", "weak.usda")
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        dispatcher._apply(
+            [{"k": K_SET_REFERENCE, "prim": "/World/Asset", "refs": []}],
+        )
+
+    assert dispatcher.pending_asset_dependencies == ("strong.usda",)
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        dispatcher._apply([_arc_event(K_SET_REFERENCE, "/World/Asset", "weak.usda")])
+        dispatcher._apply(
+            [{"k": K_RENAME_PRIM, "prim": "/World/Asset", "new_name": "Moved"}],
+        )
+
+    tracked = {
+        dependency[0]: event.event["prim"]
+        for event in dispatcher._asset_events.values()
+        for dependency in event.dependencies
+    }
+    assert tracked == {
+        "strong.usda": "/World/Asset",
+        "weak.usda": "/World/Moved",
+    }
+
+
 def test_untracked_asset_refresh_still_refreshes_resolver_context(tmp_path, monkeypatch):
     stage = _stage_with_search_context(tmp_path)
     dispatcher = EventDispatcher(

@@ -1025,6 +1025,43 @@ class TestBroadcast:
         assert observed == [records[0][0]]
         assert layered.request.getvalue()
 
+    def test_layered_transaction_includes_the_authoring_origin(self, srv):
+        import io
+
+        class FakeHandler:
+            def __init__(self, layered):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("fake", int(layered))
+                self.send_lock = threading.Lock()
+                self._layered_replay = layered
+                self._origin = "shared-session"
+
+        flat = FakeHandler(False)
+        layered = FakeHandler(True)
+        srv.receivers.update((flat, layered))
+        event = {
+            "k": "ensure_prim",
+            "prim": "/LayeredEcho",
+            "typeName": "Xform",
+        }
+        records, changed = srv.process_txn(
+            [event],
+            client_id="author",
+            origin="shared-session",
+        )
+
+        srv.broadcast_transaction_views(
+            records,
+            changed,
+            [event],
+            exclude_origin="shared-session",
+        )
+        srv._broadcast_queue.join()
+
+        assert layered.request.getvalue()
+        assert flat.request.getvalue() == b""
+
 
 # ---------------------------------------------------------------------------
 # DB resume

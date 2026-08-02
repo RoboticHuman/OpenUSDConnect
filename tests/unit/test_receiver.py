@@ -140,6 +140,24 @@ class TestReceiverThread:
         finally:
             _teardown(rt, conn, srv)
 
+    def test_sends_department(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            department="layout",
+        )
+        rt.start()
+        conn = _accept(srv)
+        try:
+            hello = _recv_hello(conn)
+            assert hello["department"] == "layout"
+            send_framed(conn, encode_message({"type": "hello_ok"}))
+            assert _poll_until(lambda: rt.connected)
+        finally:
+            _teardown(rt, conn, srv)
+
     def test_unacknowledged_layered_replay_falls_back_to_flat(self):
         srv, port = _make_server()
         rt = ReceiverThread(

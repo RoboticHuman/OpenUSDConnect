@@ -40,6 +40,7 @@ Captures transform edits into a USD session layer delta (local only, no network)
 Sends live transform events to a sync server.
 
 - **Server Host / Port** — Address of the OpenUSDConnect server (default: `127.0.0.1:7200`).
+- **Department**: Optional collaboration layer selected through server department policy.
 - **Send Rate (Hz)** — How often to poll for changes (default: 60 Hz).
 - **Auto-track New Objects** — When enabled, any manipulated object without a `usd_prim_path` tag is automatically assigned one.
 - **Root Prim** — Parent path for auto-tracked objects (default: `/World`).
@@ -49,9 +50,10 @@ Sends live transform events to a sync server.
 Listens to the sync server and applies incoming events to Blender objects.
 
 - **Host / Port** — Server address (default: `127.0.0.1:7200`).
+- **Department**: Shared with the emitter so both connections use the same collaboration identity and authorization scope.
 - **Start/Stop Receiver** — Toggles the background listener thread.
 - **Last seq** — Shows the highest event sequence number processed.
-- **Reset Seq** — Clears the sequence counter to force a full replay on next connect.
+- **Rebuild Replay**: Discards retained receiver state and rebuilds it from the configured USD base.
 
 ### Playback Sync
 Shared-playhead control (see the Playback synchronization section below).
@@ -104,6 +106,14 @@ With **Auto-start Emitter** and **Auto-start Receiver** enabled, import also
 starts the emitter and starts the receiver from `snapshot_seq + 1`. With
 either toggle disabled, use the existing manual start/stop buttons after
 import.
+
+Live-open snapshots use flat replay because the imported snapshot already
+contains the composed state at `snapshot_seq`; it does not carry the historical
+mapping needed to rebuild every collaboration layer. A normal configured base
+USD instead uses layered replay. Blender keeps those layers in a receiver-owned
+USD mirror and applies their final composed result to Blender. Reorder, mute,
+and weak local edits therefore follow OpenUSD layer strength without rewriting
+the authored opinions.
 
 The virtual share is read-only by default. Server operators can opt into
 compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
@@ -230,7 +240,10 @@ When **Auto-track New Objects** is enabled in the Network Emitter:
 
 ## Sequence Persistence
 
-The receiver remembers the last sequence number it processed. On disconnect and reconnect, it resumes from where it left off — no duplicate events. To force a full replay from the beginning, click **Reset Seq** while the receiver is stopped.
+The receiver retains its USD mirror while stopped and resumes from the next
+sequence when the base, server endpoint, and replay mode are unchanged. Click
+**Rebuild Replay** to discard that state. A normal base then replays from
+sequence 1; a live-open file rebuilds from its embedded `snapshot_seq`.
 
 If the server compacts its event log, it broadcasts a `resync` message. Receivers must handle this by resetting their sequence counter — the server then replays the compacted log. The Blender addon handles this. Other DCC integrations must implement `resync` support (see `protocol.py` for the message spec).
 

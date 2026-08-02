@@ -249,7 +249,7 @@ class TestEmitterCameraDiff:
         attrs = gprim[0]["attrs"]
         assert attrs["focalLength"] == pytest.approx(35.0)
         assert attrs["horizontalAperture"] == pytest.approx(36.0)
-        # clippingRange round-trips as a list of two floats via _usd_value_to_python
+        # clippingRange round-trips as a list of two floats via usd_value_to_python
         assert list(attrs["clippingRange"]) == [pytest.approx(0.1), pytest.approx(1000.0)]
         assert attrs["projection"] == "perspective"
 

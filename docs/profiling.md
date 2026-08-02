@@ -128,5 +128,6 @@ uv run python scripts/benchmark_sdf_spec_delta.py
 ```
 
 Run `stress_test_departments.py` as well. The focused benchmark measures the
-generic Sdf path and the specialized transform path in-process; the stress
-test guards transport, persistence, and department composition under load.
+generic Sdf path, emitter paths, native composed projection, and collaboration
+layer reorder in-process. The stress test guards transport, persistence, and
+department composition under load.

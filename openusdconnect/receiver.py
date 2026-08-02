@@ -76,6 +76,7 @@ class ReceiverThread(threading.Thread):
         reconnect_base_delay: float = _RECONNECT_BASE_DELAY,
         reconnect_max_delay: float = _RECONNECT_MAX_DELAY,
         origin: str | None = None,
+        department: str | None = None,
         token: str | None = None,
         on_token_issued: Callable | None = None,
         on_stage_metadata: Callable[[dict], None] | None = None,
@@ -93,6 +94,7 @@ class ReceiverThread(threading.Thread):
         self.socket_timeout = socket_timeout
         self.client_id = client_id
         self.origin = origin
+        self.department = department
         self.token = token
         self.layered_replay = bool(layered_replay)
         self.layered_replay_active = False
@@ -199,6 +201,7 @@ class ReceiverThread(threading.Thread):
             sync_from=sync_from,
             client_id=self.client_id,
             origin=self.origin,
+            department=self.department,
             token=self.token,
             layered_replay=self.layered_replay,
         )

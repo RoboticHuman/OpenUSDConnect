@@ -57,6 +57,16 @@ def test_bishop_materialx(blender_exe, tmp_path):
     _run_asset_test(blender_exe, tmp_path, "test_bishop.py", 7210)
 
 
+def test_remote_reference_descendant_edit(blender_exe, tmp_path):
+    """A local edit on remotely referenced geometry remains an Sdf override."""
+    _run_asset_test(
+        blender_exe,
+        tmp_path,
+        "test_remote_descendant_edit.py",
+        7219,
+    )
+
+
 def test_teapot_variants(blender_exe, tmp_path):
     """Teapot: variant switching with interleaved live editing."""
     _run_asset_test(blender_exe, tmp_path, "test_teapot_variants.py", 7211,
@@ -443,7 +453,6 @@ def test_two_blender_playback(blender_exe, tmp_path):
         )
     finally:
         stop_server(server)
-
 
 
 
