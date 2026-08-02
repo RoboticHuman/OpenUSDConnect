@@ -10,6 +10,7 @@
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/ScopeLock.h"
 
 #include "flatbuffers/flatbuffer_builder.h"
 
@@ -44,14 +45,14 @@ bool FEmitClient::Start()
 
 void FEmitClient::StopAndWait()
 {
-	bShouldStop.store(true, std::memory_order_relaxed);
-	CloseSocket();
+	Stop();
 	if (Thread)
 	{
 		Thread->WaitForCompletion();
 		delete Thread;
 		Thread = nullptr;
 	}
+	CloseSocket();
 }
 
 bool FEmitClient::Init() { return true; }
@@ -64,8 +65,17 @@ uint32 FEmitClient::Run()
 		ISocketSubsystem* SS = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
 		if (!SS) { FPlatformProcess::Sleep(ReconnectDelaySecs); continue; }
 
-		Socket = SS->CreateSocket(NAME_Stream, TEXT("USDConnectEmit"), false);
-		if (!Socket) { FPlatformProcess::Sleep(ReconnectDelaySecs); continue; }
+		FSocket* NewSocket = SS->CreateSocket(NAME_Stream, TEXT("USDConnectEmit"), false);
+		if (!NewSocket) { FPlatformProcess::Sleep(ReconnectDelaySecs); continue; }
+		{
+			FScopeLock Lock(&SocketCS);
+			Socket = NewSocket;
+		}
+		if (bShouldStop.load(std::memory_order_relaxed))
+		{
+			CloseSocket();
+			break;
+		}
 
 		TSharedRef<FInternetAddr> Addr = SS->CreateInternetAddr();
 		bool bValid = false;
@@ -193,7 +203,7 @@ uint32 FEmitClient::Run()
 void FEmitClient::Stop()
 {
 	bShouldStop.store(true, std::memory_order_relaxed);
-	CloseSocket();
+	InterruptSocket();
 }
 
 void FEmitClient::Exit()
@@ -210,16 +220,30 @@ void FEmitClient::EnqueueFrame(TArray<uint8>&& Frame)
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-void FEmitClient::CloseSocket()
+void FEmitClient::InterruptSocket()
 {
+	FScopeLock Lock(&SocketCS);
 	if (Socket)
 	{
-		Socket->Close();
+		Socket->Shutdown(ESocketShutdownMode::ReadWrite);
+	}
+}
+
+void FEmitClient::CloseSocket()
+{
+	FSocket* SocketToDestroy = nullptr;
+	{
+		FScopeLock Lock(&SocketCS);
+		SocketToDestroy = Socket;
+		Socket = nullptr;
+	}
+	if (SocketToDestroy)
+	{
+		SocketToDestroy->Close();
 		if (ISocketSubsystem* SS = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM))
 		{
-			SS->DestroySocket(Socket);
+			SS->DestroySocket(SocketToDestroy);
 		}
-		Socket = nullptr;
 	}
 }
 

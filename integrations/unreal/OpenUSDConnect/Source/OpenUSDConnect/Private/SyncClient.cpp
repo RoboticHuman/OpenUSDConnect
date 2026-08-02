@@ -10,6 +10,7 @@
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/ScopeLock.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUSDConnect, Log, All);
 
@@ -58,14 +59,14 @@ bool FSyncClient::Start()
 
 void FSyncClient::StopAndWait()
 {
-	bShouldStop.store(true, std::memory_order_relaxed);
-	CloseSocket();  // unblock any pending Recv/Send
+	Stop();
 	if (Thread)
 	{
 		Thread->WaitForCompletion();
 		delete Thread;
 		Thread = nullptr;
 	}
+	CloseSocket();
 }
 
 bool FSyncClient::Init()
@@ -87,12 +88,21 @@ uint32 FSyncClient::Run()
 		ISocketSubsystem* SS = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
 		if (!SS) { FPlatformProcess::Sleep(ReconnectDelaySecs); continue; }
 
-		Socket = SS->CreateSocket(NAME_Stream, TEXT("USDConnectRecv"), false);
-		if (!Socket)
+		FSocket* NewSocket = SS->CreateSocket(NAME_Stream, TEXT("USDConnectRecv"), false);
+		if (!NewSocket)
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to create socket"));
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
+		}
+		{
+			FScopeLock Lock(&SocketCS);
+			Socket = NewSocket;
+		}
+		if (bShouldStop.load(std::memory_order_relaxed))
+		{
+			CloseSocket();
+			break;
 		}
 
 		int32 ActualRcvBuf = 0;
@@ -211,7 +221,7 @@ uint32 FSyncClient::Run()
 void FSyncClient::Stop()
 {
 	bShouldStop.store(true, std::memory_order_relaxed);
-	CloseSocket();
+	InterruptSocket();
 }
 
 void FSyncClient::Exit()
@@ -224,16 +234,30 @@ void FSyncClient::Exit()
 // Private helpers
 // ---------------------------------------------------------------------------
 
-void FSyncClient::CloseSocket()
+void FSyncClient::InterruptSocket()
 {
+	FScopeLock Lock(&SocketCS);
 	if (Socket)
 	{
-		Socket->Close();
+		Socket->Shutdown(ESocketShutdownMode::ReadWrite);
+	}
+}
+
+void FSyncClient::CloseSocket()
+{
+	FSocket* SocketToDestroy = nullptr;
+	{
+		FScopeLock Lock(&SocketCS);
+		SocketToDestroy = Socket;
+		Socket = nullptr;
+	}
+	if (SocketToDestroy)
+	{
+		SocketToDestroy->Close();
 		if (ISocketSubsystem* SS = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM))
 		{
-			SS->DestroySocket(Socket);
+			SS->DestroySocket(SocketToDestroy);
 		}
-		Socket = nullptr;
 	}
 }
 
@@ -337,4 +361,3 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	}
 	// Other types (HelloOk, AuthRejected) only appear during handshake, not in the loop.
 }
-

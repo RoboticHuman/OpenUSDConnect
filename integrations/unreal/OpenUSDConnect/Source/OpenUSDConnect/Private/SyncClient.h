@@ -3,6 +3,7 @@
 
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
+#include "HAL/CriticalSection.h"
 #include "Sockets.h"
 #include <atomic>
 
@@ -55,6 +56,7 @@ private:
 	bool RecvFrame(TArray<uint8>& OutFrame);
 	bool SendAll(const uint8* Data, int32 Len);
 	void HandleFrame(const TArray<uint8>& Frame);
+	void InterruptSocket();
 	void CloseSocket();
 
 	UUSDConnectSubsystem* Owner;
@@ -69,6 +71,7 @@ private:
 	int32   LastSeq;        // recv-thread only — no synchronization needed
 
 	FSocket*         Socket;
+	FCriticalSection SocketCS;
 	FRunnableThread* Thread;
 	std::atomic<bool> bShouldStop;
 	std::atomic<bool> bConnected;

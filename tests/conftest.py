@@ -1,6 +1,6 @@
-"""Root conftest — provides Blender exe path for integration tests.
+"""Shared configuration for Blender, Unreal, and slow integration tests.
 
-Resolution order:
+Blender resolution order:
 1. --blender CLI flag:       uv run pytest --blender /path/to/blender.exe
 2. BLENDER_EXE env var:      BLENDER_EXE=/path/to/blender.exe uv run pytest
 3. blender.test.cfg file:    single line with the path (in repo root, gitignored)
@@ -45,15 +45,50 @@ def pytest_addoption(parser):
         default=False,
         help="Run timing-dependent tests marked 'slow' (skipped by default)",
     )
+    parser.addoption(
+        "--unreal-tests",
+        action="store_true",
+        default=False,
+        help="Run opt-in Unreal Editor integration tests",
+    )
+    parser.addoption(
+        "--unreal-engine",
+        action="store",
+        default=None,
+        help="Unreal Engine root or UnrealEditor executable",
+    )
+    parser.addoption(
+        "--unreal-project",
+        action="store",
+        default=None,
+        help="Existing .uproject to use instead of a generated test project",
+    )
+    parser.addoption(
+        "--unreal-plugin-package",
+        action="store",
+        default=None,
+        help="Prebuilt OpenUSDConnect plugin package for Unreal tests",
+    )
+    parser.addoption(
+        "--unreal-rebuild-plugin",
+        action="store_true",
+        default=False,
+        help="Rebuild the cached Unreal plugin package",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--slow-tests"):
-        return
-    skip = pytest.mark.skip(reason="timing-dependent; run with --slow-tests")
-    for item in items:
-        if item.get_closest_marker("slow"):
-            item.add_marker(skip)
+    if not config.getoption("--slow-tests"):
+        skip_slow = pytest.mark.skip(reason="timing-dependent; run with --slow-tests")
+        for item in items:
+            if item.get_closest_marker("slow"):
+                item.add_marker(skip_slow)
+
+    if not config.getoption("--unreal-tests"):
+        skip_unreal = pytest.mark.skip(reason="requires Unreal Editor; run with --unreal-tests")
+        for item in items:
+            if item.get_closest_marker("unreal"):
+                item.add_marker(skip_unreal)
 
 
 @pytest.fixture(scope="session")

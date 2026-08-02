@@ -188,6 +188,22 @@ Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
 
 ---
 
+## Automated integration test
+
+From the repository root, the opt-in harness can discover a Launcher or source
+engine, package this plugin, generate an enabled project, and run two-way stage and
+material parity checks:
+
+```bash
+uv run python scripts/run_unreal_tests.py --list-engines
+uv run python scripts/run_unreal_tests.py --engine-root /path/to/UnrealEngine
+```
+
+See [Unreal Test Configuration](../../../docs/testing-setup.md#unreal-test-configuration)
+for pytest, existing-project, cache, and interactive options.
+
+---
+
 ## Troubleshooting
 
 Live-open-specific checks:

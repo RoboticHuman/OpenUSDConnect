@@ -30,6 +30,11 @@ def _department_layer_key(department):
     return f"department:{department}"
 
 
+def _layered_receiver_ready(client):
+    router = client.dispatcher.layer_router
+    return client.receiver.connected and router is not None and router.revision >= 0
+
+
 class _RunningServer:
     def __init__(self, log_path, departments):
         self.sync = UsdSyncServer(
@@ -248,7 +253,7 @@ def test_live_late_join_compaction_reorder_and_muting(tmp_path):
     layout = None
     fallback = None
     try:
-        assert client.pump_until(lambda: client.receiver.connected)
+        assert client.pump_until(lambda: _layered_receiver_ready(client))
         animation = _sender(server.port, "animator", "animation")
         layout = _sender(server.port, "layout-artist", "layout")
         fallback = _sender(server.port, "unassigned-artist", None)
@@ -342,7 +347,7 @@ def test_native_receiver_projects_composed_department_state(tmp_path):
     animation = None
     layout = None
     try:
-        assert client.pump_until(lambda: client.receiver.connected)
+        assert client.pump_until(lambda: _layered_receiver_ready(client))
         animation = _sender(server.port, "animator", "animation")
         layout = _sender(server.port, "layout-artist", "layout")
 
@@ -432,7 +437,7 @@ def test_department_policy_advertises_logical_layer_before_its_events(tmp_path):
     receiver = _LayeredClient(server.port, "layered-observer")
     sender = None
     try:
-        assert receiver.pump_until(lambda: receiver.receiver.connected)
+        assert receiver.pump_until(lambda: _layered_receiver_ready(receiver))
         sender = _sender(server.port, "fx-artist", "fx")
         assert sender.send_events(_property_events(4))
         assert receiver.pump_until(
@@ -469,7 +474,7 @@ def test_layered_material_zoo_preserves_graphs_and_overrides(tmp_path):
     lookdev = None
     shot = None
     try:
-        assert receiver.pump_until(lambda: receiver.receiver.connected)
+        assert receiver.pump_until(lambda: _layered_receiver_ready(receiver))
         lookdev = _sender(server.port, "lookdev-artist", "lookdev")
         shot = _sender(server.port, "shot-artist", "shot")
         assert lookdev.send_events(lookdev_events)

@@ -260,6 +260,7 @@ cython_debug/
 
 # Local Blender for testing (per-developer)
 blender.test.cfg
+unreal.test.cfg
 .blender/
 .blender_addon_path
 .reload_addon

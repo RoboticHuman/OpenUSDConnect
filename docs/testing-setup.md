@@ -1,10 +1,11 @@
 # Testing Setup
 
-OpenUSDConnect has four tiers of tests:
+OpenUSDConnect has five tiers of tests:
 
 - **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices, stage parity including shader inputs (no Blender needed)
 - **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
 - **Asset E2E tests** (`tests/integration/asset_tests/`) — full pipeline with real USD assets, material enrichment, texture connections, variant switching (requires Blender GUI, skipped by default)
+- **Unreal E2E tests** (`tests/integration/test_unreal_integration.py`) — packages the plugin, provisions or targets a project, and checks two-way stage and material synchronization in Unreal Editor (opt-in)
 - **Visual regression tests** (`tests/visual/`) — render reference scenes with RenderMan and FLIP-compare against committed goldens; catches rendered-output regressions across materials, shaders, cameras, lights, and geometry (requires RenderMan + `uv sync --group visual`, skipped by default)
 
 ## Running Tests
@@ -139,6 +140,78 @@ uv run pytest tests/ -v --blender /path/to/blender
 ### Option C: Skip Blender tests
 
 If none of the above are configured, Blender tests are automatically skipped. No action needed.
+
+## Unreal Test Configuration
+
+Unreal tests are opt-in because they package the plugin and launch a real editor. Both
+Launcher installations and source builds are supported. List the installations the
+harness can use with:
+
+```bash
+uv run python scripts/run_unreal_tests.py --list-engines
+```
+
+The harness checks, in order:
+
+1. `--engine-root`, which may point to an engine root, `Engine/`, or an editor executable.
+2. `OUC_UNREAL_ENGINE_ROOT` or `UNREAL_ENGINE_ROOT`.
+3. A path stored in the gitignored `unreal.test.cfg` file.
+4. The selected project's `EngineAssociation`, Epic Games Launcher manifests and
+   registered source builds.
+5. Standard platform install locations.
+
+The generated-project scenario needs no manual setup:
+
+```bash
+uv run python scripts/run_unreal_tests.py \
+  --engine-root "/Users/Shared/Epic Games/UE_5.8" \
+  --work-dir /tmp/openusdconnect-unreal
+```
+
+Omit `--engine-root` to use discovery. The equivalent pytest entry point is:
+
+```bash
+uv run pytest tests/integration/test_unreal_integration.py \
+  --unreal-tests \
+  --unreal-engine "/path/to/UnrealEngine" \
+  -v
+```
+
+The scenario opens a Y-up USD stage, connects both Unreal sockets to a real
+OpenUSDConnect server, and checks:
+
+- exact root-layer parity after two live transactions;
+- PreviewSurface scalar and color updates on Unreal material instances;
+- a texture update on a mesh with authored face-varying UVs;
+- MaterialX material regeneration;
+- Unreal-to-server transform and shader-input edits;
+- clean socket shutdown.
+
+`BuildPlugin` output is fingerprinted by engine installation, build identity, target
+platform, and plugin source. Packages are reused from the platform cache
+(`~/Library/Caches/OpenUSDConnect/Unreal` on macOS), while `--rebuild-plugin` forces a
+rebuild.
+
+To test an existing project, pass its descriptor. The harness does not modify that
+project unless installation is requested explicitly. `--install-plugin` copies the
+package and enables the four plugins used by the test scenario:
+
+```bash
+uv run python scripts/run_unreal_tests.py \
+  --project "/path/to/Project.uproject" \
+  --install-plugin
+
+# Replace an existing project plugin deliberately
+uv run python scripts/run_unreal_tests.py \
+  --project "/path/to/Project.uproject" \
+  --install-plugin \
+  --replace-plugin
+```
+
+`--plugin-package` accepts an existing `BuildPlugin` output. `--interactive` uses the
+GUI editor and leaves the verified scene and server active until Unreal is closed.
+With `--work-dir`, the generated project, expected USD layers, structured result,
+server log, and Unreal log remain available for diagnosis.
 
 ## Server Commands
 

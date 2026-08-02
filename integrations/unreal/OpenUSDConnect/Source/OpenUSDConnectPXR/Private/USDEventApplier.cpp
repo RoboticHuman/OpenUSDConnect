@@ -30,6 +30,9 @@
 #include "pxr/usd/usdShade/connectableAPI.h"
 #include "pxr/usd/usdShade/input.h"
 #include "pxr/usd/usdShade/output.h"
+#include "pxr/usd/sdr/registry.h"
+#include "pxr/usd/sdr/shaderNode.h"
+#include "pxr/usd/sdr/shaderProperty.h"
 #include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/sdf/copyUtils.h"
 #include "pxr/usd/sdf/layer.h"
@@ -841,6 +844,27 @@ bool SplitQualifiedAttr(const FString& Qualified, bool& bOutIsInput, FString& Ou
 	return false;
 }
 
+pxr::SdfValueTypeName ResolveShaderPortType(
+	const pxr::UsdPrim& Prim,
+	const pxr::TfToken& PortName,
+	bool bIsInput)
+{
+	if (!Prim) return {};
+
+	pxr::TfToken ShaderId;
+	const pxr::UsdAttribute IdAttr = Prim.GetAttribute(pxr::TfToken("info:id"));
+	if (!IdAttr || !IdAttr.Get(&ShaderId) || ShaderId.IsEmpty()) return {};
+
+	const pxr::SdrShaderNodeConstPtr Node =
+		pxr::SdrRegistry::GetInstance().GetShaderNodeByIdentifier(ShaderId);
+	if (!Node) return {};
+
+	const pxr::SdrShaderPropertyConstPtr Property = bIsInput
+		? Node->GetShaderInput(PortName)
+		: Node->GetShaderOutput(PortName);
+	return Property ? Property->GetTypeAsSdfType().GetSdfType() : pxr::SdfValueTypeName();
+}
+
 void ApplySetConnectableConnection(pxr::UsdStageRefPtr& Stage, const Wire::SetConnectableConnection* Ev)
 {
 	const FString PrimPath = ToFString(Ev->prim());
@@ -869,20 +893,29 @@ void ApplySetConnectableConnection(pxr::UsdStageRefPtr& Stage, const Wire::SetCo
 			}
 			pxr::UsdShadeConnectableAPI SrcConn(SrcPrim);
 
-			// Existing port types win; Token otherwise. The core applier adds an
-			// Sdr lookup here, but the edge plus the shader's info:id is all the
-			// consumer needs to resolve the network.
 			pxr::SdfValueTypeName SrcType;
 			if (bSrcIsInput)
 			{
 				pxr::UsdShadeInput P = SrcConn.GetInput(ToToken(SrcBase));
-				if (!P) { P = SrcConn.CreateInput(ToToken(SrcBase), pxr::SdfValueTypeNames->Token); }
+				if (!P)
+				{
+					pxr::SdfValueTypeName Type = ResolveShaderPortType(
+						SrcPrim, ToToken(SrcBase), true);
+					P = SrcConn.CreateInput(
+						ToToken(SrcBase), Type ? Type : pxr::SdfValueTypeNames->Token);
+				}
 				SrcType = P.GetTypeName();
 			}
 			else
 			{
 				pxr::UsdShadeOutput P = SrcConn.GetOutput(ToToken(SrcBase));
-				if (!P) { P = SrcConn.CreateOutput(ToToken(SrcBase), pxr::SdfValueTypeNames->Token); }
+				if (!P)
+				{
+					pxr::SdfValueTypeName Type = ResolveShaderPortType(
+						SrcPrim, ToToken(SrcBase), false);
+					P = SrcConn.CreateOutput(
+						ToToken(SrcBase), Type ? Type : pxr::SdfValueTypeNames->Token);
+				}
 				SrcType = P.GetTypeName();
 			}
 			if (!SrcType) { SrcType = pxr::SdfValueTypeNames->Token; }
@@ -895,13 +928,25 @@ void ApplySetConnectableConnection(pxr::UsdStageRefPtr& Stage, const Wire::SetCo
 			if (bLocalIsInput)
 			{
 				pxr::UsdShadeInput Local = Connectable.GetInput(ToToken(LocalBase));
-				if (!Local) { Local = Connectable.CreateInput(ToToken(LocalBase), SrcType); }
+				if (!Local)
+				{
+					pxr::SdfValueTypeName Type = ResolveShaderPortType(
+						Prim, ToToken(LocalBase), true);
+					Local = Connectable.CreateInput(
+						ToToken(LocalBase), Type ? Type : SrcType);
+				}
 				Local.ConnectToSource(SourceInfo);
 			}
 			else
 			{
 				pxr::UsdShadeOutput Local = Connectable.GetOutput(ToToken(LocalBase));
-				if (!Local) { Local = Connectable.CreateOutput(ToToken(LocalBase), SrcType); }
+				if (!Local)
+				{
+					pxr::SdfValueTypeName Type = ResolveShaderPortType(
+						Prim, ToToken(LocalBase), false);
+					Local = Connectable.CreateOutput(
+						ToToken(LocalBase), Type ? Type : SrcType);
+				}
 				Local.ConnectToSource(SourceInfo);
 			}
 		}
