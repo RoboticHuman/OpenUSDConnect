@@ -22,5 +22,8 @@ def test_build_server_without_mcp_group_is_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, "mcp", None)
     from integrations.mcp.tools import build_server
 
-    with pytest.raises(ImportError, match="uv sync --group mcp"):
+    with pytest.raises(
+        ImportError,
+        match="uv sync --group server --group mcp",
+    ):
         build_server()

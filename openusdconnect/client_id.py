@@ -10,10 +10,14 @@ def make_stable_client_id(dcc_name: str) -> str:
 
     Format ``{user}-{hostname}-{dcc}`` — persists across sessions so the
     server maps reconnections to the same per-client layer. The
-    ``USD_CONNECT_CLIENT_ID`` environment variable overrides the computed
-    value when two DCC sessions on one machine need distinct client IDs.
+    ``OPENUSDCONNECT_CLIENT_ID`` environment variable overrides the computed
+    value when two DCC sessions on one machine need distinct client IDs. The
+    older ``USD_CONNECT_CLIENT_ID`` spelling remains supported.
     """
-    override = os.environ.get("USD_CONNECT_CLIENT_ID", "").strip()
+    override = (
+        os.environ.get("OPENUSDCONNECT_CLIENT_ID", "")
+        or os.environ.get("USD_CONNECT_CLIENT_ID", "")
+    ).strip()
     if override:
         return override
     return f"{getpass.getuser()}-{platform.node()}-{dcc_name}"

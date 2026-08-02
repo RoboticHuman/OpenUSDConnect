@@ -17,6 +17,9 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from openusdconnect.cli_common import parse_bool  # noqa: E402
+from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT  # noqa: E402
+
 LOG = logging.getLogger("openusdconnect.usdview")
 
 _receiver = None
@@ -36,8 +39,8 @@ _TICK_INTERVAL_MS = 16
 
 def start(
     usdviewApi,
-    host: str = "127.0.0.1",
-    port: int = 7200,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_SYNC_PORT,
     *,
     token: str | None = None,
     client_id: str | None = None,
@@ -73,7 +76,16 @@ def start(
     # Receiver-side OpenPBR->standard_surface translation for RenderMan, which
     # can't render the OpenPBR surface node. Enabled by the launcher's
     # --renderman flag (which sets this env var).
-    _translate_openpbr = bool(os.environ.get("OPENUSDCONNECT_TRANSLATE_OPENPBR"))
+    try:
+        _translate_openpbr = parse_bool(
+            os.environ.get("OPENUSDCONNECT_TRANSLATE_OPENPBR", "0")
+        )
+    except ValueError:
+        LOG.error(
+            "OPENUSDCONNECT_TRANSLATE_OPENPBR is not a valid boolean; "
+            "OpenPBR translation is disabled"
+        )
+        _translate_openpbr = False
 
     _receiver = ReceiverThread(
         host=host,

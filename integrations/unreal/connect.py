@@ -10,17 +10,20 @@ To stop:
 import os
 import sys
 
-# --- Configuration (edit these) -----------------------------------------
-HOST = "127.0.0.1"
-PORT = 7200
-ROOT_LAYER = "test_scene.usda"
-# ------------------------------------------------------------------------
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-# Flush cached modules so code changes take effect without restarting UE
+# Flush cached modules before importing project code so edits take effect
+# without restarting Unreal.
 for _k in [k for k in sys.modules if "usd_connect" in k or "openusdconnect" in k]:
     del sys.modules[_k]
+
+from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
+
+# --- Configuration (edit these) -----------------------------------------
+HOST = DEFAULT_HOST
+PORT = DEFAULT_SYNC_PORT
+ROOT_LAYER = "test_scene.usda"
+# ------------------------------------------------------------------------
 
 from integrations.unreal.usd_connect import start, status
 

@@ -106,7 +106,7 @@ Set up the server and two Blender instances per the walkthrough in [Blender Addo
 
 ```bash
 # Terminal: start the server on the repo's test scene
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.db
+uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log events.db
 
 # Terminal: create a Teapot with a payload, one atomic transaction
 uv run python -m openusdconnect.send \

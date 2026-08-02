@@ -29,6 +29,8 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT  # noqa: E402
+
 LOG = logging.getLogger("openusdconnect.unreal")
 
 # -- Module state --------------------------------------------------------
@@ -211,8 +213,8 @@ def _flush_emitter():
 
 
 def start(
-    host: str = "127.0.0.1",
-    port: int = 7200,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_SYNC_PORT,
     root_layer_name: str = "test_scene.usda",
     *,
     receive: bool = True,

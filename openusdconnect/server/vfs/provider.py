@@ -67,6 +67,14 @@ class VfsStat:
 
 
 @dataclass(frozen=True)
+class VfsSnapshot:
+    """Immutable bytes and metadata from one provider generation."""
+
+    data: bytes
+    stat: VfsStat
+
+
+@dataclass(frozen=True)
 class _LayerSpec:
     name: str
     identifier: str
@@ -196,15 +204,22 @@ class _CachedVirtualFile:
         return self._write_mode in (WriteMode.DROP, WriteMode.TRANSLATE)
 
     def read(self) -> bytes:
-        return self._ensure_current()[0]
+        return self.snapshot().data
 
     def stat(self) -> VfsStat:
+        return self.snapshot().stat
+
+    def snapshot(self) -> VfsSnapshot:
+        """Return content and metadata pinned to the same cache generation."""
         data, key, mtime, generation_ms = self._ensure_current()
-        return VfsStat(
-            size=len(data),
-            mtime=mtime,
-            etag=f'"{key[0]}-{key[1]}"',
-            generation_ms=generation_ms,
+        return VfsSnapshot(
+            data=data,
+            stat=VfsStat(
+                size=len(data),
+                mtime=mtime,
+                etag=f'"{key[0]}-{key[1]}"',
+                generation_ms=generation_ms,
+            ),
         )
 
     def prewarm(self) -> None:
@@ -279,6 +294,13 @@ class _CachedVirtualFile:
                 sink.dispose()
             return
         raise NotImplementedError(f"unknown write mode {self._write_mode}")
+
+    def abort_write(self, sink: _DiscardSink | _BufferedWriteSink) -> None:
+        """Release an upload sink when WebDAV aborts before commit."""
+        if isinstance(sink, _BufferedWriteSink):
+            sink.dispose()
+        else:
+            sink.close()
 
     def _translate_write(self, data: bytes) -> None:
         raise NotImplementedError(f"{self.name} cannot translate writes")

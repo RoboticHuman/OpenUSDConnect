@@ -13,18 +13,39 @@ Windows additionally exposes the mirror through a ``subst`` drive alias. Use
 from __future__ import annotations
 
 import argparse
+import ctypes
+import hashlib
 import http.client
 import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
+
+from openusdconnect.cli_common import (
+    add_sync_endpoint_args,
+    add_vfs_resource_args,
+    port_or_zero,
+    positive_seconds,
+    validate_port,
+)
+from openusdconnect.defaults import (
+    DEFAULT_LIVE_OPEN_ROOT,
+    DEFAULT_MIRROR_DIR,
+    DEFAULT_SESSION_STATE_FILE,
+    DEFAULT_STARTUP_TIMEOUT,
+    VFS_WRITE_MODES,
+    advertise_host_for_bind,
+    vfs_url,
+)
 
 
 @dataclass(frozen=True)
@@ -46,16 +67,21 @@ class LiveOpenConfig:
     base: str
     host: str
     port: int
+    vfs_host: str | None
     vfs_port: int
+    vfs_share: str
+    vfs_name: str
+    advertise_host: str | None
     mirror_dir: Path
     state_file: Path
     log_dir: Path
-    write_mode: Literal["forbid", "drop", "translate"]
-    bypass_write_validation: bool
-    dashboard: int
+    vfs_write_mode: Literal["forbid", "drop", "translate"]
+    vfs_bypass_write_validation: bool
+    dashboard_port: int
     open_exposure: bool
-    wait_timeout: float
+    startup_timeout: float
     exposure: ExposureConfig
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -72,31 +98,90 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _request_head(url: str) -> int:
+def _request_live_metadata(url: str) -> tuple[int, dict]:
     parsed = urlparse(url)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=3)
     try:
-        conn.request("HEAD", parsed.path or "/")
+        conn.request("GET", parsed.path or "/")
         resp = conn.getresponse()
-        resp.read()
-        return resp.status
+        data = resp.read()
+        if not (200 <= resp.status < 300):
+            return resp.status, {}
+        from pxr import Sdf
+
+        layer = Sdf.Layer.CreateAnonymous("live-open-startup.usda")
+        if not layer.ImportFromString(data.decode("utf-8")):
+            raise RuntimeError("endpoint did not return a parseable USD layer")
+        metadata = layer.customLayerData.get("openusdconnect")
+        if not isinstance(metadata, dict):
+            raise RuntimeError("endpoint USD has no OpenUSDConnect metadata")
+        return resp.status, metadata
     finally:
         conn.close()
 
 
-def _wait_for_http(url: str, timeout: float) -> None:
+def _wait_for_http(
+    url: str,
+    timeout: float,
+    *,
+    process: subprocess.Popen | None = None,
+    expected_scene_id: str = "",
+    expected_sync_port: int = 0,
+) -> dict:
     deadline = time.monotonic() + timeout
     last_error = ""
     while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(f"OpenUSDConnect server exited with status {process.poll()}")
         try:
-            status = _request_head(url)
+            status, metadata = _request_live_metadata(url)
             if 200 <= status < 300:
-                return
-            last_error = f"HTTP {status}"
-        except (OSError, http.client.HTTPException) as exc:
+                if metadata.get("live") is not True:
+                    last_error = "endpoint metadata is not live"
+                elif expected_scene_id and metadata.get("scene_id") != expected_scene_id:
+                    last_error = (
+                        "endpoint scene mismatch: "
+                        f"expected {expected_scene_id}, got {metadata.get('scene_id') or 'none'}"
+                    )
+                elif expected_sync_port:
+                    try:
+                        metadata_port = validate_port(metadata.get("port"))
+                    except ValueError:
+                        last_error = "endpoint metadata has no valid sync port"
+                    else:
+                        if metadata_port == expected_sync_port:
+                            if process is not None:
+                                time.sleep(0.05)
+                                if process.poll() is not None:
+                                    raise RuntimeError(
+                                        "OpenUSDConnect server exited with status "
+                                        f"{process.poll()}"
+                                    )
+                            return metadata
+                        last_error = (
+                            "endpoint sync-port mismatch: "
+                            f"expected {expected_sync_port}, got {metadata_port}"
+                        )
+                else:
+                    if process is not None:
+                        time.sleep(0.05)
+                        if process.poll() is not None:
+                            raise RuntimeError(
+                                f"OpenUSDConnect server exited with status {process.poll()}"
+                            )
+                    return metadata
+            else:
+                last_error = f"HTTP {status}"
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException) as exc:
             last_error = str(exc)
         time.sleep(0.25)
     raise TimeoutError(f"timed out waiting for {url}: {last_error}")
+
+
+def _expected_scene_id(base_usd_path: str) -> str:
+    label = os.path.splitext(os.path.basename(base_usd_path))[0] or "scene"
+    digest = hashlib.sha1(os.path.abspath(base_usd_path).encode()).hexdigest()[:12]
+    return f"{label}-{digest}"
 
 
 def _wait_for_bridge(path: Path, process: subprocess.Popen, timeout: float) -> dict:
@@ -126,9 +211,91 @@ def _wait_for_bridge(path: Path, process: subprocess.Popen, timeout: float) -> d
 
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if _is_windows():
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _assert_session_available(state_file: Path) -> None:
+    if not state_file.exists():
+        return
+    try:
+        state = _read_json(state_file)
+    except (OSError, json.JSONDecodeError):
+        return
+    if state.get("stopped_at"):
+        return
+    live_pids = [
+        pid
+        for pid in (int(state.get("server_pid") or 0), int(state.get("bridge_pid") or 0))
+        if _process_exists(pid)
+    ]
+    if live_pids:
+        raise RuntimeError(
+            f"live-open session is already active ({', '.join(map(str, live_pids))}): "
+            f"{state_file}"
+        )
+
+
+def _acquire_start_lock(state_file: Path, session_id: str) -> Path:
+    lock = state_file.with_suffix(state_file.suffix + ".start.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                existing = _read_json(lock)
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            pid = int(existing.get("pid") or 0)
+            if pid and _process_exists(pid):
+                raise RuntimeError(f"another launcher owns {state_file}") from None
+            lock.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump({"pid": os.getpid(), "session_id": session_id}, file)
+        return lock
+    raise RuntimeError(f"could not claim launcher state {state_file}")
 
 
 def _start_process(cmd: list[str], log_path: Path) -> subprocess.Popen:
@@ -155,40 +322,75 @@ def _stop_pid(pid: int) -> None:
     if pid <= 0 or pid == os.getpid():
         return
     if _is_windows():
-        subprocess.run(
+        result = subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
             text=True,
             timeout=10,
         )
+        if result.returncode != 0 and _process_exists(pid):
+            detail = (result.stdout + result.stderr).strip()
+            raise RuntimeError(detail or f"taskkill failed for PID {pid}")
+        if _process_exists(pid):
+            raise RuntimeError(f"PID {pid} is still running after taskkill")
     else:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            return
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if not _process_exists(pid):
+                return
+            time.sleep(0.05)
+        raise RuntimeError(f"PID {pid} did not terminate")
 
 
 def _build_start_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True, help="USD file for the sync server")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7200)
-    parser.add_argument("--vfs-port", type=int, default=7280)
-    parser.add_argument("--mirror-dir", default=".ouc_live_mount/usd")
-    parser.add_argument("--state-file", default=".ouc_live_mount/live_open_session.json")
-    parser.add_argument("--log-dir", default=".ouc_live_mount")
-    parser.add_argument(
-        "--write-mode", choices=["forbid", "drop", "translate"], default="translate"
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    endpoint = parser.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint)
+    scene = parser.add_argument_group("scene and local files")
+    scene.add_argument("--base", required=True, help="USD file for the sync server")
+    scene.add_argument("--mirror-dir", default=DEFAULT_MIRROR_DIR)
+    scene.add_argument("--state-file", default=DEFAULT_SESSION_STATE_FILE)
+    scene.add_argument("--log-dir", default=DEFAULT_LIVE_OPEN_ROOT)
+    vfs = parser.add_argument_group("virtual file service")
+    add_vfs_resource_args(vfs, host_default=None)
+    vfs.add_argument(
+        "--advertise-host",
+        default=None,
+        metavar="HOST",
+        help="Host embedded in live metadata and used by the local bridge",
     )
-    parser.add_argument(
-        "--bypass-write-validation",
+    vfs.add_argument(
+        "--vfs-write-mode",
+        choices=VFS_WRITE_MODES,
+        default="translate",
+        help="How saves to the virtual USD file are handled",
+    )
+    vfs.add_argument(
+        "--vfs-bypass-write-validation",
         action="store_true",
         help="Let translate write fallback accept and drop invalid USD bytes.",
     )
-    parser.add_argument("--dashboard", type=int, default=0)
-    parser.add_argument("--open", action="store_true")
-    parser.add_argument("--wait", type=float, default=20.0)
+    services = parser.add_argument_group("services and startup")
+    services.add_argument(
+        "--dashboard-port",
+        type=port_or_zero,
+        default=0,
+        metavar="PORT",
+        help="Start the admin dashboard on this port (0 disables it)",
+    )
+    services.add_argument("--open", action="store_true", help="Open the local exposure")
+    services.add_argument(
+        "--startup-timeout",
+        type=positive_seconds,
+        default=DEFAULT_STARTUP_TIMEOUT,
+        metavar="SECONDS",
+        help="Seconds to wait for the server and bridge",
+    )
     if is_windows:
         exposure = parser.add_mutually_exclusive_group()
         exposure.add_argument("--drive", default=None, help="Drive alias (default: O:)")
@@ -209,8 +411,6 @@ def _parse_start_config(
     is_windows = _is_windows() if is_windows is None else is_windows
     parser = _build_start_parser(is_windows=is_windows)
     args = parser.parse_args(argv)
-    if args.wait <= 0:
-        parser.error("--wait must be greater than zero")
     if is_windows and args.no_drive and args.force:
         parser.error("--force requires a Windows drive exposure")
     if is_windows and not args.no_drive:
@@ -224,20 +424,34 @@ def _parse_start_config(
         base=args.base,
         host=args.host,
         port=args.port,
+        vfs_host=args.vfs_host,
         vfs_port=args.vfs_port,
+        vfs_share=args.vfs_share,
+        vfs_name=args.vfs_name,
+        advertise_host=args.advertise_host,
         mirror_dir=Path(args.mirror_dir).resolve(),
         state_file=Path(args.state_file).resolve(),
         log_dir=Path(args.log_dir).resolve(),
-        write_mode=args.write_mode,
-        bypass_write_validation=args.bypass_write_validation,
-        dashboard=args.dashboard,
+        vfs_write_mode=args.vfs_write_mode,
+        vfs_bypass_write_validation=args.vfs_bypass_write_validation,
+        dashboard_port=args.dashboard_port,
         open_exposure=args.open,
-        wait_timeout=args.wait,
+        startup_timeout=args.startup_timeout,
         exposure=exposure,
+        session_id=uuid.uuid4().hex,
     )
 
 
 def _run_start(config: LiveOpenConfig) -> int:
+    _assert_session_available(config.state_file)
+    lock = _acquire_start_lock(config.state_file, config.session_id)
+    try:
+        return _run_start_claimed(config)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def _run_start_claimed(config: LiveOpenConfig) -> int:
     log_dir = config.log_dir
     state_file = config.state_file
     mirror_dir = config.mirror_dir
@@ -248,7 +462,14 @@ def _run_start(config: LiveOpenConfig) -> int:
     bridge_status.unlink(missing_ok=True)
     server_log = log_dir / "openusdconnect_server.log"
     server_db = log_dir / f"live-open-{config.port}.db"
-    vfs_url = f"http://{config.host}:{config.vfs_port}/usd/scene.usd"
+    vfs_bind_host = config.vfs_host or config.host
+    public_host = config.advertise_host or advertise_host_for_bind(vfs_bind_host)
+    live_vfs_url = vfs_url(
+        public_host,
+        config.vfs_port,
+        config.vfs_share,
+        config.vfs_name,
+    )
 
     server_cmd = [
         sys.executable,
@@ -260,36 +481,55 @@ def _run_start(config: LiveOpenConfig) -> int:
         str(config.port),
         "--base",
         config.base,
-        "--log",
+        "--event-log",
         str(server_db),
+        "--vfs-host",
+        vfs_bind_host,
         "--vfs-port",
         str(config.vfs_port),
+        "--vfs-share",
+        config.vfs_share,
+        "--vfs-name",
+        config.vfs_name,
+        "--advertise-host",
+        public_host,
         "--vfs-write-mode",
-        config.write_mode,
+        config.vfs_write_mode,
     ]
-    if config.bypass_write_validation:
+    if config.vfs_bypass_write_validation:
         server_cmd.append("--vfs-bypass-write-validation")
-    if config.dashboard:
-        server_cmd.extend(["--dashboard", str(config.dashboard)])
+    if config.dashboard_port:
+        server_cmd.extend(["--dashboard-port", str(config.dashboard_port)])
 
     server = _start_process(server_cmd, server_log)
     try:
-        _wait_for_http(vfs_url, config.wait_timeout)
-    except (OSError, TimeoutError, http.client.HTTPException):
-        _stop_pid(server.pid)
+        _wait_for_http(
+            live_vfs_url,
+            config.startup_timeout,
+            process=server,
+            expected_scene_id=_expected_scene_id(config.base),
+            expected_sync_port=config.port,
+        )
+    except (OSError, RuntimeError, TimeoutError, http.client.HTTPException):
+        try:
+            _stop_pid(server.pid)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass
         raise
 
     bridge_cmd = [
         sys.executable,
         str(Path(__file__).with_name("local_vfs_bridge.py")),
-        "--url",
-        vfs_url,
+        "--vfs-url",
+        live_vfs_url,
         "--mirror-dir",
         str(mirror_dir),
         "--status-file",
         str(bridge_status),
         "--log-file",
         str(bridge_log),
+        "--owner-id",
+        config.session_id,
     ]
     if isinstance(config.exposure, WindowsDriveExposureConfig):
         bridge_cmd.extend(["--drive", config.exposure.drive])
@@ -301,7 +541,7 @@ def _run_start(config: LiveOpenConfig) -> int:
         bridge_cmd.append("--open")
     bridge = _start_process(bridge_cmd, bridge_process_log)
     try:
-        bridge_state = _wait_for_bridge(bridge_status, bridge, config.wait_timeout)
+        bridge_state = _wait_for_bridge(bridge_status, bridge, config.startup_timeout)
     except (OSError, RuntimeError, TimeoutError):
         _stop_pid(bridge.pid)
         _stop_pid(server.pid)
@@ -309,11 +549,12 @@ def _run_start(config: LiveOpenConfig) -> int:
 
     payload = {
         "started_at": _now(),
+        "session_id": config.session_id,
         "server_pid": server.pid,
         "server_cmd": server_cmd,
         "server_log": str(server_log),
         "server_db": str(server_db),
-        "vfs_url": vfs_url,
+        "vfs_url": live_vfs_url,
         "bridge_status": str(bridge_status),
         "bridge_log": str(bridge_log),
         "bridge_process_log": str(bridge_process_log),
@@ -322,12 +563,13 @@ def _run_start(config: LiveOpenConfig) -> int:
         "root_path": bridge_state["root_path"],
         "drive": bridge_state.get("drive", ""),
         "file_path": bridge_state["file_path"],
-        "write_mode": config.write_mode,
-        "write_validation": config.write_mode == "translate" and not config.bypass_write_validation,
+        "write_mode": config.vfs_write_mode,
+        "write_validation": config.vfs_write_mode == "translate"
+        and not config.vfs_bypass_write_validation,
     }
     _write_json(state_file, payload)
     print(f"Server PID: {server.pid}")
-    print(f"VFS URL: {vfs_url}")
+    print(f"VFS URL: {live_vfs_url}")
     print(f"Live USD file: {payload['file_path']}")
     print(f"State: {state_file}")
     return 0
@@ -335,8 +577,11 @@ def _run_start(config: LiveOpenConfig) -> int:
 
 def _build_stop_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description="Stop a live-open session")
-    parser.add_argument("--state-file", default=".ouc_live_mount/live_open_session.json")
+    parser = argparse.ArgumentParser(
+        description="Stop a live-open session",
+        allow_abbrev=False,
+    )
+    parser.add_argument("--state-file", default=DEFAULT_SESSION_STATE_FILE)
     if is_windows:
         parser.add_argument("--drive", default="", help="Drive alias if state is unavailable")
     return parser
@@ -361,7 +606,11 @@ def _run_stop(config: StopConfig) -> int:
     if not state_file.exists():
         print(f"state file not found: {state_file}", file=sys.stderr)
         return 1
-    state = json.loads(state_file.read_text(encoding="utf-8"))
+    try:
+        state = _read_json(state_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"could not read live-open state {state_file}: {exc}", file=sys.stderr)
+        return 1
     drive = config.drive or state.get("drive") or ""
     bridge_status = state.get("bridge_status") or ""
     bridge_pid = int(state.get("bridge_pid") or 0)
@@ -377,10 +626,47 @@ def _run_stop(config: StopConfig) -> int:
         bridge_cmd.extend(["--drive", drive])
     if bridge_status:
         bridge_cmd.extend(["--status-file", bridge_status])
-    subprocess.run(bridge_cmd, check=False)
-    _stop_pid(int(state.get("server_pid") or 0))
+    errors: list[str] = []
+    try:
+        helper = subprocess.run(
+            bridge_cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append(f"bridge cleanup helper failed: {exc}")
+    else:
+        if helper.returncode != 0:
+            detail = (helper.stdout + helper.stderr).strip()
+            errors.append(
+                f"bridge cleanup helper exited with status {helper.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+
+    for label, pid in (
+        ("bridge", bridge_pid),
+        ("server", int(state.get("server_pid") or 0)),
+    ):
+        if not pid:
+            continue
+        try:
+            _stop_pid(pid)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            errors.append(f"could not stop {label} PID {pid}: {exc}")
+
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1
+
     state["stopped_at"] = _now()
-    _write_json(state_file, state)
+    try:
+        _write_json(state_file, state)
+    except OSError as exc:
+        print(f"cleanup succeeded but state could not be updated: {exc}", file=sys.stderr)
+        return 1
     print(f"Stopped live-open session from {state_file}")
     return 0
 

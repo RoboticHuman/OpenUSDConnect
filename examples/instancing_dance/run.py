@@ -121,7 +121,7 @@ def main() -> int:
                 "--host", args.host,
                 "--port", str(args.port),
                 "--base", str(EMPTY_USDA),
-                "--log", str(log_path),
+                "--event-log", str(log_path),
             ],
             cwd=str(_REPO_ROOT),
         )

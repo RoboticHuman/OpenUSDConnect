@@ -21,6 +21,11 @@ from openusdconnect.sdf_spec_delta import (
 )
 
 
+def _usd_path(path) -> str:
+    """Return a filesystem path in USD asset-identifier form."""
+    return path.as_posix()
+
+
 def test_transport_identifier_uses_owning_file_layer_as_anchor(tmp_path):
     source_path = tmp_path / "asset" / "looks" / "look.usda"
     source_path.parent.mkdir(parents=True)
@@ -28,7 +33,8 @@ def test_transport_identifier_uses_owning_file_layer_as_anchor(tmp_path):
 
     identifier = transport_asset_identifier(source, "../textures/albedo.tx")
 
-    assert identifier == str(tmp_path / "asset" / "textures" / "albedo.tx")
+    assert identifier == _usd_path(tmp_path / "asset" / "textures" / "albedo.tx")
+    assert "\\" not in identifier
     assert transport_asset_identifier(source, "search-path.tx") == "search-path.tx"
     assert transport_asset_identifier(source, "") == ""
 
@@ -82,7 +88,7 @@ def test_stabilize_layer_asset_paths_visits_nested_and_array_values(tmp_path):
 
     stabilize_layer_asset_paths(fragment, source)
 
-    prefix = str(tmp_path / "asset")
+    prefix = _usd_path(tmp_path / "asset")
     assert fragment.GetAttributeAtPath("/Look.file").default.path == (f"{prefix}/textures/base.tx")
     files = fragment.GetAttributeAtPath("/Look.files").default
     assert [value.path for value in files] == [f"{prefix}/textures/a.tx", ""]
@@ -104,7 +110,7 @@ def test_connectable_event_anchors_file_relative_asset_input(tmp_path):
         event for event in emitter.snapshot_events() if event["k"] == "set_connectable_input"
     )
 
-    assert event["inputs"]["file"] == str(source_path.parent / "textures" / "albedo.tx")
+    assert event["inputs"]["file"] == _usd_path(source_path.parent / "textures" / "albedo.tx")
     emitter.cleanup()
 
 
@@ -137,7 +143,7 @@ def test_typed_schema_asset_attribute_uses_owning_layer_anchor(tmp_path):
     event = next(
         event for event in events if event["k"] == "set_gprim_attrs" and event["prim"] == "/Field"
     )
-    expected = str(source_path.parent / "volumes" / "density.vdb")
+    expected = _usd_path(source_path.parent / "volumes" / "density.vdb")
     assert event["attrs"]["filePath"] == expected
 
     target = Usd.Stage.CreateInMemory()
@@ -163,7 +169,7 @@ def test_typed_schema_asset_time_sample_uses_owning_layer_anchor(tmp_path):
         and event.get("time") == 1.0
     )
 
-    assert event["attrs"]["filePath"] == str(source_path.parent / "volumes" / "frame-1.vdb")
+    assert event["attrs"]["filePath"] == _usd_path(source_path.parent / "volumes" / "frame-1.vdb")
     emitter.cleanup()
 
 
@@ -199,7 +205,7 @@ def test_sdf_fragment_anchors_asset_value_before_anonymous_apply(tmp_path):
     )
 
     value = target.GetAttributeAtPath(attr.GetPath()).Get()
-    assert value.path == str(source_path.parent / "textures" / "albedo.tx")
+    assert value.path == _usd_path(source_path.parent / "textures" / "albedo.tx")
 
 
 def test_composed_asset_projection_uses_the_value_owning_layer_anchor(tmp_path):
@@ -247,7 +253,7 @@ def test_composed_asset_projection_uses_the_value_owning_layer_anchor(tmp_path):
     )
 
     value = target.GetAttributeAtPath(strong_attr.GetPath()).Get()
-    assert value.path == str(weak_path.parent / "textures" / "albedo.tx")
+    assert value.path == _usd_path(weak_path.parent / "textures" / "albedo.tx")
 
 
 def test_composed_asset_projection_flattens_referenced_property(tmp_path):
@@ -288,7 +294,7 @@ def test_composed_asset_projection_flattens_referenced_property(tmp_path):
     )
 
     value = target.GetAttributeAtPath(prop.GetPath()).Get()
-    assert value.path == str(asset_path.parent / "textures" / "albedo.tx")
+    assert value.path == _usd_path(asset_path.parent / "textures" / "albedo.tx")
 
 
 def test_composed_asset_projection_evaluates_expression_at_its_source_anchor(tmp_path):
@@ -324,7 +330,7 @@ def test_composed_asset_projection_evaluates_expression_at_its_source_anchor(tmp
     )
 
     value = target.GetAttributeAtPath(prop.GetPath()).Get()
-    assert value.path == str(source_path.parent / "textures" / "albedo.tx")
+    assert value.path == _usd_path(source_path.parent / "textures" / "albedo.tx")
 
 
 def test_composed_asset_projection_uses_referenced_layer_stack_expression_variables(
@@ -368,7 +374,7 @@ def test_composed_asset_projection_uses_referenced_layer_stack_expression_variab
     )
 
     value = target.GetAttributeAtPath(prop.GetPath()).Get()
-    assert value.path == str(asset_path.parent / "textures" / "albedo.tx")
+    assert value.path == _usd_path(asset_path.parent / "textures" / "albedo.tx")
 
 
 def test_composed_asset_projection_preserves_dictionary_key_anchors(tmp_path):
@@ -414,8 +420,8 @@ def test_composed_asset_projection_preserves_dictionary_key_anchors(tmp_path):
     )
 
     custom_data = target.GetAttributeAtPath(prop.GetPath()).GetCustomData()
-    assert custom_data["weak"].path == str(asset_path.parent / "textures" / "weak.tx")
-    assert custom_data["strong"].path == str(shot_path.parent / "textures" / "strong.tx")
+    assert custom_data["weak"].path == _usd_path(asset_path.parent / "textures" / "weak.tx")
+    assert custom_data["strong"].path == _usd_path(shot_path.parent / "textures" / "strong.tx")
 
 
 def test_reference_custom_data_asset_values_use_reference_layer_anchor(tmp_path):
@@ -438,9 +444,11 @@ def test_reference_custom_data_asset_values_use_reference_layer_anchor(tmp_path)
     )
 
     entry = event_state["entries"][0]
-    assert entry["asset_path"] == str(source_path.parent / "model.usda")
+    assert entry["asset_path"] == _usd_path(source_path.parent / "model.usda")
     custom_data = deserialize_reference_custom_data(entry["custom_data_fragment"])
-    assert custom_data["preview"].path == str(source_path.parent / "textures" / "preview.png")
+    assert custom_data["preview"].path == _usd_path(
+        source_path.parent / "textures" / "preview.png"
+    )
 
 
 def test_sdf_fragment_preserves_reference_state_and_empty_asset_array_slots(tmp_path):
@@ -469,10 +477,10 @@ def test_sdf_fragment_preserves_reference_state_and_empty_asset_array_slots(tmp_
     assert transported.ImportFromString(fragment)
     reference = transported.GetPrimAtPath("/World").referenceList.prependedItems[0]
 
-    assert reference.assetPath == str(source_path.parent / "model.usda")
+    assert reference.assetPath == _usd_path(source_path.parent / "model.usda")
     assert reference.primPath == Sdf.Path("/Model")
     assert reference.layerOffset == Sdf.LayerOffset(7.0, 2.0)
     assert [value.path for value in reference.customData["previews"]] == [
-        str(source_path.parent / "preview.png"),
+        _usd_path(source_path.parent / "preview.png"),
         "",
     ]

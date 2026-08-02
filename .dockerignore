@@ -1,8 +1,11 @@
 .venv/
 .blender/
+.tmp/
+.ouc_live_mount/
 .git/
 dist/
 build/
+assets/
 vendor/
 tests/
 plans/

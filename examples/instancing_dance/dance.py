@@ -28,6 +28,13 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from openusdconnect.cli_common import (  # noqa: E402
+    add_sync_endpoint_args,
+    nonnegative_float,
+    positive_float,
+    positive_int,
+    positive_seconds,
+)
 from openusdconnect.sender import EventSender  # noqa: E402
 
 DEFAULT_ASSET = (
@@ -91,26 +98,25 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         add_help=add_help,
         description="Live instancing demo: a ring of pyramids on sine waves.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7300)
+    add_sync_endpoint_args(parser, port_default=7300)
     parser.add_argument(
-        "--instances", type=int, default=8,
+        "--instances", type=positive_int, default=8,
         help="number of pyramid instances in the ring (default 8)",
     )
     parser.add_argument(
-        "--radius", type=float, default=6.0,
+        "--radius", type=nonnegative_float, default=6.0,
         help="ring radius in scene units (default 6.0)",
     )
     parser.add_argument(
-        "--amplitude", type=float, default=3.0,
+        "--amplitude", type=nonnegative_float, default=3.0,
         help="sine wave amplitude in scene units (default 3.0)",
     )
     parser.add_argument(
-        "--period", type=float, default=4.0,
+        "--period", type=positive_seconds, default=4.0,
         help="seconds per sine wave cycle (default 4.0)",
     )
     parser.add_argument(
-        "--rate", type=float, default=30.0,
+        "--rate", type=positive_float, default=30.0,
         help="event-send rate in Hz (default 30)",
     )
     parser.add_argument(

@@ -9,7 +9,7 @@
 # Run:
 #   docker run -p 7200:7200 -p 7280:7280 openusdconnect-server
 #   docker run -p 7200:7200 -p 7280:7280 -p 8080:8080 openusdconnect-server:dashboard \
-#     --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard 8080
+#     --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard-port 8080
 
 FROM python:3.13-slim AS base
 
@@ -36,4 +36,4 @@ EXPOSE 7200 7280 8080
 VOLUME ["/data", "/scenes"]
 
 ENTRYPOINT ["openusdconnect-server"]
-CMD ["--host", "0.0.0.0", "--port", "7200", "--log", "/data/usd_events.db", "--vfs-host", "0.0.0.0", "--vfs-port", "7280", "--advertise-host", "127.0.0.1"]
+CMD ["--host", "0.0.0.0", "--port", "7200", "--event-log", "/data/usd_events.db", "--vfs-host", "0.0.0.0", "--vfs-port", "7280", "--advertise-host", "127.0.0.1"]

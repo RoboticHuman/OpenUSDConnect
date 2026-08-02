@@ -13,6 +13,9 @@ import os
 from pxr import Tf
 from pxr.Usdviewq.plugin import PluginContainer
 
+from openusdconnect.cli_common import parse_bool, validate_nonnegative_int, validate_port
+from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
+
 from . import connection
 
 LOG = logging.getLogger("openusdconnect.usdview")
@@ -21,8 +24,8 @@ LOG = logging.getLogger("openusdconnect.usdview")
 def _on_connect(usdviewApi) -> None:
     from pxr.Usdviewq.qt import QtWidgets
 
-    default_host = os.environ.get("OPENUSDCONNECT_HOST", "127.0.0.1")
-    default_port = os.environ.get("OPENUSDCONNECT_PORT", "7200")
+    default_host = os.environ.get("OPENUSDCONNECT_HOST", DEFAULT_HOST)
+    default_port = os.environ.get("OPENUSDCONNECT_PORT", str(DEFAULT_SYNC_PORT))
 
     dialog = QtWidgets.QDialog(usdviewApi.qMainWindow)
     dialog.setWindowTitle("Connect to OpenUSDConnect")
@@ -44,12 +47,14 @@ def _on_connect(usdviewApi) -> None:
     if dialog.exec_() != QtWidgets.QDialog.Accepted:
         return
 
-    host = host_field.text().strip() or "127.0.0.1"
+    host = host_field.text().strip() or DEFAULT_HOST
     try:
-        port = int(port_field.text().strip())
+        port = validate_port(port_field.text().strip())
     except ValueError:
         QtWidgets.QMessageBox.warning(
-            usdviewApi.qMainWindow, "OpenUSDConnect", "Port must be an integer."
+            usdviewApi.qMainWindow,
+            "OpenUSDConnect",
+            "Port must be an integer between 1 and 65535.",
         )
         return
 
@@ -81,9 +86,9 @@ def _autoconnect(usdviewApi) -> None:
     if not host:
         return
     try:
-        port = int(os.environ.get("OPENUSDCONNECT_PORT", "7200"))
+        port = validate_port(os.environ.get("OPENUSDCONNECT_PORT", DEFAULT_SYNC_PORT))
     except ValueError:
-        LOG.error("OPENUSDCONNECT_PORT is not an integer; skipping auto-connect")
+        LOG.error("OPENUSDCONNECT_PORT is not a valid TCP port; skipping auto-connect")
         return
     token = os.environ.get("OPENUSDCONNECT_TOKEN") or None
     connection.start(usdviewApi, host, port, token=token)
@@ -92,14 +97,24 @@ def _autoconnect(usdviewApi) -> None:
 def _configure_presented_view(usdviewApi) -> None:
     """Apply optional camera and scene-light settings after replay settles."""
     camera_path = os.environ.get("OPENUSDCONNECT_CAMERA_PATH", "")
-    use_scene_lights = os.environ.get("OPENUSDCONNECT_SCENE_LIGHTS") == "1"
+    try:
+        use_scene_lights = parse_bool(os.environ.get("OPENUSDCONNECT_SCENE_LIGHTS", "0"))
+    except ValueError:
+        LOG.error("OPENUSDCONNECT_SCENE_LIGHTS is not a valid boolean; ignoring it")
+        use_scene_lights = False
     if not camera_path and not use_scene_lights:
         return
 
     from pxr import UsdGeom
     from pxr.Usdviewq.qt import QtCore
 
-    expected_seq = int(os.environ.get("OPENUSDCONNECT_EXPECTED_SEQ", "0"))
+    try:
+        expected_seq = validate_nonnegative_int(
+            os.environ.get("OPENUSDCONNECT_EXPECTED_SEQ", "0")
+        )
+    except ValueError:
+        LOG.error("OPENUSDCONNECT_EXPECTED_SEQ is not a non-negative integer; using 0")
+        expected_seq = 0
     timer = QtCore.QTimer(usdviewApi.qMainWindow)
     usdviewApi.qMainWindow._openusdconnect_presentation_timer = timer
     attempts = 0

@@ -31,6 +31,10 @@ def test_unreal_stage_material_and_reverse_parity(request, tmp_path):
         rebuild_plugin=request.config.getoption("--unreal-rebuild-plugin"),
     )
 
+    assert run.unreal_log.is_file()
+    assert run.unreal_log.stat().st_size > 0
+    assert run.unreal_console_log.is_file()
+    assert not list(run.work_dir.glob("unreal_*.log"))
     assert run.result["layer_parity"] is True
     assert run.result["live_created_component"] == "StaticMeshComponent"
     assert run.result["reverse_edits_emitted"] is True

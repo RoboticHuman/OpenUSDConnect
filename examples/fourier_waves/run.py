@@ -96,7 +96,7 @@ def main() -> int:
                 "--host", args.host,
                 "--port", str(args.port),
                 "--base", str(EMPTY_USDA),
-                "--log", str(log_path),
+                "--event-log", str(log_path),
                 # Continuous mesh regeneration floods the event log
                 # (~2 MB/s at the default resolution); periodic compaction
                 # keeps only the latest state per prim, and storage reclaim

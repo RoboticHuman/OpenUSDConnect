@@ -10,6 +10,8 @@ import argparse
 import logging
 import sys
 
+from openusdconnect.cli_common import add_sync_endpoint_args, positive_seconds
+
 from .config import McpConfig
 from .tools import build_server
 
@@ -31,26 +33,53 @@ def _bootstrap_plugin_dll_dirs() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    _bootstrap_plugin_dll_dirs()
     parser = argparse.ArgumentParser(
-        prog="openusdconnect-mcp",
+        prog="python -m integrations.mcp",
         description="MCP server exposing the OpenUSDConnect event protocol as tools.",
     )
-    parser.add_argument(
-        "--host", help="Sync server host (default 127.0.0.1 or $OPENUSDCONNECT_HOST)"
-    )
-    parser.add_argument(
-        "--port", type=int, help="Sync server port (default 7200 or $OPENUSDCONNECT_PORT)"
-    )
+    endpoint = parser.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint, host_default=None, port_default=None)
     parser.add_argument("--client-id", dest="client_id", help="Stable per-client id for the layer")
     parser.add_argument("--department", help="Optional department for layer ordering")
-    parser.add_argument("--no-mirror", action="store_true", help="Disable the introspection mirror")
-    parser.add_argument("--log-level", default="INFO", help="stderr log level (default INFO)")
+    behavior = parser.add_argument_group("behavior")
+    behavior.add_argument(
+        "--mirror",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Maintain the introspection mirror",
+    )
+    behavior.add_argument(
+        "--auto-connect",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Connect automatically when the first authoring tool is called",
+    )
+    behavior.add_argument(
+        "--auto-create-ancestors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create missing parent prims as Xforms",
+    )
+    behavior.add_argument(
+        "--read-after-write-timeout",
+        type=positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help="Time to wait for the mirror after a write",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="stderr log level",
+    )
     args = parser.parse_args(argv)
+
+    _bootstrap_plugin_dll_dirs()
 
     # stdout is the MCP transport, all logging must go to stderr.
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=getattr(logging, args.log_level),
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )

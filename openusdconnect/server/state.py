@@ -544,7 +544,11 @@ class UsdSyncServer:
             return
         if time.monotonic() - self._last_reclaim < self._reclaim_interval:
             return
-        reclaimed = self.store.reclaim_storage()
+        try:
+            reclaimed = self.store.reclaim_storage()
+        except Exception:
+            LOG.exception("Failed to reclaim event-store storage")
+            return
         self._last_reclaim = time.monotonic()
         if reclaimed:
             LOG.info("Reclaimed %.1f MB of event log storage", reclaimed / 1048576)
@@ -1640,22 +1644,20 @@ class UsdSyncServer:
         """
         sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
 
-        with self._seq_lock:
-            self._next_seq = 1
         records = []
-        for ev, meta, _stamp in sorted_entries:
-            seq = self.assign_seq()
+        for seq, (ev, meta, _stamp) in enumerate(sorted_entries, start=1):
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
             records.append(
                 (seq, encode_message(rec), meta.get("client_id"), ev.get("k"), ev.get("prim"))
             )
         self.store.clear_and_rewrite(records)
-        self._maybe_reclaim_storage()
         with self._seq_lock:
             self._event_count = len(records)
+            self._next_seq = len(records) + 1
             self._seq_at_last_compact = self._next_seq
             self._snapshot_epoch += 1
+        self._maybe_reclaim_storage()
 
         self.op_cache.clear()
         self._op_cache_layer = None
@@ -1842,9 +1844,16 @@ class UsdSyncServer:
         """
         uploaded_meta = _stage_live_metadata(uploaded_stage)
         if uploaded_meta is None:
+            uploaded_scene_id = None
             uploaded_epoch = None
             uploaded_seq = None
         else:
+            uploaded_scene_id = uploaded_meta.get("scene_id")
+            if not isinstance(uploaded_scene_id, str) or not uploaded_scene_id:
+                raise InvalidVfsWriteError(
+                    "uploaded openusdconnect metadata field 'scene_id' "
+                    "must be a non-empty string"
+                )
             uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
             uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
 
@@ -1853,6 +1862,12 @@ class UsdSyncServer:
             current_epoch, current_seq = self.get_snapshot_token()
             with self.stage_lock:
                 department_layers = self._ordered_department_names()
+                additional_layers = [
+                    layer_key
+                    for layer_key in self.layer_stack.layer_keys
+                    if layer_key != _DEFAULT_LAYER_KEY
+                    and _department_for_layer_key(layer_key) is None
+                ]
                 before_types = _stage_prim_types(self.stage)
             with self.proposals_lock:
                 pending_proposals = sorted(
@@ -1875,10 +1890,6 @@ class UsdSyncServer:
             )
 
             notes = []
-            if uploaded_meta is None:
-                notes.append(
-                    "uploaded file has no openusdconnect metadata; accepting as fallback save"
-                )
 
             def _analysis(status: str, status_notes: list[str], event_counts=None):
                 return VfsWriteAnalysis(
@@ -1896,35 +1907,66 @@ class UsdSyncServer:
                     notes=status_notes,
                 )
 
-            if department_layers or pending_proposals:
+            if department_layers or additional_layers or pending_proposals:
                 details = []
                 if department_layers:
                     details.append(f"department layers: {', '.join(department_layers)}")
+                if additional_layers:
+                    details.append(
+                        f"collaboration layers: {', '.join(additional_layers)}"
+                    )
                 if pending_proposals:
                     details.append(f"pending proposals: {', '.join(pending_proposals)}")
                 analysis = _analysis(
                     "unsupported_rejected",
                     [
-                        "translate write fallback is disabled while department "
-                        f"or proposal layers are active ({'; '.join(details)})"
+                        "translate write fallback is disabled while non-default "
+                        f"collaboration or proposal layers are active ({'; '.join(details)})"
                     ],
                 )
                 self.last_vfs_write_analysis = analysis.to_dict()
                 raise UnsupportedVfsWriteError(
-                    "VFS translate writes are disabled while department or "
-                    "proposal layers are active"
+                    "VFS translate writes are disabled while non-default "
+                    "collaboration or proposal layers are active"
                 )
 
-            if reject_stale and uploaded_epoch is not None and uploaded_seq is not None:
-                stale = (uploaded_epoch, uploaded_seq) < (current_epoch, current_seq)
-                if stale:
+            if uploaded_meta is None:
+                analysis = _analysis(
+                    "metadata_rejected",
+                    ["uploaded snapshot is missing openusdconnect metadata"],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise InvalidVfsWriteError(
+                    "uploaded VFS snapshot is missing openusdconnect metadata"
+                )
+
+            if uploaded_scene_id != self.scene_id:
+                analysis = _analysis(
+                    "metadata_rejected",
+                    ["uploaded snapshot belongs to a different live scene"],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                raise InvalidVfsWriteError(
+                    "uploaded VFS snapshot scene_id does not match this server: "
+                    f"file={uploaded_scene_id!r}, server={self.scene_id!r}"
+                )
+
+            uploaded_token = (uploaded_epoch, uploaded_seq)
+            current_token = (current_epoch, current_seq)
+            if uploaded_token != current_token:
+                if uploaded_token < current_token and not reject_stale:
+                    notes.append(
+                        "stale snapshot token accepted because stale-write rejection was disabled"
+                    )
+                else:
+                    relation = "older" if uploaded_token < current_token else "newer"
                     analysis = _analysis(
-                        "stale_rejected",
-                        ["uploaded snapshot is older than the current live server state"],
+                        "stale_rejected" if relation == "older" else "future_rejected",
+                        [f"uploaded snapshot is {relation} than the current live server state"],
                     )
                     self.last_vfs_write_analysis = analysis.to_dict()
                     raise StaleVfsWriteError(
-                        "uploaded VFS snapshot is stale: "
+                        "uploaded VFS snapshot token does not match the current server: "
                         f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
                         f"server epoch/seq={current_epoch}/{current_seq}"
                     )
@@ -1985,26 +2027,117 @@ class UsdSyncServer:
 
             analysis = _analysis("translated", notes, event_counts)
 
-            self._purge_inner()
-            self.last_vfs_write_analysis = analysis.to_dict()
-            if not events:
-                return 0
+            # Build the complete replacement off-stage first. This validates
+            # every generated event and gives us an authored layer that can be
+            # installed without incrementally mutating authoritative state.
+            from ..event_apply import apply_events
+            from ..sdf_spec_delta import validate_spec_delta
 
-            records, changed_set = self.process_txn(
-                events,
-                client_id=client_id,
-                origin=origin,
-            )
-            changed_records = []
-            changed_bins = []
-            for i, (rec, rec_bin) in enumerate(records):
-                if i in changed_set:
-                    changed_records.append(rec)
-                    changed_bins.append(rec_bin)
-            if changed_records:
+            for event in events:
+                if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+                    validate_spec_delta(event)
+
+            replacement_layer = Sdf.Layer.CreateAnonymous("vfs-replacement-edits")
+            replacement_session = Sdf.Layer.CreateAnonymous("vfs-replacement-session")
+            replacement_session.subLayerPaths = [replacement_layer.identifier]
+            with self.stage_lock:
+                replacement_stage = Usd.Stage.Open(
+                    self.stage.GetRootLayer(),
+                    replacement_session,
+                    self.stage.GetPathResolverContext(),
+                )
+            if replacement_stage is None:
+                raise RuntimeError("failed to create the VFS replacement stage")
+            replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
+            replacement_events = [
+                event for event in events if event.get("k") not in SHARED_STAGE_KINDS
+            ]
+            shared_events = [
+                event for event in events if event.get("k") in SHARED_STAGE_KINDS
+            ]
+            if replacement_events:
+                apply_events(replacement_stage, replacement_events, prevalidated=True)
+            if shared_events:
+                replacement_stage.SetEditTarget(
+                    Usd.EditTarget(replacement_stage.GetSessionLayer())
+                )
+                apply_events(replacement_stage, shared_events, prevalidated=True)
+
+            records: list[tuple[dict, bytes]] = []
+            persist_tuples = []
+            for seq, event in enumerate(events, start=1):
+                record: dict = {
+                    "type": MSG_EVENT,
+                    "seq": seq,
+                    "event": event,
+                    "client": None,
+                    "client_id": client_id,
+                    "origin": origin,
+                }
+                if event.get("k") not in SHARED_STAGE_KINDS:
+                    record["layer_key"] = _DEFAULT_LAYER_KEY
+                record_bin = encode_message(record)
+                records.append((record, record_bin))
+                persist_tuples.append(
+                    (
+                        seq,
+                        record_bin,
+                        client_id,
+                        event.get("k"),
+                        event.get("prim"),
+                    )
+                )
+
+            # Realtime durability may still have accepted transactions in its
+            # queue from before this exclusive barrier was acquired.
+            if self._persist_queue is not None:
+                self._persist_queue.join()
+            self._broadcast_queue.join()
+
+            # This is the durability boundary. EventStore implementations must
+            # leave the previous log intact if the atomic replacement fails.
+            # Authoritative in-memory state is deliberately unchanged until it
+            # returns successfully.
+            self.store.clear_and_rewrite(persist_tuples)
+
+            with self.stage_lock:
+                self.edit_layer.TransferContent(replacement_layer)
+                self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
+                if shared_events:
+                    self.stage.SetEditTarget(Usd.EditTarget(self.stage.GetSessionLayer()))
+                    try:
+                        apply_events(self.stage, shared_events, prevalidated=True)
+                    finally:
+                        self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
+
+            self.op_cache.clear()
+            self._op_cache_layer = None
+            self._prim_paths.clear()
+            self._instanceable_paths.clear()
+            self._point_instancer_paths.clear()
+            for event in events:
+                self._track_prim_event(event)
+            self._prim_count_dirty = True
+
+            with self._seq_lock:
+                self._event_count = len(records)
+                self._next_seq = len(records) + 1
+                self._seq_at_last_compact = self._next_seq
+                self._snapshot_epoch += 1
+
+            self.last_vfs_write_analysis = analysis.to_dict()
+            self._maybe_reclaim_storage()
+
+            self.broadcast({"type": MSG_RESYNC, "reason": "vfs-write"})
+            if records:
+                record_dicts = [record for record, _record_bin in records]
+                record_bins = [record_bin for _record, record_bin in records]
+                if self.wire_metrics is not None:
+                    for record, record_bin in records:
+                        self.wire_metrics.record(record["event"].get("k", ""), len(record_bin))
                 self.broadcast_bytes(
-                    frame_batch(changed_bins),
-                    changed_records,
+                    frame_batch(record_bins),
+                    record_dicts,
                 )
             LOG.info(
                 "Translated VFS snapshot write into %d live events "

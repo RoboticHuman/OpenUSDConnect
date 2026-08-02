@@ -241,13 +241,13 @@ uv run python -m openusdconnect.server --port 7200
 uv run python -m openusdconnect.server --port 7200 --base test_scene.usda
 
 # Custom event log path
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log my_events.db
+uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log my_events.db
 
 # Compact the event log on startup (deduplicates, keeps latest state per prim)
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log my_events.db --compact
+uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log my_events.db --compact
 
 # With the admin dashboard (requires: uv sync --group dashboard)
-uv run python -m openusdconnect.server --port 7200 --dashboard 8080
+uv run python -m openusdconnect.server --port 7200 --dashboard-port 8080
 
 # Export the override diff layer on shutdown
 uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --export-diff diff.usda
@@ -518,7 +518,7 @@ This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each run
 | `--start-receiver` | Auto-start the network receiver on launch |
 | `--debug-port N` | debugpy port for instance A (default 5678) |
 | `--debug-port-b N` | debugpy port for instance B (default 5679) |
-| `--server-port N` | Sync server port (default 7200) |
+| `--port N` | Sync server port (default 7200) |
 | `--blender-exe path` | Override Blender executable (default: from `blender.test.cfg`) |
 
 ## Files

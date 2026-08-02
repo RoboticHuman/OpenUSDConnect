@@ -1,7 +1,10 @@
 """Event-log storage reclaim: store contract, server gating, rewrite hooks."""
 
 import os
+import sqlite3
 import time
+
+import pytest
 
 from openusdconnect.event_store import SqliteEventStore
 from openusdconnect.server.state import UsdSyncServer
@@ -45,6 +48,22 @@ def test_memory_store_reclaim_is_noop():
     _fill(store, n=3)
     assert store.reclaim_storage() == 0
     assert store.get_count() == 3
+    store.close()
+
+
+def test_clear_and_rewrite_rolls_back_failed_replacement():
+    store = SqliteEventStore(":memory:")
+    store.append(1, b"old", "client", "ensure_prim", "/Old")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.clear_and_rewrite(
+            [
+                (2, b"new-a", None, "ensure_prim", "/NewA"),
+                (2, b"new-b", None, "ensure_prim", "/NewB"),
+            ]
+        )
+
+    assert store.get_all_asc() == [(1, b"old")]
     store.close()
 
 

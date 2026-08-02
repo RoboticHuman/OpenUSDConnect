@@ -26,6 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 import numpy as np  # noqa: E402
 
 from openusdconnect.adapters import UsdStageAdapter  # noqa: E402
+from openusdconnect.cli_common import add_sync_endpoint_args  # noqa: E402
 from openusdconnect.dispatcher import EventDispatcher  # noqa: E402
 from openusdconnect.receiver import ReceiverThread  # noqa: E402
 from openusdconnect.sender import EventSender  # noqa: E402
@@ -179,8 +180,7 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         add_help=add_help,
         description="Fourier-wave compute-client procedural evaluator.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7301)
+    add_sync_endpoint_args(parser, port_default=7301)
     parser.add_argument(
         "--prim", default="/World/FourierWave",
         help="procedural prim to watch (default /World/FourierWave)",

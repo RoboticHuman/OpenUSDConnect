@@ -19,6 +19,12 @@ import pathlib
 import subprocess
 import time
 
+from openusdconnect.cli_common import (
+    add_sync_endpoint_args,
+    port_or_zero,
+)
+from openusdconnect.defaults import DEFAULT_EVENT_LOG
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ADDON_ZIP = REPO_ROOT / "dist" / "usd_connect_blender.zip"
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "blender_bootstrap_instance.py"
@@ -87,9 +93,10 @@ def _start_server(python: str, host: str, port: int,
     """Start the sync server as a subprocess."""
     args = [
         python, "-m", "openusdconnect.server",
+        "--host", host,
         "--port", str(port),
         "--base", base_usd,
-        "--log", log_path,
+        "--event-log", log_path,
     ]
     print(f"[launcher] Starting server on {host}:{port} ...")
     return subprocess.Popen(args, cwd=str(REPO_ROOT))
@@ -124,27 +131,30 @@ def _start_blender(blender_exe: str, role: str, host: str, port: int,
     return subprocess.Popen(args, cwd=str(REPO_ROOT), env=env)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Launch USD Connect debug session")
-    ap.add_argument("--server-port", type=int, default=7200)
-    ap.add_argument("--server-host", default="127.0.0.1")
+def main(argv: list[str] | None = None):
+    ap = argparse.ArgumentParser(
+        description="Launch USD Connect debug session",
+        allow_abbrev=False,
+    )
+    endpoint = ap.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint)
     ap.add_argument("--two-blenders", action="store_true")
     ap.add_argument("--start-emitter", action="store_true")
     ap.add_argument("--start-receiver", action="store_true")
-    ap.add_argument("--debug-port", type=int, default=5678)
-    ap.add_argument("--debug-port-b", type=int, default=5679)
+    ap.add_argument("--debug-port", type=port_or_zero, default=5678)
+    ap.add_argument("--debug-port-b", type=port_or_zero, default=5679)
     ap.add_argument("--wait-for-debugger", action="store_true")
     ap.add_argument("--reload", action="store_true",
                     help="Build addon and signal running Blenders to reload")
     ap.add_argument("--no-server", action="store_true",
                     help="Skip starting the server (connect to an existing one)")
     ap.add_argument("--blender-exe", default="")
-    ap.add_argument("--base-usd", default="")
-    ap.add_argument("--log-path", default="")
-    args = ap.parse_args()
+    ap.add_argument("--base", default="")
+    ap.add_argument("--event-log", default="")
+    args = ap.parse_args(argv)
 
-    base_usd = args.base_usd or str(REPO_ROOT / "test_scene.usda")
-    log_path = args.log_path or str(REPO_ROOT / "usd_events.db")
+    base_usd = args.base or str(REPO_ROOT / "test_scene.usda")
+    log_path = args.event_log or str(REPO_ROOT / DEFAULT_EVENT_LOG)
 
     # Reload mode — build and signal, then exit
     if args.reload:
@@ -166,13 +176,13 @@ def main():
     if not args.no_server:
         python = _find_uv_python()
         server_proc = _start_server(
-            python, args.server_host, args.server_port, base_usd, log_path,
+            python, args.host, args.port, base_usd, log_path,
         )
         time.sleep(1)
 
     # Start Blender A
     blender_a = _start_blender(
-        blender_exe, "A", args.server_host, args.server_port,
+        blender_exe, "A", args.host, args.port,
         args.debug_port, args.wait_for_debugger,
         args.start_emitter, args.start_receiver,
     )
@@ -181,7 +191,7 @@ def main():
     blender_b = None
     if args.two_blenders:
         blender_b = _start_blender(
-            blender_exe, "B", args.server_host, args.server_port,
+            blender_exe, "B", args.host, args.port,
             args.debug_port_b, args.wait_for_debugger,
             args.start_emitter, args.start_receiver,
         )
@@ -195,7 +205,7 @@ def main():
     if server_proc:
         print(f"  Server           PID {server_proc.pid}")
     else:
-        print(f"  Server           (external on {args.server_host}:{args.server_port})")
+        print(f"  Server           (external on {args.host}:{args.port})")
     print(f"  Blender A        PID {blender_a.pid}"
           f"    debug :{args.debug_port}")
     if blender_b:

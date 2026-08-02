@@ -69,8 +69,8 @@ uv run python scripts/start_live_open.py stop
 ```
 
 The launcher keeps translate write validation enabled by default. For
-compatibility testing only, pass `--bypass-write-validation` to forward
-`--vfs-bypass-write-validation` to the server.
+compatibility testing only, pass `--vfs-bypass-write-validation`; invalid USD
+writes are then accepted and dropped because they cannot be translated.
 
 To run the pieces manually:
 
@@ -79,7 +79,7 @@ uv run openusdconnect-server \
   --host 127.0.0.1 \
   --port 7200 \
   --base /path/to/scene.usda \
-  --log /path/to/usd_events.db \
+  --event-log /path/to/usd_events.db \
   --vfs-port 7280
 ```
 
@@ -202,7 +202,7 @@ uploads completed saves back through HTTP `PUT`:
 
 ```bash
 uv run python scripts/local_vfs_bridge.py \
-  --url http://127.0.0.1:7280/usd/scene.usd \
+  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
   --mirror-dir .ouc_live_mount/usd
 ```
 
@@ -210,7 +210,7 @@ Useful bridge options:
 
 ```bash
 uv run python scripts/local_vfs_bridge.py \
-  --url http://127.0.0.1:7280/usd/scene.usd \
+  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
   --mirror-dir .ouc_live_mount/usd \
   --background \
   --open
@@ -242,15 +242,18 @@ Notes:
 - Native VFS paths reject creation, deletion, and rename operations. The local
   bridge accommodates safe-save patterns locally and uploads only the completed
   managed file.
+- The bridge waits for a save to stabilize, uploads with the last observed
+  `ETag`, and enters a visible recovery/conflict state instead of overwriting
+  concurrent local or remote edits.
 - Direct `PUT` writes are forbidden by default, dropped only when
   `--vfs-write-mode drop` is explicitly enabled, or translated when
   `--vfs-write-mode translate` is explicitly enabled.
-- Translate mode records a write summary on the server and rejects uploaded
-  files whose embedded `epoch`/`snapshot_seq` are older than the current
-  server token.
+- Translate mode records a write summary on the server and requires the
+  embedded `scene_id`, `epoch`, and `snapshot_seq` to match the current server
+  snapshot exactly.
 - Translate mode also rejects authored USD properties outside the supported
-  event subset, and it is disabled while department or proposal layers are
-  active.
+  event subset, and it is disabled while any non-default collaboration layer
+  or proposal is active.
 
 ## Blender Live-Open
 

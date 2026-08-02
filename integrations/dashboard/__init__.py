@@ -4,7 +4,7 @@ Optional web UI served alongside the TCP sync server. Requires the
 ``dashboard`` dependency group (nicegui).
 
 Usage:
-    python -m openusdconnect --dashboard 8080
+    python -m openusdconnect --dashboard-port 8080
 """
 
 from __future__ import annotations

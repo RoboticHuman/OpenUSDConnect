@@ -92,8 +92,12 @@ class EventStore(ABC):
     @abstractmethod
     def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]]) -> None:
-        """Delete all events and insert *records* as
-        (seq, record_bin, client_id, kind, prim) tuples."""
+        """Atomically replace all events with *records*.
+
+        Each record is ``(seq, record_bin, client_id, kind, prim)``. If the
+        replacement fails, implementations must leave the previous event log
+        intact and re-raise the failure.
+        """
         raise NotImplementedError
 
     def reclaim_storage(self) -> int:
@@ -248,13 +252,18 @@ class SqliteEventStore(EventStore):
     def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]]) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM events")
-            self._conn.executemany(
-                "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
-                " VALUES (?, ?, ?, ?, ?)",
-                records,
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute("DELETE FROM events")
+                self._conn.executemany(
+                    "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    records,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _size_on_disk(self) -> int:
         import os

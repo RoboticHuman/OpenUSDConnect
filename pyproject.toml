@@ -5,6 +5,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["openusdconnect"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/openusdconnect",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+]
+
 [project]
 name = "openusdconnect"
 version = "0.1.0"
@@ -63,6 +71,7 @@ markers = [
 [project.scripts]
 openusdconnect-server = "openusdconnect.server:main"
 openusdconnect-mount-vfs = "openusdconnect.vfs_mount:main"
+openusdconnect-send = "openusdconnect.send:main"
 
 # --- Ruff (linter + formatter) ---
 # Docs: https://docs.astral.sh/ruff/

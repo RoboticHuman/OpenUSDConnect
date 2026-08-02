@@ -21,6 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SOURCE = Path(__file__).resolve().parent / "OpenUSDConnect"
 EDITOR_DRIVER = REPO_ROOT / "tests" / "integration" / "scripts" / "unreal_e2e_driver.py"
 ENGINE_CONFIG = REPO_ROOT / "unreal.test.cfg"
+FLATBUFFERS_HEADER = Path(
+    "Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/include/flatbuffers/flatbuffers.h"
+)
 TEST_PROJECT_PLUGINS = (
     "USDImporter",
     "PythonScriptPlugin",
@@ -54,6 +57,7 @@ class UnrealRunResult:
     plugin_package: Path | None
     result: dict
     unreal_log: Path
+    unreal_console_log: Path
     server_log: Path
 
 
@@ -396,6 +400,35 @@ def _engine_fingerprint(engine: UnrealEngine) -> str:
     return digest.hexdigest()
 
 
+def _ensure_flatbuffers_headers(plugin_source: Path = PLUGIN_SOURCE) -> None:
+    """Install the pinned FlatBuffers headers when a clean checkout lacks them."""
+    header = plugin_source / FLATBUFFERS_HEADER
+    if header.is_file():
+        return
+    setup_script = plugin_source / "setup_flatbuffers.py"
+    if not setup_script.is_file():
+        raise UnrealTestError(
+            f"FlatBuffers headers are missing and setup script was not found: {setup_script}"
+        )
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(setup_script)],
+            cwd=plugin_source,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise UnrealTestError(f"could not run FlatBuffers setup: {exc}") from exc
+    if completed.returncode or not header.is_file():
+        output = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        detail = f"\n{output}" if output else ""
+        raise UnrealTestError(
+            f"FlatBuffers setup failed with code {completed.returncode}: {setup_script}{detail}"
+        )
+
+
 def package_plugin(
     engine: UnrealEngine,
     *,
@@ -404,6 +437,7 @@ def package_plugin(
     force: bool = False,
 ) -> Path:
     """Build and cache a project-installable plugin package."""
+    _ensure_flatbuffers_headers(plugin_source)
     fingerprint = _plugin_fingerprint(plugin_source)
     engine_fingerprint = _engine_fingerprint(engine)
     cache_root = cache_root or _cache_root()
@@ -594,6 +628,39 @@ def _log_tail(path: Path, lines: int = 120) -> str:
     return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
 
 
+def _run_log_tail(unreal_log: Path, console_log: Path) -> str:
+    sections = []
+    for label, path in (("Unreal log", unreal_log), ("Unreal console", console_log)):
+        tail = _log_tail(path)
+        if tail:
+            sections.append(f"{label} ({path}):\n{tail}")
+    return "\n\n".join(sections)
+
+
+def _editor_command(
+    engine: UnrealEngine,
+    project: Path,
+    unreal_log: Path,
+    *,
+    interactive: bool,
+) -> list[str]:
+    executable = engine.editor if interactive else engine.editor_cmd
+    command = [
+        str(executable),
+        str(project),
+        f"-ExecutePythonScript={EDITOR_DRIVER}",
+        "-ScriptErrorsAreFatal",
+        "-nop4",
+        "-nosplash",
+        "-nosound",
+        f"-abslog={unreal_log}",
+    ]
+    if not interactive:
+        # The scenario creates editor actors and materials, which requires a real RHI.
+        command.append("-unattended")
+    return command
+
+
 def _verify_reverse_server_state(scenario: UnrealScenario) -> dict:
     from pxr import Gf
 
@@ -659,6 +726,11 @@ def run_unreal_e2e(
 
     server_log = work_dir / "server.log"
     unreal_log = work_dir / "unreal.log"
+    unreal_console_log = work_dir / "unreal-console.log"
+    unreal_log.unlink(missing_ok=True)
+    unreal_console_log.unlink(missing_ok=True)
+    for fallback_log in work_dir.glob("unreal_*.log"):
+        fallback_log.unlink()
     with server_log.open("w", encoding="utf-8") as server_output:
         server = subprocess.Popen(
             [
@@ -671,7 +743,7 @@ def run_unreal_e2e(
                 str(port),
                 "--base",
                 str(scenario.base_stage),
-                "--log",
+                "--event-log",
                 str(scenario.database_path),
             ],
             cwd=REPO_ROOT,
@@ -680,23 +752,16 @@ def run_unreal_e2e(
         )
         try:
             _wait_for_port(port, server)
-            executable = engine.editor if interactive else engine.editor_cmd
-            command = [
-                str(executable),
-                str(project),
-                f"-ExecutePythonScript={EDITOR_DRIVER}",
-                "-ScriptErrorsAreFatal",
-                "-nop4",
-                "-nosplash",
-                "-nosound",
-                f"-abslog={unreal_log}",
-            ]
-            if not interactive:
-                command.extend(("-unattended", "-nullrhi"))
+            command = _editor_command(
+                engine,
+                project,
+                unreal_log,
+                interactive=interactive,
+            )
             env = os.environ.copy()
             env["OUC_UNREAL_TEST_CONFIG"] = str(scenario.config_path)
             started = time.monotonic()
-            with unreal_log.open("a", encoding="utf-8") as unreal_output:
+            with unreal_console_log.open("w", encoding="utf-8") as unreal_output:
                 try:
                     completed = subprocess.run(
                         command,
@@ -708,7 +773,8 @@ def run_unreal_e2e(
                     )
                 except subprocess.TimeoutExpired as exc:
                     raise UnrealTestError(
-                        f"Unreal test exceeded {timeout + 90.0:.0f}s ({unreal_log})"
+                        f"Unreal test exceeded {timeout + 90.0:.0f}s\n"
+                        f"{_run_log_tail(unreal_log, unreal_console_log)}"
                     ) from exc
             elapsed = time.monotonic() - started
         finally:
@@ -716,18 +782,20 @@ def run_unreal_e2e(
 
     if not scenario.result_path.is_file():
         raise UnrealTestError(
-            f"Unreal did not write {scenario.result_path}:\n{_log_tail(unreal_log)}"
+            f"Unreal did not write {scenario.result_path}:\n"
+            f"{_run_log_tail(unreal_log, unreal_console_log)}"
         )
     result = json.loads(scenario.result_path.read_text(encoding="utf-8"))
     result["editor_elapsed_seconds"] = elapsed
     if not result.get("success"):
         raise UnrealTestError(
-            f"Unreal scenario failed: {result.get('error', result)}\n{_log_tail(unreal_log)}"
+            f"Unreal scenario failed: {result.get('error', result)}\n"
+            f"{_run_log_tail(unreal_log, unreal_console_log)}"
         )
     if completed.returncode:
         raise UnrealTestError(
             f"Unreal scenario passed but the editor exited with code "
-            f"{completed.returncode}:\n{_log_tail(unreal_log)}"
+            f"{completed.returncode}:\n{_run_log_tail(unreal_log, unreal_console_log)}"
         )
     result["server_reverse_state"] = _verify_reverse_server_state(scenario)
     return UnrealRunResult(
@@ -737,6 +805,7 @@ def run_unreal_e2e(
         plugin_package=plugin_package,
         result=result,
         unreal_log=unreal_log,
+        unreal_console_log=unreal_console_log,
         server_log=server_log,
     )
 

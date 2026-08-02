@@ -14,13 +14,15 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from openusdconnect.cli_common import port_number
+from openusdconnect.defaults import DEFAULT_SYNC_PORT
 from openusdconnect.protocol import make_hello
 from openusdconnect.transport import send_msg
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=7200)
+    parser.add_argument("--port", type=port_number, default=DEFAULT_SYNC_PORT)
     args = parser.parse_args()
 
     asset = os.path.abspath(

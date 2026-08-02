@@ -44,7 +44,7 @@ def test_launcher_starts_and_stops_local_directory_mirror(tmp_path, free_port):
         str(state_file),
         "--log-dir",
         str(tmp_path / "logs"),
-        "--wait",
+        "--startup-timeout",
         "10",
     ]
     if os.name == "nt":

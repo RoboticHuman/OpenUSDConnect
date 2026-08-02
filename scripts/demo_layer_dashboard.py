@@ -99,8 +99,8 @@ def main():
             sys.executable, "-m", "openusdconnect.server",
             "--port", str(SERVER_PORT),
             "--base", "test_scene.usda",
-            "--log", DB_PATH,
-            "--dashboard", str(DASHBOARD_PORT),
+            "--event-log", DB_PATH,
+            "--dashboard-port", str(DASHBOARD_PORT),
             "--departments", DEPARTMENTS,
         ],
     )

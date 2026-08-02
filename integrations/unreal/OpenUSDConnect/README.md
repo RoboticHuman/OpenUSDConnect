@@ -98,9 +98,9 @@ From the repo root:
 ```bash
 cd <repo>/OpenUSDConnect
 .\.venv\Scripts\activate          # or `source .venv/bin/activate`
-python -m openusdconnect.server --port 7200 --base my_scene.usda --vfs-port 7280 --dashboard 8080
+python -m openusdconnect.server --port 7200 --base my_scene.usda --vfs-port 7280 --dashboard-port 8080
 ```
-The optional `--dashboard 8080` enables a web UI at <http://localhost:8080> useful for verifying clients and event traffic.
+The optional `--dashboard-port 8080` enables a web UI at <http://localhost:8080> useful for verifying clients and event traffic.
 
 ### 2. Open the USD stage in Unreal
 
@@ -108,7 +108,7 @@ The **live-open** workflow:
 
 1. Mount or bridge the VFS share so `scene.usd` is browseable, for example:
    ```bash
-   uv run python scripts/local_vfs_drive_bridge.py --url http://127.0.0.1:7280/usd/scene.usd --mount-dir .ouc_live_mount\usd --drive O: --force
+   uv run python scripts/local_vfs_bridge.py --vfs-url http://127.0.0.1:7280/usd/scene.usd --mirror-dir .ouc_live_mount\usd --drive O: --force
    ```
 2. Open the USD Stage panel and choose **File -> Open**.
 3. Pick `O:\scene.usd` or the UNC path.
@@ -193,6 +193,9 @@ Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
 From the repository root, the opt-in harness can discover a Launcher or source
 engine, package this plugin, generate an enabled project, and run two-way stage and
 material parity checks:
+
+The harness installs the pinned FlatBuffers headers automatically when they are
+missing from a clean checkout.
 
 ```bash
 uv run python scripts/run_unreal_tests.py --list-engines

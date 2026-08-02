@@ -121,3 +121,38 @@ def test_main_maps_vfs_arguments_to_nested_config(monkeypatch):
             ),
         )
     ]
+
+
+def test_main_accepts_canonical_service_flags(monkeypatch):
+    captured = []
+    monkeypatch.setattr(server_cli, "run_server", captured.append)
+
+    server_cli.main(["--event-log", "canonical.db", "--dashboard-port", "8080"])
+
+    assert captured[0].log_path == "canonical.db"
+    assert captured[0].dashboard_port == 8080
+
+
+@pytest.mark.parametrize("args", [["--log", "legacy.db"], ["--dashboard", "8081"]])
+def test_main_rejects_removed_service_aliases(args):
+    with pytest.raises(SystemExit) as error:
+        server_cli.main(args)
+
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--port", "0"],
+        ["--vfs-port", "65536"],
+        ["--dashboard-port", "-1"],
+        ["--max-connections", "0"],
+        ["--compact-interval", "-1"],
+    ],
+)
+def test_main_rejects_invalid_numeric_configuration(args):
+    with pytest.raises(SystemExit) as error:
+        server_cli.main(args)
+
+    assert error.value.code == 2

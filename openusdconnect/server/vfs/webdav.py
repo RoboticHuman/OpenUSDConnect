@@ -29,21 +29,27 @@ class _StageFileResource(DAVNonCollection):
     def __init__(self, path: str, environ: dict, provider_file):
         super().__init__(path, environ)
         self._file = provider_file
+        self._snapshot = None
+
+    def _get_snapshot(self):
+        if self._snapshot is None:
+            self._snapshot = self._file.snapshot()
+        return self._snapshot
 
     def get_content(self):
         import io
 
-        return io.BytesIO(self._file.read())
+        return io.BytesIO(self._get_snapshot().data)
 
     def get_content_length(self):
-        return self._file.stat().size
+        return self._get_snapshot().stat.size
 
     def get_content_type(self):
         return getattr(self._file, "content_type", "application/octet-stream")
 
     def get_etag(self):
         # wsgidav emits this as the ETag header value and adds quotes itself.
-        return self._file.stat().etag.strip('"')
+        return self._get_snapshot().stat.etag.strip('"')
 
     def support_etag(self):
         return True
@@ -55,7 +61,7 @@ class _StageFileResource(DAVNonCollection):
         return None
 
     def get_last_modified(self):
-        return self._file.stat().mtime
+        return self._get_snapshot().stat.mtime
 
     def support_modified(self):
         return True
@@ -69,9 +75,13 @@ class _StageFileResource(DAVNonCollection):
     def end_write(self, *, with_errors):
         if with_errors:
             LOG.warning("VFS write aborted with errors for %s", self._file.name)
+            sink = getattr(self, "_sink", None)
+            if sink is not None:
+                self._file.abort_write(sink)
             return
         try:
             self._file.finish_write(self._sink)
+            self._snapshot = None
         except VfsWriteRejectedError as exc:
             LOG.warning("VFS write rejected for %s: %s", self._file.name, exc)
             raise DAVError(HTTP_CONFLICT) from exc

@@ -44,7 +44,7 @@ def start_server(tmp_path, port, *, base_path=None):
         "openusdconnect.server",
         "--port",
         str(port),
-        "--log",
+        "--event-log",
         db_path,
     ]
     if base_path is not None:
