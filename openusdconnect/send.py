@@ -5,22 +5,22 @@ transaction, and sends via the FlatBuffers wire protocol.
 
 Usage:
     # Single event
-    uv run python -m openusdconnect.send \
+    uv run openusdconnect-send \
       '{"k":"ensure_prim","prim":"/World/Sphere","typeName":"Sphere"}'
 
     # Multiple events in one transaction
-    uv run python -m openusdconnect.send \
+    uv run openusdconnect-send \
       '{"k":"ensure_prim","prim":"/World/Sphere","typeName":"Sphere"}' \
       '{"k":"ensure_xform_ops","prim":"/World/Sphere"}'
 
     # Raw non-event message (compact, quit)
-    uv run python -m openusdconnect.send --msg '{"type":"compact"}'
+    uv run openusdconnect-send --msg '{"type":"compact"}'
 
     # Read events from stdin (one JSON object per line)
-    cat events.jsonl | uv run python -m openusdconnect.send --stdin
+    cat events.jsonl | uv run openusdconnect-send --stdin
 
     # Custom host/port and client id
-    uv run python -m openusdconnect.send --host 10.0.0.1 --port 7201 --client-id studio-a \
+    uv run openusdconnect-send --host 10.0.0.1 --port 7201 --client-id studio-a \
       '{"k":"set_xform_trs","prim":"/World/Cube","fields":["t"],"t":[1,2,3]}'
 """
 
@@ -30,6 +30,7 @@ import argparse
 import json
 import sys
 
+from .cli_common import add_sync_endpoint_args
 from .sender import EventSender
 
 
@@ -42,9 +43,9 @@ def _parse_json(text: str) -> dict:
         sys.exit(1)
 
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        prog="python -m openusdconnect.send",
+        prog="openusdconnect-send",
         description="Send events to a running OpenUSDConnect server.",
     )
     parser.add_argument(
@@ -54,8 +55,8 @@ def main():
             'JSON event dicts (e.g. \'{"k":"ensure_prim","prim":"/World/X","typeName":"Xform"}\')'
         ),
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=7200, help="Server port (default: 7200)")
+    endpoint = parser.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint)
     parser.add_argument("--client-id", default="cli", help="Client ID (default: cli)")
     parser.add_argument(
         "--msg",
@@ -68,7 +69,7 @@ def main():
         action="store_true",
         help="Read JSON events from stdin, one per line.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     events: list[dict] = [_parse_json(text) for text in args.events]
     if args.stdin:

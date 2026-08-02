@@ -405,11 +405,11 @@ def test_two_blender_playback(blender_exe, tmp_path):
             # Same as the other asset tests: run with UI (not --background)
             # so bpy.app.timers fire reliably. Blender quits itself via
             # bpy.ops.wm.quit_blender() in TestHarness.done().
-            # USD_CONNECT_CLIENT_ID forces a distinct client_id per
-            # process — same-machine STABLE_CLIENT_IDs would otherwise
+            # OPENUSDCONNECT_CLIENT_ID forces a distinct client_id per
+            # process; same-machine STABLE_CLIENT_IDs would otherwise
             # collide and the follower would think it's the leader.
             proc_env = dict(env)
-            proc_env["USD_CONNECT_CLIENT_ID"] = client_id
+            proc_env["OPENUSDCONNECT_CLIENT_ID"] = client_id
             return subprocess.Popen(
                 [
                     blender_exe,

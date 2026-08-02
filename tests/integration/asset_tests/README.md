@@ -49,7 +49,7 @@ Start a server, then run Blender directly with the test script:
 
 ```bash
 # Terminal 1: start server
-uv run python -m openusdconnect.server --port 7202 --log test_asset.db
+uv run python -m openusdconnect.server --port 7202 --event-log test_asset.db
 
 # Terminal 2: run test (Blender auto-quits when done)
 BLENDER_USER_RESOURCES=".blender/user_data" \

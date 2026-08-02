@@ -38,6 +38,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from pxr import Usd, UsdGeom
 
+from openusdconnect.cli_common import nonnegative_int, positive_int
 from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events
 from openusdconnect.framing import recv_framed
@@ -386,7 +387,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         if not _wait_for_server(SERVER_PORT, timeout=5):
             print("ERROR: No server running. Start one first:")
             print(f"  uv run python -m openusdconnect.server --port {SERVER_PORT} "
-                  f"--log {DB_PATH} --departments {DEPARTMENTS}")
+                  f"--event-log {DB_PATH} --departments {DEPARTMENTS}")
             return False
     else:
         for f in _db_files():
@@ -396,7 +397,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         server_cmd = [
             sys.executable, "-m", "openusdconnect.server",
             "--port", str(SERVER_PORT),
-            "--log", DB_PATH,
+            "--event-log", DB_PATH,
             "--departments", DEPARTMENTS,
         ]
         # Spawn the server.  py-spy's ``record -- <cmd>`` mode cannot
@@ -694,13 +695,13 @@ def _db_files():
 
 def main():
     ap = argparse.ArgumentParser(description="Stress test department concurrency")
-    ap.add_argument("--emitters", type=int, default=40,
+    ap.add_argument("--emitters", type=nonnegative_int, default=40,
                     help="Number of emitter-only clients (default: 40)")
-    ap.add_argument("--receivers", type=int, default=40,
+    ap.add_argument("--receivers", type=nonnegative_int, default=40,
                     help="Number of receiver-only clients (default: 40)")
-    ap.add_argument("--bidi", type=int, default=20,
+    ap.add_argument("--bidi", type=nonnegative_int, default=20,
                     help="Number of bidirectional clients (default: 20)")
-    ap.add_argument("--iterations", type=int, default=100,
+    ap.add_argument("--iterations", type=positive_int, default=100,
                     help="Write iterations per writer (default: 100)")
     ap.add_argument("--profile", action="store_true",
                     help="Launch server through py-spy producing an SVG flame "

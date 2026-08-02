@@ -26,6 +26,9 @@ import sysconfig
 from collections.abc import Sequence
 from pathlib import Path
 
+from openusdconnect.cli_common import add_sync_endpoint_args, nonnegative_int
+from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
+
 
 def find_usdview() -> Path:
     """Locate the ``usdview`` executable shipped with the system OpenUSD install.
@@ -112,8 +115,8 @@ def _has_renderer_arg(args: Sequence[str]) -> bool:
 
 def launch_usdview(
     stage_path: str | os.PathLike,
-    host: str = "127.0.0.1",
-    port: int = 7200,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_SYNC_PORT,
     *,
     token: str | None = None,
     extra_args: Sequence[str] = (),
@@ -196,11 +199,12 @@ def launch_usdview(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
+        prog="python -m integrations.usdview.launcher",
         description="Launch usdview pre-wired to an OpenUSDConnect server."
     )
     parser.add_argument("stage", help="USD file to open in usdview")
-    parser.add_argument("--host", default="127.0.0.1", help="OpenUSDConnect server host")
-    parser.add_argument("--port", type=int, default=7200, help="OpenUSDConnect server port")
+    endpoint = parser.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint)
     parser.add_argument(
         "--token", default=None, help="Optional TOFU token (overrides cached value)"
     )
@@ -224,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--expected-seq",
-        type=int,
+        type=nonnegative_int,
         default=0,
         help="Wait for this replay sequence before applying camera/view settings.",
     )

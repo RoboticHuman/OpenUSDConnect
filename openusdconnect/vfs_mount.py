@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from .cli_common import add_vfs_resource_args
+from .defaults import host_for_url
+
 
 @dataclass(frozen=True)
 class MountConfig:
@@ -78,7 +81,7 @@ def default_davwwwroot_unc(host: str, port: int, share: str) -> str:
 
 
 def default_url(host: str, port: int, share: str) -> str:
-    return f"http://{host}:{port}/{_share_name(share)}"
+    return f"http://{host_for_url(host)}:{port}/{_share_name(share)}"
 
 
 def default_macos_mount_point(share: str, *, home: Path | None = None) -> Path:
@@ -345,10 +348,8 @@ def _print_macos_paths(config: MacOSMountConfig) -> None:
 def _build_native_parser(backend: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", choices=["mount", "unmount"], default="mount")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7280)
-    parser.add_argument("--share", default="usd")
-    parser.add_argument("--name", default="scene.usd")
+    endpoint = parser.add_argument_group("virtual file service")
+    add_vfs_resource_args(endpoint, option_prefix="")
     parser.add_argument("--force", action="store_true", help="Replace an existing native mount")
     parser.add_argument("--open", action="store_true", help="Open the mounted directory")
     parser.add_argument(

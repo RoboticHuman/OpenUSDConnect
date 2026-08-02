@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from openusdconnect.cli_common import nonnegative_int
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.vfs import VirtualStageFileSet
 
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default=None, help="Optional base USD file")
     parser.add_argument(
         "--synthetic-prims",
-        type=int,
+        type=nonnegative_int,
         default=0,
         help="Create this many synthetic Xform prims before benchmarking",
     )

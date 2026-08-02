@@ -94,7 +94,7 @@ To start a write-capable local mirror for that server:
 
 ```bash
 uv run python scripts/local_vfs_bridge.py \
-  --url http://127.0.0.1:7280/usd/scene.usd \
+  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
   --mirror-dir .ouc_live_mount/usd \
   --background \
   --open
@@ -141,7 +141,7 @@ existing TOFU token store for the live emitter and receiver connections.
 In a terminal:
 
 ```bash
-uv run python -m openusdconnect.server --port 7200 --base scene.usda --log events.db
+uv run python -m openusdconnect.server --port 7200 --base scene.usda --event-log events.db
 ```
 
 The server is an authoritative event sequencer. It maintains a replay log so receivers that connect late (or reconnect) get all prior events. Use `--compact` on startup to compact the event log, or send a `compact` message from any connected client to trigger compaction at runtime.

@@ -28,6 +28,7 @@ from .codec import (
     message_to_dict,
     resolve_payload,
 )
+from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
 from .protocol import make_hello
 from .transport import send_msg
@@ -66,8 +67,8 @@ class ReceiverThread(threading.Thread):
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
-        port: int = 7200,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_SYNC_PORT,
         sync_from: int = 1,
         reconnect: bool = True,
         max_queue: int = _MAX_QUEUE_DEPTH,

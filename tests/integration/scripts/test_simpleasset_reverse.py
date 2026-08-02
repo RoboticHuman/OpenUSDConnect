@@ -279,4 +279,7 @@ try:
     bpy.app.timers.register(_test_step, first_interval=2.0)
 except OSError:
     log("ERROR: Server not reachable. Start it first:")
-    log(f"  uv run python -m openusdconnect.server --port {SERVER_PORT} --log test_mtlx_reverse.db")
+    log(
+        "  uv run python -m openusdconnect.server "
+        f"--port {SERVER_PORT} --event-log test_mtlx_reverse.db"
+    )

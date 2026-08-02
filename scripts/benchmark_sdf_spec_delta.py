@@ -9,6 +9,7 @@ import time
 
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
+from openusdconnect.cli_common import positive_int
 from openusdconnect.composed_projection import ComposedChangeProjection
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
@@ -42,12 +43,12 @@ def _print_timing(label: str, timing: tuple[float, float]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=2_000)
-    parser.add_argument("--array-size", type=int, default=10_000)
-    parser.add_argument("--spec-count", type=int, default=10_000)
-    parser.add_argument("--snapshot-iterations", type=int, default=5)
-    parser.add_argument("--projection-prims", type=int, default=1_000)
-    parser.add_argument("--projection-iterations", type=int, default=3)
+    parser.add_argument("--iterations", type=positive_int, default=2_000)
+    parser.add_argument("--array-size", type=positive_int, default=10_000)
+    parser.add_argument("--spec-count", type=positive_int, default=10_000)
+    parser.add_argument("--snapshot-iterations", type=positive_int, default=5)
+    parser.add_argument("--projection-prims", type=positive_int, default=1_000)
+    parser.add_argument("--projection-iterations", type=positive_int, default=3)
     args = parser.parse_args()
 
     source = Usd.Stage.CreateInMemory()

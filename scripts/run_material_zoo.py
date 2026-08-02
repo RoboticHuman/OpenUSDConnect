@@ -24,6 +24,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from openusdconnect.cli_common import nonnegative_seconds, port_or_zero
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_PATH = PROJECT_ROOT / "test_scene.usda"
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "visual" / "fixtures" / "material_zoo.jsonl"
@@ -47,7 +49,12 @@ def _parse_args() -> argparse.Namespace:
         default=(),
         help="Launch only the selected viewers.",
     )
-    parser.add_argument("--port", type=int, default=0, help="Server port; 0 selects a free port.")
+    parser.add_argument(
+        "--port",
+        type=port_or_zero,
+        default=0,
+        help="Server port; 0 selects a free port.",
+    )
     parser.add_argument("--blender", help="Explicit Blender executable path.")
     parser.add_argument("--usdview", help="Explicit usdview executable path.")
     parser.add_argument(
@@ -67,13 +74,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--publish-delay",
-        type=float,
+        type=nonnegative_seconds,
         default=2.0,
         help="Seconds to let viewers connect before publishing the events.",
     )
     parser.add_argument(
         "--exit-after",
-        type=float,
+        type=nonnegative_seconds,
         default=0.0,
         help="Automatically close launched viewers after N seconds; 0 waits until Ctrl+C.",
     )
@@ -124,7 +131,7 @@ def _start_server(port: int, event_log: Path) -> subprocess.Popen:
             str(port),
             "--base",
             str(BASE_PATH),
-            "--log",
+            "--event-log",
             str(event_log),
         ],
         cwd=PROJECT_ROOT,

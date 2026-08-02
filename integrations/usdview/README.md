@@ -28,7 +28,7 @@ or route transactions to layers outside the managed collaboration block.
 
 ```bash
 # Terminal 1 — start the server on a base scene
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.db
+uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log events.db
 
 # Terminal 2 — launch usdview pre-wired to that server
 uv run python -m integrations.usdview.launcher test_scene.usda --host 127.0.0.1 --port 7200

@@ -20,6 +20,8 @@ import collections
 import re
 from pathlib import Path
 
+from openusdconnect.cli_common import positive_int
+
 # py-spy frame format: "function_name (file:line)" or "function_name (file)".
 _FRAME_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<loc>[^)]+)\)$")
 
@@ -159,7 +161,7 @@ def main():
         help="Write report to file (default: stdout)",
     )
     ap.add_argument(
-        "--top", type=int, default=30,
+        "--top", type=positive_int, default=30,
         help="Top N entries per section (default 30)",
     )
     ap.add_argument(

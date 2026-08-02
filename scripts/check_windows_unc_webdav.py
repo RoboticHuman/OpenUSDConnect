@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from openusdconnect.cli_common import add_vfs_resource_args
+
 
 def _default_unc(host: str, port: int, share: str, name: str) -> str:
     return f"\\\\{host}@{port}\\{share}\\{name}"
@@ -55,10 +57,7 @@ def _validate_usd_bytes(data: bytes) -> tuple[bool, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--unc", default=None, help="Full UNC path to read")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7280)
-    parser.add_argument("--share", default="usd")
-    parser.add_argument("--name", default="scene.usd")
+    add_vfs_resource_args(parser, option_prefix="")
     args = parser.parse_args(argv)
 
     if os.name != "nt":

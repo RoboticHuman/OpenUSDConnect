@@ -125,7 +125,7 @@ uv sync --group server --group vfs
 uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
 
 # With the admin dashboard (uv sync --group dashboard)
-uv run openusdconnect-server --port 7200 --base scene.usda --dashboard 8080
+uv run openusdconnect-server --port 7200 --base scene.usda --dashboard-port 8080
 
 # With per-department layers and authentication
 uv run openusdconnect-server --port 7200 --base scene.usda \
@@ -135,6 +135,14 @@ uv run openusdconnect-server --port 7200 --base scene.usda \
 uv run openusdconnect-server --port 7200 --base scene.usda \
   --resolver-context asset:/show/config/versions.json
 ```
+
+CLI naming follows the endpoint being configured: dedicated tools use
+`--host`/`--port`, while combined launchers qualify the WebDAV endpoint as
+`--vfs-host`/`--vfs-port`/`--vfs-share`/`--vfs-name`. Persistence and optional
+services use `--event-log` and `--dashboard-port`. Older spellings remain
+accepted for compatibility but are omitted from `--help`.
+See [Command-Line Reference](docs/cli-reference.md) for the command inventory,
+dependency groups, and compatibility aliases.
 
 Department assignment is server policy built on a logical collaboration-layer
 contract. Each authored opinion carries an opaque, portable `layer_key`, while
@@ -253,7 +261,7 @@ docker run -p 7200:7200 -p 7280:7280 -v ./scenes:/scenes \
 docker build --build-arg DASHBOARD=1 -t openusdconnect-server:dashboard .
 docker run -p 7200:7200 -p 7280:7280 -p 8080:8080 -v ./scenes:/scenes \
   openusdconnect-server:dashboard \
-  --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard 8080
+  --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard-port 8080
 ```
 
 Or using Docker Compose:
@@ -290,7 +298,7 @@ metadata for host, port, receiver replay position, and persisted TOFU token reus
 
 ### MCP server (LLM authoring)
 ```bash
-uv sync --group mcp
+uv sync --group server --group mcp
 uv run python -m integrations.mcp     # stdio MCP server
 ```
 Register it with an MCP client (e.g. Claude Code or Desktop) and point it at a

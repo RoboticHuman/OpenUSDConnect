@@ -7,7 +7,7 @@ crash the server during event-log replay. This thin, non-core wrapper makes
 those DLLs loadable, then hands off to the real server entry point. All
 arguments are forwarded verbatim.
 
-    uv run python -m integrations.run_server --port 7200 --base scene.usda --log events.db
+    uv run python -m integrations.run_server --port 7200 --base scene.usda --event-log events.db
 """
 
 from __future__ import annotations

@@ -1,5 +1,6 @@
 """Dump the server event log from SQLite."""
 
+import argparse
 import os
 import sqlite3
 import sys
@@ -10,12 +11,16 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from openusdconnect.codec import message_to_dict
+from openusdconnect.defaults import DEFAULT_EVENT_LOG
 
 
-def main():
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "usd_events.db"
-    conn = sqlite3.connect(db_path)
-    rows = conn.execute("SELECT seq, event_bin FROM events ORDER BY seq").fetchall()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("event_log", nargs="?", default=DEFAULT_EVENT_LOG)
+    args = parser.parse_args(argv)
+
+    with sqlite3.connect(args.event_log) as conn:
+        rows = conn.execute("SELECT seq, event_bin FROM events ORDER BY seq").fetchall()
     print(f"Events: {len(rows)}")
     for seq, event_bin in rows:
         rec = message_to_dict(event_bin)
@@ -25,8 +30,8 @@ def main():
         extras = {key: val for key, val in ev.items() if key not in ("k", "prim")}
         extra_str = f"  {extras}" if extras else ""
         print(f"  seq={seq}: {k} {prim}{extra_str}")
-    conn.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

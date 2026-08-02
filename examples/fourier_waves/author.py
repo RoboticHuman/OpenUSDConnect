@@ -18,6 +18,12 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from openusdconnect.cli_common import (  # noqa: E402
+    add_sync_endpoint_args,
+    nonnegative_seconds,
+    positive_float,
+    positive_int,
+)
 from openusdconnect.sender import EventSender  # noqa: E402
 
 
@@ -75,8 +81,7 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         add_help=add_help,
         description="Author (and optionally animate) the Fourier-wave procedural prim.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7301)
+    add_sync_endpoint_args(parser, port_default=7301)
     parser.add_argument("--prim", default="/World/FourierWave")
     parser.add_argument(
         "--frequencies", default="1.0,2.3,4.1",
@@ -91,19 +96,19 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         help="comma-separated starting phases in radians (default 0,0,0)",
     )
     parser.add_argument(
-        "--resolution", type=int, default=96,
+        "--resolution", type=positive_int, default=96,
         help="grid vertices per side (default 96)",
     )
     parser.add_argument(
-        "--size", type=float, default=10.0,
+        "--size", type=positive_float, default=10.0,
         help="grid extent in scene units (default 10)",
     )
     parser.add_argument(
-        "--animate", type=float, default=None, metavar="SECONDS",
+        "--animate", type=nonnegative_seconds, default=None, metavar="SECONDS",
         help="advance phases continuously for SECONDS (0 = until Ctrl+C)",
     )
     parser.add_argument(
-        "--rate", type=float, default=1.5,
+        "--rate", type=positive_float, default=1.5,
         help="phase advance in radians/second while animating (default 1.5)",
     )
     return parser

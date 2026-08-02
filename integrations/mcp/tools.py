@@ -75,7 +75,7 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
     except ImportError as exc:
         raise ImportError(
             "The MCP server requires the 'mcp' dependency group. "
-            "Install with: uv sync --group mcp"
+            "Install with: uv sync --group server --group mcp"
         ) from exc
     config = config or McpConfig.from_env()
     session = ConnectionSession(config)

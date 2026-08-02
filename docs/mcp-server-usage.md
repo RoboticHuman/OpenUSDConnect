@@ -18,7 +18,7 @@ logical layers.
 ## Install
 
 ```bash
-uv sync --group mcp     # installs the official `mcp` SDK alongside pxr
+uv sync --group server --group mcp  # installs pxr and the official MCP SDK
 ```
 
 ## Run
@@ -62,9 +62,10 @@ Flags (CLI) override environment variables override defaults.
 | `OPENUSDCONNECT_PORT` | `--port` | `7200` | Sync server port |
 | `OPENUSDCONNECT_CLIENT_ID` | `--client-id` | `<user>-<host>-mcp` | Client identity |
 | `OPENUSDCONNECT_DEPARTMENT` | `--department` | _(none)_ | Layer-ordering department |
-| `OPENUSDCONNECT_MIRROR` | `--no-mirror` | on | In-memory mirror for introspection |
-| `OPENUSDCONNECT_AUTO_CONNECT` | — | on | Auto-connect on first authoring tool |
-| `OPENUSDCONNECT_AUTO_ANCESTORS` | — | on | Auto-create missing parent prims (as `Xform`) |
+| `OPENUSDCONNECT_MIRROR` | `--mirror` / `--no-mirror` | on | In-memory mirror for introspection |
+| `OPENUSDCONNECT_AUTO_CONNECT` | `--auto-connect` / `--no-auto-connect` | on | Auto-connect on first authoring tool |
+| `OPENUSDCONNECT_AUTO_ANCESTORS` | `--auto-create-ancestors` / `--no-auto-create-ancestors` | on | Auto-create missing parent prims (as `Xform`) |
+| `OPENUSDCONNECT_READ_TIMEOUT` | `--read-after-write-timeout` | `2.0` | Seconds to wait for mirror visibility after a write |
 
 ## Tools
 
