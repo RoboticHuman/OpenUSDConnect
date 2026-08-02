@@ -11,9 +11,9 @@ in Blender, and let the addon configure live sync from metadata.
 - A flattened USD fallback file: `scene.usd`.
 - A composition-aware USD root: `scene.live.usda`.
 - Exported live layers under `_layers/`.
-- A Windows UNC path for file browsers: `\\127.0.0.1@7280\usd\scene.usd`.
-- A no-admin local bridge for normal drive-letter browsing, usually
-  `O:\scene.usd`.
+- A native filesystem mount on Windows or macOS.
+- A write-capable local mirror. It is a normal directory on macOS and Linux,
+  and may also use a drive alias such as `O:\scene.usd` on Windows.
 - A flattened snapshot for non-integrated tools.
 - Blender and Unreal metadata discovery with configurable auto-start for
   receiver/emitter.
@@ -46,25 +46,25 @@ uv run python scripts/build_blender_addon.py
 Then install `dist/usd_connect_blender.zip` from Blender:
 `Edit > Preferences > Add-ons > Install from Disk`.
 
-For Windows UNC paths, the Windows WebClient service must be available and
-allowed to connect to the selected host and port.
+Windows native mounts require the WebClient service. macOS native mounts use
+the system `mount_webdav` client and need no additional package.
 
 ## Start A Live-Open Server
 
-For a complete local workstation session, use the no-admin launcher:
+For a complete local workstation session, use the workstation launcher:
 
-```powershell
-uv run python scripts/start_live_open.py `
-  --base D:\path\to\scene.usda `
-  --drive O: `
-  --open `
-  --force
+```bash
+uv run python scripts/start_live_open.py \
+  --base /path/to/scene.usda \
+  --open
 ```
 
-This starts the sync server, the VFS endpoint, and the local drive bridge.
+This starts the sync server, the VFS endpoint, and a local mirror. On Windows,
+the mirror uses `O:` by default; pass `--drive` to choose another letter. On
+macOS and Linux, the file defaults to `.ouc_live_mount/usd/scene.usd`.
 Stop the recorded session with:
 
-```powershell
+```bash
 uv run python scripts/start_live_open.py stop
 ```
 
@@ -74,12 +74,12 @@ compatibility testing only, pass `--bypass-write-validation` to forward
 
 To run the pieces manually:
 
-```powershell
-uv run openusdconnect-server `
-  --host 127.0.0.1 `
-  --port 7200 `
-  --base D:\path\to\scene.usda `
-  --log D:\path\to\usd_events.db `
+```bash
+uv run openusdconnect-server \
+  --host 127.0.0.1 \
+  --port 7200 \
+  --base /path/to/scene.usda \
+  --log /path/to/usd_events.db \
   --vfs-port 7280
 ```
 
@@ -124,8 +124,8 @@ http://127.0.0.1:7280/usd/scene.usd
 
 This is the flattened fallback file. Browsers, `curl`, and
 `Invoke-WebRequest` can download it for diagnostics or custom launcher flows.
-Do not assume every stock USD runtime can open raw HTTP directly. Use the UNC
-or mounted drive path when an application expects a normal file path.
+Do not assume every stock USD runtime can open raw HTTP directly. Use a native
+mount or local mirror when an application expects a normal file path.
 
 The directory also contains:
 
@@ -136,8 +136,35 @@ http://127.0.0.1:7280/usd/openusdconnect.json
 ```
 
 `scene.live.usda` preserves the live overlay stack and uses the original base
-layer path when the server has one. Use it from UNC when the target USD runtime
-can resolve the companion layer files.
+layer path when the server has one. Use it from a native mount when the target
+USD runtime can resolve the companion layer files.
+
+### macOS Native Mount
+
+The native helper mounts the complete generated VFS tree read-only by default:
+
+```bash
+uv run python scripts/mount_vfs_share.py --port 7280 --open
+```
+
+The default live file is:
+
+```text
+~/.openusdconnect/mounts/usd/scene.usd
+```
+
+Choose a different directory with `--mount-point`. Unmount it with the same
+option:
+
+```bash
+uv run python scripts/mount_vfs_share.py unmount --mount-point /path/to/mount
+```
+
+`--read-write` is available for filesystem diagnostics, but it is not the
+recommended DCC save path. The VFS has a fixed resource tree, while OpenUSD
+normally saves by creating a temporary sibling and renaming it over the target.
+Use the local bridge for saves. Native filesystem caching can also delay a
+reread; integrated clients use live sync after the initial open.
 
 ### Windows UNC Path
 
@@ -162,57 +189,48 @@ Windows **WebClient** service from an elevated PowerShell or from
 Start-Service WebClient
 ```
 
-When WebClient cannot be started, use the no-admin local bridge instead. It
-maps a local folder as a drive with `subst`, keeps `scene.usd` refreshed from
-the VFS, and uploads local saves back through HTTP `PUT`:
-
-```powershell
-uv run python scripts/local_vfs_drive_bridge.py `
-  --url http://127.0.0.1:7280/usd/scene.usd `
-  --mount-dir .ouc_live_mount\usd `
-  --drive O: `
-  --force
-```
-
-Useful bridge options:
-
-```powershell
-uv run python scripts/local_vfs_drive_bridge.py `
-  --url http://127.0.0.1:7280/usd/scene.usd `
-  --mount-dir .ouc_live_mount\usd `
-  --drive O: `
-  --force `
-  --background `
-  --open
-
-uv run python scripts/local_vfs_drive_bridge.py status `
-  --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json
-
-uv run python scripts/local_vfs_drive_bridge.py unmount `
-  --drive O: `
-  --status-file .ouc_live_mount\bridge\openusdconnect_bridge_status.json `
-  --stop-process
-```
-
-The bridge keeps its status JSON and log outside the mounted folder, so the
-drive should only show the virtual USD file contents.
-
-Then open this in Blender or any file picker:
-
-```text
-O:\scene.usd
-```
-
-Unmount it when done:
+Unmount a Windows native mapping when done:
 
 ```powershell
 uv run python scripts/mount_vfs_share.py unmount --drive O:
 ```
 
-For a local bridge drive, use:
+### Write-Capable Local Bridge
 
-```powershell
-uv run python scripts/local_vfs_drive_bridge.py unmount --drive O:
+The local bridge keeps `scene.usd` refreshed in a normal local directory and
+uploads completed saves back through HTTP `PUT`:
+
+```bash
+uv run python scripts/local_vfs_bridge.py \
+  --url http://127.0.0.1:7280/usd/scene.usd \
+  --mirror-dir .ouc_live_mount/usd
+```
+
+Useful bridge options:
+
+```bash
+uv run python scripts/local_vfs_bridge.py \
+  --url http://127.0.0.1:7280/usd/scene.usd \
+  --mirror-dir .ouc_live_mount/usd \
+  --background \
+  --open
+
+uv run python scripts/local_vfs_bridge.py status \
+  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json
+
+uv run python scripts/local_vfs_bridge.py stop \
+  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json \
+  --stop-process
+```
+
+On Windows, add `--drive O:` to expose the mirror through `subst`; this remains
+the default when no drive option is given. Pass `--no-drive` to use only the
+directory. The bridge keeps status and logs outside the mirror.
+
+Open the reported `Live USD file`, for example:
+
+```text
+.ouc_live_mount/usd/scene.usd
 ```
 
 Notes:
@@ -221,7 +239,9 @@ Notes:
 - The server serves USDA text bytes under the `.usd` name.
 - The virtual share contains the flattened snapshot, a live composition root,
   a manifest, and exported layer files.
-- Safe-save patterns that create temp files or rename files are forbidden.
+- Native VFS paths reject creation, deletion, and rename operations. The local
+  bridge accommodates safe-save patterns locally and uploads only the completed
+  managed file.
 - Direct `PUT` writes are forbidden by default, dropped only when
   `--vfs-write-mode drop` is explicitly enabled, or translated when
   `--vfs-write-mode translate` is explicitly enabled.
@@ -240,10 +260,10 @@ path with prim tagging, then let the embedded metadata configure live sync.
 1. Start the server with `--vfs-port`.
 2. In Blender, open the USD Connect sidebar.
 3. Click `Import USD (with prim tagging)`.
-4. Select or paste the UNC path, or choose `O:\scene.usd` after mounting:
+4. Select the local mirror, native mount, or Windows UNC path. For example:
 
 ```text
-\\127.0.0.1@7280\usd\scene.usd
+.ouc_live_mount/usd/scene.usd
 ```
 
 The addon imports the snapshot normally, reads the embedded metadata, sets
@@ -321,16 +341,14 @@ open the snapshot, but they cannot join live sync.
 
 Fetch the snapshot:
 
-```powershell
-Invoke-WebRequest `
-  -Uri http://127.0.0.1:7280/usd/scene.usd `
-  -OutFile $env:TEMP\ouc_scene.usd
+```bash
+curl -o ouc_scene.usd http://127.0.0.1:7280/usd/scene.usd
 ```
 
 Open it with OpenUSD:
 
-```powershell
-uv run python -c "from pxr import Usd; stage = Usd.Stage.Open(r'$env:TEMP\ouc_scene.usd'); print(bool(stage), stage.GetRootLayer().customLayerData.get('openusdconnect'))"
+```bash
+uv run python -c "from pxr import Usd; stage = Usd.Stage.Open('ouc_scene.usd'); print(bool(stage), stage.GetRootLayer().customLayerData.get('openusdconnect'))"
 ```
 
 Validate Windows UNC/WebClient on a workstation:
@@ -339,11 +357,11 @@ Validate Windows UNC/WebClient on a workstation:
 uv run python scripts/check_windows_unc_webdav.py --port 7280
 ```
 
-Preview or create a drive-letter mapping:
+Preview or create the native mount on Windows or macOS:
 
-```powershell
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --print-only
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+```bash
+uv run python scripts/mount_vfs_share.py --port 7280 --print-only
+uv run python scripts/mount_vfs_share.py --port 7280 --open
 ```
 
 Measure snapshot cost on a real or synthetic scene:
@@ -355,7 +373,14 @@ uv run python scripts/bench_vfs_snapshot.py --synthetic-prims 10000
 
 Run the focused tests:
 
-```powershell
-uv run pytest tests/unit/test_vfs.py tests/integration/test_vfs_webdav.py -q
+```bash
+uv run pytest \
+  tests/unit/test_vfs.py \
+  tests/unit/test_vfs_mount.py \
+  tests/unit/test_local_vfs_bridge.py \
+  tests/unit/test_start_live_open.py \
+  tests/integration/test_vfs_webdav.py \
+  tests/integration/test_start_live_open.py \
+  -q
 uv run pytest tests/integration/test_live_discovery.py tests/integration/test_live_open_blender.py -q
 ```
