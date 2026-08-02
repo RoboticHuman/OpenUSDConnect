@@ -1,5 +1,7 @@
 """Tests for server event log compaction."""
 
+import pytest
+
 from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
@@ -43,6 +45,32 @@ def _read_log(server):
 
 
 class TestCompaction:
+    def test_failed_rewrite_preserves_sequence_state(self, tmp_path, monkeypatch):
+        srv = _make_server(tmp_path)
+        _inject_events(
+            srv,
+            [
+                {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+                {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": False},
+                {"k": K_SET_VISIBILITY, "prim": "/World/A", "visible": True},
+            ],
+        )
+        rows_before = srv.store.get_all_asc()
+        token_before = srv.get_snapshot_token()
+        count_before = srv.get_event_count()
+
+        def fail_rewrite(_records):
+            raise RuntimeError("injected compaction failure")
+
+        monkeypatch.setattr(srv.store, "clear_and_rewrite", fail_rewrite)
+
+        with pytest.raises(RuntimeError, match="injected compaction failure"):
+            srv.compact_log()
+
+        assert srv.store.get_all_asc() == rows_before
+        assert srv.get_snapshot_token() == token_before
+        assert srv.get_event_count() == count_before
+
     def test_trs_merged(self, tmp_path):
         """Multiple set_xform_trs for same prim collapse to one with merged fields."""
         srv = _make_server(tmp_path)

@@ -11,8 +11,14 @@ from pxr import Sdf, Usd, UsdLux
 
 from openusdconnect.protocol_constants import PROTOCOL_VERSION
 from openusdconnect.server import UsdSyncServer
-from openusdconnect.server.types import InvalidVfsWriteError, UnsupportedVfsWriteError
+from openusdconnect.server.types import (
+    InvalidVfsWriteError,
+    StaleVfsWriteError,
+    UnsupportedVfsWriteError,
+)
 from openusdconnect.server.vfs import VirtualStageFile, VirtualStageFileSet, WriteMode
+from openusdconnect.server.vfs.provider import VfsSnapshot, VfsStat
+from openusdconnect.server.vfs.webdav import _StageFileResource
 
 
 @pytest.fixture
@@ -173,6 +179,20 @@ def _stage_bytes_with_live_metadata(metadata) -> bytes:
     stage = Usd.Stage.Open(layer)
     stage.DefinePrim("/World", "Xform")
     layer.customLayerData = {"openusdconnect": metadata}
+    return layer.ExportToString().encode("utf-8")
+
+
+def _with_current_live_metadata(srv, data: bytes) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    assert layer.ImportFromString(data.decode("utf-8"))
+    epoch, snapshot_seq = srv.get_snapshot_token()
+    custom_data = dict(layer.customLayerData)
+    custom_data["openusdconnect"] = {
+        "scene_id": srv.scene_id,
+        "epoch": epoch,
+        "snapshot_seq": snapshot_seq,
+    }
+    layer.customLayerData = custom_data
     return layer.ExportToString().encode("utf-8")
 
 
@@ -473,11 +493,14 @@ class TestWriteTranslate:
         )
         assert srv.stage.GetPrimAtPath("/World/Old")
 
-        uploaded = _stage_bytes(
-            [
-                ("/World", "Xform"),
-                ("/World/New", "Sphere"),
-            ]
+        uploaded = _with_current_live_metadata(
+            srv,
+            _stage_bytes(
+                [
+                    ("/World", "Xform"),
+                    ("/World/New", "Sphere"),
+                ]
+            ),
         )
         translate_vfile.write(uploaded)
 
@@ -492,7 +515,10 @@ class TestWriteTranslate:
 
     def test_sink_translates_on_commit(self, srv, translate_vfile):
         sink = translate_vfile.open_write_sink()
-        data = _stage_bytes([("/Fallback", "Xform")])
+        data = _with_current_live_metadata(
+            srv,
+            _stage_bytes([("/Fallback", "Xform")]),
+        )
         sink.write(data[:10])
         sink.write(data[10:])
         translate_vfile.finish_write(sink)
@@ -528,6 +554,8 @@ class TestWriteTranslate:
         count = srv.get_event_count()
 
         with pytest.raises(InvalidVfsWriteError, match=message):
+            if isinstance(metadata, dict):
+                metadata = {"scene_id": srv.scene_id, **metadata}
             translate_vfile.write(_stage_bytes_with_live_metadata(metadata))
 
         assert srv.get_event_count() == count
@@ -544,11 +572,116 @@ class TestWriteTranslate:
         assert srv.get_event_count() == count
         assert translate_vfile_without_validation.read() == before
 
+    def test_missing_live_metadata_is_rejected(self, srv, translate_vfile):
+        before = translate_vfile.read()
+
+        with pytest.raises(InvalidVfsWriteError, match="missing openusdconnect metadata"):
+            translate_vfile.write(_stage_bytes([("/World", "Xform")]))
+
+        assert translate_vfile.read() == before
+
+    def test_wrong_scene_id_is_rejected(self, srv, translate_vfile):
+        epoch, snapshot_seq = srv.get_snapshot_token()
+        data = _stage_bytes_with_live_metadata(
+            {
+                "scene_id": "another-scene",
+                "epoch": epoch,
+                "snapshot_seq": snapshot_seq,
+            }
+        )
+
+        with pytest.raises(InvalidVfsWriteError, match="scene_id does not match"):
+            translate_vfile.write(data)
+
+        assert srv.last_vfs_write_analysis["status"] == "metadata_rejected"
+
+    def test_future_snapshot_token_is_rejected(self, srv, translate_vfile):
+        epoch, snapshot_seq = srv.get_snapshot_token()
+        data = _stage_bytes_with_live_metadata(
+            {
+                "scene_id": srv.scene_id,
+                "epoch": epoch + 1,
+                "snapshot_seq": snapshot_seq,
+            }
+        )
+
+        with pytest.raises(StaleVfsWriteError, match="token does not match"):
+            translate_vfile.write(data)
+
+        assert srv.last_vfs_write_analysis["status"] == "future_rejected"
+
+    def test_stale_rejection_can_be_explicitly_disabled(self, srv, translate_vfile):
+        stale_stage = _open_stage(translate_vfile.read())
+        _send(srv, [{"k": "ensure_prim", "prim": "/Root/Fresh", "typeName": "Xform"}])
+
+        event_count = srv.replace_from_stage_snapshot(stale_stage, reject_stale=False)
+
+        assert event_count > 0
+        assert not srv.stage.GetPrimAtPath("/Root/Fresh")
+        assert "stale snapshot token accepted" in srv.last_vfs_write_analysis["notes"][0]
+
+    def test_persistence_failure_leaves_authoritative_state_intact(
+        self, srv, translate_vfile, monkeypatch
+    ):
+        _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Cube"}])
+        before_bytes = translate_vfile.read()
+        before_rows = srv.store.get_all_asc()
+        before_token = srv.get_snapshot_token()
+
+        uploaded_stage = _open_stage(before_bytes)
+        uploaded_stage.DefinePrim("/After", "Sphere")
+        uploaded = uploaded_stage.GetRootLayer().ExportToString().encode("utf-8")
+
+        def fail_replacement(_records):
+            raise RuntimeError("injected event-store failure")
+
+        monkeypatch.setattr(srv.store, "clear_and_rewrite", fail_replacement)
+
+        with pytest.raises(RuntimeError, match="injected event-store failure"):
+            translate_vfile.write(uploaded)
+
+        assert srv.store.get_all_asc() == before_rows
+        assert srv.get_snapshot_token() == before_token
+        assert srv.stage.GetPrimAtPath("/Before")
+        assert not srv.stage.GetPrimAtPath("/After")
+        assert translate_vfile.read() == before_bytes
+
+    def test_translated_replacement_replays_after_restart(self, tmp_path):
+        db_path = str(tmp_path / "restart.db")
+        server = UsdSyncServer(log_path=db_path)
+        provider_file = VirtualStageFile(
+            server,
+            name="live.usd",
+            advertise_host="127.0.0.1",
+            sync_port=7200,
+            write_mode=WriteMode.TRANSLATE,
+        )
+        try:
+            uploaded_stage = _open_stage(provider_file.read())
+            uploaded_stage.DefinePrim("/Root/AfterRestart", "Sphere")
+
+            event_count = server.replace_from_stage_snapshot(uploaded_stage)
+            assert event_count > 0
+            assert server.store.get_count() == event_count
+        finally:
+            server.shutdown()
+            server.store.close()
+
+        restored = UsdSyncServer(log_path=db_path)
+        try:
+            assert restored.get_event_count() == event_count
+            assert restored.stage.GetPrimAtPath("/Root/AfterRestart")
+        finally:
+            restored.shutdown()
+            restored.store.close()
+
     def test_custom_properties_are_translated(self, srv, translate_vfile):
         _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
         count = srv.get_event_count()
 
-        translate_vfile.write(_stage_bytes_with_custom_properties())
+        translate_vfile.write(
+            _with_current_live_metadata(srv, _stage_bytes_with_custom_properties())
+        )
 
         assert srv.get_event_count() > count
         assert srv.last_vfs_write_analysis["status"] == "translated"
@@ -567,12 +700,14 @@ class TestWriteTranslate:
         _send(srv, [{"k": "ensure_prim", "prim": "/Before", "typeName": "Xform"}])
         count = srv.get_event_count()
 
-        translate_vfile.write(_stage_bytes_with_generic_spec_fields())
+        translate_vfile.write(
+            _with_current_live_metadata(srv, _stage_bytes_with_generic_spec_fields())
+        )
 
         assert srv.get_event_count() > count
         assert srv.last_vfs_write_analysis["status"] == "translated"
         assert srv.edit_layer.defaultPrim == "Before"
-        assert srv.edit_layer.customLayerData == {"pipeline": "test"}
+        assert srv.edit_layer.customLayerData["pipeline"] == "test"
         before = srv.edit_layer.GetPrimAtPath("/Before")
         assert before.documentation == "preserved documentation"
         assert dict(before.customData) == {"department": "layout"}
@@ -582,7 +717,9 @@ class TestWriteTranslate:
         assert typed_over.typeName == "Scope"
 
     def test_local_variant_definitions_are_translated(self, srv, translate_vfile):
-        translate_vfile.write(_stage_bytes_with_local_variant_definition())
+        translate_vfile.write(
+            _with_current_live_metadata(srv, _stage_bytes_with_local_variant_definition())
+        )
 
         assert srv.last_vfs_write_analysis["status"] == "translated"
         assert srv.edit_layer.GetPrimAtPath("/World{look=red}Child").documentation == "red"
@@ -593,14 +730,18 @@ class TestWriteTranslate:
         count = srv.get_event_count()
 
         with pytest.raises(UnsupportedVfsWriteError, match="sublayer topology"):
-            translate_vfile.write(_stage_bytes_with_sublayer())
+            translate_vfile.write(
+                _with_current_live_metadata(srv, _stage_bytes_with_sublayer())
+            )
 
         assert srv.get_event_count() == count
         assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
         assert "sublayer topology" in srv.last_vfs_write_analysis["notes"][0]
 
     def test_supported_api_schema_is_translated(self, srv, translate_vfile):
-        translate_vfile.write(_stage_bytes_with_supported_api_schema())
+        translate_vfile.write(
+            _with_current_live_metadata(srv, _stage_bytes_with_supported_api_schema())
+        )
 
         light = srv.stage.GetPrimAtPath("/World/Light")
         assert light.HasAPI(UsdLux.ShapingAPI)
@@ -629,6 +770,17 @@ class TestWriteTranslate:
         assert dept_srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
         assert "department layers" in dept_srv.last_vfs_write_analysis["notes"][0]
 
+    def test_non_default_collaboration_layers_disable_translate(
+        self, srv, translate_vfile
+    ):
+        with srv.stage_lock:
+            srv.layer_stack.ensure_layer("review")
+
+        with pytest.raises(UnsupportedVfsWriteError, match="non-default collaboration"):
+            translate_vfile.write(translate_vfile.read())
+
+        assert "collaboration layers: review" in srv.last_vfs_write_analysis["notes"][0]
+
     def test_pending_proposals_disable_translate(self, srv, translate_vfile):
         proposal_id = srv.create_proposal("alice", "layout")
         count = srv.get_event_count()
@@ -639,3 +791,49 @@ class TestWriteTranslate:
         assert srv.get_event_count() == count
         assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
         assert proposal_id in srv.last_vfs_write_analysis["notes"][0]
+
+
+class TestDavResourceLifecycle:
+    def test_read_metadata_and_content_use_one_pinned_snapshot(self):
+        class ChangingFile:
+            name = "scene.usd"
+
+            def __init__(self):
+                self.calls = 0
+                self.current = VfsSnapshot(
+                    data=b"old",
+                    stat=VfsStat(size=3, mtime=10.0, etag='"1-2"'),
+                )
+
+            def snapshot(self):
+                self.calls += 1
+                return self.current
+
+        provider_file = ChangingFile()
+        resource = object.__new__(_StageFileResource)
+        resource._file = provider_file
+        resource._snapshot = None
+
+        assert resource.get_content_length() == 3
+        provider_file.current = VfsSnapshot(
+            data=b"new-content",
+            stat=VfsStat(size=11, mtime=20.0, etag='"1-3"'),
+        )
+
+        assert resource.get_content().read() == b"old"
+        assert resource.get_etag() == "1-2"
+        assert resource.get_last_modified() == 10.0
+        assert provider_file.calls == 1
+
+    def test_aborted_translate_write_disposes_spooled_sink(self, srv, translate_vfile):
+        sink = translate_vfile.open_write_sink()
+        sink.write(b"partial upload")
+        resource = object.__new__(_StageFileResource)
+        resource._file = translate_vfile
+        resource._sink = sink
+        resource._snapshot = None
+
+        resource.end_write(with_errors=True)
+
+        assert sink._file.closed
+        assert srv.get_event_count() == 0

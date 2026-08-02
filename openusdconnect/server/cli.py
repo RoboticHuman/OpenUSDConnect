@@ -1,7 +1,7 @@
 """Command-line entry point for the OpenUSDConnect sync server.
 
 Usage:
-    python -m openusdconnect.server --port 7200 --base test_scene.usda --log events.db
+    python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log events.db
 """
 
 from __future__ import annotations
@@ -16,6 +16,37 @@ from dataclasses import dataclass
 
 from pxr import Ar
 
+from ..cli_common import (
+    add_hidden_aliases,
+    add_sync_endpoint_args,
+    add_vfs_resource_args,
+    comma_separated,
+    file_name,
+    nonnegative_float,
+    nonnegative_int,
+    nonnegative_seconds,
+    path_segment,
+    port_number,
+    positive_int,
+    validate_file_name,
+    validate_path_segment,
+)
+from ..defaults import (
+    DEFAULT_EVENT_LOG,
+    DEFAULT_HOST,
+    DEFAULT_SYNC_PORT,
+    DEFAULT_VFS_LAYER_DIR,
+    DEFAULT_VFS_MANIFEST_NAME,
+    DEFAULT_VFS_NAME,
+    DEFAULT_VFS_SHARE,
+    VFS_WRITE_MODES,
+)
+from ..defaults import (
+    advertise_host_for_bind as _default_advertise_host,
+)
+from ..defaults import (
+    host_for_url as _host_for_url,
+)
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
 
@@ -28,11 +59,11 @@ class VfsConfig:
 
     port: int
     host: str | None = None
-    share: str = "usd"
-    name: str = "scene.usd"
+    share: str = DEFAULT_VFS_SHARE
+    name: str = DEFAULT_VFS_NAME
     live_name: str | None = None
-    layer_dir: str = "_layers"
-    manifest_name: str = "openusdconnect.json"
+    layer_dir: str = DEFAULT_VFS_LAYER_DIR
+    manifest_name: str = DEFAULT_VFS_MANIFEST_NAME
     write_mode: str = "forbid"
     validate_writes: bool = True
     prewarm: bool = True
@@ -43,11 +74,11 @@ class VfsConfig:
 class ServerConfig:
     """Runtime configuration for the sync server and optional services."""
 
-    host: str = "127.0.0.1"
-    port: int = 7200
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_SYNC_PORT
     base_usd_path: str | None = None
     resolver_context: Ar.ResolverContext | None = None
-    log_path: str = "usd_events.db"
+    log_path: str = DEFAULT_EVENT_LOG
     compact: bool = False
     export_diff: str | None = None
     dashboard_port: int | None = None
@@ -64,32 +95,18 @@ class ServerConfig:
     vfs: VfsConfig | None = None
 
 
-def _default_advertise_host(bind_host: str) -> str:
-    if bind_host in ("", "0.0.0.0", "::"):
-        return "127.0.0.1"
-    return bind_host
-
-
-def _host_for_url(host: str) -> str:
-    return f"[{host}]" if ":" in host and not host.startswith("[") else host
-
-
 def _normalize_vfs_share(share: str) -> str:
-    normalized = share.strip("/")
-    if (
-        not normalized
-        or normalized in (".", "..")
-        or "/" in normalized
-        or "\\" in normalized
-    ):
-        raise ValueError("--vfs-share must be a single non-empty path segment")
-    return normalized
+    try:
+        return validate_path_segment(share)
+    except ValueError as exc:
+        raise ValueError(f"--vfs-share {exc}") from exc
 
 
 def _validate_vfs_name(name: str) -> str:
-    if not name or name in (".", "..") or "/" in name or "\\" in name:
-        raise ValueError("--vfs-name must be a single file name, not a path")
-    return name
+    try:
+        return validate_file_name(name)
+    except ValueError as exc:
+        raise ValueError(f"--vfs-name {exc}") from exc
 
 
 def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | None:
@@ -247,11 +264,16 @@ def run_server(config: ServerConfig | None = None):
 
 def main(argv: list[str] | None = None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
-    ap = argparse.ArgumentParser(description="OpenUSDConnect sync server")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=7200)
-    ap.add_argument("--base", default=None, help="Base USD file to load")
-    ap.add_argument(
+    ap = argparse.ArgumentParser(
+        prog="openusdconnect-server",
+        description="OpenUSDConnect sync server",
+    )
+    endpoint = ap.add_argument_group("sync endpoint")
+    add_sync_endpoint_args(endpoint)
+
+    scene = ap.add_argument_group("scene and persistence")
+    scene.add_argument("--base", default=None, help="Base USD file to load")
+    scene.add_argument(
         "--resolver-context",
         action="append",
         default=None,
@@ -261,147 +283,139 @@ def main(argv: list[str] | None = None):
             "May be specified more than once for multiple resolvers."
         ),
     )
-    ap.add_argument("--log", default="usd_events.db", help="SQLite event log file path")
-    ap.add_argument("--compact", action="store_true", help="Compact event log on startup")
-    ap.add_argument(
+    scene.add_argument(
+        "--event-log",
+        dest="event_log",
+        default=DEFAULT_EVENT_LOG,
+        help="SQLite event log file path",
+    )
+    add_hidden_aliases(ap, ["--log"], dest="event_log")
+    scene.add_argument("--compact", action="store_true", help="Compact event log on startup")
+    scene.add_argument(
         "--export-diff",
         default=None,
         metavar="PATH",
         help="Export the override layer as USDA on shutdown",
     )
-    ap.add_argument(
-        "--dashboard",
-        type=int,
+    services = ap.add_argument_group("services")
+    services.add_argument(
+        "--dashboard-port",
+        dest="dashboard_port",
+        type=port_number,
         default=None,
         metavar="PORT",
-        help="Start admin dashboard on this port (e.g. --dashboard 8080)",
+        help="Start the admin dashboard on this port",
     )
-    ap.add_argument(
+    add_hidden_aliases(ap, ["--dashboard"], dest="dashboard_port", type=port_number)
+
+    limits = ap.add_argument_group("limits and maintenance")
+    limits.add_argument(
         "--op-cache-size",
-        type=int,
+        type=positive_int,
         default=None,
         metavar="N",
         help=f"Max xform op cache entries (default: {UsdSyncServer.DEFAULT_OP_CACHE_SIZE})",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--departments",
+        type=comma_separated,
         default=None,
         metavar="LIST",
         help="Comma-separated department priority (strongest first). "
         "Enables per-client layer ordering by department. "
         "Example: --departments lighting,fx,animation,layout",
     )
-    ap.add_argument(
+    services.add_argument(
         "--require-token",
         action="store_true",
         help="Enable TOFU token authentication. Clients are issued a token "
         "on first connect and must present it on reconnect.",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--durability",
         choices=["strict", "realtime"],
         default="strict",
         help="strict: persist to DB before broadcast (no lost events). "
         "realtime: broadcast first, persist async (lower latency).",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--max-connections",
-        type=int,
+        type=positive_int,
         default=None,
         metavar="N",
         help=f"Max concurrent client connections (default: {ThreadedTCPServer.MAX_WORKERS})",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--txn-rate",
-        type=float,
+        type=nonnegative_float,
         default=0,
         metavar="N",
         help="Max transactions per second per client (0 = unlimited, default: 0)",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--txn-burst",
-        type=int,
+        type=nonnegative_int,
         default=0,
         metavar="N",
         help="Max burst size for transaction rate limiter (default: 0 = disabled)",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--wire-metrics",
         action="store_true",
         help="Track encoded record bytes per event kind (off by default; "
         "exposed via the dashboard /api/wire-metrics endpoint)",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--compact-interval",
-        type=float,
+        type=nonnegative_seconds,
         default=0,
         metavar="SECONDS",
         help="Compact the event log every SECONDS (0 = disabled, default). "
         "Skips when no events arrived since the last compaction. "
         "Adjustable at runtime via the dashboard.",
     )
-    ap.add_argument(
+    limits.add_argument(
         "--reclaim-interval",
-        type=float,
+        type=nonnegative_seconds,
         default=0,
         metavar="SECONDS",
         help="Reclaim event log disk space (VACUUM on the SQLite backend) "
         "at most every SECONDS, at compaction/purge commits "
         "(0 = disabled, default). Pair with --compact-interval.",
     )
-    ap.add_argument(
-        "--vfs-port",
-        type=int,
-        default=None,
-        metavar="PORT",
-        help="Start a WebDAV virtual USD file endpoint on this port",
-    )
-    ap.add_argument(
-        "--vfs-host",
-        default=None,
-        metavar="HOST",
-        help="Host/interface for the WebDAV endpoint (default: same as --host)",
-    )
-    ap.add_argument(
-        "--vfs-share",
-        default="usd",
-        metavar="NAME",
-        help="WebDAV share/collection name (default: usd)",
-    )
-    ap.add_argument(
-        "--vfs-name",
-        default="scene.usd",
-        metavar="FILE",
-        help="Virtual USD filename to expose (default: scene.usd)",
-    )
-    ap.add_argument(
+    vfs_group = ap.add_argument_group("virtual file service")
+    add_vfs_resource_args(vfs_group, host_default=None, port_default=None)
+    vfs_group.add_argument(
         "--vfs-live-name",
+        type=file_name,
         default=None,
         metavar="FILE",
         help="Composition-aware virtual USD root (default: <vfs-name-stem>.live.usda)",
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--vfs-layer-dir",
-        default="_layers",
+        type=path_segment,
+        default=DEFAULT_VFS_LAYER_DIR,
         metavar="NAME",
         help="Virtual directory containing exported live layers (default: _layers)",
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--vfs-manifest-name",
-        default="openusdconnect.json",
+        type=file_name,
+        default=DEFAULT_VFS_MANIFEST_NAME,
         metavar="FILE",
         help="Virtual manifest filename (default: openusdconnect.json)",
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--vfs-write-mode",
-        choices=["forbid", "drop", "translate"],
+        choices=VFS_WRITE_MODES,
         default="forbid",
         help=(
             "How WebDAV PUT writes are handled: forbid with 403, accept/drop, "
             "or translate full-file USD saves into live events"
         ),
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--vfs-bypass-write-validation",
         action="store_true",
         help=(
@@ -409,19 +423,18 @@ def main(argv: list[str] | None = None):
             "Drop mode never validates because writes are discarded."
         ),
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--no-vfs-prewarm",
         action="store_true",
         help="Do not pre-generate VFS snapshots in the background on startup",
     )
-    ap.add_argument(
+    vfs_group.add_argument(
         "--advertise-host",
         default=None,
         metavar="HOST",
         help="Host embedded in live metadata (default: bind host, or 127.0.0.1 for all interfaces)",
     )
     args = ap.parse_args(argv)
-    dept_list = args.departments.split(",") if args.departments else None
     vfs = (
         VfsConfig(
             port=args.vfs_port,
@@ -445,12 +458,12 @@ def main(argv: list[str] | None = None):
             port=args.port,
             base_usd_path=args.base,
             resolver_context=_create_resolver_context(args.resolver_context),
-            log_path=args.log,
+            log_path=args.event_log,
             compact=args.compact,
             export_diff=args.export_diff,
-            dashboard_port=args.dashboard,
+            dashboard_port=args.dashboard_port,
             op_cache_size=args.op_cache_size,
-            department_priority=dept_list,
+            department_priority=args.departments,
             require_token=args.require_token,
             durability=args.durability,
             max_connections=args.max_connections,

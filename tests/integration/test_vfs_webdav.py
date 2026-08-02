@@ -222,6 +222,20 @@ def _stage_bytes_with_prim_metadata() -> bytes:
     return layer.ExportToString().encode("utf-8")
 
 
+def _with_current_live_metadata(srv, data: bytes) -> bytes:
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    assert layer.ImportFromString(data.decode("utf-8"))
+    epoch, snapshot_seq = srv.get_snapshot_token()
+    custom_data = dict(layer.customLayerData)
+    custom_data["openusdconnect"] = {
+        "scene_id": srv.scene_id,
+        "epoch": epoch,
+        "snapshot_seq": snapshot_seq,
+    }
+    layer.customLayerData = custom_data
+    return layer.ExportToString().encode("utf-8")
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -496,11 +510,14 @@ class TestWriteDrop:
         records = []
         srv.add_event_listener(records.append)
 
-        body = _stage_bytes(
-            [
-                ("/World", "Xform"),
-                ("/World/New", "Sphere"),
-            ]
+        body = _with_current_live_metadata(
+            srv,
+            _stage_bytes(
+                [
+                    ("/World", "Xform"),
+                    ("/World/New", "Sphere"),
+                ]
+            ),
         )
         status, _, _ = client.put(_file_path(), body)
         assert 200 <= status < 300
@@ -592,7 +609,13 @@ class TestWriteDrop:
 
         status, _, _ = client.put(
             _file_path(),
-            _stage_bytes_with_live_metadata({"epoch": "invalid", "snapshot_seq": 0}),
+            _stage_bytes_with_live_metadata(
+                {
+                    "scene_id": srv.scene_id,
+                    "epoch": "invalid",
+                    "snapshot_seq": 0,
+                }
+            ),
         )
 
         assert status == 409
@@ -611,7 +634,10 @@ class TestWriteDrop:
             ],
         )
 
-        body = _stage_bytes([("/Other", "Xform")])
+        body = _with_current_live_metadata(
+            srv,
+            _stage_bytes([("/Other", "Xform")]),
+        )
         status, _, _ = client.put(_file_path(), body)
         assert status == 409
 
@@ -635,7 +661,10 @@ class TestWriteDrop:
         _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
         before_count = srv.get_event_count()
 
-        status, _, _ = client.put(_file_path(), _stage_bytes_with_custom_property())
+        status, _, _ = client.put(
+            _file_path(),
+            _with_current_live_metadata(srv, _stage_bytes_with_custom_property()),
+        )
         assert status == 204
 
         assert srv.get_event_count() > before_count
@@ -651,7 +680,7 @@ class TestWriteDrop:
 
         status, _, _ = client.put(
             _file_path(),
-            _stage_bytes_with_prim_metadata(),
+            _with_current_live_metadata(srv, _stage_bytes_with_prim_metadata()),
         )
         assert status == 204
 
