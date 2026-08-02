@@ -31,7 +31,6 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from openusdconnect.cli_common import (
-    add_hidden_aliases,
     add_sync_endpoint_args,
     add_vfs_resource_args,
     port_or_zero,
@@ -349,7 +348,7 @@ def _stop_pid(pid: int) -> None:
 
 def _build_start_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     endpoint = parser.add_argument_group("sync endpoint")
     add_sync_endpoint_args(endpoint)
     scene = parser.add_argument_group("scene and local files")
@@ -371,17 +370,10 @@ def _build_start_parser(*, is_windows: bool | None = None) -> argparse.ArgumentP
         default="translate",
         help="How saves to the virtual USD file are handled",
     )
-    add_hidden_aliases(parser, ["--write-mode"], dest="vfs_write_mode", choices=VFS_WRITE_MODES)
     vfs.add_argument(
         "--vfs-bypass-write-validation",
         action="store_true",
         help="Let translate write fallback accept and drop invalid USD bytes.",
-    )
-    add_hidden_aliases(
-        parser,
-        ["--bypass-write-validation"],
-        dest="vfs_bypass_write_validation",
-        action="store_true",
     )
     services = parser.add_argument_group("services and startup")
     services.add_argument(
@@ -391,7 +383,6 @@ def _build_start_parser(*, is_windows: bool | None = None) -> argparse.ArgumentP
         metavar="PORT",
         help="Start the admin dashboard on this port (0 disables it)",
     )
-    add_hidden_aliases(parser, ["--dashboard"], dest="dashboard_port", type=port_or_zero)
     services.add_argument("--open", action="store_true", help="Open the local exposure")
     services.add_argument(
         "--startup-timeout",
@@ -399,12 +390,6 @@ def _build_start_parser(*, is_windows: bool | None = None) -> argparse.ArgumentP
         default=DEFAULT_STARTUP_TIMEOUT,
         metavar="SECONDS",
         help="Seconds to wait for the server and bridge",
-    )
-    add_hidden_aliases(
-        parser,
-        ["--wait"],
-        dest="startup_timeout",
-        type=positive_seconds,
     )
     if is_windows:
         exposure = parser.add_mutually_exclusive_group()
@@ -592,7 +577,10 @@ def _run_start_claimed(config: LiveOpenConfig) -> int:
 
 def _build_stop_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description="Stop a live-open session")
+    parser = argparse.ArgumentParser(
+        description="Stop a live-open session",
+        allow_abbrev=False,
+    )
     parser.add_argument("--state-file", default=DEFAULT_SESSION_STATE_FILE)
     if is_windows:
         parser.add_argument("--drive", default="", help="Drive alias if state is unavailable")

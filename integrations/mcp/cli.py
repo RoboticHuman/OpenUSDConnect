@@ -84,10 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    try:
-        config = McpConfig.from_env().merge_args(args)
-    except ValueError as exc:
-        parser.error(str(exc))
+    config = McpConfig.from_env().merge_args(args)
     try:
         server = build_server(config)
     except ImportError as exc:

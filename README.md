@@ -139,10 +139,9 @@ uv run openusdconnect-server --port 7200 --base scene.usda \
 CLI naming follows the endpoint being configured: dedicated tools use
 `--host`/`--port`, while combined launchers qualify the WebDAV endpoint as
 `--vfs-host`/`--vfs-port`/`--vfs-share`/`--vfs-name`. Persistence and optional
-services use `--event-log` and `--dashboard-port`. Older spellings remain
-accepted for compatibility but are omitted from `--help`.
-See [Command-Line Reference](docs/cli-reference.md) for the command inventory,
-dependency groups, and compatibility aliases.
+services use `--event-log` and `--dashboard-port`.
+See [Command-Line Reference](docs/cli-reference.md) for the command inventory
+and dependency groups.
 
 Department assignment is server policy built on a logical collaboration-layer
 contract. Each authored opinion carries an opaque, portable `layer_key`, while

@@ -410,7 +410,7 @@ class TestRead:
                 [
                     sys.executable,
                     str(BRIDGE_SCRIPT),
-                    "--url",
+                    "--vfs-url",
                     f"http://{client.host}:{client.port}{_file_path()}",
                     "--mirror-dir",
                     str(mirror_dir),
@@ -418,7 +418,7 @@ class TestRead:
                     str(status_file),
                     "--log-file",
                     str(log_file),
-                    "--poll",
+                    "--poll-interval",
                     "0.02",
                     *_local_directory_args(),
                     "--background",
@@ -544,13 +544,13 @@ class TestWriteDrop:
         command = [
             sys.executable,
             str(BRIDGE_SCRIPT),
-            "--url",
+            "--vfs-url",
             f"http://{client.host}:{client.port}{_file_path()}",
             "--mirror-dir",
             str(mirror_dir),
             "--status-file",
             str(status_file),
-            "--poll",
+            "--poll-interval",
             "0.02",
             *_local_directory_args(),
         ]

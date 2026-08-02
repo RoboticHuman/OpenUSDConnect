@@ -30,7 +30,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from openusdconnect.cli_common import (
-    add_hidden_aliases,
     nonnegative_seconds,
     positive_seconds,
 )
@@ -750,13 +749,12 @@ def _maybe_open(path: str) -> None:
 
 def _build_run_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
         "--vfs-url",
         default=vfs_url(DEFAULT_HOST, DEFAULT_VFS_PORT, DEFAULT_VFS_SHARE, DEFAULT_VFS_NAME),
         help="HTTP URL of the virtual USD file",
     )
-    add_hidden_aliases(parser, ["--url"], dest="vfs_url")
     parser.add_argument("--mirror-dir", default=DEFAULT_MIRROR_DIR)
     parser.add_argument(
         "--poll-interval",
@@ -765,24 +763,12 @@ def _build_run_parser(*, is_windows: bool | None = None) -> argparse.ArgumentPar
         metavar="SECONDS",
         help="Seconds between local and remote change checks",
     )
-    add_hidden_aliases(
-        parser,
-        ["--poll"],
-        dest="poll_interval",
-        type=positive_seconds,
-    )
     parser.add_argument(
         "--settle-time",
         type=nonnegative_seconds,
         default=DEFAULT_BRIDGE_SETTLE_TIME,
         metavar="SECONDS",
         help="Seconds a changed file must remain stable before upload",
-    )
-    add_hidden_aliases(
-        parser,
-        ["--settle"],
-        dest="settle_time",
-        type=nonnegative_seconds,
     )
     parser.add_argument("--once", action="store_true", help="Seed and expose once, then exit")
     parser.add_argument("--background", action="store_true", help="Start a detached bridge process")
@@ -847,7 +833,10 @@ def _parse_bridge_config(
 
 def _build_stop_parser(*, is_windows: bool | None = None) -> argparse.ArgumentParser:
     is_windows = _is_windows() if is_windows is None else is_windows
-    parser = argparse.ArgumentParser(description="Stop a local VFS bridge")
+    parser = argparse.ArgumentParser(
+        description="Stop a local VFS bridge",
+        allow_abbrev=False,
+    )
     parser.add_argument("--pid", type=int, default=0, help="Bridge PID if no status is available")
     parser.add_argument("--status-file", default="")
     parser.add_argument("--stop-process", action="store_true")
@@ -971,7 +960,10 @@ def _run_stop(config: StopConfig) -> int:
 
 
 def _run_status(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Print local VFS bridge status JSON")
+    parser = argparse.ArgumentParser(
+        description="Print local VFS bridge status JSON",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "--status-file",
         default=DEFAULT_BRIDGE_STATUS_FILE,

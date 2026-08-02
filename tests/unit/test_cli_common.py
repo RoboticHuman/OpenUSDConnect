@@ -5,7 +5,6 @@ import argparse
 import pytest
 
 from openusdconnect.cli_common import (
-    add_hidden_aliases,
     add_sync_endpoint_args,
     add_vfs_resource_args,
     comma_separated,
@@ -69,12 +68,3 @@ def test_path_segment_rejects_non_segment_values(value):
 def test_file_name_rejects_paths(value):
     with pytest.raises(argparse.ArgumentTypeError):
         file_name(value)
-
-
-def test_hidden_alias_overrides_canonical_destination_without_appearing_in_help():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--event-log", dest="event_log", default="events.db")
-    add_hidden_aliases(parser, ["--log"], dest="event_log")
-
-    assert parser.parse_args(["--log", "legacy.db"]).event_log == "legacy.db"
-    assert "--log" not in parser.format_help()

@@ -53,16 +53,3 @@ are rejected during argument parsing.
 Benchmark, stress, and DCC bootstrap scripts under `scripts/` are developer
 helpers used by these workflows or their tests; they are not additional server
 entry points.
-
-## Compatibility Aliases
-
-Older spellings remain accepted but are hidden from `--help`:
-
-| Tool | Compatibility aliases |
-| --- | --- |
-| Server | `--log`, `--dashboard` |
-| Live-open launcher | `--write-mode`, `--bypass-write-validation`, `--dashboard`, `--wait` |
-| Local bridge | `--url`, `--poll`, `--settle` |
-| Blender debug launcher | `--server-host`, `--server-port`, `--base-usd`, `--log-path` |
-
-New examples and automation should use the canonical options.

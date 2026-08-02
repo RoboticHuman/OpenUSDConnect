@@ -20,9 +20,7 @@ import subprocess
 import time
 
 from openusdconnect.cli_common import (
-    add_hidden_aliases,
     add_sync_endpoint_args,
-    port_number,
     port_or_zero,
 )
 from openusdconnect.defaults import DEFAULT_EVENT_LOG
@@ -134,11 +132,12 @@ def _start_blender(blender_exe: str, role: str, host: str, port: int,
 
 
 def main(argv: list[str] | None = None):
-    ap = argparse.ArgumentParser(description="Launch USD Connect debug session")
+    ap = argparse.ArgumentParser(
+        description="Launch USD Connect debug session",
+        allow_abbrev=False,
+    )
     endpoint = ap.add_argument_group("sync endpoint")
     add_sync_endpoint_args(endpoint)
-    add_hidden_aliases(ap, ["--server-host"], dest="host")
-    add_hidden_aliases(ap, ["--server-port"], dest="port", type=port_number)
     ap.add_argument("--two-blenders", action="store_true")
     ap.add_argument("--start-emitter", action="store_true")
     ap.add_argument("--start-receiver", action="store_true")
@@ -151,9 +150,7 @@ def main(argv: list[str] | None = None):
                     help="Skip starting the server (connect to an existing one)")
     ap.add_argument("--blender-exe", default="")
     ap.add_argument("--base", default="")
-    add_hidden_aliases(ap, ["--base-usd"], dest="base")
     ap.add_argument("--event-log", default="")
-    add_hidden_aliases(ap, ["--log-path"], dest="event_log")
     args = ap.parse_args(argv)
 
     base_usd = args.base or str(REPO_ROOT / "test_scene.usda")

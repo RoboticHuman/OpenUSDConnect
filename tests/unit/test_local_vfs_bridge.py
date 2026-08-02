@@ -339,7 +339,7 @@ def test_bridge_parser_builds_typed_platform_exposure_configs(tmp_path):
     assert drive.exposure.release_on_exit is True
 
 
-def test_bridge_parser_uses_canonical_names_and_accepts_legacy_aliases(tmp_path):
+def test_bridge_parser_uses_canonical_names(tmp_path):
     bridge = _load_bridge()
     canonical = bridge._parse_bridge_config(
         [
@@ -354,26 +354,22 @@ def test_bridge_parser_uses_canonical_names_and_accepts_legacy_aliases(tmp_path)
         ],
         is_windows=False,
     )
-    legacy = bridge._parse_bridge_config(
-        [
-            "--url",
-            "http://localhost/live.usd",
-            "--mirror-dir",
-            str(tmp_path),
-            "--poll",
-            "0.25",
-            "--settle",
-            "0.75",
-        ],
-        is_windows=False,
-    )
+    assert canonical.vfs_url == "http://localhost/live.usd"
+    assert canonical.poll_interval == 0.25
+    assert canonical.settle_time == 0.75
 
-    assert canonical.vfs_url == legacy.vfs_url == "http://localhost/live.usd"
-    assert canonical.poll_interval == legacy.poll_interval == 0.25
-    assert canonical.settle_time == legacy.settle_time == 0.75
-    help_text = bridge._build_run_parser(is_windows=False).format_help()
-    for legacy_option in ("--url ", "--poll ", "--settle "):
-        assert legacy_option not in help_text
+
+@pytest.mark.parametrize("alias", ["--url", "--poll", "--settle"])
+def test_bridge_parser_rejects_removed_aliases(tmp_path, alias):
+    bridge = _load_bridge()
+
+    with pytest.raises(SystemExit) as error:
+        bridge._parse_bridge_config(
+            ["--mirror-dir", str(tmp_path), alias, "1"],
+            is_windows=False,
+        )
+
+    assert error.value.code == 2
 
 
 def test_windows_exposure_uses_subst(tmp_path, monkeypatch):

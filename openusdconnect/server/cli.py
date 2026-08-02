@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pxr import Ar
 
 from ..cli_common import (
-    add_hidden_aliases,
     add_sync_endpoint_args,
     add_vfs_resource_args,
     comma_separated,
@@ -267,6 +266,7 @@ def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(
         prog="openusdconnect-server",
         description="OpenUSDConnect sync server",
+        allow_abbrev=False,
     )
     endpoint = ap.add_argument_group("sync endpoint")
     add_sync_endpoint_args(endpoint)
@@ -289,7 +289,6 @@ def main(argv: list[str] | None = None):
         default=DEFAULT_EVENT_LOG,
         help="SQLite event log file path",
     )
-    add_hidden_aliases(ap, ["--log"], dest="event_log")
     scene.add_argument("--compact", action="store_true", help="Compact event log on startup")
     scene.add_argument(
         "--export-diff",
@@ -306,7 +305,6 @@ def main(argv: list[str] | None = None):
         metavar="PORT",
         help="Start the admin dashboard on this port",
     )
-    add_hidden_aliases(ap, ["--dashboard"], dest="dashboard_port", type=port_number)
 
     limits = ap.add_argument_group("limits and maintenance")
     limits.add_argument(

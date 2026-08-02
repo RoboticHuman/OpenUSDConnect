@@ -93,7 +93,7 @@ def test_start_parser_builds_typed_platform_exposure_configs(tmp_path):
     assert drive.exposure.force is True
 
 
-def test_start_parser_uses_canonical_names_and_accepts_legacy_aliases(tmp_path):
+def test_start_parser_uses_canonical_names(tmp_path):
     launcher = _load_launcher()
     base = str(tmp_path / "base.usda")
 
@@ -116,31 +116,30 @@ def test_start_parser_uses_canonical_names_and_accepts_legacy_aliases(tmp_path):
         ],
         is_windows=False,
     )
-    legacy = launcher._parse_start_config(
-        [
-            "--base",
-            base,
-            "--write-mode",
-            "drop",
-            "--dashboard",
-            "8080",
-            "--wait",
-            "3",
-        ],
-        is_windows=False,
-    )
-
     assert (canonical.vfs_host, canonical.vfs_share, canonical.vfs_name) == (
         "0.0.0.0",
         "shots",
         "live.usd",
     )
-    assert canonical.vfs_write_mode == legacy.vfs_write_mode == "drop"
-    assert canonical.dashboard_port == legacy.dashboard_port == 8080
-    assert canonical.startup_timeout == legacy.startup_timeout == 3.0
-    help_text = launcher._build_start_parser(is_windows=False).format_help()
-    for legacy_option in ("--write-mode", "--dashboard ", "--wait "):
-        assert legacy_option not in help_text
+    assert canonical.vfs_write_mode == "drop"
+    assert canonical.dashboard_port == 8080
+    assert canonical.startup_timeout == 3.0
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["--write-mode", "--bypass-write-validation", "--dashboard", "--wait"],
+)
+def test_start_parser_rejects_removed_aliases(tmp_path, alias):
+    launcher = _load_launcher()
+    args = ["--base", str(tmp_path / "base.usda"), alias]
+    if alias != "--bypass-write-validation":
+        args.append("1")
+
+    with pytest.raises(SystemExit) as error:
+        launcher._parse_start_config(args, is_windows=False)
+
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize(

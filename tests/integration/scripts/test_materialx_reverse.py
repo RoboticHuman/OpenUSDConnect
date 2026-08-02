@@ -68,7 +68,7 @@ def start_server():
     # Use cmd /c to detach from Blender's env so pxr DLLs resolve correctly.
     _server_proc = subprocess.Popen(
         ["cmd", "/c", "uv", "run", "python", "-m", "openusdconnect.server",
-         "--host", SERVER_HOST, "--port", str(SERVER_PORT), "--log", DB_PATH],
+         "--host", SERVER_HOST, "--port", str(SERVER_PORT), "--event-log", DB_PATH],
         cwd=PROJECT_ROOT,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
         stdout=subprocess.DEVNULL,

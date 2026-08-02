@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
 
 from .defaults import (
     DEFAULT_HOST,
@@ -266,22 +265,4 @@ def add_vfs_resource_args(
         default=name_default,
         metavar="FILE",
         help="Virtual USD filename",
-    )
-
-
-def add_hidden_aliases(
-    parser,
-    aliases: Sequence[str],
-    *,
-    dest: str,
-    **kwargs,
-) -> None:
-    """Accept deprecated option spellings without advertising them in help."""
-
-    parser.add_argument(
-        *aliases,
-        dest=dest,
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
-        **kwargs,
     )
