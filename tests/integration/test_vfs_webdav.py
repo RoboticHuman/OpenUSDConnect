@@ -8,9 +8,13 @@ service itself, so it runs on any platform/CI.
 
 import http.client
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from pxr import Sdf, Usd
@@ -27,6 +31,12 @@ from openusdconnect.server.vfs.webdav import run_vfs_server  # noqa: E402
 
 SHARE = "usd"
 FILE_NAME = "live.usd"
+ROOT = Path(__file__).parents[2]
+BRIDGE_SCRIPT = ROOT / "scripts" / "local_vfs_bridge.py"
+
+
+def _local_directory_args() -> list[str]:
+    return ["--no-drive"] if os.name == "nt" else []
 
 
 class DavClient:
@@ -228,6 +238,13 @@ def _wait_until(predicate, timeout=5.0):
     return predicate()
 
 
+def _read_status(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 class TestDavCompliance:
     def test_options_advertises_class2(self, vfs):
         _, client = vfs
@@ -359,6 +376,68 @@ class TestRead:
         assert results[0][0] == results[1][0] == 200
         assert results[0][2] == results[1][2]
 
+    def test_local_bridge_background_lifecycle(self, vfs, tmp_path):
+        _, client = vfs
+        mirror_dir = tmp_path / "mirror"
+        status_file = tmp_path / "bridge-status.json"
+        log_file = tmp_path / "bridge.log"
+        stop = [
+            sys.executable,
+            str(BRIDGE_SCRIPT),
+            "stop",
+            "--status-file",
+            str(status_file),
+            "--stop-process",
+        ]
+
+        stopped = False
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(BRIDGE_SCRIPT),
+                    "--url",
+                    f"http://{client.host}:{client.port}{_file_path()}",
+                    "--mirror-dir",
+                    str(mirror_dir),
+                    "--status-file",
+                    str(status_file),
+                    "--log-file",
+                    str(log_file),
+                    "--poll",
+                    "0.02",
+                    *_local_directory_args(),
+                    "--background",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert _wait_until(lambda: _read_status(status_file).get("state") == "running")
+            assert (mirror_dir / FILE_NAME).is_file()
+
+            result = subprocess.run(
+                stop,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            stopped = True
+            assert _read_status(status_file)["state"] == "stopped"
+        finally:
+            if status_file.exists() and not stopped:
+                subprocess.run(
+                    stop,
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
 
 class TestWriteDrop:
     def test_put_forbidden_by_default(self, vfs):
@@ -417,10 +496,12 @@ class TestWriteDrop:
         records = []
         srv.add_event_listener(records.append)
 
-        body = _stage_bytes([
-            ("/World", "Xform"),
-            ("/World/New", "Sphere"),
-        ])
+        body = _stage_bytes(
+            [
+                ("/World", "Xform"),
+                ("/World/New", "Sphere"),
+            ]
+        )
         status, _, _ = client.put(_file_path(), body)
         assert 200 <= status < 300
 
@@ -439,6 +520,56 @@ class TestWriteDrop:
         assert stage.GetPrimAtPath("/World/New")
         assert not stage.GetPrimAtPath("/World/Old")
 
+    def test_local_bridge_uploads_openusd_safe_save(self, vfs_translate, tmp_path):
+        srv, client = vfs_translate
+        mirror_dir = tmp_path / "mirror"
+        status_file = tmp_path / "bridge-status.json"
+        command = [
+            sys.executable,
+            str(BRIDGE_SCRIPT),
+            "--url",
+            f"http://{client.host}:{client.port}{_file_path()}",
+            "--mirror-dir",
+            str(mirror_dir),
+            "--status-file",
+            str(status_file),
+            "--poll",
+            "0.02",
+            *_local_directory_args(),
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(ROOT),
+        )
+
+        try:
+            assert _wait_until(lambda: _read_status(status_file).get("state") == "running")
+            assert process.poll() is None
+            path = mirror_dir / FILE_NAME
+            layer = Sdf.Layer.FindOrOpen(str(path))
+            assert layer is not None
+            stage = Usd.Stage.Open(layer)
+            assert stage is not None
+            stage.DefinePrim("/SavedThroughBridge", "Sphere")
+
+            assert layer.Save()
+
+            assert _wait_until(
+                lambda: bool(srv.stage.GetPrimAtPath("/SavedThroughBridge")),
+                timeout=10.0,
+            )
+            assert _wait_until(lambda: bool(_read_status(status_file).get("last_upload_at")))
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
     def test_put_rejects_stale_live_snapshot_in_translate_mode(self, vfs_translate):
         srv, client = vfs_translate
         status, _, stale_data = client.get(_file_path())
@@ -451,8 +582,7 @@ class TestWriteDrop:
         assert srv.stage.GetPrimAtPath("/World/Fresh")
         assert srv.last_vfs_write_analysis["status"] == "stale_rejected"
         assert (
-            srv.last_vfs_write_analysis["uploaded_seq"]
-            < srv.last_vfs_write_analysis["current_seq"]
+            srv.last_vfs_write_analysis["uploaded_seq"] < srv.last_vfs_write_analysis["current_seq"]
         )
 
     def test_put_rejects_malformed_live_metadata_in_translate_mode(self, vfs_translate):
@@ -555,6 +685,19 @@ class TestWriteDrop:
         _, client = vfs
         status, _, _ = client._request("DELETE", _file_path())
         assert status == 403
+
+    def test_put_cannot_create_new_file(self, vfs_translate):
+        srv, client = vfs_translate
+        event_count = srv.get_event_count()
+
+        status, _, _ = client.put(
+            f"/{SHARE}/new.usd",
+            b'#usda 1.0\ndef Xform "New" {}\n',
+        )
+
+        assert status == 403
+        assert srv.get_event_count() == event_count
+        assert client.get(f"/{SHARE}/new.usd")[0] == 404
 
     def test_mkcol_forbidden(self, vfs):
         _, client = vfs

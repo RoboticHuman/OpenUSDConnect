@@ -215,7 +215,7 @@ def run_vfs_server(
         "provider_mapping": {f"/{share}": OpenUsdConnectDavProvider(provider_file)},
         # Anonymous access; live sync auth remains on the TCP protocol.
         "simple_dc": {"user_mapping": {"*": True}},
-        # Default lock manager stays enabled (class-2 DAV for Windows WebClient).
+        # Native WebDAV filesystem clients expect class-2 DAV locking.
         "verbose": 0,
     }
     app = _no_cache_middleware(WsgiDAVApp(config))

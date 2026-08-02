@@ -32,17 +32,25 @@ Unit tests cover protocol validation, USD stage event application, and emitter/a
 
 ## Live-Open And VFS Tests
 
-The WebDAV/UNC live-open path has a focused headless suite:
+The WebDAV live-open path and local mirror have a focused headless suite:
 
 ```bash
-uv run pytest tests/unit/test_vfs.py tests/integration/test_vfs_webdav.py -q
+uv run pytest \
+  tests/unit/test_vfs.py \
+  tests/unit/test_vfs_mount.py \
+  tests/unit/test_local_vfs_bridge.py \
+  tests/unit/test_start_live_open.py \
+  tests/integration/test_vfs_webdav.py \
+  tests/integration/test_start_live_open.py \
+  -q
 uv run pytest tests/integration/test_live_discovery.py -q
 ```
 
 These cover snapshot metadata, ETag/cache invalidation, read-only/drop/translate
 write modes, WebDAV verbs, virtual directory browsing, composition roots,
-startup cleanup, HTTP snapshot caching, drive-mount helper path generation, and
-the replay contract for receivers started at `snapshot_seq + 1`.
+startup cleanup, HTTP snapshot caching, mount helper path generation, a real
+`Sdf.Layer.Save()` through the local mirror, and the replay contract for
+receivers started at `snapshot_seq + 1`.
 
 Real Windows WebClient/UNC behavior is opt-in because it depends on local
 Windows service and policy configuration:
@@ -63,6 +71,14 @@ To make the virtual share browseable in normal Windows file pickers:
 ```powershell
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
 uv run python scripts/mount_vfs_share.py unmount --drive O:
+```
+
+The native macOS filesystem smoke is also opt-in because it creates a real
+WebDAV mount:
+
+```bash
+OUC_RUN_MACOS_WEBDAV_SMOKE=1 \
+  uv run pytest tests/integration/test_macos_webdav_mount.py -q
 ```
 
 For large-scene sizing:

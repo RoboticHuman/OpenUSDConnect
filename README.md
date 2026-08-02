@@ -213,15 +213,14 @@ flattened snapshot and `scene.live.usda` as the composition root. Both contain
 file normally, read the live endpoint metadata, and start from the snapshot
 sequence instead of replaying old events.
 
-```powershell
-# Windows WebDAV/UNC form
-\\127.0.0.1@7280\usd\scene.usd
+```bash
+# Start the server and a write-capable local mirror on any supported platform
+uv run python scripts/start_live_open.py --base scene.usda --open
 
-# Map a drive if the Windows WebClient service is available
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
-
-# No-admin local bridge: server + VFS + O: drive helper
-uv run python scripts/start_live_open.py --base scene.usda --drive O: --open --force
+# Mount the generated VFS tree using the native filesystem client
+# macOS mounts read-only by default; Windows uses WebClient and a drive letter
+uv run python scripts/mount_vfs_share.py --port 7280 --open
+uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open  # Windows
 ```
 
 For write fallback, start the server with `--vfs-write-mode translate`. Full-file
@@ -230,6 +229,12 @@ to live events when safe. Custom attributes, relationships, prim and layer
 metadata, and local variant definitions are preserved. Authored sublayer
 topology is rejected because it cannot be mapped safely into the managed
 collaboration layer stack.
+
+The virtual directory has a fixed, server-generated file set. Existing managed
+files may accept `PUT` according to the selected write mode; creating, moving,
+or deleting arbitrary VFS files is not supported. The local mirror is the
+recommended save path because it accommodates temporary-file and rename-based
+DCC saves before uploading the completed `scene.usd`.
 
 ### Docker
 
@@ -265,10 +270,10 @@ uv run python scripts/build_blender_addon.py
 Install the output zip (`dist/usd_connect_blender.zip`) in Blender via
 **Edit > Preferences > Add-ons > Install from Disk**.
 
-For seamless live-open, import `\\127.0.0.1@7280\usd\scene.usd` or
-`O:\scene.usd` with **Import USD (with Prim Tagging)**. The addon reads embedded
-metadata and can auto-start receiver/emitter when the import-panel options are
-enabled.
+For seamless live-open, import the local mirror reported by
+`scripts/start_live_open.py`, or use a native macOS/Windows VFS mount, with
+**Import USD (with Prim Tagging)**. The addon reads embedded metadata and can
+auto-start receiver/emitter when the import-panel options are enabled.
 
 ### usdview
 ```bash

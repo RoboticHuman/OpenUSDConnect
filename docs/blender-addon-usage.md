@@ -87,18 +87,24 @@ This exposes:
 | `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL for diagnostics, launchers, and the local bridge. |
 | `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
 | `O:\scene.usd` | Drive-letter file-picker path after mounting the WebDAV share. |
+| `.ouc_live_mount/usd/scene.usd` | Write-capable local mirror on macOS and Linux. |
+| `~/.openusdconnect/mounts/usd/scene.usd` | Read-only native macOS mount. |
 
-To mount a browseable drive:
+To start a write-capable local mirror for that server:
 
 ```bash
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+uv run python scripts/local_vfs_bridge.py \
+  --url http://127.0.0.1:7280/usd/scene.usd \
+  --mirror-dir .ouc_live_mount/usd \
+  --background \
+  --open
 ```
 
 ### Blender
 
-Click **Import USD (with prim tagging)** and choose the normal file path:
-the UNC path when Windows WebClient is available, or `O:\scene.usd` after
-mounting the WebDAV share or no-admin local bridge as a drive.
+Click **Import USD (with prim tagging)** and choose the reported local mirror
+path. A native macOS mount, Windows UNC path, or Windows drive mapping also
+works for read/live-open workflows.
 
 The addon imports the snapshot first. If live metadata is present, it sets the
 receiver and emitter host/port and seeds the receiver from `snapshot_seq`.

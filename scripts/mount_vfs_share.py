@@ -1,10 +1,10 @@
 # ruff: noqa: E402, I001
-"""Mount an OpenUSDConnect WebDAV share as a Windows drive.
+"""Mount an OpenUSDConnect WebDAV share using the native filesystem client.
 
 This wrapper is intentionally tiny so users can run it from a checkout without
 refreshing console scripts:
 
-    uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
+    uv run python scripts/mount_vfs_share.py --port 7280 --open
 """
 
 from __future__ import annotations

@@ -178,20 +178,6 @@ def run_server(config: ServerConfig | None = None):
         LOG.info("VFS flattened snapshot: %s/%s", vfs_base_url, file_name)
         LOG.info("VFS live composition root: %s/%s", vfs_base_url, provider_file.live_name)
         LOG.info("VFS manifest: %s/%s", vfs_base_url, manifest_name)
-        LOG.info(
-            "Windows UNC path: \\\\%s@%d\\%s\\%s",
-            public_host,
-            vfs.port,
-            share,
-            file_name,
-        )
-        LOG.info(
-            "Windows UNC live root: \\\\%s@%d\\%s\\%s",
-            public_host,
-            vfs.port,
-            share,
-            provider_file.live_name,
-        )
 
     _cleaned_up = False
 
