@@ -439,6 +439,7 @@ def test_stop_releases_windows_drive_and_process(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bridge, "_is_windows", lambda: True)
     monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge, "_process_exists", lambda _pid: False)
 
     assert (
         bridge.main(

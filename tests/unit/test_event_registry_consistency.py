@@ -18,7 +18,6 @@ from openusdconnect.protocol_constants import (
     ARC_KINDS,
     CREATE_KINDS,
     EVENT_KEYS,
-    FLAT_RECEIVER_PROJECTION_KINDS,
     IMPORT_KINDS,
     NATIVE_DIRECT_KINDS,
     NATIVE_FIELD_ROUTED_KINDS,
@@ -85,18 +84,13 @@ def test_derived_kind_sets_pin():
     }
     assert ARC_KINDS == {"set_payload", "set_reference", "set_variant_selections"}
     assert IMPORT_KINDS == {"load_payload", "set_reference"}
-    assert FLAT_RECEIVER_PROJECTION_KINDS == {"set_sdf_spec_fields"}
     assert NATIVE_DIRECT_KINDS == {
         "load_payload",
         "set_stage_metadata",
         "unload_payload",
     }
     assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields"}
-    assert (
-        NATIVE_PROJECTED_KINDS
-        | NATIVE_DIRECT_KINDS
-        | NATIVE_FIELD_ROUTED_KINDS
-    ) == EVENT_KEYS
+    assert (NATIVE_PROJECTED_KINDS | NATIVE_DIRECT_KINDS | NATIVE_FIELD_ROUTED_KINDS) == EVENT_KEYS
 
 
 def test_stage_sync_kinds_are_structural():

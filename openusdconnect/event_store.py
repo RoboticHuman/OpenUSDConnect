@@ -55,11 +55,16 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
-        """Return binary blobs for all events with seq >= seq_start.
+    def get_from_seq_bin(
+        self,
+        seq_start: int,
+        seq_end: int | None = None,
+    ) -> list[bytes]:
+        """Return binary blobs in the inclusive sequence range.
 
-        This is the primary replay path — binary is sent directly to
-        receivers without re-serialization.
+        This is the primary replay path; binary is sent directly to
+        receivers without re-serialization. ``seq_end=None`` leaves the
+        upper bound open.
         """
         raise NotImplementedError
 
@@ -186,12 +191,23 @@ class SqliteEventStore(EventStore):
                 "SELECT seq, event_bin FROM events ORDER BY seq"
             ).fetchall()
 
-    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
+    def get_from_seq_bin(
+        self,
+        seq_start: int,
+        seq_end: int | None = None,
+    ) -> list[bytes]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT event_bin FROM events WHERE seq >= ? ORDER BY seq",
-                (seq_start,),
-            ).fetchall()
+            if seq_end is None:
+                rows = self._conn.execute(
+                    "SELECT event_bin FROM events WHERE seq >= ? ORDER BY seq",
+                    (seq_start,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT event_bin FROM events"
+                    " WHERE seq >= ? AND seq <= ? ORDER BY seq",
+                    (seq_start, seq_end),
+                ).fetchall()
         return [row[0] for row in rows]
 
     def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, bytes]]:

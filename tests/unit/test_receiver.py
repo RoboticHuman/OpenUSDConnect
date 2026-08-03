@@ -4,7 +4,7 @@ import logging
 import socket
 import time
 
-from openusdconnect.codec import encode_message, message_to_dict
+from openusdconnect.codec import HelloRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.receiver import ReceiverThread
 
@@ -24,7 +24,9 @@ def _accept_and_hello(srv, timeout=2, hello_ok=None):
     conn, _ = srv.accept()
     conn.settimeout(timeout)
     recv_framed(conn)  # consume hello
-    send_framed(conn, encode_message(hello_ok or {"type": "hello_ok"}))
+    if hello_ok is None:
+        hello_ok = {"type": "hello_ok", "layered_replay": True}
+    send_framed(conn, encode_message(hello_ok))
     return conn
 
 
@@ -100,6 +102,7 @@ class TestReceiverThread:
             assert hello["type"] == "hello"
             assert hello["role"] == "receiver"
             assert hello["sync_from"] == 5
+            assert hello["layered_replay"] is True
         finally:
             _teardown(rt, conn, srv)
 
@@ -153,12 +156,15 @@ class TestReceiverThread:
         try:
             hello = _recv_hello(conn)
             assert hello["department"] == "layout"
-            send_framed(conn, encode_message({"type": "hello_ok"}))
+            send_framed(
+                conn,
+                encode_message({"type": "hello_ok", "layered_replay": True}),
+            )
             assert _poll_until(lambda: rt.connected)
         finally:
             _teardown(rt, conn, srv)
 
-    def test_unacknowledged_layered_replay_falls_back_to_flat(self):
+    def test_unacknowledged_layered_replay_rejects_handshake(self):
         srv, port = _make_server()
         rt = ReceiverThread(
             host="127.0.0.1",
@@ -167,10 +173,62 @@ class TestReceiverThread:
             layered_replay=True,
         )
         rt.start()
-        conn = _accept_and_hello(srv)
+        conn = _accept_and_hello(srv, hello_ok={"type": "hello_ok"})
+        try:
+            rt.join(timeout=1)
+            assert not rt.is_alive()
+            assert not rt.connected
+            assert rt.hello_rejected
+            assert rt.layered_replay_active is False
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_explicit_flat_replay_accepts_unlayered_handshake(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            layered_replay=False,
+        )
+        rt.start()
+        conn = _accept_and_hello(srv, hello_ok={"type": "hello_ok"})
         try:
             assert _poll_until(lambda: rt.connected)
-            assert rt.layered_replay_active is False
+            assert not rt.layered_replay_active
+            assert not rt.hello_rejected
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_hello_rejection_stops_reconnects(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.01,
+        )
+        rt.start()
+        conn = _accept(srv)
+        try:
+            _recv_hello(conn)
+            send_framed(
+                conn,
+                encode_message(
+                    {
+                        "type": "hello_rejected",
+                        "code": HelloRejectionCode.LayeredReplayRequired,
+                        "reason": "layered replay is required",
+                    }
+                ),
+            )
+            rt.join(timeout=1)
+            assert not rt.is_alive()
+            assert not rt.connected
+            assert not rt.auth_rejected
+            assert rt.hello_rejected
+            assert rt.rejection_code == HelloRejectionCode.LayeredReplayRequired
+            assert rt.rejection_reason == "layered replay is required"
         finally:
             _teardown(rt, conn, srv)
 
@@ -316,7 +374,10 @@ class TestReconnection:
             conn2 = _accept(srv, timeout=2)
             hello = _recv_hello(conn2)
             assert hello["sync_from"] == 2
-            send_framed(conn2, encode_message({"type": "hello_ok"}))
+            send_framed(
+                conn2,
+                encode_message({"type": "hello_ok", "layered_replay": True}),
+            )
             assert _poll_until(lambda: rt.connected)
 
             _send_event(conn2, 2)

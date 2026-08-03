@@ -11,6 +11,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..codec import (
+    HelloRejectionCode,
     PayloadType,
     decode_envelope,
     event_to_dict,
@@ -26,6 +27,7 @@ from ..protocol_constants import (
     K_LOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
     MSG_HELLO_OK,
+    MSG_HELLO_REJECTED,
     MSG_PLAYBACK_CLAIMED,
     MSG_PLAYBACK_REJECTED,
     MSG_PLAYBACK_STATE,
@@ -50,6 +52,26 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     """Handles a single client connection (emitter or receiver)."""
 
     server: ThreadedTCPServer
+
+    def setup(self):
+        super().setup()
+        self._receiver_replay_reserved = False
+        self._receiver_replay_reservation_lock = threading.Lock()
+
+    def release_receiver_replay_reservation(self) -> None:
+        """Release an accepted receiver mode exactly once."""
+        with self._receiver_replay_reservation_lock:
+            if not self._receiver_replay_reserved:
+                return
+            self._receiver_replay_reserved = False
+            layered_replay = self._layered_replay
+        self.server.sync_server.release_receiver_replay_mode(layered_replay)
+
+    def finish(self):
+        try:
+            self.release_receiver_replay_reservation()
+        finally:
+            super().finish()
 
     def handle(self):
         sync_server = self.server.sync_server
@@ -115,6 +137,28 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         self._client_id = client_id
         self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
+        if role == "receiver":
+            accepted, reason = sync_server.reserve_receiver_replay_mode(
+                self._layered_replay,
+            )
+            if not accepted:
+                send_msg(
+                    self.request,
+                    {
+                        "type": MSG_HELLO_REJECTED,
+                        "code": HelloRejectionCode.LayeredReplayRequired,
+                        "reason": reason,
+                    },
+                )
+                LOG.warning(
+                    "Rejected flat receiver %s from %s: %s",
+                    client_id,
+                    self.client_address,
+                    reason,
+                )
+                return
+            self._receiver_replay_reserved = True
+
         # TOFU authentication
         accepted, issued_token = sync_server.authenticate(
             client_id,
@@ -143,14 +187,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             hello_ok["stage_metadata"] = stage_meta
         send_msg(self.request, hello_ok)
 
-        # Receivers get a PlaybackState snapshot post-handshake so fresh
-        # clients see the current leader + timecode without waiting for
-        # the next control. Emitters skip it — they don't read past
-        # hello_ok and would just fill their socket buffer.
-        if role == "receiver":
-            snapshot = sync_server.get_playback_state()
-            send_msg(self.request, {"type": MSG_PLAYBACK_STATE, **snapshot})
-
         LOG.info(
             "Client connected: role=%s origin=%s dept=%s from %s",
             role,
@@ -178,32 +214,32 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             if role == "receiver":
                 sync_from = hello_fb.SyncFrom() or 1
-
-                # If sync_from is beyond the current log tail (e.g., after
-                # compaction reset seq numbers), send resync so the receiver
-                # resets its sequence counter, then replay the full log. Requesting
-                # exactly max_seq + 1 is a valid "start from the live tail" case.
-                max_seq = sync_server.store.get_max_seq()
-                if sync_from > (max_seq + 1) and max_seq > 0:
-                    send_msg(self.request, {"type": MSG_RESYNC, "reason": "seq_overflow"})
-                    sync_from = 1
-
-                # Acquire send_lock first, then add to broadcast set and replay.
-                # The send_lock prevents broadcasts from reaching this receiver
-                # until replay is complete (preserving event ordering). The
-                # broadcast thread never holds both locks simultaneously (it
-                # snapshots under clients_lock, releases it, then acquires
-                # send_lock per target), so no deadlock is possible.
                 try:
-                    with self.send_lock:
-                        with sync_server.clients_lock:
-                            sync_server.receivers.add(self)
+                    with sync_server.receiver_replay_window(self) as replay_end:
+                        # A sequence beyond the captured tail indicates a stale
+                        # pre-compaction cursor. Tail + 1 remains a valid live join.
+                        if sync_from > replay_end + 1:
+                            send_msg(
+                                self.request,
+                                {"type": MSG_RESYNC, "reason": "seq_overflow"},
+                            )
+                            sync_from = 1
+
+                        snapshot = sync_server.get_playback_state()
+                        send_msg(
+                            self.request,
+                            {"type": MSG_PLAYBACK_STATE, **snapshot},
+                        )
                         if self._layered_replay:
                             send_msg(
                                 self.request,
                                 sync_server.get_layer_stack_state(),
                             )
-                        sync_server.replay_from(self, sync_from)
+                        sync_server.replay_from(
+                            self,
+                            sync_from,
+                            seq_end=replay_end,
+                        )
                 except (OSError, TimeoutError):
                     LOG.info(
                         "Receiver disconnected during replay: %s",
@@ -302,7 +338,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             sync_server.txn_barrier.acquire_shared()
             try:
-                records, changed_set = sync_server.process_txn(
+                records = sync_server.process_txn(
                     events,
                     client_id=self._client_id,
                     origin=self._origin,
@@ -312,8 +348,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
                 sync_server.broadcast_transaction_views(
                     records,
-                    changed_set,
-                    events,
                     exclude_origin=self._origin,
                 )
 

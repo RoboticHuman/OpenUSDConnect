@@ -45,7 +45,8 @@ namespace OUC
 			Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
 			Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin)),
 			Builder.CreateString(TCHAR_TO_UTF8(*Department)),
-			Builder.CreateString(TCHAR_TO_UTF8(*Token)));
+			Builder.CreateString(TCHAR_TO_UTF8(*Token)),
+			/*layered_replay=*/false);
 
 		Builder.Finish(OpenUSDConnect::CreateEnvelope(
 			Builder,

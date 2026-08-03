@@ -59,6 +59,7 @@ bool FEmitClient::Init() { return true; }
 
 uint32 FEmitClient::Run()
 {
+	TArray<uint8> RetryFrame;
 	while (!bShouldStop.load(std::memory_order_relaxed))
 	{
 		// --- Connect ---
@@ -144,12 +145,28 @@ uint32 FEmitClient::Run()
 		{
 			// 1. Drain outbound queue
 			bool bSentAny = false;
+			if (RetryFrame.Num() > 0)
+			{
+				if (!SendAll(RetryFrame.GetData(), RetryFrame.Num()))
+				{
+					UE_LOG(LogUSDEmit, Warning, TEXT("Emitter retry send failed"));
+					bShouldDisconnect = true;
+				}
+				else
+				{
+					RetryFrame.Reset();
+					bSentAny = true;
+				}
+			}
+			if (bShouldDisconnect) break;
+
 			TArray<uint8> SendFrame;
 			while (SendQueue.Dequeue(SendFrame))
 			{
 				if (!SendAll(SendFrame.GetData(), SendFrame.Num()))
 				{
 					UE_LOG(LogUSDEmit, Warning, TEXT("Emitter send failed"));
+					RetryFrame = MoveTemp(SendFrame);
 					bShouldDisconnect = true;
 					break;
 				}
@@ -177,7 +194,7 @@ uint32 FEmitClient::Run()
 						TEXT("Emitter rate limited — sleeping %.1fs"), Retry);
 					FPlatformProcess::Sleep(Retry);
 				}
-				// Other inbound (Ping, BroadcastEvent corrections) — ignore for MVP.
+				// The emit-only client does not consume other control messages.
 			}
 
 			// 3. Yield briefly if idle

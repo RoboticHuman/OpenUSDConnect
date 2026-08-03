@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 # Message type constants
 MSG_HELLO = "hello"
 MSG_HELLO_OK = "hello_ok"
 MSG_AUTH_REJECTED = "auth_rejected"
+MSG_HELLO_REJECTED = "hello_rejected"
 MSG_TXN = "txn"
 MSG_EVENT = "event"
 MSG_RESYNC = "resync"
@@ -130,10 +131,9 @@ class EventKindInfo:
     """Classification flags for one event kind.
 
     The single declaration site for everything that is a property of the
-    kind itself: apply ordering, receive-side categorization, and the
-    server's layer-strength checks all derive from this table. Behavior
-    (encoder, decoder, applier, adapter method, emitter invalidator) is
-    registered at the function definition sites.
+    kind itself: apply ordering and receive-side categorization derive from
+    this table. Behavior (encoder, decoder, applier, adapter method, emitter
+    invalidator) is registered at the function definition sites.
 
     create: a prim must exist before anything can author on it; applied
         first, ancestors before descendants.
@@ -147,13 +147,6 @@ class EventKindInfo:
         skip-detect it against the mirror's composed state.
     imports: application brings new content into the consumer; fires the
         dispatcher's on_imported callback.
-    strength_attrs: what the server inspects for the per-client layer
-        strength check. None means not checked (always broadcast), an
-        empty tuple means strongest-spec check (structural ops), names
-        mean a per-attribute check ("meta:X" is a prim metadata field,
-        "rel:X" a relationship).
-    flat_receiver_projection: server-side flat receivers need an authoritative
-        composed property correction instead of the authored layer opinion.
     native_projection: how a layered receiver maps the event into a non-USD
         adapter after applying it to the receiver-owned USD mirror.
     target: whether the event authors into a collaboration layer, authors
@@ -167,8 +160,6 @@ class EventKindInfo:
     stage_sync: bool = False
     arc: bool = False
     imports: bool = False
-    strength_attrs: tuple[str, ...] | None = None
-    flat_receiver_projection: bool = False
     target: EventTarget = EventTarget.COLLABORATION_LAYER
 
 
@@ -177,32 +168,25 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         native_projection=NativeProjectionMode.PROJECT,
         create=True,
         structural=True,
-        strength_attrs=(),
     ),
     K_ENSURE_XFORM_OPS: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
         structural=True,
-        strength_attrs=(),
     ),
     K_SET_XFORM_TRS: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
-        strength_attrs=("xformOp:translate", "xformOp:orient", "xformOp:scale"),
     ),
     K_DELETE_PRIM: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
-        strength_attrs=(),
     ),
     K_DEACTIVATE_PRIM: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
-        strength_attrs=("meta:active",),
     ),
     K_RENAME_PRIM: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
-        strength_attrs=(),
     ),
     K_SET_VISIBILITY: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
-        strength_attrs=("visibility",),
     ),
     K_SET_GPRIM_ATTRS: EventKindInfo(native_projection=NativeProjectionMode.PROJECT),
     K_SET_REFERENCE: EventKindInfo(
@@ -241,7 +225,6 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         native_projection=NativeProjectionMode.PROJECT,
         structural=True,
         stage_sync=True,
-        strength_attrs=("rel:material:binding",),
     ),
     K_SET_CONNECTABLE_INPUT: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
@@ -270,7 +253,6 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         native_projection=NativeProjectionMode.FIELD_ROUTED,
         structural=True,
         stage_sync=True,
-        flat_receiver_projection=True,
     ),
 }
 
@@ -278,9 +260,6 @@ EVENT_KEYS = frozenset(EVENT_KIND_INFO)
 STRUCTURAL_EVENT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.structural)
 CREATE_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.create)
 STAGE_SYNC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.stage_sync)
-FLAT_RECEIVER_PROJECTION_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items() if i.flat_receiver_projection
-)
 NATIVE_PROJECTED_KINDS = frozenset(
     k for k, i in EVENT_KIND_INFO.items() if i.native_projection == NativeProjectionMode.PROJECT
 )

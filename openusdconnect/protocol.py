@@ -38,7 +38,7 @@ def make_hello(
     origin: str | None = None,
     department: str | None = None,
     token: str | None = None,
-    layered_replay: bool = False,
+    layered_replay: bool | None = None,
 ) -> dict:
     """Build a hello message.
 
@@ -55,6 +55,7 @@ def make_hello(
         token: Authentication token from a previous session (TOFU).
         layered_replay: Whether a receiver can reconstruct the logical
             authored-layer stack instead of consuming only the composed view.
+            Defaults to true for receivers and false for other roles.
     """
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
@@ -67,6 +68,8 @@ def make_hello(
         msg["department"] = department
     if token is not None:
         msg["token"] = token
+    if layered_replay is None:
+        layered_replay = role == "receiver"
     if layered_replay:
         msg["layered_replay"] = True
     return msg

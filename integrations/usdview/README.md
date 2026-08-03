@@ -15,8 +15,8 @@ layer key to a receiver-owned anonymous layer, composes those layers in the
 advertised strong-to-weak order, and tracks live mute changes. Department
 assignment is a server policy that currently selects those logical layers; it
 is not part of the receiver's composition logic. Unrelated session sublayers
-retain their relative order and offsets. If the server does not acknowledge
-the capability, the receiver falls back to the existing flat replay path.
+retain their relative order and offsets. Flat replay is not used by this
+integration.
 
 Authored fields from the sender's current edit-target layer are preserved as
 exact Sdf spec deltas. This includes custom properties, relationships, prim and

@@ -111,6 +111,9 @@ struct HelloOkBuilder;
 struct AuthRejected;
 struct AuthRejectedBuilder;
 
+struct HelloRejected;
+struct HelloRejectedBuilder;
+
 struct Txn;
 struct TxnBuilder;
 
@@ -521,6 +524,36 @@ bool VerifyEventPayload(::flatbuffers::VerifierTemplate<B> &verifier, const void
 template <bool B = false>
 bool VerifyEventPayloadVector(::flatbuffers::VerifierTemplate<B> &verifier, const ::flatbuffers::Vector<::flatbuffers::Offset<void>> *values, const ::flatbuffers::Vector<EventPayload> *types);
 
+enum class HelloRejectionCode : uint8_t {
+  Unspecified = 0,
+  LayeredReplayRequired = 1,
+  MIN = Unspecified,
+  MAX = LayeredReplayRequired
+};
+
+inline const HelloRejectionCode (&EnumValuesHelloRejectionCode())[2] {
+  static const HelloRejectionCode values[] = {
+    HelloRejectionCode::Unspecified,
+    HelloRejectionCode::LayeredReplayRequired
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesHelloRejectionCode() {
+  static const char * const names[3] = {
+    "Unspecified",
+    "LayeredReplayRequired",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameHelloRejectionCode(HelloRejectionCode e) {
+  if (::flatbuffers::IsOutRange(e, HelloRejectionCode::Unspecified, HelloRejectionCode::LayeredReplayRequired)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesHelloRejectionCode()[index];
+}
+
 enum class Payload : uint8_t {
   NONE = 0,
   Hello = 1,
@@ -541,11 +574,12 @@ enum class Payload : uint8_t {
   PlaybackControl = 16,
   PlaybackState = 17,
   LayerStackState = 18,
+  HelloRejected = 19,
   MIN = NONE,
-  MAX = LayerStackState
+  MAX = HelloRejected
 };
 
-inline const Payload (&EnumValuesPayload())[19] {
+inline const Payload (&EnumValuesPayload())[20] {
   static const Payload values[] = {
     Payload::NONE,
     Payload::Hello,
@@ -565,13 +599,14 @@ inline const Payload (&EnumValuesPayload())[19] {
     Payload::PlaybackRejected,
     Payload::PlaybackControl,
     Payload::PlaybackState,
-    Payload::LayerStackState
+    Payload::LayerStackState,
+    Payload::HelloRejected
   };
   return values;
 }
 
 inline const char * const *EnumNamesPayload() {
-  static const char * const names[20] = {
+  static const char * const names[21] = {
     "NONE",
     "Hello",
     "HelloOk",
@@ -591,13 +626,14 @@ inline const char * const *EnumNamesPayload() {
     "PlaybackControl",
     "PlaybackState",
     "LayerStackState",
+    "HelloRejected",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNamePayload(Payload e) {
-  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::LayerStackState)) return "";
+  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::HelloRejected)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesPayload()[index];
 }
@@ -676,6 +712,10 @@ template<> struct PayloadTraits<OpenUSDConnect::PlaybackState> {
 
 template<> struct PayloadTraits<OpenUSDConnect::LayerStackState> {
   static const Payload enum_value = Payload::LayerStackState;
+};
+
+template<> struct PayloadTraits<OpenUSDConnect::HelloRejected> {
+  static const Payload enum_value = Payload::HelloRejected;
 };
 
 template <bool B = false>
@@ -3892,6 +3932,76 @@ inline ::flatbuffers::Offset<AuthRejected> CreateAuthRejectedDirect(
       reason__);
 }
 
+struct HelloRejected FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef HelloRejectedBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_CODE = 4,
+    VT_REASON = 6
+  };
+  OpenUSDConnect::HelloRejectionCode code() const {
+    return static_cast<OpenUSDConnect::HelloRejectionCode>(GetField<uint8_t>(VT_CODE, 0));
+  }
+  const ::flatbuffers::String *reason() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_REASON);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_CODE, 1) &&
+           VerifyOffset(verifier, VT_REASON) &&
+           verifier.VerifyString(reason()) &&
+           verifier.EndTable();
+  }
+};
+
+struct HelloRejectedBuilder {
+  typedef HelloRejected Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_code(OpenUSDConnect::HelloRejectionCode code) {
+    fbb_.AddElement<uint8_t>(HelloRejected::VT_CODE, static_cast<uint8_t>(code), 0);
+  }
+  void add_reason(::flatbuffers::Offset<::flatbuffers::String> reason) {
+    fbb_.AddOffset(HelloRejected::VT_REASON, reason);
+  }
+  explicit HelloRejectedBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<HelloRejected> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<HelloRejected>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<HelloRejected> CreateHelloRejected(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    OpenUSDConnect::HelloRejectionCode code = OpenUSDConnect::HelloRejectionCode::Unspecified,
+    ::flatbuffers::Offset<::flatbuffers::String> reason = 0) {
+  HelloRejectedBuilder builder_(_fbb);
+  builder_.add_reason(reason);
+  builder_.add_code(code);
+  return builder_.Finish();
+}
+
+struct HelloRejected::Traits {
+  using type = HelloRejected;
+  static auto constexpr Create = CreateHelloRejected;
+};
+
+inline ::flatbuffers::Offset<HelloRejected> CreateHelloRejectedDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    OpenUSDConnect::HelloRejectionCode code = OpenUSDConnect::HelloRejectionCode::Unspecified,
+    const char *reason = nullptr) {
+  auto reason__ = reason ? _fbb.CreateString(reason) : 0;
+  return OpenUSDConnect::CreateHelloRejected(
+      _fbb,
+      code,
+      reason__);
+}
+
 struct Txn FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef TxnBuilder Builder;
   struct Traits;
@@ -5055,6 +5165,9 @@ struct Envelope FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const OpenUSDConnect::LayerStackState *payload_as_LayerStackState() const {
     return payload_type() == OpenUSDConnect::Payload::LayerStackState ? static_cast<const OpenUSDConnect::LayerStackState *>(payload()) : nullptr;
   }
+  const OpenUSDConnect::HelloRejected *payload_as_HelloRejected() const {
+    return payload_type() == OpenUSDConnect::Payload::HelloRejected ? static_cast<const OpenUSDConnect::HelloRejected *>(payload()) : nullptr;
+  }
   uint16_t schema_version() const {
     return GetField<uint16_t>(VT_SCHEMA_VERSION, 0);
   }
@@ -5139,6 +5252,10 @@ template<> inline const OpenUSDConnect::PlaybackState *Envelope::payload_as<Open
 
 template<> inline const OpenUSDConnect::LayerStackState *Envelope::payload_as<OpenUSDConnect::LayerStackState>() const {
   return payload_as_LayerStackState();
+}
+
+template<> inline const OpenUSDConnect::HelloRejected *Envelope::payload_as<OpenUSDConnect::HelloRejected>() const {
+  return payload_as_HelloRejected();
 }
 
 struct EnvelopeBuilder {
@@ -5361,6 +5478,10 @@ inline bool VerifyPayload(::flatbuffers::VerifierTemplate<B> &verifier, const vo
     }
     case Payload::LayerStackState: {
       auto ptr = reinterpret_cast<const OpenUSDConnect::LayerStackState *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case Payload::HelloRejected: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::HelloRejected *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

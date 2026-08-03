@@ -840,6 +840,45 @@ def test_receiver_mirror_has_an_independent_session_layer(monkeypatch):
     assert not author.stage.GetPrimAtPath("/ReceiverOnly")
 
 
+def test_blender_emitter_releases_batch_only_after_send_succeeds(monkeypatch):
+    from integrations.blender import capture
+
+    events = [{"k": "delete_prim", "prim": "/World/Deleted"}]
+    emitter = MagicMock()
+    emitter.prepare_events_for_send.return_value = events
+    sender = MagicMock()
+    sender.sock = object()
+    sender.send_events.side_effect = [False, True]
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    monkeypatch.setattr(capture._state, "sender", sender)
+
+    capture._try_send_dirty_events()
+    emitter.mark_prepared_events_sent.assert_not_called()
+
+    sender.sock = object()
+    capture._try_send_dirty_events()
+
+    assert sender.send_events.call_count == 2
+    emitter.mark_prepared_events_sent.assert_called_once_with(events)
+
+
+def test_blender_timer_retries_a_prepared_batch_after_reconnect(monkeypatch):
+    from integrations.blender import capture
+
+    author = MagicMock()
+    author.enabled = True
+    emitter = MagicMock()
+    emitter.dirty = set()
+    emitter.prepared_event_count = 1
+    send_pending = MagicMock()
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    monkeypatch.setattr(capture, "_try_send_dirty_events", send_pending)
+
+    assert capture._timer_tick() == 0.25
+    send_pending.assert_called_once_with()
+
+
 def test_receiver_rebuilds_logical_layers_from_full_replay():
     from integrations.blender import receiver_addon
 

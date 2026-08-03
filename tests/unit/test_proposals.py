@@ -139,12 +139,11 @@ class TestProposalApproval:
         srv_with_layers.approve_proposal(pid)
         assert srv_with_layers.get_proposal_layer(pid) is None
 
-    def test_approve_projects_composed_sdf_state(self, srv_with_layers, monkeypatch):
+    def test_approve_broadcasts_authored_sdf_state(self, srv_with_layers, monkeypatch):
         from pxr import Sdf, Usd
 
         from openusdconnect.codec import message_to_dict
         from openusdconnect.emitter import NoticeEmitter
-        from openusdconnect.event_apply import apply_events
         from openusdconnect.protocol_constants import K_SET_SDF_SPEC_FIELDS
 
         def _events(value):
@@ -167,36 +166,46 @@ class TestProposalApproval:
         proposal_id = srv_with_layers.create_proposal("bob", "layout", "weak override")
         _apply_to_proposal(srv_with_layers, proposal_id, _events(1))
         broadcast = []
-        monkeypatch.setattr(
-            srv_with_layers,
-            "broadcast",
-            lambda record, **_kwargs: broadcast.append(record),
-        )
-        # The composed correction is a flat-receiver projection.
+
+        def _capture(_payload, records, **_kwargs):
+            broadcast.extend(records)
+
+        monkeypatch.setattr(srv_with_layers, "broadcast_bytes", _capture)
         monkeypatch.setattr(
             srv_with_layers,
             "_receiver_audience_presence",
-            lambda: (True, False),
+            lambda: (False, True),
         )
 
         assert srv_with_layers.approve_proposal(proposal_id)
-        corrections = [
-            record for record in broadcast if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
+        authored = [
+            record
+            for record in broadcast
+            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
+            and record["event"].get("spec_path") == "/World/Cube.userProperties:value"
         ]
-        assert len(corrections) == 1
-        stored_generic = [
+        assert len(authored) == 1
+        assert authored[0]["layer_key"] == "department:layout"
+
+        stored = [
             record
             for record in map(
                 message_to_dict,
                 srv_with_layers.store.get_from_seq_bin(1),
             )
             if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
+            and record["event"].get("spec_path") == "/World/Cube.userProperties:value"
         ]
-        assert corrections[0]["seq"] == stored_generic[-1]["seq"]
-
-        flat = Usd.Stage.CreateInMemory()
-        apply_events(flat, [record["event"] for record in broadcast])
-        assert flat.GetAttributeAtPath("/World/Cube.userProperties:value").Get() == 2
+        assert authored[0] == stored[-1]
+        assert (
+            srv_with_layers.stage.GetAttributeAtPath("/World/Cube.userProperties:value").Get() == 2
+        )
+        assert (
+            srv_with_layers.resolve_layer("layout")
+            .GetAttributeAtPath("/World/Cube.userProperties:value")
+            .default
+            == 1
+        )
 
 
 def _apply_to_proposal(srv, proposal_id, events):

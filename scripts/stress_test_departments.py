@@ -93,6 +93,7 @@ def _connect_receiver(port, client_id):
             "receiver",
             sync_from=1,
             client_id=client_id,
+            layered_replay=True,
         ),
     )
     s.settimeout(0.5)
@@ -601,10 +602,9 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         n = iterations - 1
         all_pass = True
 
-        # Shared prims must exist (we can't predict the exact composed
-        # value because department interleaving is non-deterministic, but
-        # the server's broadcast gating ensures only the strongest
-        # department's value is sent when there's contention).
+        # Shared prims must exist. This lightweight verifier applies the
+        # authored stream to one flat stage, so it does not assert the
+        # department stack's final composed value.
         for prim_path in SHARED_PRIMS:
             actual = _read_translate(verify_stage, prim_path)
             if actual is None:

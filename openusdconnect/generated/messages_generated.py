@@ -71,6 +71,11 @@ class EventPayload(object):
     SetSdfSpecFields = 20
 
 
+class HelloRejectionCode(object):
+    Unspecified = 0
+    LayeredReplayRequired = 1
+
+
 class Payload(object):
     NONE = 0
     Hello = 1
@@ -91,6 +96,7 @@ class Payload(object):
     PlaybackControl = 16
     PlaybackState = 17
     LayerStackState = 18
+    HelloRejected = 19
 
 
 class AttrValue(object):
@@ -2801,6 +2807,52 @@ def AuthRejectedAddReason(builder, reason):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
 
 def AuthRejectedEnd(builder):
+    return builder.EndObject()
+
+
+
+class HelloRejected(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = HelloRejected()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsHelloRejected(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # HelloRejected
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # HelloRejected
+    def Code(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
+        return 0
+
+    # HelloRejected
+    def Reason(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def HelloRejectedStart(builder):
+    builder.StartObject(2)
+
+def HelloRejectedAddCode(builder, code):
+    builder.PrependUint8Slot(0, code, 0)
+
+def HelloRejectedAddReason(builder, reason):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
+
+def HelloRejectedEnd(builder):
     return builder.EndObject()
 
 

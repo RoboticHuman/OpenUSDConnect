@@ -14,8 +14,9 @@ import os
 import queue
 import threading
 import time
+from contextlib import contextmanager
 
-from pxr import Ar, Sdf, Usd, UsdGeom, UsdUtils
+from pxr import Ar, Sdf, Usd, UsdGeom
 
 from ..codec import encode_message, message_to_dict
 from ..emitter import (
@@ -28,8 +29,6 @@ from ..event_store import EventStore, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
     COLLABORATION_LAYER_KINDS,
-    EVENT_KIND_INFO,
-    FLAT_RECEIVER_PROJECTION_KINDS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -57,16 +56,8 @@ from ..protocol_constants import (
     STAGE_METADATA_KEYS,
     event_apply_tier,
 )
-from ..sdf_spec_delta import (
-    SDF_SPEC_KIND_ATTRIBUTE,
-    SDF_SPEC_KIND_RELATIONSHIP,
-    composed_layer_spec_event,
-    composed_property_spec_event,
-    composed_property_spec_requires_flattening,
-    merge_spec_events,
-)
+from ..sdf_spec_delta import merge_spec_events
 from ..usd_state import read_material_binding, read_variant_selections
-from ..xform_decompose import as_matrix, decompose_trs_from_matrix
 from ._txn_barrier import _TxnBarrier
 from .layer_stack import CollaborationLayerStack
 from .types import (
@@ -74,6 +65,7 @@ from .types import (
     ClientInfo,
     InvalidVfsWriteError,
     Proposal,
+    ReplayModeConflictError,
     StaleVfsWriteError,
     UnsupportedVfsWriteError,
     VfsWriteAnalysis,
@@ -93,19 +85,6 @@ _AUDIENCE_LAYERED = "layered"
 _AUDIENCES = frozenset({_AUDIENCE_ALL, _AUDIENCE_FLAT, _AUDIENCE_LAYERED})
 _DEFAULT_LAYER_KEY = "default"
 _DEPARTMENT_LAYER_KEY_PREFIX = "department:"
-
-
-def _needs_flattened_spec_projection(event: dict) -> bool:
-    if event.get("k") != K_SET_SDF_SPEC_FIELDS:
-        return False
-    return (
-        event.get("spec_kind")
-        not in (
-            SDF_SPEC_KIND_ATTRIBUTE,
-            SDF_SPEC_KIND_RELATIONSHIP,
-        )
-        or Sdf.Path(event.get("spec_path", "")).ContainsPrimVariantSelection()
-    )
 
 
 def _layer_key_for_department(department: str | None) -> str:
@@ -359,6 +338,12 @@ class UsdSyncServer:
             default_key=_DEFAULT_LAYER_KEY,
         )
 
+        # Flat replay cannot represent layer order or muting. Reservations and
+        # stack-policy changes share this lock so neither can invalidate the
+        # other's contract during a handshake.
+        self._replay_mode_lock = threading.Lock()
+        self._flat_receiver_count = 0
+
         self.clients_lock = threading.Lock()
         self.receivers: set = set()
         self.clients: dict[str, ClientInfo] = {}
@@ -412,10 +397,10 @@ class UsdSyncServer:
         # Async broadcast — emitter threads push to the queue, a dedicated
         # thread handles the actual network sends so emitters are never
         # blocked by slow receivers.
-        # Item: (payload_bytes, exclude_origin, target_origin, audience)
-        #   exclude_origin set -> broadcast to all except that origin
-        #   target_origin set  -> send only to that origin (corrections)
-        #   audience           -> all, flat, or layered receivers
+        # Each queued item retains the receiver membership captured when the
+        # broadcast was authored. A receiver joining later obtains older
+        # records only through its bounded replay window.
+        # Item: (payload_bytes, receiver_handlers, exclude_origin, audience)
         self._broadcast_queue: queue.Queue = queue.Queue(maxsize=_BROADCAST_QUEUE_MAX)
         self._broadcast_thread = threading.Thread(
             target=self._broadcast_loop,
@@ -962,8 +947,8 @@ class UsdSyncServer:
         """Approve a proposal — replay events into target department layer.
 
         Replays the accumulated events through apply_txn targeting the
-        department layer. This handles stage mutation, broadcast, gating,
-        corrections, and log persistence — same path as normal txns.
+        department layer. This handles stage mutation, broadcast, and log
+        persistence through the same path as normal transactions.
         Then removes the proposal layer.
         """
         self.txn_barrier.acquire_shared()
@@ -988,12 +973,8 @@ class UsdSyncServer:
             return False
 
         if p.events:
-            # Apply into the target department layer.
-            changed_set = set(self.apply_txn(p.events, layer=target_layer))
+            self.apply_txn(p.events, layer=target_layer)
 
-            # Persist every authored opinion, but expose only the composed
-            # result to flat live receivers, matching normal transaction
-            # gating.
             records: list[tuple[dict, bytes]] = []
             persist_tuples = []
             for ev in p.events:
@@ -1022,11 +1003,7 @@ class UsdSyncServer:
                     )
                 )
             self.append_log_batch(persist_tuples)
-            self.broadcast_transaction_views(
-                records,
-                changed_set,
-                p.events,
-            )
+            self.broadcast_transaction_views(records)
 
         # Remove proposal layer from session
         with self.stage_lock:
@@ -1122,24 +1099,65 @@ class UsdSyncServer:
         """
         layer_key = _layer_key_for_department(department)
         if department:
-            self._client_departments[client_id] = department
             layer = self._get_or_create_department_layer(department)
+            self._client_departments[client_id] = department
         else:
             layer = self.edit_layer
         self._client_layer_keys[client_id] = layer_key
         self.client_layers[client_id] = layer
         return layer
 
+    def _flat_replay_rejection_reason_unlocked(self) -> str:
+        """Return why a new flat receiver cannot mirror this server."""
+        if self.department_priority:
+            return "department collaboration requires layered replay"
+        if len(self.layer_stack.layer_keys) != 1:
+            return "multiple collaboration layers require layered replay"
+        layer = self.layer_stack.ordered_layers[0]
+        with self.stage_lock:
+            if self.stage.IsLayerMuted(layer.identifier):
+                return "muted collaboration layers require layered replay"
+        return ""
+
+    def reserve_receiver_replay_mode(self, layered: bool) -> tuple[bool, str]:
+        """Atomically admit a receiver under the current layer-stack contract."""
+        if layered:
+            return True, ""
+        with self._replay_mode_lock:
+            reason = self._flat_replay_rejection_reason_unlocked()
+            if reason:
+                return False, reason
+            self._flat_receiver_count += 1
+        return True, ""
+
+    def release_receiver_replay_mode(self, layered: bool) -> None:
+        """Release a replay-mode reservation when a receiver disconnects."""
+        if layered:
+            return
+        with self._replay_mode_lock:
+            if self._flat_receiver_count <= 0:
+                raise RuntimeError("flat receiver reservation underflow")
+            self._flat_receiver_count -= 1
+
+    def _reject_layer_stack_change_for_flat_receivers(self) -> None:
+        if self._flat_receiver_count:
+            raise ReplayModeConflictError(
+                "layer-stack changes require all connected receivers to use layered replay"
+            )
+
     def _get_or_create_department_layer(self, department: str) -> Sdf.Layer:
         """Resolve department policy to one shared collaboration layer."""
         layer_key = _layer_key_for_department(department)
-        with self.stage_lock:
-            layer, added = self.layer_stack.ensure_layer(
-                layer_key,
-                label=department,
-            )
-            if added:
-                self._apply_department_order()
+        with self._replay_mode_lock:
+            if not self.layer_stack.has_layer(layer_key):
+                self._reject_layer_stack_change_for_flat_receivers()
+            with self.stage_lock:
+                layer, added = self.layer_stack.ensure_layer(
+                    layer_key,
+                    label=department,
+                )
+                if added:
+                    self._apply_department_order()
         if not added:
             return layer
 
@@ -1199,8 +1217,14 @@ class UsdSyncServer:
         layer_key = self.resolve_layer_key(key)
         if not layer_key:
             return False
-        with self.stage_lock:
-            changed = self.layer_stack.set_muted(layer_key, True)
+        with self._replay_mode_lock:
+            with self.stage_lock:
+                layer = self.layer_stack.layer_for(layer_key)
+                if self.stage.IsLayerMuted(layer.identifier):
+                    changed = False
+                else:
+                    self._reject_layer_stack_change_for_flat_receivers()
+                    changed = self.layer_stack.set_muted(layer_key, True)
         if not changed:
             return True
         self.bump_snapshot_epoch(f"mute_layer:{key}")
@@ -1212,8 +1236,14 @@ class UsdSyncServer:
         layer_key = self.resolve_layer_key(key)
         if not layer_key:
             return False
-        with self.stage_lock:
-            changed = self.layer_stack.set_muted(layer_key, False)
+        with self._replay_mode_lock:
+            with self.stage_lock:
+                layer = self.layer_stack.layer_for(layer_key)
+                if not self.stage.IsLayerMuted(layer.identifier):
+                    changed = False
+                else:
+                    self._reject_layer_stack_change_for_flat_receivers()
+                    changed = self.layer_stack.set_muted(layer_key, False)
         if not changed:
             return True
         self.bump_snapshot_epoch(f"unmute_layer:{key}")
@@ -1304,10 +1334,13 @@ class UsdSyncServer:
             raise ValueError("department names must be non-empty")
         if len(set(ordered_departments)) != len(ordered_departments):
             raise ValueError("department priority contains duplicates")
-        with self.stage_lock:
-            policy_changed = ordered_departments != self.department_priority
-            self.department_priority = ordered_departments
-            order_changed = self._apply_department_order()
+        with self._replay_mode_lock:
+            if ordered_departments != self.department_priority:
+                self._reject_layer_stack_change_for_flat_receivers()
+            with self.stage_lock:
+                policy_changed = ordered_departments != self.department_priority
+                self.department_priority = ordered_departments
+                order_changed = self._apply_department_order()
         if not order_changed and not policy_changed:
             return
         self.bump_snapshot_epoch("set_department_priority")
@@ -1639,8 +1672,7 @@ class UsdSyncServer:
         Surviving events are rewritten in stamp order, preserving causal
         ordering within and across authored layers: creates precede the
         connections and bindings that reference them, and deletes precede
-        recreates. Layered receivers reconstruct logical layer strength; flat
-        receivers continue to consume the composed projection.
+        recreates.
         """
         sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
 
@@ -1691,10 +1723,7 @@ class UsdSyncServer:
                     handler.client_address,
                 )
                 disconnected.append(handler)
-        if disconnected:
-            with self.clients_lock:
-                for handler in disconnected:
-                    self.receivers.discard(handler)
+        self._discard_unreachable_receivers(disconnected)
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
@@ -1724,94 +1753,6 @@ class UsdSyncServer:
         self._point_instancer_paths.clear()
         LOG.info("Purged event log and reset authored collaboration layers")
         self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
-
-    def _flatten_layer_stack_for_projection(self) -> Sdf.Layer:
-        with self.stage_lock:
-            return UsdUtils.FlattenLayerStack(
-                self.stage,
-                tag="openusdconnect-flat-projection.usda",
-            )
-
-    def _flattened_stage_layer_for_property_event(
-        self,
-        event: dict,
-    ) -> Sdf.Layer | None:
-        if event.get("k") != K_SET_SDF_SPEC_FIELDS or _needs_flattened_spec_projection(event):
-            return None
-        with self.stage_lock:
-            if not composed_property_spec_requires_flattening(self.stage, event):
-                return None
-            return self.stage.Flatten()
-
-    def build_correction(
-        self,
-        ev: dict,
-        *,
-        composed_layer: Sdf.Layer | None = None,
-        flattened_stage_layer: Sdf.Layer | None = None,
-    ) -> dict | None:
-        """Build a correction event with the composed value for an overridden event.
-
-        Returns a new event dict with the server's authoritative composed
-        values, or None if no correction is needed.
-        """
-        k = ev.get("k")
-        pp = ev.get("prim", "")
-        if not pp:
-            return None
-
-        with self.stage_lock:
-            if k == K_SET_SDF_SPEC_FIELDS:
-                if _needs_flattened_spec_projection(ev):
-                    layer = (
-                        composed_layer
-                        if composed_layer is not None
-                        else self._flatten_layer_stack_for_projection()
-                    )
-                    return composed_layer_spec_event(
-                        layer,
-                        ev,
-                    )
-                if flattened_stage_layer is not None:
-                    return composed_layer_spec_event(flattened_stage_layer, ev)
-                return composed_property_spec_event(self.stage, ev)
-
-            prim = self.stage.GetPrimAtPath(pp)
-            if not prim or not prim.IsValid():
-                return None
-
-            if k == K_SET_XFORM_TRS:
-                xf = UsdGeom.Xformable(prim)
-                local = xf.GetLocalTransformation(Usd.TimeCode.Default())
-                t, r, s = decompose_trs_from_matrix(as_matrix(local))
-                return {
-                    "k": K_SET_XFORM_TRS,
-                    "prim": pp,
-                    "fields": ["t", "r", "s"],
-                    "t": t,
-                    "r": r,
-                    "s": s,
-                }
-
-            if k == K_SET_VISIBILITY:
-                img = UsdGeom.Imageable(prim)
-                vis = img.GetVisibilityAttr().Get()
-                return {
-                    "k": K_SET_VISIBILITY,
-                    "prim": pp,
-                    "visible": vis != "invisible",
-                }
-
-            if k == K_DEACTIVATE_PRIM:
-                return {
-                    "k": K_DEACTIVATE_PRIM,
-                    "prim": pp,
-                    "active": prim.IsActive(),
-                }
-
-        # For event types we can't build corrections for, return None.
-        # The sender stays divergent until the next full resync.
-        return None
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -2151,8 +2092,8 @@ class UsdSyncServer:
         finally:
             self.txn_barrier.release_exclusive()
 
-    def append_log(self, rec: dict):
-        """Append event record to the event store.
+    def append_log(self, rec: dict) -> bytes:
+        """Append an event record and return its encoded representation.
 
         Raises on persistence failure — callers should not broadcast
         events that were not successfully persisted.
@@ -2162,6 +2103,7 @@ class UsdSyncServer:
         self.store.append(rec["seq"], rec_bin, kind=ev.get("k"), prim=ev.get("prim"))
         with self._seq_lock:
             self._event_count += 1
+        return rec_bin
 
     def append_log_batch(
         self,
@@ -2247,8 +2189,13 @@ class UsdSyncServer:
                 rec["origin"] = origin
             if layer_key:
                 rec["layer_key"] = layer_key
-            self.append_log(rec)
-            self.broadcast(rec, exclude_origin=origin)
+            rec_bin = self.append_log(rec)
+            if self.wire_metrics is not None:
+                self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
+            self.broadcast_transaction_views(
+                [(rec, rec_bin)],
+                exclude_origin=origin,
+            )
 
         LOG.info(
             "Replayed %d child events after load_payload %s",
@@ -2264,6 +2211,42 @@ class UsdSyncServer:
         """Unsubscribe from broadcast events."""
         if callback in self._event_listeners:
             self._event_listeners.remove(callback)
+
+    @contextmanager
+    def receiver_replay_window(self, handler):
+        """Register a receiver at a stable replay-to-live boundary.
+
+        The exclusive barrier is held only long enough to make prior realtime
+        writes durable, capture the replay watermark, and join the live
+        receiver set. The handler's send lock remains held while the caller
+        sends bounded replay, so newer captured broadcasts follow it.
+        """
+        self.txn_barrier.acquire_exclusive()
+        send_lock_acquired = False
+        receiver_registered = False
+        try:
+            if self._persist_queue is not None:
+                self._persist_queue.join()
+            handler.send_lock.acquire()
+            send_lock_acquired = True
+            with self.clients_lock:
+                self.receivers.add(handler)
+                receiver_registered = True
+            replay_end = self.store.get_max_seq()
+        except Exception:
+            if receiver_registered:
+                with self.clients_lock:
+                    self.receivers.discard(handler)
+            if send_lock_acquired:
+                handler.send_lock.release()
+            raise
+        finally:
+            self.txn_barrier.release_exclusive()
+
+        try:
+            yield replay_end
+        finally:
+            handler.send_lock.release()
 
     def register_client(
         self,
@@ -2293,103 +2276,39 @@ class UsdSyncServer:
     def broadcast_transaction_views(
         self,
         records: list[tuple[dict, bytes]],
-        changed_indices: set[int],
-        events: list[dict],
         *,
         exclude_origin: str | None = None,
     ) -> None:
-        """Deliver one authored transaction to layered and flat receivers.
+        """Deliver one authored transaction under each receiver contract.
 
         Layered receivers always get every persisted authored record, including
         records from their own origin, because omitting one would leave their
-        reconstructed layer stack incomplete. Flat receivers retain the
-        existing composed-view behavior and origin echo suppression: winning
-        records pass through, while overridden generic Sdf edits become
-        authoritative composed corrections.
+        reconstructed layer incomplete. Flat receivers are limited to a single
+        unmuted collaboration layer, so they receive the same records with
+        origin echo suppression.
         """
         if not records:
             return
-        if len(records) != len(events):
-            raise ValueError("transaction record and event counts differ")
 
         has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
+        authored_records = [record for record, _encoded in records]
+        authored_payload = frame_batch([encoded for _record, encoded in records])
         if has_layered_receivers:
-            authored_records = [record for record, _encoded in records]
-            authored_bytes = [encoded for _record, encoded in records]
             self.broadcast_bytes(
-                frame_batch(authored_bytes),
+                authored_payload,
                 authored_records,
                 audience=_AUDIENCE_LAYERED,
                 notify_listeners=False,
             )
-
-        notify_flat_view = bool(self._event_listeners)
-        if not has_flat_receivers and not notify_flat_view:
-            return
-
-        flat_records: list[dict] = []
-        flat_bytes: list[bytes] = []
-        projection_layer: Sdf.Layer | None = None
-        flattened_stage_layer: Sdf.Layer | None = None
-
-        def _flush_flat() -> None:
-            if not flat_records:
-                return
-            if has_flat_receivers:
-                self.broadcast_bytes(
-                    frame_batch(flat_bytes),
-                    flat_records,
-                    exclude_origin=exclude_origin,
-                    audience=_AUDIENCE_FLAT,
-                )
-            else:
-                self._notify_event_listeners(flat_records)
-            flat_records.clear()
-            flat_bytes.clear()
-
-        for index, ((record, encoded), event) in enumerate(
-            zip(records, events, strict=True),
-        ):
-            if index in changed_indices:
-                flat_records.append(record)
-                flat_bytes.append(encoded)
-                continue
-
-            _flush_flat()
-            if projection_layer is None and _needs_flattened_spec_projection(event):
-                projection_layer = self._flatten_layer_stack_for_projection()
-            if flattened_stage_layer is None:
-                flattened_stage_layer = self._flattened_stage_layer_for_property_event(event)
-            correction = self.build_correction(
-                event,
-                composed_layer=projection_layer,
-                flattened_stage_layer=flattened_stage_layer,
+        if has_flat_receivers:
+            self.broadcast_bytes(
+                authored_payload,
+                authored_records,
+                exclude_origin=exclude_origin,
+                audience=_AUDIENCE_FLAT,
+                notify_listeners=False,
             )
-            if correction is None:
-                continue
-            correction_record = {
-                "type": MSG_EVENT,
-                # This is a receiver view of the persisted opinion, not a new
-                # authored event, so it deliberately reuses the same sequence.
-                "seq": record["seq"],
-                "event": correction,
-            }
-            if exclude_origin and has_flat_receivers:
-                self.send_to_origin(
-                    correction_record,
-                    exclude_origin,
-                    audience=_AUDIENCE_FLAT,
-                )
-            if event.get("k") in FLAT_RECEIVER_PROJECTION_KINDS:
-                if has_flat_receivers:
-                    self.broadcast(
-                        correction_record,
-                        exclude_origin=exclude_origin,
-                        audience=_AUDIENCE_FLAT,
-                    )
-                else:
-                    self._notify_event_listeners([correction_record])
-        _flush_flat()
+        self._notify_event_listeners(authored_records)
 
     @staticmethod
     def _validate_audience(audience: str) -> None:
@@ -2459,7 +2378,7 @@ class UsdSyncServer:
                 kind = rec.get("event", {}).get("k") or rec.get("type", "")
                 self.wire_metrics.record(kind, len(buf))
         payload = frame_batch(framed_payloads)
-        self._broadcast_queue.put((payload, exclude_origin, None, audience))
+        self._enqueue_broadcast(payload, exclude_origin, audience)
         # Notify event listeners synchronously — these are in-process
         # callbacks (e.g. dashboard) that are fast and must see events
         # in order.
@@ -2476,22 +2395,10 @@ class UsdSyncServer:
     ):
         """Enqueue pre-framed payload for broadcast and notify listeners."""
         self._validate_audience(audience)
-        self._broadcast_queue.put((payload, exclude_origin, None, audience))
+        self._enqueue_broadcast(payload, exclude_origin, audience)
         if not notify_listeners:
             return
         self._notify_event_listeners(records)
-
-    def send_to_origin(
-        self,
-        rec: dict,
-        origin: str,
-        *,
-        audience: str = _AUDIENCE_ALL,
-    ):
-        """Enqueue a record for async send to receivers matching an origin."""
-        self._validate_audience(audience)
-        payload = frame_batch([encode_message(rec)])
-        self._broadcast_queue.put((payload, None, origin, audience))
 
     def broadcast_message(
         self,
@@ -2508,7 +2415,20 @@ class UsdSyncServer:
         """
         self._validate_audience(audience)
         payload = frame_batch([encode_message(msg)])
-        self._broadcast_queue.put((payload, exclude_origin, None, audience))
+        self._enqueue_broadcast(payload, exclude_origin, audience)
+
+    def _enqueue_broadcast(
+        self,
+        payload: bytes,
+        exclude_origin: str | None,
+        audience: str,
+    ) -> None:
+        targets = self._receiver_targets(
+            exclude_origin=exclude_origin,
+            audience=audience,
+        )
+        if targets:
+            self._broadcast_queue.put((payload, targets, exclude_origin, audience))
 
     def _broadcast_loop(self):
         """Dedicated thread: drain the broadcast queue and send to receivers.
@@ -2535,25 +2455,25 @@ class UsdSyncServer:
                         break
                     if remaining is None:
                         continue
-                    payload, exclude_origin, target_origin, audience = remaining
+                    payload, targets, exclude_origin, audience = remaining
                     try:
                         self._send_to_all(
                             payload,
                             exclude_origin=exclude_origin,
-                            target_origin=target_origin,
                             audience=audience,
+                            targets=targets,
                         )
                     except Exception:
                         LOG.exception("Error draining broadcast queue")
                 return
 
-            payload, exclude_origin, target_origin, audience = item
+            payload, targets, exclude_origin, audience = item
             try:
                 self._send_to_all(
                     payload,
                     exclude_origin=exclude_origin,
-                    target_origin=target_origin,
                     audience=audience,
+                    targets=targets,
                 )
             except Exception:
                 LOG.exception("Unexpected error in broadcast loop")
@@ -2564,8 +2484,8 @@ class UsdSyncServer:
         self,
         payload: bytes,
         exclude_origin: str | None = None,
-        target_origin: str | None = None,
         audience: str = _AUDIENCE_ALL,
+        targets: tuple | None = None,
     ):
         """Send payload to matching receivers, removing dead ones.
 
@@ -2574,34 +2494,58 @@ class UsdSyncServer:
         clients don't wait a full keepalive cycle to reclaim it. The
         dead handler's recv loop exits separately once keepalive expires.
         """
-        with self.clients_lock:
-            targets = list(self.receivers)
+        if targets is None:
+            targets = self._receiver_targets(
+                exclude_origin=exclude_origin,
+                audience=audience,
+            )
         dead = []
         for h in targets:
-            h_origin = getattr(h, "_origin", None)
-            layered = bool(getattr(h, "_layered_replay", False))
-            if audience == _AUDIENCE_LAYERED and not layered:
-                continue
-            if audience == _AUDIENCE_FLAT and layered:
-                continue
-            if target_origin and h_origin != target_origin:
-                continue
-            if exclude_origin and h_origin == exclude_origin:
-                continue
             try:
                 with h.send_lock:
                     h.request.sendall(payload)
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead", h.client_address)
                 dead.append(h)
-        if not dead:
+        self._discard_unreachable_receivers(dead)
+
+    def _receiver_targets(
+        self,
+        *,
+        exclude_origin: str | None = None,
+        audience: str = _AUDIENCE_ALL,
+    ) -> tuple:
+        """Capture receivers matching one broadcast's delivery contract."""
+        with self.clients_lock:
+            targets = []
+            for handler in self.receivers:
+                layered = bool(getattr(handler, "_layered_replay", False))
+                if audience == _AUDIENCE_LAYERED and not layered:
+                    continue
+                if audience == _AUDIENCE_FLAT and layered:
+                    continue
+                if exclude_origin and getattr(handler, "_origin", None) == exclude_origin:
+                    continue
+                targets.append(handler)
+        return tuple(targets)
+
+    def _discard_unreachable_receivers(self, handlers: list) -> None:
+        """Remove failed receiver sockets and release their server-side roles."""
+        if not handlers:
             return
         with self.clients_lock:
-            for h in dead:
-                self.receivers.discard(h)
+            for handler in handlers:
+                self.receivers.discard(handler)
         released_any = False
-        for h in dead:
-            client_id = getattr(h, "_client_id", "") or ""
+        for handler in handlers:
+            release_replay = getattr(
+                handler,
+                "release_receiver_replay_reservation",
+                None,
+            )
+            if release_replay is not None:
+                release_replay()
+            client_id = getattr(handler, "_client_id", "") or ""
             if client_id and self.release_playback(client_id):
                 released_any = True
         if released_any:
@@ -2640,119 +2584,12 @@ class UsdSyncServer:
             finally:
                 self._persist_queue.task_done()
 
-    # Derived from the EVENT_KIND_INFO declaration table; semantics are
-    # documented on EventKindInfo.strength_attrs. Kinds with no entry are
-    # always broadcast (conservative default).
-    _EVENT_ATTR_MAP: dict[str, list[str]] = {
-        k: list(info.strength_attrs)
-        for k, info in EVENT_KIND_INFO.items()
-        if info.strength_attrs is not None
-    }
-
-    def _is_layer_winning(self, prim, target, ev) -> bool:
-        """Check if the target layer's opinions from this event are visible.
-
-        For attribute-writing events, checks ``GetPropertyStack`` per
-        attribute.  For metadata and structural events, walks session
-        sublayers with early exit (avoids building the full prim stack).
-        For unknown event types, returns True (conservative — always broadcast).
-        """
-        k = ev.get("k", "")
-        attr_names = self._EVENT_ATTR_MAP.get(k)
-
-        if attr_names is None:
-            return True  # unknown event type — always broadcast
-
-        if k == K_SET_MATERIAL_BINDING:
-            purpose = ev.get("material_purpose", "")
-            if purpose:
-                attr_names = [f"rel:material:binding:{purpose}"]
-
-        prim_path = str(prim.GetPath())
-
-        if not attr_names:
-            # Structural event (ensure_prim, delete, rename) — walk
-            # session sublayers strong-to-weak, first with a spec wins.
-            # Uses HasSpec() (cheap lookup) instead of GetPrimStack()
-            # (builds full spec vector).
-            return self._is_first_layer_with_spec(prim_path, target)
-
-        for attr_name in attr_names:
-            if attr_name == "meta:active":
-                # Walk session sublayers; first with HasInfo("active") wins.
-                return self._is_first_layer_with_info(
-                    prim_path,
-                    target,
-                    "active",
-                )
-            elif attr_name.startswith("rel:"):
-                rel = prim.GetRelationship(attr_name[4:])
-                if not rel or not rel.IsValid():
-                    continue
-                stack = rel.GetPropertyStack()
-                if stack and stack[0].layer == target:
-                    return True
-            else:
-                attr = prim.GetAttribute(attr_name)
-                if not attr or not attr.IsValid():
-                    continue
-                stack = attr.GetPropertyStack()
-                if stack and stack[0].layer == target:
-                    return True
-
-        return False
-
-    def _is_first_layer_with_spec(self, prim_path: str, target) -> bool:
-        """Check if target is the strongest layer with a spec for prim_path.
-
-        Iterates cached session layer objects (strong → weak). Returns
-        True at the first layer that has a spec — early exit, no
-        Sdf.Layer.Find() calls.
-        """
-        for layer in self.layer_stack.ordered_layers:
-            if layer.GetPrimAtPath(prim_path):
-                return layer == target
-        root = self.stage.GetRootLayer()
-        if root.GetPrimAtPath(prim_path):
-            return root == target
-        return True
-
-    def _is_first_layer_with_info(
-        self,
-        prim_path: str,
-        target,
-        field: str,
-    ) -> bool:
-        """Check if target is the strongest layer with a given metadata field."""
-        for layer in self.layer_stack.ordered_layers:
-            spec = layer.GetPrimAtPath(prim_path)
-            if spec and spec.HasInfo(field):
-                return layer == target
-        root = self.stage.GetRootLayer()
-        spec = root.GetPrimAtPath(prim_path)
-        if spec and spec.HasInfo(field):
-            return root == target
-        return True
-
-    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None) -> list[int]:
+    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None) -> None:
         """Apply a transaction to the stage.
 
         Layer opinions are authored into *layer* (defaults to
         ``self.edit_layer``). Shared session metadata and stage-state events
         are applied under the primary session edit target.
-        Returns indices of events that changed the composed view — events
-        whose composed values are unchanged (overridden by a stronger layer)
-        are excluded.  All events are persisted to the log regardless.
-
-        Uses per-attribute strength checking via ``GetPropertyStack`` and
-        ``PrimSpec.HasInfo`` — works for all event types without snapshotting.
-        When the edit layer is the only unmuted session sublayer (no
-        department layers), every event wins and the checks are skipped.
-
-        Winning checks are cached per (prim_path, event_kind) for the
-        duration of the txn.  The layer stack is frozen while we hold
-        stage_lock, so the result cannot change between the first and
-        subsequent checks for the same prim+kind.
         """
         from ..event_apply import apply_events
         from ..sdf_spec_delta import validate_spec_delta
@@ -2763,7 +2600,6 @@ class UsdSyncServer:
 
         target = layer or self.edit_layer
 
-        changed_indices = []
         with self.stage_lock:
             edit_target = Usd.EditTarget(target)
             session_target = Usd.EditTarget(self.stage.GetSessionLayer())
@@ -2812,65 +2648,13 @@ class UsdSyncServer:
                 if was_muted:
                     self.stage.MuteLayer(target.identifier)
 
-            # Single-layer mode: the edit layer is the only unmuted session
-            # sublayer, and local session opinions are strongest in LIVRPS
-            # order, so every event's opinion is composed-visible. Skips
-            # the per-event GetPropertyStack/HasSpec strength checks.
-            if (
-                target is self.edit_layer
-                and len(self.layer_stack.ordered_layers) == 1
-                and not was_muted
-            ):
-                for i, ev in enumerate(events):
-                    ev_kind = ev.get("k")
-                    if ev_kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
-                        self._prim_count_dirty = True
-                        self._track_prim_event(ev)
-                    elif ev_kind == K_SET_INSTANCEABLE:
-                        self._track_prim_event(ev)
-                    changed_indices.append(i)
-                return changed_indices
-
-            # Cache winning results per (prim_path, event_kind) — the
-            # layer stack is frozen for the duration of this txn so the
-            # result is stable across events touching the same prim.
-            winning_cache: dict[tuple[str, str], bool] = {}
-
-            for i, ev in enumerate(events):
+            for ev in events:
                 k = ev.get("k")
                 if k in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
                     self._prim_count_dirty = True
                     self._track_prim_event(ev)
                 elif k == K_SET_INSTANCEABLE:
                     self._track_prim_event(ev)
-                pp = ev.get("prim", "")
-                if not pp:
-                    changed_indices.append(i)
-                    continue
-                if k in FLAT_RECEIVER_PROJECTION_KINDS:
-                    # Flat receivers need an authoritative composed correction
-                    # so weaker opinions, dictionary composition, and clears
-                    # cannot leak through.
-                    continue
-
-                cache_key = (pp, k)
-                cached = winning_cache.get(cache_key)
-                if cached is not None:
-                    if cached:
-                        changed_indices.append(i)
-                    continue
-
-                prim = self.stage.GetPrimAtPath(pp)
-                if not prim or not prim.IsValid():
-                    winning_cache[cache_key] = True
-                    changed_indices.append(i)
-                    continue
-                wins = self._is_layer_winning(prim, target, ev)
-                winning_cache[cache_key] = wins
-                if wins:
-                    changed_indices.append(i)
-
-        return changed_indices
 
     def process_txn(
         self,
@@ -2880,7 +2664,7 @@ class UsdSyncServer:
         origin: str | None = None,
         client_addr: str | None = None,
         layer: Sdf.Layer | None = None,
-    ) -> tuple[list[tuple[dict, bytes]], set[int]]:
+    ) -> list[tuple[dict, bytes]]:
         """Apply, seq-assign, encode, and persist a transaction.
 
         Runs apply_txn, assigns monotonic sequence numbers, encodes each
@@ -2890,17 +2674,8 @@ class UsdSyncServer:
         shared lock themselves — this method does not, so it stays
         composable with broader critical sections.
 
-        Returns:
-            records: list of (rec_dict, rec_bin) in input order — used by
-                callers that need to broadcast the encoded records.
-            changed_indices: set of event indices whose composed value
-                actually landed on the stage (the rest were overridden by
-                a stronger layer). Broadcast callers typically send only
-                the changed records and emit corrections for the rest.
-
-        Callers that need broadcast/correction (ConnectionHandler) consume
-        the return value. Callers that just want authoritative state plus
-        a populated log (tests, replay tooling) can ignore it.
+        Returns encoded broadcast records in input order. Callers that only
+        need authoritative state plus a populated log may ignore the result.
 
         Collaboration records derive their portable layer key from the actual
         edit target. Client policy selects that target before this method is
@@ -2911,8 +2686,7 @@ class UsdSyncServer:
         if layer_key is None and any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        changed = self.apply_txn(events, layer=target_layer)
-        changed_set = set(changed)
+        self.apply_txn(events, layer=target_layer)
 
         records: list[tuple[dict, bytes]] = []
         persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]] = []
@@ -2934,7 +2708,7 @@ class UsdSyncServer:
             records.append((rec, rec_bin))
             persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
         self.append_log_batch(persist_tuples)
-        return records, changed_set
+        return records
 
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe, cached)."""
@@ -3157,54 +2931,28 @@ class UsdSyncServer:
             flat = self.stage.Flatten()
         return flat.ExportToString()
 
-    def replay_from(self, handler, seq_start: int):
-        """Replay events from the event store starting at seq_start.
+    def replay_from(
+        self,
+        handler,
+        seq_start: int,
+        *,
+        seq_end: int | None = None,
+    ):
+        """Replay events from the event store in an inclusive sequence range.
 
         All events are replayed regardless of origin — the receiver needs
         its own prior edits (which share its origin) to restore state.
         Origin filtering only applies to live broadcast to prevent echo.
         Layered receivers get every persisted authored record with its logical
-        layer target. Flat receivers retain the composed projection used by
-        existing DCC adapters.
-
-        Single-layer replay sends binary blobs directly from the store.
+        layer target. Flat receivers are admitted only for a single unmuted
+        collaboration layer, so both modes replay stored records directly.
         """
         _REPLAY_CHUNK = 65536
-        blobs = self.store.get_from_seq_bin(seq_start)
+        blobs = self.store.get_from_seq_bin(seq_start, seq_end)
         buf_parts: list[bytes] = []
         buf_size = 0
-        projection_layer: Sdf.Layer | None = None
-        flattened_stage_layer: Sdf.Layer | None = None
         for blob in blobs:
-            outbound = blob
-            if len(self.layer_stack.layer_keys) > 1 and not getattr(
-                handler,
-                "_layered_replay",
-                False,
-            ):
-                rec = message_to_dict(blob)
-                event = rec.get("event", {})
-                if event.get("k") in FLAT_RECEIVER_PROJECTION_KINDS:
-                    if projection_layer is None and _needs_flattened_spec_projection(event):
-                        projection_layer = self._flatten_layer_stack_for_projection()
-                    if flattened_stage_layer is None:
-                        flattened_stage_layer = self._flattened_stage_layer_for_property_event(
-                            event
-                        )
-                    correction = self.build_correction(
-                        event,
-                        composed_layer=projection_layer,
-                        flattened_stage_layer=flattened_stage_layer,
-                    )
-                    if correction is not None:
-                        outbound = encode_message(
-                            {
-                                "type": MSG_EVENT,
-                                "seq": rec["seq"],
-                                "event": correction,
-                            }
-                        )
-            framed = frame_batch([outbound])
+            framed = frame_batch([blob])
             buf_parts.append(framed)
             buf_size += len(framed)
             if buf_size >= _REPLAY_CHUNK:

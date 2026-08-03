@@ -4,10 +4,11 @@
 cycle.  ``connect()`` waits for ``hello_ok`` (or surfaces ``auth_rejected``)
 before returning, so callers know the server accepted them before the
 first event leaves.  ``send_events`` / ``send_message`` return ``False``
-on socket error and put the sender into a disconnected state — callers
-reconnect from their own tick loop (the protocol is latest-wins for
-most events, so dropping during disconnect is correct: the next
-successful tick re-snapshots current state).
+on socket error and put the sender into a disconnected state; callers
+own reconnect and retry policy. ``EventSender`` does not retain a failed
+message. Stage integrations can pair it with
+``NoticeEmitter.prepare_events_for_send`` to keep one emitter batch pending
+until the socket write succeeds.
 
 Token persistence (TOFU) is opt-in: pass an ``on_token_issued`` callback
 to receive a freshly issued token on first connect, and pass the saved
@@ -176,7 +177,8 @@ class EventSender:
         """Wrap *events* in a ``txn`` and send.  Returns success.
 
         On socket error, marks the sender disconnected and returns
-        ``False``; the caller is expected to reconnect from its next tick.
+        ``False``. The caller is responsible for retaining the batch and
+        reconnecting; this object does not queue failed events.
         """
         if self.sock is None or not events:
             return False

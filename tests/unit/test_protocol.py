@@ -99,9 +99,12 @@ class TestMessageConstruction:
         assert "sync_from" not in msg
 
     def test_make_hello_receiver_with_sync(self):
-        msg = make_hello("receiver", sync_from=5, layered_replay=True)
+        msg = make_hello("receiver", sync_from=5)
         assert msg["sync_from"] == 5
         assert msg["layered_replay"] is True
+
+        flat = make_hello("receiver", layered_replay=False)
+        assert "layered_replay" not in flat
 
     def test_hello_ok_layered_replay_roundtrip(self):
         msg = {"type": "hello_ok", "layered_replay": True}

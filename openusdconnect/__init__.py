@@ -10,6 +10,7 @@ from .adapters import (
 )
 from .codec import (
     DecodeResult,
+    HelloRejectionCode,
     ReceivedEvent,
     decode_envelope,
     decode_messages,
@@ -25,6 +26,7 @@ from .protocol import make_hello, make_quit, make_txn
 from .receiver import ReceiverThread
 from .sender import EventSender
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
+from .usd_client import UsdPublisher, UsdReceiver
 
 __version__ = "0.1.0"
 
@@ -33,11 +35,14 @@ __all__ = [
     "DecodeResult",
     "Event",
     "EventSender",
+    "HelloRejectionCode",
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
     "ReceivedEvent",
     "ServerConfig",
+    "UsdPublisher",
+    "UsdReceiver",
     "UsdStageAdapter",
     "UsdSyncServer",
     "VfsConfig",

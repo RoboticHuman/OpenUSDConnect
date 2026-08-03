@@ -5,10 +5,11 @@ suppress flag, and ChangeBlock batching — all DCC-agnostic.
 """
 
 import numpy as np
+import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
 from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.event_apply import apply_event
+from openusdconnect.event_apply import apply_event, apply_events
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
@@ -83,6 +84,60 @@ class TestCreationDetection:
         ensure = [e for e in events if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/MySphere"]
         assert len(ensure) == 1
         assert ensure[0]["typeName"] == "Sphere"
+
+
+class TestPreparedEventBatches:
+    def test_failed_send_reuses_exact_batch(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Thing", "Xform")
+
+        first = emitter.prepare_events_for_send()
+        second = emitter.prepare_events_for_send()
+
+        assert first
+        assert second is first
+
+    def test_edits_during_pending_batch_form_following_batch(self):
+        stage, emitter = _make_stage_and_emitter()
+        prim = stage.DefinePrim("/World/Thing", "Xform")
+        value = prim.CreateAttribute(
+            "userProperties:value",
+            Sdf.ValueTypeNames.Int,
+            custom=True,
+        )
+        value.Set(1)
+        first = emitter.prepare_events_for_send()
+
+        value.Set(2)
+        assert emitter.prepare_events_for_send() is first
+
+        emitter.mark_prepared_events_sent(first)
+        second = emitter.prepare_events_for_send()
+        assert second
+        assert second is not first
+        target = Usd.Stage.CreateInMemory()
+        apply_events(target, first + second)
+        assert target.GetAttributeAtPath("/World/Thing.userProperties:value").Get() == 2
+
+    def test_immediate_build_rejects_pending_prepared_batch(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Thing", "Xform")
+        emitter.prepare_events_for_send()
+
+        with pytest.raises(RuntimeError, match="prepared emitter batch"):
+            emitter.build_events_for_dirty()
+
+    def test_only_exact_prepared_batch_can_be_released(self):
+        stage, emitter = _make_stage_and_emitter()
+        stage.DefinePrim("/World/Thing", "Xform")
+        events = emitter.prepare_events_for_send()
+
+        with pytest.raises(ValueError, match="currently prepared"):
+            emitter.mark_prepared_events_sent(list(events))
+
+        assert emitter.prepare_events_for_send() is events
+        emitter.mark_prepared_events_sent(events)
+        assert emitter.prepare_events_for_send() == []
 
 
 class TestDeletionDetection:

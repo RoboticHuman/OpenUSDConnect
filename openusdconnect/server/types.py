@@ -57,6 +57,10 @@ class UnsupportedVfsWriteError(VfsWriteRejectedError):
     """Raised when a valid uploaded USD stage cannot be safely translated."""
 
 
+class ReplayModeConflictError(RuntimeError):
+    """Raised when a layer-stack change is incompatible with a flat receiver."""
+
+
 @dataclass(frozen=True)
 class VfsWriteAnalysis:
     """Summary of a translated full-file VFS save."""

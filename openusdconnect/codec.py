@@ -67,6 +67,7 @@ from .protocol_constants import (
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
+    MSG_HELLO_REJECTED,
     MSG_LAYER_STACK_STATE,
     MSG_PING,
     MSG_PLAYBACK_CLAIMED,
@@ -88,6 +89,8 @@ Envelope = _fb.Envelope
 Hello = _fb.Hello
 HelloOk = _fb.HelloOk
 AuthRejected = _fb.AuthRejected
+HelloRejectionCode = _fb.HelloRejectionCode
+HelloRejected = _fb.HelloRejected
 Txn = _fb.Txn
 BroadcastEvent = _fb.BroadcastEvent
 Resync = _fb.Resync
@@ -140,7 +143,7 @@ PayloadType = _fb.Payload
 EventPayloadType = _fb.EventPayload
 SdfSpecKindType = _fb.SdfSpecKind
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -150,6 +153,7 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_HELLO: PayloadType.Hello,
     MSG_HELLO_OK: PayloadType.HelloOk,
     MSG_AUTH_REJECTED: PayloadType.AuthRejected,
+    MSG_HELLO_REJECTED: PayloadType.HelloRejected,
     MSG_TXN: PayloadType.Txn,
     MSG_EVENT: PayloadType.BroadcastEvent,
     MSG_RESYNC: PayloadType.Resync,
@@ -195,6 +199,7 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.Hello: Hello,
     PayloadType.HelloOk: HelloOk,
     PayloadType.AuthRejected: AuthRejected,
+    PayloadType.HelloRejected: HelloRejected,
     PayloadType.Txn: Txn,
     PayloadType.BroadcastEvent: BroadcastEvent,
     PayloadType.Resync: Resync,
@@ -416,6 +421,17 @@ def _encode_auth_rejected(b, msg):
     return _fb.AuthRejectedEnd(b)
 
 
+def _encode_hello_rejected(b, msg):
+    code = int(msg.get("code", HelloRejectionCode.Unspecified))
+    if code == HelloRejectionCode.Unspecified:
+        raise ValueError("hello_rejected code must be specified")
+    reason = b.CreateString(msg.get("reason", ""))
+    _fb.HelloRejectedStart(b)
+    _fb.HelloRejectedAddCode(b, code)
+    _fb.HelloRejectedAddReason(b, reason)
+    return _fb.HelloRejectedEnd(b)
+
+
 def _encode_txn(b, msg):
     client_id = b.CreateString(msg["client_id"])
     proposal_id = b.CreateString(msg["proposal_id"]) if msg.get("proposal_id") else None
@@ -583,6 +599,7 @@ _ENCODE_DISPATCH = {
     MSG_HELLO: _encode_hello,
     MSG_HELLO_OK: _encode_hello_ok,
     MSG_AUTH_REJECTED: _encode_auth_rejected,
+    MSG_HELLO_REJECTED: _encode_hello_rejected,
     MSG_TXN: _encode_txn,
     MSG_EVENT: _encode_broadcast_event,
     MSG_RESYNC: _encode_resync,
@@ -1544,6 +1561,14 @@ def _dict_auth_rejected(h, msg_type):
     return {"type": msg_type, "reason": _str(h.Reason()) or ""}
 
 
+def _dict_hello_rejected(h, msg_type):
+    return {
+        "type": msg_type,
+        "code": int(h.Code()),
+        "reason": _str(h.Reason()) or "",
+    }
+
+
 def _dict_txn(t, msg_type, numpy_arrays=False):
     events = [
         event_to_dict(t.Events(i), numpy_arrays=numpy_arrays) for i in range(t.EventsLength())
@@ -1599,6 +1624,7 @@ _DICT_DECODE_DISPATCH = {
     MSG_HELLO: _dict_hello,
     MSG_HELLO_OK: _dict_hello_ok,
     MSG_AUTH_REJECTED: _dict_auth_rejected,
+    MSG_HELLO_REJECTED: _dict_hello_rejected,
     MSG_TXN: _dict_txn,
     MSG_EVENT: _dict_broadcast_event,
     MSG_RESYNC: _dict_empty,

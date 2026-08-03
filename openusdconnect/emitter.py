@@ -1760,6 +1760,9 @@ class NoticeEmitter:
         self._full_sdf_spec_scan = False
         self._pending_edit_target: Usd.EditTarget | None = None
         self._edit_target_conflict = False
+        # Building advances the diff caches, so retain one unsent batch.
+        # Later notices stay dirty until the retained batch is released.
+        self._prepared_events: list[dict] | None = None
         # Specialized channels transport their own values, but their local
         # field ownership can still change when an opinion is set or cleared.
         # Keep those field deltas separate from fragment serialization so a
@@ -2277,6 +2280,7 @@ class NoticeEmitter:
         self._full_sdf_spec_scan = False
         self._pending_edit_target = None
         self._edit_target_conflict = False
+        self._prepared_events = None
         self._suppress_depth = 0
 
     def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
@@ -3164,6 +3168,15 @@ class NoticeEmitter:
         for ev in events:
             self.invalidate_for_event(ev)
 
+    def _mark_snapshot_dirty(self) -> None:
+        """Mark every authored prim and Sdf spec for one full snapshot."""
+        self._record_edit_target()
+        self._full_sdf_spec_scan = True
+        for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
+            path = str(prim.GetPath())
+            if path != "/":
+                self.mark_dirty(path)
+
     def snapshot_events(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build events for every prim on the stage as if newly authored.
 
@@ -3175,13 +3188,20 @@ class NoticeEmitter:
         a populated stage, a replay harness reproducing a captured scene,
         or tests that need a full event stream for an authored stage.
         """
-        self._record_edit_target()
-        self._full_sdf_spec_scan = True
-        for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
-            path = str(prim.GetPath())
-            if path != "/":
-                self.mark_dirty(path)
+        if self._prepared_events is not None:
+            raise RuntimeError(
+                "a prepared emitter batch is still pending; mark it sent or "
+                "discard it before building a snapshot"
+            )
+        self._mark_snapshot_dirty()
         return self.build_events_for_dirty(eps_trs=eps_trs)
+
+    def prepare_snapshot_events_for_send(self, eps_trs: float = 1e-9) -> list[dict]:
+        """Prepare a retryable current-edit-target snapshot for transport."""
+        if self._prepared_events is not None:
+            return self._prepared_events
+        self._mark_snapshot_dirty()
+        return self.prepare_events_for_send(eps_trs=eps_trs)
 
     def snapshot_prim(self, prim_path: str) -> dict | None:
         """Snapshot the current local transform of a prim as TRS."""
@@ -4234,7 +4254,7 @@ class NoticeEmitter:
             )
         return events
 
-    def build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
+    def _build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
         """Build one transaction from edits authored into one edit target.
 
         USD notices are synchronous, so the edit target active during each
@@ -4262,3 +4282,55 @@ class NoticeEmitter:
                 self._pending_edit_target = None
                 self._edit_target_conflict = False
                 self._full_sdf_spec_scan = False
+
+    def build_events_for_dirty(self, eps_trs: float = 1e-9) -> list[dict]:
+        """Build and consume one transaction from the current dirty state.
+
+        This is the low-level immediate-consumption API. Integrations that
+        need to survive transport failure should use
+        :meth:`prepare_events_for_send` and call
+        :meth:`mark_prepared_events_sent` only after ``send_events`` succeeds.
+        """
+        if self._prepared_events is not None:
+            raise RuntimeError(
+                "a prepared emitter batch is still pending; mark it sent or "
+                "discard it before building another batch"
+            )
+        return self._build_events_for_dirty(eps_trs)
+
+    def prepare_events_for_send(self, eps_trs: float = 1e-9) -> list[dict]:
+        """Return a stable event batch until its transport write succeeds.
+
+        The first call consumes the current dirty state exactly like
+        :meth:`build_events_for_dirty`. If the caller cannot send the returned
+        batch, later calls return the same list object. Edits received in the
+        meantime remain dirty and form the following batch after
+        :meth:`mark_prepared_events_sent` releases this one.
+        """
+        if self._prepared_events is not None:
+            return self._prepared_events
+        events = self._build_events_for_dirty(eps_trs)
+        if events:
+            self._prepared_events = events
+        return events
+
+    @property
+    def prepared_event_count(self) -> int:
+        """Number of events retained for a later transport attempt."""
+        return len(self._prepared_events) if self._prepared_events is not None else 0
+
+    def mark_prepared_events_sent(self, events: list[dict]) -> None:
+        """Release the exact batch returned by :meth:`prepare_events_for_send`."""
+        if self._prepared_events is None:
+            raise RuntimeError("no prepared emitter batch is pending")
+        if events is not self._prepared_events:
+            raise ValueError("events are not the currently prepared emitter batch")
+        self._prepared_events = None
+
+    def discard_prepared_events(self) -> None:
+        """Discard a pending batch without treating it as sent.
+
+        This is an explicit lossy operation intended for session shutdown or
+        user-requested reset. It does not reconstruct the consumed dirty state.
+        """
+        self._prepared_events = None

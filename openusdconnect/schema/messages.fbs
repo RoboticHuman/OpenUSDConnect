@@ -30,6 +30,16 @@ table AuthRejected {
     reason:string;
 }
 
+enum HelloRejectionCode : ubyte {
+    Unspecified = 0,
+    LayeredReplayRequired = 1,
+}
+
+table HelloRejected {
+    code:HelloRejectionCode = Unspecified;
+    reason:string;
+}
+
 table Txn {
     client_id:string;
     events:[EventWrapper];
@@ -147,6 +157,7 @@ union Payload {
     PlaybackControl,
     PlaybackState,
     LayerStackState,
+    HelloRejected,
 }
 
 table Envelope {

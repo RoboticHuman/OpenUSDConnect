@@ -39,7 +39,9 @@ from .protocol_constants import (
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
+    K_UNLOAD_PAYLOAD,
     SHARED_STAGE_KINDS,
+    STAGE_METADATA_KEYS,
     STAGE_SYNC_KINDS,
 )
 from .sdf_arc_state import canonical_arc_state, clear_arc_state, read_arc_state
@@ -68,6 +70,117 @@ class _TrackedAssetEvent:
     event: dict
     edit_target: Usd.EditTarget
     dependencies: tuple[tuple[str, str, str], ...]
+
+
+class _SharedStageBinding:
+    """Move shared session metadata and runtime state between bound stages."""
+
+    def __init__(self):
+        self._stage: Usd.Stage | None = None
+        self._session_fields: dict[str, tuple[bool, object]] = {}
+        self._load_rules = None
+        self._events: dict[tuple[str, str], dict] = {}
+
+    def bind(self, stage: Usd.Stage) -> None:
+        if stage is self._stage:
+            return
+        self._restore_baseline()
+        self._stage = stage
+        self._capture_baseline()
+        self._apply_current()
+
+    def remember(self, events: Sequence[dict]) -> None:
+        for event in events:
+            kind = event.get("k")
+            if kind == K_SET_STAGE_METADATA:
+                key = (K_SET_STAGE_METADATA, "")
+                current = self._events.setdefault(key, {"k": K_SET_STAGE_METADATA})
+                for field in STAGE_METADATA_KEYS:
+                    if field in event:
+                        current[field] = copy.deepcopy(event[field])
+            elif kind in (K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD):
+                prim_path = str(event.get("prim") or "")
+                if prim_path:
+                    self._events[("payload_load_state", prim_path)] = copy.deepcopy(event)
+            elif kind == K_RENAME_PRIM:
+                self._rename_payload_state(
+                    str(event.get("prim") or ""),
+                    str(event.get("new_name") or ""),
+                )
+
+    def reset(self) -> None:
+        self._restore_baseline()
+        self._events.clear()
+        if self._stage is not None:
+            self._capture_baseline()
+
+    def close(self) -> None:
+        self._restore_baseline()
+        self._stage = None
+        self._session_fields.clear()
+        self._load_rules = None
+        self._events.clear()
+
+    def _capture_baseline(self) -> None:
+        from pxr import Usd
+
+        stage = self._stage
+        if stage is None:
+            return
+        pseudo_root = stage.GetSessionLayer().pseudoRoot
+        self._session_fields = {
+            field: (
+                pseudo_root.HasInfo(field),
+                copy.deepcopy(pseudo_root.GetInfo(field))
+                if pseudo_root.HasInfo(field)
+                else None,
+            )
+            for field in STAGE_METADATA_KEYS
+        }
+        self._load_rules = Usd.StageLoadRules(stage.GetLoadRules())
+
+    def _restore_baseline(self) -> None:
+        from pxr import Sdf
+
+        stage = self._stage
+        if stage is None:
+            return
+        pseudo_root = stage.GetSessionLayer().pseudoRoot
+        with Sdf.ChangeBlock():
+            for field, (authored, value) in self._session_fields.items():
+                if authored:
+                    pseudo_root.SetInfo(field, copy.deepcopy(value))
+                elif pseudo_root.HasInfo(field):
+                    pseudo_root.ClearInfo(field)
+        if self._load_rules is not None:
+            stage.SetLoadRules(self._load_rules)
+
+    def _apply_current(self) -> None:
+        from pxr import Usd
+
+        from .event_apply import apply_events
+
+        stage = self._stage
+        if stage is None or not self._events:
+            return
+        with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
+            apply_events(stage, list(self._events.values()))
+
+    def _rename_payload_state(self, old_root: str, new_name: str) -> None:
+        if not old_root or not new_name:
+            return
+        moved = []
+        for key, event in self._events.items():
+            if key[0] != "payload_load_state" or not _path_is_at_or_below(
+                key[1],
+                old_root,
+            ):
+                continue
+            new_path = _renamed_path(key[1], old_root, new_name)
+            moved.append((key, (key[0], new_path), {**event, "prim": new_path}))
+        for old_key, new_key, event in moved:
+            del self._events[old_key]
+            self._events[new_key] = event
 
 
 def _asset_paths(event: dict) -> tuple[str, ...]:
@@ -181,6 +294,7 @@ class EventDispatcher:
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LogicalLayerRouter | None = None
+        self._shared_stage = _SharedStageBinding()
 
     @property
     def last_seq(self) -> int:
@@ -241,15 +355,24 @@ class EventDispatcher:
         return applied
 
     def bind_layered_stage(self, stage: Usd.Stage) -> None:
-        """Rebind managed receiver layers after an integration swaps stages."""
+        """Move layered and shared receiver state to a replacement stage."""
         if self._layer_router is None:
             return
-        self._layer_router.bind(stage)
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            self._layer_router.bind(stage)
+            self._shared_stage.bind(stage)
 
     def close(self) -> None:
-        """Release receiver-owned USD layers from their bound stage."""
-        if self._layer_router is not None:
-            self._layer_router.close()
+        """Release receiver-owned layers and restore shared stage state."""
+        self._release_layered_state()
+
+    def _release_layered_state(self) -> None:
+        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        with suppress_ctx:
+            self._shared_stage.close()
+            if self._layer_router is not None:
+                self._layer_router.close()
 
     def _sync_layer_router(self) -> None:
         """Match the local router to the receiver's negotiated capability."""
@@ -259,7 +382,7 @@ class EventDispatcher:
 
             self._layer_router = LogicalLayerRouter()
         elif not active and self._layer_router is not None:
-            self._layer_router.close()
+            self._release_layered_state()
             self._layer_router = None
 
     def _bind_layer_router(self) -> Usd.Stage:
@@ -272,6 +395,7 @@ class EventDispatcher:
                 "layered replay requires a Usd.Stage mirror",
             )
         router.bind(stage)
+        self._shared_stage.bind(stage)
         return stage
 
     def _apply_layered(
@@ -330,13 +454,17 @@ class EventDispatcher:
         projected: list[dict] = []
         with suppress_ctx:
             if reset_layers:
+                self._shared_stage.reset()
                 router.clear()
             for state in layer_stack_states:
                 router.apply_state(state)
 
             routed = []
+            shared_state_events = []
             for record in records:
-                if record.event.get("k") in SHARED_STAGE_KINDS:
+                event = record.event
+                kind = event.get("k")
+                if kind in SHARED_STAGE_KINDS:
                     layer = None
                 else:
                     if not record.layer_key:
@@ -344,7 +472,9 @@ class EventDispatcher:
                             "layered replay record is missing its collaboration layer key"
                         )
                     layer = router.layer_for(record.layer_key)
-                routed.append((layer, record.event))
+                if kind in SHARED_STAGE_KINDS or kind == K_RENAME_PRIM:
+                    shared_state_events.append(event)
+                routed.append((layer, event))
             layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
 
             with router.writable(layers.values()):
@@ -364,6 +494,8 @@ class EventDispatcher:
                         with Usd.EditContext(stage, edit_target):
                             _apply_run(run, edit_target)
                     start = end
+
+            self._shared_stage.remember(shared_state_events)
 
             if projection is not None:
                 projected = projection.build_events()

@@ -1,4 +1,4 @@
-"""Network coverage for flat receiver projections of department-layer edits."""
+"""Network coverage for the flat and layered replay contracts."""
 
 from __future__ import annotations
 
@@ -6,16 +6,14 @@ import threading
 import time
 
 import pytest
-from pxr import Sdf, Usd
 
-from openusdconnect.codec import message_to_dict
-from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.event_apply import apply_events
-from openusdconnect.protocol_constants import K_SET_SDF_SPEC_FIELDS, MSG_EVENT
+from openusdconnect.codec import HelloRejectionCode, message_to_dict
+from openusdconnect.protocol_constants import MSG_RESYNC
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
+from openusdconnect.server.types import ReplayModeConflictError
 
 
 def _wait_until(predicate, timeout=5.0):
@@ -28,77 +26,31 @@ def _wait_until(predicate, timeout=5.0):
     return predicate()
 
 
-def _drain_through(receiver, target_seq):
-    messages = []
-
-    def _received_target():
-        messages.extend(receiver.drain_queue())
-        return receiver.last_seq >= target_seq
-
-    assert _wait_until(_received_target)
-    messages.extend(receiver.drain_queue())
-    return [message_to_dict(raw) for raw in messages]
-
-
-def _custom_attribute_events(value, custom_data):
-    stage = Usd.Stage.CreateInMemory()
-    prim = stage.DefinePrim("/World/Thing", "Xform")
-    attr = prim.CreateAttribute(
-        "userProperties:value",
-        Sdf.ValueTypeNames.Int,
-        custom=True,
-    )
-    attr.Set(value)
-    attr.SetCustomData(custom_data)
-    emitter = NoticeEmitter(stage)
-    try:
-        return emitter.snapshot_events()
-    finally:
-        emitter.cleanup()
-
-
-def _variant_events(label, variant_name):
-    stage = Usd.Stage.CreateInMemory()
-    stage.GetRootLayer().customLayerData = {label: True}
-    thing = stage.DefinePrim("/World/Thing", "Xform")
-    thing.SetDocumentation(label)
-    thing.SetCustomData({label: True, "shared": label})
-    variants = thing.GetVariantSets().AddVariantSet("look")
-    variants.AddVariant(variant_name)
-    variants.SetVariantSelection(variant_name)
-    with variants.GetVariantEditContext():
-        child = stage.DefinePrim(f"/World/Thing/{label.title()}", "Scope")
-        child.SetDocumentation(f"{label} variant")
-    variants.ClearVariantSelection()
-    emitter = NoticeEmitter(stage)
-    try:
-        return emitter.snapshot_events()
-    finally:
-        emitter.cleanup()
-
-
-def _attribute_value(stage, path):
-    attr = stage.GetAttributeAtPath(path)
-    return attr.Get() if attr and attr.IsValid() else None
-
-
 @pytest.fixture
-def department_server(tmp_path):
-    sync_server = UsdSyncServer(
-        log_path=str(tmp_path / "department-projection.db"),
-        department_priority=["animation", "layout"],
-    )
-    tcp_server = ThreadedTCPServer(
-        ("127.0.0.1", 0),
-        ConnectionHandler,
-        sync_server,
-        max_workers=8,
-    )
-    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield sync_server, tcp_server.server_address[1]
-    finally:
+def server_factory(tmp_path):
+    resources = []
+
+    def _create(departments, *, durability="strict"):
+        index = len(resources)
+        sync_server = UsdSyncServer(
+            log_path=str(tmp_path / f"replay-contract-{index}.db"),
+            department_priority=departments,
+            durability=durability,
+        )
+        tcp_server = ThreadedTCPServer(
+            ("127.0.0.1", 0),
+            ConnectionHandler,
+            sync_server,
+            max_workers=8,
+        )
+        thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+        thread.start()
+        resources.append((sync_server, tcp_server, thread))
+        return sync_server, tcp_server.server_address[1]
+
+    yield _create
+
+    for sync_server, tcp_server, thread in reversed(resources):
         tcp_server.shutdown()
         tcp_server.server_close()
         thread.join(timeout=5)
@@ -106,215 +58,168 @@ def department_server(tmp_path):
         sync_server.store.close()
 
 
-def test_generic_sdf_projection_is_ordered_and_replayable(department_server):
-    sync_server, port = department_server
-    observer = ReceiverThread(
+@pytest.mark.parametrize(
+    ("departments", "accepted"),
+    [([], True), (["animation", "layout"], False)],
+)
+def test_flat_receiver_is_admitted_only_for_single_layer(
+    server_factory,
+    departments,
+    accepted,
+):
+    sync_server, port = server_factory(departments)
+    receiver = ReceiverThread(
         port=port,
         reconnect=False,
-        client_id="observer",
-        origin="observer-origin",
+        client_id="flat-observer",
+        origin="flat-observer-origin",
+        layered_replay=False,
     )
-    weak_origin = ReceiverThread(
-        port=port,
-        reconnect=False,
-        client_id="layout-view",
-        origin="layout-origin",
-    )
-    animation = EventSender(
-        "127.0.0.1",
-        port,
-        client_id="animator",
-        origin="animation-origin",
-        department="animation",
-    )
-    layout = EventSender(
-        "127.0.0.1",
-        port,
-        client_id="layout",
-        origin="layout-origin",
-        department="layout",
-    )
-    late_receiver = None
-    observer.start()
-    weak_origin.start()
+    receiver.start()
     try:
-        assert _wait_until(lambda: observer.connected and weak_origin.connected)
-        assert animation.connect()
-        assert layout.connect()
+        if not accepted:
+            receiver.join(timeout=5)
+            assert not receiver.is_alive()
+            assert not receiver.connected
+            assert receiver.hello_rejected
+            assert receiver.rejection_code == HelloRejectionCode.LayeredReplayRequired
+            assert "department" in receiver.rejection_reason
+            assert not receiver.auth_rejected
+            assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+            assert not sync_server.receivers
+        else:
+            assert _wait_until(lambda: receiver.connected)
+            assert not receiver.layered_replay_active
+            assert sync_server._flat_receiver_count == 1
+    finally:
+        receiver.stop()
+        receiver.join(timeout=2)
 
-        assert animation.send_events(_custom_attribute_events(2, {"animation": 2}))
-        path = "/World/Thing.userProperties:value"
-        assert _wait_until(lambda: _attribute_value(sync_server.stage, path) == 2)
 
-        assert layout.send_events(_custom_attribute_events(1, {"layout": 1}))
-        assert _wait_until(
-            lambda: (
-                sync_server.resolve_layer("layout")
-                and sync_server.resolve_layer("layout").GetAttributeAtPath(path)
-                and sync_server.resolve_layer("layout").GetAttributeAtPath(path).default == 1
-            )
-        )
-        max_seq = sync_server.store.get_max_seq()
+@pytest.mark.parametrize("departments", [[], ["animation", "layout"]])
+def test_layered_receiver_is_admitted_for_both_server_modes(server_factory, departments):
+    sync_server, port = server_factory(departments)
+    receiver = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="layered-observer",
+        origin="layered-observer-origin",
+    )
+    receiver.start()
+    try:
+        assert _wait_until(lambda: receiver.connected)
+        assert receiver.layered_replay_active
+        assert sync_server._flat_receiver_count == 0
+    finally:
+        receiver.stop()
+        receiver.join(timeout=2)
 
-        live_messages = _drain_through(observer, max_seq)
-        live_records = [msg for msg in live_messages if msg.get("type") == MSG_EVENT]
-        live_sequences = [record["seq"] for record in live_records]
-        assert live_sequences == sorted(live_sequences)
-        assert max(live_sequences) == max_seq
 
-        live_stage = Usd.Stage.CreateInMemory()
-        apply_events(live_stage, [record["event"] for record in live_records])
-        live_attr = live_stage.GetAttributeAtPath(path)
-        assert live_attr.Get() == 2
-        assert live_attr.GetCustomData() == {"animation": 2, "layout": 1}
+def test_single_layer_flat_receiver_gets_live_and_replayed_records(server_factory):
+    sync_server, port = server_factory([])
 
-        own_messages = _drain_through(weak_origin, max_seq)
-        own_generic = [
-            msg
-            for msg in own_messages
-            if msg.get("type") == MSG_EVENT
-            and msg["event"]["k"] == K_SET_SDF_SPEC_FIELDS
-            and msg["seq"] == max_seq
-        ]
-        assert len(own_generic) == 1
-        assert "origin" not in own_generic[0]
+    live = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="live-flat",
+        origin="live-flat-origin",
+        layered_replay=False,
+    )
+    sender = EventSender(
+        "127.0.0.1",
+        port,
+        client_id="author",
+        origin="author-origin",
+    )
+    late = None
+    live.start()
+    try:
+        assert _wait_until(lambda: live.connected)
+        assert sender.connect()
+        event = {"k": "ensure_prim", "prim": "/World/Live", "typeName": "Xform"}
+        assert sender.send_events([event])
+        assert _wait_until(lambda: live.last_seq == 1)
+        live_records = [message_to_dict(raw) for raw in live.drain_queue()]
+        assert [record["event"] for record in live_records] == [event]
 
-        observer.stop()
-        observer.join(timeout=2)
-        late_receiver = ReceiverThread(
+        live.stop()
+        live.join(timeout=2)
+        assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+
+        late = ReceiverThread(
             port=port,
             reconnect=False,
-            client_id="late-observer",
-            origin="late-origin",
             sync_from=1,
+            client_id="late-flat",
+            origin="late-flat-origin",
+            layered_replay=False,
         )
-        late_receiver.start()
-        assert _wait_until(lambda: late_receiver.connected)
-        replay_messages = _drain_through(late_receiver, max_seq)
-        replay_records = [msg for msg in replay_messages if msg.get("type") == MSG_EVENT]
-
-        replay_stage = Usd.Stage.CreateInMemory()
-        apply_events(replay_stage, [record["event"] for record in replay_records])
-        replay_attr = replay_stage.GetAttributeAtPath(path)
-        assert replay_attr.Get() == 2
-        assert replay_attr.GetCustomData() == {"animation": 2, "layout": 1}
-
-        stored_generic = {
-            record["seq"]
-            for record in (message_to_dict(blob) for blob in sync_server.store.get_from_seq_bin(1))
-            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
-        }
-        replay_generic = {
-            record["seq"]
-            for record in replay_records
-            if record["event"]["k"] == K_SET_SDF_SPEC_FIELDS
-        }
-        assert replay_generic == stored_generic
+        late.start()
+        assert _wait_until(lambda: late.connected and late.last_seq == 1)
+        replay_records = [message_to_dict(raw) for raw in late.drain_queue()]
+        assert [record["event"] for record in replay_records] == [event]
     finally:
-        animation.disconnect()
-        layout.disconnect()
-        observer.stop()
-        observer.join(timeout=2)
-        weak_origin.stop()
-        weak_origin.join(timeout=2)
-        if late_receiver is not None:
-            late_receiver.stop()
-            late_receiver.join(timeout=2)
+        sender.disconnect()
+        live.stop()
+        live.join(timeout=2)
+        if late is not None:
+            late.stop()
+            late.join(timeout=2)
 
 
-def test_prim_layer_and_variant_projection_is_live_and_replayable(department_server):
-    sync_server, port = department_server
-    observer = ReceiverThread(
+def test_stale_cursor_resyncs_against_an_empty_log(server_factory):
+    _sync_server, port = server_factory([])
+    receiver = ReceiverThread(
         port=port,
         reconnect=False,
-        client_id="observer",
-        origin="observer-origin",
+        sync_from=5,
+        client_id="stale-layered-observer",
     )
-    animation = EventSender(
-        "127.0.0.1",
-        port,
-        client_id="animator",
-        origin="animation-origin",
-        department="animation",
-    )
-    layout = EventSender(
-        "127.0.0.1",
-        port,
-        client_id="layout",
-        origin="layout-origin",
-        department="layout",
-    )
-    late_receiver = None
-
-    def _assert_projection(records):
-        stage = Usd.Stage.CreateInMemory()
-        apply_events(stage, [record["event"] for record in records])
-        thing = stage.GetPrimAtPath("/World/Thing")
-        assert stage.GetRootLayer().customLayerData == {
-            "strong": True,
-            "weak": True,
-        }
-        assert thing.GetDocumentation() == "strong"
-        assert dict(stage.GetRootLayer().GetPrimAtPath("/World/Thing").customData) == {
-            "shared": "strong",
-            "strong": True,
-            "weak": True,
-        }
-        variants = thing.GetVariantSets().GetVariantSet("look")
-        assert variants.GetVariantNames() == ["blue", "red"]
-        variants.SetVariantSelection("blue")
-        assert stage.GetPrimAtPath("/World/Thing/Strong")
-        variants.SetVariantSelection("red")
-        assert stage.GetPrimAtPath("/World/Thing/Weak")
-
-    observer.start()
+    receiver.start()
+    received = []
     try:
-        assert _wait_until(lambda: observer.connected)
-        assert animation.connect()
-        assert layout.connect()
-        assert animation.send_events(_variant_events("strong", "blue"))
-        assert layout.send_events(_variant_events("weak", "red"))
-        assert _wait_until(
-            lambda: (
-                sync_server.resolve_layer("layout")
-                and sync_server.resolve_layer("layout").GetObjectAtPath("/World/Thing{look=red}")
-                and sync_server.stage.GetPrimAtPath("/World/Thing")
-                and sync_server.stage.GetPrimAtPath("/World/Thing").GetDocumentation() == "strong"
+        assert receiver.wait_connected(timeout=5)
+
+        def _received_resync():
+            received.extend(receiver.drain_queue())
+            return any(
+                message_to_dict(raw).get("type") == MSG_RESYNC
+                for raw in received
             )
-        )
-        max_seq = sync_server.store.get_max_seq()
-        live_messages = _drain_through(observer, max_seq)
-        live_records = [msg for msg in live_messages if msg.get("type") == MSG_EVENT]
-        _assert_projection(live_records)
 
-        observer.stop()
-        observer.join(timeout=2)
-        late_receiver = ReceiverThread(
-            port=port,
-            reconnect=False,
-            client_id="late-observer",
-            origin="late-origin",
-            sync_from=1,
-        )
-        late_receiver.start()
-        assert _wait_until(lambda: late_receiver.connected)
-        replay_messages = _drain_through(late_receiver, max_seq)
-        replay_records = [msg for msg in replay_messages if msg.get("type") == MSG_EVENT]
-        _assert_projection(replay_records)
+        assert _wait_until(_received_resync)
     finally:
-        animation.disconnect()
-        layout.disconnect()
-        observer.stop()
-        observer.join(timeout=2)
-        if late_receiver is not None:
-            late_receiver.stop()
-            late_receiver.join(timeout=2)
+        receiver.stop()
+        receiver.join(timeout=2)
 
 
-def test_replay_failure_unregisters_receiver(department_server, monkeypatch):
-    sync_server, port = department_server
+def test_flat_receiver_blocks_enabling_department_policy(server_factory):
+    sync_server, port = server_factory([])
 
-    def _fail_replay(_handler, _seq_start):
+    receiver = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="flat-policy-guard",
+        layered_replay=False,
+    )
+    receiver.start()
+    try:
+        assert _wait_until(lambda: receiver.connected)
+        with pytest.raises(ReplayModeConflictError, match="layer-stack changes"):
+            sync_server.set_department_priority(["animation", "layout"])
+    finally:
+        receiver.stop()
+        receiver.join(timeout=2)
+
+    assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+    sync_server.set_department_priority(["animation", "layout"])
+    assert sync_server.department_priority == ["animation", "layout"]
+
+
+def test_replay_failure_unregisters_layered_receiver(server_factory, monkeypatch):
+    sync_server, port = server_factory(["animation"])
+
+    def _fail_replay(_handler, _seq_start, *, seq_end=None):
         raise OSError("injected replay failure")
 
     monkeypatch.setattr(sync_server, "replay_from", _fail_replay)
@@ -333,3 +238,91 @@ def test_replay_failure_unregisters_receiver(department_server, monkeypatch):
     finally:
         receiver.stop()
         receiver.join(timeout=2)
+
+
+def test_compaction_replay_failure_releases_flat_reservation(server_factory, monkeypatch):
+    sync_server, port = server_factory([])
+    receiver = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="failing-flat-compaction",
+        layered_replay=False,
+    )
+    sender = EventSender(
+        "127.0.0.1",
+        port,
+        client_id="compaction-author",
+        origin="compaction-author-origin",
+    )
+    receiver.start()
+    try:
+        assert _wait_until(lambda: receiver.connected)
+        assert sender.connect()
+        assert sender.send_events(
+            [{"k": "ensure_prim", "prim": "/World/Compaction", "typeName": "Xform"}]
+        )
+        assert _wait_until(lambda: receiver.last_seq == 1)
+        assert _wait_until(lambda: sync_server.store.get_count() == 1)
+
+        def _fail_replay(_handler, _seq_start, *, seq_end=None):
+            raise OSError("injected compaction replay failure")
+
+        monkeypatch.setattr(sync_server, "replay_from", _fail_replay)
+        sync_server.compact_log()
+
+        assert not sync_server.receivers
+        assert sync_server._flat_receiver_count == 0
+    finally:
+        sender.disconnect()
+        receiver.stop()
+        receiver.join(timeout=2)
+
+
+def test_realtime_receiver_boundary_waits_for_pending_persistence(
+    server_factory,
+    monkeypatch,
+):
+    sync_server, port = server_factory([], durability="realtime")
+    persist_started = threading.Event()
+    allow_persist = threading.Event()
+    append_batch = sync_server.store.append_batch
+
+    def _blocked_append(records):
+        persist_started.set()
+        if not allow_persist.wait(timeout=5):
+            raise TimeoutError("test did not release persistence")
+        append_batch(records)
+
+    monkeypatch.setattr(sync_server.store, "append_batch", _blocked_append)
+    sender = EventSender(
+        "127.0.0.1",
+        port,
+        client_id="realtime-author",
+        origin="realtime-author-origin",
+    )
+    receiver = ReceiverThread(
+        port=port,
+        reconnect=False,
+        client_id="realtime-observer",
+        layered_replay=False,
+    )
+    try:
+        assert sender.connect()
+        event = {"k": "ensure_prim", "prim": "/World/Realtime", "typeName": "Xform"}
+        assert sender.send_events([event])
+        assert persist_started.wait(timeout=5)
+
+        receiver.start()
+        assert receiver.wait_connected(timeout=5)
+        assert not receiver.drain_queue()
+
+        allow_persist.set()
+        assert _wait_until(lambda: receiver.last_seq == 1)
+        records = [message_to_dict(raw) for raw in receiver.drain_queue()]
+        assert [record["event"] for record in records] == [event]
+    finally:
+        allow_persist.set()
+        sender.disconnect()
+        receiver.stop()
+        if receiver.ident is not None:
+            receiver.join(timeout=2)

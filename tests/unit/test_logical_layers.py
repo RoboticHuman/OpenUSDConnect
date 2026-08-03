@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import pytest
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.codec import encode_message
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.logical_layers import LogicalLayerRouter
-from openusdconnect.protocol_constants import K_LOAD_PAYLOAD, K_SET_STAGE_METADATA
+from openusdconnect.protocol_constants import (
+    K_LOAD_PAYLOAD,
+    K_SET_STAGE_METADATA,
+    K_UNLOAD_PAYLOAD,
+)
 
 from .layered_replay_test_support import (
     _BASE_LAYER,
@@ -328,3 +332,123 @@ def test_dispatcher_keeps_stage_runtime_events_outside_logical_layers():
         (session_id, [K_LOAD_PAYLOAD, K_SET_STAGE_METADATA]),
     ]
     assert stage.GetSessionLayer().pseudoRoot.GetInfo("upAxis") == "Z"
+
+
+def test_dispatcher_moves_shared_stage_metadata_on_rebind_and_close():
+    first = Usd.Stage.CreateInMemory()
+    second = Usd.Stage.CreateInMemory()
+    receiver = _LayeredQueue(
+        [
+            encode_message(_state(1, [(_BASE_LAYER, "Base", False)])),
+            encode_message(
+                {
+                    "type": "event",
+                    "seq": 1,
+                    "event": {
+                        "k": K_SET_STAGE_METADATA,
+                        "upAxis": "Z",
+                    },
+                }
+            ),
+        ]
+    )
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=UsdStageAdapter(first),
+    )
+
+    assert dispatcher.drain_and_apply() == 1
+    assert UsdGeom.GetStageUpAxis(first) == UsdGeom.Tokens.z
+
+    dispatcher.adapter = UsdStageAdapter(second)
+    dispatcher.bind_layered_stage(second)
+
+    assert UsdGeom.GetStageUpAxis(first) == UsdGeom.Tokens.y
+    assert not first.GetSessionLayer().pseudoRoot.HasInfo("upAxis")
+    assert UsdGeom.GetStageUpAxis(second) == UsdGeom.Tokens.z
+
+    dispatcher.close()
+    assert UsdGeom.GetStageUpAxis(second) == UsdGeom.Tokens.y
+    assert not second.GetSessionLayer().pseudoRoot.HasInfo("upAxis")
+
+
+def test_dispatcher_resync_clears_shared_stage_state():
+    stage = Usd.Stage.CreateInMemory()
+    receiver = _LayeredQueue(
+        [
+            encode_message(_state(1, [(_BASE_LAYER, "Base", False)])),
+            encode_message(
+                {
+                    "type": "event",
+                    "seq": 1,
+                    "event": {
+                        "k": K_SET_STAGE_METADATA,
+                        "upAxis": "Z",
+                    },
+                }
+            ),
+        ]
+    )
+    dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
+    assert dispatcher.drain_and_apply() == 1
+    assert UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z
+
+    receiver.messages = [
+        encode_message({"type": "resync"}),
+        encode_message(_state(1, [(_BASE_LAYER, "Base", False)])),
+    ]
+    assert dispatcher.drain_and_apply() == 0
+    assert UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
+
+
+def test_dispatcher_moves_payload_load_state_on_rebind_and_close(tmp_path):
+    payload_path = tmp_path / "payload.usda"
+    payload_layer = Sdf.Layer.CreateNew(str(payload_path))
+    payload_spec = Sdf.CreatePrimInLayer(payload_layer, "/Payload")
+    payload_spec.specifier = Sdf.SpecifierDef
+    payload_spec.typeName = "Xform"
+    payload_layer.defaultPrim = "Payload"
+    payload_layer.Save()
+
+    def _stage_with_payload():
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/World/Thing", "Xform").GetPayloads().AddPayload(
+            str(payload_path),
+            "/Payload",
+        )
+        assert stage.GetPrimAtPath("/World/Thing").IsLoaded()
+        return stage
+
+    first = _stage_with_payload()
+    second = _stage_with_payload()
+    receiver = _LayeredQueue(
+        [
+            encode_message(_state(1, [(_BASE_LAYER, "Base", False)])),
+            encode_message(
+                {
+                    "type": "event",
+                    "seq": 1,
+                    "event": {
+                        "k": K_UNLOAD_PAYLOAD,
+                        "prim": "/World/Thing",
+                    },
+                }
+            ),
+        ]
+    )
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=UsdStageAdapter(first),
+    )
+
+    assert dispatcher.drain_and_apply() == 1
+    assert not first.GetPrimAtPath("/World/Thing").IsLoaded()
+
+    dispatcher.adapter = UsdStageAdapter(second)
+    dispatcher.bind_layered_stage(second)
+
+    assert first.GetPrimAtPath("/World/Thing").IsLoaded()
+    assert not second.GetPrimAtPath("/World/Thing").IsLoaded()
+
+    dispatcher.close()
+    assert second.GetPrimAtPath("/World/Thing").IsLoaded()

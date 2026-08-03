@@ -12,9 +12,9 @@ OpenUSDConnect is a **general-purpose USD livelink framework**, not a
 single-DCC plugin. The core library (`openusdconnect/`) is pure Python on top of
 the OpenUSD bindings (`pxr`), has no DCC dependencies, and is fully testable
 headless. The bundled integrations (Blender, usdview, Unreal, an MCP authoring
-server) are **reference clients**: thin emit/receive layers on the core, meant
-to be used as-is and to serve as templates for building integrations for other
-hosts (Maya, Houdini, and so on). The protocol itself is DCC-agnostic.
+server) are **reference clients**. They combine the core protocol with the
+host-specific stage ownership, event-loop, conversion, and lifecycle policy
+needed by each application. The protocol itself is DCC-agnostic.
 
 Scene changes are expressed as a fixed vocabulary of **events** (`ensure_prim`,
 `set_xform_trs`, `set_material_binding`, and so on) that map directly to USD spec
@@ -73,9 +73,9 @@ not used as that mirror.
 
 ### Integrations
 These ship as **reference implementations**: working clients you can run today,
-and worked examples for writing your own. Each is a thin layer on the core
-library, so a new host integration is mostly mapping its scene to the same
-emit/receive event flow.
+and worked examples for writing your own. A new host integration maps its scene
+to the common event flow and defines how it owns authoring and receive-side USD
+stages.
 
 | Integration | Direction | Notes |
 |---|---|---|
@@ -143,6 +143,31 @@ services use `--event-log` and `--dashboard-port`.
 See [Command-Line Reference](docs/cli-reference.md) for the command inventory
 and dependency groups.
 
+### USD-native Python clients
+
+New `pxr.Usd` applications can use the layered high-level API and keep network
+work out of the stage-owning thread:
+
+```python
+from pxr import Usd
+
+from openusdconnect import UsdReceiver
+
+stage = Usd.Stage.Open("scene.usda")
+with UsdReceiver(stage, app_name="my-viewer") as receiver:
+    if not receiver.wait_connected(timeout=5):
+        raise ConnectionError("OpenUSDConnect server is unavailable")
+    while application_is_running():
+        receiver.update()
+```
+
+`UsdReceiver` requires layered replay and never silently falls back to flat
+replay. `UsdPublisher` observes ordinary USD edits in the current edit
+target and retains an unsent batch across reconnects. Bidirectional hosts use
+separate author and receive-mirror stages. See the
+[USD-native integration contract](docs/usd-native-integration.md) and the
+[`usd_native_client` example](examples/usd_native_client/README.md).
+
 Department assignment is server policy built on a logical collaboration-layer
 contract. Each authored opinion carries an opaque, portable `layer_key`, while
 the advertised layer stack defines strength through strongest-to-weakest order
@@ -167,8 +192,11 @@ instanceability use this path.
 
 Flattened live-open snapshots resume flat replay from `snapshot_seq + 1` because
 they do not contain enough identity to reconstruct the historical logical layer
-stack. Unreal and receivers that do not negotiate layered replay also retain the
-flat composed-projection path.
+stack. Flat replay is available only while the server has one unmuted
+collaboration layer and no department policy. A server that needs layer order or
+muting rejects a flat receiver with `hello_rejected` and the
+`LayeredReplayRequired` code. Native Unreal currently uses this single-layer
+compatibility mode.
 
 On restart, configured department order comes from `--departments`; unlisted
 departments are reconstructed in persisted replay order before the weakest
@@ -304,6 +332,8 @@ Register it with an MCP client (e.g. Claude Code or Desktop) and point it at a
 running sync server. See [MCP Server Usage](docs/mcp-server-usage.md).
 
 ## Documentation
+- [USD-native Integration Contract](docs/usd-native-integration.md): layered
+  receiver and publisher lifecycle for `pxr.Usd` applications
 - [Blender Addon Usage](docs/blender-addon-usage.md): installation, UI overview, live-sync walkthrough
 - [Live-Open Quickstart](docs/live-open-quickstart.md): WebDAV/UNC live-open and metadata sync
 - [Live Material Editing](docs/live-material-editing.md): material and shader synchronization
