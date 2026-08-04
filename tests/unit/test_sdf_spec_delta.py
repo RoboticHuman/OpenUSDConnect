@@ -9,6 +9,7 @@ from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_GPRIM_ATTRS,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
@@ -19,11 +20,17 @@ from openusdconnect.sdf_spec_delta import (
     SDF_SPEC_KIND_ATTRIBUTE,
     SDF_SPEC_KIND_LAYER,
     SDF_SPEC_KIND_PRIM,
+    SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KIND_RELATIONSHIP,
     SDF_SPEC_KIND_VARIANT,
     SDF_SPEC_KIND_VARIANT_SET,
+    apply_layer_content_replacement,
     apply_spec_delta,
+    apply_spec_delta_to_layer,
+    serialize_layer_content,
     serialize_spec_fields,
+    validate_layer_content_replacement,
+    validate_spec_delta,
 )
 from openusdconnect.server import UsdSyncServer
 
@@ -35,6 +42,92 @@ def _property_info(layer: Sdf.Layer, path: str) -> dict:
 
 def _sdf_events(events: list[dict]) -> list[dict]:
     return [event for event in events if event["k"] == K_SET_SDF_SPEC_FIELDS]
+
+
+@pytest.mark.parametrize("relationship", [False, True])
+def test_generic_property_removal_handles_both_property_spec_types(relationship):
+    layer = Sdf.Layer.CreateAnonymous("property-removal")
+    prim = Sdf.CreatePrimInLayer(layer, "/Thing")
+    if relationship:
+        Sdf.RelationshipSpec(prim, "value", True)
+    else:
+        Sdf.AttributeSpec(prim, "value", Sdf.ValueTypeNames.Int)
+    event = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/Thing",
+        "spec_path": "/Thing.value",
+        "spec_kind": SDF_SPEC_KIND_PROPERTY,
+        "fields": [],
+        "fragment": "",
+        "removed": True,
+    }
+
+    validate_spec_delta(event)
+    apply_spec_delta_to_layer(layer, event)
+
+    assert layer.GetObjectAtPath("/Thing.value") is None
+
+
+def test_generic_property_kind_rejects_non_removal():
+    event = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/Thing",
+        "spec_path": "/Thing.value",
+        "spec_kind": SDF_SPEC_KIND_PROPERTY,
+        "fields": ["default"],
+        "fragment": '#usda 1.0\n\nover "Thing" {}\n',
+        "removed": False,
+    }
+
+    with pytest.raises(ValueError, match="valid only for removal"):
+        validate_spec_delta(event)
+
+
+def test_layer_content_replacement_preserves_topology_and_private_metadata():
+    source = Sdf.Layer.CreateAnonymous("replacement-source")
+    Sdf.CreatePrimInLayer(source, "/New").documentation = "new content"
+    source.customLayerData = {
+        "user": 7,
+        "openusdconnect": {"source": "must not cross"},
+    }
+    source.subLayerPaths.append("./source-child.usda")
+
+    target = Sdf.Layer.CreateAnonymous("replacement-target")
+    Sdf.CreatePrimInLayer(target, "/Old")
+    target.customLayerData = {
+        "stale": True,
+        "openusdconnect": {"layer_key": "keep"},
+    }
+    target.subLayerPaths.append("./target-child.usda")
+    target.subLayerOffsets[0] = Sdf.LayerOffset(7, 2)
+    event = {
+        "k": K_REPLACE_SDF_LAYER_CONTENT,
+        "prim": "/",
+        "fragment": serialize_layer_content(source),
+    }
+
+    validate_layer_content_replacement(event)
+    apply_layer_content_replacement(target, event)
+
+    assert target.GetPrimAtPath("/Old") is None
+    assert target.GetPrimAtPath("/New").documentation == "new content"
+    assert list(target.subLayerPaths) == ["./target-child.usda"]
+    assert target.subLayerOffsets[0] == Sdf.LayerOffset(7, 2)
+    assert target.customLayerData == {
+        "user": 7,
+        "openusdconnect": {"layer_key": "keep"},
+    }
+
+
+def test_layer_content_replacement_rejects_embedded_sublayers():
+    event = {
+        "k": K_REPLACE_SDF_LAYER_CONTENT,
+        "prim": "/",
+        "fragment": "#usda 1.0\n( subLayers = [@./asset.usda@] )\n",
+    }
+
+    with pytest.raises(ValueError, match="cannot author sublayer topology"):
+        validate_layer_content_replacement(event)
 
 
 def test_custom_attribute_and_relationship_snapshot_roundtrip():

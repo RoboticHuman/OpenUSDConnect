@@ -30,6 +30,9 @@ struct NamedAttrBuilder;
 struct ArcEntry;
 struct ArcEntryBuilder;
 
+struct SublayerEntry;
+struct SublayerEntryBuilder;
+
 struct Connection;
 struct ConnectionBuilder;
 
@@ -96,6 +99,12 @@ struct SetPointInstancerBuilder;
 struct SetSdfSpecFields;
 struct SetSdfSpecFieldsBuilder;
 
+struct ReplaceSdfLayerContent;
+struct ReplaceSdfLayerContentBuilder;
+
+struct SetSublayers;
+struct SetSublayersBuilder;
+
 struct SetStageMetadata;
 struct SetStageMetadataBuilder;
 
@@ -161,6 +170,12 @@ struct LogicalLayerStateBuilder;
 
 struct LayerStackState;
 struct LayerStackStateBuilder;
+
+struct SharedLayerState;
+struct SharedLayerStateBuilder;
+
+struct LayerGraphState;
+struct LayerGraphStateBuilder;
 
 struct Envelope;
 struct EnvelopeBuilder;
@@ -313,37 +328,40 @@ enum class SdfSpecKind : int8_t {
   Relationship = 3,
   VariantSet = 4,
   Variant = 5,
+  Property = 6,
   MIN = Layer,
-  MAX = Variant
+  MAX = Property
 };
 
-inline const SdfSpecKind (&EnumValuesSdfSpecKind())[6] {
+inline const SdfSpecKind (&EnumValuesSdfSpecKind())[7] {
   static const SdfSpecKind values[] = {
     SdfSpecKind::Layer,
     SdfSpecKind::Prim,
     SdfSpecKind::Attribute,
     SdfSpecKind::Relationship,
     SdfSpecKind::VariantSet,
-    SdfSpecKind::Variant
+    SdfSpecKind::Variant,
+    SdfSpecKind::Property
   };
   return values;
 }
 
 inline const char * const *EnumNamesSdfSpecKind() {
-  static const char * const names[7] = {
+  static const char * const names[8] = {
     "Layer",
     "Prim",
     "Attribute",
     "Relationship",
     "VariantSet",
     "Variant",
+    "Property",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameSdfSpecKind(SdfSpecKind e) {
-  if (::flatbuffers::IsOutRange(e, SdfSpecKind::Layer, SdfSpecKind::Variant)) return "";
+  if (::flatbuffers::IsOutRange(e, SdfSpecKind::Layer, SdfSpecKind::Property)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesSdfSpecKind()[index];
 }
@@ -370,11 +388,13 @@ enum class EventPayload : uint8_t {
   SetInstanceable = 18,
   SetPointInstancer = 19,
   SetSdfSpecFields = 20,
+  ReplaceSdfLayerContent = 21,
+  SetSublayers = 22,
   MIN = NONE,
-  MAX = SetSdfSpecFields
+  MAX = SetSublayers
 };
 
-inline const EventPayload (&EnumValuesEventPayload())[21] {
+inline const EventPayload (&EnumValuesEventPayload())[23] {
   static const EventPayload values[] = {
     EventPayload::NONE,
     EventPayload::EnsurePrim,
@@ -396,13 +416,15 @@ inline const EventPayload (&EnumValuesEventPayload())[21] {
     EventPayload::SetStageMetadata,
     EventPayload::SetInstanceable,
     EventPayload::SetPointInstancer,
-    EventPayload::SetSdfSpecFields
+    EventPayload::SetSdfSpecFields,
+    EventPayload::ReplaceSdfLayerContent,
+    EventPayload::SetSublayers
   };
   return values;
 }
 
 inline const char * const *EnumNamesEventPayload() {
-  static const char * const names[22] = {
+  static const char * const names[24] = {
     "NONE",
     "EnsurePrim",
     "EnsureXformOps",
@@ -424,13 +446,15 @@ inline const char * const *EnumNamesEventPayload() {
     "SetInstanceable",
     "SetPointInstancer",
     "SetSdfSpecFields",
+    "ReplaceSdfLayerContent",
+    "SetSublayers",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameEventPayload(EventPayload e) {
-  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::SetSdfSpecFields)) return "";
+  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::SetSublayers)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesEventPayload()[index];
 }
@@ -519,37 +543,78 @@ template<> struct EventPayloadTraits<OpenUSDConnect::SetSdfSpecFields> {
   static const EventPayload enum_value = EventPayload::SetSdfSpecFields;
 };
 
+template<> struct EventPayloadTraits<OpenUSDConnect::ReplaceSdfLayerContent> {
+  static const EventPayload enum_value = EventPayload::ReplaceSdfLayerContent;
+};
+
+template<> struct EventPayloadTraits<OpenUSDConnect::SetSublayers> {
+  static const EventPayload enum_value = EventPayload::SetSublayers;
+};
+
 template <bool B = false>
 bool VerifyEventPayload(::flatbuffers::VerifierTemplate<B> &verifier, const void *obj, EventPayload type);
 template <bool B = false>
 bool VerifyEventPayloadVector(::flatbuffers::VerifierTemplate<B> &verifier, const ::flatbuffers::Vector<::flatbuffers::Offset<void>> *values, const ::flatbuffers::Vector<EventPayload> *types);
 
+enum class LayerMode : uint8_t {
+  Managed = 0,
+  SharedStage = 1,
+  MIN = Managed,
+  MAX = SharedStage
+};
+
+inline const LayerMode (&EnumValuesLayerMode())[2] {
+  static const LayerMode values[] = {
+    LayerMode::Managed,
+    LayerMode::SharedStage
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesLayerMode() {
+  static const char * const names[3] = {
+    "Managed",
+    "SharedStage",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameLayerMode(LayerMode e) {
+  if (::flatbuffers::IsOutRange(e, LayerMode::Managed, LayerMode::SharedStage)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesLayerMode()[index];
+}
+
 enum class HelloRejectionCode : uint8_t {
   Unspecified = 0,
   LayeredReplayRequired = 1,
+  LayerModeMismatch = 2,
   MIN = Unspecified,
-  MAX = LayeredReplayRequired
+  MAX = LayerModeMismatch
 };
 
-inline const HelloRejectionCode (&EnumValuesHelloRejectionCode())[2] {
+inline const HelloRejectionCode (&EnumValuesHelloRejectionCode())[3] {
   static const HelloRejectionCode values[] = {
     HelloRejectionCode::Unspecified,
-    HelloRejectionCode::LayeredReplayRequired
+    HelloRejectionCode::LayeredReplayRequired,
+    HelloRejectionCode::LayerModeMismatch
   };
   return values;
 }
 
 inline const char * const *EnumNamesHelloRejectionCode() {
-  static const char * const names[3] = {
+  static const char * const names[4] = {
     "Unspecified",
     "LayeredReplayRequired",
+    "LayerModeMismatch",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameHelloRejectionCode(HelloRejectionCode e) {
-  if (::flatbuffers::IsOutRange(e, HelloRejectionCode::Unspecified, HelloRejectionCode::LayeredReplayRequired)) return "";
+  if (::flatbuffers::IsOutRange(e, HelloRejectionCode::Unspecified, HelloRejectionCode::LayerModeMismatch)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesHelloRejectionCode()[index];
 }
@@ -575,11 +640,12 @@ enum class Payload : uint8_t {
   PlaybackState = 17,
   LayerStackState = 18,
   HelloRejected = 19,
+  LayerGraphState = 20,
   MIN = NONE,
-  MAX = HelloRejected
+  MAX = LayerGraphState
 };
 
-inline const Payload (&EnumValuesPayload())[20] {
+inline const Payload (&EnumValuesPayload())[21] {
   static const Payload values[] = {
     Payload::NONE,
     Payload::Hello,
@@ -600,13 +666,14 @@ inline const Payload (&EnumValuesPayload())[20] {
     Payload::PlaybackControl,
     Payload::PlaybackState,
     Payload::LayerStackState,
-    Payload::HelloRejected
+    Payload::HelloRejected,
+    Payload::LayerGraphState
   };
   return values;
 }
 
 inline const char * const *EnumNamesPayload() {
-  static const char * const names[21] = {
+  static const char * const names[22] = {
     "NONE",
     "Hello",
     "HelloOk",
@@ -627,13 +694,14 @@ inline const char * const *EnumNamesPayload() {
     "PlaybackState",
     "LayerStackState",
     "HelloRejected",
+    "LayerGraphState",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNamePayload(Payload e) {
-  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::HelloRejected)) return "";
+  if (::flatbuffers::IsOutRange(e, Payload::NONE, Payload::LayerGraphState)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesPayload()[index];
 }
@@ -716,6 +784,10 @@ template<> struct PayloadTraits<OpenUSDConnect::LayerStackState> {
 
 template<> struct PayloadTraits<OpenUSDConnect::HelloRejected> {
   static const Payload enum_value = Payload::HelloRejected;
+};
+
+template<> struct PayloadTraits<OpenUSDConnect::LayerGraphState> {
+  static const Payload enum_value = Payload::LayerGraphState;
 };
 
 template <bool B = false>
@@ -1232,6 +1304,102 @@ inline ::flatbuffers::Offset<ArcEntry> CreateArcEntryDirect(
       layer_offset,
       layer_scale,
       custom_data_fragment__);
+}
+
+struct SublayerEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SublayerEntryBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_AUTHORED_PATH = 4,
+    VT_OFFSET = 6,
+    VT_SCALE = 8,
+    VT_LAYER_KEY = 10
+  };
+  const ::flatbuffers::String *authored_path() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_AUTHORED_PATH);
+  }
+  double offset() const {
+    return GetField<double>(VT_OFFSET, 0.0);
+  }
+  double scale() const {
+    return GetField<double>(VT_SCALE, 1.0);
+  }
+  const ::flatbuffers::String *layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_AUTHORED_PATH) &&
+           verifier.VerifyString(authored_path()) &&
+           VerifyField<double>(verifier, VT_OFFSET, 8) &&
+           VerifyField<double>(verifier, VT_SCALE, 8) &&
+           VerifyOffset(verifier, VT_LAYER_KEY) &&
+           verifier.VerifyString(layer_key()) &&
+           verifier.EndTable();
+  }
+};
+
+struct SublayerEntryBuilder {
+  typedef SublayerEntry Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_authored_path(::flatbuffers::Offset<::flatbuffers::String> authored_path) {
+    fbb_.AddOffset(SublayerEntry::VT_AUTHORED_PATH, authored_path);
+  }
+  void add_offset(double offset) {
+    fbb_.AddElement<double>(SublayerEntry::VT_OFFSET, offset, 0.0);
+  }
+  void add_scale(double scale) {
+    fbb_.AddElement<double>(SublayerEntry::VT_SCALE, scale, 1.0);
+  }
+  void add_layer_key(::flatbuffers::Offset<::flatbuffers::String> layer_key) {
+    fbb_.AddOffset(SublayerEntry::VT_LAYER_KEY, layer_key);
+  }
+  explicit SublayerEntryBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SublayerEntry> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SublayerEntry>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SublayerEntry> CreateSublayerEntry(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> authored_path = 0,
+    double offset = 0.0,
+    double scale = 1.0,
+    ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0) {
+  SublayerEntryBuilder builder_(_fbb);
+  builder_.add_scale(scale);
+  builder_.add_offset(offset);
+  builder_.add_layer_key(layer_key);
+  builder_.add_authored_path(authored_path);
+  return builder_.Finish();
+}
+
+struct SublayerEntry::Traits {
+  using type = SublayerEntry;
+  static auto constexpr Create = CreateSublayerEntry;
+};
+
+inline ::flatbuffers::Offset<SublayerEntry> CreateSublayerEntryDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *authored_path = nullptr,
+    double offset = 0.0,
+    double scale = 1.0,
+    const char *layer_key = nullptr) {
+  auto authored_path__ = authored_path ? _fbb.CreateString(authored_path) : 0;
+  auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
+  return OpenUSDConnect::CreateSublayerEntry(
+      _fbb,
+      authored_path__,
+      offset,
+      scale,
+      layer_key__);
 }
 
 struct Connection FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3323,6 +3491,177 @@ inline ::flatbuffers::Offset<SetSdfSpecFields> CreateSetSdfSpecFieldsDirect(
       removed);
 }
 
+struct ReplaceSdfLayerContent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ReplaceSdfLayerContentBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PRIM = 4,
+    VT_FRAGMENT = 6
+  };
+  const ::flatbuffers::String *prim() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PRIM);
+  }
+  const ::flatbuffers::String *fragment() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_FRAGMENT);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PRIM) &&
+           verifier.VerifyString(prim()) &&
+           VerifyOffset(verifier, VT_FRAGMENT) &&
+           verifier.VerifyString(fragment()) &&
+           verifier.EndTable();
+  }
+};
+
+struct ReplaceSdfLayerContentBuilder {
+  typedef ReplaceSdfLayerContent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_prim(::flatbuffers::Offset<::flatbuffers::String> prim) {
+    fbb_.AddOffset(ReplaceSdfLayerContent::VT_PRIM, prim);
+  }
+  void add_fragment(::flatbuffers::Offset<::flatbuffers::String> fragment) {
+    fbb_.AddOffset(ReplaceSdfLayerContent::VT_FRAGMENT, fragment);
+  }
+  explicit ReplaceSdfLayerContentBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ReplaceSdfLayerContent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ReplaceSdfLayerContent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ReplaceSdfLayerContent> CreateReplaceSdfLayerContent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> prim = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> fragment = 0) {
+  ReplaceSdfLayerContentBuilder builder_(_fbb);
+  builder_.add_fragment(fragment);
+  builder_.add_prim(prim);
+  return builder_.Finish();
+}
+
+struct ReplaceSdfLayerContent::Traits {
+  using type = ReplaceSdfLayerContent;
+  static auto constexpr Create = CreateReplaceSdfLayerContent;
+};
+
+inline ::flatbuffers::Offset<ReplaceSdfLayerContent> CreateReplaceSdfLayerContentDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *prim = nullptr,
+    const char *fragment = nullptr) {
+  auto prim__ = prim ? _fbb.CreateString(prim) : 0;
+  auto fragment__ = fragment ? _fbb.CreateString(fragment) : 0;
+  return OpenUSDConnect::CreateReplaceSdfLayerContent(
+      _fbb,
+      prim__,
+      fragment__);
+}
+
+struct SetSublayers FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SetSublayersBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PRIM = 4,
+    VT_GENERATION = 6,
+    VT_REVISION = 8,
+    VT_SUBLAYERS = 10
+  };
+  const ::flatbuffers::String *prim() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PRIM);
+  }
+  const ::flatbuffers::String *generation() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GENERATION);
+  }
+  uint64_t revision() const {
+    return GetField<uint64_t>(VT_REVISION, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *>(VT_SUBLAYERS);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PRIM) &&
+           verifier.VerifyString(prim()) &&
+           VerifyOffset(verifier, VT_GENERATION) &&
+           verifier.VerifyString(generation()) &&
+           VerifyField<uint64_t>(verifier, VT_REVISION, 8) &&
+           VerifyOffset(verifier, VT_SUBLAYERS) &&
+           verifier.VerifyVector(sublayers()) &&
+           verifier.VerifyVectorOfTables(sublayers()) &&
+           verifier.EndTable();
+  }
+};
+
+struct SetSublayersBuilder {
+  typedef SetSublayers Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_prim(::flatbuffers::Offset<::flatbuffers::String> prim) {
+    fbb_.AddOffset(SetSublayers::VT_PRIM, prim);
+  }
+  void add_generation(::flatbuffers::Offset<::flatbuffers::String> generation) {
+    fbb_.AddOffset(SetSublayers::VT_GENERATION, generation);
+  }
+  void add_revision(uint64_t revision) {
+    fbb_.AddElement<uint64_t>(SetSublayers::VT_REVISION, revision, 0);
+  }
+  void add_sublayers(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers) {
+    fbb_.AddOffset(SetSublayers::VT_SUBLAYERS, sublayers);
+  }
+  explicit SetSublayersBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SetSublayers> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SetSublayers>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SetSublayers> CreateSetSublayers(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> prim = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> generation = 0,
+    uint64_t revision = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers = 0) {
+  SetSublayersBuilder builder_(_fbb);
+  builder_.add_revision(revision);
+  builder_.add_sublayers(sublayers);
+  builder_.add_generation(generation);
+  builder_.add_prim(prim);
+  return builder_.Finish();
+}
+
+struct SetSublayers::Traits {
+  using type = SetSublayers;
+  static auto constexpr Create = CreateSetSublayers;
+};
+
+inline ::flatbuffers::Offset<SetSublayers> CreateSetSublayersDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *prim = nullptr,
+    const char *generation = nullptr,
+    uint64_t revision = 0,
+    const std::vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers = nullptr) {
+  auto prim__ = prim ? _fbb.CreateString(prim) : 0;
+  auto generation__ = generation ? _fbb.CreateString(generation) : 0;
+  auto sublayers__ = sublayers ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>(*sublayers) : 0;
+  return OpenUSDConnect::CreateSetSublayers(
+      _fbb,
+      prim__,
+      generation__,
+      revision,
+      sublayers__);
+}
+
 struct SetStageMetadata FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef SetStageMetadataBuilder Builder;
   struct Traits;
@@ -3515,6 +3854,12 @@ struct EventWrapper FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const OpenUSDConnect::SetSdfSpecFields *event_as_SetSdfSpecFields() const {
     return event_type() == OpenUSDConnect::EventPayload::SetSdfSpecFields ? static_cast<const OpenUSDConnect::SetSdfSpecFields *>(event()) : nullptr;
   }
+  const OpenUSDConnect::ReplaceSdfLayerContent *event_as_ReplaceSdfLayerContent() const {
+    return event_type() == OpenUSDConnect::EventPayload::ReplaceSdfLayerContent ? static_cast<const OpenUSDConnect::ReplaceSdfLayerContent *>(event()) : nullptr;
+  }
+  const OpenUSDConnect::SetSublayers *event_as_SetSublayers() const {
+    return event_type() == OpenUSDConnect::EventPayload::SetSublayers ? static_cast<const OpenUSDConnect::SetSublayers *>(event()) : nullptr;
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3605,6 +3950,14 @@ template<> inline const OpenUSDConnect::SetSdfSpecFields *EventWrapper::event_as
   return event_as_SetSdfSpecFields();
 }
 
+template<> inline const OpenUSDConnect::ReplaceSdfLayerContent *EventWrapper::event_as<OpenUSDConnect::ReplaceSdfLayerContent>() const {
+  return event_as_ReplaceSdfLayerContent();
+}
+
+template<> inline const OpenUSDConnect::SetSublayers *EventWrapper::event_as<OpenUSDConnect::SetSublayers>() const {
+  return event_as_SetSublayers();
+}
+
 struct EventWrapperBuilder {
   typedef EventWrapper Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
@@ -3652,7 +4005,8 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ORIGIN = 12,
     VT_DEPARTMENT = 14,
     VT_TOKEN = 16,
-    VT_LAYERED_REPLAY = 18
+    VT_LAYERED_REPLAY = 18,
+    VT_LAYER_MODE = 20
   };
   const ::flatbuffers::String *role() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ROLE);
@@ -3678,6 +4032,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool layered_replay() const {
     return GetField<uint8_t>(VT_LAYERED_REPLAY, 0) != 0;
   }
+  OpenUSDConnect::LayerMode layer_mode() const {
+    return static_cast<OpenUSDConnect::LayerMode>(GetField<uint8_t>(VT_LAYER_MODE, 0));
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3694,6 +4051,7 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_TOKEN) &&
            verifier.VerifyString(token()) &&
            VerifyField<uint8_t>(verifier, VT_LAYERED_REPLAY, 1) &&
+           VerifyField<uint8_t>(verifier, VT_LAYER_MODE, 1) &&
            verifier.EndTable();
   }
 };
@@ -3726,6 +4084,9 @@ struct HelloBuilder {
   void add_layered_replay(bool layered_replay) {
     fbb_.AddElement<uint8_t>(Hello::VT_LAYERED_REPLAY, static_cast<uint8_t>(layered_replay), 0);
   }
+  void add_layer_mode(OpenUSDConnect::LayerMode layer_mode) {
+    fbb_.AddElement<uint8_t>(Hello::VT_LAYER_MODE, static_cast<uint8_t>(layer_mode), 0);
+  }
   explicit HelloBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3746,7 +4107,8 @@ inline ::flatbuffers::Offset<Hello> CreateHello(
     ::flatbuffers::Offset<::flatbuffers::String> origin = 0,
     ::flatbuffers::Offset<::flatbuffers::String> department = 0,
     ::flatbuffers::Offset<::flatbuffers::String> token = 0,
-    bool layered_replay = false) {
+    bool layered_replay = false,
+    OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed) {
   HelloBuilder builder_(_fbb);
   builder_.add_token(token);
   builder_.add_department(department);
@@ -3755,6 +4117,7 @@ inline ::flatbuffers::Offset<Hello> CreateHello(
   builder_.add_sync_from(sync_from);
   builder_.add_protocol_version(protocol_version);
   builder_.add_role(role);
+  builder_.add_layer_mode(layer_mode);
   builder_.add_layered_replay(layered_replay);
   return builder_.Finish();
 }
@@ -3773,7 +4136,8 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
     const char *origin = nullptr,
     const char *department = nullptr,
     const char *token = nullptr,
-    bool layered_replay = false) {
+    bool layered_replay = false,
+    OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed) {
   auto role__ = role ? _fbb.CreateString(role) : 0;
   auto client_id__ = client_id ? _fbb.CreateString(client_id) : 0;
   auto origin__ = origin ? _fbb.CreateString(origin) : 0;
@@ -3788,7 +4152,8 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
       origin__,
       department__,
       token__,
-      layered_replay);
+      layered_replay,
+      layer_mode);
 }
 
 struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3797,7 +4162,8 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TOKEN = 4,
     VT_STAGE_METADATA = 6,
-    VT_LAYERED_REPLAY = 8
+    VT_LAYERED_REPLAY = 8,
+    VT_LAYER_MODE = 10
   };
   const ::flatbuffers::String *token() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TOKEN);
@@ -3808,6 +4174,9 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool layered_replay() const {
     return GetField<uint8_t>(VT_LAYERED_REPLAY, 0) != 0;
   }
+  OpenUSDConnect::LayerMode layer_mode() const {
+    return static_cast<OpenUSDConnect::LayerMode>(GetField<uint8_t>(VT_LAYER_MODE, 0));
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3816,6 +4185,7 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_STAGE_METADATA) &&
            verifier.VerifyTable(stage_metadata()) &&
            VerifyField<uint8_t>(verifier, VT_LAYERED_REPLAY, 1) &&
+           VerifyField<uint8_t>(verifier, VT_LAYER_MODE, 1) &&
            verifier.EndTable();
   }
 };
@@ -3833,6 +4203,9 @@ struct HelloOkBuilder {
   void add_layered_replay(bool layered_replay) {
     fbb_.AddElement<uint8_t>(HelloOk::VT_LAYERED_REPLAY, static_cast<uint8_t>(layered_replay), 0);
   }
+  void add_layer_mode(OpenUSDConnect::LayerMode layer_mode) {
+    fbb_.AddElement<uint8_t>(HelloOk::VT_LAYER_MODE, static_cast<uint8_t>(layer_mode), 0);
+  }
   explicit HelloOkBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3848,10 +4221,12 @@ inline ::flatbuffers::Offset<HelloOk> CreateHelloOk(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> token = 0,
     ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
-    bool layered_replay = false) {
+    bool layered_replay = false,
+    OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed) {
   HelloOkBuilder builder_(_fbb);
   builder_.add_stage_metadata(stage_metadata);
   builder_.add_token(token);
+  builder_.add_layer_mode(layer_mode);
   builder_.add_layered_replay(layered_replay);
   return builder_.Finish();
 }
@@ -3865,13 +4240,15 @@ inline ::flatbuffers::Offset<HelloOk> CreateHelloOkDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *token = nullptr,
     ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
-    bool layered_replay = false) {
+    bool layered_replay = false,
+    OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
   return OpenUSDConnect::CreateHelloOk(
       _fbb,
       token__,
       stage_metadata,
-      layered_replay);
+      layered_replay,
+      layer_mode);
 }
 
 struct AuthRejected FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -4008,7 +4385,8 @@ struct Txn FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_CLIENT_ID = 4,
     VT_EVENTS = 6,
-    VT_PROPOSAL_ID = 8
+    VT_PROPOSAL_ID = 8,
+    VT_LAYER_KEY = 10
   };
   const ::flatbuffers::String *client_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_CLIENT_ID);
@@ -4018,6 +4396,9 @@ struct Txn FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const ::flatbuffers::String *proposal_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_PROPOSAL_ID);
+  }
+  const ::flatbuffers::String *layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -4029,6 +4410,8 @@ struct Txn FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(events()) &&
            VerifyOffset(verifier, VT_PROPOSAL_ID) &&
            verifier.VerifyString(proposal_id()) &&
+           VerifyOffset(verifier, VT_LAYER_KEY) &&
+           verifier.VerifyString(layer_key()) &&
            verifier.EndTable();
   }
 };
@@ -4046,6 +4429,9 @@ struct TxnBuilder {
   void add_proposal_id(::flatbuffers::Offset<::flatbuffers::String> proposal_id) {
     fbb_.AddOffset(Txn::VT_PROPOSAL_ID, proposal_id);
   }
+  void add_layer_key(::flatbuffers::Offset<::flatbuffers::String> layer_key) {
+    fbb_.AddOffset(Txn::VT_LAYER_KEY, layer_key);
+  }
   explicit TxnBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -4061,8 +4447,10 @@ inline ::flatbuffers::Offset<Txn> CreateTxn(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> client_id = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::EventWrapper>>> events = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> proposal_id = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> proposal_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0) {
   TxnBuilder builder_(_fbb);
+  builder_.add_layer_key(layer_key);
   builder_.add_proposal_id(proposal_id);
   builder_.add_events(events);
   builder_.add_client_id(client_id);
@@ -4078,15 +4466,18 @@ inline ::flatbuffers::Offset<Txn> CreateTxnDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *client_id = nullptr,
     const std::vector<::flatbuffers::Offset<OpenUSDConnect::EventWrapper>> *events = nullptr,
-    const char *proposal_id = nullptr) {
+    const char *proposal_id = nullptr,
+    const char *layer_key = nullptr) {
   auto client_id__ = client_id ? _fbb.CreateString(client_id) : 0;
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::EventWrapper>>(*events) : 0;
   auto proposal_id__ = proposal_id ? _fbb.CreateString(proposal_id) : 0;
+  auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
   return OpenUSDConnect::CreateTxn(
       _fbb,
       client_id__,
       events__,
-      proposal_id__);
+      proposal_id__,
+      layer_key__);
 }
 
 struct BroadcastEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -5096,6 +5487,190 @@ inline ::flatbuffers::Offset<LayerStackState> CreateLayerStackStateDirect(
       layers__);
 }
 
+struct SharedLayerState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SharedLayerStateBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_LAYER_KEY = 4,
+    VT_SUBLAYERS = 6
+  };
+  const ::flatbuffers::String *layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *>(VT_SUBLAYERS);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_LAYER_KEY) &&
+           verifier.VerifyString(layer_key()) &&
+           VerifyOffset(verifier, VT_SUBLAYERS) &&
+           verifier.VerifyVector(sublayers()) &&
+           verifier.VerifyVectorOfTables(sublayers()) &&
+           verifier.EndTable();
+  }
+};
+
+struct SharedLayerStateBuilder {
+  typedef SharedLayerState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_layer_key(::flatbuffers::Offset<::flatbuffers::String> layer_key) {
+    fbb_.AddOffset(SharedLayerState::VT_LAYER_KEY, layer_key);
+  }
+  void add_sublayers(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers) {
+    fbb_.AddOffset(SharedLayerState::VT_SUBLAYERS, sublayers);
+  }
+  explicit SharedLayerStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SharedLayerState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SharedLayerState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SharedLayerState> CreateSharedLayerState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers = 0) {
+  SharedLayerStateBuilder builder_(_fbb);
+  builder_.add_sublayers(sublayers);
+  builder_.add_layer_key(layer_key);
+  return builder_.Finish();
+}
+
+struct SharedLayerState::Traits {
+  using type = SharedLayerState;
+  static auto constexpr Create = CreateSharedLayerState;
+};
+
+inline ::flatbuffers::Offset<SharedLayerState> CreateSharedLayerStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *layer_key = nullptr,
+    const std::vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers = nullptr) {
+  auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
+  auto sublayers__ = sublayers ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>(*sublayers) : 0;
+  return OpenUSDConnect::CreateSharedLayerState(
+      _fbb,
+      layer_key__,
+      sublayers__);
+}
+
+struct LayerGraphState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LayerGraphStateBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQ = 4,
+    VT_GENERATION = 6,
+    VT_REVISION = 8,
+    VT_ROOT_LAYER_KEY = 10,
+    VT_LAYERS = 12
+  };
+  int32_t seq() const {
+    return GetField<int32_t>(VT_SEQ, 0);
+  }
+  const ::flatbuffers::String *generation() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GENERATION);
+  }
+  uint64_t revision() const {
+    return GetField<uint64_t>(VT_REVISION, 0);
+  }
+  const ::flatbuffers::String *root_layer_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ROOT_LAYER_KEY);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>> *layers() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>> *>(VT_LAYERS);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_SEQ, 4) &&
+           VerifyOffset(verifier, VT_GENERATION) &&
+           verifier.VerifyString(generation()) &&
+           VerifyField<uint64_t>(verifier, VT_REVISION, 8) &&
+           VerifyOffset(verifier, VT_ROOT_LAYER_KEY) &&
+           verifier.VerifyString(root_layer_key()) &&
+           VerifyOffset(verifier, VT_LAYERS) &&
+           verifier.VerifyVector(layers()) &&
+           verifier.VerifyVectorOfTables(layers()) &&
+           verifier.EndTable();
+  }
+};
+
+struct LayerGraphStateBuilder {
+  typedef LayerGraphState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_seq(int32_t seq) {
+    fbb_.AddElement<int32_t>(LayerGraphState::VT_SEQ, seq, 0);
+  }
+  void add_generation(::flatbuffers::Offset<::flatbuffers::String> generation) {
+    fbb_.AddOffset(LayerGraphState::VT_GENERATION, generation);
+  }
+  void add_revision(uint64_t revision) {
+    fbb_.AddElement<uint64_t>(LayerGraphState::VT_REVISION, revision, 0);
+  }
+  void add_root_layer_key(::flatbuffers::Offset<::flatbuffers::String> root_layer_key) {
+    fbb_.AddOffset(LayerGraphState::VT_ROOT_LAYER_KEY, root_layer_key);
+  }
+  void add_layers(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>>> layers) {
+    fbb_.AddOffset(LayerGraphState::VT_LAYERS, layers);
+  }
+  explicit LayerGraphStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LayerGraphState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LayerGraphState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LayerGraphState> CreateLayerGraphState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t seq = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> generation = 0,
+    uint64_t revision = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> root_layer_key = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>>> layers = 0) {
+  LayerGraphStateBuilder builder_(_fbb);
+  builder_.add_revision(revision);
+  builder_.add_layers(layers);
+  builder_.add_root_layer_key(root_layer_key);
+  builder_.add_generation(generation);
+  builder_.add_seq(seq);
+  return builder_.Finish();
+}
+
+struct LayerGraphState::Traits {
+  using type = LayerGraphState;
+  static auto constexpr Create = CreateLayerGraphState;
+};
+
+inline ::flatbuffers::Offset<LayerGraphState> CreateLayerGraphStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t seq = 0,
+    const char *generation = nullptr,
+    uint64_t revision = 0,
+    const char *root_layer_key = nullptr,
+    const std::vector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>> *layers = nullptr) {
+  auto generation__ = generation ? _fbb.CreateString(generation) : 0;
+  auto root_layer_key__ = root_layer_key ? _fbb.CreateString(root_layer_key) : 0;
+  auto layers__ = layers ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::SharedLayerState>>(*layers) : 0;
+  return OpenUSDConnect::CreateLayerGraphState(
+      _fbb,
+      seq,
+      generation__,
+      revision,
+      root_layer_key__,
+      layers__);
+}
+
 struct Envelope FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef EnvelopeBuilder Builder;
   struct Traits;
@@ -5167,6 +5742,9 @@ struct Envelope FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const OpenUSDConnect::HelloRejected *payload_as_HelloRejected() const {
     return payload_type() == OpenUSDConnect::Payload::HelloRejected ? static_cast<const OpenUSDConnect::HelloRejected *>(payload()) : nullptr;
+  }
+  const OpenUSDConnect::LayerGraphState *payload_as_LayerGraphState() const {
+    return payload_type() == OpenUSDConnect::Payload::LayerGraphState ? static_cast<const OpenUSDConnect::LayerGraphState *>(payload()) : nullptr;
   }
   uint16_t schema_version() const {
     return GetField<uint16_t>(VT_SCHEMA_VERSION, 0);
@@ -5256,6 +5834,10 @@ template<> inline const OpenUSDConnect::LayerStackState *Envelope::payload_as<Op
 
 template<> inline const OpenUSDConnect::HelloRejected *Envelope::payload_as<OpenUSDConnect::HelloRejected>() const {
   return payload_as_HelloRejected();
+}
+
+template<> inline const OpenUSDConnect::LayerGraphState *Envelope::payload_as<OpenUSDConnect::LayerGraphState>() const {
+  return payload_as_LayerGraphState();
 }
 
 struct EnvelopeBuilder {
@@ -5385,6 +5967,14 @@ inline bool VerifyEventPayload(::flatbuffers::VerifierTemplate<B> &verifier, con
       auto ptr = reinterpret_cast<const OpenUSDConnect::SetSdfSpecFields *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case EventPayload::ReplaceSdfLayerContent: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::ReplaceSdfLayerContent *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case EventPayload::SetSublayers: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::SetSublayers *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -5482,6 +6072,10 @@ inline bool VerifyPayload(::flatbuffers::VerifierTemplate<B> &verifier, const vo
     }
     case Payload::HelloRejected: {
       auto ptr = reinterpret_cast<const OpenUSDConnect::HelloRejected *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case Payload::LayerGraphState: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::LayerGraphState *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

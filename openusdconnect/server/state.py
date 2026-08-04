@@ -35,6 +35,7 @@ from ..protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -43,20 +44,27 @@ from ..protocol_constants import (
     K_SET_POINT_INSTANCER,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
     MSG_EVENT,
+    MSG_LAYER_GRAPH_STATE,
     MSG_LAYER_STACK_STATE,
     MSG_PING,
     MSG_PLAYBACK_STATE,
     MSG_RESYNC,
-    SHARED_STAGE_KINDS,
+    NON_COLLABORATION_KINDS,
+    SDF_SPEC_KIND_ATTRIBUTE,
+    SDF_SPEC_KIND_PROPERTY,
+    SDF_SPEC_KIND_RELATIONSHIP,
     STAGE_METADATA_KEYS,
+    LayerMode,
     event_apply_tier,
 )
 from ..sdf_spec_delta import merge_spec_events
+from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph
 from ..usd_state import read_material_binding, read_variant_selections
 from ._txn_barrier import _TxnBarrier
 from .layer_stack import CollaborationLayerStack
@@ -292,11 +300,16 @@ class UsdSyncServer:
         reclaim_interval: float = 0,
         stage: Usd.Stage | None = None,
         resolver_context: Ar.ResolverContext | None = None,
+        layer_mode: LayerMode | str = LayerMode.MANAGED,
     ):
         if stage is not None and base_usd_path:
             raise ValueError("stage and base_usd_path are mutually exclusive")
         if stage is not None and resolver_context is not None:
             raise ValueError("a supplied stage already owns its resolver context")
+
+        self.layer_mode = LayerMode(layer_mode)
+        if self.layer_mode is LayerMode.SHARED_STAGE and department_priority:
+            raise ValueError("department policy is not available in shared-stage mode")
 
         if stage is not None:
             self.stage = stage
@@ -315,6 +328,10 @@ class UsdSyncServer:
                 else Usd.Stage.CreateInMemory()
             )
             self.stage.DefinePrim("/Root", "Xform")
+        if self.layer_mode is LayerMode.SHARED_STAGE and Sdf.Layer.IsAnonymousLayerIdentifier(
+            self.stage.GetRootLayer().identifier
+        ):
+            raise ValueError("shared-stage mode requires a portable root layer")
 
         self.stage_lock = threading.RLock()
 
@@ -351,6 +368,9 @@ class UsdSyncServer:
         self._start_time = time.time()
         self._seq_lock = threading.Lock()
         self.txn_barrier = _TxnBarrier()
+        # Graph revisions, log sequences, and broadcast enqueue order form one
+        # shared-stage commit order across concurrent connection threads.
+        self._shared_stage_commit_lock = threading.RLock()
 
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
@@ -465,9 +485,22 @@ class UsdSyncServer:
         self._instanceable_paths: set[str] = set()
         self._point_instancer_paths: set[str] = set()
 
+        self.shared_layer_graph: SharedLayerGraph | None = None
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            self.shared_layer_graph = SharedLayerGraph(
+                self.stage,
+                authoritative=self.store.get_count() == 0,
+            )
+            if self.store.get_count() == 0:
+                seq = self.assign_seq()
+                self.append_log(self.shared_layer_graph.state_message(seq=seq))
+
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
         self._replay_log_into_stage()
+        if self.shared_layer_graph is not None:
+            self.shared_layer_graph.authoritative = True
+            self.refresh_shared_layer_dependencies()
 
     @staticmethod
     def _make_scene_id(base_usd_path: str | None) -> str:
@@ -757,13 +790,16 @@ class UsdSyncServer:
         rows = self.store.get_all_asc()
         if not rows:
             return
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            self._replay_shared_log(rows)
+            return
 
         routed: list[tuple[Sdf.Layer, dict]] = []
         for _seq, record_bin in rows:
             rec = message_to_dict(record_bin, numpy_arrays=True)
             ev = rec.get("event", rec)
             client_id = rec.get("client_id")
-            if ev.get("k") in SHARED_STAGE_KINDS:
+            if ev.get("k") in NON_COLLABORATION_KINDS:
                 layer = self.stage.GetSessionLayer()
             else:
                 layer_key = rec.get("layer_key") or ""
@@ -810,6 +846,69 @@ class UsdSyncServer:
             self._track_prim_event(ev)
 
         LOG.info("Restored stage from event log: %d events", len(routed))
+
+    def _replay_shared_log(self, rows: list[tuple[int, bytes]]) -> None:
+        """Restore exact file-backed layer opinions in persisted order."""
+        from ..event_apply import apply_events
+
+        graph = self.shared_layer_graph
+        if graph is None:
+            raise RuntimeError("shared-stage replay requires a layer graph")
+
+        baseline_seen = False
+        current_key = ""
+        run: list[dict] = []
+
+        def _apply_run() -> None:
+            if not run:
+                return
+            layer = graph.layer_for(current_key)
+            if layer is None:
+                raise ValueError(f"persisted event targets unresolved layer key {current_key!r}")
+            with Usd.EditContext(self.stage, Usd.EditTarget(layer)):
+                apply_events(self.stage, run)
+
+        with self.stage_lock:
+            for _seq, record_bin in rows:
+                record = message_to_dict(record_bin, numpy_arrays=True)
+                if record.get("type") == MSG_LAYER_GRAPH_STATE:
+                    _apply_run()
+                    run = []
+                    current_key = ""
+                    graph.apply_state(record)
+                    baseline_seen = True
+                    continue
+                if record.get("type") != MSG_EVENT:
+                    raise ValueError("shared-stage log contains an unsupported record")
+                if not baseline_seen:
+                    raise ValueError("shared-stage log must begin with a layer graph baseline")
+                event = record.get("event", {})
+                layer_key = record.get("layer_key") or ""
+                if event.get("k") == K_SET_SUBLAYERS:
+                    _apply_run()
+                    run = []
+                    current_key = ""
+                    graph.apply_sublayers(layer_key, event)
+                    continue
+                if event.get("k") not in (
+                    K_SET_SDF_SPEC_FIELDS,
+                    K_REPLACE_SDF_LAYER_CONTENT,
+                ):
+                    raise ValueError(
+                        f"shared-stage log contains unsupported event {event.get('k')!r}"
+                    )
+                if run and layer_key != current_key:
+                    _apply_run()
+                    run = []
+                current_key = layer_key
+                run.append(event)
+            _apply_run()
+
+        if not baseline_seen:
+            raise ValueError("shared-stage log has no layer graph baseline")
+        self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
+        self._prim_count_dirty = True
+        LOG.info("Restored shared stage from event log: %d records", len(rows))
 
     # -- TOFU authentication -------------------------------------------
 
@@ -881,6 +980,8 @@ class UsdSyncServer:
 
         Returns the proposal_id.
         """
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            raise RuntimeError("department proposals are unavailable in shared-stage mode")
         import uuid
 
         proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
@@ -987,7 +1088,7 @@ class UsdSyncServer:
                     "client_id": p.from_client,
                     "origin": f"proposal-{p.proposal_id}",
                 }
-                if ev.get("k") not in SHARED_STAGE_KINDS:
+                if ev.get("k") not in NON_COLLABORATION_KINDS:
                     rec["layer_key"] = _layer_key_for_department(
                         p.target_department,
                     )
@@ -1055,6 +1156,8 @@ class UsdSyncServer:
         re-mute after — the opinions stay out of composition. Events also
         accumulate on the proposal for the merge + log replay on approval.
         """
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            return False
         from ..event_apply import apply_events
 
         with self.proposals_lock:
@@ -1465,10 +1568,14 @@ class UsdSyncServer:
         instancer arrays) into minutes of decode.
         """
         rec = message_to_dict(record_bin, numpy_arrays=True)
+        if rec.get("type") == MSG_LAYER_GRAPH_STATE:
+            return
         ev = rec.get("event", rec)
         prim = ev.get("prim", "")
         k = ev.get("k", "")
-        layer_scope = "" if k in SHARED_STAGE_KINDS else rec.get("layer_key") or ""
+        if k == K_SET_SUBLAYERS:
+            return
+        layer_scope = "" if k in NON_COLLABORATION_KINDS else rec.get("layer_key") or ""
         key = (prim, k, ev.get("time"), layer_scope)
         if k == K_SET_MATERIAL_BINDING:
             key = (
@@ -1478,9 +1585,16 @@ class UsdSyncServer:
                 layer_scope,
             )
         elif k == K_SET_SDF_SPEC_FIELDS:
+            spec_kind = ev.get("spec_kind") or ""
+            if spec_kind in (
+                SDF_SPEC_KIND_ATTRIBUTE,
+                SDF_SPEC_KIND_PROPERTY,
+                SDF_SPEC_KIND_RELATIONSHIP,
+            ):
+                spec_kind = SDF_SPEC_KIND_PROPERTY
             key = (
                 prim,
-                (f"{k}:{ev.get('spec_kind') or ''}:{ev.get('spec_path') or ''}"),
+                f"{k}:{spec_kind}:{ev.get('spec_path') or ''}",
                 None,
                 layer_scope,
             )
@@ -1501,6 +1615,21 @@ class UsdSyncServer:
                 for existing in latest
                 if existing[3] == layer_scope
                 and (existing[0] == prim or existing[0].startswith(child_prefix))
+            ]
+            for existing in to_remove:
+                del latest[existing]
+            latest[key] = (ev, meta, seq)
+            return
+
+        if k == K_REPLACE_SDF_LAYER_CONTENT:
+            to_remove = [
+                existing
+                for existing in latest
+                if existing[3] == layer_scope
+                and (
+                    existing[1] == K_REPLACE_SDF_LAYER_CONTENT
+                    or existing[1].startswith(f"{K_SET_SDF_SPEC_FIELDS}:")
+                )
             ]
             for existing in to_remove:
                 del latest[existing]
@@ -1617,7 +1746,10 @@ class UsdSyncServer:
         elif k == K_SET_SDF_SPEC_FIELDS:
             existing = latest.get(key)
             if existing:
-                latest[key] = (merge_spec_events(existing[0], ev), meta, seq)
+                previous = existing[0]
+                if previous.get("spec_kind") == ev.get("spec_kind"):
+                    ev = merge_spec_events(previous, ev)
+                latest[key] = (ev, meta, seq)
             else:
                 latest[key] = (ev, meta, seq)
         elif k == K_ENSURE_PRIM:
@@ -1675,9 +1807,21 @@ class UsdSyncServer:
         recreates.
         """
         sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
-
         records = []
-        for seq, (ev, meta, _stamp) in enumerate(sorted_entries, start=1):
+        first_event_seq = 1
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            graph = self.shared_layer_graph
+            if graph is None:
+                raise RuntimeError("shared-stage compaction requires a layer graph")
+            reachable = set(graph.reachable_layer_keys())
+            sorted_entries = [
+                entry for entry in sorted_entries if entry[1].get("layer_key") in reachable
+            ]
+            graph_record = graph.state_message(seq=1)
+            records.append((1, encode_message(graph_record), None, MSG_LAYER_GRAPH_STATE, None))
+            first_event_seq = 2
+
+        for seq, (ev, meta, _stamp) in enumerate(sorted_entries, start=first_event_seq):
             rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
             rec.update(meta)
             records.append(
@@ -1701,7 +1845,7 @@ class UsdSyncServer:
         for ev, _meta, _stamp in sorted_entries:
             self._track_prim_event(ev)
 
-        LOG.info("Compacted event log: %d -> %d events", original_count, len(sorted_entries))
+        LOG.info("Compacted event log: %d -> %d records", original_count, len(records))
 
         # Reset and replay each receiver while holding its send lock. Sending
         # the control message directly avoids an async-broadcast race where
@@ -1727,6 +1871,11 @@ class UsdSyncServer:
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            raise RuntimeError(
+                "purge is unavailable in shared-stage mode because file-backed "
+                "authored opinions are not server-owned"
+            )
         self.txn_barrier.acquire_exclusive()
         try:
             if self._persist_queue is not None:
@@ -1792,8 +1941,7 @@ class UsdSyncServer:
             uploaded_scene_id = uploaded_meta.get("scene_id")
             if not isinstance(uploaded_scene_id, str) or not uploaded_scene_id:
                 raise InvalidVfsWriteError(
-                    "uploaded openusdconnect metadata field 'scene_id' "
-                    "must be a non-empty string"
+                    "uploaded openusdconnect metadata field 'scene_id' must be a non-empty string"
                 )
             uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
             uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
@@ -1853,9 +2001,7 @@ class UsdSyncServer:
                 if department_layers:
                     details.append(f"department layers: {', '.join(department_layers)}")
                 if additional_layers:
-                    details.append(
-                        f"collaboration layers: {', '.join(additional_layers)}"
-                    )
+                    details.append(f"collaboration layers: {', '.join(additional_layers)}")
                 if pending_proposals:
                     details.append(f"pending proposals: {', '.join(pending_proposals)}")
                 analysis = _analysis(
@@ -1991,17 +2137,13 @@ class UsdSyncServer:
                 raise RuntimeError("failed to create the VFS replacement stage")
             replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
             replacement_events = [
-                event for event in events if event.get("k") not in SHARED_STAGE_KINDS
+                event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
             ]
-            shared_events = [
-                event for event in events if event.get("k") in SHARED_STAGE_KINDS
-            ]
+            shared_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
             if replacement_events:
                 apply_events(replacement_stage, replacement_events, prevalidated=True)
             if shared_events:
-                replacement_stage.SetEditTarget(
-                    Usd.EditTarget(replacement_stage.GetSessionLayer())
-                )
+                replacement_stage.SetEditTarget(Usd.EditTarget(replacement_stage.GetSessionLayer()))
                 apply_events(replacement_stage, shared_events, prevalidated=True)
 
             records: list[tuple[dict, bytes]] = []
@@ -2015,7 +2157,7 @@ class UsdSyncServer:
                     "client_id": client_id,
                     "origin": origin,
                 }
-                if event.get("k") not in SHARED_STAGE_KINDS:
+                if event.get("k") not in NON_COLLABORATION_KINDS:
                     record["layer_key"] = _DEFAULT_LAYER_KEY
                 record_bin = encode_message(record)
                 records.append((record, record_bin))
@@ -2288,6 +2430,15 @@ class UsdSyncServer:
         origin echo suppression.
         """
         if not records:
+            return
+
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            payload = frame_batch([encoded for _record, encoded in records])
+            self.broadcast_bytes(
+                payload,
+                [record for record, _encoded in records],
+                audience=_AUDIENCE_ALL,
+            )
             return
 
         has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
@@ -2603,7 +2754,7 @@ class UsdSyncServer:
         with self.stage_lock:
             edit_target = Usd.EditTarget(target)
             session_target = Usd.EditTarget(self.stage.GetSessionLayer())
-            has_layer_opinions = any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events)
+            has_layer_opinions = any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events)
             target_was_muted = self.stage.IsLayerMuted(target.identifier)
             was_muted = has_layer_opinions and target_was_muted
             if was_muted:
@@ -2623,15 +2774,16 @@ class UsdSyncServer:
 
                 start = 0
                 while start < len(events):
-                    shared = events[start].get("k") in SHARED_STAGE_KINDS
+                    non_collaboration = events[start].get("k") in NON_COLLABORATION_KINDS
                     end = start + 1
                     while (
-                        end < len(events) and (events[end].get("k") in SHARED_STAGE_KINDS) == shared
+                        end < len(events)
+                        and (events[end].get("k") in NON_COLLABORATION_KINDS) == non_collaboration
                     ):
                         end += 1
                     run = events[start:end]
-                    run_target = session_target if shared else edit_target
-                    run_layer = self.stage.GetSessionLayer() if shared else target
+                    run_target = session_target if non_collaboration else edit_target
+                    run_layer = self.stage.GetSessionLayer() if non_collaboration else target
                     self.stage.SetEditTarget(run_target)
                     apply_events(
                         self.stage,
@@ -2664,6 +2816,7 @@ class UsdSyncServer:
         origin: str | None = None,
         client_addr: str | None = None,
         layer: Sdf.Layer | None = None,
+        layer_key: str = "",
     ) -> list[tuple[dict, bytes]]:
         """Apply, seq-assign, encode, and persist a transaction.
 
@@ -2681,9 +2834,32 @@ class UsdSyncServer:
         edit target. Client policy selects that target before this method is
         called; cached client metadata is not authoritative for persistence.
         """
+        if self.layer_mode is LayerMode.SHARED_STAGE:
+            if layer is not None:
+                raise ValueError("managed layer routing is unavailable in shared-stage mode")
+            with self._shared_stage_commit_lock:
+                return self._process_shared_txn(
+                    events,
+                    layer_key=layer_key,
+                    client_id=client_id,
+                    origin=origin,
+                    client_addr=client_addr,
+                )
+        if layer_key:
+            raise ValueError("managed transactions cannot select an arbitrary layer key")
+        shared_only = {
+            event.get("k")
+            for event in events
+            if event.get("k") in (K_REPLACE_SDF_LAYER_CONTENT, K_SET_SUBLAYERS)
+        }
+        if shared_only:
+            raise ValueError(
+                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
+            )
+
         target_layer = layer or self.edit_layer
         layer_key = self.layer_stack.key_for_layer(target_layer)
-        if layer_key is None and any(ev.get("k") not in SHARED_STAGE_KINDS for ev in events):
+        if layer_key is None and any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events):
             raise ValueError("transaction target is not a managed collaboration layer")
 
         self.apply_txn(events, layer=target_layer)
@@ -2700,7 +2876,7 @@ class UsdSyncServer:
             }
             if origin:
                 rec["origin"] = origin
-            if ev.get("k") not in SHARED_STAGE_KINDS:
+            if ev.get("k") not in NON_COLLABORATION_KINDS:
                 rec["layer_key"] = layer_key
             rec_bin = encode_message(rec)
             if self.wire_metrics is not None:
@@ -2709,6 +2885,160 @@ class UsdSyncServer:
             persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
         self.append_log_batch(persist_tuples)
         return records
+
+    def _process_shared_txn(
+        self,
+        events: list[dict],
+        *,
+        layer_key: str,
+        client_id: str | None,
+        origin: str | None,
+        client_addr: str | None,
+    ) -> list[tuple[dict, bytes]]:
+        """Apply one exact authored-layer transaction."""
+        from ..event_apply import apply_events, atomic_apply
+        from ..protocol_validation import validate_event
+        from ..sdf_spec_delta import (
+            validate_layer_content_replacement,
+            validate_spec_delta,
+        )
+
+        graph = self.shared_layer_graph
+        if graph is None:
+            raise RuntimeError("shared-stage transaction requires a layer graph")
+        if not layer_key:
+            raise ValueError("shared-stage transactions require layer_key")
+        target = graph.layer_for(layer_key)
+        if target is None or layer_key not in graph.reachable_layer_keys():
+            raise ValueError(f"unknown or unresolved shared layer key {layer_key!r}")
+        unsupported = {
+            event.get("k")
+            for event in events
+            if event.get("k")
+            not in (
+                K_REPLACE_SDF_LAYER_CONTENT,
+                K_SET_SDF_SPEC_FIELDS,
+                K_SET_SUBLAYERS,
+            )
+        }
+        if unsupported:
+            raise ValueError(f"unsupported shared-stage events: {sorted(unsupported)!r}")
+        if sum(event.get("k") == K_SET_SUBLAYERS for event in events) > 1:
+            raise ValueError("one shared-stage transaction may replace a parent topology once")
+        if sum(event.get("k") == K_REPLACE_SDF_LAYER_CONTENT for event in events) > 1:
+            raise ValueError("one shared-stage transaction may replace layer content once")
+
+        prepared: PreparedSublayers | None = None
+        canonical_events = []
+        for event in events:
+            if event.get("k") == K_SET_SUBLAYERS:
+                prepared = graph.canonicalize_sublayers(layer_key, event)
+                canonical = prepared.event
+            elif event.get("k") == K_REPLACE_SDF_LAYER_CONTENT:
+                canonical = dict(event)
+                validate_layer_content_replacement(canonical)
+            else:
+                canonical = dict(event)
+                validate_spec_delta(canonical)
+            if not validate_event(canonical):
+                raise ValueError(f"invalid shared-stage event {canonical.get('k')!r}")
+            canonical_events.append(canonical)
+
+        routed_events = [(layer_key, event) for event in canonical_events]
+        with (
+            self.stage_lock,
+            Usd.EditContext(self.stage, Usd.EditTarget(target)),
+            graph.transaction(),
+        ):
+            for event in canonical_events:
+                if event.get("k") != K_SET_SDF_SPEC_FIELDS or not event.get("removed", False):
+                    continue
+                path = Sdf.Path(event["spec_path"])
+                spec = target.GetObjectAtPath(path)
+                if spec:
+                    event["fields"] = sorted(
+                        set(event.get("fields", ())) | {str(key) for key in spec.ListInfoKeys()}
+                    )
+            with atomic_apply(self.stage):
+                apply_events(self.stage, canonical_events, prevalidated=True)
+                if prepared is not None:
+                    graph.accept_sublayers(prepared)
+                    routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
+
+        records = self._persist_shared_events(
+            routed_events,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
+        )
+        self._prim_count_dirty = True
+        return records
+
+    def _persist_shared_events(
+        self,
+        routed_events: list[tuple[str, dict]],
+        *,
+        client_id: str | None,
+        origin: str | None,
+        client_addr: str | None,
+    ) -> list[tuple[dict, bytes]]:
+        records = []
+        persist_tuples = []
+        for event_layer_key, event in routed_events:
+            record = {
+                "type": MSG_EVENT,
+                "seq": self.assign_seq(),
+                "event": event,
+                "client": client_addr,
+                "client_id": client_id,
+                "layer_key": event_layer_key,
+            }
+            if origin:
+                record["origin"] = origin
+            record_bin = encode_message(record)
+            if self.wire_metrics is not None:
+                self.wire_metrics.record(event.get("k", ""), len(record_bin))
+            records.append((record, record_bin))
+            persist_tuples.append(
+                (
+                    record["seq"],
+                    record_bin,
+                    client_id,
+                    event.get("k"),
+                    event.get("prim"),
+                )
+            )
+        self.append_log_batch(persist_tuples)
+        return records
+
+    def refresh_shared_layer_dependencies(self) -> tuple[str, ...]:
+        """Resolve newly available sublayers and publish their routing state."""
+        graph = self.shared_layer_graph
+        if self.layer_mode is not LayerMode.SHARED_STAGE or graph is None:
+            raise RuntimeError("shared layer dependency refresh requires shared-stage mode")
+
+        self.txn_barrier.acquire_shared()
+        try:
+            with self._shared_stage_commit_lock:
+                before = set(graph.reachable_layer_keys())
+                with self.stage_lock, graph.transaction():
+                    Ar.GetResolver().RefreshContext(self.stage.GetPathResolverContext())
+                    routed_events = list(graph.refresh_resolved_sublayers())
+                if routed_events:
+                    records = self._persist_shared_events(
+                        routed_events,
+                        client_id=None,
+                        origin=None,
+                        client_addr=None,
+                    )
+                    self.broadcast_transaction_views(records)
+                return tuple(
+                    layer_key
+                    for layer_key in graph.reachable_layer_keys()
+                    if layer_key not in before
+                )
+        finally:
+            self.txn_barrier.release_shared()
 
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe, cached)."""

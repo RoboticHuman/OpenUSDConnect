@@ -26,6 +26,7 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -36,6 +37,7 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -482,6 +484,20 @@ def _apply_set_sdf_spec_fields(stage: Usd.Stage, ev: dict) -> None:
     from .sdf_spec_delta import apply_spec_delta
 
     apply_spec_delta(stage, ev)
+
+
+@register_applier(K_REPLACE_SDF_LAYER_CONTENT)
+def _apply_replace_sdf_layer_content(stage: Usd.Stage, ev: dict) -> None:
+    from .sdf_spec_delta import apply_layer_content_replacement
+
+    apply_layer_content_replacement(stage.GetEditTarget().GetLayer(), ev)
+
+
+@register_applier(K_SET_SUBLAYERS)
+def _apply_set_sublayers(stage: Usd.Stage, ev: dict) -> None:
+    from .shared_layer_graph import apply_sublayer_entries
+
+    apply_sublayer_entries(stage.GetEditTarget().GetLayer(), ev.get("sublayers", ()))
 
 
 @register_applier(K_SET_STAGE_METADATA)

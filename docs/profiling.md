@@ -131,3 +131,29 @@ Run `stress_test_departments.py` as well. The focused benchmark measures the
 generic Sdf path, emitter paths, native composed projection, and collaboration
 layer reorder in-process. The stress test guards transport, persistence, and
 department composition under load.
+
+## Shared-stage layer graphs
+
+Use the shared-stage benchmark for exact file-layer tracking and topology:
+
+```bash
+uv run python scripts/benchmark_shared_stage.py
+```
+
+It reports initial snapshot memory, the validated one-field path, the complete
+dirty-layer fallback used for changes omitted by composition notices, accepted
+baseline updates, idle graph scans, graph baseline encoding and application,
+and full-parent sublayer reordering. Use `--spec-count`, `--graph-layers`, and
+the iteration options to match a production layer layout.
+
+To measure the optional native notice path against the Python tracker:
+
+```bash
+openusdconnect-build-sdf-notice-bridge --build-dir build/sdf-notice-bridge
+uv run python scripts/benchmark_native_sdf_notice.py \
+  --bridge build/sdf-notice-bridge/libopenusdconnect_sdf_notice_bridge.so
+```
+
+Use the platform library suffix printed by the build command. The benchmark
+checks exact replay before reporting callback, drain, fragment, and burst-queue
+costs.

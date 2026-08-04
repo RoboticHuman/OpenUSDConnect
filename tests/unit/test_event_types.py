@@ -17,6 +17,7 @@ from openusdconnect.events import (
     Event,
     LoadPayload,
     RenamePrim,
+    ReplaceSdfLayerContent,
     SetConnectableConnection,
     SetConnectableInput,
     SetGprimAttrs,
@@ -27,6 +28,7 @@ from openusdconnect.events import (
     SetReference,
     SetSdfSpecFields,
     SetStageMetadata,
+    SetSublayers,
     SetVariantSelections,
     SetVisibility,
     SetXformTRS,
@@ -191,6 +193,31 @@ _CASES: list[tuple[str, Event]] = [
             fields=["default"],
             fragment='#usda 1.0\n\nover "World" {}\n',
             removed=False,
+        ),
+    ),
+    (
+        "replace_sdf_layer_content",
+        ReplaceSdfLayerContent(
+            k="replace_sdf_layer_content",
+            prim="/",
+            fragment="#usda 1.0\n",
+        ),
+    ),
+    (
+        "set_sublayers",
+        SetSublayers(
+            k="set_sublayers",
+            prim="/",
+            generation="graph-1",
+            revision=2,
+            sublayers=[
+                {
+                    "authored_path": "./asset.usda",
+                    "offset": 7.0,
+                    "scale": 2.0,
+                    "layer_key": "layer:asset",
+                }
+            ],
         ),
     ),
 ]

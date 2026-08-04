@@ -10,7 +10,7 @@ import pytest
 from pxr import Ar, Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.codec import message_to_dict
-from openusdconnect.protocol_constants import SHARED_STAGE_KINDS
+from openusdconnect.protocol_constants import NON_COLLABORATION_KINDS
 from openusdconnect.server import TokenBucket, UsdSyncServer
 
 
@@ -301,7 +301,7 @@ class TestCompaction:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
-            if ev["k"] not in SHARED_STAGE_KINDS:
+            if ev["k"] not in NON_COLLABORATION_KINDS:
                 rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)
@@ -1919,7 +1919,7 @@ class TestCompactionWithEditLayer:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
-            if ev["k"] not in SHARED_STAGE_KINDS:
+            if ev["k"] not in NON_COLLABORATION_KINDS:
                 rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)

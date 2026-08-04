@@ -350,6 +350,37 @@ class TestReconnection:
 
         _teardown(rt, conn2, srv)
 
+    def test_resync_rewinds_the_reconnect_cursor(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.2,
+        )
+        rt.start()
+        conn1 = _accept_and_hello(srv)
+        conn2 = None
+        try:
+            _send_event(conn1, 10)
+            assert _poll_until(lambda: rt.last_seq == 10)
+            send_framed(conn1, encode_message({"type": "resync"}))
+            _send_event(conn1, 1)
+            assert _poll_until(lambda: rt.last_seq == 1)
+
+            conn1.close()
+            assert _poll_until(lambda: not rt.connected)
+            conn2 = _accept(srv, timeout=2)
+            assert _recv_hello(conn2)["sync_from"] == 2
+        finally:
+            if conn2 is not None:
+                _teardown(rt, conn2, srv)
+            else:
+                rt.stop()
+                rt.join(timeout=1)
+                srv.close()
+
     def test_requested_replay_rewinds_sequence_and_clears_queue(self):
         srv, port = _make_server()
         rt = ReceiverThread(

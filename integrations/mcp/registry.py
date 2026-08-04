@@ -24,6 +24,7 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -34,6 +35,7 @@ from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -321,6 +323,28 @@ def _set_sdf_spec_fields(
     }
 
 
+def _set_sublayers(
+    generation: str,
+    sublayers: list[dict],
+    revision: int = 0,
+) -> dict:
+    return {
+        "k": K_SET_SUBLAYERS,
+        "prim": "/",
+        "generation": generation,
+        "revision": int(revision),
+        "sublayers": sublayers,
+    }
+
+
+def _replace_sdf_layer_content(fragment: str) -> dict:
+    return {
+        "k": K_REPLACE_SDF_LAYER_CONTENT,
+        "prim": "/",
+        "fragment": fragment,
+    }
+
+
 TOOL_TABLE: dict[str, ToolRow] = {
     K_ENSURE_PRIM: ToolRow(
         K_ENSURE_PRIM,
@@ -440,6 +464,18 @@ TOOL_TABLE: dict[str, ToolRow] = {
         "Apply a low-level Sdf spec delta. The fragment must contain the exact "
         "spec_path; fields lists the opinions to set or clear.",
         _set_sdf_spec_fields,
+        expose=False,
+    ),
+    K_REPLACE_SDF_LAYER_CONTENT: ToolRow(
+        K_REPLACE_SDF_LAYER_CONTENT,
+        "Replace all non-topology opinions in one shared-stage layer.",
+        _replace_sdf_layer_content,
+        expose=False,
+    ),
+    K_SET_SUBLAYERS: ToolRow(
+        K_SET_SUBLAYERS,
+        "Replace shared-stage sublayer topology using an authoritative graph revision.",
+        _set_sublayers,
         expose=False,
     ),
 }

@@ -40,7 +40,7 @@ from .protocol_constants import (
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
-    SHARED_STAGE_KINDS,
+    NON_COLLABORATION_KINDS,
     STAGE_METADATA_KEYS,
     STAGE_SYNC_KINDS,
 )
@@ -464,7 +464,7 @@ class EventDispatcher:
             for record in records:
                 event = record.event
                 kind = event.get("k")
-                if kind in SHARED_STAGE_KINDS:
+                if kind in NON_COLLABORATION_KINDS:
                     layer = None
                 else:
                     if not record.layer_key:
@@ -472,7 +472,7 @@ class EventDispatcher:
                             "layered replay record is missing its collaboration layer key"
                         )
                     layer = router.layer_for(record.layer_key)
-                if kind in SHARED_STAGE_KINDS or kind == K_RENAME_PRIM:
+                if kind in NON_COLLABORATION_KINDS or kind == K_RENAME_PRIM:
                     shared_state_events.append(event)
                 routed.append((layer, event))
             layers = {layer.identifier: layer for layer, _event in routed if layer is not None}

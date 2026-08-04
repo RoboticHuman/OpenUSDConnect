@@ -32,6 +32,7 @@ from .codec import (
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
 from .protocol import make_hello
+from .protocol_constants import LayerMode
 from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class ReceiverThread(threading.Thread):
         on_playback_claimed: Callable[[dict], None] | None = None,
         on_playback_rejected: Callable[[dict], None] | None = None,
         layered_replay: bool = True,
+        layer_mode: LayerMode | str = LayerMode.MANAGED,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -100,6 +102,8 @@ class ReceiverThread(threading.Thread):
         self.token = token
         self.layered_replay = bool(layered_replay)
         self.layered_replay_active = False
+        self.layer_mode = LayerMode(layer_mode)
+        self.layer_mode_active = LayerMode.MANAGED
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
         self._on_playback_state = on_playback_state
@@ -224,6 +228,7 @@ class ReceiverThread(threading.Thread):
             department=self.department,
             token=self.token,
             layered_replay=self.layered_replay,
+            layer_mode=self.layer_mode,
         )
         send_msg(sock, hello)
         self._handshake_event.clear()
@@ -299,6 +304,16 @@ class ReceiverThread(threading.Thread):
 
                 if pt == PayloadType.HelloOk:
                     _, ho = resolve_payload(env)
+                    self.layer_mode_active = LayerMode(
+                        "shared_stage" if ho.LayerMode() else "managed"
+                    )
+                    if self.layer_mode_active is not self.layer_mode:
+                        self.hello_rejected = True
+                        self.rejection_code = HelloRejectionCode.LayerModeMismatch
+                        self.rejection_reason = "server did not negotiate requested layer mode"
+                        LOG.error("ReceiverThread: %s", self.rejection_reason)
+                        self._handshake_event.set()
+                        return
                     self.layered_replay_active = bool(self.layered_replay and ho.LayeredReplay())
                     if self.layered_replay and not self.layered_replay_active:
                         self.hello_rejected = True
@@ -368,9 +383,14 @@ class ReceiverThread(threading.Thread):
 
             # Extract seq for tracking (read from BroadcastEvent without
             # full dict conversion)
-            if pt == PayloadType.BroadcastEvent:
+            if pt == PayloadType.Resync:
+                seq = 0
+            elif pt == PayloadType.BroadcastEvent:
                 _, be = resolve_payload(env)
                 seq = be.Seq()
+            elif pt == PayloadType.LayerGraphState:
+                _, graph = resolve_payload(env)
+                seq = graph.Seq()
 
             with self._incoming_lock:
                 if connection_generation != self._replay_generation:
@@ -382,7 +402,13 @@ class ReceiverThread(threading.Thread):
                     )
                     self._queue_overflow = True
                     break
-                if pt == PayloadType.BroadcastEvent and seq > self.last_seq:
+                is_sequenced = pt in (
+                    PayloadType.BroadcastEvent,
+                    PayloadType.LayerGraphState,
+                )
+                if pt == PayloadType.Resync:
+                    self.last_seq = 0
+                elif is_sequenced and seq > self.last_seq:
                     self.last_seq = seq
                 self._incoming.append(buf)
 

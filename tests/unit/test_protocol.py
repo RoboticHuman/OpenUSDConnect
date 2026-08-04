@@ -1,5 +1,7 @@
 """Tests for openusdconnect.protocol — validation helpers, message construction."""
 
+import pytest
+
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.connectable_attrs import (
     SIDE_INPUT,
@@ -27,6 +29,7 @@ from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
@@ -36,6 +39,7 @@ from openusdconnect.protocol_constants import (
     PROTOCOL_VERSION,
     SESSION_LAYER_KINDS,
     STAGE_RUNTIME_KINDS,
+    LayerMode,
 )
 from openusdconnect.protocol_validation import (
     clamp_fields,
@@ -110,12 +114,27 @@ class TestMessageConstruction:
         msg = {"type": "hello_ok", "layered_replay": True}
         assert message_to_dict(encode_message(msg)) == msg
 
+    def test_shared_stage_hello_uses_a_separate_capability(self):
+        msg = make_hello("receiver", layer_mode=LayerMode.SHARED_STAGE)
+        assert msg["layer_mode"] == "shared_stage"
+        assert "layered_replay" not in msg
+
+        for kwargs in (
+            {"department": "animation"},
+            {"layered_replay": True},
+        ):
+            with pytest.raises(ValueError):
+                make_hello("receiver", layer_mode=LayerMode.SHARED_STAGE, **kwargs)
+
     def test_make_txn(self):
         events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo", "typeName": "Xform"}]
         msg = make_txn("client-1", events)
         assert msg["type"] == MSG_TXN
         assert msg["client_id"] == "client-1"
         assert msg["events"] == events
+
+        targeted = make_txn("client-1", events, layer_key="layer:root")
+        assert targeted["layer_key"] == "layer:root"
 
     def test_make_quit(self):
         msg = make_quit()
@@ -167,6 +186,24 @@ class TestValidateEvent:
         for field in ("subLayers", "subLayerOffsets"):
             event["fields"] = [field]
             assert not validate_event(event)
+
+    def test_set_sublayers_validates_complete_ordered_state(self):
+        event = {
+            "k": K_SET_SUBLAYERS,
+            "prim": "/",
+            "generation": "graph-1",
+            "revision": 0,
+            "sublayers": [
+                {
+                    "authored_path": "./asset.usda",
+                    "offset": 7.0,
+                    "scale": -2.0,
+                }
+            ],
+        }
+        assert validate_event(event)
+        event["sublayers"].append(dict(event["sublayers"][0]))
+        assert not validate_event(event)
 
     def test_set_xform_trs_valid(self):
         ev = {

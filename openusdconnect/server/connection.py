@@ -8,6 +8,7 @@ import socket
 import socketserver
 import threading
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 from ..codec import (
@@ -35,6 +36,7 @@ from ..protocol_constants import (
     MSG_RATE_LIMITED,
     MSG_RESYNC,
     PROTOCOL_VERSION,
+    LayerMode,
 )
 from ..transport import send_msg
 from ._sock_utils import _set_keepalive, _set_send_timeout
@@ -132,12 +134,51 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         dept_raw = hello_fb.Department()
         self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
         self._layered_replay = bool(hello_fb.LayeredReplay())
+        self._layer_mode = (
+            LayerMode.SHARED_STAGE if hello_fb.LayerMode() else LayerMode.MANAGED
+        )
         token_raw = hello_fb.Token()
         hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
         self._client_id = client_id
         self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
-        if role == "receiver":
+        if self._layer_mode is not sync_server.layer_mode:
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_HELLO_REJECTED,
+                    "code": HelloRejectionCode.LayerModeMismatch,
+                    "reason": (
+                        f"server uses {sync_server.layer_mode.value!r} layer mode, "
+                        f"client requested {self._layer_mode.value!r}"
+                    ),
+                },
+            )
+            LOG.warning(
+                "Rejected %s layer mode from %s; server uses %s",
+                self._layer_mode.value,
+                self.client_address,
+                sync_server.layer_mode.value,
+            )
+            return
+
+        if self._layer_mode is LayerMode.SHARED_STAGE and (
+            self._layered_replay or self._department
+        ):
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_HELLO_REJECTED,
+                    "code": HelloRejectionCode.LayerModeMismatch,
+                    "reason": (
+                        "shared-stage mode does not use managed layered replay "
+                        "or department routing"
+                    ),
+                },
+            )
+            return
+
+        if role == "receiver" and self._layer_mode is LayerMode.MANAGED:
             accepted, reason = sync_server.reserve_receiver_replay_mode(
                 self._layered_replay,
             )
@@ -178,9 +219,15 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Send hello_ok with token (issued on first connect, None on reconnect)
         hello_ok = {"type": MSG_HELLO_OK}
+        if sync_server.layer_mode is LayerMode.SHARED_STAGE:
+            hello_ok["layer_mode"] = LayerMode.SHARED_STAGE.value
         if issued_token:
             hello_ok["token"] = issued_token
-        if role == "receiver" and self._layered_replay:
+        if (
+            role == "receiver"
+            and sync_server.layer_mode is LayerMode.MANAGED
+            and self._layered_replay
+        ):
             hello_ok["layered_replay"] = True
         stage_meta = sync_server.get_stage_metadata_payload()
         if stage_meta:
@@ -206,7 +253,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # Create per-client layer only when department ordering is enabled.
             # Without departments, all clients share edit_layer (last-write-wins).
             self._client_layer = None
-            if role == "emitter" and client_id and sync_server.department_priority:
+            if (
+                role == "emitter"
+                and client_id
+                and sync_server.layer_mode is LayerMode.MANAGED
+                and sync_server.department_priority
+            ):
                 self._client_layer = sync_server.get_or_create_client_layer(
                     client_id,
                     department=self._department,
@@ -230,7 +282,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                             self.request,
                             {"type": MSG_PLAYBACK_STATE, **snapshot},
                         )
-                        if self._layered_replay:
+                        if (
+                            sync_server.layer_mode is LayerMode.MANAGED
+                            and self._layered_replay
+                        ):
                             send_msg(
                                 self.request,
                                 sync_server.get_layer_stack_state(),
@@ -292,6 +347,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 continue
 
             if pt == PayloadType.CreateProposal:
+                if sync_server.layer_mode is LayerMode.SHARED_STAGE:
+                    LOG.warning("Shared-stage client requested a department proposal")
+                    break
                 msg = message_to_dict(buf)
                 self._handle_create_proposal(sync_server, msg)
                 continue
@@ -321,6 +379,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             proposal_id = txn_fb.ProposalId()
             if proposal_id:
+                if sync_server.layer_mode is LayerMode.SHARED_STAGE:
+                    LOG.warning("Shared-stage client targeted a department proposal")
+                    break
                 sync_server.apply_proposal_txn(proposal_id.decode(), events)
                 continue
 
@@ -338,26 +399,36 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             sync_server.txn_barrier.acquire_shared()
             try:
-                records = sync_server.process_txn(
-                    events,
-                    client_id=self._client_id,
-                    origin=self._origin,
-                    client_addr=self._addr_key,
-                    layer=self._client_layer,
+                commit_guard = (
+                    sync_server._shared_stage_commit_lock
+                    if sync_server.layer_mode is LayerMode.SHARED_STAGE
+                    else nullcontext()
                 )
+                with commit_guard:
+                    txn_layer_key = txn_fb.LayerKey()
+                    if isinstance(txn_layer_key, bytes):
+                        txn_layer_key = txn_layer_key.decode("utf-8")
+                    records = sync_server.process_txn(
+                        events,
+                        client_id=self._client_id,
+                        origin=self._origin,
+                        client_addr=self._addr_key,
+                        layer=self._client_layer,
+                        layer_key=txn_layer_key or "",
+                    )
 
-                sync_server.broadcast_transaction_views(
-                    records,
-                    exclude_origin=self._origin,
-                )
+                    sync_server.broadcast_transaction_views(
+                        records,
+                        exclude_origin=self._origin,
+                    )
 
-                # After load_payload, re-broadcast latest child state so
-                # receivers re-apply authoritative TRS after re-import. Kept
-                # inside the shared txn barrier so its extra seq/append_log/
-                # broadcast can't interleave with a concurrent compaction/purge.
-                for ev in events:
-                    if ev.get("k") == K_LOAD_PAYLOAD:
-                        sync_server.replay_children_after_load(ev["prim"])
+                    # After load_payload, re-broadcast latest child state so
+                    # receivers re-apply authoritative TRS after re-import. Kept
+                    # inside the shared txn barrier so its extra seq/append_log/
+                    # broadcast can't interleave with a concurrent compaction/purge.
+                    for ev in events:
+                        if ev.get("k") == K_LOAD_PAYLOAD:
+                            sync_server.replay_children_after_load(ev["prim"])
             finally:
                 sync_server.txn_barrier.release_shared()
 

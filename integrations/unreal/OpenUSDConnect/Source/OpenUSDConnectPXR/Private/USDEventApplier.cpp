@@ -1240,6 +1240,7 @@ void ApplySetSdfSpecFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfSpecFie
 		case Wire::SdfSpecKind::Relationship: return pxr::SdfSpecTypeRelationship;
 		case Wire::SdfSpecKind::VariantSet:   return pxr::SdfSpecTypeVariantSet;
 		case Wire::SdfSpecKind::Variant:      return pxr::SdfSpecTypeVariant;
+		case Wire::SdfSpecKind::Property:     return pxr::SdfSpecTypeUnknown;
 		}
 		return pxr::SdfSpecTypeUnknown;
 	};

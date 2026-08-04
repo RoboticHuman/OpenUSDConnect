@@ -65,6 +65,9 @@ not used as that mirror.
 - **Composition**: exact reference and payload list-op opinions, including
   offsets, scales, reference custom data, payload load/unload, and variant
   selections
+- **Shared file layers**: opt-in synchronization of an existing root layer and
+  its recursive sublayer graph, including topology, offsets, metadata,
+  variants, custom properties, connections, targets, and time samples
 - **Instancing**: native scenegraph instancing and `UsdGeomPointInstancer`
 - **Cameras and lights**: `UsdGeomCamera`; `UsdLux` lights with applied API schemas (Shaping, Shadow, and others)
 - **Stage metadata**: units (`metersPerUnit`, `upAxis`) and timeline (fps, time codes, range)
@@ -207,6 +210,37 @@ records remain stage runtime state rather than layer opinions.
 Layered replay covers OpenUSDConnect's managed collaboration layers. It does
 not transmit arbitrary client-authored sublayer graphs, sublayer offsets, or
 edit-target changes outside that block.
+
+Applications that need to edit the same existing USD layer graph use the
+separate shared-stage contract:
+
+```bash
+uv run openusdconnect-server --base shot.usda --layer-mode shared_stage
+```
+
+```python
+from pxr import Usd
+
+from openusdconnect import SharedStageClient
+
+stage = Usd.Stage.Open("shot.usda")
+with SharedStageClient(stage, app_name="my-editor") as client:
+    if not client.wait_connected(timeout=5):
+        raise ConnectionError("OpenUSDConnect server is unavailable")
+    while application_is_running():
+        client.update()
+```
+
+Every process opens an equivalent root document under its own `ArResolver`
+context. The server sends opaque layer keys and exact authored Sdf deltas, not
+local filesystem paths or a flattened baseline. This mode supports same-stage
+bidirectional editing because authoritative records return to the same file
+layers. It does not use departments, managed collaboration layers, or the VFS
+snapshot workflow. See [Shared file-layer editing](docs/usd-native-integration.md#shared-file-layer-editing)
+and the [`shared_stage_client` example](examples/shared_stage_client/README.md).
+The pure-Python tracker is the portable default. Native hosts can build and
+opt into the exact-build Sdf notice bridge described in the integration guide
+to avoid full-layer baseline snapshots.
 
 Native DCC projection is limited by the adapter event contract. Clearing a
 property reveals and projects a weaker or schema fallback when one exists.

@@ -58,6 +58,7 @@ def test_derived_kind_sets_pin():
         "ensure_prim",
         "ensure_xform_ops",
         "load_payload",
+        "replace_sdf_layer_content",
         "set_connectable_connection",
         "set_connectable_input",
         "set_instanceable",
@@ -66,11 +67,13 @@ def test_derived_kind_sets_pin():
         "set_reference",
         "set_sdf_spec_fields",
         "set_stage_metadata",
+        "set_sublayers",
         "set_variant_selections",
         "unload_payload",
     }
     assert STAGE_SYNC_KINDS == {
         "load_payload",
+        "replace_sdf_layer_content",
         "set_connectable_connection",
         "set_connectable_input",
         "set_instanceable",
@@ -79,6 +82,7 @@ def test_derived_kind_sets_pin():
         "set_reference",
         "set_sdf_spec_fields",
         "set_stage_metadata",
+        "set_sublayers",
         "set_variant_selections",
         "unload_payload",
     }
@@ -86,7 +90,9 @@ def test_derived_kind_sets_pin():
     assert IMPORT_KINDS == {"load_payload", "set_reference"}
     assert NATIVE_DIRECT_KINDS == {
         "load_payload",
+        "replace_sdf_layer_content",
         "set_stage_metadata",
+        "set_sublayers",
         "unload_payload",
     }
     assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields"}

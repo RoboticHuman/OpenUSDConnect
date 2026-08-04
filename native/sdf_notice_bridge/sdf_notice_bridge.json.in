@@ -1,0 +1,7 @@
+{
+  "abi_version": @OUC_BRIDGE_ABI_VERSION@,
+  "pxr_version": @OUC_PXR_VERSION@,
+  "pxr_dir": "@OUC_PXR_DIR@",
+  "system": "@OUC_SYSTEM_NAME@",
+  "architecture": "@OUC_SYSTEM_PROCESSOR@"
+}

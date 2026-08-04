@@ -46,6 +46,7 @@ from ..defaults import (
 from ..defaults import (
     host_for_url as _host_for_url,
 )
+from ..protocol_constants import LayerMode
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
 
@@ -76,6 +77,7 @@ class ServerConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_SYNC_PORT
     base_usd_path: str | None = None
+    layer_mode: LayerMode | str = LayerMode.MANAGED
     resolver_context: Ar.ResolverContext | None = None
     log_path: str = DEFAULT_EVENT_LOG
     compact: bool = False
@@ -127,8 +129,14 @@ def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | N
 def run_server(config: ServerConfig | None = None):
     """Start the server (blocking)."""
     config = config or ServerConfig()
+    layer_mode = LayerMode(config.layer_mode)
+    if layer_mode is LayerMode.SHARED_STAGE and config.vfs is not None:
+        raise ValueError("the managed VFS composition is unavailable in shared-stage mode")
+    if layer_mode is LayerMode.SHARED_STAGE and config.export_diff:
+        raise ValueError("--export-diff is unavailable in shared-stage mode")
     sync_server = UsdSyncServer(
         base_usd_path=config.base_usd_path,
+        layer_mode=layer_mode,
         resolver_context=config.resolver_context,
         log_path=config.log_path,
         op_cache_size=config.op_cache_size,
@@ -273,6 +281,15 @@ def main(argv: list[str] | None = None):
 
     scene = ap.add_argument_group("scene and persistence")
     scene.add_argument("--base", default=None, help="Base USD file to load")
+    scene.add_argument(
+        "--layer-mode",
+        choices=[mode.value for mode in LayerMode],
+        default=LayerMode.MANAGED.value,
+        help=(
+            "managed: receiver-owned collaboration layers; shared_stage: "
+            "synchronize the base file's root-layer graph"
+        ),
+    )
     scene.add_argument(
         "--resolver-context",
         action="append",
@@ -455,6 +472,7 @@ def main(argv: list[str] | None = None):
             host=args.host,
             port=args.port,
             base_usd_path=args.base,
+            layer_mode=args.layer_mode,
             resolver_context=_create_resolver_context(args.resolver_context),
             log_path=args.event_log,
             compact=args.compact,

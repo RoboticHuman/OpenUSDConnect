@@ -5,7 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
+
+
+class LayerMode(StrEnum):
+    """How authored layer identity is represented by one server."""
+
+    MANAGED = "managed"
+    SHARED_STAGE = "shared_stage"
+
 
 # Message type constants
 MSG_HELLO = "hello"
@@ -27,6 +35,7 @@ MSG_PLAYBACK_REJECTED = "playback_rejected"
 MSG_PLAYBACK_CONTROL = "playback_control"
 MSG_PLAYBACK_STATE = "playback_state"
 MSG_LAYER_STACK_STATE = "layer_stack_state"
+MSG_LAYER_GRAPH_STATE = "layer_graph_state"
 
 # Event kind constants - use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"
@@ -49,6 +58,8 @@ K_SET_STAGE_METADATA = "set_stage_metadata"
 K_SET_INSTANCEABLE = "set_instanceable"
 K_SET_POINT_INSTANCER = "set_point_instancer"
 K_SET_SDF_SPEC_FIELDS = "set_sdf_spec_fields"
+K_REPLACE_SDF_LAYER_CONTENT = "replace_sdf_layer_content"
+K_SET_SUBLAYERS = "set_sublayers"
 
 SDF_SPEC_KIND_LAYER = "layer"
 SDF_SPEC_KIND_PRIM = "prim"
@@ -56,6 +67,7 @@ SDF_SPEC_KIND_ATTRIBUTE = "attribute"
 SDF_SPEC_KIND_RELATIONSHIP = "relationship"
 SDF_SPEC_KIND_VARIANT_SET = "variant_set"
 SDF_SPEC_KIND_VARIANT = "variant"
+SDF_SPEC_KIND_PROPERTY = "property"
 SDF_SPEC_KINDS = (
     SDF_SPEC_KIND_LAYER,
     SDF_SPEC_KIND_PRIM,
@@ -63,6 +75,7 @@ SDF_SPEC_KINDS = (
     SDF_SPEC_KIND_RELATIONSHIP,
     SDF_SPEC_KIND_VARIANT_SET,
     SDF_SPEC_KIND_VARIANT,
+    SDF_SPEC_KIND_PROPERTY,
 )
 SDF_LAYER_TOPOLOGY_FIELDS = frozenset({"subLayers", "subLayerOffsets"})
 
@@ -254,6 +267,16 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
         structural=True,
         stage_sync=True,
     ),
+    K_REPLACE_SDF_LAYER_CONTENT: EventKindInfo(
+        native_projection=NativeProjectionMode.DIRECT,
+        structural=True,
+        stage_sync=True,
+    ),
+    K_SET_SUBLAYERS: EventKindInfo(
+        native_projection=NativeProjectionMode.DIRECT,
+        structural=True,
+        stage_sync=True,
+    ),
 }
 
 EVENT_KEYS = frozenset(EVENT_KIND_INFO)
@@ -280,7 +303,7 @@ SESSION_LAYER_KINDS = frozenset(
 STAGE_RUNTIME_KINDS = frozenset(
     k for k, i in EVENT_KIND_INFO.items() if i.target == EventTarget.STAGE_STATE
 )
-SHARED_STAGE_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
+NON_COLLABORATION_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
 IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
 

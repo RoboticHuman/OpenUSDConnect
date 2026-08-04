@@ -78,6 +78,17 @@ def test_server_config_disables_vfs_by_default():
     assert config.vfs is None
 
 
+def test_shared_stage_mode_rejects_managed_outputs():
+    with pytest.raises(ValueError, match="VFS"):
+        server_cli.run_server(
+            ServerConfig(layer_mode="shared_stage", vfs=VfsConfig(port=7280))
+        )
+    with pytest.raises(ValueError, match="export-diff"):
+        server_cli.run_server(
+            ServerConfig(layer_mode="shared_stage", export_diff="changes.usda")
+        )
+
+
 def test_main_maps_vfs_arguments_to_nested_config(monkeypatch):
     captured = []
     monkeypatch.setattr(server_cli, "run_server", captured.append)
@@ -131,6 +142,15 @@ def test_main_accepts_canonical_service_flags(monkeypatch):
 
     assert captured[0].log_path == "canonical.db"
     assert captured[0].dashboard_port == 8080
+
+
+def test_main_maps_shared_stage_mode(monkeypatch):
+    captured = []
+    monkeypatch.setattr(server_cli, "run_server", captured.append)
+
+    server_cli.main(["--layer-mode", "shared_stage", "--base", "scene.usda"])
+
+    assert captured[0].layer_mode == "shared_stage"
 
 
 @pytest.mark.parametrize("args", [["--log", "legacy.db"], ["--dashboard", "8081"]])

@@ -13,6 +13,7 @@ from .protocol_constants import (
     SDF_SPEC_KIND_ATTRIBUTE,
     SDF_SPEC_KIND_LAYER,
     SDF_SPEC_KIND_PRIM,
+    SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KIND_RELATIONSHIP,
     SDF_SPEC_KIND_VARIANT,
     SDF_SPEC_KIND_VARIANT_SET,
@@ -58,7 +59,11 @@ def _spec_path(value: str | Sdf.Path, kind: str) -> Sdf.Path:
         valid = path == Sdf.Path.absoluteRootPath
     elif kind == SDF_SPEC_KIND_PRIM:
         valid = path.IsPrimPath()
-    elif kind in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
+    elif kind in (
+        SDF_SPEC_KIND_ATTRIBUTE,
+        SDF_SPEC_KIND_RELATIONSHIP,
+        SDF_SPEC_KIND_PROPERTY,
+    ):
         valid = path.IsPropertyPath()
     elif kind == SDF_SPEC_KIND_VARIANT_SET:
         valid = path.IsPrimVariantSelectionPath() and not path.GetVariantSelection()[1]
@@ -98,6 +103,8 @@ def _get_spec(layer: Sdf.Layer, path: Sdf.Path, kind: str):
     spec = layer.pseudoRoot if kind == SDF_SPEC_KIND_LAYER else layer.GetObjectAtPath(path)
     if not spec:
         return None
+    if kind == SDF_SPEC_KIND_PROPERTY:
+        return spec if isinstance(spec, Sdf.PropertySpec) else None
     return spec if spec_kind_for_object(spec) == kind else None
 
 
@@ -111,6 +118,9 @@ def _remove_namespace_spec(layer: Sdf.Layer, path: Sdf.Path) -> None:
 
 
 def _remove_spec(layer: Sdf.Layer, path: Sdf.Path, kind: str) -> None:
+    if kind == SDF_SPEC_KIND_PROPERTY:
+        _remove_namespace_spec(layer, path)
+        return
     spec = _get_spec(layer, path, kind)
     if not spec:
         if kind == SDF_SPEC_KIND_VARIANT_SET:
@@ -229,9 +239,12 @@ def serialize_spec_fields(
     *,
     expression_variables: dict | None = None,
     resolver_context: Ar.ResolverContext | None = None,
+    stabilize_asset_paths: bool = True,
 ) -> str:
     """Serialize selected fields and required declaration data to USDA."""
     spec_path = _spec_path(spec_path, spec_kind)
+    if spec_kind == SDF_SPEC_KIND_PROPERTY:
+        raise ValueError("the generic property kind cannot carry authored fields")
     source_spec = _get_spec(source_layer, spec_path, spec_kind)
     if not source_spec:
         raise ValueError(f"source layer has no {spec_kind} spec at {spec_path}")
@@ -253,7 +266,7 @@ def serialize_spec_fields(
         )
         if spec_kind == SDF_SPEC_KIND_VARIANT_SET and not target_spec.variants:
             Sdf.VariantSpec(target_spec, _FRAGMENT_VARIANT_NAME)
-        if _fields_contain_asset_paths(source_spec, selected):
+        if stabilize_asset_paths and _fields_contain_asset_paths(source_spec, selected):
             stabilize_layer_asset_paths(
                 scratch,
                 source_layer,
@@ -263,6 +276,67 @@ def serialize_spec_fields(
         return scratch.ExportToString()
     finally:
         scratch.Clear()
+
+
+def serialize_layer_content(source_layer: Sdf.Layer) -> str:
+    """Serialize all authored opinions except managed sublayer topology."""
+    scratch = _scratch_layer("serialize-layer-content")
+    try:
+        scratch.TransferContent(source_layer)
+        scratch.subLayerPaths.clear()
+        custom_data = dict(scratch.customLayerData)
+        custom_data.pop(_RESERVED_LAYER_DATA_KEY, None)
+        if custom_data:
+            scratch.customLayerData = custom_data
+        else:
+            scratch.pseudoRoot.ClearInfo("customLayerData")
+        return scratch.ExportToString()
+    finally:
+        scratch.Clear()
+
+
+def _replacement_layer(fragment: str) -> Sdf.Layer:
+    if not isinstance(fragment, str) or not fragment:
+        raise ValueError("replace_sdf_layer_content requires a valid Sdf fragment")
+    incoming = _scratch_layer("replace-layer-content")
+    incoming.Clear()
+    if not incoming.ImportFromString(fragment):
+        raise ValueError("replace_sdf_layer_content requires a valid Sdf fragment")
+    if incoming.subLayerPaths:
+        incoming.Clear()
+        raise ValueError("layer content replacement cannot author sublayer topology")
+    return incoming
+
+
+def validate_layer_content_replacement(event: dict) -> None:
+    """Validate one complete non-topology layer replacement."""
+    incoming = _replacement_layer(event.get("fragment", ""))
+    incoming.Clear()
+
+
+def apply_layer_content_replacement(target_layer: Sdf.Layer, event: dict) -> None:
+    """Replace authored content while retaining graph and collaboration data."""
+    incoming = _replacement_layer(event.get("fragment", ""))
+    paths = list(target_layer.subLayerPaths)
+    offsets = list(target_layer.subLayerOffsets)
+    reserved_data = target_layer.customLayerData.get(_RESERVED_LAYER_DATA_KEY)
+    try:
+        custom_data = dict(incoming.customLayerData)
+        custom_data.pop(_RESERVED_LAYER_DATA_KEY, None)
+        if reserved_data is not None:
+            custom_data[_RESERVED_LAYER_DATA_KEY] = reserved_data
+        if custom_data:
+            incoming.customLayerData = custom_data
+        else:
+            incoming.pseudoRoot.ClearInfo("customLayerData")
+        with Sdf.ChangeBlock():
+            target_layer.TransferContent(incoming)
+            target_layer.subLayerPaths.clear()
+            for index, path in enumerate(paths):
+                target_layer.subLayerPaths.append(path)
+                target_layer.subLayerOffsets[index] = offsets[index]
+    finally:
+        incoming.Clear()
 
 
 def fragment_authored_fields(
@@ -304,6 +378,8 @@ def _spec_delta_info(event: dict) -> tuple[str, Sdf.Path, tuple[str, ...]]:
         raise ValueError("Sdf spec removed state must be boolean")
     if removed and kind == SDF_SPEC_KIND_LAYER:
         raise ValueError("the pseudo-root spec cannot be removed")
+    if kind == SDF_SPEC_KIND_PROPERTY and not removed:
+        raise ValueError("the generic property kind is valid only for removal")
     return kind, path, fields
 
 
@@ -320,8 +396,12 @@ def validate_spec_delta(event: dict) -> None:
 
 def apply_spec_delta(stage: Usd.Stage, event: dict) -> None:
     """Apply one ``set_sdf_spec_fields`` event to the current layer."""
+    apply_spec_delta_to_layer(stage.GetEditTarget().GetLayer(), event)
+
+
+def apply_spec_delta_to_layer(target_layer: Sdf.Layer, event: dict) -> None:
+    """Apply one exact field delta directly to an ``Sdf.Layer``."""
     kind, event_path, fields = _spec_delta_info(event)
-    target_layer = stage.GetEditTarget().GetLayer()
 
     if event.get("removed", False):
         _remove_spec(target_layer, event_path, kind)
@@ -373,9 +453,8 @@ def merge_spec_events(previous: dict, current: dict) -> dict:
     path = _spec_path(current["spec_path"], kind)
     output = _scratch_layer("merge-output")
     try:
-        stage = Usd.Stage.Open(output)
-        apply_spec_delta(stage, previous)
-        apply_spec_delta(stage, current)
+        apply_spec_delta_to_layer(output, previous)
+        apply_spec_delta_to_layer(output, current)
         fields = list(
             dict.fromkeys(
                 [
@@ -391,6 +470,7 @@ def merge_spec_events(previous: dict, current: dict) -> dict:
             path,
             kind,
             fields,
+            stabilize_asset_paths=False,
         )
         merged["removed"] = False
         return merged
@@ -404,14 +484,19 @@ __all__ = [
     "SDF_SPEC_KIND_ATTRIBUTE",
     "SDF_SPEC_KIND_LAYER",
     "SDF_SPEC_KIND_PRIM",
+    "SDF_SPEC_KIND_PROPERTY",
     "SDF_SPEC_KIND_RELATIONSHIP",
     "SDF_SPEC_KIND_VARIANT",
     "SDF_SPEC_KIND_VARIANT_SET",
+    "apply_spec_delta_to_layer",
     "apply_spec_delta",
+    "apply_layer_content_replacement",
     "event_prim_path",
     "fragment_authored_fields",
     "merge_spec_events",
     "serialize_spec_fields",
+    "serialize_layer_content",
     "spec_kind_for_object",
     "validate_spec_delta",
+    "validate_layer_content_replacement",
 ]
