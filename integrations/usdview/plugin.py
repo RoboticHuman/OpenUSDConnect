@@ -59,11 +59,18 @@ def _on_connect(usdviewApi) -> None:
         return
 
     token = os.environ.get("OPENUSDCONNECT_TOKEN") or None
-    if not connection.start(usdviewApi, host, port, token=token):
+    try:
+        if not connection.start(usdviewApi, host, port, token=token):
+            QtWidgets.QMessageBox.warning(
+                usdviewApi.qMainWindow,
+                "OpenUSDConnect",
+                "Failed to start receiver. See console for details.",
+            )
+    except Exception as exc:
         QtWidgets.QMessageBox.warning(
             usdviewApi.qMainWindow,
             "OpenUSDConnect",
-            "Failed to start receiver. See console for details.",
+            f"Failed to start receiver: {exc}",
         )
 
 
@@ -91,7 +98,10 @@ def _autoconnect(usdviewApi) -> None:
         LOG.error("OPENUSDCONNECT_PORT is not a valid TCP port; skipping auto-connect")
         return
     token = os.environ.get("OPENUSDCONNECT_TOKEN") or None
-    connection.start(usdviewApi, host, port, token=token)
+    try:
+        connection.start(usdviewApi, host, port, token=token)
+    except Exception:
+        LOG.exception("Auto-connect failed")
 
 
 def _configure_presented_view(usdviewApi) -> None:
