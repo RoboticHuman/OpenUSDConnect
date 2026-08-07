@@ -1,9 +1,12 @@
 # USD-native integration contract
 
-`UsdPublisher` and `UsdReceiver` are the high-level entry points for Python
-applications that already use `pxr.Usd`. They provide lifecycle and retry
-behavior while leaving stage ownership and the application event loop under
-the host's control.
+`ManagedClient` is the primary entry point for Python applications that
+already use `pxr.Usd` and need bidirectional synchronization with server-owned
+collaboration layers. `UsdPublisher` (send-only) and `UsdReceiver`
+(receive-only) remain available as low-level building blocks for hosts that
+need only one direction. All three provide lifecycle and retry behavior while
+leaving stage ownership and the application event loop under the host's
+control.
 
 ## Receive into a stage
 
@@ -87,9 +90,47 @@ retained, retry it with `update()` before requesting this full publication. A
 failed full-publication write is retained and retried by `update()` in the same
 way.
 
+## Bidirectional managed client
+
+`ManagedClient` runs the publisher and receiver over one application-owned
+stage:
+
+```python
+from pxr import Gf, Usd, UsdGeom
+
+from openusdconnect import ManagedClient
+
+stage = Usd.Stage.Open("shot.usda", session_layer)
+stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+
+with ManagedClient(
+    stage,
+    app_name="my-editor",
+    department="layout",
+) as client:
+    if not client.wait_connected(timeout=5):
+        raise ConnectionError("OpenUSDConnect server is unavailable")
+
+    sphere = UsdGeom.Sphere.Define(stage, "/World/Sphere")
+    translate = UsdGeom.Xformable(sphere).AddTranslateOp()
+
+    while application_is_running():
+        translate.Set(Gf.Vec3d(1, 2, 3))
+        update = client.update()  # apply incoming, then publish local edits
+```
+
+`update()` applies the authoritative batch first, then publishes the
+application's own edits, and returns the event counts for each direction.
+The dispatcher suppresses the emitter while authoritative records apply and
+invalidates its diff cache afterward, so the server's echo of the
+application's own edits is not re-published. Author into the stage's session
+layer (or any weaker layer); managed collaboration layers rebuild at the
+strong end of the session stack and never become the emitter's edit target.
+
 ## Bidirectional hosts
 
-Use separate USD stages for authoring and authoritative receive state:
+The two-stage pattern applies to the low-level `UsdPublisher` +
+`UsdReceiver` combination:
 
 ```text
 native edits -> author stage -> UsdPublisher -> server
@@ -97,10 +138,12 @@ native edits -> author stage -> UsdPublisher -> server
 native scene <- adapter      <- mirror stage <- UsdReceiver
 ```
 
-Do not attach a layered `UsdReceiver` and a `UsdPublisher` to the same stage.
-The local edit would remain in its authoring layer and the echoed authoritative
-record would also be reconstructed in a managed collaboration layer. The
-composed value can look correct while opinion ownership is duplicated.
+Do not attach a layered `UsdReceiver` and a `UsdPublisher` to the same stage
+directly. The local edit would remain in its authoring layer and the echoed
+authoritative record would also be reconstructed in a managed collaboration
+layer. The composed value can look correct while opinion ownership is
+duplicated. `ManagedClient` is the supported single-stage form; it wires the
+emitter into the dispatcher so the echo is suppressed and cached instead.
 
 Blender follows this contract today: it authors into one USD stage, rebuilds
 server layers in an independent mirror stage, and projects the mirror's
@@ -181,6 +224,10 @@ If its bounded local queue fills, pending records are coalesced into one exact
 current-content replacement per affected layer. That rare recovery transaction
 has whole-layer conflict scope; ordinary edits remain field-level.
 
+The sender connects lazily on the first `update()`; call `start_sender()`
+after `wait_connected()` when connection failures should surface immediately
+instead of being retried inside `update()`.
+
 Call `update()` on the thread that owns the stage. It freezes local authored
 changes, applies sequenced server records, restores concurrent local changes,
 and publishes one transaction per changed layer. Changes are expressed as
@@ -200,7 +247,7 @@ continue to anchor to each process's corresponding document, while search-path
 identifiers and custom URIs resolve through that process's `ArResolver` plugin
 and stage context. Local identifiers and resolved filesystem paths never cross
 the wire. If an asset appears after startup, refresh the server mapping and
-call `client.refresh_asset_dependencies()` where necessary. Unresolved keyed
+call `client.refresh_asset_dependency()` where necessary. Unresolved keyed
 events remain pending on the client.
 
 The server event log remains authoritative for unsaved edits, but neither the
@@ -239,6 +286,7 @@ The existing `NoticeEmitter`, `EventSender`, `ReceiverThread`, and
 continuation on single-layer servers, playback control, proposals, and custom
 scheduling. `ReceiverThread` requests layered replay by default; callers must
 pass `layered_replay=False` to select the constrained flat contract. New
-USD-native clients should begin with `UsdPublisher` and `UsdReceiver` unless
-they need one of those lower-level policies. Construct the low-level objects
-directly rather than mutating components inside the high-level wrappers.
+USD-native clients should begin with `ManagedClient` unless they need a
+send-only (`UsdPublisher`) or receive-only (`UsdReceiver`) surface, or one of
+those lower-level policies. Construct the low-level objects directly rather
+than mutating components inside the high-level wrappers.

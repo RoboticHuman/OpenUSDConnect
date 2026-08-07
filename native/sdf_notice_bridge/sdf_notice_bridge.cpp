@@ -1,5 +1,9 @@
 #include "sdf_notice_bridge.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "pxr/pxr.h"
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"

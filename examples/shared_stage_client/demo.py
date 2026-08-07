@@ -66,6 +66,7 @@ def main() -> int:
         if not client.wait_connected(timeout=5):
             print("server is unavailable", file=sys.stderr)
             return 1
+        client.start_sender()
 
         deadline = time.monotonic() + 5.0
         while not client.is_layer_mapped(content):

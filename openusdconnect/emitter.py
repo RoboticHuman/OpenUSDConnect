@@ -2908,6 +2908,8 @@ class NoticeEmitter:
                 path,
                 spec_kind,
             )
+            if spec_kind == SDF_SPEC_KIND_LAYER:
+                selected_fields -= SDF_LAYER_TOPOLOGY_FIELDS
             if selected_fields or (requires_identity and not previous_exists):
                 fields = sorted(selected_fields)
                 events.append(

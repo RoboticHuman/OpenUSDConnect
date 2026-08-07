@@ -81,7 +81,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         late = Sdf.Layer.CreateNew(str(tmp_path / "late.usda"))
         Sdf.CreatePrimInLayer(late, "/Late")
         late.Save()
-        mapped = client.refresh_asset_dependencies()
+        mapped = client.refresh_asset_dependency()
 
         assert mapped == (child_key,)
         assert client.pending_event_count == 0

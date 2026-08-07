@@ -666,10 +666,19 @@ def _verify_reverse_server_state(scenario: UnrealScenario) -> dict:
 
     from openusdconnect.server import UsdSyncServer
 
-    server = UsdSyncServer(
-        base_usd_path=str(scenario.base_stage),
-        log_path=str(scenario.database_path),
-    )
+    server = None
+    for attempt in range(5):
+        try:
+            server = UsdSyncServer(
+                base_usd_path=str(scenario.base_stage),
+                log_path=str(scenario.database_path),
+            )
+            break
+        except Exception:
+            if attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+    assert server is not None
     try:
         translate = (
             server.stage.GetPrimAtPath("/World/PreviewBall").GetAttribute("xformOp:translate").Get()

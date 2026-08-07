@@ -1,0 +1,164 @@
+"""Live-server coverage for ManagedClient's single-stage bidirectional flow.
+
+The tight-loop test is a regression guard for a C++ crash (0x80000003 inside
+``event_apply.get_or_define_prim``) seen when the app thread authors into the
+same ``Sdf.Layer`` the in-process server stage composes: ``Sdf.FindOrOpen``
+deduplicates by identifier, so a client stage opened from the server's base
+file shares the root layer, and the app thread's ``UsdAttribute.Set`` races
+the server thread's ChangeBlock-driven recomposition. The safe in-process
+pattern keeps the server and client on separate base files.
+"""
+
+from __future__ import annotations
+
+import shutil
+import threading
+import time
+
+import pytest
+from pxr import Gf, Sdf, Usd, UsdGeom
+
+from openusdconnect.managed_client import ManagedClient
+from openusdconnect.server import UsdSyncServer
+from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
+
+
+@pytest.fixture
+def live_server(tmp_path):
+    base = tmp_path / "server-base.usda"
+    Sdf.Layer.CreateNew(str(base)).Save()
+    sync_server = UsdSyncServer(
+        base_usd_path=str(base),
+        log_path=str(tmp_path / "managed.db"),
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0),
+        ConnectionHandler,
+        sync_server,
+        max_workers=8,
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield sync_server, tcp_server.server_address[1]
+    finally:
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
+def _client_stage(tmp_path):
+    """A stage opened from a separate copy of the server base.
+
+    Opening the server's own base file in-process would hand both stages the
+    same ``Sdf.Layer`` (identifier dedup), recreating the crash scenario.
+    """
+    client_base = tmp_path / "client-base.usda"
+    shutil.copyfile(tmp_path / "server-base.usda", client_base)
+    return Usd.Stage.Open(
+        Sdf.Layer.FindOrOpen(str(client_base)),
+        Sdf.Layer.CreateAnonymous("managed-client"),
+    )
+
+
+def _translation(prim: Usd.Prim):
+    m = UsdGeom.Xformable(prim).GetLocalTransformation(Usd.TimeCode.Default())
+    return (m[3][0], m[3][1], m[3][2])
+
+
+def _drain_until(client: ManagedClient, predicate, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        client.update()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    client.update()
+    return bool(predicate())
+
+
+def test_managed_client_tight_loop_round_trips_without_crash(live_server, tmp_path):
+    """Full-speed edit loop: every authored value reaches the server and the
+    composed stage, without the shared-layer C++ crash."""
+    sync_server, port = live_server
+    stage = _client_stage(tmp_path)
+    client = ManagedClient(
+        stage,
+        app_name="managed-tight-loop",
+        host="127.0.0.1",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    client.start()
+    assert client.wait_connected(timeout=5)
+
+    prim = stage.DefinePrim("/World/Test", "Xform")
+    tr = UsdGeom.Xformable(prim).AddTranslateOp()
+    tr.Set(Gf.Vec3d(0, 0, 0))
+    for _ in range(5):
+        client.update()
+    for i in range(200):
+        tr.Set(Gf.Vec3d(float(i), 0, 0))
+        client.update()
+
+    try:
+        assert _drain_until(
+            client,
+            lambda: _translation(sync_server.stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+        )
+        assert _drain_until(
+            client,
+            lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+        )
+        assert _translation(sync_server.stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
+        assert _translation(stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
+    finally:
+        client.close()
+
+
+def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_path):
+    """The initial batch carries one ensure_prim per locally defined prim; the
+    tight loop must never re-emit them (feedback-loop guard)."""
+    sync_server, port = live_server
+    stage = _client_stage(tmp_path)
+    client = ManagedClient(
+        stage,
+        app_name="managed-once",
+        host="127.0.0.1",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    client.start()
+    assert client.wait_connected(timeout=5)
+
+    counts: dict[str, int] = {}
+    original_send = client._send
+
+    def counting_send(events):
+        for event in events:
+            counts[event["k"]] = counts.get(event["k"], 0) + 1
+        return original_send(events)
+
+    client._send = counting_send
+
+    prim = stage.DefinePrim("/World/Test", "Xform")
+    tr = UsdGeom.Xformable(prim).AddTranslateOp()
+    tr.Set(Gf.Vec3d(0, 0, 0))
+    for _ in range(5):
+        client.update()
+    for i in range(50):
+        tr.Set(Gf.Vec3d(float(i), 0, 0))
+        client.update()
+    _drain_until(client, lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 49.0)
+    client.close()
+
+    # /World and /World/Test are both locally defined by the first
+    # DefinePrim, so the initial batch legitimately contains two
+    # ensure_prim. Everything after must be value-only.
+    assert counts["ensure_prim"] == 2
+    assert counts["ensure_xform_ops"] == 1
+    assert counts["set_xform_trs"] == 50

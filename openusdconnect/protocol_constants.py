@@ -168,6 +168,7 @@ class EventKindInfo:
     """
 
     native_projection: NativeProjectionMode
+    mode: LayerMode = LayerMode.MANAGED
     create: bool = False
     structural: bool = False
     stage_sync: bool = False
@@ -264,16 +265,19 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_POINT_INSTANCER: EventKindInfo(native_projection=NativeProjectionMode.PROJECT),
     K_SET_SDF_SPEC_FIELDS: EventKindInfo(
         native_projection=NativeProjectionMode.FIELD_ROUTED,
+        mode=LayerMode.SHARED_STAGE,
         structural=True,
         stage_sync=True,
     ),
     K_REPLACE_SDF_LAYER_CONTENT: EventKindInfo(
         native_projection=NativeProjectionMode.DIRECT,
+        mode=LayerMode.SHARED_STAGE,
         structural=True,
         stage_sync=True,
     ),
     K_SET_SUBLAYERS: EventKindInfo(
         native_projection=NativeProjectionMode.DIRECT,
+        mode=LayerMode.SHARED_STAGE,
         structural=True,
         stage_sync=True,
     ),
@@ -306,6 +310,16 @@ STAGE_RUNTIME_KINDS = frozenset(
 NON_COLLABORATION_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
 IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
+MANAGED_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.mode == LayerMode.MANAGED)
+SHARED_STAGE_EVENT_KINDS = frozenset(
+    k for k, i in EVENT_KIND_INFO.items() if i.mode == LayerMode.SHARED_STAGE
+)
+# set_sdf_spec_fields is the Sdf-spec fallback channel: managed mode emits
+# it for authored fields with no high-level event kind (prim kind, layer
+# metadata), so managed gating rejects only the shared-exclusive kinds.
+SHARED_STAGE_ONLY_KINDS = SHARED_STAGE_EVENT_KINDS - frozenset({K_SET_SDF_SPEC_FIELDS})
+assert MANAGED_KINDS | SHARED_STAGE_EVENT_KINDS == EVENT_KEYS, "every event kind must have a mode"
+assert not (MANAGED_KINDS & SHARED_STAGE_EVENT_KINDS), "no event kind may belong to both modes"
 
 
 def event_apply_tier(kind: str) -> int:

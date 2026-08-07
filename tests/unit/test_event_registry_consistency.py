@@ -19,9 +19,12 @@ from openusdconnect.protocol_constants import (
     CREATE_KINDS,
     EVENT_KEYS,
     IMPORT_KINDS,
+    MANAGED_KINDS,
     NATIVE_DIRECT_KINDS,
     NATIVE_FIELD_ROUTED_KINDS,
     NATIVE_PROJECTED_KINDS,
+    SHARED_STAGE_EVENT_KINDS,
+    SHARED_STAGE_ONLY_KINDS,
     STAGE_SYNC_KINDS,
     STRUCTURAL_EVENT_KINDS,
 )
@@ -97,6 +100,34 @@ def test_derived_kind_sets_pin():
     }
     assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields"}
     assert (NATIVE_PROJECTED_KINDS | NATIVE_DIRECT_KINDS | NATIVE_FIELD_ROUTED_KINDS) == EVENT_KEYS
+    assert MANAGED_KINDS == {
+        "deactivate_prim",
+        "delete_prim",
+        "ensure_prim",
+        "ensure_xform_ops",
+        "load_payload",
+        "rename_prim",
+        "set_connectable_connection",
+        "set_connectable_input",
+        "set_gprim_attrs",
+        "set_instanceable",
+        "set_material_binding",
+        "set_payload",
+        "set_point_instancer",
+        "set_reference",
+        "set_stage_metadata",
+        "set_variant_selections",
+        "set_visibility",
+        "set_xform_trs",
+        "unload_payload",
+    }
+    assert SHARED_STAGE_EVENT_KINDS == {
+        "replace_sdf_layer_content",
+        "set_sdf_spec_fields",
+        "set_sublayers",
+    }
+    assert SHARED_STAGE_ONLY_KINDS == {"replace_sdf_layer_content", "set_sublayers"}
+    assert MANAGED_KINDS | SHARED_STAGE_EVENT_KINDS == EVENT_KEYS
 
 
 def test_stage_sync_kinds_are_structural():

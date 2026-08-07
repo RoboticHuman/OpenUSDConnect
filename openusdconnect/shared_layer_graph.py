@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from pxr import Ar, Sdf, Usd
 
+from .layer_key_router import LayerKeyRouter
 from .protocol_constants import K_SET_SUBLAYERS, MSG_LAYER_GRAPH_STATE
 
 LOG = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ class PreparedSublayers:
     mappings: tuple[tuple[Sdf.Layer, str], ...]
 
 
-class SharedLayerGraph:
+class SharedLayerGraph(LayerKeyRouter):
     """Map portable layer keys onto one process's root-layer stack.
 
     Keys are protocol identity. ``Sdf.Layer.identifier`` remains local and is
@@ -119,31 +120,18 @@ class SharedLayerGraph:
     def __init__(self, stage: Usd.Stage, *, authoritative: bool = False):
         if not isinstance(stage, Usd.Stage):
             raise TypeError("SharedLayerGraph requires a Usd.Stage")
-        self.stage = stage
+        super().__init__(stage)
         self.authoritative = bool(authoritative)
-        self.generation = ""
-        self.revision = 0
         self.root_layer_key = ""
-        self._layers: dict[str, Sdf.Layer] = {}
-        self._keys_by_identifier: dict[str, str] = {}
         self._states: dict[str, tuple[dict, ...]] = {}
 
         if self.authoritative:
-            self.generation = uuid.uuid4().hex
-            self.revision = 1
+            self._generation = uuid.uuid4().hex
+            self._revision = 1
+            self._ready = True
             self.root_layer_key = _new_layer_key()
-            self._bind(self.root_layer_key, stage.GetRootLayer())
+            self._bind_key(self.root_layer_key, stage.GetRootLayer())
             self._capture_reachable(assign_keys=True)
-
-    @property
-    def ready(self) -> bool:
-        return bool(self.generation and self.root_layer_key)
-
-    def layer_for(self, layer_key: str) -> Sdf.Layer | None:
-        return self._layers.get(layer_key)
-
-    def key_for(self, layer: Sdf.Layer) -> str | None:
-        return self._keys_by_identifier.get(layer.identifier)
 
     def sublayers_for(self, layer_key: str) -> tuple[dict, ...] | None:
         entries = self._states.get(layer_key)
@@ -209,8 +197,8 @@ class SharedLayerGraph:
     def transaction(self) -> Iterator[None]:
         """Roll back routing state when a surrounding stage edit fails."""
         old = (
-            self.generation,
-            self.revision,
+            self._generation,
+            self._revision,
             self.root_layer_key,
             dict(self._layers),
             dict(self._keys_by_identifier),
@@ -220,26 +208,14 @@ class SharedLayerGraph:
             yield
         except Exception:
             (
-                self.generation,
-                self.revision,
+                self._generation,
+                self._revision,
                 self.root_layer_key,
                 self._layers,
                 self._keys_by_identifier,
                 self._states,
             ) = old
             raise
-
-    def _bind(self, layer_key: str, layer: Sdf.Layer) -> None:
-        existing_layer = self._layers.get(layer_key)
-        if existing_layer is not None and existing_layer.identifier != layer.identifier:
-            raise ValueError(f"layer key {layer_key!r} maps to more than one local layer")
-        existing_key = self._keys_by_identifier.get(layer.identifier)
-        if existing_key is not None and existing_key != layer_key:
-            raise ValueError(
-                f"local layer {layer.identifier!r} maps to both {existing_key!r} and {layer_key!r}"
-            )
-        self._layers[layer_key] = layer
-        self._keys_by_identifier[layer.identifier] = layer_key
 
     def _resolve(self, parent: Sdf.Layer, authored_path: str) -> Sdf.Layer | None:
         try:
@@ -268,7 +244,7 @@ class SharedLayerGraph:
                 layer_key = self.key_for(child)
                 if layer_key is None and assign_keys:
                     layer_key = _new_layer_key()
-                    self._bind(layer_key, child)
+                    self._bind_key(layer_key, child)
                 if layer_key:
                     entry["layer_key"] = layer_key
                 children.append(child)
@@ -292,7 +268,7 @@ class SharedLayerGraph:
                 if not assign_keys:
                     continue
                 layer_key = _new_layer_key()
-                self._bind(layer_key, layer)
+                self._bind_key(layer_key, layer)
             entries, children = self._entries_for_layer(layer, assign_keys=assign_keys)
             states[layer_key] = entries
             queue.extend(children)
@@ -323,7 +299,7 @@ class SharedLayerGraph:
         }
 
     @staticmethod
-    def _validate_state(message: dict) -> dict[str, tuple[dict, ...]]:
+    def _validate_topology(message: dict) -> dict[str, tuple[dict, ...]]:
         generation = message.get("generation")
         root_key = message.get("root_layer_key")
         revision = message.get("revision")
@@ -357,24 +333,28 @@ class SharedLayerGraph:
 
     def apply_state(self, message: dict) -> None:
         """Apply and route a complete authoritative graph baseline."""
-        states = self._validate_state(message)
-        root_key = message["root_layer_key"]
+        if not super().apply_state(message):
+            return
+
+    def _apply_state_inner(self, state: dict) -> bool:
+        states = self._validate_topology(state)
+        root_key = state["root_layer_key"]
         old = (
-            self.generation,
-            self.revision,
+            self._generation,
+            self._revision,
             self.root_layer_key,
             self._layers,
             self._keys_by_identifier,
             self._states,
         )
         backups: dict[str, tuple[dict, ...]] = {}
-        self.generation = message["generation"]
-        self.revision = int(message["revision"])
+        self._generation = state["generation"]
+        self._revision = int(state["revision"])
         self.root_layer_key = root_key
         self._layers = {}
         self._keys_by_identifier = {}
         self._states = states
-        self._bind(root_key, self.stage.GetRootLayer())
+        self._bind_key(root_key, self.stage.GetRootLayer())
         try:
             self._materialize_states(backups=backups)
         except Exception:
@@ -383,14 +363,15 @@ class SharedLayerGraph:
                 if layer is not None:
                     apply_sublayer_entries(layer, entries)
             (
-                self.generation,
-                self.revision,
+                self._generation,
+                self._revision,
                 self.root_layer_key,
                 self._layers,
                 self._keys_by_identifier,
                 self._states,
             ) = old
             raise
+        return True
 
     def _materialize_states(
         self,
@@ -422,7 +403,7 @@ class SharedLayerGraph:
                 if child is None:
                     continue
                 was_known = self.layer_for(child_key) is not None
-                self._bind(child_key, child)
+                self._bind_key(child_key, child)
                 if not was_known:
                     newly_mapped.append(child_key)
                 queue.append(child_key)
@@ -495,9 +476,9 @@ class SharedLayerGraph:
                 f"expected layer graph revision {expected_revision}, got {event.get('revision', 0)}"
             )
         for layer, layer_key in prepared.mappings:
-            self._bind(layer_key, layer)
+            self._bind_key(layer_key, layer)
         self._states[prepared.parent_key] = normalize_sublayer_entries(event["sublayers"])
-        self.revision = expected_revision
+        self._revision = expected_revision
 
     def discover_sublayer_states(
         self,

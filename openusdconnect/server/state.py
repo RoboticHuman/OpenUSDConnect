@@ -57,6 +57,8 @@ from ..protocol_constants import (
     MSG_RESYNC,
     NON_COLLABORATION_KINDS,
     SDF_SPEC_KIND_ATTRIBUTE,
+    SHARED_STAGE_EVENT_KINDS,
+    SHARED_STAGE_ONLY_KINDS,
     SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KIND_RELATIONSHIP,
     STAGE_METADATA_KEYS,
@@ -2850,7 +2852,7 @@ class UsdSyncServer:
         shared_only = {
             event.get("k")
             for event in events
-            if event.get("k") in (K_REPLACE_SDF_LAYER_CONTENT, K_SET_SUBLAYERS)
+            if event.get("k") in SHARED_STAGE_ONLY_KINDS
         }
         if shared_only:
             raise ValueError(
@@ -2914,12 +2916,7 @@ class UsdSyncServer:
         unsupported = {
             event.get("k")
             for event in events
-            if event.get("k")
-            not in (
-                K_REPLACE_SDF_LAYER_CONTENT,
-                K_SET_SDF_SPEC_FIELDS,
-                K_SET_SUBLAYERS,
-            )
+            if event.get("k") not in SHARED_STAGE_EVENT_KINDS
         }
         if unsupported:
             raise ValueError(f"unsupported shared-stage events: {sorted(unsupported)!r}")

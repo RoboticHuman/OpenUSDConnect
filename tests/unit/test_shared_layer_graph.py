@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -74,7 +75,8 @@ def test_nonanchored_sublayers_use_each_stage_resolver_context(tmp_path):
     receiver.apply_state(authoritative.state_message(seq=1))
 
     child_key = receiver.sublayers_for(receiver.root_layer_key)[0]["layer_key"]
-    assert str(receiver.layer_for(child_key).resolvedPath).endswith("target/search/asset.usda")
+    resolved = str(receiver.layer_for(child_key).resolvedPath)
+    assert resolved.endswith(os.path.join("target", "search", "asset.usda"))
 
 
 def test_alias_paths_share_one_layer_key(tmp_path):
