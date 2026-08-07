@@ -9,57 +9,30 @@ stage or host scene.
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Callable, Sequence
 
 from pxr import Usd
 
+from ._client_utils import (
+    client_origin,
+    client_token_callback,
+    client_token_handlers,
+    require_app_name,
+    resolve_client_token,
+    validate_layered_source,
+)
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
 from .sender import EventSender
-from .token_client import load_token, save_token
+from .token_client import load_token
 
 LOG = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7200
-
-
-def _require_app_name(app_name: str) -> str:
-    value = str(app_name).strip()
-    if not value:
-        raise ValueError("app_name must not be empty")
-    return value
-
-
-def _resolve_token(host: str, port: int, token: str | None, persist: bool) -> str | None:
-    if token is not None or not persist:
-        return token
-    return load_token(host, port)
-
-
-def _token_callback(host: str, port: int, persist: bool) -> Callable[[str], None] | None:
-    if not persist:
-        return None
-    return lambda token: save_token(host, port, token)
-
-
-def _origin(app_name: str, role: str) -> str:
-    return f"{app_name}-{uuid.uuid4().hex[:8]}-{role}"
-
-
-def _validate_layered_source(stage: Usd.Stage) -> None:
-    root = stage.GetRootLayer()
-    metadata = (root.customLayerData or {}).get("openusdconnect") if root else None
-    if metadata and metadata.get("live"):
-        raise ValueError(
-            "UsdReceiver requires the original base stage so it can rebuild "
-            "collaboration layers from sequence 1; generated live files are "
-            "continuation baselines"
-        )
 
 
 class UsdReceiver:
@@ -85,11 +58,16 @@ class UsdReceiver:
         on_resync: Callable[[], None] | None = None,
         on_applied: Callable[[list[str]], None] | None = None,
         on_applied_events: Callable[[list[dict]], None] | None = None,
+        on_stage_metadata: Callable[[dict], None] | None = None,
+        on_playback_state: Callable[[dict], None] | None = None,
+        on_playback_claimed: Callable[[dict], None] | None = None,
+        on_playback_rejected: Callable[[dict], None] | None = None,
+        on_token_issued: Callable[[str], None] | None = None,
     ):
-        app_name = _require_app_name(app_name)
+        app_name = require_app_name(app_name)
         adapter = UsdStageAdapter(stage)
-        _validate_layered_source(stage)
-        resolved_token = _resolve_token(host, port, token, persist_token)
+        validate_layered_source(stage)
+        resolved_token = resolve_client_token(host, port, token, persist_token)
         self._stage = stage
         self._host = host
         self._port = port
@@ -100,9 +78,13 @@ class UsdReceiver:
             sync_from=1,
             reconnect=reconnect,
             client_id=client_id or make_stable_client_id(app_name),
-            origin=origin or _origin(app_name, "recv"),
+            origin=origin or client_origin(app_name, "recv"),
             token=resolved_token,
-            on_token_issued=_token_callback(host, port, persist_token),
+            on_token_issued=client_token_handlers(host, port, persist_token, on_token_issued),
+            on_stage_metadata=on_stage_metadata,
+            on_playback_state=on_playback_state,
+            on_playback_claimed=on_playback_claimed,
+            on_playback_rejected=on_playback_rejected,
             layered_replay=True,
         )
         self._dispatcher = EventDispatcher(
@@ -117,9 +99,19 @@ class UsdReceiver:
         self._closed = False
 
     @property
-    def stage(self) -> Usd.Stage:
-        """Application-owned stage receiving authoritative changes."""
+    def stage(self) -> Usd.Stage | None:
+        """Application-owned stage receiving authoritative changes, or ``None`` while parked."""
         return self._stage
+
+    @property
+    def receiver(self):
+        """The underlying :class:`ReceiverThread`."""
+        return self._receiver
+
+    @property
+    def dispatcher(self):
+        """The underlying :class:`EventDispatcher`."""
+        return self._dispatcher
 
     @property
     def connected(self) -> bool:
@@ -187,12 +179,22 @@ class UsdReceiver:
         self._require_layered_replay()
         return self._dispatcher.drain_and_apply()
 
-    def rebind_stage(self, stage: Usd.Stage) -> None:
-        """Move receive-side application and managed layers to a new stage."""
+    def rebind_stage(self, stage: Usd.Stage | None) -> None:
+        """Move receive-side application and managed layers to a new stage.
+
+        Pass ``None`` to park: the receiver stays connected and the queue
+        continues to fill, but ``update()`` returns zero until a new stage
+        is bound.
+        """
         if self._closed:
             raise RuntimeError("UsdReceiver is closed")
+        if stage is None:
+            self._stage = None
+            self._dispatcher.unbind_stage()
+            self._dispatcher.adapter = None
+            return
         adapter = UsdStageAdapter(stage)
-        _validate_layered_source(stage)
+        validate_layered_source(stage)
         self._stage = stage
         self._dispatcher.adapter = adapter
         self._dispatcher.bind_layered_stage(stage)
@@ -245,7 +247,7 @@ class UsdPublisher:
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
     ):
-        app_name = _require_app_name(app_name)
+        app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdPublisher requires a Usd.Stage")
         self._stage = stage
@@ -262,10 +264,10 @@ class UsdPublisher:
             host,
             port,
             client_id=client_id or make_stable_client_id(app_name),
-            origin=origin or _origin(app_name, "emit"),
+            origin=origin or client_origin(app_name, "emit"),
             department=department,
-            token=_resolve_token(host, port, token, persist_token),
-            on_token_issued=_token_callback(host, port, persist_token),
+            token=resolve_client_token(host, port, token, persist_token),
+            on_token_issued=client_token_callback(host, port, persist_token),
         )
         self._closed = False
 
@@ -275,12 +277,26 @@ class UsdPublisher:
         return self._stage
 
     @property
+    def sender(self):
+        """The underlying :class:`EventSender`."""
+        return self._sender
+
+    @property
+    def emitter(self):
+        """The underlying :class:`NoticeEmitter`."""
+        return self._emitter
+
+    @property
     def connected(self) -> bool:
         return not self._closed and self._sender.connected
 
     @property
     def auth_rejected(self) -> bool:
         return self._sender.auth_rejected
+
+    @property
+    def stage_metadata(self) -> dict:
+        return dict(self._sender.stage_metadata)
 
     @property
     def prepared_event_count(self) -> int:

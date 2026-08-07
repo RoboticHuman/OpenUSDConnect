@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from pxr import Sdf, Usd
 
+from ._client_utils import (
+    client_origin,
+    client_token_handlers,
+    require_app_name,
+    resolve_client_token,
+)
 from .client_id import make_stable_client_id
 from .codec import ReceivedEvent, decode_messages
 from .event_apply import apply_events, atomic_apply
@@ -22,7 +27,7 @@ from .receiver import ReceiverThread
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
 from .shared_layer_graph import SharedLayerGraph
-from .token_client import load_token, save_token
+from .token_client import load_token
 
 LOG = logging.getLogger(__name__)
 
@@ -58,19 +63,22 @@ class SharedStageClient:
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
+        on_stage_metadata: Callable[[dict], None] | None = None,
+        on_playback_state: Callable[[dict], None] | None = None,
+        on_playback_claimed: Callable[[dict], None] | None = None,
+        on_playback_rejected: Callable[[dict], None] | None = None,
+        on_token_issued: Callable[[str], None] | None = None,
         sdf_notice_bridge: str | Path | None = None,
     ):
         if not isinstance(stage, Usd.Stage):
             raise TypeError("SharedStageClient requires a Usd.Stage")
-        app_name = str(app_name).strip()
-        if not app_name:
-            raise ValueError("app_name must not be empty")
+        app_name = require_app_name(app_name)
         if Sdf.Layer.IsAnonymousLayerIdentifier(stage.GetRootLayer().identifier):
             raise ValueError("shared-stage synchronization requires a portable root layer")
         stable_client_id = client_id or make_stable_client_id(app_name)
-        connection_origin = origin or f"{app_name}-{uuid.uuid4().hex[:8]}-shared"
-        resolved_token = token if token is not None or not persist_token else load_token(host, port)
-        token_callback = (lambda issued: save_token(host, port, issued)) if persist_token else None
+        connection_origin = origin or client_origin(app_name, "shared")
+        resolved_token = resolve_client_token(host, port, token, persist_token)
+        token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
 
         self._stage = stage
         self._host = host
@@ -78,6 +86,10 @@ class SharedStageClient:
         self._persist_token = persist_token
         self._graph = SharedLayerGraph(stage)
         if sdf_notice_bridge is None:
+            LOG.info(
+                "Native Sdf notice bridge not available; using Python fallback. "
+                "Build with: uv run python -m openusdconnect.build_sdf_notice_bridge"
+            )
             self._tracker = SdfLayerChangeTracker(stage, self._graph)
         else:
             from .sdf_notice_bridge import NativeSdfLayerChangeTracker
@@ -96,6 +108,10 @@ class SharedStageClient:
             origin=connection_origin,
             token=resolved_token,
             on_token_issued=token_callback,
+            on_stage_metadata=on_stage_metadata,
+            on_playback_state=on_playback_state,
+            on_playback_claimed=on_playback_claimed,
+            on_playback_rejected=on_playback_rejected,
             layered_replay=False,
             layer_mode=LayerMode.SHARED_STAGE,
         )
@@ -118,12 +134,34 @@ class SharedStageClient:
         return self._stage
 
     @property
+    def sender(self):
+        """The underlying :class:`EventSender`."""
+        return self._sender
+
+    @property
+    def receiver(self):
+        """The underlying :class:`ReceiverThread`."""
+        return self._receiver
+
+    @property
     def connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
     def graph_ready(self) -> bool:
         return self._graph.ready
+
+    @property
+    def auth_rejected(self) -> bool:
+        return self._receiver.auth_rejected
+
+    @property
+    def connection_rejected(self) -> bool:
+        return self._receiver.hello_rejected
+
+    @property
+    def stage_metadata(self) -> dict:
+        return dict(self._receiver.stage_metadata)
 
     @property
     def last_seq(self) -> int:
@@ -158,6 +196,7 @@ class SharedStageClient:
         return self
 
     def wait_connected(self, timeout: float | None = None) -> bool:
+        """Wait for the receiver handshake and shared-stage mode negotiation."""
         if not self._started:
             raise RuntimeError("SharedStageClient has not been started")
         if not self._receiver.wait_connected(timeout):
@@ -170,17 +209,25 @@ class SharedStageClient:
             return False
         if self._receiver.layer_mode_active is not LayerMode.SHARED_STAGE:
             raise RuntimeError("server did not negotiate shared-stage mode")
-        if not self._sender.connected:
-            self._sender.token = self._receiver.token
-            if not self._sender.connect():
-                if self._sender.auth_rejected:
-                    raise PermissionError("shared-stage sender authentication rejected")
-                if self._sender.hello_rejected:
-                    raise ConnectionError(
-                        self._sender.rejection_reason or "shared-stage sender rejected"
-                    )
-                return False
         return True
+
+    def _connect_sender(self) -> None:
+        if self._sender.connected:
+            return
+        self._sender.token = self._receiver.token
+        if not self._sender.connect():
+            if self._sender.auth_rejected:
+                raise PermissionError("shared-stage sender authentication rejected")
+            if self._sender.hello_rejected:
+                raise ConnectionError(
+                    self._sender.rejection_reason or "shared-stage sender rejected"
+                )
+            raise ConnectionError(f"could not connect sender to {self._host}:{self._port}")
+
+    def start_sender(self) -> bool:
+        """Connect the sender explicitly for fail-fast error handling."""
+        self._connect_sender()
+        return self._sender.connected
 
     def update(self) -> SharedStageUpdate:
         """Apply queued authoritative records, then publish local layer edits."""
@@ -195,6 +242,11 @@ class SharedStageClient:
         finally:
             self._tracker.restore_prepared()
         sent = 0
+        if self._graph.ready:
+            try:
+                self._connect_sender()
+            except (PermissionError, ConnectionError):
+                pass  # best-effort during update
         if self._sender.connected and self._graph.ready:
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
@@ -300,8 +352,12 @@ class SharedStageClient:
         self._pending_records = retained
         return applied
 
-    def refresh_asset_dependencies(self) -> tuple[str, ...]:
-        """Retry unresolved graph edges under this stage's resolver context."""
+    def refresh_asset_dependency(self, asset_path: str | None = None) -> tuple[str, ...]:
+        """Retry unresolved graph edges under this stage's resolver context.
+
+        ``asset_path`` is accepted for API consistency with the managed-mode
+        clients; shared-stage graph edges are not filtered by asset path.
+        """
         with self._tracker.suppressed():
             mapped = self._graph.refresh_dependencies()
             self._tracker.sync_graph(force=True)

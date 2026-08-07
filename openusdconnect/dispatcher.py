@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from .adapters import DCCAdapter
     from .codec import ReceivedEvent
     from .emitter import NoticeEmitter
-    from .logical_layers import LogicalLayerRouter
+    from .layer_key_router import LayerKeyRouter
     from .receiver import ReceiverThread
 
 LOG = logging.getLogger(__name__)
@@ -293,7 +293,7 @@ class EventDispatcher:
         self._last_seq = 0
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
-        self._layer_router: LogicalLayerRouter | None = None
+        self._layer_router: LayerKeyRouter | None = None
         self._shared_stage = _SharedStageBinding()
 
     @property
@@ -305,16 +305,18 @@ class EventDispatcher:
         self._last_seq = value
 
     @property
-    def layer_router(self) -> LogicalLayerRouter | None:
+    def layer_router(self) -> LayerKeyRouter | None:
         """Receiver-local logical-layer router, or ``None`` for flat replay."""
         return self._layer_router
 
     def drain_and_apply(self) -> int:
         """Drain the receiver queue and run the apply pipeline.
 
-        Returns the number of events applied (0 when the queue was empty
-        or only contained pings/resync).
+        Returns the number of events applied (0 when the queue was empty,
+        only contained pings/resync, or the dispatcher is parked).
         """
+        if self.adapter is None:
+            return 0
         bufs = self.receiver.drain_queue()
         if not bufs:
             return 0
@@ -362,6 +364,14 @@ class EventDispatcher:
         with suppress_ctx:
             self._layer_router.bind(stage)
             self._shared_stage.bind(stage)
+
+    def unbind_stage(self) -> None:
+        """Detach managed layers without closing the dispatcher.
+
+        The receiver and queue stay alive; the next :meth:`bind_layered_stage`
+        or :meth:`drain_and_apply` re-attaches layers to the new stage.
+        """
+        self._release_layered_state()
 
     def close(self) -> None:
         """Release receiver-owned layers and restore shared stage state."""

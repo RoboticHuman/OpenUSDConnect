@@ -189,7 +189,8 @@ def test_current_edit_target_publication_is_retained_for_update_retry():
         publisher.close()
 
 
-def test_stages_are_read_only_properties():
+def test_inner_blocks_are_read_only():
+    """Inner blocks are accessible for advanced use but not reassignable."""
     stage = Usd.Stage.CreateInMemory()
     publisher = UsdPublisher(stage, app_name="test-publisher", persist_token=False)
     receiver = UsdReceiver(
@@ -200,10 +201,20 @@ def test_stages_are_read_only_properties():
     )
     replacement = Usd.Stage.CreateInMemory()
     try:
-        assert not hasattr(publisher, "sender")
-        assert not hasattr(publisher, "emitter")
-        assert not hasattr(receiver, "receiver")
-        assert not hasattr(receiver, "dispatcher")
+        # Public escape hatches exist (read-only).
+        assert publisher.sender is not None
+        assert publisher.emitter is not None
+        assert receiver.receiver is not None
+        assert receiver.dispatcher is not None
+        # Stage and inner blocks are not reassignable.
+        with pytest.raises(AttributeError):
+            publisher.sender = None
+        with pytest.raises(AttributeError):
+            publisher.emitter = None
+        with pytest.raises(AttributeError):
+            receiver.receiver = None
+        with pytest.raises(AttributeError):
+            receiver.dispatcher = None
         with pytest.raises(AttributeError):
             publisher.stage = replacement
         with pytest.raises(AttributeError):
