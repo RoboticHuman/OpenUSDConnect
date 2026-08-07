@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,7 +69,7 @@ class SharedStageClient:
         on_playback_claimed: Callable[[dict], None] | None = None,
         on_playback_rejected: Callable[[dict], None] | None = None,
         on_token_issued: Callable[[str], None] | None = None,
-        sdf_notice_bridge: str | Path | None = None,
+        delegate_bridge_path: str | Path | None = None,
     ):
         if not isinstance(stage, Usd.Stage):
             raise TypeError("SharedStageClient requires a Usd.Stage")
@@ -85,19 +86,21 @@ class SharedStageClient:
         self._port = port
         self._persist_token = persist_token
         self._graph = SharedLayerGraph(stage)
-        if sdf_notice_bridge is None:
+
+        from .sdf_delegate_bridge import NativeSdfLayerChangeTracker, _find_bridge
+
+        bridge_path = delegate_bridge_path or _find_bridge()
+        if bridge_path is None:
             LOG.info(
-                "Native Sdf notice bridge not available; using Python fallback. "
-                "Build with: uv run python -m openusdconnect.build_sdf_notice_bridge"
+                "Sdf delegate bridge not found; using Python fallback. "
+                "Build and install with: uv run python -m openusdconnect.build_sdf_notice_bridge"
             )
             self._tracker = SdfLayerChangeTracker(stage, self._graph)
         else:
-            from .sdf_notice_bridge import NativeSdfLayerChangeTracker
-
             self._tracker = NativeSdfLayerChangeTracker(
                 stage,
                 self._graph,
-                sdf_notice_bridge,
+                bridge_path,
             )
         self._receiver = ReceiverThread(
             host=host,

@@ -1,7 +1,7 @@
 """Exact authored Sdf changes for shared-stage synchronization.
 
 This Python tracker is the fallback implementation. The native C++ bridge
-(``NativeSdfLayerChangeTracker`` in ``sdf_notice_bridge.py``) is preferred for
+(``NativeSdfLayerChangeTracker`` in ``sdf_delegate_bridge.py``) is preferred for
 production use; build it with
 ``uv run python -m openusdconnect.build_sdf_notice_bridge``.
 """

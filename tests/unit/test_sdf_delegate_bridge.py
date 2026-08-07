@@ -9,25 +9,25 @@ import pytest
 from pxr import Sdf, Usd
 
 from openusdconnect.event_apply import apply_events
-from openusdconnect.sdf_notice_bridge import (
+from openusdconnect.sdf_delegate_bridge import (
+    NativeDelegateTracker,
     NativeSdfLayerChangeTracker,
-    SdfNoticeBridge,
 )
 from openusdconnect.shared_layer_graph import SharedLayerGraph
 
 
 @pytest.fixture
 def bridge_path() -> Path:
-    value = os.environ.get("OPENUSDCONNECT_SDF_NOTICE_BRIDGE")
+    value = os.environ.get("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE")
     if not value:
-        pytest.skip("OPENUSDCONNECT_SDF_NOTICE_BRIDGE is not configured")
+        pytest.skip("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE is not configured")
     return Path(value)
 
 
 def test_bridge_updates_layers_and_suppresses_authoritative_edits(bridge_path):
     tracked = Sdf.Layer.CreateAnonymous("tracked")
     other = Sdf.Layer.CreateAnonymous("other")
-    bridge = SdfNoticeBridge(bridge_path, [tracked.identifier])
+    bridge = NativeDelegateTracker(bridge_path, [tracked.identifier])
     try:
         Sdf.CreatePrimInLayer(tracked, "/Local")
         assert {record.layer_identifier for record in bridge.drain()} == {tracked.identifier}

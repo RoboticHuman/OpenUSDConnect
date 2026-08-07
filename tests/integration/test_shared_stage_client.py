@@ -79,7 +79,7 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         port=port,
         persist_token=False,
         reconnect=False,
-        sdf_notice_bridge=os.environ.get("OPENUSDCONNECT_SDF_NOTICE_BRIDGE"),
+        delegate_bridge_path=os.environ.get("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE"),
     )
     second = SharedStageClient(
         second_stage,

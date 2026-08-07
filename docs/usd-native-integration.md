@@ -198,20 +198,20 @@ with SharedStageClient(stage, app_name="shot-editor") as client:
 
 The default tracker is pure Python and keeps complete local layer snapshots so
 it works with any compatible OpenUSD Python package. Native USD applications
-can build the optional notice bridge against the exact OpenUSD installation
+can build the optional delegate bridge against the exact OpenUSD installation
 loaded by the host:
 
 ```bash
-openusdconnect-build-sdf-notice-bridge --build-dir build/sdf-notice-bridge
+uv run python -m openusdconnect.build_sdf_notice_bridge
 ```
 
-Pass the printed library path to opt in:
+The build installs to ~/.openusdconnect/ for auto-discovery.  To override:
 
 ```python
 with SharedStageClient(
     stage,
     app_name="shot-editor",
-    sdf_notice_bridge="build/sdf-notice-bridge/libopenusdconnect_sdf_notice_bridge.so",
+    delegate_bridge_path="/custom/path/to/bridge.dll",
 ) as client:
     ...
 ```
@@ -219,7 +219,7 @@ with SharedStageClient(
 The extension uses a C ABI but links to OpenUSD's C++ ABI. Its generated
 manifest must match the host's OpenUSD version, platform, and architecture;
 an incompatible build is rejected before loading. The native path consumes
-`SdfNotice::LayersDidChange` directly and does not prime full-layer snapshots.
+`SdfLayerStateDelegate` directly and captures old values inline without snapshots.
 If its bounded local queue fills, pending records are coalesced into one exact
 current-content replacement per affected layer. That rare recovery transaction
 has whole-layer conflict scope; ordinary edits remain field-level.

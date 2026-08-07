@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def _built_library(build_directory: Path) -> Path:
     suffixes = {".dll", ".dylib", ".so"}
     candidates = sorted(
         path
-        for path in build_directory.rglob("*openusdconnect_sdf_notice_bridge*")
+        for path in build_directory.rglob("*openusdconnect_sdf_delegate_bridge*")
         if path.is_file() and path.suffix.lower() in suffixes
     )
     if not candidates:
@@ -118,7 +119,15 @@ def main(argv: list[str] | None = None) -> int:
         configuration=args.config,
         parallel=args.parallel,
     )
-    print(library)
+    manifest = Path(str(library) + ".json")
+
+    # Install to the user-local cache so auto-discovery finds it.
+    dest_dir = Path.home() / ".openusdconnect"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(library, dest_dir / library.name)
+    if manifest.is_file():
+        shutil.copy2(manifest, dest_dir / manifest.name)
+    print(f"Installed to {dest_dir / library.name}")
     return 0
 
 

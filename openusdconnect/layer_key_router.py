@@ -118,10 +118,10 @@ class LayerKeyRouter(ABC):
         same generation). Generation/revision commit only on success.
         """
 
-    def _install_layers(self, stage: Usd.Stage) -> None:
+    def _install_layers(self, stage: Usd.Stage) -> None:  # noqa: B027
         """Called after bind() to make layers visible in the stage composition."""
 
-    def _detach_layers(self, stage: Usd.Stage) -> None:
+    def _detach_layers(self, stage: Usd.Stage) -> None:  # noqa: B027
         """Called before unbinding to remove layers from composition."""
 
 

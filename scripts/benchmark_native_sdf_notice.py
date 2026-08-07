@@ -17,7 +17,7 @@ from pxr import Sdf, Usd
 
 from openusdconnect.event_apply import apply_events
 from openusdconnect.sdf_layer_tracker import SdfLayerChangeTracker
-from openusdconnect.sdf_notice_bridge import NativeSdfLayerChangeTracker
+from openusdconnect.sdf_delegate_bridge import NativeSdfLayerChangeTracker
 from openusdconnect.sdf_spec_delta import (
     serialize_spec_fields,
     spec_kind_for_object,

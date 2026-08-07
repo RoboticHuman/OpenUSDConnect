@@ -1,10 +1,12 @@
-"""Native ``SdfNotice::LayersDidChange`` tracking for shared stages."""
+"""Native SdfLayerStateDelegate-based change tracking for shared stages."""
 
 from __future__ import annotations
 
 import ctypes
 import json
+import os
 import platform
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -78,33 +80,31 @@ _REMOVED_SPEC_FLAGS = (
 )
 
 
-class _Record(ctypes.Structure):
+class _DelegateRecord(ctypes.Structure):
     _fields_ = [
-        ("serial", ctypes.c_uint64),
-        ("flags", ctypes.c_uint64),
         ("layer_identifier", ctypes.c_void_p),
         ("layer_identifier_size", ctypes.c_size_t),
         ("path", ctypes.c_void_p),
         ("path_size", ctypes.c_size_t),
-        ("old_path", ctypes.c_void_p),
-        ("old_path_size", ctypes.c_size_t),
-        ("old_identifier", ctypes.c_void_p),
-        ("old_identifier_size", ctypes.c_size_t),
-        ("fields", ctypes.POINTER(ctypes.c_char_p)),
-        ("field_count", ctypes.c_size_t),
+        ("field_name", ctypes.c_void_p),
+        ("field_name_size", ctypes.c_size_t),
+        ("flags", ctypes.c_uint64),
+        ("old_value_json", ctypes.c_void_p),
+        ("old_value_json_size", ctypes.c_size_t),
+        ("new_value_json", ctypes.c_void_p),
+        ("new_value_json_size", ctypes.c_size_t),
     ]
 
 
-class _Batch(ctypes.Structure):
+class _DelegateBatch(ctypes.Structure):
     _fields_ = [
-        ("serial", ctypes.c_uint64),
-        ("records", ctypes.POINTER(_Record)),
+        ("records", ctypes.POINTER(_DelegateRecord)),
         ("record_count", ctypes.c_size_t),
     ]
 
 
 @dataclass(frozen=True, slots=True)
-class SdfNoticeRecord:
+class DelegateMutation:
     """One owned change-list record copied from the native bridge."""
 
     serial: int
@@ -114,6 +114,15 @@ class SdfNoticeRecord:
     old_path: str
     old_identifier: str
     fields: tuple[str, ...]
+
+
+def _encoded_identifiers(
+    layer_identifiers: list[str],
+) -> tuple[ctypes.Array[ctypes.c_char_p] | None, int]:
+    encoded = [identifier.encode() for identifier in layer_identifiers]
+    if not encoded:
+        return None, 0
+    return (ctypes.c_char_p * len(encoded))(*encoded), len(encoded)
 
 
 def _decode_text(pointer: int | None, size: int) -> str:
@@ -134,14 +143,57 @@ def _architecture(value: str) -> str:
     }.get(value.lower(), value.lower())
 
 
+def _dll_name() -> str:
+    """Platform-specific DLL filename."""
+    if sys.platform == "win32":
+        return "openusdconnect_sdf_delegate_bridge.dll"
+    if sys.platform == "darwin":
+        return "libopenusdconnect_sdf_delegate_bridge.dylib"
+    return "libopenusdconnect_sdf_delegate_bridge.so"
+
+
+def _find_bridge() -> Path | None:
+    """Locate the built bridge DLL, or None if not found."""
+    # 1. Explicit env-var override
+    if env := os.environ.get("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE"):
+        p = Path(env)
+        return p if p.is_file() else None
+
+    name = _dll_name()
+
+    # 2. Next to this source module (development / editable install)
+    module_dir = Path(__file__).resolve().parent
+    p = module_dir / name
+    if p.is_file(): return p
+
+    # 3. Platform-specific library directory (installed via package manager)
+    if sys.platform == "win32":
+        candidates = [
+            module_dir.parent / "native" / "sdf_notice_bridge" / "Release" / name,
+        ]
+    else:
+        import sysconfig
+        candidates = [
+            Path(sysconfig.get_config_var("LIBDIR")) / name,
+        ]
+    for p in candidates:
+        if p.is_file(): return p
+
+    # 4. User-local cache
+    p = Path.home() / ".openusdconnect" / name
+    if p.is_file(): return p
+
+    return None
+
+
 def _load_manifest(library_path: Path) -> dict:
     manifest_path = Path(f"{library_path}.json")
     if not manifest_path.is_file():
-        raise RuntimeError(f"Sdf notice bridge manifest is missing: {manifest_path}")
+        raise RuntimeError(f"Sdf delegate bridge manifest is missing: {manifest_path}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not read Sdf notice bridge manifest: {exc}") from exc
+        raise RuntimeError(f"could not read Sdf delegate bridge manifest: {exc}") from exc
     expected = {
         "abi_version": _BRIDGE_ABI_VERSION,
         "pxr_version": _pxr_version(),
@@ -156,168 +208,149 @@ def _load_manifest(library_path: Path) -> dict:
         if actual.get(name) != value
     ]
     if mismatches:
-        raise RuntimeError("incompatible Sdf notice bridge: " + ", ".join(mismatches))
+        raise RuntimeError("incompatible Sdf delegate bridge: " + ", ".join(mismatches))
     return manifest
 
 
-class SdfNoticeBridge:
-    """Owned C-ABI access to one exact-build OpenUSD notice bridge."""
+class NativeDelegateTracker:
+    """C-ABI access to the delegate-based change tracker.
+
+    Uses ``SdfLayerStateDelegate`` to intercept every layer mutation at the
+    moment it happens, capturing (path, field, old_value, new_value) inline.
+    No layer snapshots or ExportToString diffs are needed.
+    """
 
     def __init__(
         self,
-        library_path: str | Path,
-        layer_identifiers: list[str],
+        library_path: str | Path | None = None,
+        layer_identifiers: list[str] | None = None,
         *,
         max_queued_bytes: int = _DEFAULT_MAX_QUEUED_BYTES,
     ):
+        if library_path is None:
+            library_path = _find_bridge()
+            if library_path is None:
+                raise FileNotFoundError(
+                    "Sdf delegate bridge not found. Build it with: "
+                    "uv run python -m openusdconnect.build_sdf_notice_bridge"
+                )
         path = Path(library_path).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
+        if layer_identifiers is None:
+            layer_identifiers = []
         if max_queued_bytes < 0:
             raise ValueError("max_queued_bytes must not be negative")
         _load_manifest(path)
         self._library = ctypes.CDLL(str(path))
         self._configure_library()
-        if self._library.ouc_sdf_notice_abi_version() != _BRIDGE_ABI_VERSION:
-            raise RuntimeError("loaded Sdf notice bridge reports an incompatible ABI")
-        if self._library.ouc_sdf_notice_pxr_version() != _pxr_version():
-            raise RuntimeError("loaded Sdf notice bridge reports an incompatible OpenUSD build")
-        identifiers, count = self._encoded_identifiers(layer_identifiers)
-        self._handle = self._library.ouc_sdf_notice_tracker_create(
-            identifiers,
-            count,
-            max_queued_bytes,
+        if self._library.ouc_sdf_delegate_abi_version() != _BRIDGE_ABI_VERSION:
+            raise RuntimeError("loaded Sdf delegate bridge reports an incompatible ABI")
+        if self._library.ouc_sdf_delegate_pxr_version() != _pxr_version():
+            raise RuntimeError("loaded Sdf delegate bridge reports an incompatible OpenUSD build")
+        identifiers, count = _encoded_identifiers(layer_identifiers)
+        self._handle = self._library.ouc_sdf_delegate_tracker_create(
+            identifiers, count, max_queued_bytes
         )
         if not self._handle:
             raise RuntimeError(self._last_error())
 
     def _configure_library(self) -> None:
-        library = self._library
-        library.ouc_sdf_notice_tracker_create.argtypes = [
-            ctypes.POINTER(ctypes.c_char_p),
-            ctypes.c_size_t,
-            ctypes.c_size_t,
+        lib = self._library
+        lib.ouc_sdf_delegate_tracker_create.argtypes = [
+            ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t, ctypes.c_size_t
         ]
-        library.ouc_sdf_notice_tracker_create.restype = ctypes.c_void_p
-        library.ouc_sdf_notice_tracker_destroy.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_destroy.restype = None
-        library.ouc_sdf_notice_tracker_set_layers.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_char_p),
-            ctypes.c_size_t,
+        lib.ouc_sdf_delegate_tracker_create.restype = ctypes.c_void_p
+        lib.ouc_sdf_delegate_tracker_destroy.argtypes = [ctypes.c_void_p]
+        lib.ouc_sdf_delegate_tracker_destroy.restype = None
+        lib.ouc_sdf_delegate_tracker_set_layers.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t
         ]
-        library.ouc_sdf_notice_tracker_set_layers.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_set_suppressed.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
+        lib.ouc_sdf_delegate_tracker_set_layers.restype = ctypes.c_int
+        lib.ouc_sdf_delegate_tracker_set_suppressed.argtypes = [
+            ctypes.c_void_p, ctypes.c_int
         ]
-        library.ouc_sdf_notice_tracker_set_suppressed.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_acquire.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_Batch),
+        lib.ouc_sdf_delegate_tracker_set_suppressed.restype = ctypes.c_int
+        lib.ouc_sdf_delegate_tracker_acquire.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_DelegateBatch)
         ]
-        library.ouc_sdf_notice_tracker_acquire.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_release.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_release.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_pending_batches.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_pending_batches.restype = ctypes.c_size_t
-        library.ouc_sdf_notice_tracker_queued_bytes.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_queued_bytes.restype = ctypes.c_size_t
-        library.ouc_sdf_notice_tracker_coalesced_batch_count.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_coalesced_batch_count.restype = ctypes.c_uint64
-        library.ouc_sdf_notice_last_error.argtypes = []
-        library.ouc_sdf_notice_last_error.restype = ctypes.c_char_p
-        library.ouc_sdf_notice_pxr_version.argtypes = []
-        library.ouc_sdf_notice_pxr_version.restype = ctypes.c_uint32
-        library.ouc_sdf_notice_abi_version.argtypes = []
-        library.ouc_sdf_notice_abi_version.restype = ctypes.c_uint32
-
-    @staticmethod
-    def _encoded_identifiers(
-        layer_identifiers: list[str],
-    ) -> tuple[ctypes.Array[ctypes.c_char_p] | None, int]:
-        encoded = [identifier.encode() for identifier in layer_identifiers]
-        if not encoded:
-            return None, 0
-        return (ctypes.c_char_p * len(encoded))(*encoded), len(encoded)
+        lib.ouc_sdf_delegate_tracker_acquire.restype = ctypes.c_int
+        lib.ouc_sdf_delegate_tracker_release.argtypes = [ctypes.c_void_p]
+        lib.ouc_sdf_delegate_tracker_release.restype = ctypes.c_int
+        lib.ouc_sdf_delegate_tracker_pending_batches.argtypes = [ctypes.c_void_p]
+        lib.ouc_sdf_delegate_tracker_pending_batches.restype = ctypes.c_size_t
+        lib.ouc_sdf_delegate_tracker_coalesced_batch_count.argtypes = [ctypes.c_void_p]
+        lib.ouc_sdf_delegate_tracker_coalesced_batch_count.restype = ctypes.c_uint64
 
     def _last_error(self) -> str:
-        value = self._library.ouc_sdf_notice_last_error()
-        return value.decode() if value else "native Sdf notice bridge failed"
+        value = self._library.ouc_sdf_delegate_last_error()
+        return value.decode() if value else "native delegate tracker failed"
 
     @property
     def pending_batch_count(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_pending_batches(self._handle)
-
-    @property
-    def queued_bytes(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_queued_bytes(self._handle)
+        return self._library.ouc_sdf_delegate_tracker_pending_batches(self._handle)
 
     @property
     def coalesced_batch_count(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_coalesced_batch_count(self._handle)
+        return self._library.ouc_sdf_delegate_tracker_coalesced_batch_count(self._handle)
 
     def set_layers(self, layer_identifiers: list[str]) -> None:
-        identifiers, count = self._encoded_identifiers(layer_identifiers)
-        if self._library.ouc_sdf_notice_tracker_set_layers(
-            self._handle,
-            identifiers,
-            count,
+        identifiers, count = _encoded_identifiers(layer_identifiers)
+        if self._library.ouc_sdf_delegate_tracker_set_layers(
+            self._handle, identifiers, count
         ):
             raise RuntimeError(self._last_error())
 
     def set_suppressed(self, suppressed: bool) -> None:
-        if self._library.ouc_sdf_notice_tracker_set_suppressed(
-            self._handle,
-            int(suppressed),
+        if self._library.ouc_sdf_delegate_tracker_set_suppressed(
+            self._handle, int(suppressed)
         ):
             raise RuntimeError(self._last_error())
 
-    def drain(self) -> tuple[SdfNoticeRecord, ...]:
-        records = []
+    def drain(self) -> tuple[DelegateMutation, ...]:
+        records: list[DelegateMutation] = []
+        batch_count = 0
         while True:
-            batch = _Batch()
-            status = self._library.ouc_sdf_notice_tracker_acquire(
-                self._handle,
-                ctypes.byref(batch),
+            batch = _DelegateBatch()
+            status = self._library.ouc_sdf_delegate_tracker_acquire(
+                self._handle, ctypes.byref(batch)
             )
             if status < 0:
                 raise RuntimeError(self._last_error())
             if status == 0:
                 return tuple(records)
+            batch_count += 1
             try:
                 for index in range(batch.record_count):
-                    record = batch.records[index]
+                    rec = batch.records[index]
+                    field_name = (
+                        _decode_text(rec.field_name, rec.field_name_size)
+                        if rec.field_name
+                        else ""
+                    )
                     records.append(
-                        SdfNoticeRecord(
-                            serial=int(record.serial),
-                            flags=_ChangeFlag(record.flags),
+                        DelegateMutation(
+                            serial=0,
+                            flags=_ChangeFlag(rec.flags),
                             layer_identifier=_decode_text(
-                                record.layer_identifier,
-                                record.layer_identifier_size,
+                                rec.layer_identifier, rec.layer_identifier_size
                             ),
-                            path=_decode_text(record.path, record.path_size),
-                            old_path=_decode_text(record.old_path, record.old_path_size),
-                            old_identifier=_decode_text(
-                                record.old_identifier,
-                                record.old_identifier_size,
-                            ),
-                            fields=tuple(
-                                record.fields[field_index].decode()
-                                for field_index in range(record.field_count)
-                            ),
+                            path=_decode_text(rec.path, rec.path_size),
+                            old_path="",
+                            old_identifier="",
+                            fields=(field_name,) if field_name else (),
                         )
                     )
             finally:
-                if self._library.ouc_sdf_notice_tracker_release(self._handle):
+                if self._library.ouc_sdf_delegate_tracker_release(self._handle):
                     raise RuntimeError(self._last_error())
 
     def close(self) -> None:
         if self._handle:
-            self._library.ouc_sdf_notice_tracker_destroy(self._handle)
+            self._library.ouc_sdf_delegate_tracker_destroy(self._handle)
             self._handle = None
 
-    def __enter__(self) -> SdfNoticeBridge:
+    def __enter__(self) -> NativeDelegateTracker:
         return self
 
     def __exit__(self, _exc_type, _exc_value, _traceback) -> bool:
@@ -463,13 +496,13 @@ def _materialize_changes(changes: _LayerChanges) -> tuple[dict, ...]:
 
 
 class NativeSdfLayerChangeTracker:
-    """Materialize exact authored deltas from native OpenUSD change lists."""
+    """Materialize exact authored deltas from native delegate change records."""
 
     def __init__(
         self,
         stage: Usd.Stage,
         graph: SharedLayerGraph,
-        bridge_path: str | Path,
+        bridge_path: str | Path | None = None,
         *,
         max_queued_bytes: int = _DEFAULT_MAX_QUEUED_BYTES,
     ):
@@ -482,7 +515,7 @@ class NativeSdfLayerChangeTracker:
         self._prepared: list[PreparedLayerBatch] = []
         self._suppression_depth = 0
         layers = graph.local_reachable_layers()
-        self._bridge = SdfNoticeBridge(
+        self._bridge = NativeDelegateTracker(
             bridge_path,
             [layer.identifier for layer in layers],
             max_queued_bytes=max_queued_bytes,
@@ -533,20 +566,36 @@ class NativeSdfLayerChangeTracker:
                 self._bridge.set_suppressed(False)
                 self.sync_graph()
 
-    def _merge_records(self, records: tuple[SdfNoticeRecord, ...]) -> None:
+    def _merge_records(self, records: tuple[DelegateMutation, ...]) -> None:
+        has_delete = False
+        has_create = False
         for record in records:
             layer = self._tracked.get(record.layer_identifier)
             if layer is None:
                 continue
             changes = self._pending.setdefault(id(layer), _LayerChanges(layer))
-            changes.replacement |= bool(record.flags & _ChangeFlag.REPLACED_CONTENT)
-            changes.topology |= bool(
-                record.flags & (_ChangeFlag.REPLACED_CONTENT | _ChangeFlag.SUBLAYERS)
-            )
-            if record.path:
-                changes.add(record.path, record.flags, record.fields)
-            if record.old_path:
-                changes.add(record.old_path, _ChangeFlag.REMOVED_PROPERTY, ())
+            if not record.path:
+                continue
+            field = record.fields[0] if record.fields else ""
+            if field == "_createSpec":
+                changes.add(record.path, _ADDED_SPEC_FLAGS, ())
+                if Sdf.Path(record.path).IsPrimPath():
+                    has_create = True
+            elif field == "_deleteSpec":
+                changes.add(record.path, _REMOVED_SPEC_FLAGS, ())
+                if Sdf.Path(record.path).IsPrimPath():
+                    has_delete = True
+            elif field == "_setTimeSample":
+                changes.add(record.path, _ChangeFlag.TIME_SAMPLES, ())
+            elif field in ("subLayers", "subLayerOffsets"):
+                changes.topology = True
+                changes.add(record.path, _ChangeFlag.SUBLAYERS, (field,))
+            else:
+                changes.add(record.path, _ChangeFlag(0), (field,))
+        if has_delete and has_create:
+            for changes in self._pending.values():
+                changes.replacement = True
+                changes.topology = True
 
     def prepare_local_changes(self) -> tuple[PreparedLayerBatch, ...]:
         self.sync_graph()
@@ -617,9 +666,7 @@ class NativeSdfLayerChangeTracker:
         pass
 
     def accept_authoritative_sublayers(
-        self,
-        _layer: Sdf.Layer,
-        _entries: list[dict],
+        self, _layer: Sdf.Layer, _entries: list[dict]
     ) -> None:
         pass
 
@@ -639,7 +686,7 @@ class NativeSdfLayerChangeTracker:
 
 
 __all__ = [
+    "NativeDelegateTracker",
     "NativeSdfLayerChangeTracker",
-    "SdfNoticeBridge",
-    "SdfNoticeRecord",
+    "DelegateMutation",
 ]
