@@ -342,16 +342,23 @@ class SharedStageClient:
             return 0
         retained = []
         applied = 0
+        groups: list[tuple[Sdf.Layer, list[ReceivedEvent]]] = []
         for record in self._pending_records:
             layer = self._graph.layer_for(record.layer_key)
             if layer is None:
                 retained.append(record)
                 continue
+            if groups and groups[-1][0] is layer:
+                groups[-1][1].append(record)
+            else:
+                groups.append((layer, [record]))
+        for layer, records in groups:
             with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
                 with atomic_apply(self._stage):
-                    apply_events(self._stage, [record.event])
-            self._tracker.accept_authoritative_event(layer, record.event)
-            applied += 1
+                    apply_events(self._stage, [record.event for record in records])
+            for record in records:
+                self._tracker.accept_authoritative_event(layer, record.event)
+            applied += len(records)
         self._pending_records = retained
         return applied
 
