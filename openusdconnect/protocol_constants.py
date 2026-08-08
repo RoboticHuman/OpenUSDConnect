@@ -162,13 +162,16 @@ class EventKindInfo:
         dispatcher's on_imported callback.
     native_projection: how a layered receiver maps the event into a non-USD
         adapter after applying it to the receiver-owned USD mirror.
+    modes: protocol layer modes in which the event is valid. Some exact Sdf
+        fallback events are intentionally valid in both managed and shared
+        stage mode.
     target: whether the event authors into a collaboration layer, authors
         shared stage metadata into the primary session layer, or changes
         non-authored stage state such as payload load rules.
     """
 
     native_projection: NativeProjectionMode
-    mode: LayerMode = LayerMode.MANAGED
+    modes: frozenset[LayerMode] = frozenset({LayerMode.MANAGED})
     create: bool = False
     structural: bool = False
     stage_sync: bool = False
@@ -265,19 +268,19 @@ EVENT_KIND_INFO: dict[str, EventKindInfo] = {
     K_SET_POINT_INSTANCER: EventKindInfo(native_projection=NativeProjectionMode.PROJECT),
     K_SET_SDF_SPEC_FIELDS: EventKindInfo(
         native_projection=NativeProjectionMode.FIELD_ROUTED,
-        mode=LayerMode.SHARED_STAGE,
+        modes=frozenset({LayerMode.MANAGED, LayerMode.SHARED_STAGE}),
         structural=True,
         stage_sync=True,
     ),
     K_REPLACE_SDF_LAYER_CONTENT: EventKindInfo(
         native_projection=NativeProjectionMode.DIRECT,
-        mode=LayerMode.SHARED_STAGE,
+        modes=frozenset({LayerMode.SHARED_STAGE}),
         structural=True,
         stage_sync=True,
     ),
     K_SET_SUBLAYERS: EventKindInfo(
         native_projection=NativeProjectionMode.DIRECT,
-        mode=LayerMode.SHARED_STAGE,
+        modes=frozenset({LayerMode.SHARED_STAGE}),
         structural=True,
         stage_sync=True,
     ),
@@ -310,16 +313,13 @@ STAGE_RUNTIME_KINDS = frozenset(
 NON_COLLABORATION_KINDS = SESSION_LAYER_KINDS | STAGE_RUNTIME_KINDS
 ARC_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.arc)
 IMPORT_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.imports)
-MANAGED_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if i.mode == LayerMode.MANAGED)
+MANAGED_KINDS = frozenset(k for k, i in EVENT_KIND_INFO.items() if LayerMode.MANAGED in i.modes)
 SHARED_STAGE_EVENT_KINDS = frozenset(
-    k for k, i in EVENT_KIND_INFO.items() if i.mode == LayerMode.SHARED_STAGE
+    k for k, i in EVENT_KIND_INFO.items() if LayerMode.SHARED_STAGE in i.modes
 )
-# set_sdf_spec_fields is the Sdf-spec fallback channel: managed mode emits
-# it for authored fields with no high-level event kind (prim kind, layer
-# metadata), so managed gating rejects only the shared-exclusive kinds.
-SHARED_STAGE_ONLY_KINDS = SHARED_STAGE_EVENT_KINDS - frozenset({K_SET_SDF_SPEC_FIELDS})
+SHARED_STAGE_ONLY_KINDS = SHARED_STAGE_EVENT_KINDS - MANAGED_KINDS
 assert MANAGED_KINDS | SHARED_STAGE_EVENT_KINDS == EVENT_KEYS, "every event kind must have a mode"
-assert not (MANAGED_KINDS & SHARED_STAGE_EVENT_KINDS), "no event kind may belong to both modes"
+assert all(info.modes for info in EVENT_KIND_INFO.values()), "every event kind needs a mode"
 
 
 def event_apply_tier(kind: str) -> int:

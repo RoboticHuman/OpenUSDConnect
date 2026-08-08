@@ -1,198 +1,30 @@
 #!/usr/bin/env python3
-"""Compare native Sdf change notices with the complete Python layer tracker."""
+"""Compare native Sdf delegate tracking with the complete Python layer tracker."""
 
 from __future__ import annotations
 
 import argparse
 import ctypes
 import difflib
-import resource
 import statistics
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+if sys.platform != "win32":
+    import resource
+
 from pxr import Sdf, Usd
 
 from openusdconnect.event_apply import apply_events
+from openusdconnect.sdf_delegate_bridge import NativeDelegateTracker, NativeSdfLayerChangeTracker
 from openusdconnect.sdf_layer_tracker import SdfLayerChangeTracker
-from openusdconnect.sdf_delegate_bridge import NativeSdfLayerChangeTracker
 from openusdconnect.sdf_spec_delta import (
     serialize_spec_fields,
     spec_kind_for_object,
 )
 from openusdconnect.shared_layer_graph import SharedLayerGraph
-
-CHANGE_RENAMED = 1 << 0
-CHANGE_PRIM_REFERENCES = 1 << 10
-CHANGE_TIME_SAMPLES = 1 << 11
-CHANGE_CONNECTIONS = 1 << 12
-CHANGE_RELATIONSHIP_TARGETS = 1 << 13
-CHANGE_REMOVED_INERT_PRIM = 1 << 18
-CHANGE_REMOVED_PRIM = 1 << 19
-CHANGE_REMOVED_PROPERTY = 1 << 23
-CHANGE_SUBLAYERS = 1 << 24
-
-
-class _Record(ctypes.Structure):
-    _fields_ = [
-        ("serial", ctypes.c_uint64),
-        ("flags", ctypes.c_uint64),
-        ("layer_identifier", ctypes.c_void_p),
-        ("layer_identifier_size", ctypes.c_size_t),
-        ("path", ctypes.c_void_p),
-        ("path_size", ctypes.c_size_t),
-        ("old_path", ctypes.c_void_p),
-        ("old_path_size", ctypes.c_size_t),
-        ("old_identifier", ctypes.c_void_p),
-        ("old_identifier_size", ctypes.c_size_t),
-        ("fields", ctypes.POINTER(ctypes.c_char_p)),
-        ("field_count", ctypes.c_size_t),
-    ]
-
-
-class _Batch(ctypes.Structure):
-    _fields_ = [
-        ("serial", ctypes.c_uint64),
-        ("records", ctypes.POINTER(_Record)),
-        ("record_count", ctypes.c_size_t),
-    ]
-
-
-def _text(pointer: int | None, size: int) -> str:
-    return ctypes.string_at(pointer, size).decode() if pointer and size else ""
-
-
-class NativeTracker:
-    def __init__(
-        self,
-        library: Path,
-        layer_identifiers: list[str],
-        *,
-        max_queued_bytes: int = 0,
-    ):
-        self._library = ctypes.CDLL(str(library))
-        self._configure_library()
-        expected_version = sum(
-            component * multiplier
-            for component, multiplier in zip(
-                Usd.GetVersion(),
-                (10_000, 100, 1),
-                strict=True,
-            )
-        )
-        actual_abi = self._library.ouc_sdf_notice_abi_version()
-        if actual_abi != 1:
-            raise RuntimeError(f"unsupported bridge ABI {actual_abi}")
-        actual_version = self._library.ouc_sdf_notice_pxr_version()
-        if actual_version != expected_version:
-            raise RuntimeError(
-                f"bridge uses OpenUSD {actual_version}, Python uses {expected_version}"
-            )
-        encoded = [identifier.encode() for identifier in layer_identifiers]
-        values = (ctypes.c_char_p * len(encoded))(*encoded)
-        self._handle = self._library.ouc_sdf_notice_tracker_create(
-            values,
-            len(values),
-            max_queued_bytes,
-        )
-        if not self._handle:
-            raise RuntimeError(self._last_error())
-
-    def _configure_library(self) -> None:
-        library = self._library
-        library.ouc_sdf_notice_tracker_create.argtypes = [
-            ctypes.POINTER(ctypes.c_char_p),
-            ctypes.c_size_t,
-            ctypes.c_size_t,
-        ]
-        library.ouc_sdf_notice_tracker_create.restype = ctypes.c_void_p
-        library.ouc_sdf_notice_tracker_destroy.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_destroy.restype = None
-        library.ouc_sdf_notice_tracker_acquire.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_Batch),
-        ]
-        library.ouc_sdf_notice_tracker_acquire.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_release.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_release.restype = ctypes.c_int
-        library.ouc_sdf_notice_tracker_pending_batches.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_pending_batches.restype = ctypes.c_size_t
-        library.ouc_sdf_notice_tracker_queued_bytes.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_queued_bytes.restype = ctypes.c_size_t
-        library.ouc_sdf_notice_tracker_coalesced_batch_count.argtypes = [ctypes.c_void_p]
-        library.ouc_sdf_notice_tracker_coalesced_batch_count.restype = ctypes.c_uint64
-        library.ouc_sdf_notice_last_error.argtypes = []
-        library.ouc_sdf_notice_last_error.restype = ctypes.c_char_p
-        library.ouc_sdf_notice_pxr_version.argtypes = []
-        library.ouc_sdf_notice_pxr_version.restype = ctypes.c_uint32
-        library.ouc_sdf_notice_abi_version.argtypes = []
-        library.ouc_sdf_notice_abi_version.restype = ctypes.c_uint32
-
-    def _last_error(self) -> str:
-        value = self._library.ouc_sdf_notice_last_error()
-        return value.decode() if value else "native Sdf notice bridge failed"
-
-    @property
-    def pending_batches(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_pending_batches(self._handle)
-
-    @property
-    def queued_bytes(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_queued_bytes(self._handle)
-
-    @property
-    def coalesced_batch_count(self) -> int:
-        return self._library.ouc_sdf_notice_tracker_coalesced_batch_count(self._handle)
-
-    def drain(self) -> list[dict]:
-        result = []
-        while True:
-            batch = _Batch()
-            status = self._library.ouc_sdf_notice_tracker_acquire(
-                self._handle,
-                ctypes.byref(batch),
-            )
-            if status < 0:
-                raise RuntimeError(self._last_error())
-            if status == 0:
-                return result
-            for index in range(batch.record_count):
-                record = batch.records[index]
-                result.append(
-                    {
-                        "serial": record.serial,
-                        "flags": record.flags,
-                        "layer": _text(
-                            record.layer_identifier,
-                            record.layer_identifier_size,
-                        ),
-                        "path": _text(record.path, record.path_size),
-                        "old_path": _text(record.old_path, record.old_path_size),
-                        "old_identifier": _text(
-                            record.old_identifier,
-                            record.old_identifier_size,
-                        ),
-                        "fields": [
-                            record.fields[field_index].decode()
-                            for field_index in range(record.field_count)
-                        ],
-                    }
-                )
-            if self._library.ouc_sdf_notice_tracker_release(self._handle) != 0:
-                raise RuntimeError(self._last_error())
-
-    def close(self) -> None:
-        if self._handle:
-            self._library.ouc_sdf_notice_tracker_destroy(self._handle)
-            self._handle = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _exc_type, _exc_value, _traceback):
-        self.close()
 
 
 def _median_us(samples: list[int]) -> float:
@@ -200,6 +32,37 @@ def _median_us(samples: list[int]) -> float:
 
 
 def _rss_bytes() -> int:
+    if sys.platform == "win32":
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.restype = wintypes.HANDLE
+        get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_process_memory_info.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        get_process_memory_info.restype = wintypes.BOOL
+        if not get_process_memory_info(get_current_process(), ctypes.byref(counters), counters.cb):
+            raise ctypes.WinError()
+        return int(counters.PeakWorkingSetSize)
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value if sys.platform == "darwin" else value * 1024)
 
@@ -256,27 +119,25 @@ def _verify_change_coverage_in_directory(library: Path, directory: Path) -> None
 
     exact_tracker = NativeSdfLayerChangeTracker(stage, graph, library)
     try:
-        with NativeTracker(library, [root.identifier]) as tracker:
-            with Sdf.ChangeBlock():
-                visible.SetDocumentation("changed")
-                hidden.default = 2
-                prim.RemoveProperty("user:removed")
-                sampled.Set(2.0, 1.0)
-                root.subLayerPaths.append("./child.usda")
-                connected.AddConnection(source.GetPath())
-                relation.AddTarget(Sdf.Path("/Model"))
-                prim.GetReferences().AddReference("./asset.usda", "/Asset")
-                variant_set.RemoveVariant(removed_variant)
-                edits = Sdf.BatchNamespaceEdit()
-                edits.Add(
-                    Sdf.NamespaceEdit.Rename(
-                        Sdf.Path("/Model.user:rename_before"),
-                        "user:rename_after",
-                    )
+        with Sdf.ChangeBlock():
+            visible.SetDocumentation("changed")
+            hidden.default = 2
+            prim.RemoveProperty("user:removed")
+            sampled.Set(2.0, 1.0)
+            root.subLayerPaths.append("./child.usda")
+            connected.AddConnection(source.GetPath())
+            relation.AddTarget(Sdf.Path("/Model"))
+            prim.GetReferences().AddReference("./asset.usda", "/Asset")
+            prim.SetCustomDataByKey("benchmark:nested", 7)
+            variant_set.RemoveVariant(removed_variant)
+            edits = Sdf.BatchNamespaceEdit()
+            edits.Add(
+                Sdf.NamespaceEdit.Rename(
+                    Sdf.Path("/Model.user:rename_before"),
+                    "user:rename_after",
                 )
-                assert root.Apply(edits)
-
-            records = tracker.drain()
+            )
+            assert root.Apply(edits)
         start = time.perf_counter_ns()
         exact_tracker.prepare_local_changes()
         routed = exact_tracker.next_routed_batch()
@@ -287,39 +148,6 @@ def _verify_change_coverage_in_directory(library: Path, directory: Path) -> None
     finally:
         exact_tracker.close()
 
-    by_path = {}
-    for record in records:
-        by_path.setdefault(record["path"], []).append(record)
-
-    assert any("documentation" in record["fields"] for record in by_path["/Model.user:visible"])
-    assert any(
-        "default" in record["fields"] for record in by_path["/Model{look=inactive}.user:hidden"]
-    )
-    assert any(
-        record["flags"] & CHANGE_REMOVED_PROPERTY for record in by_path["/Model.user:removed"]
-    )
-    assert any(record["flags"] & CHANGE_TIME_SAMPLES for record in by_path["/Model.user:sampled"])
-    assert any(
-        record["flags"] & CHANGE_CONNECTIONS and "connectionPaths" in record["fields"]
-        for record in by_path["/Model.inputs:connected"]
-    )
-    assert any(
-        record["flags"] & CHANGE_RELATIONSHIP_TARGETS and "targetPaths" in record["fields"]
-        for record in by_path["/Model.user:link"]
-    )
-    assert any(
-        record["flags"] & CHANGE_PRIM_REFERENCES and "references" in record["fields"]
-        for record in by_path["/Model"]
-    )
-    assert any(
-        record["flags"] & (CHANGE_REMOVED_INERT_PRIM | CHANGE_REMOVED_PRIM)
-        for record in by_path["/Model{look=removed}"]
-    )
-    assert any(
-        record["flags"] & CHANGE_RENAMED and record["old_path"] == "/Model.user:rename_before"
-        for record in by_path["/Model.user:rename_after"]
-    )
-    assert any(record["flags"] & CHANGE_SUBLAYERS for record in by_path["/"])
     target = Usd.Stage.Open(baseline)
     apply_events(target, events)
     target_text = target.GetRootLayer().ExportToString()
@@ -335,8 +163,7 @@ def _verify_change_coverage_in_directory(library: Path, directory: Path) -> None
         )
         raise AssertionError(f"native replay did not reach exact parity:\n{difference}")
     print(
-        f"coverage probe: {len(records)} native records, "
-        f"{len(events)} replay events, exact layer parity, "
+        f"coverage probe: {len(events)} replay events, exact layer parity, "
         f"{_median_us(replay_build_samples):.2f} us materialization"
     )
 
@@ -380,8 +207,8 @@ def _benchmark_python(spec_count: int, iterations: int) -> dict[str, float]:
     }
 
 
-def _materialize_record(layer: Sdf.Layer, record: dict) -> dict:
-    path = Sdf.Path(record["path"])
+def _materialize_record(layer: Sdf.Layer, record) -> dict:
+    path = Sdf.Path(record.path)
     spec = layer.pseudoRoot if path == Sdf.Path.absoluteRootPath else layer.GetObjectAtPath(path)
     if spec is None:
         raise RuntimeError(f"native record points to missing spec {path}")
@@ -389,12 +216,12 @@ def _materialize_record(layer: Sdf.Layer, record: dict) -> dict:
     return {
         "spec_path": str(path),
         "spec_kind": kind,
-        "fields": record["fields"],
+        "fields": record.fields,
         "fragment": serialize_spec_fields(
             layer,
             path,
             kind,
-            record["fields"],
+            record.fields,
             stabilize_asset_paths=False,
         ),
     }
@@ -414,7 +241,7 @@ def _benchmark_native(library: Path, spec_count: int, iterations: int) -> dict[s
     author_samples = []
     drain_samples = []
     materialize_samples = []
-    with NativeTracker(library, [root.identifier]) as tracker:
+    with NativeDelegateTracker(library, [root.identifier]) as tracker:
         for iteration in range(iterations + 3):
             start = time.perf_counter_ns()
             attrs[0].SetDocumentation(f"native {iteration}")
@@ -422,7 +249,7 @@ def _benchmark_native(library: Path, spec_count: int, iterations: int) -> dict[s
             start = time.perf_counter_ns()
             records = tracker.drain()
             drained = time.perf_counter_ns() - start
-            if len(records) != 1 or records[0]["fields"] != ["documentation"]:
+            if len(records) != 1 or records[0].fields != ("documentation",):
                 raise RuntimeError(f"unexpected native records: {records!r}")
             start = time.perf_counter_ns()
             _materialize_record(root, records[0])
@@ -435,8 +262,7 @@ def _benchmark_native(library: Path, spec_count: int, iterations: int) -> dict[s
         with Sdf.ChangeBlock():
             for index, attr in enumerate(attrs):
                 attr.SetDocumentation(f"burst {index}")
-        burst_batches = tracker.pending_batches
-        burst_bytes = tracker.queued_bytes
+        burst_batches = tracker.pending_batch_count
         start = time.perf_counter_ns()
         burst_records = len(tracker.drain())
         burst_drain = time.perf_counter_ns() - start
@@ -454,7 +280,6 @@ def _benchmark_native(library: Path, spec_count: int, iterations: int) -> dict[s
         "total_us": author + drain + materialize,
         "burst_batches": burst_batches,
         "burst_records": burst_records,
-        "burst_mib": burst_bytes / (1024 * 1024),
         "burst_drain_us": burst_drain / 1_000,
     }
 
@@ -521,7 +346,7 @@ def main() -> None:
     print(f"  prepare:        {python['prepare_us']:.2f} us median")
     print(f"  commit:         {python['commit_us']:.2f} us median")
 
-    print("\nNative notice bridge")
+    print("\nNative delegate bridge")
     print(f"  baseline author:  {native['baseline_author_us']:.2f} us median")
     print(f"  author + callback:{native['author_us']:9.2f} us median")
     print(f"  callback overhead:{native['callback_overhead_us']:9.2f} us median")
@@ -531,7 +356,7 @@ def main() -> None:
     print(
         "  burst queue:      "
         f"{native['burst_records']} records in {native['burst_batches']} batch, "
-        f"{native['burst_mib']:.2f} MiB, {native['burst_drain_us']:.2f} us drain"
+        f"{native['burst_drain_us']:.2f} us drain"
     )
 
     print("\nNative layer tracker")

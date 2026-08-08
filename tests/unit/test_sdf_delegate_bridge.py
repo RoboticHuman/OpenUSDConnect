@@ -45,6 +45,63 @@ def test_bridge_updates_layers_and_suppresses_authoritative_edits(bridge_path):
         bridge.close()
 
 
+def test_bridge_keeps_one_delegate_per_tracked_layer(bridge_path):
+    first = Sdf.Layer.CreateAnonymous("first")
+    second = Sdf.Layer.CreateAnonymous("second")
+    bridge = NativeDelegateTracker(bridge_path, [first.identifier, second.identifier])
+    try:
+        Sdf.CreatePrimInLayer(first, "/First")
+        records = bridge.drain()
+        assert {record.layer_identifier for record in records} == {first.identifier}
+        assert first.GetPrimAtPath("/First") is not None
+        assert second.GetPrimAtPath("/First") is None
+    finally:
+        bridge.close()
+
+
+def test_bridge_reports_dictionary_key_mutations(bridge_path):
+    layer = Sdf.Layer.CreateAnonymous("dictionary")
+    prim = Sdf.CreatePrimInLayer(layer, "/Model")
+    bridge = NativeDelegateTracker(bridge_path, [layer.identifier])
+    try:
+        prim.SetInfoDictionaryValue("customData", "nested:key", 7)
+        records = bridge.drain()
+        assert any(
+            record.layer_identifier == layer.identifier
+            and record.path == "/Model"
+            and record.fields == ("customData",)
+            for record in records
+        )
+    finally:
+        bridge.close()
+
+
+def test_native_tracker_replays_dictionary_and_time_sample_changes(
+    bridge_path,
+    tmp_path,
+):
+    source_layer = Sdf.Layer.CreateNew(str(tmp_path / "source.usda"))
+    source_stage = Usd.Stage.Open(source_layer)
+    prim = source_stage.DefinePrim("/Model", "Xform")
+    sampled = prim.CreateAttribute("sampled", Sdf.ValueTypeNames.Double)
+    sampled.Set(1.0)
+    graph = SharedLayerGraph(source_stage, authoritative=True)
+    target_layer = Sdf.Layer.CreateNew(str(tmp_path / "target.usda"))
+    target_layer.TransferContent(source_layer)
+    target_stage = Usd.Stage.Open(target_layer)
+    tracker = NativeSdfLayerChangeTracker(source_stage, graph, bridge_path)
+    try:
+        prim.SetCustomDataByKey("nested:key", 7)
+        sampled.Set(2.0, 1.0)
+        tracker.prepare_local_changes()
+        _batch, _layer_key, events = tracker.next_routed_batch()
+        with Usd.EditContext(target_stage, Usd.EditTarget(target_layer)):
+            apply_events(target_stage, events)
+        assert target_layer.ExportToString() == source_layer.ExportToString()
+    finally:
+        tracker.close()
+
+
 def test_native_tracker_replays_mixed_changes_without_baseline_snapshot(
     bridge_path,
     tmp_path,
@@ -98,8 +155,7 @@ def test_queue_coalescing_replays_complete_current_state(bridge_path, tmp_path):
         max_queued_bytes=1,
     )
     try:
-        source_stage.RemovePrim("/Old")
-        source_stage.DefinePrim("/New", "Scope").SetDocumentation("replacement")
+        source_stage.GetPrimAtPath("/Old").SetDocumentation("replacement")
         tracker.prepare_local_changes()
         _batch, _layer_key, events = tracker.next_routed_batch()
         assert [event["k"] for event in events] == [

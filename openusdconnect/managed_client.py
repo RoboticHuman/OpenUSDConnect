@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from pxr import Usd
+from pxr import Sdf, Usd
 
 from ._client_utils import (
     client_origin,
@@ -85,6 +85,8 @@ class ManagedClient:
         self._host = host
         self._port = port
         self._persist_token = persist_token
+        self._app_name = app_name
+        self._authoring_layer = self._ensure_convergent_edit_target(stage, app_name)
 
         self._emitter = NoticeEmitter(
             stage,
@@ -155,16 +157,26 @@ class ManagedClient:
         return self._emitter
 
     @property
+    def authoring_layer(self) -> Sdf.Layer | None:
+        """Application layer currently intended for local shared edits.
+
+        When the stage initially targets its strong session root, ManagedClient
+        creates a transient session sublayer instead. Authoritative managed
+        layers compose above that sublayer, so peer edits can converge.
+        """
+        return self._authoring_layer
+
+    @property
     def connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
     def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected
+        return self._receiver.auth_rejected or self._sender.auth_rejected
 
     @property
     def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected
+        return self._receiver.hello_rejected or self._sender.hello_rejected
 
     @property
     def last_seq(self) -> int:
@@ -201,11 +213,12 @@ class ManagedClient:
         connected = self._receiver.wait_connected(timeout)
         if connected:
             self._require_layered_replay()
+            self._connect_sender()
         elif self._receiver.auth_rejected:
             raise PermissionError("authentication rejected")
         elif self._receiver.hello_rejected:
             raise ConnectionError(self._receiver.rejection_reason or "connection rejected")
-        return connected
+        return connected and self.connected
 
     def _require_layered_replay(self) -> None:
         if self._receiver.connected and not self._receiver.layered_replay_active:
@@ -215,8 +228,11 @@ class ManagedClient:
     def _connect_sender(self) -> None:
         if self._sender.connected:
             return
-        if self._sender.token is None and self._persist_token:
-            self._sender.token = resolve_client_token(self._host, self._port, None, True)
+        if self._sender.token is None:
+            if self._receiver.token is not None:
+                self._sender.token = self._receiver.token
+            elif self._persist_token:
+                self._sender.token = resolve_client_token(self._host, self._port, None, True)
         if not self._sender.connect():
             if self._sender.auth_rejected:
                 raise PermissionError("sender authentication rejected")
@@ -260,6 +276,8 @@ class ManagedClient:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
             raise RuntimeError("ManagedClient has not been started")
+        if self._stage is None:
+            return ManagedUpdate(received=0, sent=0)
         self._require_layered_replay()
 
         received = self._dispatcher.drain_and_apply()
@@ -270,6 +288,7 @@ class ManagedClient:
         except (PermissionError, ConnectionError):
             pass  # sender connection is best-effort during update
         if self._sender.connected:
+            self._validate_authoring_target()
             sent = self._send(self._emitter.prepare_events_for_send())
 
         return ManagedUpdate(received=received, sent=sent)
@@ -282,6 +301,9 @@ class ManagedClient:
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
+        if self._stage is None:
+            return 0
+        self._validate_authoring_target()
         if not self._sender.connected:
             try:
                 self._connect_sender()
@@ -295,7 +317,7 @@ class ManagedClient:
         return self._send(self._emitter.prepare_snapshot_events_for_send())
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
-        """Move receive-side application and managed layers to a new stage.
+        """Move sending, receiving, and managed layers to a new stage.
 
         Pass ``None`` to park: the receiver stays connected and the queue
         continues to fill, but ``update()`` returns zero until a new stage
@@ -303,16 +325,49 @@ class ManagedClient:
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
+        if self._emitter.prepared_event_count:
+            raise RuntimeError("cannot rebind while a prepared publisher batch is pending")
         if stage is None:
-            self._stage = None
             self._dispatcher.unbind_stage()
             self._dispatcher.adapter = None
+            self._emitter.cleanup()
+            self._stage = None
+            self._authoring_layer = None
             return
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
-        self._stage = stage
         self._dispatcher.adapter = adapter
         self._dispatcher.bind_layered_stage(stage)
+        self._authoring_layer = self._ensure_convergent_edit_target(stage, self._app_name)
+        self._emitter.rebind_stage(stage)
+        self._stage = stage
+
+    @staticmethod
+    def _ensure_convergent_edit_target(stage: Usd.Stage, label: str) -> Sdf.Layer:
+        """Return a target weaker than receiver-owned managed layers."""
+        edit_layer = stage.GetEditTarget().GetLayer()
+        session = stage.GetSessionLayer()
+        if edit_layer is not session:
+            return edit_layer
+        authoring = Sdf.Layer.CreateAnonymous(f"openusdconnect-{label}-authoring")
+        with Sdf.ChangeBlock():
+            session.subLayerPaths.append(authoring.identifier)
+        stage.SetEditTarget(Usd.EditTarget(authoring))
+        return authoring
+
+    def _validate_authoring_target(self) -> None:
+        stage = self._stage
+        if stage is None:
+            return
+        layer = stage.GetEditTarget().GetLayer()
+        if layer is stage.GetSessionLayer():
+            raise RuntimeError(
+                "ManagedClient cannot publish from the strong session root; "
+                "author into client.authoring_layer or another weaker layer"
+            )
+        router = self._dispatcher.layer_router
+        if router is not None and router.key_for(layer) is not None:
+            raise RuntimeError("ManagedClient cannot publish from a receiver-owned managed layer")
 
     def refresh_asset_dependency(
         self,

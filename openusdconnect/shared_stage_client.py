@@ -156,11 +156,11 @@ class SharedStageClient:
 
     @property
     def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected
+        return self._receiver.auth_rejected or self._sender.auth_rejected
 
     @property
     def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected
+        return self._receiver.hello_rejected or self._sender.hello_rejected
 
     @property
     def stage_metadata(self) -> dict:
@@ -212,7 +212,8 @@ class SharedStageClient:
             return False
         if self._receiver.layer_mode_active is not LayerMode.SHARED_STAGE:
             raise RuntimeError("server did not negotiate shared-stage mode")
-        return True
+        self._connect_sender()
+        return self.connected
 
     def _connect_sender(self) -> None:
         if self._sender.connected:

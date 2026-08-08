@@ -36,6 +36,19 @@ from .shared_layer_graph import SharedLayerGraph, read_sublayer_entries
 
 _BRIDGE_ABI_VERSION = 1
 _DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 * 1024
+_SDF_CHILDREN_FIELDS = frozenset(
+    {
+        "connectionChildren",
+        "expressionChildren",
+        "mapperArgChildren",
+        "mapperChildren",
+        "primChildren",
+        "properties",
+        "targetChildren",
+        "variantChildren",
+        "variantSetChildren",
+    }
+)
 
 
 class _ChangeFlag(IntFlag):
@@ -164,7 +177,8 @@ def _find_bridge() -> Path | None:
     # 2. Next to this source module (development / editable install)
     module_dir = Path(__file__).resolve().parent
     p = module_dir / name
-    if p.is_file(): return p
+    if p.is_file():
+        return p
 
     # 3. Platform-specific library directory (installed via package manager)
     if sys.platform == "win32":
@@ -173,15 +187,18 @@ def _find_bridge() -> Path | None:
         ]
     else:
         import sysconfig
+
         candidates = [
             Path(sysconfig.get_config_var("LIBDIR")) / name,
         ]
     for p in candidates:
-        if p.is_file(): return p
+        if p.is_file():
+            return p
 
     # 4. User-local cache
     p = Path.home() / ".openusdconnect" / name
-    if p.is_file(): return p
+    if p.is_file():
+        return p
 
     return None
 
@@ -258,21 +275,24 @@ class NativeDelegateTracker:
     def _configure_library(self) -> None:
         lib = self._library
         lib.ouc_sdf_delegate_tracker_create.argtypes = [
-            ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t, ctypes.c_size_t
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.c_size_t,
+            ctypes.c_size_t,
         ]
         lib.ouc_sdf_delegate_tracker_create.restype = ctypes.c_void_p
         lib.ouc_sdf_delegate_tracker_destroy.argtypes = [ctypes.c_void_p]
         lib.ouc_sdf_delegate_tracker_destroy.restype = None
         lib.ouc_sdf_delegate_tracker_set_layers.argtypes = [
-            ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.c_size_t,
         ]
         lib.ouc_sdf_delegate_tracker_set_layers.restype = ctypes.c_int
-        lib.ouc_sdf_delegate_tracker_set_suppressed.argtypes = [
-            ctypes.c_void_p, ctypes.c_int
-        ]
+        lib.ouc_sdf_delegate_tracker_set_suppressed.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.ouc_sdf_delegate_tracker_set_suppressed.restype = ctypes.c_int
         lib.ouc_sdf_delegate_tracker_acquire.argtypes = [
-            ctypes.c_void_p, ctypes.POINTER(_DelegateBatch)
+            ctypes.c_void_p,
+            ctypes.POINTER(_DelegateBatch),
         ]
         lib.ouc_sdf_delegate_tracker_acquire.restype = ctypes.c_int
         lib.ouc_sdf_delegate_tracker_release.argtypes = [ctypes.c_void_p]
@@ -296,15 +316,11 @@ class NativeDelegateTracker:
 
     def set_layers(self, layer_identifiers: list[str]) -> None:
         identifiers, count = _encoded_identifiers(layer_identifiers)
-        if self._library.ouc_sdf_delegate_tracker_set_layers(
-            self._handle, identifiers, count
-        ):
+        if self._library.ouc_sdf_delegate_tracker_set_layers(self._handle, identifiers, count):
             raise RuntimeError(self._last_error())
 
     def set_suppressed(self, suppressed: bool) -> None:
-        if self._library.ouc_sdf_delegate_tracker_set_suppressed(
-            self._handle, int(suppressed)
-        ):
+        if self._library.ouc_sdf_delegate_tracker_set_suppressed(self._handle, int(suppressed)):
             raise RuntimeError(self._last_error())
 
     def drain(self) -> tuple[DelegateMutation, ...]:
@@ -324,14 +340,14 @@ class NativeDelegateTracker:
                 for index in range(batch.record_count):
                     rec = batch.records[index]
                     field_name = (
-                        _decode_text(rec.field_name, rec.field_name_size)
-                        if rec.field_name
-                        else ""
+                        _decode_text(rec.field_name, rec.field_name_size) if rec.field_name else ""
                     )
                     records.append(
                         DelegateMutation(
                             serial=0,
-                            flags=_ChangeFlag(rec.flags),
+                            # The C ABI flags describe record payload presence,
+                            # not Sdf change-list semantics.
+                            flags=_ChangeFlag(0),
                             layer_identifier=_decode_text(
                                 rec.layer_identifier, rec.layer_identifier_size
                             ),
@@ -464,6 +480,8 @@ def _materialize_changes(changes: _LayerChanges) -> tuple[dict, ...]:
 
         kind = spec_kind_for_object(spec)
         fields = set(path_changes.fields)
+        if path_changes.flags & _ChangeFlag.TIME_SAMPLES:
+            fields.add("timeSamples")
         if path_changes.flags & (_ADDED_SPEC_FLAGS | _ChangeFlag.RENAMED):
             fields.update(str(field_name) for field_name in spec.ListInfoKeys())
         if kind == "layer":
@@ -544,7 +562,10 @@ class NativeSdfLayerChangeTracker:
         current = {layer.identifier: layer for layer in layers}
         if force or current.keys() != self._tracked.keys():
             self._tracked = current
-            self._bridge.set_layers(list(current))
+        # Content replacement can reset an SdfLayer's state delegate. Reassert
+        # ownership after every graph/application cycle, even when reachability
+        # did not change.
+        self._bridge.set_layers(list(current))
         reachable_ids = {id(layer) for layer in layers}
         self._pending = {
             layer_id: changes
@@ -567,35 +588,45 @@ class NativeSdfLayerChangeTracker:
                 self.sync_graph()
 
     def _merge_records(self, records: tuple[DelegateMutation, ...]) -> None:
-        has_delete = False
-        has_create = False
+        delete_layers: set[int] = set()
+        create_layers: set[int] = set()
         for record in records:
             layer = self._tracked.get(record.layer_identifier)
             if layer is None:
                 continue
-            changes = self._pending.setdefault(id(layer), _LayerChanges(layer))
+            layer_id = id(layer)
+            changes = self._pending.setdefault(layer_id, _LayerChanges(layer))
             if not record.path:
                 continue
             field = record.fields[0] if record.fields else ""
-            if field == "_createSpec":
+            if field == "_replaceLayerContent":
+                changes.replacement = True
+                changes.topology = True
+                changes.serial += 1
+            elif field == "_createSpec":
                 changes.add(record.path, _ADDED_SPEC_FLAGS, ())
                 if Sdf.Path(record.path).IsPrimPath():
-                    has_create = True
+                    create_layers.add(layer_id)
             elif field == "_deleteSpec":
                 changes.add(record.path, _REMOVED_SPEC_FLAGS, ())
                 if Sdf.Path(record.path).IsPrimPath():
-                    has_delete = True
+                    delete_layers.add(layer_id)
             elif field == "_setTimeSample":
                 changes.add(record.path, _ChangeFlag.TIME_SAMPLES, ())
             elif field in ("subLayers", "subLayerOffsets"):
                 changes.topology = True
                 changes.add(record.path, _ChangeFlag.SUBLAYERS, (field,))
+            elif field in _SDF_CHILDREN_FIELDS:
+                # Create/delete/move callbacks carry the child specs. These
+                # fields are Sdf's internal ownership tables, not authored
+                # scene-description fields; serializing them separately only
+                # duplicates the exact spec delta.
+                continue
             else:
                 changes.add(record.path, _ChangeFlag(0), (field,))
-        if has_delete and has_create:
-            for changes in self._pending.values():
-                changes.replacement = True
-                changes.topology = True
+        for layer_id in delete_layers & create_layers:
+            self._pending[layer_id].replacement = True
+            self._pending[layer_id].topology = True
 
     def prepare_local_changes(self) -> tuple[PreparedLayerBatch, ...]:
         self.sync_graph()
@@ -665,9 +696,7 @@ class NativeSdfLayerChangeTracker:
     def accept_authoritative_event(self, _layer: Sdf.Layer, _event: dict) -> None:
         pass
 
-    def accept_authoritative_sublayers(
-        self, _layer: Sdf.Layer, _entries: list[dict]
-    ) -> None:
+    def accept_authoritative_sublayers(self, _layer: Sdf.Layer, _entries: list[dict]) -> None:
         pass
 
     def mark_prepared_sent(self, batch: PreparedLayerBatch) -> None:

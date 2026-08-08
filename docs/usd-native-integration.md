@@ -38,6 +38,12 @@ the background, but it never mutates the stage itself.
 If the host replaces its stage, call `rebind_stage(new_stage)` on the owning
 thread. Managed layers move to the replacement and detach from the old stage.
 
+Callbacks driven by event application (`on_imported`, `on_resync`,
+`on_applied`, and `on_applied_events`) run synchronously inside `update()` on
+the calling thread. Transport callbacks, including metadata/playback updates
+and token issuance, may run on the background receiver or on the thread making
+a sender connection; UI integrations must marshal those callbacks explicitly.
+
 The supplied stage must be opened from the original base scene. A generated
 live snapshot already contains server state and is rejected because replaying
 the full logical history over that baseline would leave duplicate, stale
@@ -123,9 +129,13 @@ with ManagedClient(
 application's own edits, and returns the event counts for each direction.
 The dispatcher suppresses the emitter while authoritative records apply and
 invalidates its diff cache afterward, so the server's echo of the
-application's own edits is not re-published. Author into the stage's session
-layer (or any weaker layer); managed collaboration layers rebuild at the
-strong end of the session stack and never become the emitter's edit target.
+application's own edits is not re-published. The session root itself is
+stronger than all session sublayers, so `ManagedClient` redirects an initial
+session-root edit target into `client.authoring_layer`, a transient session
+sublayer below the receiver-owned managed block. Author into that layer, the
+root layer, or another application layer weaker than the managed block. The
+client rejects publishing from the strong session root or from a
+receiver-owned managed layer.
 
 ## Bidirectional hosts
 
@@ -142,8 +152,9 @@ Do not attach a layered `UsdReceiver` and a `UsdPublisher` to the same stage
 directly. The local edit would remain in its authoring layer and the echoed
 authoritative record would also be reconstructed in a managed collaboration
 layer. The composed value can look correct while opinion ownership is
-duplicated. `ManagedClient` is the supported single-stage form; it wires the
-emitter into the dispatcher so the echo is suppressed and cached instead.
+duplicated. `ManagedClient` is the supported single-stage form; it places local
+authoring below the authoritative managed block and wires the emitter into the
+dispatcher so echoes are suppressed and cached instead.
 
 Blender follows this contract today: it authors into one USD stage, rebuilds
 server layers in an independent mirror stage, and projects the mirror's
@@ -224,9 +235,10 @@ If its bounded local queue fills, pending records are coalesced into one exact
 current-content replacement per affected layer. That rare recovery transaction
 has whole-layer conflict scope; ordinary edits remain field-level.
 
-The sender connects lazily on the first `update()`; call `start_sender()`
-after `wait_connected()` when connection failures should surface immediately
-instead of being retried inside `update()`.
+`wait_connected()` completes both receive and send handshakes, including an
+in-memory TOFU token handoff when token persistence is disabled. Code that does
+not call `wait_connected()` may connect the sender explicitly with
+`start_sender()` or let the first `update()` retry it best-effort.
 
 Call `update()` on the thread that owns the stage. It freezes local authored
 changes, applies sequenced server records, restores concurrent local changes,

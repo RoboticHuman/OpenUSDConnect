@@ -115,6 +115,7 @@ def test_derived_kind_sets_pin():
         "set_payload",
         "set_point_instancer",
         "set_reference",
+        "set_sdf_spec_fields",
         "set_stage_metadata",
         "set_variant_selections",
         "set_visibility",
@@ -134,10 +135,9 @@ def test_stage_sync_kinds_are_structural():
     """Every stage-sync kind must also be structural.
 
     The dispatcher's mirror commit applies only STAGE_SYNC_KINDS, and
-    apply_events runs value-tier kinds inside an Sdf.ChangeBlock where
-    Usd.Stage.DefinePrim fails — so a value-tier stage-sync kind could
-    never create its prim on the mirror and would silently diverge.
-    A kind that needs the mirror but stays value-tier should instead
+    Structural classification ensures prim-index-affecting stage-sync kinds
+    run before ordinary value writes. A kind that needs the mirror but stays
+    value-tier should instead
     dedup via event-value writes in the emitter's _INVALIDATE_DISPATCH
     (the set_gprim_attrs pattern).
     """

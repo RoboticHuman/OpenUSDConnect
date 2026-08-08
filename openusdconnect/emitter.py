@@ -251,18 +251,22 @@ def _is_transform_attr(attr_name: str) -> bool:
 # in the viewport. DCC integrations register their own at import time;
 # tests pass an explicit set via the NoticeEmitter constructor.
 
-DEFAULT_REPLICATED_API_SCHEMAS = frozenset({
-    "ShapingAPI", "ShadowAPI",          # UsdLux user-applied
-    "MeshLightAPI", "VolumeLightAPI",   # UsdLux user-applied (light on Mesh/Volume)
-    # UsdHydra: marks a GenerativeProcedural prim for Hydra evaluation; without
-    # it a replicated procedural loses its imaging type and never resolves.
-    "HydraGenerativeProceduralAPI",
-    # NOTE: LightAPI is built-in for typed UsdLux lights, so replicating it
-    # would add a redundant authored opinion. Excluded by design.
-    # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.
-    # NOTE: MotionAPI (motion-blur sampling) is render-time, not viewport;
-    # users who need it call register_replicated_api_schema("MotionAPI").
-})
+DEFAULT_REPLICATED_API_SCHEMAS = frozenset(
+    {
+        "ShapingAPI",
+        "ShadowAPI",  # UsdLux user-applied
+        "MeshLightAPI",
+        "VolumeLightAPI",  # UsdLux user-applied (light on Mesh/Volume)
+        # UsdHydra: marks a GenerativeProcedural prim for Hydra evaluation; without
+        # it a replicated procedural loses its imaging type and never resolves.
+        "HydraGenerativeProceduralAPI",
+        # NOTE: LightAPI is built-in for typed UsdLux lights, so replicating it
+        # would add a redundant authored opinion. Excluded by design.
+        # NOTE: MaterialBindingAPI is handled via K_SET_MATERIAL_BINDING.
+        # NOTE: MotionAPI (motion-blur sampling) is render-time, not viewport;
+        # users who need it call register_replicated_api_schema("MotionAPI").
+    }
+)
 
 _REPLICATED_API_SCHEMAS: set[str] = set(DEFAULT_REPLICATED_API_SCHEMAS)
 
@@ -2282,6 +2286,21 @@ class NoticeEmitter:
         self._edit_target_conflict = False
         self._prepared_events = None
         self._suppress_depth = 0
+
+    def rebind_stage(self, stage: Usd.Stage) -> None:
+        """Reset tracking and attach this emitter to a replacement stage.
+
+        Pending dirty state belongs to the previous stage and is deliberately
+        discarded. Callers that retain a prepared transport batch must send or
+        explicitly discard it before rebinding.
+        """
+        if not isinstance(stage, Usd.Stage):
+            raise TypeError("NoticeEmitter requires a Usd.Stage")
+        if self._prepared_events is not None:
+            raise RuntimeError("cannot rebind an emitter while a prepared batch is pending")
+        self.cleanup()
+        self.stage = stage
+        self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
 
     def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
         """Seed the per-prim diff cache for a prim and its composed children.

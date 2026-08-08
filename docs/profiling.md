@@ -146,7 +146,7 @@ baseline updates, idle graph scans, graph baseline encoding and application,
 and full-parent sublayer reordering. Use `--spec-count`, `--graph-layers`, and
 the iteration options to match a production layer layout.
 
-To measure the optional native notice path against the Python tracker:
+To measure the optional native state-delegate path against the Python tracker:
 
 ```bash
 openusdconnect-build-sdf-notice-bridge --build-dir build/sdf-notice-bridge
