@@ -11,13 +11,11 @@ import pytest
 from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect.codec import message_to_dict
-from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
-    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_XFORM_TRS,
 )
@@ -292,8 +290,7 @@ class TestSharedDepartmentLayer:
         # Alice wrote last — her value wins
         assert _read_translate(srv.stage, "/World/Cube") == (3, 0, 0)
 
-    def test_shared_layer_broadcast_within_department(self, tmp_path):
-        """Events from same department always change composed view (shared layer)."""
+    def test_direct_apply_authors_shared_department_layer(self, tmp_path):
         srv = _make_server(tmp_path, department_priority=["animation"])
 
         _emit_events(
@@ -302,10 +299,8 @@ class TestSharedDepartmentLayer:
 
         layer = srv.get_or_create_client_layer("bob", department="animation")
         events = _make_trs_events("/World/Cube", (2, 0, 0))
-        changed = srv.apply_txn(events, layer=layer)
-
-        # Same layer — Bob's write always changes composed view
-        assert len(changed) == 3
+        assert srv.apply_txn(events, layer=layer) is None
+        assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
 
 
 class TestLayerLifecycle:
@@ -494,261 +489,6 @@ class TestMergeParity:
         assert len(srv.client_layers) == 0
 
 
-class TestBroadcastGating:
-    def test_overridden_event_not_broadcast(self, tmp_path):
-        """Events that don't change the composed view are persisted but not broadcast."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        # Bob (animation = stronger) sets /World/Cube
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
-
-        # Alice (layout = weaker) writes to same prim — composed value unchanged
-        layer = srv.get_or_create_client_layer("alice", department="layout")
-        events = _make_trs_events("/World/Cube", (99, 99, 99))
-        changed = srv.apply_txn(events, layer=layer)
-
-        # Composed value is still Bob's
-        assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
-
-        # apply_txn reports no composed changes
-        assert changed == []
-
-    def test_non_conflicting_event_is_broadcast(self, tmp_path):
-        """Events that change the composed view are reported."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
-
-        # Alice writes to a different prim — composed value changes
-        layer = srv.get_or_create_client_layer("alice", department="layout")
-        events = _make_trs_events("/World/Sphere", (5, 5, 5))
-        changed = srv.apply_txn(events, layer=layer)
-
-        # All 3 events (ensure_prim, ensure_xform_ops, set_xform_trs) changed composed view
-        assert len(changed) == 3
-
-    def test_stronger_layer_always_broadcast(self, tmp_path):
-        """Events from the strongest layer always change the composed view."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        # Alice (layout = weaker) writes first
-        _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
-
-        # Bob (animation = stronger) writes to same prim — his value wins
-        layer = srv.get_or_create_client_layer("bob", department="animation")
-        events = _make_trs_events("/World/Cube", (2, 0, 0))
-        changed = srv.apply_txn(events, layer=layer)
-
-        assert _read_translate(srv.stage, "/World/Cube") == (2, 0, 0)
-        assert len(changed) == 3  # all events produced composed changes
-
-
-class TestCorrectionPath:
-    def test_build_correction_for_overridden_transform(self, tmp_path):
-        """Server builds a correction event with composed TRS for overridden writes."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
-        _emit_events(
-            srv, "alice", _make_trs_events("/World/Cube", (99, 99, 99)), department="layout"
-        )
-
-        # Alice's event was overridden — build correction
-        correction = srv.build_correction(
-            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [99, 99, 99]},
-        )
-
-        assert correction is not None
-        assert correction["k"] == K_SET_XFORM_TRS
-        assert correction["prim"] == "/World/Cube"
-        # Correction contains Bob's composed value, not Alice's
-        assert correction["t"][0] == pytest.approx(2.0)
-        assert correction["t"][1] == pytest.approx(0.0)
-
-    def test_build_correction_for_deactivation(self, tmp_path):
-        """Correction for overridden deactivation returns composed active state."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (1, 0, 0)), department="animation")
-
-        # Bob's prim is active, Alice tries to deactivate (weaker)
-        correction = srv.build_correction(
-            {"k": "deactivate_prim", "prim": "/World/Cube", "active": False},
-        )
-        # Bob never set active — but prim defaults to active
-        assert correction is not None
-        assert correction["active"] is True
-
-    def test_no_correction_for_winning_event(self, tmp_path):
-        """No correction needed when the sender's layer wins."""
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-
-        _emit_events(srv, "bob", _make_trs_events("/World/Cube", (2, 0, 0)), department="animation")
-
-        # Bob is strongest — no correction
-        changed = srv.apply_txn(
-            _make_trs_events("/World/Cube", (5, 0, 0)),
-            layer=srv.get_or_create_client_layer("bob", department="animation"),
-        )
-        assert len(changed) == 3  # all events won
-
-    def test_send_to_origin(self, tmp_path):
-        """send_to_origin delivers to receivers matching the origin."""
-        srv = _make_server(tmp_path)
-
-        # Verify method exists and doesn't crash with no receivers
-        srv.send_to_origin({"type": "ping"}, "nonexistent-origin")
-
-    def test_sdf_correction_projects_composed_department_state(self, tmp_path):
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-        strong_layer = srv.get_or_create_client_layer("bob", department="animation")
-        weak_layer = srv.get_or_create_client_layer("alice", department="layout")
-        flat_receiver = Usd.Stage.CreateInMemory()
-
-        strong_stage = Usd.Stage.CreateInMemory()
-        strong_prim = strong_stage.DefinePrim("/World/Thing", "Xform")
-        strong_attr = strong_prim.CreateAttribute(
-            "userProperties:value",
-            Sdf.ValueTypeNames.Int,
-            True,
-        )
-        strong_attr.Set(2)
-        strong_attr.SetCustomData({"strong": 2})
-        strong_emitter = NoticeEmitter(strong_stage)
-        strong_events = strong_emitter.snapshot_events()
-        strong_generic = next(
-            event for event in strong_events if event["k"] == K_SET_SDF_SPEC_FIELDS
-        )
-
-        changed = srv.apply_txn(strong_events, layer=strong_layer)
-        assert strong_events.index(strong_generic) not in changed
-        apply_events(
-            flat_receiver,
-            [event for event in strong_events if event["k"] != K_SET_SDF_SPEC_FIELDS],
-        )
-        apply_events(flat_receiver, [srv.build_correction(strong_generic)])
-
-        weak_stage = Usd.Stage.CreateInMemory()
-        weak_prim = weak_stage.DefinePrim("/World/Thing", "Xform")
-        weak_attr = weak_prim.CreateAttribute(
-            "userProperties:value",
-            Sdf.ValueTypeNames.Int,
-            True,
-        )
-        weak_attr.Set(1)
-        weak_attr.SetCustomData({"weak": 1})
-        weak_emitter = NoticeEmitter(weak_stage)
-        weak_generic = next(
-            event for event in weak_emitter.snapshot_events() if event["k"] == K_SET_SDF_SPEC_FIELDS
-        )
-
-        assert srv.apply_txn([weak_generic], layer=weak_layer) == []
-        weak_correction = srv.build_correction(weak_generic)
-        apply_events(flat_receiver, [weak_correction])
-
-        path = "/World/Thing.userProperties:value"
-        server_attr = srv.stage.GetAttributeAtPath(path)
-        receiver_attr = flat_receiver.GetAttributeAtPath(path)
-        assert server_attr.Get() == receiver_attr.Get() == 2
-        assert (
-            server_attr.GetCustomData()
-            == receiver_attr.GetCustomData()
-            == {
-                "strong": 2,
-                "weak": 1,
-            }
-        )
-
-        strong_prim.RemoveProperty("userProperties:value")
-        removed = next(
-            event
-            for event in strong_emitter.build_events_for_dirty()
-            if event["k"] == K_SET_SDF_SPEC_FIELDS
-        )
-        assert removed["removed"] is True
-        assert removed["fields"]
-        assert srv.apply_txn([removed], layer=strong_layer) == []
-
-        revealed_correction = srv.build_correction(removed)
-        apply_events(flat_receiver, [revealed_correction])
-        assert revealed_correction["removed"] is False
-        assert srv.stage.GetAttributeAtPath(path).Get() == 1
-        assert flat_receiver.GetAttributeAtPath(path).Get() == 1
-        assert flat_receiver.GetAttributeAtPath(path).GetCustomData() == {"weak": 1}
-
-        strong_emitter.cleanup()
-        weak_emitter.cleanup()
-
-    def test_sdf_correction_projects_prim_layer_and_variant_specs(self, tmp_path):
-        srv = _make_server(tmp_path, department_priority=["animation", "layout"])
-        strong_layer = srv.get_or_create_client_layer("bob", department="animation")
-        weak_layer = srv.get_or_create_client_layer("alice", department="layout")
-        flat_receiver = Usd.Stage.CreateInMemory()
-
-        def _source(label, variant_name):
-            stage = Usd.Stage.CreateInMemory()
-            stage.GetRootLayer().customLayerData = {label: True}
-            thing = stage.DefinePrim("/World/Thing", "Xform")
-            thing.SetDocumentation(label)
-            thing.SetCustomData({label: True, "shared": label})
-            variants = thing.GetVariantSets().AddVariantSet("look")
-            variants.AddVariant(variant_name)
-            variants.SetVariantSelection(variant_name)
-            with variants.GetVariantEditContext():
-                child = stage.DefinePrim(f"/World/Thing/{label.title()}", "Scope")
-                child.SetDocumentation(f"{label} variant")
-            variants.ClearVariantSelection()
-            emitter = NoticeEmitter(stage)
-            return stage, emitter, emitter.snapshot_events()
-
-        def _apply_flat_view(events, changed_indices):
-            for index, event in enumerate(events):
-                if event["k"] == K_SET_SDF_SPEC_FIELDS:
-                    apply_events(flat_receiver, [srv.build_correction(event)])
-                elif index in changed_indices:
-                    apply_events(flat_receiver, [event])
-
-        strong_stage, strong_emitter, strong_events = _source("strong", "blue")
-        weak_stage, weak_emitter, weak_events = _source("weak", "red")
-        try:
-            changed = srv.apply_txn(strong_events, layer=strong_layer)
-            _apply_flat_view(strong_events, changed)
-            changed = srv.apply_txn(weak_events, layer=weak_layer)
-            _apply_flat_view(weak_events, changed)
-
-            thing = flat_receiver.GetPrimAtPath("/World/Thing")
-            assert flat_receiver.GetRootLayer().customLayerData == {
-                "strong": True,
-                "weak": True,
-            }
-            assert thing.GetDocumentation() == "strong"
-            assert dict(flat_receiver.GetRootLayer().GetPrimAtPath("/World/Thing").customData) == {
-                "shared": "strong",
-                "strong": True,
-                "weak": True,
-            }
-            variants = thing.GetVariantSets().GetVariantSet("look")
-            assert variants.GetVariantNames() == ["blue", "red"]
-            variants.SetVariantSelection("blue")
-            assert flat_receiver.GetPrimAtPath("/World/Thing/Strong")
-            variants.SetVariantSelection("red")
-            assert flat_receiver.GetPrimAtPath("/World/Thing/Weak")
-
-            variant_set = strong_stage.GetRootLayer().GetObjectAtPath(
-                "/World/Thing{look=}",
-            )
-            variant_set.RemoveVariant(variant_set.variants["blue"])
-            removed = strong_emitter.build_events_for_dirty()
-            changed = srv.apply_txn(removed, layer=strong_layer)
-            _apply_flat_view(removed, changed)
-            assert variants.GetVariantNames() == ["red"]
-        finally:
-            strong_emitter.cleanup()
-            weak_emitter.cleanup()
-            srv.shutdown()
-            srv.store.close()
-
-
 class TestReplayWithClientLayers:
     def test_replay_routes_to_client_layers(self, tmp_path):
         """Events replayed on startup go to the correct client layers."""
@@ -867,7 +607,7 @@ class TestReplayWithClientLayers:
         srv2 = UsdSyncServer(log_path=db)
         try:
             animation = srv2.resolve_layer("animation")
-            records, _changed = srv2.process_txn(
+            records = srv2.process_txn(
                 [
                     {
                         "k": K_ENSURE_PRIM,
@@ -1003,8 +743,6 @@ class TestConcurrentDepartmentWrites:
         race) and that per-layer values are independently correct."""
         import threading
 
-        from pxr import Sdf
-
         srv = _make_server(tmp_path, department_priority=["animation", "lighting", "fx"])
         barrier = threading.Barrier(3)
         errors = []
@@ -1127,8 +865,6 @@ class TestConcurrentDepartmentWrites:
         t2.join(timeout=10)
 
         assert not errors, f"Writer threads raised: {errors}"
-
-        from pxr import Sdf
 
         # Animation is stronger — composed value must be animation's last write,
         # regardless of which thread finished last.
@@ -1285,8 +1021,6 @@ class TestMultiDepartmentContention:
     def test_concurrent_contention_on_shared_prims(self, tmp_path):
         """Concurrent department writes with shared and private prims."""
         import threading
-
-        from pxr import Sdf
 
         srv = _make_server(tmp_path, department_priority=self.DEPTS)
         barrier = threading.Barrier(len(self.CLIENTS))

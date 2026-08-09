@@ -495,8 +495,21 @@ def _drain_and_process() -> int:
 
 def _process_queue_timer():
     """Apply queued events and refresh Blender under the feedback guard."""
+    global _QUEUE_TIMER_REGISTERED, _RECEIVER
     if _RECEIVER is None:
         return None  # Unregister timer
+
+    if _RECEIVER.hello_rejected:
+        reason = _RECEIVER.rejection_reason or "receiver connection rejected"
+        LOG.error("OpenUSDConnect receiver rejected: %s", reason)
+        receiver = _RECEIVER
+        _RECEIVER = None
+        _stop_receiver_thread(receiver)
+        _QUEUE_TIMER_REGISTERED = False
+        scene = bpy.context.scene
+        if scene is not None:
+            scene.usd_connect_recv_running = False
+        return None
 
     # Hold the feedback guard for the entire batch INCLUDING view_layer.update()
     # so the depsgraph handler doesn't echo received changes back to the server.

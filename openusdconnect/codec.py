@@ -46,6 +46,7 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -56,6 +57,7 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -67,6 +69,8 @@ from .protocol_constants import (
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
+    MSG_HELLO_REJECTED,
+    MSG_LAYER_GRAPH_STATE,
     MSG_LAYER_STACK_STATE,
     MSG_PING,
     MSG_PLAYBACK_CLAIMED,
@@ -80,6 +84,7 @@ from .protocol_constants import (
     MSG_TXN,
     POINT_INSTANCER_FIELDS,
     SDF_SPEC_KINDS,
+    LayerMode,
 )
 
 # Re-export generated classes so consumers import from codec, not generated path.
@@ -88,6 +93,8 @@ Envelope = _fb.Envelope
 Hello = _fb.Hello
 HelloOk = _fb.HelloOk
 AuthRejected = _fb.AuthRejected
+HelloRejectionCode = _fb.HelloRejectionCode
+HelloRejected = _fb.HelloRejected
 Txn = _fb.Txn
 BroadcastEvent = _fb.BroadcastEvent
 Resync = _fb.Resync
@@ -118,6 +125,8 @@ SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
 SetSdfSpecFields = _fb.SetSdfSpecFields
+ReplaceSdfLayerContent = _fb.ReplaceSdfLayerContent
+SetSublayers = _fb.SetSublayers
 ClaimPlayback = _fb.ClaimPlayback
 PlaybackClaimed = _fb.PlaybackClaimed
 PlaybackRejected = _fb.PlaybackRejected
@@ -125,6 +134,9 @@ PlaybackControl = _fb.PlaybackControl
 PlaybackState = _fb.PlaybackState
 LogicalLayerState = _fb.LogicalLayerState
 LayerStackState = _fb.LayerStackState
+LayerGraphState = _fb.LayerGraphState
+SharedLayerState = _fb.SharedLayerState
+SublayerEntry = _fb.SublayerEntry
 NamedAttr = _fb.NamedAttr
 AttrValue = _fb.AttrValue
 AttrValueType = _fb.AttrValueType
@@ -139,8 +151,9 @@ StringPair = _fb.StringPair
 PayloadType = _fb.Payload
 EventPayloadType = _fb.EventPayload
 SdfSpecKindType = _fb.SdfSpecKind
+LayerModeType = _fb.LayerMode
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -150,6 +163,7 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_HELLO: PayloadType.Hello,
     MSG_HELLO_OK: PayloadType.HelloOk,
     MSG_AUTH_REJECTED: PayloadType.AuthRejected,
+    MSG_HELLO_REJECTED: PayloadType.HelloRejected,
     MSG_TXN: PayloadType.Txn,
     MSG_EVENT: PayloadType.BroadcastEvent,
     MSG_RESYNC: PayloadType.Resync,
@@ -165,7 +179,14 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_PLAYBACK_CONTROL: PayloadType.PlaybackControl,
     MSG_PLAYBACK_STATE: PayloadType.PlaybackState,
     MSG_LAYER_STACK_STATE: PayloadType.LayerStackState,
+    MSG_LAYER_GRAPH_STATE: PayloadType.LayerGraphState,
 }
+
+_LAYER_MODE_TO_FB = {
+    LayerMode.MANAGED.value: LayerModeType.Managed,
+    LayerMode.SHARED_STAGE.value: LayerModeType.SharedStage,
+}
+_FB_TO_LAYER_MODE = {value: key for key, value in _LAYER_MODE_TO_FB.items()}
 
 _ARC_POSITION_TO_FB = {
     "explicit": ArcListPositionType.Explicit,
@@ -185,6 +206,7 @@ _SDF_SPEC_KIND_TO_FB = {
     "relationship": SdfSpecKindType.Relationship,
     "variant_set": SdfSpecKindType.VariantSet,
     "variant": SdfSpecKindType.Variant,
+    "property": SdfSpecKindType.Property,
 }
 assert tuple(_SDF_SPEC_KIND_TO_FB) == SDF_SPEC_KINDS
 _FB_TO_SDF_SPEC_KIND = {value: key for key, value in _SDF_SPEC_KIND_TO_FB.items()}
@@ -195,6 +217,7 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.Hello: Hello,
     PayloadType.HelloOk: HelloOk,
     PayloadType.AuthRejected: AuthRejected,
+    PayloadType.HelloRejected: HelloRejected,
     PayloadType.Txn: Txn,
     PayloadType.BroadcastEvent: BroadcastEvent,
     PayloadType.Resync: Resync,
@@ -210,6 +233,7 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.PlaybackControl: PlaybackControl,
     PayloadType.PlaybackState: PlaybackState,
     PayloadType.LayerStackState: LayerStackState,
+    PayloadType.LayerGraphState: LayerGraphState,
 }
 
 # Stage metadata numeric fields paired with their FB Add* setters.
@@ -360,6 +384,10 @@ def _encode_hello(b, msg):
         _fb.HelloAddToken(b, token)
     if msg.get("layered_replay"):
         _fb.HelloAddLayeredReplay(b, True)
+    _fb.HelloAddLayerMode(
+        b,
+        _LAYER_MODE_TO_FB[msg.get("layer_mode", LayerMode.MANAGED.value)],
+    )
     return _fb.HelloEnd(b)
 
 
@@ -406,6 +434,10 @@ def _encode_hello_ok(b, msg):
         _fb.HelloOkAddStageMetadata(b, sm_off)
     if msg.get("layered_replay"):
         _fb.HelloOkAddLayeredReplay(b, True)
+    _fb.HelloOkAddLayerMode(
+        b,
+        _LAYER_MODE_TO_FB[msg.get("layer_mode", LayerMode.MANAGED.value)],
+    )
     return _fb.HelloOkEnd(b)
 
 
@@ -416,9 +448,21 @@ def _encode_auth_rejected(b, msg):
     return _fb.AuthRejectedEnd(b)
 
 
+def _encode_hello_rejected(b, msg):
+    code = int(msg.get("code", HelloRejectionCode.Unspecified))
+    if code == HelloRejectionCode.Unspecified:
+        raise ValueError("hello_rejected code must be specified")
+    reason = b.CreateString(msg.get("reason", ""))
+    _fb.HelloRejectedStart(b)
+    _fb.HelloRejectedAddCode(b, code)
+    _fb.HelloRejectedAddReason(b, reason)
+    return _fb.HelloRejectedEnd(b)
+
+
 def _encode_txn(b, msg):
     client_id = b.CreateString(msg["client_id"])
     proposal_id = b.CreateString(msg["proposal_id"]) if msg.get("proposal_id") else None
+    layer_key = b.CreateString(msg["layer_key"]) if msg.get("layer_key") else None
     event_offsets = [_encode_event_wrapper(b, ev) for ev in msg["events"]]
     _fb.TxnStartEventsVector(b, len(event_offsets))
     for off in reversed(event_offsets):
@@ -429,6 +473,8 @@ def _encode_txn(b, msg):
     _fb.TxnAddEvents(b, events_vec)
     if proposal_id is not None:
         _fb.TxnAddProposalId(b, proposal_id)
+    if layer_key is not None:
+        _fb.TxnAddLayerKey(b, layer_key)
     return _fb.TxnEnd(b)
 
 
@@ -579,10 +625,62 @@ def _encode_layer_stack_state(b, msg):
     return _fb.LayerStackStateEnd(b)
 
 
+def _encode_sublayer_entries(b, entries):
+    offsets = []
+    for entry in entries:
+        authored_path = b.CreateString(entry["authored_path"])
+        layer_key = b.CreateString(entry["layer_key"]) if entry.get("layer_key") else None
+        _fb.SublayerEntryStart(b)
+        _fb.SublayerEntryAddAuthoredPath(b, authored_path)
+        _fb.SublayerEntryAddOffset(b, float(entry.get("offset", 0.0)))
+        _fb.SublayerEntryAddScale(b, float(entry.get("scale", 1.0)))
+        if layer_key is not None:
+            _fb.SublayerEntryAddLayerKey(b, layer_key)
+        offsets.append(_fb.SublayerEntryEnd(b))
+    return offsets
+
+
+def _encode_layer_graph_state(b, msg):
+    generation = b.CreateString(msg["generation"])
+    root_layer_key = b.CreateString(msg["root_layer_key"])
+    layer_offsets = []
+    for state in msg.get("layers", ()):
+        layer_key = b.CreateString(state["layer_key"])
+        sublayer_offsets = _encode_sublayer_entries(b, state.get("sublayers", ()))
+        sublayers = None
+        if sublayer_offsets:
+            _fb.SharedLayerStateStartSublayersVector(b, len(sublayer_offsets))
+            for offset in reversed(sublayer_offsets):
+                b.PrependUOffsetTRelative(offset)
+            sublayers = b.EndVector()
+        _fb.SharedLayerStateStart(b)
+        _fb.SharedLayerStateAddLayerKey(b, layer_key)
+        if sublayers is not None:
+            _fb.SharedLayerStateAddSublayers(b, sublayers)
+        layer_offsets.append(_fb.SharedLayerStateEnd(b))
+
+    layers = None
+    if layer_offsets:
+        _fb.LayerGraphStateStartLayersVector(b, len(layer_offsets))
+        for offset in reversed(layer_offsets):
+            b.PrependUOffsetTRelative(offset)
+        layers = b.EndVector()
+
+    _fb.LayerGraphStateStart(b)
+    _fb.LayerGraphStateAddSeq(b, int(msg.get("seq", 0)))
+    _fb.LayerGraphStateAddGeneration(b, generation)
+    _fb.LayerGraphStateAddRevision(b, int(msg["revision"]))
+    _fb.LayerGraphStateAddRootLayerKey(b, root_layer_key)
+    if layers is not None:
+        _fb.LayerGraphStateAddLayers(b, layers)
+    return _fb.LayerGraphStateEnd(b)
+
+
 _ENCODE_DISPATCH = {
     MSG_HELLO: _encode_hello,
     MSG_HELLO_OK: _encode_hello_ok,
     MSG_AUTH_REJECTED: _encode_auth_rejected,
+    MSG_HELLO_REJECTED: _encode_hello_rejected,
     MSG_TXN: _encode_txn,
     MSG_EVENT: _encode_broadcast_event,
     MSG_RESYNC: _encode_resync,
@@ -598,6 +696,7 @@ _ENCODE_DISPATCH = {
     MSG_PLAYBACK_CONTROL: _encode_playback_control,
     MSG_PLAYBACK_STATE: _encode_playback_state,
     MSG_LAYER_STACK_STATE: _encode_layer_stack_state,
+    MSG_LAYER_GRAPH_STATE: _encode_layer_graph_state,
 }
 
 
@@ -1301,6 +1400,44 @@ def _encode_set_sdf_spec_fields(b, ev):
     return _fb.SetSdfSpecFieldsEnd(b)
 
 
+@register_encoder(
+    K_REPLACE_SDF_LAYER_CONTENT,
+    fb_tag=EventPayloadType.ReplaceSdfLayerContent,
+    fb_class=ReplaceSdfLayerContent,
+)
+def _encode_replace_sdf_layer_content(b, ev):
+    prim = b.CreateString(ev["prim"])
+    fragment = b.CreateString(ev["fragment"])
+    _fb.ReplaceSdfLayerContentStart(b)
+    _fb.ReplaceSdfLayerContentAddPrim(b, prim)
+    _fb.ReplaceSdfLayerContentAddFragment(b, fragment)
+    return _fb.ReplaceSdfLayerContentEnd(b)
+
+
+@register_encoder(
+    K_SET_SUBLAYERS,
+    fb_tag=EventPayloadType.SetSublayers,
+    fb_class=SetSublayers,
+)
+def _encode_set_sublayers(b, ev):
+    prim = b.CreateString(ev["prim"])
+    generation = b.CreateString(ev["generation"])
+    entry_offsets = _encode_sublayer_entries(b, ev.get("sublayers", ()))
+    sublayers = None
+    if entry_offsets:
+        _fb.SetSublayersStartSublayersVector(b, len(entry_offsets))
+        for offset in reversed(entry_offsets):
+            b.PrependUOffsetTRelative(offset)
+        sublayers = b.EndVector()
+    _fb.SetSublayersStart(b)
+    _fb.SetSublayersAddPrim(b, prim)
+    _fb.SetSublayersAddGeneration(b, generation)
+    _fb.SetSublayersAddRevision(b, int(ev.get("revision", 0)))
+    if sublayers is not None:
+        _fb.SetSublayersAddSublayers(b, sublayers)
+    return _fb.SetSublayersEnd(b)
+
+
 # ===================================================================
 # DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
 # ===================================================================
@@ -1356,6 +1493,7 @@ class DecodeResult:
     received: list[Event] = field(default_factory=list)
     received_records: list[ReceivedEvent] = field(default_factory=list)
     layer_stack_states: list[dict] = field(default_factory=list)
+    layer_graph_states: list[dict] = field(default_factory=list)
     last_seq: int = 0
     resync_requested: bool = False
     rate_limited_retry_after: float | None = None
@@ -1392,10 +1530,20 @@ def decode_messages(
                 result.received.clear()
                 result.received_records.clear()
                 result.layer_stack_states.clear()
+                result.layer_graph_states.clear()
             continue
 
         if msg_type == MSG_LAYER_STACK_STATE:
             result.layer_stack_states.append(msg)
+            continue
+
+        if msg_type == MSG_LAYER_GRAPH_STATE:
+            seq = int(msg.get("seq") or 0)
+            if seq and seq <= result.last_seq:
+                continue
+            if seq:
+                result.last_seq = seq
+            result.layer_graph_states.append(msg)
             continue
 
         if msg_type == MSG_RATE_LIMITED:
@@ -1460,6 +1608,9 @@ def _dict_hello(h, msg_type):
             msg[key] = v
     if h.LayeredReplay():
         msg["layered_replay"] = True
+    mode = _FB_TO_LAYER_MODE[h.LayerMode()]
+    if mode != LayerMode.MANAGED.value:
+        msg["layer_mode"] = mode
     return msg
 
 
@@ -1475,6 +1626,9 @@ def _dict_hello_ok(h, msg_type):
             msg["stage_metadata"] = meta
     if h.LayeredReplay():
         msg["layered_replay"] = True
+    mode = _FB_TO_LAYER_MODE[h.LayerMode()]
+    if mode != LayerMode.MANAGED.value:
+        msg["layer_mode"] = mode
     return msg
 
 
@@ -1540,8 +1694,38 @@ def _dict_layer_stack_state(state, msg_type):
     }
 
 
+def _dict_layer_graph_state(state, msg_type):
+    layers = []
+    for index in range(state.LayersLength()):
+        item = state.Layers(index)
+        layers.append(
+            {
+                "layer_key": _str(item.LayerKey()) or "",
+                "sublayers": [
+                    _dict_sublayer_entry(item.Sublayers(i)) for i in range(item.SublayersLength())
+                ],
+            }
+        )
+    return {
+        "type": msg_type,
+        "seq": int(state.Seq()),
+        "generation": _str(state.Generation()) or "",
+        "revision": int(state.Revision()),
+        "root_layer_key": _str(state.RootLayerKey()) or "",
+        "layers": layers,
+    }
+
+
 def _dict_auth_rejected(h, msg_type):
     return {"type": msg_type, "reason": _str(h.Reason()) or ""}
+
+
+def _dict_hello_rejected(h, msg_type):
+    return {
+        "type": msg_type,
+        "code": int(h.Code()),
+        "reason": _str(h.Reason()) or "",
+    }
 
 
 def _dict_txn(t, msg_type, numpy_arrays=False):
@@ -1552,6 +1736,9 @@ def _dict_txn(t, msg_type, numpy_arrays=False):
     pid = _str(t.ProposalId())
     if pid:
         msg["proposal_id"] = pid
+    layer_key = _str(t.LayerKey())
+    if layer_key:
+        msg["layer_key"] = layer_key
     return msg
 
 
@@ -1599,6 +1786,7 @@ _DICT_DECODE_DISPATCH = {
     MSG_HELLO: _dict_hello,
     MSG_HELLO_OK: _dict_hello_ok,
     MSG_AUTH_REJECTED: _dict_auth_rejected,
+    MSG_HELLO_REJECTED: _dict_hello_rejected,
     MSG_TXN: _dict_txn,
     MSG_EVENT: _dict_broadcast_event,
     MSG_RESYNC: _dict_empty,
@@ -1614,6 +1802,7 @@ _DICT_DECODE_DISPATCH = {
     MSG_PLAYBACK_CONTROL: _dict_playback_control,
     MSG_PLAYBACK_STATE: _dict_playback_state,
     MSG_LAYER_STACK_STATE: _dict_layer_stack_state,
+    MSG_LAYER_GRAPH_STATE: _dict_layer_graph_state,
 }
 
 
@@ -1976,4 +2165,36 @@ def _dict_set_sdf_spec_fields(sss, kind):
         "fields": [_str(sss.Fields(i)) for i in range(sss.FieldsLength())],
         "fragment": _str(sss.Fragment()),
         "removed": bool(sss.Removed()),
+    }
+
+
+@register_decoder(K_REPLACE_SDF_LAYER_CONTENT)
+def _dict_replace_sdf_layer_content(replacement, kind):
+    return {
+        "k": kind,
+        "prim": _str(replacement.Prim()) or "",
+        "fragment": _str(replacement.Fragment()) or "",
+    }
+
+
+def _dict_sublayer_entry(entry) -> dict:
+    result = {
+        "authored_path": _str(entry.AuthoredPath()) or "",
+        "offset": float(entry.Offset()),
+        "scale": float(entry.Scale()),
+    }
+    layer_key = _str(entry.LayerKey())
+    if layer_key:
+        result["layer_key"] = layer_key
+    return result
+
+
+@register_decoder(K_SET_SUBLAYERS)
+def _dict_set_sublayers(ss, kind):
+    return {
+        "k": kind,
+        "prim": _str(ss.Prim()) or "",
+        "generation": _str(ss.Generation()) or "",
+        "revision": int(ss.Revision()),
+        "sublayers": [_dict_sublayer_entry(ss.Sublayers(i)) for i in range(ss.SublayersLength())],
     }

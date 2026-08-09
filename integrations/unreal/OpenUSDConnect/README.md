@@ -88,6 +88,12 @@ the project. Linux follows the same layout but has not been validated here.
 | Persist Auth Tokens | `true` | Save server-issued TOFU tokens in the user's Unreal config and reuse them on reconnect. |
 | Reconnect Delay (s) | `3.0` | Wait time between reconnect attempts |
 
+The native plugin currently receives through flat replay. Use it with one
+unmuted collaboration layer and no server department policy. A department
+server rejects the receiver with a clear status message; layered Unreal replay
+is future work. The Department setting remains available to the emitter but
+does not make the receive path layer-aware.
+
 ---
 
 ## Usage

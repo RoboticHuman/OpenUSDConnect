@@ -48,6 +48,15 @@ class ArcEntry(TypedDict):
     custom_data_fragment: NotRequired[str]  # reference-only typed USDA dictionary
 
 
+class SublayerEntry(TypedDict):
+    """One authored edge in an ordered ``Sdf.Layer.subLayerPaths`` list."""
+
+    authored_path: str
+    offset: NotRequired[float]
+    scale: NotRequired[float]
+    layer_key: NotRequired[str]
+
+
 class PrimvarMeta(TypedDict):
     """USD type + interpolation for a primvar attribute."""
 
@@ -344,10 +353,29 @@ class SetSdfSpecFields(TypedDict):
         "relationship",
         "variant_set",
         "variant",
+        "property",
     ]
     fields: list[str]
     fragment: str
     removed: bool
+
+
+class ReplaceSdfLayerContent(TypedDict):
+    """Replace all non-topology opinions in the targeted authored layer."""
+
+    k: Literal["replace_sdf_layer_content"]
+    prim: Literal["/"]
+    fragment: str
+
+
+class SetSublayers(TypedDict):
+    """Replace the complete ordered sublayer list of the targeted layer."""
+
+    k: Literal["set_sublayers"]
+    prim: Literal["/"]
+    generation: str
+    revision: int
+    sublayers: list[SublayerEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +403,8 @@ Event = (
     | SetInstanceable
     | SetPointInstancer
     | SetSdfSpecFields
+    | ReplaceSdfLayerContent
+    | SetSublayers
 )
 
 
@@ -478,6 +508,7 @@ def all_specs() -> list[EventSpec]:
 __all__ = [
     "ArcListPosition",
     "ArcEntry",
+    "SublayerEntry",
     "PrimvarMeta",
     "ConnSource",
     "AttrValue",
@@ -502,6 +533,8 @@ __all__ = [
     "SetInstanceable",
     "SetPointInstancer",
     "SetSdfSpecFields",
+    "ReplaceSdfLayerContent",
+    "SetSublayers",
     "Event",
     "EventSpec",
     "register_encoder",

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from pxr import Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
+from pxr import Sdf, Usd, UsdGeom, UsdShade, Vt
 
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_GPRIM_ATTRS,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
@@ -19,15 +20,17 @@ from openusdconnect.sdf_spec_delta import (
     SDF_SPEC_KIND_ATTRIBUTE,
     SDF_SPEC_KIND_LAYER,
     SDF_SPEC_KIND_PRIM,
+    SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KIND_RELATIONSHIP,
     SDF_SPEC_KIND_VARIANT,
     SDF_SPEC_KIND_VARIANT_SET,
+    apply_layer_content_replacement,
     apply_spec_delta,
-    composed_layer_spec_event,
-    composed_property_spec_event,
-    fragment_authored_fields,
-    serialize_composed_property_spec_fields,
+    apply_spec_delta_to_layer,
+    serialize_layer_content,
     serialize_spec_fields,
+    validate_layer_content_replacement,
+    validate_spec_delta,
 )
 from openusdconnect.server import UsdSyncServer
 
@@ -39,6 +42,92 @@ def _property_info(layer: Sdf.Layer, path: str) -> dict:
 
 def _sdf_events(events: list[dict]) -> list[dict]:
     return [event for event in events if event["k"] == K_SET_SDF_SPEC_FIELDS]
+
+
+@pytest.mark.parametrize("relationship", [False, True])
+def test_generic_property_removal_handles_both_property_spec_types(relationship):
+    layer = Sdf.Layer.CreateAnonymous("property-removal")
+    prim = Sdf.CreatePrimInLayer(layer, "/Thing")
+    if relationship:
+        Sdf.RelationshipSpec(prim, "value", True)
+    else:
+        Sdf.AttributeSpec(prim, "value", Sdf.ValueTypeNames.Int)
+    event = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/Thing",
+        "spec_path": "/Thing.value",
+        "spec_kind": SDF_SPEC_KIND_PROPERTY,
+        "fields": [],
+        "fragment": "",
+        "removed": True,
+    }
+
+    validate_spec_delta(event)
+    apply_spec_delta_to_layer(layer, event)
+
+    assert layer.GetObjectAtPath("/Thing.value") is None
+
+
+def test_generic_property_kind_rejects_non_removal():
+    event = {
+        "k": K_SET_SDF_SPEC_FIELDS,
+        "prim": "/Thing",
+        "spec_path": "/Thing.value",
+        "spec_kind": SDF_SPEC_KIND_PROPERTY,
+        "fields": ["default"],
+        "fragment": '#usda 1.0\n\nover "Thing" {}\n',
+        "removed": False,
+    }
+
+    with pytest.raises(ValueError, match="valid only for removal"):
+        validate_spec_delta(event)
+
+
+def test_layer_content_replacement_preserves_topology_and_private_metadata():
+    source = Sdf.Layer.CreateAnonymous("replacement-source")
+    Sdf.CreatePrimInLayer(source, "/New").documentation = "new content"
+    source.customLayerData = {
+        "user": 7,
+        "openusdconnect": {"source": "must not cross"},
+    }
+    source.subLayerPaths.append("./source-child.usda")
+
+    target = Sdf.Layer.CreateAnonymous("replacement-target")
+    Sdf.CreatePrimInLayer(target, "/Old")
+    target.customLayerData = {
+        "stale": True,
+        "openusdconnect": {"layer_key": "keep"},
+    }
+    target.subLayerPaths.append("./target-child.usda")
+    target.subLayerOffsets[0] = Sdf.LayerOffset(7, 2)
+    event = {
+        "k": K_REPLACE_SDF_LAYER_CONTENT,
+        "prim": "/",
+        "fragment": serialize_layer_content(source),
+    }
+
+    validate_layer_content_replacement(event)
+    apply_layer_content_replacement(target, event)
+
+    assert target.GetPrimAtPath("/Old") is None
+    assert target.GetPrimAtPath("/New").documentation == "new content"
+    assert list(target.subLayerPaths) == ["./target-child.usda"]
+    assert target.subLayerOffsets[0] == Sdf.LayerOffset(7, 2)
+    assert target.customLayerData == {
+        "user": 7,
+        "openusdconnect": {"layer_key": "keep"},
+    }
+
+
+def test_layer_content_replacement_rejects_embedded_sublayers():
+    event = {
+        "k": K_REPLACE_SDF_LAYER_CONTENT,
+        "prim": "/",
+        "fragment": "#usda 1.0\n( subLayers = [@./asset.usda@] )\n",
+    }
+
+    with pytest.raises(ValueError, match="cannot author sublayer topology"):
+        validate_layer_content_replacement(event)
 
 
 def test_custom_attribute_and_relationship_snapshot_roundtrip():
@@ -335,33 +424,6 @@ def test_snapshot_omits_sublayer_topology_fields():
     )
 
 
-def test_flat_projection_omits_sublayer_topology_fields():
-    root = Sdf.Layer.CreateAnonymous("root.usda")
-    weak = Sdf.Layer.CreateAnonymous("weak.usda")
-    root.subLayerPaths = [weak.identifier]
-    root.subLayerOffsets[0] = Sdf.LayerOffset(7.0, 2.0)
-
-    correction = composed_layer_spec_event(
-        root,
-        {
-            "k": K_SET_SDF_SPEC_FIELDS,
-            "prim": "/",
-            "spec_path": "/",
-            "spec_kind": SDF_SPEC_KIND_LAYER,
-            "fields": sorted(SDF_LAYER_TOPOLOGY_FIELDS),
-            "fragment": "",
-            "removed": False,
-        },
-    )
-
-    assert not set(correction["fields"]) & SDF_LAYER_TOPOLOGY_FIELDS
-    assert not fragment_authored_fields(
-        correction["fragment"],
-        "/",
-        SDF_SPEC_KIND_LAYER,
-    ) & SDF_LAYER_TOPOLOGY_FIELDS
-
-
 def test_spec_delta_rejects_mismatched_routing_prim():
     target = Usd.Stage.CreateInMemory()
     with pytest.raises(ValueError, match="belongs to /World/Thing"):
@@ -438,229 +500,6 @@ def test_server_preflights_sdf_events_before_shared_stage_edits(tmp_path):
         server.store.close()
 
 
-def test_composed_projection_follows_usd_field_resolution():
-    weak = Sdf.Layer.CreateAnonymous("weak.usda")
-    source = Usd.Stage.Open(weak)
-    prim = source.DefinePrim("/World/Thing", "Xform")
-    value = prim.CreateAttribute(
-        "userProperties:value",
-        Sdf.ValueTypeNames.Int,
-        custom=True,
-    )
-    value.Set(1)
-    value.SetCustomData({"weak": 1})
-    samples = prim.CreateAttribute(
-        "userProperties:samples",
-        Sdf.ValueTypeNames.Float,
-        custom=True,
-    )
-    samples.Set(1.0, 1.0)
-    samples.Set(2.0, 2.0)
-    relation = prim.CreateRelationship("userProperties:targets", custom=True)
-    relation.SetTargets([Sdf.Path("/World/A")])
-    declaration = prim.CreateAttribute(
-        "userProperties:declaration",
-        Sdf.ValueTypeNames.Float,
-        custom=True,
-    )
-    declaration.Set(1.0)
-
-    strong = source.GetSessionLayer()
-    source.SetEditTarget(strong)
-    value.Set(Sdf.ValueBlock())
-    value.SetCustomData({"strong": 2})
-    samples.Set(3.0, 3.0)
-    samples.Set(Sdf.ValueBlock(), 4.0)
-    relation.AddTarget(
-        Sdf.Path("/World/B"),
-        Usd.ListPositionFrontOfPrependList,
-    )
-    declaration.SetMetadata("custom", False)
-    declaration.SetDocumentation("strong documentation")
-
-    target = Usd.Stage.CreateInMemory()
-    requests = [
-        (
-            "/World/Thing.userProperties:value",
-            SDF_SPEC_KIND_ATTRIBUTE,
-            ["default", "customData"],
-        ),
-        (
-            "/World/Thing.userProperties:samples",
-            SDF_SPEC_KIND_ATTRIBUTE,
-            ["timeSamples"],
-        ),
-        (
-            "/World/Thing.userProperties:targets",
-            "relationship",
-            ["targetPaths"],
-        ),
-        (
-            "/World/Thing.userProperties:declaration",
-            SDF_SPEC_KIND_ATTRIBUTE,
-            ["documentation"],
-        ),
-    ]
-    corrections = [
-        composed_property_spec_event(
-            source,
-            {
-                "k": K_SET_SDF_SPEC_FIELDS,
-                "prim": "/World/Thing",
-                "spec_path": path,
-                "spec_kind": spec_kind,
-                "fields": fields,
-                "removed": False,
-            },
-        )
-        for path, spec_kind, fields in requests
-    ]
-    apply_events(target, corrections)
-
-    target_value = target.GetAttributeAtPath(requests[0][0])
-    assert target_value.Get() is None
-    assert isinstance(
-        target.GetRootLayer().GetAttributeAtPath(requests[0][0]).default,
-        Sdf.ValueBlock,
-    )
-    assert target_value.GetCustomData() == {"strong": 2, "weak": 1}
-
-    target_samples = target.GetAttributeAtPath(requests[1][0])
-    assert target_samples.GetTimeSamples() == samples.GetTimeSamples() == [3.0, 4.0]
-    assert target_samples.Get(3.0) == samples.Get(3.0) == 3.0
-    assert target_samples.Get(4.0) is None
-    assert isinstance(
-        target.GetRootLayer().GetAttributeAtPath(requests[1][0]).QueryTimeSample(4.0),
-        Sdf.ValueBlock,
-    )
-
-    target_relation = target.GetRelationshipAtPath(requests[2][0])
-    assert (
-        target_relation.GetTargets()
-        == relation.GetTargets()
-        == [
-            Sdf.Path("/World/B"),
-            Sdf.Path("/World/A"),
-        ]
-    )
-
-    target_declaration = target.GetAttributeAtPath(requests[3][0])
-    assert target_declaration.GetDocumentation() == "strong documentation"
-    assert target_declaration.IsCustom() is True
-
-
-def test_composed_projection_replaces_property_with_composed_kind():
-    weak = Sdf.Layer.CreateAnonymous("weak.usda")
-    weak_stage = Usd.Stage.Open(weak)
-    weak_prim = weak_stage.DefinePrim("/World/Thing", "Xform")
-    weak_prim.CreateAttribute(
-        "userProperties:item",
-        Sdf.ValueTypeNames.Int,
-        custom=True,
-    ).Set(1)
-
-    strong = Sdf.Layer.CreateAnonymous("strong.usda")
-    strong_stage = Usd.Stage.Open(strong)
-    strong_prim = strong_stage.OverridePrim("/World/Thing")
-    strong_prim.CreateRelationship("userProperties:item", custom=True).AddTarget(
-        Sdf.Path("/World/Target")
-    )
-
-    root = Sdf.Layer.CreateAnonymous("root.usda")
-    root.subLayerPaths = [strong.identifier, weak.identifier]
-    source = Usd.Stage.Open(root)
-    request = {
-        "k": K_SET_SDF_SPEC_FIELDS,
-        "prim": "/World/Thing",
-        "spec_path": "/World/Thing.userProperties:item",
-        "spec_kind": SDF_SPEC_KIND_ATTRIBUTE,
-        "fields": ["default"],
-        "fragment": "",
-        "removed": True,
-    }
-    corrections = [
-        composed_property_spec_event(source, request),
-        composed_layer_spec_event(UsdUtils.FlattenLayerStack(source), request),
-    ]
-
-    for correction in corrections:
-        assert correction["spec_kind"] == SDF_SPEC_KIND_RELATIONSHIP
-        assert "default" not in correction["fields"]
-        target = Usd.Stage.CreateInMemory()
-        target_prim = target.DefinePrim("/World/Thing", "Xform")
-        target_prim.CreateAttribute(
-            "userProperties:item",
-            Sdf.ValueTypeNames.Int,
-            custom=True,
-        ).Set(1)
-        apply_events(target, [correction])
-
-        assert not target.GetAttributeAtPath("/World/Thing.userProperties:item")
-        assert target.GetRelationshipAtPath("/World/Thing.userProperties:item").GetTargets() == [
-            Sdf.Path("/World/Target")
-        ]
-
-
-def test_composed_projection_remaps_internal_property_paths():
-    asset_layer = Sdf.Layer.CreateAnonymous("asset.usda")
-    asset = Usd.Stage.Open(asset_layer)
-    root = asset.DefinePrim("/Asset", "Scope")
-    source_prim = asset.DefinePrim("/Asset/Source", "Scope")
-    target_prim = asset.DefinePrim("/Asset/Target", "Scope")
-    source_prim.CreateRelationship("user:target", custom=True).SetTargets(
-        [Sdf.Path("/Asset/Target")]
-    )
-    target_prim.CreateAttribute("outputs:value", Sdf.ValueTypeNames.Float).Set(1.0)
-    source_prim.CreateAttribute("inputs:value", Sdf.ValueTypeNames.Float).AddConnection(
-        Sdf.Path("/Asset/Target.outputs:value")
-    )
-    asset.SetDefaultPrim(root)
-
-    source = Usd.Stage.CreateInMemory()
-    source.DefinePrim("/World", "Scope").GetReferences().AddReference(
-        asset_layer.identifier,
-        "/Asset",
-    )
-    target = Usd.Stage.CreateInMemory()
-    cases = (
-        (
-            "/World/Source.user:target",
-            "/Asset/Source.user:target",
-            SDF_SPEC_KIND_RELATIONSHIP,
-            "targetPaths",
-        ),
-        (
-            "/World/Source.inputs:value",
-            "/Asset/Source.inputs:value",
-            SDF_SPEC_KIND_ATTRIBUTE,
-            "connectionPaths",
-        ),
-    )
-    for path, source_path, kind, field in cases:
-        prop = source.GetPropertyAtPath(path)
-        assert prop.GetPropertyStack()[0].path == Sdf.Path(source_path)
-        apply_spec_delta(
-            target,
-            {
-                "spec_path": path,
-                "spec_kind": kind,
-                "fields": [field],
-                "fragment": serialize_composed_property_spec_fields(
-                    source,
-                    path,
-                    kind,
-                    [field],
-                ),
-                "removed": False,
-            },
-        )
-
-    assert target.GetRelationshipAtPath(cases[0][0]).GetTargets() == [Sdf.Path("/World/Target")]
-    assert target.GetAttributeAtPath(cases[1][0]).GetConnections() == [
-        Sdf.Path("/World/Target.outputs:value")
-    ]
-
-
 def test_variant_set_identity_preserves_authored_name_list_op():
     source_layer = Sdf.Layer.CreateAnonymous("variant-order.usda")
     prim = Sdf.CreatePrimInLayer(source_layer, "/World/Thing")
@@ -727,78 +566,6 @@ def test_layer_custom_data_preserves_receiver_transport_metadata():
     )
     apply_events(target, [event])
     assert target.GetRootLayer().customLayerData == {"openusdconnect": {"snapshot_seq": 99}}
-
-
-def test_flattened_layer_projection_preserves_prim_and_inactive_variant_specs():
-    root = Sdf.Layer.CreateAnonymous("root.usda")
-    session = Sdf.Layer.CreateAnonymous("session.usda")
-    strong = Sdf.Layer.CreateAnonymous("strong.usda")
-    weak = Sdf.Layer.CreateAnonymous("weak.usda")
-    session.subLayerPaths = [strong.identifier, weak.identifier]
-
-    def _author(layer, label, variant_name):
-        stage = Usd.Stage.Open(layer)
-        layer.customLayerData = {label: True}
-        thing = stage.DefinePrim("/World/Thing", "Xform")
-        thing.SetDocumentation(label)
-        thing.SetCustomData({label: True, "shared": label})
-        variants = thing.GetVariantSets().AddVariantSet("look")
-        variants.AddVariant(variant_name)
-        variants.SetVariantSelection(variant_name)
-        with variants.GetVariantEditContext():
-            child = stage.DefinePrim(f"/World/Thing/{label.title()}", "Scope")
-            child.SetDocumentation(f"{label} variant")
-        variants.ClearVariantSelection()
-
-    _author(weak, "weak", "red")
-    _author(strong, "strong", "blue")
-    source = Usd.Stage.Open(root, session)
-    composed = UsdUtils.FlattenLayerStack(source, tag="projection.usda")
-
-    paths_and_kinds = (
-        ("/", SDF_SPEC_KIND_LAYER),
-        ("/World", SDF_SPEC_KIND_PRIM),
-        ("/World/Thing", SDF_SPEC_KIND_PRIM),
-        ("/World/Thing{look=}", SDF_SPEC_KIND_VARIANT_SET),
-        ("/World/Thing{look=red}", SDF_SPEC_KIND_VARIANT),
-        ("/World/Thing{look=red}Weak", SDF_SPEC_KIND_PRIM),
-        ("/World/Thing{look=blue}", SDF_SPEC_KIND_VARIANT),
-        ("/World/Thing{look=blue}Strong", SDF_SPEC_KIND_PRIM),
-    )
-    corrections = []
-    for path, kind in paths_and_kinds:
-        spec = composed.pseudoRoot if path == "/" else composed.GetObjectAtPath(path)
-        corrections.append(
-            composed_layer_spec_event(
-                composed,
-                {
-                    "k": K_SET_SDF_SPEC_FIELDS,
-                    "prim": "/" if path == "/" else "/World/Thing",
-                    "spec_path": path,
-                    "spec_kind": kind,
-                    "fields": [str(key) for key in spec.ListInfoKeys()],
-                    "fragment": "",
-                    "removed": False,
-                },
-            )
-        )
-
-    target = Usd.Stage.CreateInMemory()
-    apply_events(target, corrections)
-    target_thing = target.GetPrimAtPath("/World/Thing")
-    assert target.GetRootLayer().customLayerData == {"strong": True, "weak": True}
-    assert target_thing.GetDocumentation() == "strong"
-    assert dict(target.GetRootLayer().GetPrimAtPath("/World/Thing").customData) == {
-        "shared": "strong",
-        "strong": True,
-        "weak": True,
-    }
-    variants = target_thing.GetVariantSets().GetVariantSet("look")
-    assert variants.GetVariantNames() == ["blue", "red"]
-    variants.SetVariantSelection("blue")
-    assert target.GetPrimAtPath("/World/Thing/Strong")
-    variants.SetVariantSelection("red")
-    assert target.GetPrimAtPath("/World/Thing/Weak")
 
 
 def test_snapshot_preserves_layer_prim_and_inactive_variant_opinions():

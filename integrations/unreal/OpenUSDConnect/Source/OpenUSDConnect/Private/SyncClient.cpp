@@ -174,6 +174,25 @@ uint32 FSyncClient::Run()
 				CloseSocket();
 				return 0;
 			}
+			if (PType == OpenUSDConnect::Payload::HelloRejected)
+			{
+				const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
+				const OpenUSDConnect::HelloRejected* Rejection =
+					Env ? Env->payload_as_HelloRejected() : nullptr;
+				const OpenUSDConnect::HelloRejectionCode Code = Rejection
+					? Rejection->code()
+					: OpenUSDConnect::HelloRejectionCode::Unspecified;
+				const FString CodeName = Code == OpenUSDConnect::HelloRejectionCode::Unspecified
+					? FString()
+					: FString(UTF8_TO_TCHAR(OpenUSDConnect::EnumNameHelloRejectionCode(Code)));
+				const FString Reason = Rejection ? ToFString(Rejection->reason()) : FString();
+				UE_LOG(LogUSDConnect, Error,
+					TEXT("OpenUSDConnect: receiver rejected by server (%s): %s"),
+					*CodeName, *Reason);
+				if (Owner) { Owner->OnClientHelloRejected(TEXT("receiver"), CodeName, Reason); }
+				CloseSocket();
+				return 0;
+			}
 			if (PType != OpenUSDConnect::Payload::HelloOk)
 			{
 				UE_LOG(LogUSDConnect, Warning,
@@ -359,5 +378,5 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 		UE_LOG(LogUSDConnect, Log, TEXT("Resync received — resetting seq counter"));
 		LastSeq = 0;
 	}
-	// Other types (HelloOk, AuthRejected) only appear during handshake, not in the loop.
+	// Handshake responses do not appear in the receive loop.
 }

@@ -19,9 +19,10 @@ class UUSDConnectSubsystem;
  *  3. Loop:
  *      - Drain SendQueue (pre-framed Txn frames produced by the subsystem) → send
  *      - HasPendingData() → if data available, read one frame and dispatch
- *        (RateLimited / corrections; Ping/BroadcastEvent corrections ignored)
+ *        (RateLimited is handled; other control messages are ignored)
  *      - Sleep 5ms when idle to avoid busy-spinning
- *  4. On error: close socket, wait, retry.
+ *  4. On error: retain the in-flight frame, close socket, wait, and retry it
+ *     before later queued frames on the next connection.
  *
  * Threading: the SendQueue is SPSC (single producer = game thread,
  * single consumer = this thread). Frames pushed via EnqueueFrame() include the

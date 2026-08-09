@@ -75,6 +75,15 @@ table ArcEntry {
     custom_data_fragment:string;
 }
 
+// One authored sublayer edge. The path remains exactly as authored; each
+// process resolves it relative to its own parent layer and resolver context.
+table SublayerEntry {
+    authored_path:string;
+    offset:double;
+    scale:double = 1.0;
+    layer_key:string;       // empty while the dependency is unresolved
+}
+
 // ---------------------------------------------------------------------------
 // UsdShade connectable connection / disconnection
 // ---------------------------------------------------------------------------
@@ -261,6 +270,7 @@ enum SdfSpecKind : byte {
     Relationship,
     VariantSet,
     Variant,
+    Property,
 }
 
 // Exact field deltas for authored Sdf specs that specialized events do not
@@ -275,6 +285,23 @@ table SetSdfSpecFields {
     fields:[string];
     fragment:string;
     removed:bool = false;
+}
+
+// Replace all non-topology opinions in one authored layer. Sublayer paths and
+// offsets remain governed by SetSublayers. The fragment is portable USDA
+// syntax regardless of the source layer's file format.
+table ReplaceSdfLayerContent {
+    prim:string;            // always "/"; retained for uniform event routing
+    fragment:string;
+}
+
+// Replace one layer's complete ordered sublayer list. The parent layer is
+// selected by BroadcastEvent.layer_key / Txn.layer_key.
+table SetSublayers {
+    prim:string;            // always "/"; retained for uniform event routing
+    generation:string;
+    revision:ulong;         // server-assigned graph revision; 0 on client input
+    sublayers:[SublayerEntry];
 }
 
 // Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
@@ -315,6 +342,8 @@ union EventPayload {
     SetInstanceable,
     SetPointInstancer,
     SetSdfSpecFields,
+    ReplaceSdfLayerContent,
+    SetSublayers,
 }
 
 table EventWrapper {

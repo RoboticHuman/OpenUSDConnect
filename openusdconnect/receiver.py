@@ -21,6 +21,7 @@ from collections import deque
 from collections.abc import Callable
 
 from .codec import (
+    HelloRejectionCode,
     PayloadType,
     _decode_stage_metadata_table,
     decode_envelope,
@@ -31,6 +32,7 @@ from .codec import (
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .framing import IncompleteRead, MessageTooLarge, recv_framed
 from .protocol import make_hello
+from .protocol_constants import LayerMode
 from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
@@ -84,7 +86,8 @@ class ReceiverThread(threading.Thread):
         on_playback_state: Callable[[dict], None] | None = None,
         on_playback_claimed: Callable[[dict], None] | None = None,
         on_playback_rejected: Callable[[dict], None] | None = None,
-        layered_replay: bool = False,
+        layered_replay: bool = True,
+        layer_mode: LayerMode | str = LayerMode.MANAGED,
     ):
         super().__init__(daemon=True)
         self.host = host
@@ -99,6 +102,8 @@ class ReceiverThread(threading.Thread):
         self.token = token
         self.layered_replay = bool(layered_replay)
         self.layered_replay_active = False
+        self.layer_mode = LayerMode(layer_mode)
+        self.layer_mode_active = LayerMode.MANAGED
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
         self._on_playback_state = on_playback_state
@@ -114,9 +119,13 @@ class ReceiverThread(threading.Thread):
         self._replay_from: int | None = None
         self._replay_generation = 0
         self._connected_event = threading.Event()
+        self._handshake_event = threading.Event()
         self.last_seq: int = 0
         self._queue_overflow = False
         self.auth_rejected = False
+        self.hello_rejected = False
+        self.rejection_code = HelloRejectionCode.Unspecified
+        self.rejection_reason = ""
         self.stage_metadata: dict = {}
 
     @property
@@ -130,6 +139,13 @@ class ReceiverThread(threading.Thread):
         else:
             self._connected_event.clear()
 
+    def wait_connected(self, timeout: float | None = None) -> bool:
+        """Wait for the current handshake result, not for replay completion."""
+        if self.connected:
+            return True
+        self._handshake_event.wait(timeout=timeout)
+        return self.connected
+
     def run(self):
         delay = self._reconnect_base_delay
         while not self._stop_event.is_set():
@@ -142,8 +158,15 @@ class ReceiverThread(threading.Thread):
                 self.connected = False
                 self._close_socket()
 
-            if not self.reconnect or self._stop_event.is_set() or self.auth_rejected:
+            if (
+                not self.reconnect
+                or self._stop_event.is_set()
+                or self.auth_rejected
+                or self.hello_rejected
+            ):
                 break
+
+            self._handshake_event.clear()
 
             if self._queue_overflow:
                 # Intentional disconnect — wait for main thread to drain
@@ -205,9 +228,14 @@ class ReceiverThread(threading.Thread):
             department=self.department,
             token=self.token,
             layered_replay=self.layered_replay,
+            layer_mode=self.layer_mode,
         )
         send_msg(sock, hello)
+        self._handshake_event.clear()
         self.auth_rejected = False
+        self.hello_rejected = False
+        self.rejection_code = HelloRejectionCode.Unspecified
+        self.rejection_reason = ""
 
         consecutive_timeouts = 0
         while not self._stop_event.is_set():
@@ -254,18 +282,49 @@ class ReceiverThread(threading.Thread):
                         reason = reason.decode("utf-8")
                     LOG.error("ReceiverThread: auth rejected — %s", reason)
                     self.auth_rejected = True
+                    self._handshake_event.set()
+                    return
+
+                if pt == PayloadType.HelloRejected:
+                    _, rejection = resolve_payload(env)
+                    code = int(rejection.Code())
+                    reason = rejection.Reason()
+                    if isinstance(reason, bytes):
+                        reason = reason.decode("utf-8")
+                    self.hello_rejected = True
+                    self.rejection_code = code
+                    self.rejection_reason = reason or ""
+                    LOG.error(
+                        "ReceiverThread: connection rejected (%s): %s",
+                        self.rejection_code,
+                        self.rejection_reason,
+                    )
+                    self._handshake_event.set()
                     return
 
                 if pt == PayloadType.HelloOk:
                     _, ho = resolve_payload(env)
-                    self.layered_replay_active = bool(
-                        self.layered_replay and ho.LayeredReplay()
+                    self.layer_mode_active = LayerMode(
+                        "shared_stage" if ho.LayerMode() else "managed"
                     )
+                    if self.layer_mode_active is not self.layer_mode:
+                        self.hello_rejected = True
+                        self.rejection_code = HelloRejectionCode.LayerModeMismatch
+                        self.rejection_reason = "server did not negotiate requested layer mode"
+                        LOG.error("ReceiverThread: %s", self.rejection_reason)
+                        self._handshake_event.set()
+                        return
+                    self.layered_replay_active = bool(self.layered_replay and ho.LayeredReplay())
                     if self.layered_replay and not self.layered_replay_active:
-                        LOG.info(
-                            "ReceiverThread: server did not negotiate layered replay; "
-                            "using flat replay",
+                        self.hello_rejected = True
+                        self.rejection_code = HelloRejectionCode.LayeredReplayRequired
+                        self.rejection_reason = "server did not negotiate requested layered replay"
+                        LOG.error(
+                            "ReceiverThread: %s",
+                            self.rejection_reason,
                         )
+                        self._handshake_event.set()
+                        return
                     issued = ho.Token()
                     if issued:
                         if isinstance(issued, bytes):
@@ -290,6 +349,7 @@ class ReceiverThread(threading.Thread):
                         if connection_generation == self._replay_generation:
                             self._replay_from = None
                     self.connected = True
+                    self._handshake_event.set()
                     LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                 continue
 
@@ -323,9 +383,14 @@ class ReceiverThread(threading.Thread):
 
             # Extract seq for tracking (read from BroadcastEvent without
             # full dict conversion)
-            if pt == PayloadType.BroadcastEvent:
+            if pt == PayloadType.Resync:
+                seq = 0
+            elif pt == PayloadType.BroadcastEvent:
                 _, be = resolve_payload(env)
                 seq = be.Seq()
+            elif pt == PayloadType.LayerGraphState:
+                _, graph = resolve_payload(env)
+                seq = graph.Seq()
 
             with self._incoming_lock:
                 if connection_generation != self._replay_generation:
@@ -337,7 +402,13 @@ class ReceiverThread(threading.Thread):
                     )
                     self._queue_overflow = True
                     break
-                if pt == PayloadType.BroadcastEvent and seq > self.last_seq:
+                is_sequenced = pt in (
+                    PayloadType.BroadcastEvent,
+                    PayloadType.LayerGraphState,
+                )
+                if pt == PayloadType.Resync:
+                    self.last_seq = 0
+                elif is_sequenced and seq > self.last_seq:
                     self.last_seq = seq
                 self._incoming.append(buf)
 
@@ -392,4 +463,5 @@ class ReceiverThread(threading.Thread):
     def stop(self):
         """Request clean shutdown."""
         self._stop_event.set()
+        self._handshake_event.set()
         self._close_socket()

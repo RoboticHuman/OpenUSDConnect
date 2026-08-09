@@ -280,6 +280,10 @@ composed scene at `snapshot_seq`, but not the logical identity of every
 historical collaboration-layer opinion. Layered replay remains available when
 Blender is configured from the original base USD rather than a live snapshot.
 
+Flat continuation requires one unmuted collaboration layer and no department
+policy. The sync server rejects it when layer ordering or muting must be
+preserved. In that case, open the original base USD and use layered replay.
+
 If live auto-start fails, the imported snapshot stays open and Blender
 reports the connection error. When either checkbox is disabled, the manual
 start/stop buttons remain available and use the metadata-populated host,

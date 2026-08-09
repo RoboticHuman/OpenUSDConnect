@@ -13,65 +13,33 @@ from contextlib import contextmanager
 from pxr import Sdf, Usd
 
 from ._managed_sublayers import replace_managed_sublayers
+from .layer_key_router import LayerKeyRouter
 from .protocol_constants import K_SET_PAYLOAD, K_SET_REFERENCE
 
 
-class LogicalLayerRouter:
+class LogicalLayerRouter(LayerKeyRouter):
     """Own and route one receiver's logical collaboration layers."""
 
     def __init__(self, stage: Usd.Stage | None = None):
-        self._stage: Usd.Stage | None = None
-        self._layers: dict[str, Sdf.Layer] = {}
+        super().__init__()
         self._layer_keys: tuple[str, ...] = ()
         self._muted: dict[str, bool] = {}
-        self._generation = ""
-        self._revision = -1
         if stage is not None:
             self.bind(stage)
-
-    @property
-    def revision(self) -> int:
-        return self._revision
 
     @property
     def layer_keys(self) -> tuple[str, ...]:
         return self._layer_keys
 
-    @property
-    def stage(self) -> Usd.Stage | None:
-        return self._stage
+    def layer_for(self, layer_key: str) -> Sdf.Layer:
+        """Return the receiver-local layer for one routed event."""
+        if not self._ready:
+            raise RuntimeError("layer stack state has not been received")
+        if layer_key not in self._layer_keys:
+            raise ValueError(f"event targets unknown logical layer {layer_key!r}")
+        return self._layers[layer_key]
 
-    def bind(self, stage: Usd.Stage) -> None:
-        """Attach the managed layers to *stage*, preserving their contents."""
-        if not isinstance(stage, Usd.Stage):
-            raise TypeError("LogicalLayerRouter requires a Usd.Stage")
-        if stage is self._stage:
-            return
-        self._detach()
-        self._stage = stage
-        if self._layer_keys:
-            self._install_stack()
-
-    def close(self) -> None:
-        """Detach only layers owned by this router."""
-        self._detach()
-        self._stage = None
-
-    def apply_state(self, state: dict) -> bool:
-        """Apply an authoritative layer-stack state.
-
-        Returns ``False`` for an older or duplicate state in the same server
-        generation. Revisions may restart when the server process changes;
-        ``generation`` scopes the comparison without acting as persistent
-        layer identity.
-        """
-        generation = str(state.get("generation") or "")
-        revision = int(state.get("revision", 0))
-        if revision < 0:
-            raise ValueError("layer stack revision must be non-negative")
-        if generation == self._generation and revision <= self._revision:
-            return False
-
+    def _apply_state_inner(self, state: dict) -> bool:
         layer_keys: list[str] = []
         labels: dict[str, str] = {}
         muted: dict[str, bool] = {}
@@ -88,29 +56,22 @@ class LogicalLayerRouter:
         for layer_key in layer_keys:
             label = labels[layer_key]
             if layer_key not in self._layers:
-                self._layers[layer_key] = self._create_layer(
+                layer = self._create_layer(
                     layer_key,
                     label,
                 )
+                self._layers[layer_key] = layer
+                self._keys_by_identifier[layer.identifier] = layer_key
 
-        self._generation = generation
-        self._revision = revision
         self._layer_keys = tuple(layer_keys)
         self._muted = muted
         removed_keys = set(self._layers) - set(layer_keys)
         if self._stage is not None:
-            self._install_stack()
+            self._install_layers(self._stage)
         for layer_key in removed_keys:
-            del self._layers[layer_key]
+            layer = self._layers.pop(layer_key)
+            self._keys_by_identifier.pop(layer.identifier, None)
         return True
-
-    def layer_for(self, layer_key: str) -> Sdf.Layer:
-        """Return the receiver-local layer for one routed event."""
-        if self._revision < 0:
-            raise RuntimeError("layer stack state has not been received")
-        if layer_key not in self._layer_keys:
-            raise ValueError(f"event targets unknown logical layer {layer_key!r}")
-        return self._layers[layer_key]
 
     def edit_target_for(self, layer_key: str) -> Usd.EditTarget:
         return Usd.EditTarget(self.layer_for(layer_key))
@@ -188,8 +149,9 @@ class LogicalLayerRouter:
     def _managed_identifiers(self) -> set[str]:
         return {layer.identifier for layer in self._layers.values()}
 
-    def _install_stack(self) -> None:
-        stage = self._stage
+    def _install_layers(self, stage: Usd.Stage) -> None:
+        if not self._layer_keys:
+            return
         if stage is None:
             return
 
@@ -222,8 +184,7 @@ class LogicalLayerRouter:
         if to_mute or to_unmute:
             stage.MuteAndUnmuteLayers(sorted(to_mute), sorted(to_unmute))
 
-    def _detach(self) -> None:
-        stage = self._stage
+    def _detach_layers(self, stage: Usd.Stage) -> None:
         if stage is None:
             return
         managed = self._managed_identifiers()

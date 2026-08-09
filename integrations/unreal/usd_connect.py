@@ -6,8 +6,9 @@ transform conversion, and scene management. We only touch the USD stage.
 
 Usage (from UE Python console):
     >>> import sys; sys.path.insert(0, r"D:\\gamedev\\OpenUSDConnect")
-    >>> from integrations.unreal.usd_connect import start, stop
+    >>> from integrations.unreal.usd_connect import reconnect_emitter, start, stop
     >>> start("127.0.0.1", 7200, "test_scene.usda")
+    >>> reconnect_emitter()  # after a reported emitter connection loss
     >>> stop()
 
 Or add the project root to UE's Additional Python Paths (Project Settings →
@@ -200,16 +201,45 @@ def _on_tick(delta_seconds: float):
             _last_send_time = now
 
 
-def _flush_emitter():
+def _flush_emitter() -> bool:
     """Build events from dirty prims and send to server."""
-    events = _emitter.build_events_for_dirty()
+    events = _emitter.prepare_events_for_send()
     if not events:
-        return
-    if not _sender.send_events(events):
-        LOG.warning("Emitter send failed — will retry on next tick")
+        return True
+    if _sender.send_events(events):
+        _emitter.mark_prepared_events_sent(events)
+        return True
+    LOG.warning(
+        "Emitter send failed; retaining %d events. Call reconnect_emitter() to retry",
+        len(events),
+    )
+    return False
 
 
 # -- Public API ----------------------------------------------------------
+
+
+def reconnect_emitter() -> bool:
+    """Reconnect the emitter and retry its retained batch.
+
+    This call is synchronous and should be initiated by the user after a
+    connection failure rather than from the Slate tick callback.
+    """
+    if not _running or _sender is None or _emitter is None:
+        LOG.error("Emitter is not initialized; call start(..., emit=True) first")
+        return False
+    if _sender.connected:
+        return True
+    if _sender.auth_rejected:
+        LOG.error("Emitter authentication was rejected")
+        return False
+    if not _sender.connect():
+        LOG.error("Failed to reconnect emitter")
+        return False
+    if not _flush_emitter():
+        return False
+    LOG.info("Emitter reconnected")
+    return True
 
 
 def start(
@@ -319,6 +349,7 @@ def start(
             origin=_origin,
             token=token_for_clients,
             on_token_issued=_remember_token,
+            layered_replay=False,
         )
         _receiver.start()
         LOG.info("Receiver started → %s:%d", host, port)
@@ -427,4 +458,5 @@ def status() -> dict:
         "live_metadata": _live_metadata,
         "client_id": _client_id,
         "origin": _origin,
+        "pending_emitter_events": _emitter.prepared_event_count if _emitter else 0,
     }

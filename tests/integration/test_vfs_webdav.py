@@ -824,6 +824,7 @@ class TestSnapshotReplayContract:
                 reconnect=False,
                 client_id="snapshot-receiver",
                 origin="snapshot-receiver-origin",
+                layered_replay=False,
             )
             receiver.start()
             assert _wait_until(lambda: receiver.connected)

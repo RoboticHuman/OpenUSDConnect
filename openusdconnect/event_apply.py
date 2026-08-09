@@ -26,6 +26,7 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -36,6 +37,7 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -102,16 +104,14 @@ def get_or_define_prim(
 
 
 def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
-    """Find an xform op by its base name (e.g. 'translate', 'orient', 'scale').
+    """Return the named xform op via direct attribute lookup.
 
-    Handles USD version differences in GetOpName() by matching against the
-    attribute name (xformOp:translate, etc.).
+    Canonical ops always live at ``xformOp:translate``,
+    ``xformOp:orient``, ``xformOp:scale`` — no scan needed.
     """
-    target = f"xformOp:{op_base}"
-    for op in xf.GetOrderedXformOps():
-        attr_name = op.GetAttr().GetName()
-        if attr_name == target or attr_name.startswith(target + ":"):
-            return op
+    attr = xf.GetPrim().GetAttribute(f"xformOp:{op_base}")
+    if attr and attr.IsValid():
+        return UsdGeom.XformOp(attr)
     return None
 
 
@@ -423,11 +423,9 @@ def _vec3f_array(value) -> Vt.Vec3fArray:
 def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
     """Author PointInstancer state on an existing prim.
 
-    Requires the prim to exist (the emitter pairs first-encounter events
-    with an ensure_prim, which the create pass applies first): prim
-    creation cannot happen here because value events run inside an
-    Sdf.ChangeBlock, where Usd.Stage.DefinePrim fails. Relationship and
-    attribute writes on an existing prim are ChangeBlock-safe.
+    Requires the prim to exist: the emitter pairs first-encounter events
+    with an ensure_prim, which the structural pass applies first. Only
+    value writes happen here (no prim creation).
 
     Orientations arrive as float32 wxyz rows and are authored to
     orientationsf (lossless for the wire format, wins value resolution
@@ -482,6 +480,20 @@ def _apply_set_sdf_spec_fields(stage: Usd.Stage, ev: dict) -> None:
     from .sdf_spec_delta import apply_spec_delta
 
     apply_spec_delta(stage, ev)
+
+
+@register_applier(K_REPLACE_SDF_LAYER_CONTENT)
+def _apply_replace_sdf_layer_content(stage: Usd.Stage, ev: dict) -> None:
+    from .sdf_spec_delta import apply_layer_content_replacement
+
+    apply_layer_content_replacement(stage.GetEditTarget().GetLayer(), ev)
+
+
+@register_applier(K_SET_SUBLAYERS)
+def _apply_set_sublayers(stage: Usd.Stage, ev: dict) -> None:
+    from .shared_layer_graph import apply_sublayer_entries
+
+    apply_sublayer_entries(stage.GetEditTarget().GetLayer(), ev.get("sublayers", ()))
 
 
 @register_applier(K_SET_STAGE_METADATA)
@@ -918,12 +930,11 @@ def apply_events(
     delete-then-recreate of the same path survives even when a whole replay
     backlog is applied in one batch.
 
-    Structural events apply outside a ChangeBlock; value-setting events run
-    inside one for atomicity. delete_prim/rename_prim apply outside any block,
-    after the preceding segment's block closes, so each sees the composed result
-    of every event before it (Usd.NamespaceEditor and later events validate
-    against the composed stage, which does not refresh until a ChangeBlock
-    closes).
+    Events apply outside ``Sdf.ChangeBlock`` because the appliers resolve and
+    mutate through ``Usd`` APIs. ``SdfChangeBlock`` permits direct ``Sdf``
+    authoring only; downstream ``Usd`` queries while a block is open are unsafe.
+    delete_prim/rename_prim remain sequencing barriers so later events see the
+    composed result of every event before them.
 
     *op_cache* is an optional dict-like mapping prim_path to
     (translate_op, orient_op, scale_op).  Pass a persistent cache
@@ -946,7 +957,13 @@ def apply_events(
     def _apply_segment(segment: list) -> None:
         # A prim must exist before anything authors on it: prim-creating kinds
         # first (ancestors before descendants via path depth), then the other
-        # structural kinds, then value-setting ops inside a ChangeBlock.
+        # structural kinds, then value-setting ops.  Structural events each
+        # pay their own stage recomposition (they are create / delete / rename /
+        # arc operations that modify the prim index).  Value events only write
+        # typed values on already-established prims and attributes, so they
+        # do not benefit from a ChangeBlock (attr.Set uses a fast incremental
+        # Sdf path); an explicit ChangeBlock here would also be unsafe per the
+        # SdfChangeBlock contract which forbids Usd queries inside the block.
         structural = [ev for ev in segment if ev.get("k") in STRUCTURAL_EVENT_KINDS]
 
         # An empty-type ensure carrying only API schemas represents metadata
@@ -975,14 +992,12 @@ def apply_events(
             else:
                 apply_event(stage, ev)
         value = [ev for ev in segment if ev.get("k") not in STRUCTURAL_EVENT_KINDS]
-        if value:
-            with Sdf.ChangeBlock():
-                for run_ev in value:
-                    if run_ev.get("k") == K_SET_XFORM_TRS:
-                        if not _is_instance_proxy_target(stage, run_ev):
-                            _apply_set_xform_trs(stage, run_ev, op_cache)
-                    else:
-                        apply_event(stage, run_ev)
+        for run_ev in value:
+            if run_ev.get("k") == K_SET_XFORM_TRS:
+                if not _is_instance_proxy_target(stage, run_ev):
+                    _apply_set_xform_trs(stage, run_ev, op_cache)
+            else:
+                apply_event(stage, run_ev)
 
     # Split the batch at namespace edits so structural ops are never hoisted
     # across a delete/rename. Without this, a delete received before a same-path

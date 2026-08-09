@@ -10,7 +10,7 @@ import pytest
 from pxr import Ar, Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect.codec import message_to_dict
-from openusdconnect.protocol_constants import SHARED_STAGE_KINDS
+from openusdconnect.protocol_constants import NON_COLLABORATION_KINDS
 from openusdconnect.server import TokenBucket, UsdSyncServer
 
 
@@ -166,7 +166,7 @@ class TestProcessTxnRouting:
             department="animation",
         )
 
-        records, _changed = srv.process_txn(
+        records = srv.process_txn(
             [{"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"}],
             client_id="artist",
             layer=srv.edit_layer,
@@ -301,7 +301,7 @@ class TestCompaction:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
-            if ev["k"] not in SHARED_STAGE_KINDS:
+            if ev["k"] not in NON_COLLABORATION_KINDS:
                 rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)
@@ -850,6 +850,38 @@ class TestReplay:
         assert len(msgs) == 2
         assert msgs[0]["seq"] == 2
 
+    def test_replay_from_stops_at_captured_tail(self, srv):
+        import io
+
+        from openusdconnect.codec import message_to_dict
+        from openusdconnect.framing import recv_framed_rfile
+
+        for i in range(3):
+            seq = srv.assign_seq()
+            srv.append_log(
+                {
+                    "type": "event",
+                    "seq": seq,
+                    "event": {"k": "ensure_prim", "prim": f"/P{i}", "typeName": "Xform"},
+                    "layer_key": "default",
+                }
+            )
+
+        class FakeHandler:
+            def __init__(self):
+                self.request = io.BytesIO()
+
+        handler = FakeHandler()
+        handler.request.sendall = handler.request.write
+        srv.replay_from(handler, 1, seq_end=2)
+
+        handler.request.seek(0)
+        raw = handler.request.getvalue()
+        messages = []
+        while handler.request.tell() < len(raw):
+            messages.append(message_to_dict(recv_framed_rfile(handler.request)))
+        assert [message["seq"] for message in messages] == [1, 2]
+
     def test_replay_from_propagates_send_failure(self, srv):
         seq = srv.assign_seq()
         srv.append_log(
@@ -939,6 +971,36 @@ class TestBroadcast:
         srv._broadcast_queue.join()  # wait for async broadcast thread
         assert h not in srv.receivers
 
+    def test_queued_broadcast_excludes_receivers_that_join_later(self, srv):
+        import io
+
+        class FakeHandler:
+            def __init__(self, address):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = address
+                self.send_lock = threading.Lock()
+
+        existing = FakeHandler(("existing", 0))
+        joining = FakeHandler(("joining", 0))
+        existing.send_lock.acquire()
+        try:
+            srv.receivers.add(existing)
+            srv.broadcast(
+                {
+                    "type": "event",
+                    "seq": 1,
+                    "event": {"k": "ensure_prim", "prim": "/A", "typeName": "Xform"},
+                }
+            )
+            srv.receivers.add(joining)
+        finally:
+            existing.send_lock.release()
+
+        srv._broadcast_queue.join()
+        assert existing.request.getvalue()
+        assert joining.request.getvalue() == b""
+
     def test_broadcast_targets_negotiated_receiver_audience(self, srv):
         import io
 
@@ -999,15 +1061,15 @@ class TestBroadcast:
         def _record_audience(
             payload,
             exclude_origin=None,
-            target_origin=None,
             audience="all",
+            targets=None,
         ):
             audiences.append(audience)
             return send_to_all(
                 payload,
                 exclude_origin=exclude_origin,
-                target_origin=target_origin,
                 audience=audience,
+                targets=targets,
             )
 
         monkeypatch.setattr(srv, "_send_to_all", _record_audience)
@@ -1016,9 +1078,9 @@ class TestBroadcast:
             "prim": "/LayeredOnly",
             "typeName": "Xform",
         }
-        records, changed = srv.process_txn([event])
+        records = srv.process_txn([event])
 
-        srv.broadcast_transaction_views(records, changed, [event])
+        srv.broadcast_transaction_views(records)
         srv._broadcast_queue.join()
 
         assert audiences == ["layered"]
@@ -1045,7 +1107,7 @@ class TestBroadcast:
             "prim": "/LayeredEcho",
             "typeName": "Xform",
         }
-        records, changed = srv.process_txn(
+        records = srv.process_txn(
             [event],
             client_id="author",
             origin="shared-session",
@@ -1053,13 +1115,50 @@ class TestBroadcast:
 
         srv.broadcast_transaction_views(
             records,
-            changed,
-            [event],
             exclude_origin="shared-session",
         )
         srv._broadcast_queue.join()
 
         assert layered.request.getvalue()
+        assert flat.request.getvalue() == b""
+
+    def test_replayed_payload_children_follow_receiver_replay_mode(self, srv):
+        import io
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        class FakeHandler:
+            def __init__(self, layered):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("fake", int(layered))
+                self.send_lock = threading.Lock()
+                self._layered_replay = layered
+                self._origin = "shared-session"
+
+        flat = FakeHandler(False)
+        layered = FakeHandler(True)
+        srv.receivers.update((flat, layered))
+        records = srv.process_txn(
+            [
+                {
+                    "k": "ensure_prim",
+                    "prim": "/Payload/Child",
+                    "typeName": "Xform",
+                }
+            ],
+            client_id="author",
+            origin="shared-session",
+        )
+
+        srv.replay_children_after_load("/Payload")
+        srv._broadcast_queue.join()
+
+        layered.request.seek(0)
+        replayed = message_to_dict(recv_framed_rfile(layered.request))
+        assert replayed["seq"] == records[0][0]["seq"] + 1
+        assert replayed["origin"] == "shared-session"
+        assert replayed["event"] == records[0][0]["event"]
         assert flat.request.getvalue() == b""
 
 
@@ -1820,7 +1919,7 @@ class TestCompactionWithEditLayer:
         for ev in events:
             seq = srv.assign_seq()
             rec = {"type": "event", "seq": seq, "event": ev}
-            if ev["k"] not in SHARED_STAGE_KINDS:
+            if ev["k"] not in NON_COLLABORATION_KINDS:
                 rec["layer_key"] = "default"
             srv.append_log(rec)
         srv.apply_txn(events)
@@ -1960,45 +2059,15 @@ class TestGetByPrimPrefix:
 
 
 # ---------------------------------------------------------------------------
-# apply_txn single-layer fast path
+# apply_txn bookkeeping
 # ---------------------------------------------------------------------------
 
 
-class TestApplyTxnSingleLayerFastPath:
-    def test_skips_strength_checks(self, srv, monkeypatch):
-        """With only the edit layer in the session stack, apply_txn must not
-        run per-event strength checks at all."""
-
-        def _boom(*args, **kwargs):
-            raise AssertionError("_is_layer_winning called on single-layer fast path")
-
-        monkeypatch.setattr(srv, "_is_layer_winning", _boom)
+class TestApplyTxnBookkeeping:
+    def test_tracks_structural_events(self, srv):
         events = [
             {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"},
             {"k": "set_visibility", "prim": "/World/X", "visible": False},
         ]
-        changed = srv.apply_txn(events)
-        assert changed == [0, 1]
+        assert srv.apply_txn(events) is None
         assert "/World/X" in srv._prim_paths
-
-    def test_department_layers_still_check_strength(self, tmp_path, monkeypatch):
-        """With department layers in the stack, strength checks still run."""
-        db = str(tmp_path / "dept.db")
-        s = UsdSyncServer(log_path=db, department_priority=["anim", "layout"])
-        try:
-            layer = s.get_or_create_client_layer("alice", department="anim")
-            calls = []
-            real = s._is_layer_winning
-
-            def _spy(prim, target, ev):
-                calls.append(ev.get("k"))
-                return real(prim, target, ev)
-
-            monkeypatch.setattr(s, "_is_layer_winning", _spy)
-            s.apply_txn(
-                [{"k": "ensure_prim", "prim": "/World/Y", "typeName": "Xform"}],
-                layer=layer,
-            )
-            assert calls == ["ensure_prim"]
-        finally:
-            s.store.close()

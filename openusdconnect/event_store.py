@@ -12,6 +12,7 @@ dashboard).
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -55,11 +56,16 @@ class EventStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
-        """Return binary blobs for all events with seq >= seq_start.
+    def get_from_seq_bin(
+        self,
+        seq_start: int,
+        seq_end: int | None = None,
+    ) -> list[bytes]:
+        """Return binary blobs in the inclusive sequence range.
 
-        This is the primary replay path — binary is sent directly to
-        receivers without re-serialization.
+        This is the primary replay path; binary is sent directly to
+        receivers without re-serialization. ``seq_end=None`` leaves the
+        upper bound open.
         """
         raise NotImplementedError
 
@@ -120,6 +126,7 @@ class SqliteEventStore(EventStore):
 
     def __init__(self, db_path: str):
         self._db_path = db_path
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("""
@@ -186,12 +193,23 @@ class SqliteEventStore(EventStore):
                 "SELECT seq, event_bin FROM events ORDER BY seq"
             ).fetchall()
 
-    def get_from_seq_bin(self, seq_start: int) -> list[bytes]:
+    def get_from_seq_bin(
+        self,
+        seq_start: int,
+        seq_end: int | None = None,
+    ) -> list[bytes]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT event_bin FROM events WHERE seq >= ? ORDER BY seq",
-                (seq_start,),
-            ).fetchall()
+            if seq_end is None:
+                rows = self._conn.execute(
+                    "SELECT event_bin FROM events WHERE seq >= ? ORDER BY seq",
+                    (seq_start,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT event_bin FROM events"
+                    " WHERE seq >= ? AND seq <= ? ORDER BY seq",
+                    (seq_start, seq_end),
+                ).fetchall()
         return [row[0] for row in rows]
 
     def get_from_seq_asc(self, seq_start: int) -> list[tuple[int, bytes]]:

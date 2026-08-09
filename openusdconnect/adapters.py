@@ -29,6 +29,7 @@ from .protocol_constants import (
     K_ENSURE_XFORM_OPS,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -39,6 +40,7 @@ from .protocol_constants import (
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
@@ -113,6 +115,14 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "fields": ev.get("fields", []),
         "fragment": ev.get("fragment", ""),
         "removed": bool(ev.get("removed", False)),
+    },
+    K_REPLACE_SDF_LAYER_CONTENT: lambda ev: {
+        "fragment": ev["fragment"],
+    },
+    K_SET_SUBLAYERS: lambda ev: {
+        "sublayers": ev.get("sublayers", []),
+        "generation": ev.get("generation", ""),
+        "revision": int(ev.get("revision", 0)),
     },
     K_SET_REFERENCE: lambda ev: {
         "prim_path": ev["prim"],
@@ -296,6 +306,20 @@ class DCCAdapter(ABC):
         applies the event to their mirror stage. Stage-backed adapters
         override it and apply the spec delta directly.
         """
+        return True
+
+    def set_sublayers(
+        self,
+        sublayers: list[dict],
+        *,
+        generation: str,
+        revision: int,
+    ) -> bool:
+        """Accept topology already applied to a USD mirror stage."""
+        return True
+
+    def replace_sdf_layer_content(self, fragment: str) -> bool:
+        """Accept layer content already applied to a USD mirror stage."""
         return True
 
     @abstractmethod

@@ -422,6 +422,30 @@ void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
 	SetStatusMessage(TEXT("auth_rejected"), FString::Printf(TEXT("%s auth rejected"), *Role));
 }
 
+void UUSDConnectSubsystem::OnClientHelloRejected(
+	const FString& Role,
+	const FString& Code,
+	const FString& Reason)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role, Code, Reason]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnClientHelloRejected(Role, Code, Reason);
+			}
+		});
+		return;
+	}
+
+	const FString Message = Reason.IsEmpty()
+		? FString::Printf(TEXT("%s connection rejected"), *Role)
+		: FString::Printf(TEXT("%s connection rejected: %s"), *Role, *Reason);
+	SetStatusMessage(Code.IsEmpty() ? TEXT("connection_rejected") : Code, Message);
+}
+
 void UUSDConnectSubsystem::EnqueueEvent(TArray<uint8>&& RawBytes)
 {
 	FScopeLock Lock(&EventQueueCS);

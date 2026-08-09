@@ -18,11 +18,13 @@ from openusdconnect.protocol_constants import (
     ARC_KINDS,
     CREATE_KINDS,
     EVENT_KEYS,
-    FLAT_RECEIVER_PROJECTION_KINDS,
     IMPORT_KINDS,
+    MANAGED_KINDS,
     NATIVE_DIRECT_KINDS,
     NATIVE_FIELD_ROUTED_KINDS,
     NATIVE_PROJECTED_KINDS,
+    SHARED_STAGE_EVENT_KINDS,
+    SHARED_STAGE_ONLY_KINDS,
     STAGE_SYNC_KINDS,
     STRUCTURAL_EVENT_KINDS,
 )
@@ -59,6 +61,7 @@ def test_derived_kind_sets_pin():
         "ensure_prim",
         "ensure_xform_ops",
         "load_payload",
+        "replace_sdf_layer_content",
         "set_connectable_connection",
         "set_connectable_input",
         "set_instanceable",
@@ -67,11 +70,13 @@ def test_derived_kind_sets_pin():
         "set_reference",
         "set_sdf_spec_fields",
         "set_stage_metadata",
+        "set_sublayers",
         "set_variant_selections",
         "unload_payload",
     }
     assert STAGE_SYNC_KINDS == {
         "load_payload",
+        "replace_sdf_layer_content",
         "set_connectable_connection",
         "set_connectable_input",
         "set_instanceable",
@@ -80,33 +85,59 @@ def test_derived_kind_sets_pin():
         "set_reference",
         "set_sdf_spec_fields",
         "set_stage_metadata",
+        "set_sublayers",
         "set_variant_selections",
         "unload_payload",
     }
     assert ARC_KINDS == {"set_payload", "set_reference", "set_variant_selections"}
     assert IMPORT_KINDS == {"load_payload", "set_reference"}
-    assert FLAT_RECEIVER_PROJECTION_KINDS == {"set_sdf_spec_fields"}
     assert NATIVE_DIRECT_KINDS == {
         "load_payload",
+        "replace_sdf_layer_content",
         "set_stage_metadata",
+        "set_sublayers",
         "unload_payload",
     }
     assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields"}
-    assert (
-        NATIVE_PROJECTED_KINDS
-        | NATIVE_DIRECT_KINDS
-        | NATIVE_FIELD_ROUTED_KINDS
-    ) == EVENT_KEYS
+    assert (NATIVE_PROJECTED_KINDS | NATIVE_DIRECT_KINDS | NATIVE_FIELD_ROUTED_KINDS) == EVENT_KEYS
+    assert MANAGED_KINDS == {
+        "deactivate_prim",
+        "delete_prim",
+        "ensure_prim",
+        "ensure_xform_ops",
+        "load_payload",
+        "rename_prim",
+        "set_connectable_connection",
+        "set_connectable_input",
+        "set_gprim_attrs",
+        "set_instanceable",
+        "set_material_binding",
+        "set_payload",
+        "set_point_instancer",
+        "set_reference",
+        "set_sdf_spec_fields",
+        "set_stage_metadata",
+        "set_variant_selections",
+        "set_visibility",
+        "set_xform_trs",
+        "unload_payload",
+    }
+    assert SHARED_STAGE_EVENT_KINDS == {
+        "replace_sdf_layer_content",
+        "set_sdf_spec_fields",
+        "set_sublayers",
+    }
+    assert SHARED_STAGE_ONLY_KINDS == {"replace_sdf_layer_content", "set_sublayers"}
+    assert MANAGED_KINDS | SHARED_STAGE_EVENT_KINDS == EVENT_KEYS
 
 
 def test_stage_sync_kinds_are_structural():
     """Every stage-sync kind must also be structural.
 
     The dispatcher's mirror commit applies only STAGE_SYNC_KINDS, and
-    apply_events runs value-tier kinds inside an Sdf.ChangeBlock where
-    Usd.Stage.DefinePrim fails — so a value-tier stage-sync kind could
-    never create its prim on the mirror and would silently diverge.
-    A kind that needs the mirror but stays value-tier should instead
+    Structural classification ensures prim-index-affecting stage-sync kinds
+    run before ordinary value writes. A kind that needs the mirror but stays
+    value-tier should instead
     dedup via event-value writes in the emitter's _INVALIDATE_DISPATCH
     (the set_gprim_attrs pattern).
     """

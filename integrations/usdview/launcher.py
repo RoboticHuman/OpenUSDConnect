@@ -113,6 +113,35 @@ def _has_renderer_arg(args: Sequence[str]) -> bool:
     return any(a in ("-r", "--renderer") or a.startswith("--renderer=") for a in args)
 
 
+def _normalize_prim_path(raw: str) -> str:
+    """Make a CLI-supplied prim path shell-portable.
+
+    Shells that translate POSIX-like arguments (MSYS2, Cygwin) may mangle
+    ``/World/Cam`` into a Windows absolute path.  The portable form omits
+    the leading ``/``::
+
+        --camera World/_TestCam      # works everywhere
+
+    Both forms are accepted; the result always has a leading ``/``.
+    """
+    raw = raw.strip()
+    if not raw:
+        return raw
+    if raw.startswith("/"):
+        return raw
+    # If the shell mangled /Foo into C:/.../Foo, take the last path element
+    # group as a best-effort recovery.
+    if len(raw) >= 3 and raw[1] == ":" and raw[2] in ("/", "\\"):
+        from pxr import Sdf
+
+        slash_positions = [i for i, ch in enumerate(raw) if ch in ("/", "\\")]
+        for i in reversed(slash_positions):
+            candidate = "/" + raw[i + 1:].replace("\\", "/")
+            if "/" in candidate[1:] and Sdf.Path.IsValidPathString(candidate):
+                return candidate
+    return "/" + raw
+
+
 def launch_usdview(
     stage_path: str | os.PathLike,
     host: str = DEFAULT_HOST,
@@ -156,7 +185,7 @@ def launch_usdview(
     if token:
         env["OPENUSDCONNECT_TOKEN"] = token
     if camera_path:
-        env["OPENUSDCONNECT_CAMERA_PATH"] = camera_path
+        env["OPENUSDCONNECT_CAMERA_PATH"] = _normalize_prim_path(camera_path)
     if expected_seq > 0:
         env["OPENUSDCONNECT_EXPECTED_SEQ"] = str(expected_seq)
     if scene_lights:

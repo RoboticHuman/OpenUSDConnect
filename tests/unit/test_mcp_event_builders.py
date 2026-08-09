@@ -64,6 +64,11 @@ SAMPLE_ARGS: dict[str, dict] = {
             '#usda 1.0\n\nover "World" { over "A" { custom double userProperties:weight = 1 } }\n'
         ),
     },
+    "replace_sdf_layer_content": {"fragment": "#usda 1.0\n"},
+    "set_sublayers": {
+        "generation": "graph-1",
+        "sublayers": [{"authored_path": "./asset.usda"}],
+    },
 }
 
 

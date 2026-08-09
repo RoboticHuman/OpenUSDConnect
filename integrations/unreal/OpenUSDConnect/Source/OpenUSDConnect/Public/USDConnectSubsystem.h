@@ -120,6 +120,12 @@ public:
 	/** Called from client background threads when auth is rejected. */
 	void OnClientAuthRejected(const FString& Role);
 
+	/** Called from client background threads when the requested mode is rejected. */
+	void OnClientHelloRejected(
+		const FString& Role,
+		const FString& Code,
+		const FString& Reason);
+
 private:
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);

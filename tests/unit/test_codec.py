@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 4
+        assert SCHEMA_VERSION == 6
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -133,6 +133,27 @@ class TestAuthRejected:
     def test_roundtrip(self):
         d, _ = _roundtrip({"type": "auth_rejected", "reason": "bad token"})
         assert d["reason"] == "bad token"
+
+
+class TestHelloRejected:
+    def test_roundtrip(self):
+        msg = {
+            "type": "hello_rejected",
+            "code": _fb.HelloRejectionCode.LayeredReplayRequired,
+            "reason": "department collaboration requires layered replay",
+        }
+        decoded, _ = _roundtrip(msg)
+        assert decoded == msg
+
+    def test_requires_a_specific_code(self):
+        with pytest.raises(ValueError, match="must be specified"):
+            encode_message(
+                {
+                    "type": "hello_rejected",
+                    "code": _fb.HelloRejectionCode.Unspecified,
+                    "reason": "connection rejected",
+                }
+            )
 
 
 class TestResyncCompactQuit:

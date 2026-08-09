@@ -20,6 +20,7 @@ from .protocol_constants import (
     MSG_QUIT,
     MSG_TXN,
     PROTOCOL_VERSION,
+    LayerMode,
 )
 
 __all__ = [
@@ -38,7 +39,8 @@ def make_hello(
     origin: str | None = None,
     department: str | None = None,
     token: str | None = None,
-    layered_replay: bool = False,
+    layered_replay: bool | None = None,
+    layer_mode: LayerMode | str = LayerMode.MANAGED,
 ) -> dict:
     """Build a hello message.
 
@@ -55,7 +57,17 @@ def make_hello(
         token: Authentication token from a previous session (TOFU).
         layered_replay: Whether a receiver can reconstruct the logical
             authored-layer stack instead of consuming only the composed view.
+            Defaults to true for receivers and false for other roles.
+        layer_mode: Managed collaboration layers or the shared root-layer graph.
     """
+    mode = LayerMode(layer_mode)
+    if mode is LayerMode.SHARED_STAGE and department is not None:
+        raise ValueError("department routing is unavailable in shared-stage mode")
+    if layered_replay is None:
+        layered_replay = role == "receiver" and mode is LayerMode.MANAGED
+    if mode is LayerMode.SHARED_STAGE and layered_replay:
+        raise ValueError("managed layered replay is unavailable in shared-stage mode")
+
     msg = {"type": MSG_HELLO, "role": role, "protocol_version": PROTOCOL_VERSION}
     if sync_from is not None:
         msg["sync_from"] = sync_from
@@ -69,10 +81,18 @@ def make_hello(
         msg["token"] = token
     if layered_replay:
         msg["layered_replay"] = True
+    if mode is not LayerMode.MANAGED:
+        msg["layer_mode"] = mode.value
     return msg
 
 
-def make_txn(client_id: str, events: list[Event], proposal_id: str = "") -> dict:
+def make_txn(
+    client_id: str,
+    events: list[Event],
+    proposal_id: str = "",
+    *,
+    layer_key: str = "",
+) -> dict:
     """Build a transaction message.
 
     With *proposal_id*, the server routes the edits to that proposal's muted
@@ -81,6 +101,8 @@ def make_txn(client_id: str, events: list[Event], proposal_id: str = "") -> dict
     msg = {"type": MSG_TXN, "client_id": client_id, "events": events}
     if proposal_id:
         msg["proposal_id"] = proposal_id
+    if layer_key:
+        msg["layer_key"] = layer_key
     return msg
 
 

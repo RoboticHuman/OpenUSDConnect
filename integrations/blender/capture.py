@@ -978,13 +978,16 @@ def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
         return
-    events = _state.notice_emitter.build_events_for_dirty()
+    events = _state.notice_emitter.prepare_events_for_send()
     if events:
         from collections import Counter
 
         kinds = Counter(e["k"] for e in events)
         LOG.debug("sending %d events: %s", len(events), dict(kinds))
-        _state.sender.send_events(events)
+        if _state.sender.send_events(events):
+            _state.notice_emitter.mark_prepared_events_sent(events)
+        else:
+            LOG.warning("emitter send failed; retaining %d events for reconnect", len(events))
 
 
 def set_emitter_feedback_guard(value: bool):
@@ -1108,7 +1111,8 @@ def _timer_tick():
     try:
         if _state.author is None or not _state.author.enabled:
             return 0.25
-        if _state.notice_emitter and _state.notice_emitter.dirty:
+        emitter = _state.notice_emitter
+        if emitter and (emitter.dirty or emitter.prepared_event_count):
             _try_send_dirty_events()
             _state._last_send_time = time.time()
         return 0.25
@@ -1145,11 +1149,17 @@ def _wait_for_receiver_handshake(receiver_addon, timeout: float = 2.0) -> None:
     while time.monotonic() < deadline:
         if getattr(receiver, "auth_rejected", False):
             raise RuntimeError("receiver authentication rejected")
+        if getattr(receiver, "hello_rejected", False):
+            reason = getattr(receiver, "rejection_reason", "")
+            raise RuntimeError(reason or "receiver connection rejected")
         if getattr(receiver, "connected", False):
             return
         time.sleep(0.02)
     if getattr(receiver, "auth_rejected", False):
         raise RuntimeError("receiver authentication rejected")
+    if getattr(receiver, "hello_rejected", False):
+        reason = getattr(receiver, "rejection_reason", "")
+        raise RuntimeError(reason or "receiver connection rejected")
     raise RuntimeError("receiver did not connect")
 
 
@@ -1372,7 +1382,8 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
 
             from openusdconnect.emitter import NoticeEmitter
 
-            _state.notice_emitter = NoticeEmitter(_state.author.stage)
+            if _state.notice_emitter is None:
+                _state.notice_emitter = NoticeEmitter(_state.author.stage)
 
             _state.sender = EventSender(
                 host=scene.usd_connect_emit_host,

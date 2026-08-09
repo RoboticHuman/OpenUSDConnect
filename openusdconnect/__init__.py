@@ -10,6 +10,7 @@ from .adapters import (
 )
 from .codec import (
     DecodeResult,
+    HelloRejectionCode,
     ReceivedEvent,
     decode_envelope,
     decode_messages,
@@ -21,10 +22,15 @@ from .codec import (
 from .emitter import NoticeEmitter
 from .event_apply import apply_event, apply_events, atomic_apply
 from .events import Event
+from .layer_key_router import LayerKeyRouter
+from .managed_client import ManagedClient, ManagedUpdate
 from .protocol import make_hello, make_quit, make_txn
+from .protocol_constants import LayerMode
 from .receiver import ReceiverThread
 from .sender import EventSender
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
+from .shared_stage_client import SharedStageClient, SharedStageUpdate
+from .usd_client import UsdPublisher, UsdReceiver
 
 __version__ = "0.1.0"
 
@@ -33,11 +39,20 @@ __all__ = [
     "DecodeResult",
     "Event",
     "EventSender",
+    "HelloRejectionCode",
+    "LayerKeyRouter",
+    "LayerMode",
+    "ManagedClient",
+    "ManagedUpdate",
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
     "ReceivedEvent",
     "ServerConfig",
+    "SharedStageClient",
+    "SharedStageUpdate",
+    "UsdPublisher",
+    "UsdReceiver",
     "UsdStageAdapter",
     "UsdSyncServer",
     "VfsConfig",

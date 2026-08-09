@@ -11,6 +11,7 @@ from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_ENSURE_PRIM,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
@@ -18,11 +19,13 @@ from .protocol_constants import (
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
+    K_SET_SUBLAYERS,
     K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     SDF_LAYER_TOPOLOGY_FIELDS,
     SDF_SPEC_KIND_LAYER,
+    SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KINDS,
     TRS_FIELDS,
 )
@@ -170,8 +173,44 @@ def validate_event(ev: dict) -> bool:
             return False
         if removed and spec_kind == SDF_SPEC_KIND_LAYER:
             return False
+        if spec_kind == SDF_SPEC_KIND_PROPERTY and not removed:
+            return False
         if not removed and not fragment:
             return False
+    if k == K_REPLACE_SDF_LAYER_CONTENT:
+        if ev.get("prim") != "/":
+            return False
+        fragment = ev.get("fragment")
+        if not isinstance(fragment, str) or not fragment:
+            return False
+    if k == K_SET_SUBLAYERS:
+        if ev.get("prim") != "/":
+            return False
+        if not isinstance(ev.get("generation"), str) or not ev["generation"]:
+            return False
+        revision = ev.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            return False
+        sublayers = ev.get("sublayers")
+        if not isinstance(sublayers, list):
+            return False
+        authored_paths = set()
+        for entry in sublayers:
+            if not isinstance(entry, dict):
+                return False
+            path = entry.get("authored_path")
+            if not isinstance(path, str) or not path or path in authored_paths:
+                return False
+            authored_paths.add(path)
+            for name, default in (("offset", 0.0), ("scale", 1.0)):
+                value = entry.get(name, default)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return False
+                if not math.isfinite(value):
+                    return False
+            layer_key = entry.get("layer_key")
+            if layer_key is not None and (not isinstance(layer_key, str) or not layer_key):
+                return False
     if k == K_SET_REFERENCE and not _is_arc_event_valid(
         ev,
         "refs",

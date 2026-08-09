@@ -4,10 +4,11 @@
 cycle.  ``connect()`` waits for ``hello_ok`` (or surfaces ``auth_rejected``)
 before returning, so callers know the server accepted them before the
 first event leaves.  ``send_events`` / ``send_message`` return ``False``
-on socket error and put the sender into a disconnected state — callers
-reconnect from their own tick loop (the protocol is latest-wins for
-most events, so dropping during disconnect is correct: the next
-successful tick re-snapshots current state).
+on socket error and put the sender into a disconnected state; callers
+own reconnect and retry policy. ``EventSender`` does not retain a failed
+message. Stage integrations can pair it with
+``NoticeEmitter.prepare_events_for_send`` to keep one emitter batch pending
+until the socket write succeeds.
 
 Token persistence (TOFU) is opt-in: pass an ``on_token_issued`` callback
 to receive a freshly issued token on first connect, and pass the saved
@@ -36,6 +37,7 @@ from .protocol import (
     make_quit,
     make_txn,
 )
+from .protocol_constants import LayerMode
 from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ class EventSender:
         handshake_timeout: float = _HANDSHAKE_TIMEOUT_S,
         on_token_issued: Callable[[str], None] | None = None,
         on_stage_metadata: Callable[[dict], None] | None = None,
+        layer_mode: LayerMode | str = LayerMode.MANAGED,
     ):
         self.host = host
         self.port = port
@@ -67,11 +70,15 @@ class EventSender:
         self.origin = origin
         self.department = department
         self.token = token
+        self.layer_mode = LayerMode(layer_mode)
+        self.layer_mode_active = LayerMode.MANAGED
         self.handshake_timeout = handshake_timeout
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
         self.sock: socket.socket | None = None
         self.auth_rejected: bool = False
+        self.hello_rejected: bool = False
+        self.rejection_reason = ""
         self.stage_metadata: dict = {}
 
     @property
@@ -95,6 +102,8 @@ class EventSender:
             return True
 
         self.auth_rejected = False
+        self.hello_rejected = False
+        self.rejection_reason = ""
         try:
             self.sock = socket.create_connection(
                 (self.host, self.port),
@@ -111,6 +120,7 @@ class EventSender:
                     origin=self.origin,
                     department=self.department,
                     token=self.token,
+                    layer_mode=self.layer_mode,
                 ),
             )
             buf = recv_framed(self.sock)
@@ -132,12 +142,34 @@ class EventSender:
             self._close()
             return False
 
+        if pt == PayloadType.HelloRejected:
+            _, rejection = resolve_payload(env)
+            reason = rejection.Reason()
+            if isinstance(reason, bytes):
+                reason = reason.decode("utf-8")
+            self.hello_rejected = True
+            self.rejection_reason = reason or "connection rejected"
+            LOG.error("EventSender: connection rejected: %s", self.rejection_reason)
+            self._close()
+            return False
+
         if pt != PayloadType.HelloOk:
             LOG.error("EventSender: unexpected response type %s", pt)
             self._close()
             return False
 
         _, ho = resolve_payload(env)
+        self.layer_mode_active = LayerMode(
+            "shared_stage" if ho.LayerMode() else "managed"
+        )
+        if self.layer_mode_active is not self.layer_mode:
+            LOG.error(
+                "EventSender: server negotiated %s instead of %s",
+                self.layer_mode_active.value,
+                self.layer_mode.value,
+            )
+            self._close()
+            return False
         issued = ho.Token()
         if issued:
             if isinstance(issued, bytes):
@@ -172,16 +204,17 @@ class EventSender:
             pass
         self._close()
 
-    def send_events(self, events: list) -> bool:
+    def send_events(self, events: list, *, layer_key: str = "") -> bool:
         """Wrap *events* in a ``txn`` and send.  Returns success.
 
         On socket error, marks the sender disconnected and returns
-        ``False``; the caller is expected to reconnect from its next tick.
+        ``False``. The caller is responsible for retaining the batch and
+        reconnecting; this object does not queue failed events.
         """
         if self.sock is None or not events:
             return False
         try:
-            send_msg(self.sock, make_txn(self.client_id, events))
+            send_msg(self.sock, make_txn(self.client_id, events, layer_key=layer_key))
             return True
         except OSError:
             LOG.exception("EventSender: failed to send events")

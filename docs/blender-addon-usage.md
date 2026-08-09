@@ -121,6 +121,12 @@ USD mirror and applies their final composed result to Blender. Reorder, mute,
 and weak local edits therefore follow OpenUSD layer strength without rewriting
 the authored opinions.
 
+Snapshot continuation is supported only on a server with one unmuted
+collaboration layer and no department policy. If the server requires layered
+replay, Blender leaves the imported snapshot open, stops the receiver, and logs
+the server's rejection reason. Configure Blender from the original base USD to
+join that layered session.
+
 The virtual share is read-only by default. Server operators can opt into
 compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
 translation with `--vfs-write-mode translate`. Drop mode accepts and discards

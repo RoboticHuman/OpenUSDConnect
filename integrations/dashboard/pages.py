@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from nicegui import ui
 
 from openusdconnect.protocol_constants import EVENT_KEYS
+from openusdconnect.server.types import ReplayModeConflictError
 
 if TYPE_CHECKING:
     from openusdconnect.server import UsdSyncServer
@@ -752,16 +753,28 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None,
         new_order = [
             info["department"] for info in layers if info.get("department")
         ]
-        srv.set_department_priority(new_order)
+        try:
+            srv.set_department_priority(new_order)
+        except ReplayModeConflictError as exc:
+            ui.notify(str(exc), type="warning")
+            return
         _refresh_all()
 
     def _mute(key):
-        srv.mute_layer(key)
+        try:
+            srv.mute_layer(key)
+        except ReplayModeConflictError as exc:
+            ui.notify(str(exc), type="warning")
+            return
         ui.notify(f"Muted: {key}", type="info")
         _refresh_all()
 
     def _unmute(key):
-        srv.unmute_layer(key)
+        try:
+            srv.unmute_layer(key)
+        except ReplayModeConflictError as exc:
+            ui.notify(str(exc), type="warning")
+            return
         ui.notify(f"Unmuted: {key}", type="positive")
         _refresh_all()
 
@@ -1307,7 +1320,14 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
 def _register_api_routes(srv: UsdSyncServer):
     """REST API for scripting."""
     from nicegui import app
+    from starlette.exceptions import HTTPException
     from starlette.requests import Request
+
+    def _change_layer_stack(operation):
+        try:
+            return operation()
+        except ReplayModeConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/status")
     def api_status():
@@ -1376,17 +1396,17 @@ def _register_api_routes(srv: UsdSyncServer):
     async def api_layers_reorder(request: Request):
         body = await request.json()
         ordered = body.get("departments", body.get("order", []))
-        srv.set_department_priority(ordered)
+        _change_layer_stack(lambda: srv.set_department_priority(ordered))
         return {"ok": True}
 
     @app.post("/api/layers/{key}/mute")
     def api_layer_mute(key: str):
-        ok = srv.mute_layer(key)
+        ok = _change_layer_stack(lambda: srv.mute_layer(key))
         return {"ok": ok}
 
     @app.post("/api/layers/{key}/unmute")
     def api_layer_unmute(key: str):
-        ok = srv.unmute_layer(key)
+        ok = _change_layer_stack(lambda: srv.unmute_layer(key))
         return {"ok": ok}
 
     @app.post("/api/layers/{client_id}/merge")
@@ -1407,7 +1427,7 @@ def _register_api_routes(srv: UsdSyncServer):
     async def api_departments_set(request: Request):
         body = await request.json()
         ordered = body.get("departments", [])
-        srv.set_department_priority(ordered)
+        _change_layer_stack(lambda: srv.set_department_priority(ordered))
         return {"ok": True}
 
     # -- Token management endpoints ----------------------------------------

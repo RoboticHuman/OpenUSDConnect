@@ -13,6 +13,7 @@ from .protocol_constants import (
     SDF_SPEC_KIND_ATTRIBUTE,
     SDF_SPEC_KIND_LAYER,
     SDF_SPEC_KIND_PRIM,
+    SDF_SPEC_KIND_PROPERTY,
     SDF_SPEC_KIND_RELATIONSHIP,
     SDF_SPEC_KIND_VARIANT,
     SDF_SPEC_KIND_VARIANT_SET,
@@ -58,7 +59,11 @@ def _spec_path(value: str | Sdf.Path, kind: str) -> Sdf.Path:
         valid = path == Sdf.Path.absoluteRootPath
     elif kind == SDF_SPEC_KIND_PRIM:
         valid = path.IsPrimPath()
-    elif kind in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
+    elif kind in (
+        SDF_SPEC_KIND_ATTRIBUTE,
+        SDF_SPEC_KIND_RELATIONSHIP,
+        SDF_SPEC_KIND_PROPERTY,
+    ):
         valid = path.IsPropertyPath()
     elif kind == SDF_SPEC_KIND_VARIANT_SET:
         valid = path.IsPrimVariantSelectionPath() and not path.GetVariantSelection()[1]
@@ -98,6 +103,8 @@ def _get_spec(layer: Sdf.Layer, path: Sdf.Path, kind: str):
     spec = layer.pseudoRoot if kind == SDF_SPEC_KIND_LAYER else layer.GetObjectAtPath(path)
     if not spec:
         return None
+    if kind == SDF_SPEC_KIND_PROPERTY:
+        return spec if isinstance(spec, Sdf.PropertySpec) else None
     return spec if spec_kind_for_object(spec) == kind else None
 
 
@@ -111,6 +118,9 @@ def _remove_namespace_spec(layer: Sdf.Layer, path: Sdf.Path) -> None:
 
 
 def _remove_spec(layer: Sdf.Layer, path: Sdf.Path, kind: str) -> None:
+    if kind == SDF_SPEC_KIND_PROPERTY:
+        _remove_namespace_spec(layer, path)
+        return
     spec = _get_spec(layer, path, kind)
     if not spec:
         if kind == SDF_SPEC_KIND_VARIANT_SET:
@@ -129,32 +139,6 @@ def _remove_spec(layer: Sdf.Layer, path: Sdf.Path, kind: str) -> None:
     _remove_namespace_spec(layer, path)
 
 
-def _copy_path_list(proxy, value) -> None:
-    proxy.ClearEdits()
-    if value.isExplicit:
-        proxy.explicitItems = list(value.explicitItems)
-        return
-    proxy.addedItems = list(value.addedItems)
-    proxy.prependedItems = list(value.prependedItems)
-    proxy.appendedItems = list(value.appendedItems)
-    proxy.deletedItems = list(value.deletedItems)
-    proxy.orderedItems = list(value.orderedItems)
-
-
-def _clear_field(spec, field: str) -> None:
-    if field == "timeSamples" and isinstance(spec, Sdf.AttributeSpec):
-        for time in tuple(spec.ListTimeSamples()):
-            spec.EraseTimeSample(time)
-        return
-    if field == "connectionPaths" and isinstance(spec, Sdf.AttributeSpec):
-        spec.connectionPathList.ClearEdits()
-        return
-    if field == "targetPaths" and isinstance(spec, Sdf.RelationshipSpec):
-        spec.targetPathList.ClearEdits()
-        return
-    spec.ClearInfo(field)
-
-
 def _field_value(source_spec, field: str):
     value = source_spec.GetInfo(field)
     if isinstance(source_spec, Sdf.PseudoRootSpec) and field == "customLayerData":
@@ -170,64 +154,6 @@ def _fields_contain_asset_paths(spec, fields: Iterable[str]) -> bool:
         if value_contains_asset_path(_field_value(spec, field)):
             return True
     return False
-
-
-def _set_composed_field(spec, field: str, value) -> None:
-    if field == "timeSamples" and isinstance(spec, Sdf.AttributeSpec):
-        _clear_field(spec, field)
-        for time, sample in value.items():
-            spec.SetTimeSample(float(time), sample)
-        return
-    if field == "connectionPaths" and isinstance(spec, Sdf.AttributeSpec):
-        _copy_path_list(spec.connectionPathList, value)
-        return
-    if field == "targetPaths" and isinstance(spec, Sdf.RelationshipSpec):
-        _copy_path_list(spec.targetPathList, value)
-        return
-    spec.SetInfo(field, value)
-
-
-def _composed_property_field_value(prop: Usd.Property, field: str):
-    if field == "custom":
-        return prop.IsCustom()
-    if isinstance(prop, Usd.Attribute):
-        if field == "typeName":
-            return prop.GetTypeName()
-        if field == "variability":
-            return prop.GetVariability()
-        if field == "connectionPaths":
-            value = Sdf.PathListOp()
-            value.explicitItems = prop.GetConnections()
-            return value
-    if isinstance(prop, Usd.Relationship) and field == "targetPaths":
-        value = Sdf.PathListOp()
-        value.explicitItems = prop.GetTargets()
-        return value
-    return prop.GetMetadata(field)
-
-
-def _composed_asset_source_layer(
-    prop: Usd.Property,
-    stack,
-    fields: Iterable[str],
-) -> tuple[bool, Sdf.Layer | None]:
-    source_layer = None
-    found = False
-    for field in fields:
-        if field in _ASSET_FREE_FIELDS or not prop.HasAuthoredMetadata(field):
-            continue
-        value = _composed_property_field_value(prop, field)
-        if not value_contains_asset_path(value):
-            continue
-        found = True
-        sources = [spec for spec in stack if spec.HasInfo(field)]
-        if not sources or (isinstance(value, dict) and len(sources) > 1):
-            return True, None
-        field_layer = sources[0].layer
-        if source_layer is not None and source_layer != field_layer:
-            return True, None
-        source_layer = field_layer
-    return found, source_layer
 
 
 def _prepare_copy_destination(layer: Sdf.Layer, path: Sdf.Path, kind: str) -> None:
@@ -313,9 +239,12 @@ def serialize_spec_fields(
     *,
     expression_variables: dict | None = None,
     resolver_context: Ar.ResolverContext | None = None,
+    stabilize_asset_paths: bool = True,
 ) -> str:
     """Serialize selected fields and required declaration data to USDA."""
     spec_path = _spec_path(spec_path, spec_kind)
+    if spec_kind == SDF_SPEC_KIND_PROPERTY:
+        raise ValueError("the generic property kind cannot carry authored fields")
     source_spec = _get_spec(source_layer, spec_path, spec_kind)
     if not source_spec:
         raise ValueError(f"source layer has no {spec_kind} spec at {spec_path}")
@@ -337,7 +266,7 @@ def serialize_spec_fields(
         )
         if spec_kind == SDF_SPEC_KIND_VARIANT_SET and not target_spec.variants:
             Sdf.VariantSpec(target_spec, _FRAGMENT_VARIANT_NAME)
-        if _fields_contain_asset_paths(source_spec, selected):
+        if stabilize_asset_paths and _fields_contain_asset_paths(source_spec, selected):
             stabilize_layer_asset_paths(
                 scratch,
                 source_layer,
@@ -349,204 +278,65 @@ def serialize_spec_fields(
         scratch.Clear()
 
 
-def serialize_composed_property_spec_fields(
-    stage: Usd.Stage,
-    event_path: str | Sdf.Path,
-    spec_kind: str,
-    fields: Iterable[str],
-) -> str | None:
-    """Serialize selected fields from one property's composed state."""
-    if spec_kind not in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
-        raise ValueError("composed projection is only defined for property specs")
-    event_path = _spec_path(event_path, spec_kind)
-    if event_path.ContainsPrimVariantSelection():
-        return None
-    prop = stage.GetPropertyAtPath(event_path)
-    if not prop or not prop.IsValid():
-        return None
-    stack = prop.GetPropertyStack()
-    if not stack:
-        return None
-    if spec_kind_for_object(stack[0]) != spec_kind:
-        return None
-
-    selected = set(str(field) for field in fields)
-    scratch = _scratch_layer("compose")
+def serialize_layer_content(source_layer: Sdf.Layer) -> str:
+    """Serialize all authored opinions except managed sublayer topology."""
+    scratch = _scratch_layer("serialize-layer-content")
     try:
-        source_spec = stack[0]
-        spec = _copy_spec_fields(
-            source_spec.layer,
-            source_spec.path,
-            scratch,
-            event_path,
-            spec_kind,
-            selected,
-            include_required=True,
-        )
-        declaration_fields = _PROPERTY_DECLARATION_FIELDS & {
-            str(key) for key in spec.ListInfoKeys()
-        }
-        for field in declaration_fields:
-            value = _composed_property_field_value(prop, field)
-            if spec.GetInfo(field) != value:
-                _set_composed_field(spec, field, value)
-        for field in selected - declaration_fields:
-            if prop.HasAuthoredMetadata(field):
-                _set_composed_field(
-                    spec,
-                    field,
-                    _composed_property_field_value(prop, field),
-                )
-            else:
-                _clear_field(spec, field)
-        asset_fields = [
-            str(field)
-            for field in spec.ListInfoKeys()
-            if value_contains_asset_path(_field_value(spec, str(field)))
-        ]
-        if asset_fields:
-            _found, source_layer = _composed_asset_source_layer(
-                prop,
-                stack,
-                asset_fields,
-            )
-            if source_layer is None:
-                flattened = stage.Flatten()
-                return serialize_spec_fields(
-                    flattened,
-                    event_path,
-                    spec_kind,
-                    selected,
-                )
-            stabilize_layer_asset_paths(
-                scratch,
-                source_layer,
-                resolver_context=stage.GetPathResolverContext(),
-                use_evaluated_paths=True,
-            )
+        scratch.TransferContent(source_layer)
+        scratch.subLayerPaths.clear()
+        custom_data = dict(scratch.customLayerData)
+        custom_data.pop(_RESERVED_LAYER_DATA_KEY, None)
+        if custom_data:
+            scratch.customLayerData = custom_data
+        else:
+            scratch.pseudoRoot.ClearInfo("customLayerData")
         return scratch.ExportToString()
     finally:
         scratch.Clear()
 
 
-def composed_property_spec_requires_flattening(stage: Usd.Stage, event: dict) -> bool:
-    """Return whether a flat property correction needs USD layer flattening."""
-    requested_kind = event["spec_kind"]
-    if requested_kind not in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
-        return False
-    path = _spec_path(event["spec_path"], requested_kind)
-    if path.ContainsPrimVariantSelection():
-        return True
-
-    prop = stage.GetPropertyAtPath(path)
-    if not prop or not prop.IsValid():
-        return False
-    stack = prop.GetPropertyStack()
-    if not stack:
-        return False
-
-    composed_kind = spec_kind_for_object(stack[0])
-    fields = set(str(field) for field in event.get("fields", ()))
-    if composed_kind != requested_kind or event.get("removed", False):
-        fields.update(
-            str(key)
-            for spec in stack
-            if spec_kind_for_object(spec) == composed_kind
-            for key in spec.ListInfoKeys()
-        )
-
-    found, source_layer = _composed_asset_source_layer(prop, stack, fields)
-    return found and source_layer is None
+def _replacement_layer(fragment: str) -> Sdf.Layer:
+    if not isinstance(fragment, str) or not fragment:
+        raise ValueError("replace_sdf_layer_content requires a valid Sdf fragment")
+    incoming = _scratch_layer("replace-layer-content")
+    incoming.Clear()
+    if not incoming.ImportFromString(fragment):
+        raise ValueError("replace_sdf_layer_content requires a valid Sdf fragment")
+    if incoming.subLayerPaths:
+        incoming.Clear()
+        raise ValueError("layer content replacement cannot author sublayer topology")
+    return incoming
 
 
-def composed_property_spec_event(stage: Usd.Stage, event: dict) -> dict | None:
-    """Build a flat-projection event for a property's composed state."""
-    if composed_property_spec_requires_flattening(stage, event):
-        return composed_layer_spec_event(
-            stage.Flatten(),
-            event,
-        )
-
-    requested_kind = event["spec_kind"]
-    if requested_kind not in (SDF_SPEC_KIND_ATTRIBUTE, SDF_SPEC_KIND_RELATIONSHIP):
-        return None
-    path = _spec_path(event["spec_path"], requested_kind)
-    fields = set(str(field) for field in event.get("fields", ()))
-    prop = stage.GetPropertyAtPath(path)
-    composed_kind = requested_kind
-    if prop and prop.IsValid():
-        stack = prop.GetPropertyStack()
-        if stack:
-            composed_kind = spec_kind_for_object(stack[0])
-        if composed_kind != requested_kind:
-            fields.clear()
-            for spec in stack:
-                if spec_kind_for_object(spec) == composed_kind:
-                    fields.update(str(key) for key in spec.ListInfoKeys())
-        elif event.get("removed", False):
-            for spec in stack:
-                if spec_kind_for_object(spec) == composed_kind:
-                    fields.update(str(key) for key in spec.ListInfoKeys())
-
-    fragment = serialize_composed_property_spec_fields(
-        stage,
-        path,
-        composed_kind,
-        fields,
-    )
-    return {
-        "k": event["k"],
-        "prim": event_prim_path(path, composed_kind),
-        "spec_path": str(path),
-        "spec_kind": composed_kind,
-        "fields": sorted(fields),
-        "fragment": fragment or "",
-        "removed": fragment is None,
-    }
+def validate_layer_content_replacement(event: dict) -> None:
+    """Validate one complete non-topology layer replacement."""
+    incoming = _replacement_layer(event.get("fragment", ""))
+    incoming.Clear()
 
 
-def composed_layer_spec_event(composed_layer: Sdf.Layer, event: dict) -> dict:
-    """Build a flat-projection event from a flattened USD layer stack."""
-    requested_kind = event["spec_kind"]
-    path = _spec_path(event["spec_path"], requested_kind)
-    source_spec = (
-        composed_layer.pseudoRoot
-        if requested_kind == SDF_SPEC_KIND_LAYER
-        else composed_layer.GetObjectAtPath(path)
-    )
-    if not source_spec:
-        return {
-            "k": event["k"],
-            "prim": event["prim"],
-            "spec_path": str(path),
-            "spec_kind": requested_kind,
-            "fields": sorted(set(str(field) for field in event.get("fields", ()))),
-            "fragment": "",
-            "removed": True,
-        }
-
-    composed_kind = spec_kind_for_object(source_spec)
-    fields = set(str(field) for field in event.get("fields", ()))
-    if composed_kind != requested_kind:
-        fields.clear()
-        fields.update(str(key) for key in source_spec.ListInfoKeys())
-    elif event.get("removed", False):
-        fields.update(str(key) for key in source_spec.ListInfoKeys())
-    fields.difference_update(SDF_LAYER_TOPOLOGY_FIELDS)
-    return {
-        "k": event["k"],
-        "prim": event_prim_path(path, composed_kind),
-        "spec_path": str(path),
-        "spec_kind": composed_kind,
-        "fields": sorted(fields),
-        "fragment": serialize_spec_fields(
-            composed_layer,
-            path,
-            composed_kind,
-            fields,
-        ),
-        "removed": False,
-    }
+def apply_layer_content_replacement(target_layer: Sdf.Layer, event: dict) -> None:
+    """Replace authored content while retaining graph and collaboration data."""
+    incoming = _replacement_layer(event.get("fragment", ""))
+    paths = list(target_layer.subLayerPaths)
+    offsets = list(target_layer.subLayerOffsets)
+    reserved_data = target_layer.customLayerData.get(_RESERVED_LAYER_DATA_KEY)
+    try:
+        custom_data = dict(incoming.customLayerData)
+        custom_data.pop(_RESERVED_LAYER_DATA_KEY, None)
+        if reserved_data is not None:
+            custom_data[_RESERVED_LAYER_DATA_KEY] = reserved_data
+        if custom_data:
+            incoming.customLayerData = custom_data
+        else:
+            incoming.pseudoRoot.ClearInfo("customLayerData")
+        with Sdf.ChangeBlock():
+            target_layer.TransferContent(incoming)
+            target_layer.subLayerPaths.clear()
+            for index, path in enumerate(paths):
+                target_layer.subLayerPaths.append(path)
+                target_layer.subLayerOffsets[index] = offsets[index]
+    finally:
+        incoming.Clear()
 
 
 def fragment_authored_fields(
@@ -588,6 +378,8 @@ def _spec_delta_info(event: dict) -> tuple[str, Sdf.Path, tuple[str, ...]]:
         raise ValueError("Sdf spec removed state must be boolean")
     if removed and kind == SDF_SPEC_KIND_LAYER:
         raise ValueError("the pseudo-root spec cannot be removed")
+    if kind == SDF_SPEC_KIND_PROPERTY and not removed:
+        raise ValueError("the generic property kind is valid only for removal")
     return kind, path, fields
 
 
@@ -604,8 +396,12 @@ def validate_spec_delta(event: dict) -> None:
 
 def apply_spec_delta(stage: Usd.Stage, event: dict) -> None:
     """Apply one ``set_sdf_spec_fields`` event to the current layer."""
+    apply_spec_delta_to_layer(stage.GetEditTarget().GetLayer(), event)
+
+
+def apply_spec_delta_to_layer(target_layer: Sdf.Layer, event: dict) -> None:
+    """Apply one exact field delta directly to an ``Sdf.Layer``."""
     kind, event_path, fields = _spec_delta_info(event)
-    target_layer = stage.GetEditTarget().GetLayer()
 
     if event.get("removed", False):
         _remove_spec(target_layer, event_path, kind)
@@ -657,9 +453,8 @@ def merge_spec_events(previous: dict, current: dict) -> dict:
     path = _spec_path(current["spec_path"], kind)
     output = _scratch_layer("merge-output")
     try:
-        stage = Usd.Stage.Open(output)
-        apply_spec_delta(stage, previous)
-        apply_spec_delta(stage, current)
+        apply_spec_delta_to_layer(output, previous)
+        apply_spec_delta_to_layer(output, current)
         fields = list(
             dict.fromkeys(
                 [
@@ -675,6 +470,7 @@ def merge_spec_events(previous: dict, current: dict) -> dict:
             path,
             kind,
             fields,
+            stabilize_asset_paths=False,
         )
         merged["removed"] = False
         return merged
@@ -688,18 +484,19 @@ __all__ = [
     "SDF_SPEC_KIND_ATTRIBUTE",
     "SDF_SPEC_KIND_LAYER",
     "SDF_SPEC_KIND_PRIM",
+    "SDF_SPEC_KIND_PROPERTY",
     "SDF_SPEC_KIND_RELATIONSHIP",
     "SDF_SPEC_KIND_VARIANT",
     "SDF_SPEC_KIND_VARIANT_SET",
+    "apply_spec_delta_to_layer",
     "apply_spec_delta",
-    "composed_layer_spec_event",
-    "composed_property_spec_event",
-    "composed_property_spec_requires_flattening",
+    "apply_layer_content_replacement",
     "event_prim_path",
     "fragment_authored_fields",
     "merge_spec_events",
-    "serialize_composed_property_spec_fields",
     "serialize_spec_fields",
+    "serialize_layer_content",
     "spec_kind_for_object",
     "validate_spec_delta",
+    "validate_layer_content_replacement",
 ]
