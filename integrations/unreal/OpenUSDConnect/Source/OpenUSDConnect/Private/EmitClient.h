@@ -10,6 +10,13 @@
 
 class UUSDConnectSubsystem;
 
+struct FQueuedProducerTxn
+{
+	uint64 TxnId = 0;
+	TArray<uint8> Frame;
+	bool bSent = false;
+};
+
 /**
  * Background TCP thread that connects to the OpenUSDConnect server as an **emitter**.
  *
@@ -50,8 +57,26 @@ public:
 
 	bool Start();
 	void StopAndWait();
+	/** Wait for the server's cumulative acknowledgement without blocking normal emits. */
+	bool FlushPending(double TimeoutSeconds) const;
 
 	bool IsConnected() const { return bConnected.load(std::memory_order_acquire); }
+	uint64 GetSubmittedTransactionCount() const
+	{
+		return SubmittedTransactionCount.load(std::memory_order_relaxed);
+	}
+	uint64 GetAcknowledgedTransactionCount() const
+	{
+		return AcknowledgedTransactionCount.load(std::memory_order_relaxed);
+	}
+	uint64 GetPendingTransactionCount() const
+	{
+		return PendingTransactionCount.load(std::memory_order_relaxed);
+	}
+	bool IsRecoveryRequired() const
+	{
+		return bRecoveryRequired.load(std::memory_order_acquire);
+	}
 
 	/**
 	 * Monotonically increasing identifier for each successful HELLO handshake.
@@ -63,8 +88,8 @@ public:
 		return ConnectionGeneration.load(std::memory_order_relaxed);
 	}
 
-	/** Push a complete pre-framed Envelope{Txn} message onto the send queue. */
-	void EnqueueFrame(TArray<uint8>&& Frame);
+	/** Push a complete pre-framed Envelope{Txn} into the acknowledged outbox. */
+	void EnqueueFrame(uint64 TxnId, TArray<uint8>&& Frame);
 
 private:
 	bool RecvExact(uint8* Buf, int32 Needed);
@@ -88,6 +113,10 @@ private:
 	std::atomic<bool> bShouldStop;
 	std::atomic<bool> bConnected;
 	std::atomic<uint64> ConnectionGeneration;
+	std::atomic<uint64> SubmittedTransactionCount;
+	std::atomic<uint64> AcknowledgedTransactionCount;
+	std::atomic<uint64> PendingTransactionCount;
+	std::atomic<bool> bRecoveryRequired;
 
-	TQueue<TArray<uint8>, EQueueMode::Spsc> SendQueue;
+	TQueue<FQueuedProducerTxn, EQueueMode::Spsc> SendQueue;
 };

@@ -53,10 +53,19 @@ def _send_events_to_server(events, port=PORT):
     for attempt in range(3):
         sock = socket.create_connection(("127.0.0.1", port), timeout=5)
         try:
-            send_msg(sock, make_hello("emitter", client_id="test-emitter", origin="test"))
+            session_id = f"stage-first-{time.time_ns()}"
+            send_msg(
+                sock,
+                make_hello(
+                    "emitter",
+                    client_id="test-emitter",
+                    origin="test",
+                    producer_session_id=session_id,
+                ),
+            )
             reply = message_to_dict(recv_msg(sock))
             assert reply.get("type") == "hello_ok", f"handshake failed: {reply}"
-            send_msg(sock, make_txn("test-emitter", events))
+            send_msg(sock, make_txn(events, txn_id=1))
             return
         except ConnectionError:
             if attempt == 2:
@@ -118,6 +127,7 @@ class TestStageFirstIntegration:
                 "emitter",
                 client_id="old-client",
                 origin="old-client",
+                producer_session_id="old-client-session",
             )
             hello["protocol_version"] = 1
             send_msg(sock, hello)

@@ -119,7 +119,13 @@ class ReceiverThread(threading.Thread):
         self._replay_from: int | None = None
         self._replay_generation = 0
         self._connected_event = threading.Event()
+        self._synchronized_event = threading.Event()
         self._handshake_event = threading.Event()
+        self._incoming_serial = 0
+        self._last_drained_serial = 0
+        self._received_replay_complete: tuple[int, int, int, int] | None = None
+        self.replay_head_seq = 0
+        self.replay_epoch = 0
         self.last_seq: int = 0
         self._queue_overflow = False
         self.auth_rejected = False
@@ -138,6 +144,14 @@ class ReceiverThread(threading.Thread):
             self._connected_event.set()
         else:
             self._connected_event.clear()
+            self._synchronized_event.clear()
+            with self._incoming_lock:
+                self._received_replay_complete = None
+
+    @property
+    def synchronized(self) -> bool:
+        """Whether replay through the server's advertised head was applied."""
+        return self.connected and self._synchronized_event.is_set()
 
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Wait for the current handshake result, not for replay completion."""
@@ -145,6 +159,27 @@ class ReceiverThread(threading.Thread):
             return True
         self._handshake_event.wait(timeout=timeout)
         return self.connected
+
+    def wait_synchronized(self, timeout: float | None = None) -> bool:
+        """Wait for replay to be applied by the stage-owning consumer thread."""
+        if self.synchronized:
+            return True
+        self._synchronized_event.wait(timeout=timeout)
+        return self.synchronized
+
+    def mark_replay_applied(self) -> bool:
+        """Publish READY after a successful drain applied the replay prefix."""
+        with self._incoming_lock:
+            marker = self._received_replay_complete
+            if marker is None:
+                return False
+            generation, head_seq, epoch, serial = marker
+            if generation != self._replay_generation or self._last_drained_serial < serial:
+                return False
+            self.replay_head_seq = head_seq
+            self.replay_epoch = epoch
+            self._synchronized_event.set()
+            return True
 
     def run(self):
         delay = self._reconnect_base_delay
@@ -212,7 +247,10 @@ class ReceiverThread(threading.Thread):
             return
 
         with self._incoming_lock:
+            self._replay_generation += 1
             connection_generation = self._replay_generation
+            self._synchronized_event.clear()
+            self._received_replay_complete = None
             sync_from = self._replay_from
             if sync_from is None:
                 sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
@@ -361,6 +399,18 @@ class ReceiverThread(threading.Thread):
             # do not enqueue (the queue is reserved for stage-event bytes).
             env = decode_envelope(buf)
             pt = env.PayloadType()
+            if pt == PayloadType.ReplayComplete:
+                _, complete = resolve_payload(env)
+                with self._incoming_lock:
+                    if connection_generation != self._replay_generation:
+                        return
+                    self._received_replay_complete = (
+                        connection_generation,
+                        int(complete.HeadSeq()),
+                        int(complete.Epoch()),
+                        self._incoming_serial,
+                    )
+                continue
             if pt in (
                 PayloadType.PlaybackState,
                 PayloadType.PlaybackClaimed,
@@ -408,9 +458,12 @@ class ReceiverThread(threading.Thread):
                 )
                 if pt == PayloadType.Resync:
                     self.last_seq = 0
+                    self._synchronized_event.clear()
+                    self._received_replay_complete = None
                 elif is_sequenced and seq > self.last_seq:
                     self.last_seq = seq
                 self._incoming.append(buf)
+                self._incoming_serial += 1
 
     def request_replay_from(self, seq_start: int) -> None:
         """Reconnect and request replay beginning at ``seq_start``.
@@ -429,6 +482,8 @@ class ReceiverThread(threading.Thread):
             self.last_seq = seq_start - 1
             self._incoming.clear()
             self._queue_overflow = False
+            self._synchronized_event.clear()
+            self._received_replay_complete = None
         self._close_socket()
 
     def _close_socket(self, sock: socket.socket | None = None) -> None:
@@ -458,6 +513,7 @@ class ReceiverThread(threading.Thread):
         with self._incoming_lock:
             old = self._incoming
             self._incoming = deque()
+            self._last_drained_serial = self._incoming_serial
         return old
 
     def stop(self):

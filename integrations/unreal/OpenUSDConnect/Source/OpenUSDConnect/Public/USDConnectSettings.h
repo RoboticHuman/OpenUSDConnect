@@ -25,8 +25,9 @@ public:
 	int32 ServerPort = 7200;
 
 	/**
-	 * Layer/department name sent in the HELLO message.
-	 * Leave empty to use the default (no per-department layer separation).
+	 * Layer/department name sent by emitter-only sessions.
+	 * The native Unreal receiver does not yet implement managed layered replay,
+	 * so bidirectional/receive sessions fail closed when this is non-empty.
 	 */
 	UPROPERTY(config, EditAnywhere, Category="Server", meta=(DisplayName="Department"))
 	FString Department = TEXT("");

@@ -76,6 +76,8 @@ def test_server_config_disables_vfs_by_default():
     assert config.host == "127.0.0.1"
     assert config.port == 7200
     assert config.vfs is None
+    assert config.txn_batch_size == 128
+    assert config.txn_batch_delay_ms == 0.5
 
 
 def test_shared_stage_mode_rejects_managed_outputs():
@@ -144,6 +146,16 @@ def test_main_accepts_canonical_service_flags(monkeypatch):
     assert captured[0].dashboard_port == 8080
 
 
+def test_main_maps_group_commit_configuration(monkeypatch):
+    captured = []
+    monkeypatch.setattr(server_cli, "run_server", captured.append)
+
+    server_cli.main(["--txn-batch-size", "8", "--txn-batch-delay-ms", "0.25"])
+
+    assert captured[0].txn_batch_size == 8
+    assert captured[0].txn_batch_delay_ms == 0.25
+
+
 def test_main_maps_shared_stage_mode(monkeypatch):
     captured = []
     monkeypatch.setattr(server_cli, "run_server", captured.append)
@@ -168,6 +180,8 @@ def test_main_rejects_removed_service_aliases(args):
         ["--vfs-port", "65536"],
         ["--dashboard-port", "-1"],
         ["--max-connections", "0"],
+        ["--txn-batch-size", "0"],
+        ["--txn-batch-delay-ms", "-0.1"],
         ["--compact-interval", "-1"],
     ],
 )

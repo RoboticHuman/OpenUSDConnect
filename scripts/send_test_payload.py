@@ -29,10 +29,20 @@ def main():
         os.path.join("tests", "fixtures", "test_asset.usda"),
     ).replace("\\", "/")
 
+    session_id = "payload-test-cli"
+    txn_id = 0
+
     def send_txn(events):
+        nonlocal txn_id
+        txn_id += 1
         s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
-        send_msg(s, make_hello("emitter"))
-        send_msg(s, {"type": "txn", "client_id": "cli", "events": events})
+        send_msg(
+            s,
+            make_hello(
+                "emitter", client_id="cli", producer_session_id=session_id
+            ),
+        )
+        send_msg(s, {"type": "txn", "txn_id": txn_id, "events": events})
         s.close()
 
     send_txn([

@@ -90,6 +90,8 @@ class ServerConfig:
     max_connections: int | None = None
     txn_rate: float = 0
     txn_burst: int = 0
+    txn_batch_size: int = 128
+    txn_batch_delay_ms: float = 0.5
     wire_metrics: bool = False
     compact_interval: float = 0
     reclaim_interval: float = 0
@@ -145,6 +147,8 @@ def run_server(config: ServerConfig | None = None):
         durability=config.durability,
         txn_rate=config.txn_rate,
         txn_burst=config.txn_burst,
+        txn_batch_size=config.txn_batch_size,
+        txn_batch_delay=config.txn_batch_delay_ms / 1000.0,
         wire_metrics=config.wire_metrics,
         compact_interval=config.compact_interval,
         reclaim_interval=config.reclaim_interval,
@@ -375,6 +379,22 @@ def main(argv: list[str] | None = None):
         help="Max burst size for transaction rate limiter (default: 0 = disabled)",
     )
     limits.add_argument(
+        "--txn-batch-size",
+        type=positive_int,
+        default=128,
+        metavar="N",
+        help="Maximum durable managed transactions per SQLite group commit "
+        "(1 disables batching, default: 128)",
+    )
+    limits.add_argument(
+        "--txn-batch-delay-ms",
+        type=nonnegative_float,
+        default=0.5,
+        metavar="MS",
+        help="Maximum time to collect a transaction group in milliseconds "
+        "(default: 0.5)",
+    )
+    limits.add_argument(
         "--wire-metrics",
         action="store_true",
         help="Track encoded record bytes per event kind (off by default; "
@@ -485,6 +505,8 @@ def main(argv: list[str] | None = None):
             max_connections=args.max_connections,
             txn_rate=args.txn_rate,
             txn_burst=args.txn_burst,
+            txn_batch_size=args.txn_batch_size,
+            txn_batch_delay_ms=args.txn_batch_delay_ms,
             wire_metrics=args.wire_metrics,
             compact_interval=args.compact_interval,
             reclaim_interval=args.reclaim_interval,

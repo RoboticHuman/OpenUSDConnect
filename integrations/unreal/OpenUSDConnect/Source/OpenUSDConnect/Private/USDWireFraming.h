@@ -33,7 +33,8 @@ namespace OUC
 		const FString& ClientId,
 		const FString& SessionOrigin,
 		const FString& Department,
-		const FString& Token = FString())
+		const FString& Token = FString(),
+		const FString& ProducerSessionId = FString())
 	{
 		flatbuffers::FlatBufferBuilder Builder(512);
 
@@ -46,7 +47,9 @@ namespace OUC
 			Builder.CreateString(TCHAR_TO_UTF8(*SessionOrigin)),
 			Builder.CreateString(TCHAR_TO_UTF8(*Department)),
 			Builder.CreateString(TCHAR_TO_UTF8(*Token)),
-			/*layered_replay=*/false);
+			/*layered_replay=*/false,
+			OpenUSDConnect::LayerMode::Managed,
+			Builder.CreateString(TCHAR_TO_UTF8(*ProducerSessionId)));
 
 		Builder.Finish(OpenUSDConnect::CreateEnvelope(
 			Builder,

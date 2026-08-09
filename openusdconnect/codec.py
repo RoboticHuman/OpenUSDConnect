@@ -80,7 +80,9 @@ from .protocol_constants import (
     MSG_PROPOSAL_CREATED,
     MSG_QUIT,
     MSG_RATE_LIMITED,
+    MSG_REPLAY_COMPLETE,
     MSG_RESYNC,
+    MSG_TRANSACTION_RESULT,
     MSG_TXN,
     POINT_INSTANCER_FIELDS,
     SDF_SPEC_KINDS,
@@ -96,6 +98,10 @@ AuthRejected = _fb.AuthRejected
 HelloRejectionCode = _fb.HelloRejectionCode
 HelloRejected = _fb.HelloRejected
 Txn = _fb.Txn
+TransactionResult = _fb.TransactionResult
+TransactionStatus = _fb.TransactionStatus
+TransactionRejectionCode = _fb.TransactionRejectionCode
+ReplayComplete = _fb.ReplayComplete
 BroadcastEvent = _fb.BroadcastEvent
 Resync = _fb.Resync
 Compact = _fb.Compact
@@ -153,7 +159,7 @@ EventPayloadType = _fb.EventPayload
 SdfSpecKindType = _fb.SdfSpecKind
 LayerModeType = _fb.LayerMode
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -165,6 +171,8 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_AUTH_REJECTED: PayloadType.AuthRejected,
     MSG_HELLO_REJECTED: PayloadType.HelloRejected,
     MSG_TXN: PayloadType.Txn,
+    MSG_TRANSACTION_RESULT: PayloadType.TransactionResult,
+    MSG_REPLAY_COMPLETE: PayloadType.ReplayComplete,
     MSG_EVENT: PayloadType.BroadcastEvent,
     MSG_RESYNC: PayloadType.Resync,
     MSG_COMPACT: PayloadType.Compact,
@@ -211,6 +219,17 @@ _SDF_SPEC_KIND_TO_FB = {
 assert tuple(_SDF_SPEC_KIND_TO_FB) == SDF_SPEC_KINDS
 _FB_TO_SDF_SPEC_KIND = {value: key for key, value in _SDF_SPEC_KIND_TO_FB.items()}
 
+_TRANSACTION_STATUS_TO_FB = {
+    "acknowledged": TransactionStatus.Acknowledged,
+    "rejected": TransactionStatus.Rejected,
+}
+_TRANSACTION_REJECTION_TO_FB = {
+    "none": TransactionRejectionCode.None_,
+    "invalid_identity": TransactionRejectionCode.InvalidIdentity,
+    "unexpected_id": TransactionRejectionCode.UnexpectedId,
+    "invalid_transaction": TransactionRejectionCode.InvalidTransaction,
+}
+
 _PAYLOAD_TO_MSG_TYPE = {v: k for k, v in _MSG_TYPE_TO_PAYLOAD.items()}
 
 _PAYLOAD_TO_CLASS = {
@@ -219,6 +238,8 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.AuthRejected: AuthRejected,
     PayloadType.HelloRejected: HelloRejected,
     PayloadType.Txn: Txn,
+    PayloadType.TransactionResult: TransactionResult,
+    PayloadType.ReplayComplete: ReplayComplete,
     PayloadType.BroadcastEvent: BroadcastEvent,
     PayloadType.Resync: Resync,
     PayloadType.Compact: Compact,
@@ -368,6 +389,11 @@ def _encode_hello(b, msg):
     origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
     department = b.CreateString(msg["department"]) if msg.get("department") else None
     token = b.CreateString(msg["token"]) if msg.get("token") else None
+    producer_session_id = (
+        b.CreateString(msg["producer_session_id"])
+        if msg.get("producer_session_id")
+        else None
+    )
 
     _fb.HelloStart(b)
     _fb.HelloAddRole(b, role)
@@ -388,6 +414,8 @@ def _encode_hello(b, msg):
         b,
         _LAYER_MODE_TO_FB[msg.get("layer_mode", LayerMode.MANAGED.value)],
     )
+    if producer_session_id:
+        _fb.HelloAddProducerSessionId(b, producer_session_id)
     return _fb.HelloEnd(b)
 
 
@@ -438,6 +466,8 @@ def _encode_hello_ok(b, msg):
         b,
         _LAYER_MODE_TO_FB[msg.get("layer_mode", LayerMode.MANAGED.value)],
     )
+    if msg.get("committed_through"):
+        _fb.HelloOkAddCommittedThrough(b, int(msg["committed_through"]))
     return _fb.HelloOkEnd(b)
 
 
@@ -460,7 +490,6 @@ def _encode_hello_rejected(b, msg):
 
 
 def _encode_txn(b, msg):
-    client_id = b.CreateString(msg["client_id"])
     proposal_id = b.CreateString(msg["proposal_id"]) if msg.get("proposal_id") else None
     layer_key = b.CreateString(msg["layer_key"]) if msg.get("layer_key") else None
     event_offsets = [_encode_event_wrapper(b, ev) for ev in msg["events"]]
@@ -469,13 +498,39 @@ def _encode_txn(b, msg):
         b.PrependUOffsetTRelative(off)
     events_vec = b.EndVector()
     _fb.TxnStart(b)
-    _fb.TxnAddClientId(b, client_id)
     _fb.TxnAddEvents(b, events_vec)
     if proposal_id is not None:
         _fb.TxnAddProposalId(b, proposal_id)
     if layer_key is not None:
         _fb.TxnAddLayerKey(b, layer_key)
+    if msg.get("txn_id"):
+        _fb.TxnAddTxnId(b, int(msg["txn_id"]))
     return _fb.TxnEnd(b)
+
+
+def _encode_transaction_result(b, msg):
+    reason = b.CreateString(msg["reason"]) if msg.get("reason") else None
+    _fb.TransactionResultStart(b)
+    _fb.TransactionResultAddTxnId(b, int(msg["txn_id"]))
+    status = msg["status"]
+    if isinstance(status, str):
+        status = _TRANSACTION_STATUS_TO_FB[status]
+    rejection_code = msg.get("rejection_code", 0)
+    if isinstance(rejection_code, str):
+        rejection_code = _TRANSACTION_REJECTION_TO_FB[rejection_code]
+    _fb.TransactionResultAddStatus(b, int(status))
+    _fb.TransactionResultAddExpectedTxnId(b, int(msg.get("expected_txn_id", 0)))
+    _fb.TransactionResultAddRejectionCode(b, int(rejection_code))
+    if reason is not None:
+        _fb.TransactionResultAddReason(b, reason)
+    return _fb.TransactionResultEnd(b)
+
+
+def _encode_replay_complete(b, msg):
+    _fb.ReplayCompleteStart(b)
+    _fb.ReplayCompleteAddHeadSeq(b, int(msg.get("head_seq", 0)))
+    _fb.ReplayCompleteAddEpoch(b, int(msg.get("epoch", 0)))
+    return _fb.ReplayCompleteEnd(b)
 
 
 def _encode_broadcast_event(b, msg):
@@ -682,6 +737,8 @@ _ENCODE_DISPATCH = {
     MSG_AUTH_REJECTED: _encode_auth_rejected,
     MSG_HELLO_REJECTED: _encode_hello_rejected,
     MSG_TXN: _encode_txn,
+    MSG_TRANSACTION_RESULT: _encode_transaction_result,
+    MSG_REPLAY_COMPLETE: _encode_replay_complete,
     MSG_EVENT: _encode_broadcast_event,
     MSG_RESYNC: _encode_resync,
     MSG_COMPACT: _encode_compact,
@@ -1486,6 +1543,17 @@ class ReceivedEvent:
     client: str | None = None
 
 
+class SequenceGapError(ValueError):
+    """A lossless replay stream skipped the next required sequence."""
+
+    def __init__(self, expected: int, received: int):
+        self.expected = expected
+        self.received = received
+        super().__init__(
+            f"sequence gap: expected {expected}, received {received}",
+        )
+
+
 @dataclass(slots=True)
 class DecodeResult:
     """Outcome of decoding one batch of wire messages."""
@@ -1497,6 +1565,7 @@ class DecodeResult:
     last_seq: int = 0
     resync_requested: bool = False
     rate_limited_retry_after: float | None = None
+    replay_complete: tuple[int, int] | None = None
     errors: list[Exception] = field(default_factory=list)
 
 
@@ -1507,6 +1576,7 @@ def decode_messages(
     numpy_arrays: bool = False,
     clear_on_resync: bool = False,
     preserve_envelopes: bool = False,
+    require_contiguous: bool = False,
 ) -> DecodeResult:
     """Decode a batch of wire messages with sequence dedup and resync handling.
 
@@ -1541,6 +1611,9 @@ def decode_messages(
             seq = int(msg.get("seq") or 0)
             if seq and seq <= result.last_seq:
                 continue
+            if require_contiguous and seq and seq != result.last_seq + 1:
+                result.errors.append(SequenceGapError(result.last_seq + 1, seq))
+                break
             if seq:
                 result.last_seq = seq
             result.layer_graph_states.append(msg)
@@ -1552,12 +1625,22 @@ def decode_messages(
                 result.rate_limited_retry_after = float(retry_after)
             continue
 
+        if msg_type == MSG_REPLAY_COMPLETE:
+            result.replay_complete = (
+                int(msg.get("head_seq", 0)),
+                int(msg.get("epoch", 0)),
+            )
+            continue
+
         if msg_type != MSG_EVENT:
             continue
 
         seq = int(msg.get("seq") or 0)
         if seq and seq <= result.last_seq:
             continue
+        if require_contiguous and seq and seq != result.last_seq + 1:
+            result.errors.append(SequenceGapError(result.last_seq + 1, seq))
+            break
         if seq:
             result.last_seq = seq
         event = msg.get("event")
@@ -1602,6 +1685,7 @@ def _dict_hello(h, msg_type):
         ("origin", h.Origin),
         ("department", h.Department),
         ("token", h.Token),
+        ("producer_session_id", h.ProducerSessionId),
     ]:
         v = _str(getter())
         if v:
@@ -1626,6 +1710,8 @@ def _dict_hello_ok(h, msg_type):
             msg["stage_metadata"] = meta
     if h.LayeredReplay():
         msg["layered_replay"] = True
+    if h.CommittedThrough():
+        msg["committed_through"] = int(h.CommittedThrough())
     mode = _FB_TO_LAYER_MODE[h.LayerMode()]
     if mode != LayerMode.MANAGED.value:
         msg["layer_mode"] = mode
@@ -1732,14 +1818,39 @@ def _dict_txn(t, msg_type, numpy_arrays=False):
     events = [
         event_to_dict(t.Events(i), numpy_arrays=numpy_arrays) for i in range(t.EventsLength())
     ]
-    msg = {"type": msg_type, "client_id": _str(t.ClientId()), "events": events}
+    msg = {"type": msg_type, "events": events}
     pid = _str(t.ProposalId())
     if pid:
         msg["proposal_id"] = pid
     layer_key = _str(t.LayerKey())
     if layer_key:
         msg["layer_key"] = layer_key
+    txn_id = int(t.TxnId())
+    if txn_id:
+        msg["txn_id"] = txn_id
     return msg
+
+
+def _dict_transaction_result(result, msg_type):
+    msg = {
+        "type": msg_type,
+        "txn_id": int(result.TxnId()),
+        "status": int(result.Status()),
+        "expected_txn_id": int(result.ExpectedTxnId()),
+        "rejection_code": int(result.RejectionCode()),
+    }
+    reason = _str(result.Reason())
+    if reason:
+        msg["reason"] = reason
+    return msg
+
+
+def _dict_replay_complete(complete, msg_type):
+    return {
+        "type": msg_type,
+        "head_seq": int(complete.HeadSeq()),
+        "epoch": int(complete.Epoch()),
+    }
 
 
 def _dict_broadcast_event(be, msg_type, numpy_arrays=False):
@@ -1788,6 +1899,8 @@ _DICT_DECODE_DISPATCH = {
     MSG_AUTH_REJECTED: _dict_auth_rejected,
     MSG_HELLO_REJECTED: _dict_hello_rejected,
     MSG_TXN: _dict_txn,
+    MSG_TRANSACTION_RESULT: _dict_transaction_result,
+    MSG_REPLAY_COMPLETE: _dict_replay_complete,
     MSG_EVENT: _dict_broadcast_event,
     MSG_RESYNC: _dict_empty,
     MSG_COMPACT: _dict_empty,

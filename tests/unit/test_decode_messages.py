@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from openusdconnect.codec import decode_messages, encode_message, message_to_dict
+from openusdconnect.codec import (
+    SequenceGapError,
+    decode_messages,
+    encode_message,
+    message_to_dict,
+)
 
 
 def _event(seq: int, prim: str = "/World/Cube") -> bytes:
@@ -126,6 +131,25 @@ class TestDecodeMessages:
 
         assert [ev["prim"] for ev in second.received] == ["/C"]
         assert second.last_seq == 3
+
+    def test_lossless_decode_stops_before_forward_gap(self):
+        result = decode_messages(
+            [_event(2, "/TooNew"), _event(1, "/Missing")],
+            require_contiguous=True,
+        )
+
+        assert result.received == []
+        assert result.last_seq == 0
+        assert len(result.errors) == 1
+        assert isinstance(result.errors[0], SequenceGapError)
+        assert (result.errors[0].expected, result.errors[0].received) == (1, 2)
+
+    def test_flat_decode_allows_origin_suppression_gaps(self):
+        result = decode_messages([_event(2, "/Visible")])
+
+        assert [event["prim"] for event in result.received] == ["/Visible"]
+        assert result.last_seq == 2
+        assert result.errors == []
 
     def test_handles_resync_and_rate_limit_messages(self):
         result = decode_messages(

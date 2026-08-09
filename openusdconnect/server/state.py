@@ -14,7 +14,8 @@ import os
 import queue
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 
 from pxr import Ar, Sdf, Usd, UsdGeom
 
@@ -25,7 +26,7 @@ from ..emitter import (
     read_references,
     read_stage_metadata,
 )
-from ..event_store import EventStore, SqliteEventStore
+from ..event_store import EventStore, ProducerProgress, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
     COLLABORATION_LAYER_KINDS,
@@ -54,6 +55,7 @@ from ..protocol_constants import (
     MSG_LAYER_STACK_STATE,
     MSG_PING,
     MSG_PLAYBACK_STATE,
+    MSG_REPLAY_COMPLETE,
     MSG_RESYNC,
     NON_COLLABORATION_KINDS,
     SDF_SPEC_KIND_ATTRIBUTE,
@@ -77,6 +79,8 @@ from .types import (
     Proposal,
     ReplayModeConflictError,
     StaleVfsWriteError,
+    TransactionCommit,
+    TransactionRejectedError,
     UnsupportedVfsWriteError,
     VfsWriteAnalysis,
 )
@@ -95,6 +99,32 @@ _AUDIENCE_LAYERED = "layered"
 _AUDIENCES = frozenset({_AUDIENCE_ALL, _AUDIENCE_FLAT, _AUDIENCE_LAYERED})
 _DEFAULT_LAYER_KEY = "default"
 _DEPARTMENT_LAYER_KEY_PREFIX = "department:"
+
+
+@dataclass(slots=True)
+class _TransactionRequest:
+    events: list[dict]
+    session_id: str
+    txn_id: int
+    client_id: str
+    origin: str | None
+    client_addr: str | None
+    layer: Sdf.Layer | None
+    layer_key: str
+    done: threading.Event = field(default_factory=threading.Event)
+    commit: TransactionCommit | None = None
+    error: BaseException | None = None
+
+
+@dataclass(slots=True)
+class _PreparedTransaction:
+    request: _TransactionRequest
+    target_layer: Sdf.Layer
+    collaboration_paths: set[str]
+    has_session_events: bool
+    records: list[tuple[dict, bytes]]
+    persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]]
+    progress: ProducerProgress
 
 
 def _layer_key_for_department(department: str | None) -> str:
@@ -256,27 +286,49 @@ def _metadata_int(metadata: dict, key: str) -> int:
 
 
 class _WireMetrics:
-    """Thread-safe per-event-kind counters of encoded record bytes."""
+    """Thread-safe logical-record and actual transport byte counters."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._counts: dict[str, int] = {}
         self._bytes: dict[str, int] = {}
+        self._transport_counts: dict[str, int] = {}
+        self._transport_bytes: dict[str, int] = {}
 
     def record(self, kind: str, nbytes: int) -> None:
         with self._lock:
             self._counts[kind] = self._counts.get(kind, 0) + 1
             self._bytes[kind] = self._bytes.get(kind, 0) + nbytes
 
+    def record_transport(self, channel: str, nbytes: int, *, count: int = 1) -> None:
+        """Record framed bytes actually read or successfully written."""
+        with self._lock:
+            self._transport_counts[channel] = (
+                self._transport_counts.get(channel, 0) + count
+            )
+            self._transport_bytes[channel] = (
+                self._transport_bytes.get(channel, 0) + nbytes
+            )
+
     def snapshot(self) -> dict:
         with self._lock:
             kinds = {
                 k: {"count": self._counts[k], "bytes": self._bytes[k]} for k in sorted(self._counts)
             }
+            transport = {
+                channel: {
+                    "count": self._transport_counts[channel],
+                    "bytes": self._transport_bytes[channel],
+                }
+                for channel in sorted(self._transport_counts)
+            }
         return {
             "kinds": kinds,
             "total_count": sum(v["count"] for v in kinds.values()),
             "total_bytes": sum(v["bytes"] for v in kinds.values()),
+            "transport": transport,
+            "transport_total_count": sum(v["count"] for v in transport.values()),
+            "transport_total_bytes": sum(v["bytes"] for v in transport.values()),
         }
 
 
@@ -297,6 +349,8 @@ class UsdSyncServer:
         durability: str = "strict",
         txn_rate: float = 0,
         txn_burst: int = 0,
+        txn_batch_size: int = 128,
+        txn_batch_delay: float = 0.0005,
         wire_metrics: bool = False,
         compact_interval: float = 0,
         reclaim_interval: float = 0,
@@ -370,12 +424,27 @@ class UsdSyncServer:
         self._start_time = time.time()
         self._seq_lock = threading.Lock()
         self.txn_barrier = _TxnBarrier()
-        # Graph revisions, log sequences, and broadcast enqueue order form one
-        # shared-stage commit order across concurrent connection threads.
-        self._shared_stage_commit_lock = threading.RLock()
+        # Identity lookup, USD mutation, sequence assignment, and producer
+        # progress form one failure boundary across connection threads. The
+        # same lock also covers live enqueue: a later durable sequence must
+        # never become visible before an earlier one.
+        self._transaction_commit_lock = threading.RLock()
+        # Shared graph revisions participate in the same global persisted/live
+        # sequence order as managed transactions.
+        self._shared_stage_commit_lock = self._transaction_commit_lock
+        self.txn_batch_size = max(1, int(txn_batch_size))
+        self.txn_batch_delay = max(0.0, float(txn_batch_delay))
+        self._transaction_queue: queue.Queue[_TransactionRequest | None] | None = None
+        self._transaction_thread: threading.Thread | None = None
+        self._transaction_stopping = False
 
         # Pluggable event store — defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
+        # Lazy durable highwater cache. Commit serialization makes this an
+        # exact mirror of producer_sessions after the first lookup; reconnect
+        # handshakes and hot transaction batches avoid one SQLite query per
+        # producer per group while restart still recovers from the store.
+        self._producer_progress_cache: dict[tuple[str, str], int] = {}
         self._next_seq = self.store.get_max_seq() + 1
         self._event_count = self.store.get_count()
         # Periodic compaction skips when no seq was assigned since the last
@@ -504,6 +573,18 @@ class UsdSyncServer:
             self.shared_layer_graph.authoritative = True
             self.refresh_shared_layer_dependencies()
 
+        if (
+            self.txn_batch_size > 1
+            and self.layer_mode is LayerMode.MANAGED
+        ):
+            self._transaction_queue = queue.Queue(maxsize=_PERSIST_QUEUE_MAX)
+            self._transaction_thread = threading.Thread(
+                target=self._transaction_batch_loop,
+                name="ouc-transaction-commit",
+                daemon=True,
+            )
+            self._transaction_thread.start()
+
     @staticmethod
     def _make_scene_id(base_usd_path: str | None) -> str:
         """Readable, stable-ish identifier for the currently hosted stage."""
@@ -522,6 +603,10 @@ class UsdSyncServer:
         Compaction stops first (no rewrite mid-shutdown), then the persist
         queue drains (durability), then broadcast.
         """
+        self._transaction_stopping = True
+        if self._transaction_queue is not None:
+            self._transaction_queue.put(None)
+            self._transaction_thread.join(timeout=10.0)
         self._compact_stop = True
         self._compact_wake.set()
         if self._compact_thread is not None:
@@ -1863,6 +1948,20 @@ class UsdSyncServer:
                         controls.append(encode_message(self.get_layer_stack_state()))
                     handler.request.sendall(frame_batch(controls))
                     self.replay_from(handler, 1)
+                    replay_epoch, replay_head = self.get_snapshot_token()
+                    handler.request.sendall(
+                        frame_batch(
+                            [
+                                encode_message(
+                                    {
+                                        "type": MSG_REPLAY_COMPLETE,
+                                        "head_seq": replay_head,
+                                        "epoch": replay_epoch,
+                                    }
+                                )
+                            ]
+                        )
+                    )
             except (OSError, TimeoutError):
                 LOG.info(
                     "Receiver disconnected during compaction replay: %s",
@@ -1888,6 +1987,9 @@ class UsdSyncServer:
             self.txn_barrier.release_exclusive()
 
     def _purge_inner(self):
+        # Producer high-water marks survive a scene purge. Otherwise an old
+        # ambiguous retry could resurrect pre-purge edits, and still-connected
+        # producers would be rejected for starting above transaction 1.
         self.store.clear_and_rewrite([])
         self._maybe_reclaim_storage()
         with self._seq_lock:
@@ -1903,7 +2005,33 @@ class UsdSyncServer:
         self._instanceable_paths.clear()
         self._point_instancer_paths.clear()
         LOG.info("Purged event log and reset authored collaboration layers")
-        self.broadcast({"type": MSG_RESYNC, "reason": "purge"})
+        replay_epoch, replay_head = self.get_snapshot_token()
+        with self.clients_lock:
+            targets = list(self.receivers)
+        disconnected = []
+        for handler in targets:
+            try:
+                with handler.send_lock:
+                    controls = [encode_message({"type": MSG_RESYNC, "reason": "purge"})]
+                    if getattr(handler, "_layered_replay", False):
+                        controls.append(encode_message(self.get_layer_stack_state()))
+                    controls.append(
+                        encode_message(
+                            {
+                                "type": MSG_REPLAY_COMPLETE,
+                                "head_seq": replay_head,
+                                "epoch": replay_epoch,
+                            }
+                        )
+                    )
+                    handler.request.sendall(frame_batch(controls))
+            except (OSError, TimeoutError):
+                LOG.info(
+                    "Receiver disconnected during purge resync: %s",
+                    handler.client_address,
+                )
+                disconnected.append(handler)
+        self._discard_unreachable_receivers(disconnected)
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -2252,6 +2380,8 @@ class UsdSyncServer:
     def append_log_batch(
         self,
         tuples: list[tuple[int, bytes, str | None, str | None, str | None]],
+        *,
+        producer_progress: tuple[ProducerProgress, ...] = (),
     ):
         """Persist pre-serialized event records.
 
@@ -2259,10 +2389,12 @@ class UsdSyncServer:
         In strict mode, writes synchronously (caller blocks until DB commit).
         In realtime mode, enqueues for async write (caller returns immediately).
         """
-        if self._persist_queue is not None:
+        if self._persist_queue is not None and not producer_progress:
             self._persist_queue.put(tuples)
         else:
-            self.store.append_batch(tuples)
+            # A transaction result is acknowledged only after the atomic
+            # event+producer-progress commit returns, including in realtime mode.
+            self.store.append_batch(tuples, producer_progress=producer_progress)
             with self._seq_lock:
                 self._event_count += len(tuples)
 
@@ -2377,6 +2509,7 @@ class UsdSyncServer:
                 self.receivers.add(handler)
                 receiver_registered = True
             replay_end = self.store.get_max_seq()
+            replay_epoch, _latest_seq = self.get_snapshot_token()
         except Exception:
             if receiver_registered:
                 with self.clients_lock:
@@ -2388,7 +2521,7 @@ class UsdSyncServer:
             self.txn_barrier.release_exclusive()
 
         try:
-            yield replay_end
+            yield replay_end, replay_epoch
         finally:
             handler.send_lock.release()
 
@@ -2431,37 +2564,84 @@ class UsdSyncServer:
         unmuted collaboration layer, so they receive the same records with
         origin echo suppression.
         """
-        if not records:
+        self.broadcast_transaction_group_views([(records, exclude_origin)])
+
+    def broadcast_transaction_group_views(
+        self,
+        transactions: list[
+            tuple[list[tuple[dict, bytes]], str | None]
+        ],
+    ) -> None:
+        """Deliver a committed group with one send per layered receiver.
+
+        Flat receivers retain per-transaction origin echo suppression, while
+        layered receivers can consume the complete authored record stream as
+        one framed payload.  Framing still preserves individual message
+        boundaries and record order on the wire.
+        """
+        transactions = [
+            (records, exclude_origin)
+            for records, exclude_origin in transactions
+            if records
+        ]
+        if not transactions:
             return
 
+        all_records = [
+            record
+            for records, _exclude_origin in transactions
+            for record, _encoded in records
+        ]
+        transaction_payloads = [
+            (
+                frame_batch([encoded for _record, encoded in records]),
+                exclude_origin,
+            )
+            for records, exclude_origin in transactions
+        ]
+        all_payload = b"".join(payload for payload, _origin in transaction_payloads)
+
         if self.layer_mode is LayerMode.SHARED_STAGE:
-            payload = frame_batch([encoded for _record, encoded in records])
             self.broadcast_bytes(
-                payload,
-                [record for record, _encoded in records],
+                all_payload,
+                all_records,
                 audience=_AUDIENCE_ALL,
             )
             return
 
         has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
-        authored_records = [record for record, _encoded in records]
-        authored_payload = frame_batch([encoded for _record, encoded in records])
         if has_layered_receivers:
             self.broadcast_bytes(
-                authored_payload,
-                authored_records,
+                all_payload,
+                all_records,
                 audience=_AUDIENCE_LAYERED,
                 notify_listeners=False,
             )
         if has_flat_receivers:
-            self.broadcast_bytes(
-                authored_payload,
-                authored_records,
-                exclude_origin=exclude_origin,
-                audience=_AUDIENCE_FLAT,
-                notify_listeners=False,
-            )
-        self._notify_event_listeners(authored_records)
+            # Echo suppression varies by receiving origin, not transaction.
+            # Build one ordered payload per distinct receiver origin so a
+            # durable group costs one socket write per receiver instead of one
+            # write per transaction per receiver. Message framing is unchanged.
+            targets_by_origin: dict[str | None, list] = {}
+            for handler in self._receiver_targets(audience=_AUDIENCE_FLAT):
+                targets_by_origin.setdefault(
+                    getattr(handler, "_origin", None), []
+                ).append(handler)
+            for receiver_origin, targets in targets_by_origin.items():
+                payload = (
+                    all_payload
+                    if not receiver_origin
+                    else b"".join(
+                        transaction_payload
+                        for transaction_payload, exclude_origin in transaction_payloads
+                        if exclude_origin != receiver_origin
+                    )
+                )
+                if payload:
+                    self._broadcast_queue.put(
+                        (payload, tuple(targets), receiver_origin, _AUDIENCE_FLAT)
+                    )
+        self._notify_event_listeners(all_records)
 
     @staticmethod
     def _validate_audience(audience: str) -> None:
@@ -2657,6 +2837,11 @@ class UsdSyncServer:
             try:
                 with h.send_lock:
                     h.request.sendall(payload)
+                if self.wire_metrics is not None:
+                    self.wire_metrics.record_transport(
+                        "receiver_egress",
+                        len(payload),
+                    )
             except (OSError, TimeoutError):
                 LOG.debug("Send failed for %s, marking as dead", h.client_address)
                 dead.append(h)
@@ -2810,6 +2995,486 @@ class UsdSyncServer:
                 elif k == K_SET_INSTANCEABLE:
                     self._track_prim_event(ev)
 
+    def process_idempotent_txn(
+        self,
+        events: list[dict],
+        *,
+        session_id: str,
+        txn_id: int,
+        client_id: str,
+        origin: str | None = None,
+        client_addr: str | None = None,
+        layer: Sdf.Layer | None = None,
+        layer_key: str = "",
+    ) -> TransactionCommit:
+        """Commit once for an ordered producer session and return its result."""
+        request = self.submit_idempotent_txn(
+            events,
+            session_id=session_id,
+            txn_id=txn_id,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
+            layer=layer,
+            layer_key=layer_key,
+        )
+        return self.wait_for_transaction(request)
+
+    def submit_idempotent_txn(
+        self,
+        events: list[dict],
+        *,
+        session_id: str,
+        txn_id: int,
+        client_id: str,
+        origin: str | None = None,
+        client_addr: str | None = None,
+        layer: Sdf.Layer | None = None,
+        layer_key: str = "",
+    ) -> _TransactionRequest:
+        """Submit without waiting; the coordinator owns its maintenance barrier."""
+        if not client_id or not session_id or len(session_id) > 128 or txn_id < 1:
+            raise TransactionRejectedError(
+                "invalid_identity",
+                "client_id and session_id are required and txn_id must be positive",
+            )
+
+        if self._transaction_stopping:
+            raise RuntimeError("transaction coordinator is shutting down")
+
+        request = _TransactionRequest(
+            events=events,
+            session_id=session_id,
+            txn_id=txn_id,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
+            layer=layer,
+            layer_key=layer_key,
+        )
+        # Maintenance cannot pass this request while it is queued, applying,
+        # persisting, or publishing. Ownership transfers to the coordinator,
+        # which releases the shared barrier immediately before setting done.
+        self.txn_barrier.acquire_shared()
+        if self._transaction_queue is None:
+            try:
+                self._commit_one_transaction_request(request)
+            finally:
+                self.txn_barrier.release_shared()
+                request.done.set()
+            return request
+        try:
+            self._transaction_queue.put(request)
+        except BaseException:
+            self.txn_barrier.release_shared()
+            raise
+        return request
+
+    @staticmethod
+    def wait_for_transaction(request: _TransactionRequest) -> TransactionCommit:
+        """Wait for a previously submitted transaction's terminal outcome."""
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+        if request.commit is None:
+            raise RuntimeError("transaction coordinator returned no result")
+        return request.commit
+
+    def _process_idempotent_txn_now(
+        self,
+        events: list[dict],
+        *,
+        session_id: str,
+        txn_id: int,
+        client_id: str,
+        origin: str | None = None,
+        client_addr: str | None = None,
+        layer: Sdf.Layer | None = None,
+        layer_key: str = "",
+    ) -> TransactionCommit:
+        """Execute one transaction synchronously on the commit worker."""
+
+        with self._transaction_commit_lock:
+            committed_through = self._producer_progress_locked(client_id, session_id)
+            if txn_id <= committed_through:
+                return TransactionCommit("duplicate", committed_through)
+
+            expected = committed_through + 1
+            if txn_id != expected:
+                raise TransactionRejectedError(
+                    "unexpected_id",
+                    f"expected transaction {expected}, received {txn_id}",
+                    expected_txn_id=expected,
+                )
+
+            first_reserved_seq = self._next_seq
+            try:
+                records = self.process_txn(
+                    events,
+                    client_id=client_id,
+                    origin=origin,
+                    client_addr=client_addr,
+                    layer=layer,
+                    layer_key=layer_key,
+                    transaction_identity=(session_id, txn_id),
+                )
+            except Exception:
+                with self._seq_lock:
+                    self._next_seq = first_reserved_seq
+                raise
+            self._producer_progress_cache[(client_id, session_id)] = txn_id
+            commit = TransactionCommit(
+                "committed",
+                txn_id,
+                tuple(records),
+            )
+            return self._publish_transaction_commit(
+                commit,
+                events=events,
+                session_id=session_id,
+                txn_id=txn_id,
+                origin=origin,
+            )
+
+    def _publish_transaction_commit(
+        self,
+        commit: TransactionCommit,
+        *,
+        events: list[dict],
+        session_id: str,
+        txn_id: int,
+        origin: str | None,
+    ) -> TransactionCommit:
+        """Enqueue one durable commit before releasing global commit order."""
+        try:
+            self.broadcast_transaction_views(
+                list(commit.records),
+                exclude_origin=origin,
+            )
+            for event in events:
+                if event.get("k") == K_LOAD_PAYLOAD:
+                    self.replay_children_after_load(event["prim"])
+        except Exception:
+            LOG.exception(
+                "Transaction %s/%d committed but its live broadcast failed",
+                session_id,
+                txn_id,
+            )
+        return TransactionCommit(
+            commit.status,
+            commit.txn_id,
+            commit.records,
+        )
+
+    def _transaction_batch_loop(self) -> None:
+        """Collect a bounded set of producer transactions for one DB commit."""
+        transaction_queue = self._transaction_queue
+        if transaction_queue is None:
+            return
+        stop = False
+        while not stop:
+            first = transaction_queue.get()
+            if first is None:
+                break
+            requests = [first]
+            deadline = time.monotonic() + self.txn_batch_delay
+            while len(requests) < self.txn_batch_size:
+                try:
+                    request = transaction_queue.get_nowait()
+                except queue.Empty:
+                    if time.monotonic() >= deadline:
+                        break
+                    # Sub-millisecond Queue.get timeouts round up to the OS
+                    # scheduler quantum on Windows. A cooperative zero sleep
+                    # gives connection threads a chance to enqueue without a
+                    # 10-16 ms interactive-latency penalty.
+                    time.sleep(0)
+                    continue
+                if request is None:
+                    stop = True
+                    break
+                requests.append(request)
+            self._execute_transaction_requests(requests)
+
+    def _execute_transaction_requests(
+        self,
+        requests: list[_TransactionRequest],
+    ) -> None:
+        try:
+            if self.layer_mode is LayerMode.SHARED_STAGE:
+                for request in requests:
+                    self._commit_one_transaction_request(request)
+            else:
+                try:
+                    self._commit_managed_transaction_group(requests)
+                except Exception:
+                    # The group failure boundary restored every USD layer and
+                    # sequence reservation. Re-run individually so one invalid
+                    # payload or storage failure does not reject its neighbors.
+                    LOG.debug(
+                        "Grouped transaction commit failed; retrying individually",
+                        exc_info=True,
+                    )
+                    for request in requests:
+                        self._commit_one_transaction_request(request)
+        finally:
+            for request in requests:
+                self.txn_barrier.release_shared()
+                request.done.set()
+
+    def _commit_one_transaction_request(self, request: _TransactionRequest) -> None:
+        request.commit = None
+        request.error = None
+        try:
+            request.commit = self._process_idempotent_txn_now(
+                request.events,
+                session_id=request.session_id,
+                txn_id=request.txn_id,
+                client_id=request.client_id,
+                origin=request.origin,
+                client_addr=request.client_addr,
+                layer=request.layer,
+                layer_key=request.layer_key,
+            )
+        except Exception as exc:
+            request.error = exc
+
+    def _commit_managed_transaction_group(
+        self,
+        requests: list[_TransactionRequest],
+    ) -> None:
+        """Commit queued managed transactions through one failure boundary."""
+        with self._transaction_commit_lock:
+            accepted: list[_TransactionRequest] = []
+            next_by_session: dict[tuple[str, str], int] = {}
+
+            for request in requests:
+                producer = (request.client_id, request.session_id)
+                committed_through = next_by_session.get(producer)
+                if committed_through is None:
+                    committed_through = self._producer_progress_locked(*producer)
+                if request.txn_id <= committed_through:
+                    request.commit = TransactionCommit("duplicate", committed_through)
+                    continue
+
+                expected = committed_through + 1
+                if request.txn_id != expected:
+                    request.error = TransactionRejectedError(
+                        "unexpected_id",
+                        f"expected transaction {expected}, received {request.txn_id}",
+                        expected_txn_id=expected,
+                    )
+                    continue
+                next_by_session[producer] = request.txn_id
+                accepted.append(request)
+
+            if not accepted:
+                return
+
+            first_reserved_seq = self._next_seq
+            try:
+                prepared = [self._prepare_managed_transaction(request) for request in accepted]
+                paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
+                snapshot_session = False
+                for transaction in prepared:
+                    if transaction.collaboration_paths:
+                        entry = paths_by_layer.setdefault(
+                            transaction.target_layer.identifier,
+                            (transaction.target_layer, set()),
+                        )
+                        entry[1].update(transaction.collaboration_paths)
+                    snapshot_session = snapshot_session or transaction.has_session_events
+
+                from ..event_apply import atomic_apply_layer
+
+                with self.stage_lock:
+                    original_target = self.stage.GetEditTarget()
+                    try:
+                        with ExitStack() as rollback:
+                            for target_layer, paths in paths_by_layer.values():
+                                rollback.enter_context(atomic_apply_layer(target_layer, paths))
+                            if snapshot_session:
+                                rollback.enter_context(
+                                    atomic_apply_layer(self.stage.GetSessionLayer())
+                                )
+                            for transaction in prepared:
+                                self.apply_txn(
+                                    transaction.request.events,
+                                    layer=transaction.target_layer,
+                                )
+                            progress_by_producer = {
+                                (transaction.progress.client_id, transaction.progress.session_id):
+                                    transaction.progress
+                                for transaction in prepared
+                            }
+                            self.store.append_batch(
+                                [
+                                    record
+                                    for transaction in prepared
+                                    for record in transaction.persist_tuples
+                                ],
+                                producer_progress=tuple(progress_by_producer.values()),
+                            )
+                            for producer, progress in progress_by_producer.items():
+                                self._producer_progress_cache[producer] = (
+                                    progress.committed_through
+                                )
+                            with self._seq_lock:
+                                self._event_count += sum(
+                                    len(transaction.persist_tuples)
+                                    for transaction in prepared
+                                )
+                    finally:
+                        self.stage.SetEditTarget(original_target)
+            except Exception:
+                with self._seq_lock:
+                    self._next_seq = first_reserved_seq
+                self.op_cache.clear()
+                self._op_cache_layer = None
+                raise
+
+            for transaction in prepared:
+                records = tuple(transaction.records)
+                commit = TransactionCommit(
+                    "committed",
+                    transaction.request.txn_id,
+                    records,
+                )
+                transaction.request.commit = commit
+            # Persistence and live enqueue are one ordering boundary. Keep
+            # this inside _transaction_commit_lock so another transaction can
+            # neither reserve a later sequence nor publish ahead of the group.
+            self._broadcast_grouped_transactions(requests)
+
+    def _producer_progress_locked(self, client_id: str, session_id: str) -> int:
+        """Return durable producer progress while the commit lock is held."""
+        producer = (client_id, session_id)
+        cached = self._producer_progress_cache.get(producer)
+        if cached is None:
+            cached = self.store.get_producer_progress(client_id, session_id)
+            self._producer_progress_cache[producer] = cached
+        return cached
+
+    def producer_committed_through(self, client_id: str, session_id: str) -> int:
+        """Return the cumulative durable acknowledgement for a handshake."""
+        with self._transaction_commit_lock:
+            return self._producer_progress_locked(client_id, session_id)
+
+    def _prepare_managed_transaction(
+        self,
+        request: _TransactionRequest,
+    ) -> _PreparedTransaction:
+        if request.layer_key:
+            raise ValueError("managed transactions cannot select an arbitrary layer key")
+        shared_only = {
+            event.get("k")
+            for event in request.events
+            if event.get("k") in SHARED_STAGE_ONLY_KINDS
+        }
+        if shared_only:
+            raise ValueError(
+                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
+            )
+        target_layer = request.layer or self.edit_layer
+        layer_key = self.layer_stack.key_for_layer(target_layer)
+        if layer_key is None and any(
+            event.get("k") not in NON_COLLABORATION_KINDS for event in request.events
+        ):
+            raise ValueError("transaction target is not a managed collaboration layer")
+
+        collaboration_paths = {
+            event.get("prim")
+            for event in request.events
+            if event.get("k") not in NON_COLLABORATION_KINDS and event.get("prim")
+        }
+        has_session_events = any(
+            event.get("k") in NON_COLLABORATION_KINDS for event in request.events
+        )
+        records, persist_tuples = self._encode_managed_txn_records(
+            request.events,
+            client_id=request.client_id,
+            origin=request.origin,
+            client_addr=request.client_addr,
+            layer_key=layer_key or "",
+        )
+        progress = ProducerProgress(
+            request.client_id,
+            request.session_id,
+            request.txn_id,
+        )
+        return _PreparedTransaction(
+            request,
+            target_layer,
+            collaboration_paths,
+            has_session_events,
+            records,
+            persist_tuples,
+            progress,
+        )
+
+    def _broadcast_grouped_transactions(
+        self,
+        requests: list[_TransactionRequest],
+    ) -> None:
+        pending: list[_TransactionRequest] = []
+
+        def flush_pending() -> None:
+            if not pending:
+                return
+            try:
+                self.broadcast_transaction_group_views(
+                    [
+                        (list(request.commit.records), request.origin)
+                        for request in pending
+                    ]
+                )
+            except Exception:
+                LOG.exception(
+                    "Committed transaction group could not be broadcast live"
+                )
+            for request in pending:
+                commit = request.commit
+                request.commit = TransactionCommit(
+                    commit.status,
+                    commit.txn_id,
+                    commit.records,
+                )
+            pending.clear()
+
+        for request in requests:
+            commit = request.commit
+            if commit is None or commit.status != "committed" or not commit.records:
+                continue
+            load_events = [
+                event for event in request.events if event.get("k") == K_LOAD_PAYLOAD
+            ]
+            if not load_events:
+                pending.append(request)
+                continue
+
+            # Payload child replay must stay immediately after the transaction
+            # that loaded it, so it forms a boundary between broadcast groups.
+            flush_pending()
+            try:
+                self.broadcast_transaction_views(
+                    list(commit.records),
+                    exclude_origin=request.origin,
+                )
+                for event in load_events:
+                    self.replay_children_after_load(event["prim"])
+            except Exception:
+                LOG.exception(
+                    "Transaction %s/%d committed but its live broadcast failed",
+                    request.session_id,
+                    request.txn_id,
+                )
+            request.commit = TransactionCommit(
+                commit.status,
+                commit.txn_id,
+                commit.records,
+            )
+        flush_pending()
+
     def process_txn(
         self,
         events: list[dict],
@@ -2819,6 +3484,7 @@ class UsdSyncServer:
         client_addr: str | None = None,
         layer: Sdf.Layer | None = None,
         layer_key: str = "",
+        transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
         """Apply, seq-assign, encode, and persist a transaction.
 
@@ -2846,6 +3512,7 @@ class UsdSyncServer:
                     client_id=client_id,
                     origin=origin,
                     client_addr=client_addr,
+                    transaction_identity=transaction_identity,
                 )
         if layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
@@ -2864,29 +3531,108 @@ class UsdSyncServer:
         if layer_key is None and any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        self.apply_txn(events, layer=target_layer)
+        if transaction_identity is None:
+            records, persist_tuples = self._encode_managed_txn_records(
+                events,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                layer_key=layer_key,
+            )
+            self.apply_txn(events, layer=target_layer)
+            self.append_log_batch(persist_tuples)
+            return records
 
-        records: list[tuple[dict, bytes]] = []
-        persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]] = []
-        for ev in events:
-            rec: dict = {
+        # Keep the USD mutation inside the durable failure boundary. Scoped
+        # snapshots make rollback proportional to touched prims rather than to
+        # the full collaboration layer; session metadata uses a full snapshot.
+        from ..event_apply import atomic_apply_layer
+
+        collaboration_paths = {
+            event.get("prim")
+            for event in events
+            if event.get("k") not in NON_COLLABORATION_KINDS and event.get("prim")
+        }
+        has_session_events = any(
+            event.get("k") in NON_COLLABORATION_KINDS for event in events
+        )
+        records, persist_tuples = self._encode_managed_txn_records(
+            events,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
+            layer_key=layer_key,
+        )
+        if not client_id:
+            raise ValueError("idempotent transaction persistence requires client_id")
+        session_id, txn_id = transaction_identity
+        progress = ProducerProgress(
+            client_id,
+            session_id,
+            txn_id,
+        )
+        with self.stage_lock:
+            original_target = self.stage.GetEditTarget()
+            try:
+                with ExitStack() as rollback:
+                    if collaboration_paths:
+                        rollback.enter_context(
+                            atomic_apply_layer(target_layer, collaboration_paths)
+                        )
+                    if has_session_events:
+                        rollback.enter_context(
+                            atomic_apply_layer(self.stage.GetSessionLayer())
+                        )
+                    self.apply_txn(events, layer=target_layer)
+                    self.append_log_batch(
+                        persist_tuples,
+                        producer_progress=(progress,),
+                    )
+            finally:
+                self.stage.SetEditTarget(original_target)
+        return records
+
+    def _encode_managed_txn_records(
+        self,
+        events: list[dict],
+        *,
+        client_id: str | None,
+        origin: str | None,
+        client_addr: str | None,
+        layer_key: str,
+    ) -> tuple[
+        list[tuple[dict, bytes]],
+        list[tuple[int, bytes, str | None, str | None, str | None]],
+    ]:
+        """Assign sequences and encode one managed transaction."""
+        records = []
+        persist_tuples = []
+        for event in events:
+            record: dict = {
                 "type": MSG_EVENT,
                 "seq": self.assign_seq(),
-                "event": ev,
+                "event": event,
                 "client": client_addr,
                 "client_id": client_id,
             }
             if origin:
-                rec["origin"] = origin
-            if ev.get("k") not in NON_COLLABORATION_KINDS:
-                rec["layer_key"] = layer_key
-            rec_bin = encode_message(rec)
+                record["origin"] = origin
+            if event.get("k") not in NON_COLLABORATION_KINDS:
+                record["layer_key"] = layer_key
+            record_bin = encode_message(record)
             if self.wire_metrics is not None:
-                self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
-            records.append((rec, rec_bin))
-            persist_tuples.append((rec["seq"], rec_bin, client_id, ev.get("k"), ev.get("prim")))
-        self.append_log_batch(persist_tuples)
-        return records
+                self.wire_metrics.record(event.get("k", ""), len(record_bin))
+            records.append((record, record_bin))
+            persist_tuples.append(
+                (
+                    record["seq"],
+                    record_bin,
+                    client_id,
+                    event.get("k"),
+                    event.get("prim"),
+                )
+            )
+        return records, persist_tuples
 
     def _process_shared_txn(
         self,
@@ -2896,6 +3642,7 @@ class UsdSyncServer:
         client_id: str | None,
         origin: str | None,
         client_addr: str | None,
+        transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
         """Apply one exact authored-layer transaction."""
         from ..event_apply import apply_events, atomic_apply
@@ -2961,13 +3708,13 @@ class UsdSyncServer:
                 if prepared is not None:
                     graph.accept_sublayers(prepared)
                     routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
-
-        records = self._persist_shared_events(
-            routed_events,
-            client_id=client_id,
-            origin=origin,
-            client_addr=client_addr,
-        )
+                records = self._persist_shared_events(
+                    routed_events,
+                    client_id=client_id,
+                    origin=origin,
+                    client_addr=client_addr,
+                    transaction_identity=transaction_identity,
+                )
         self._prim_count_dirty = True
         return records
 
@@ -2978,6 +3725,7 @@ class UsdSyncServer:
         client_id: str | None,
         origin: str | None,
         client_addr: str | None,
+        transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
         records = []
         persist_tuples = []
@@ -3005,7 +3753,20 @@ class UsdSyncServer:
                     event.get("prim"),
                 )
             )
-        self.append_log_batch(persist_tuples)
+        producer_progress: tuple[ProducerProgress, ...] = ()
+        if transaction_identity is not None:
+            if not client_id:
+                raise ValueError("idempotent transaction persistence requires client_id")
+            session_id, txn_id = transaction_identity
+            producer_progress = (ProducerProgress(
+                client_id,
+                session_id,
+                txn_id,
+            ),)
+        self.append_log_batch(
+            persist_tuples,
+            producer_progress=producer_progress,
+        )
         return records
 
     def refresh_shared_layer_dependencies(self) -> tuple[str, ...]:

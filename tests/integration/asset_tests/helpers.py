@@ -53,6 +53,8 @@ class TestHarness:
         self.passed = 0
         self.failed = 0
         self.errors = []
+        self._session_id = f"asset-test-{label}"
+        self._txn_id = 0
 
     def log(self, msg):
         print(f"[{self.label}] {msg}", flush=True)
@@ -252,12 +254,22 @@ class TestHarness:
         from openusdconnect.protocol import make_hello
         from openusdconnect.transport import send_line
         s = _socket.create_connection((self.host, self.port), timeout=5)
-        send_line(s, make_hello("emitter", client_id="asset_test"))
+        send_line(
+            s,
+            make_hello(
+                "emitter",
+                client_id="asset_test",
+                producer_session_id=self._session_id,
+            ),
+        )
         # Read hello_ok before sending txn: the server won't process
         # further messages until hello_ok is sent.
         s.settimeout(5)
         s.recv(4096)
-        send_line(s, {"type": "txn", "client_id": "asset_test", "events": events})
+        self._txn_id += 1
+        send_line(s, {
+            "type": "txn", "events": events, "txn_id": self._txn_id,
+        })
         # Ensure the server fully reads and processes the txn before this
         # connection tears down. A bare close() can RST the socket and drop
         # the unprocessed txn; half-closing then draining to EOF waits for the

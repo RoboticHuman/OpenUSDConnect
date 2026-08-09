@@ -36,10 +36,25 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
 	bool bReceiverConnected = false;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bReceiverSynchronized = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	bool bEmitterStarted = false;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	bool bEmitterConnected = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int64 SubmittedTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int64 AcknowledgedTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int32 PendingTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bRecoveryRequired = false;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	FString AuthState;
@@ -100,6 +115,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
 	void Disconnect();
 
+	/** Wait until all submitted emitter transactions are durably acknowledged. */
+	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	bool Flush(float TimeoutSeconds = 5.0f) const;
+
 	/** True while the receiver TCP connection is established */
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	bool IsConnected() const;
@@ -116,6 +135,12 @@ public:
 
 	/** Called from client background threads after HELLO_OK. */
 	void OnClientHelloOk(const FString& Role);
+
+	/** Called when a receiver handshake starts a new replay generation. */
+	void OnReceiverReplayStarted();
+
+	/** Called when the server deterministically rejects a producer transaction. */
+	void OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason);
 
 	/** Called from client background threads when auth is rejected. */
 	void OnClientAuthRejected(const FString& Role);
@@ -172,6 +197,8 @@ private:
 	FString ClientId;
 	/** Random session origin shared by both connections */
 	FString SessionOrigin;
+	/** Strictly ordered durable producer transaction ID within SessionOrigin. */
+	uint64 NextProducerTxnId = 1;
 
 	/**
 	 * When true, Tick() will perform the auto-connect on the first tick that runs
@@ -191,6 +218,11 @@ private:
 	 * the safer default and not on a hot path.
 	 */
 	std::atomic<bool> bSuppressEmit;
+
+	/** New native transactions remain gated until replay is applied on the game thread. */
+	std::atomic<bool> bReplaySynchronized;
+	int32 ReplayHeadSeq = 0;
+	uint64 ReplayEpoch = 0;
 
 	/** Cached weak reference to the currently attached stage actor */
 	TWeakObjectPtr<AUsdStageActor> CachedStageActor;

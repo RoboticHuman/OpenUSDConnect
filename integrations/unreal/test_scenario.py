@@ -457,9 +457,9 @@ def create_scenario(work_dir: Path, *, port: int, python_executable: Path) -> Un
         "./textures/brass_color.jpg",
         "./textures/brass_roughness.jpg",
     )
-    baseline = message_to_dict(encode_message(make_txn("unreal-test", baseline)))["events"]
-    initial = message_to_dict(encode_message(make_txn("unreal-test", initial)))["events"]
-    updates = message_to_dict(encode_message(make_txn("unreal-test", updates)))["events"]
+    baseline = message_to_dict(encode_message(make_txn(baseline)))["events"]
+    initial = message_to_dict(encode_message(make_txn(initial)))["events"]
+    updates = message_to_dict(encode_message(make_txn(updates)))["events"]
     apply_events(stage, baseline)
     stage.GetRootLayer().Save()
     expected = Usd.Stage.Open(str(base_stage))

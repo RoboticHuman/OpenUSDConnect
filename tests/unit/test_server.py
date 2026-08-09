@@ -693,8 +693,11 @@ class TestCompaction:
         healthy_request.seek(0)
         resync = message_to_dict(recv_framed_rfile(healthy_request))
         replayed = message_to_dict(recv_framed_rfile(healthy_request))
+        ready = message_to_dict(recv_framed_rfile(healthy_request))
         assert resync["type"] == "resync"
         assert replayed["event"]["prim"] == "/A"
+        assert ready["type"] == "replay_complete"
+        assert ready["head_seq"] == replayed["seq"]
 
     def test_compaction_drains_queued_broadcast_before_resync(self, srv):
         import io
@@ -752,6 +755,35 @@ class TestCompaction:
         assert messages[0]["seq"] == 99
         assert messages[1]["type"] == "resync"
         assert messages[2]["event"]["prim"] == "/A"
+        assert messages[3]["type"] == "replay_complete"
+        assert messages[3]["head_seq"] == messages[2]["seq"]
+
+    def test_purge_sends_resync_and_ready_watermark_under_one_send_lock(self, srv):
+        import io
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        class FakeHandler:
+            def __init__(self):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("purge", 1)
+                self.send_lock = threading.Lock()
+
+        self._insert_events(
+            srv,
+            [{"k": "ensure_prim", "prim": "/BeforePurge", "typeName": "Xform"}],
+        )
+        handler = FakeHandler()
+        srv.receivers.add(handler)
+
+        srv.purge()
+
+        handler.request.seek(0)
+        resync = message_to_dict(recv_framed_rfile(handler.request))
+        ready = message_to_dict(recv_framed_rfile(handler.request))
+        assert resync["type"] == "resync"
+        assert ready == {"type": "replay_complete", "head_seq": 0, "epoch": 1}
 
     def test_seq_resets_after_compact(self, srv):
         """After compaction, sequence numbers restart from 1."""
@@ -1121,6 +1153,110 @@ class TestBroadcast:
 
         assert layered.request.getvalue()
         assert flat.request.getvalue() == b""
+
+    def test_grouped_layered_transactions_share_one_receiver_send(
+        self,
+        srv,
+        monkeypatch,
+    ):
+        import io
+
+        class LayeredHandler:
+            def __init__(self):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("layered", 2)
+                self.send_lock = threading.Lock()
+                self._layered_replay = True
+
+        layered = LayeredHandler()
+        srv.receivers.add(layered)
+        observed = []
+        srv.add_event_listener(observed.append)
+        send_calls = []
+        send_to_all = srv._send_to_all
+
+        def observe_send(payload, **kwargs):
+            send_calls.append(payload)
+            return send_to_all(payload, **kwargs)
+
+        monkeypatch.setattr(srv, "_send_to_all", observe_send)
+        first = srv.process_txn(
+            [{"k": "ensure_prim", "prim": "/First", "typeName": "Xform"}]
+        )
+        second = srv.process_txn(
+            [{"k": "ensure_prim", "prim": "/Second", "typeName": "Xform"}]
+        )
+
+        srv.broadcast_transaction_group_views(
+            [(first, "first-origin"), (second, "second-origin")]
+        )
+        srv._broadcast_queue.join()
+
+        assert len(send_calls) == 1
+        assert observed == [first[0][0], second[0][0]]
+        assert layered.request.getvalue() == send_calls[0]
+
+    def test_grouped_flat_transactions_batch_per_receiver_origin(self, srv, monkeypatch):
+        import io
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        class FlatHandler:
+            def __init__(self, origin, port):
+                self.request = io.BytesIO()
+                self.request.sendall = self.request.write
+                self.client_address = ("flat", port)
+                self.send_lock = threading.Lock()
+                self._layered_replay = False
+                self._origin = origin
+
+        plain_a = FlatHandler(None, 1)
+        plain_b = FlatHandler(None, 2)
+        author = FlatHandler("first-origin", 3)
+        other = FlatHandler("other-origin", 4)
+        srv.receivers.update((plain_a, plain_b, author, other))
+        send_calls = []
+        send_to_all = srv._send_to_all
+
+        def observe_send(payload, **kwargs):
+            send_calls.append((payload, kwargs["targets"]))
+            return send_to_all(payload, **kwargs)
+
+        monkeypatch.setattr(srv, "_send_to_all", observe_send)
+        first = srv.process_txn(
+            [{"k": "ensure_prim", "prim": "/FirstFlat", "typeName": "Xform"}]
+        )
+        second = srv.process_txn(
+            [{"k": "ensure_prim", "prim": "/SecondFlat", "typeName": "Xform"}]
+        )
+
+        srv.broadcast_transaction_group_views(
+            [(first, "first-origin"), (second, "second-origin")]
+        )
+        srv._broadcast_queue.join()
+
+        # Three distinct receiving origins, not two transactions x four sockets.
+        assert len(send_calls) == 3
+        assert len(plain_a.request.getvalue()) == len(plain_b.request.getvalue())
+        assert plain_a.request.getvalue() == other.request.getvalue()
+        assert author.request.getvalue()
+        assert len(author.request.getvalue()) < len(plain_a.request.getvalue())
+
+        plain_a.request.seek(0)
+        author.request.seek(0)
+        plain_messages = [
+            message_to_dict(recv_framed_rfile(plain_a.request)),
+            message_to_dict(recv_framed_rfile(plain_a.request)),
+        ]
+        author_messages = [message_to_dict(recv_framed_rfile(author.request))]
+        assert [message["event"]["prim"] for message in plain_messages] == [
+            "/FirstFlat",
+            "/SecondFlat",
+        ]
+        assert [message["event"]["prim"] for message in author_messages] == [
+            "/SecondFlat"
+        ]
 
     def test_replayed_payload_children_follow_receiver_replay_mode(self, srv):
         import io

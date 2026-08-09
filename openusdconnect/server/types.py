@@ -61,6 +61,24 @@ class ReplayModeConflictError(RuntimeError):
     """Raised when a layer-stack change is incompatible with a flat receiver."""
 
 
+@dataclass(frozen=True, slots=True)
+class TransactionCommit:
+    """Server outcome for a durable producer transaction."""
+
+    status: str
+    txn_id: int
+    records: tuple = ()
+
+
+class TransactionRejectedError(ValueError):
+    """A transaction identity or payload cannot be accepted."""
+
+    def __init__(self, code: str, reason: str, *, expected_txn_id: int = 0):
+        super().__init__(reason)
+        self.code = code
+        self.expected_txn_id = expected_txn_id
+
+
 @dataclass(frozen=True)
 class VfsWriteAnalysis:
     """Summary of a translated full-file VFS save."""

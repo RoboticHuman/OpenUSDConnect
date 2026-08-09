@@ -177,8 +177,14 @@ def main():
     from openusdconnect.transport import send_line
 
     ext_sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    send_line(ext_sock, make_hello("emitter"))
-    send_line(ext_sock, {"type": "txn", "client_id": "cli", "events": [
+    send_line(
+        ext_sock,
+        make_hello(
+            "emitter", client_id="cli", producer_session_id="payload-axis-cli"
+        ),
+    )
+    send_line(ext_sock, {
+        "type": "txn", "txn_id": 1, "events": [
         {"k": "ensure_prim", "prim": "/World/Teapot", "typeName": "Xform"},
         {"k": "ensure_xform_ops", "prim": "/World/Teapot"},
         {"k": "set_xform_trs", "prim": "/World/Teapot",

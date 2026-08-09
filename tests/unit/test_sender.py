@@ -1,10 +1,15 @@
 """Tests for EventSender."""
 
 import socket
+import threading
+import time
+
+import pytest
 
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
-from openusdconnect.sender import EventSender
+from openusdconnect.protocol import make_transaction_result
+from openusdconnect.sender import EventSender, TransactionRejectedError
 
 
 def _make_server():
@@ -47,12 +52,12 @@ class TestEventSenderConnect:
 
             assert result["hello"]["type"] == "hello"
             assert result["hello"]["client_id"] == "test-client"
+            assert result["hello"]["producer_session_id"] == sender.session_id
 
             events = [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
             assert sender.send_events(events) is True
             txn = message_to_dict(recv_framed(conn))
             assert txn["type"] == "txn"
-            assert txn["client_id"] == "test-client"
             assert txn["events"] == events
         finally:
             sender.disconnect()
@@ -94,3 +99,147 @@ class TestEventSenderConnect:
         )
         assert sender.connect() is False
         assert sender.sock is None
+
+    def test_reconnect_replays_identical_bytes_until_duplicate_ack(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1", port, client_id="test-client", session_id="stable-session"
+        )
+        observed = []
+        first_closed = threading.Event()
+
+        def _serve():
+            first, _ = _accept_and_hello_ok(srv)
+            observed.append(recv_framed(first))
+            first.close()  # committed outcome was lost with the connection
+            first_closed.set()
+
+            second, _ = _accept_and_hello_ok(srv)
+            observed.append(recv_framed(second))
+            send_framed(
+                second,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="acknowledged",
+                    )
+                ),
+            )
+            time.sleep(0.05)
+            second.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            assert sender.connect()
+            events = [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
+            assert sender.send_events(events)
+            assert first_closed.wait(timeout=2)
+            deadline = time.monotonic() + 2
+            while sender.connected and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not sender.connected
+            assert sender.pending_transaction_count == 1
+
+            assert sender.connect()
+            assert sender.flush(timeout=2)
+            assert observed[0] == observed[1]
+            assert sender.pending_transaction_count == 0
+            assert sender.acknowledged_event_count == 1
+            assert sender.drain_acknowledged_event_count() == 1
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
+
+    def test_bounded_outbox_and_rejection_are_terminal(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="test-client",
+            session_id="bounded-session",
+            max_pending_transactions=1,
+        )
+
+        def _serve():
+            conn, _ = _accept_and_hello_ok(srv)
+            recv_framed(conn)
+            send_framed(
+                conn,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="rejected",
+                        expected_txn_id=1,
+                        rejection_code="unexpected_id",
+                        reason="injected rejection",
+                    )
+                ),
+            )
+            time.sleep(0.05)
+            conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        event = {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}
+        try:
+            assert sender.connect()
+            assert sender.send_events([event])
+            assert not sender.send_events([event])
+            with pytest.raises(TransactionRejectedError, match="injected rejection"):
+                sender.flush(timeout=2)
+            assert sender.pending_transaction_count == 0
+            assert sender.transaction_error
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
+
+    def test_rejection_closes_transport_and_quarantines_later_transactions(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="test-client",
+            session_id="quarantine-session",
+        )
+        received = threading.Event()
+
+        def _serve():
+            conn, _ = _accept_and_hello_ok(srv)
+            recv_framed(conn)
+            recv_framed(conn)
+            received.set()
+            send_framed(
+                conn,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="rejected",
+                        rejection_code="invalid_transaction",
+                        reason="invalid first transaction",
+                    )
+                ),
+            )
+            time.sleep(0.1)
+            conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        event = {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}
+        try:
+            assert sender.connect()
+            assert sender.send_events([event])
+            assert sender.send_events([event])
+            assert received.wait(timeout=2)
+            with pytest.raises(TransactionRejectedError, match="invalid first"):
+                sender.flush(timeout=2)
+            assert sender.recovery_required
+            assert not sender.connected
+            assert sender.pending_transaction_count == 1
+            assert not sender.send_events([event])
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()

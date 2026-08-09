@@ -30,7 +30,7 @@ def roundtrip_stage(source_path: str):
 
     source = Usd.Stage.Open(source_path)
     events = NoticeEmitter(source).snapshot_events()
-    decoded = message_to_dict(encode_message(make_txn("visualtest", events)))
+    decoded = message_to_dict(encode_message(make_txn(events)))
 
     rebuilt = Usd.Stage.CreateInMemory()
     # Stage metadata travels out-of-band (hello_ok) in the live flow, not in the

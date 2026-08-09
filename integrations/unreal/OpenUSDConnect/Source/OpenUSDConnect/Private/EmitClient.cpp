@@ -10,6 +10,7 @@
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/ScopeLock.h"
 
 #include "flatbuffers/flatbuffer_builder.h"
@@ -31,6 +32,8 @@ FEmitClient::FEmitClient(UUSDConnectSubsystem* InOwner,
 	, ReconnectDelaySecs(InReconnectDelaySecs)
 	, Socket(nullptr), Thread(nullptr)
 	, bShouldStop(false), bConnected(false), ConnectionGeneration(0)
+	, SubmittedTransactionCount(0), AcknowledgedTransactionCount(0)
+	, PendingTransactionCount(0), bRecoveryRequired(false)
 {
 }
 
@@ -55,11 +58,44 @@ void FEmitClient::StopAndWait()
 	CloseSocket();
 }
 
+bool FEmitClient::FlushPending(double TimeoutSeconds) const
+{
+	const double Deadline = FPlatformTime::Seconds() + FMath::Max(0.0, TimeoutSeconds);
+	while (PendingTransactionCount.load(std::memory_order_acquire) > 0
+		&& !bRecoveryRequired.load(std::memory_order_acquire)
+		&& FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::Sleep(0.005f);
+	}
+	return PendingTransactionCount.load(std::memory_order_acquire) == 0;
+}
+
 bool FEmitClient::Init() { return true; }
 
 uint32 FEmitClient::Run()
 {
-	TArray<uint8> RetryFrame;
+	TArray<FQueuedProducerTxn> PendingTxns;
+	int32 PendingHead = 0;
+	auto RetireThrough = [this, &PendingTxns, &PendingHead](uint64 AckId)
+	{
+		uint64 Removed = 0;
+		while (PendingHead < PendingTxns.Num()
+			&& PendingTxns[PendingHead].TxnId <= AckId)
+		{
+			++PendingHead;
+			++Removed;
+		}
+		if (Removed > 0)
+		{
+			PendingTransactionCount.fetch_sub(Removed, std::memory_order_relaxed);
+			AcknowledgedTransactionCount.fetch_add(Removed, std::memory_order_relaxed);
+		}
+		if (PendingHead >= 1024 && PendingHead * 2 >= PendingTxns.Num())
+		{
+			PendingTxns.RemoveAt(0, PendingHead, EAllowShrinking::No);
+			PendingHead = 0;
+		}
+	};
 	while (!bShouldStop.load(std::memory_order_relaxed))
 	{
 		// --- Connect ---
@@ -92,7 +128,8 @@ uint32 FEmitClient::Run()
 
 		// --- Send HELLO as emitter ---
 		TArray<uint8> HelloFrame =
-			OUC::BuildHelloFrame(TEXT("emitter"), 0, ClientId, SessionOrigin, Department, AuthToken);
+			OUC::BuildHelloFrame(
+				TEXT("emitter"), 0, ClientId, SessionOrigin, Department, AuthToken, SessionOrigin);
 		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			CloseSocket();
@@ -126,6 +163,10 @@ uint32 FEmitClient::Run()
 			}
 			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
 			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
+			if (HelloOk)
+			{
+				RetireThrough(HelloOk->committed_through());
+			}
 			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
 			if (Owner) { Owner->OnClientHelloOk(TEXT("emitter")); }
 			if (!IssuedToken.IsEmpty())
@@ -141,64 +182,96 @@ uint32 FEmitClient::Run()
 
 		// --- Main loop: drain send queue + poll for incoming messages ---
 		bool bShouldDisconnect = false;
+		float RateLimitDelay = 0.0f;
 		while (!bShouldStop.load(std::memory_order_relaxed) && !bShouldDisconnect)
 		{
-			// 1. Drain outbound queue
-			bool bSentAny = false;
-			if (RetryFrame.Num() > 0)
+			// 1. Adopt queued frames into the thread-owned outbox, then send
+			// every item not yet written on this connection. Items remain until
+			// a committed/duplicate TransactionResult arrives.
+			bool bDidWork = false;
+			FQueuedProducerTxn Queued;
+			while (SendQueue.Dequeue(Queued))
 			{
-				if (!SendAll(RetryFrame.GetData(), RetryFrame.Num()))
-				{
-					UE_LOG(LogUSDEmit, Warning, TEXT("Emitter retry send failed"));
-					bShouldDisconnect = true;
-				}
-				else
-				{
-					RetryFrame.Reset();
-					bSentAny = true;
-				}
+				PendingTxns.Add(MoveTemp(Queued));
+				bDidWork = true;
 			}
-			if (bShouldDisconnect) break;
-
-			TArray<uint8> SendFrame;
-			while (SendQueue.Dequeue(SendFrame))
+			for (int32 PendingIndex = PendingHead;
+				PendingIndex < PendingTxns.Num(); ++PendingIndex)
 			{
-				if (!SendAll(SendFrame.GetData(), SendFrame.Num()))
+				FQueuedProducerTxn& Pending = PendingTxns[PendingIndex];
+				if (Pending.bSent) continue;
+				if (!SendAll(Pending.Frame.GetData(), Pending.Frame.Num()))
 				{
-					UE_LOG(LogUSDEmit, Warning, TEXT("Emitter send failed"));
-					RetryFrame = MoveTemp(SendFrame);
+					UE_LOG(LogUSDEmit, Warning,
+						TEXT("Emitter send failed for txn %llu"), Pending.TxnId);
 					bShouldDisconnect = true;
 					break;
 				}
-				bSentAny = true;
+				Pending.bSent = true;
+				bDidWork = true;
 			}
 			if (bShouldDisconnect) break;
 
-			// 2. Poll for incoming data with HasPendingData (non-destructive peek).
-			//    Socket stays blocking — we only read when at least 4 bytes are ready.
-			uint32 Pending = 0;
-			if (Socket && Socket->HasPendingData(Pending) && Pending >= 4)
+			// 2. Drain a bounded batch of complete result/control frames. The
+			// server may coalesce many individually framed acknowledgements into
+			// one TCP write; consuming one frame per 5 ms loop would cap quiescent
+			// acknowledgement progress at roughly 200 transactions/second.
+			constexpr int32 MaxResultsPerIteration = 256;
+			for (int32 ResultIndex = 0;
+				ResultIndex < MaxResultsPerIteration && !bShouldDisconnect;
+				++ResultIndex)
 			{
+				uint32 PendingBytes = 0;
+				if (!Socket || !Socket->HasPendingData(PendingBytes) || PendingBytes < 4)
+				{
+					break;
+				}
 				TArray<uint8> InFrame;
 				if (!RecvFrame(InFrame))
 				{
 					bShouldDisconnect = true;
 					break;
 				}
+				bDidWork = true;
 				const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(InFrame);
-				if (Env && Env->payload_type() == OpenUSDConnect::Payload::RateLimited)
+				if (Env && Env->payload_type() == OpenUSDConnect::Payload::TransactionResult)
+				{
+					const OpenUSDConnect::TransactionResult* Result =
+						Env->payload_as_TransactionResult();
+					if (Result)
+					{
+						const uint64 AckId = Result->txn_id();
+						const OpenUSDConnect::TransactionStatus Status = Result->status();
+						if (Status == OpenUSDConnect::TransactionStatus::Rejected)
+						{
+							const FString Reason = ToFString(Result->reason());
+							UE_LOG(LogUSDEmit, Error,
+								TEXT("Transaction %llu rejected: %s"),
+								AckId, *Reason);
+							bRecoveryRequired.store(true, std::memory_order_release);
+							if (Owner) { Owner->OnEmitterTransactionRejected(AckId, Reason); }
+							bShouldStop.store(true, std::memory_order_relaxed);
+							bShouldDisconnect = true;
+						}
+						else
+						{
+							RetireThrough(AckId);
+						}
+					}
+				}
+				else if (Env && Env->payload_type() == OpenUSDConnect::Payload::RateLimited)
 				{
 					const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
 					const float Retry = RL ? RL->retry_after() : 1.0f;
 					UE_LOG(LogUSDEmit, Warning,
 						TEXT("Emitter rate limited — sleeping %.1fs"), Retry);
-					FPlatformProcess::Sleep(Retry);
+					RateLimitDelay = Retry;
+					bShouldDisconnect = true;
 				}
-				// The emit-only client does not consume other control messages.
 			}
 
 			// 3. Yield briefly if idle
-			if (!bSentAny)
+			if (!bDidWork)
 			{
 				FPlatformProcess::Sleep(0.005f);  // 5ms
 			}
@@ -206,12 +279,18 @@ uint32 FEmitClient::Run()
 
 		bConnected.store(false, std::memory_order_relaxed);
 		CloseSocket();
+		for (int32 PendingIndex = PendingHead;
+			PendingIndex < PendingTxns.Num(); ++PendingIndex)
+		{
+			PendingTxns[PendingIndex].bSent = false;
+		}
 		if (!bShouldStop.load(std::memory_order_relaxed))
 		{
 			UE_LOG(LogUSDEmit, Log,
 				TEXT("Emitter disconnected — reconnecting in %.1fs"),
 				ReconnectDelaySecs);
-			FPlatformProcess::Sleep(ReconnectDelaySecs);
+			FPlatformProcess::Sleep(
+				RateLimitDelay > 0.0f ? RateLimitDelay : ReconnectDelaySecs);
 		}
 	}
 	return 0;
@@ -229,9 +308,14 @@ void FEmitClient::Exit()
 	CloseSocket();
 }
 
-void FEmitClient::EnqueueFrame(TArray<uint8>&& Frame)
+void FEmitClient::EnqueueFrame(uint64 TxnId, TArray<uint8>&& Frame)
 {
-	SendQueue.Enqueue(MoveTemp(Frame));
+	FQueuedProducerTxn Queued;
+	Queued.TxnId = TxnId;
+	Queued.Frame = MoveTemp(Frame);
+	SubmittedTransactionCount.fetch_add(1, std::memory_order_relaxed);
+	PendingTransactionCount.fetch_add(1, std::memory_order_relaxed);
+	SendQueue.Enqueue(MoveTemp(Queued));
 }
 
 // ---------------------------------------------------------------------------

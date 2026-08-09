@@ -3,7 +3,7 @@
 import pytest
 from pxr import Sdf, Usd
 
-from openusdconnect.adapters import MockAdapter
+from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.codec import encode_message
 from openusdconnect.dispatcher import EventDispatcher, _stage_sync_scope
 from openusdconnect.protocol_constants import (
@@ -85,7 +85,7 @@ def test_decode_failure_applies_prefix_and_requests_replay():
 
     assert dispatcher.drain_and_apply() == 1
     assert dispatcher.last_seq == 1
-    assert callback_sequences == [1]
+    assert callback_sequences == [0]
     assert receiver.replay_requests == [2]
     assert "/World/A" in adapter._prims
     assert "/World/B" not in adapter._prims
@@ -94,6 +94,67 @@ def test_decode_failure_applies_prefix_and_requests_replay():
     assert dispatcher.drain_and_apply() == 1
     assert dispatcher.last_seq == 2
     assert "/World/B" in adapter._prims
+
+
+def test_adapter_failure_keeps_applied_cursor_and_requests_full_suffix_replay(
+    monkeypatch,
+):
+    receiver = _QueuedReceiver([_event(1, "/World/Retry")])
+    adapter = MockAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter)
+
+    original_apply = adapter.apply_events
+
+    def fail_apply(_events):
+        raise RuntimeError("injected adapter failure")
+
+    monkeypatch.setattr(adapter, "apply_events", fail_apply)
+    with pytest.raises(RuntimeError, match="injected adapter failure"):
+        dispatcher.drain_and_apply()
+
+    assert dispatcher.last_seq == 0
+    assert receiver.messages == []
+    assert receiver.replay_requests == [1]
+
+    monkeypatch.setattr(adapter, "apply_events", original_apply)
+    receiver.messages = [_event(1, "/World/Retry")]
+    assert dispatcher.drain_and_apply() == 1
+    assert dispatcher.last_seq == 1
+    assert "/World/Retry" in adapter._prims
+
+
+def test_callback_failure_does_not_publish_applied_cursor():
+    receiver = _QueuedReceiver([_event(1, "/World/Callback")])
+
+    def fail_callback(_paths):
+        raise RuntimeError("injected callback failure")
+
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=MockAdapter(),
+        on_applied=fail_callback,
+    )
+
+    with pytest.raises(RuntimeError, match="injected callback failure"):
+        dispatcher.drain_and_apply()
+
+    assert dispatcher.last_seq == 0
+    assert receiver.replay_requests == [1]
+
+
+def test_layered_sequence_gap_is_not_applied_and_requests_missing_sequence():
+    stage = Usd.Stage.CreateInMemory()
+    receiver = _QueuedReceiver([_event(2, "/World/TooNew")])
+    receiver.layered_replay_active = True
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=UsdStageAdapter(stage),
+    )
+
+    assert dispatcher.drain_and_apply() == 0
+    assert dispatcher.last_seq == 0
+    assert receiver.replay_requests == [1]
+    assert not stage.GetPrimAtPath("/World/TooNew")
 
 
 def test_unnegotiated_layered_request_uses_flat_dispatch():

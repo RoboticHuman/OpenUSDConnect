@@ -204,6 +204,7 @@ uint32 FSyncClient::Run()
 			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
 			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
 			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
+			if (Owner) { Owner->OnReceiverReplayStarted(); }
 			if (Owner) { Owner->OnClientHelloOk(TEXT("receiver")); }
 			if (!IssuedToken.IsEmpty())
 			{
@@ -377,6 +378,22 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	{
 		UE_LOG(LogUSDConnect, Log, TEXT("Resync received — resetting seq counter"));
 		LastSeq = 0;
+		if (Owner)
+		{
+			Owner->OnReceiverReplayStarted();
+			TArray<uint8> Copy = Frame;
+			Owner->EnqueueEvent(MoveTemp(Copy));
+		}
+	}
+	else if (PType == OpenUSDConnect::Payload::ReplayComplete)
+	{
+		// Keep the marker in the same FIFO as BroadcastEvent frames. The game
+		// thread declares READY only after every preceding replay frame applied.
+		TArray<uint8> Copy = Frame;
+		if (Owner)
+		{
+			Owner->EnqueueEvent(MoveTemp(Copy));
+		}
 	}
 	// Handshake responses do not appear in the receive loop.
 }

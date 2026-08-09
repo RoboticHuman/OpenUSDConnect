@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import queue
 import socket
 import socketserver
 import threading
 import time
-from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..codec import (
     HelloRejectionCode,
     PayloadType,
     decode_envelope,
+    encode_message,
     event_to_dict,
     message_to_dict,
     resolve_payload,
@@ -22,10 +24,11 @@ from ..codec import (
 from ..framing import (
     IncompleteRead,
     MessageTooLarge,
+    frame_batch,
     recv_framed_rfile,
 )
+from ..protocol import make_replay_complete, make_transaction_result
 from ..protocol_constants import (
-    K_LOAD_PAYLOAD,
     MSG_AUTH_REJECTED,
     MSG_HELLO_OK,
     MSG_HELLO_REJECTED,
@@ -44,10 +47,34 @@ from .rate_limit import TokenBucket
 
 if TYPE_CHECKING:
     from .state import UsdSyncServer
+from .types import TransactionRejectedError
 
 LOG = logging.getLogger(__name__)
 
 _SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
+
+
+@dataclass(slots=True)
+class _PendingTransactionResult:
+    request: object | None
+    result: dict | None
+    txn_id: int
+    event_count: int
+
+
+def _send_transaction_results(
+    sock: socket.socket,
+    results: list[dict],
+    *,
+    measure: bool = False,
+) -> int:
+    """Send ordered results with one syscall when multiple are ready."""
+    if len(results) == 1 and not measure:
+        send_msg(sock, results[0])
+        return 0
+    payload = frame_batch([encode_message(result) for result in results])
+    sock.sendall(payload)
+    return len(payload)
 
 
 class ConnectionHandler(socketserver.StreamRequestHandler):
@@ -103,6 +130,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             hello_buf = recv_framed_rfile(self.rfile)
         except (TimeoutError, IncompleteRead, MessageTooLarge):
             return
+        if sync_server.wire_metrics is not None:
+            sync_server.wire_metrics.record_transport(
+                "client_ingress",
+                len(hello_buf) + 4,
+            )
 
         try:
             env = decode_envelope(hello_buf)
@@ -140,6 +172,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         token_raw = hello_fb.Token()
         hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
         self._client_id = client_id
+        producer_session_raw = hello_fb.ProducerSessionId()
+        self._producer_session_id = (
+            producer_session_raw.decode("utf-8")
+            if isinstance(producer_session_raw, bytes)
+            else producer_session_raw
+        ) or ""
         self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
         if self._layer_mode is not sync_server.layer_mode:
@@ -159,6 +197,21 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 self._layer_mode.value,
                 self.client_address,
                 sync_server.layer_mode.value,
+            )
+            return
+
+        if role == "emitter" and (
+            not client_id
+            or not self._producer_session_id
+            or len(self._producer_session_id) > 128
+        ):
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_HELLO_REJECTED,
+                    "code": HelloRejectionCode.Unspecified,
+                    "reason": "emitter hello requires client_id and producer_session_id",
+                },
             )
             return
 
@@ -219,6 +272,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Send hello_ok with token (issued on first connect, None on reconnect)
         hello_ok = {"type": MSG_HELLO_OK}
+        if role == "emitter":
+            hello_ok["committed_through"] = sync_server.producer_committed_through(
+                client_id,
+                self._producer_session_id,
+            )
         if sync_server.layer_mode is LayerMode.SHARED_STAGE:
             hello_ok["layer_mode"] = LayerMode.SHARED_STAGE.value
         if issued_token:
@@ -267,7 +325,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if role == "receiver":
                 sync_from = hello_fb.SyncFrom() or 1
                 try:
-                    with sync_server.receiver_replay_window(self) as replay_end:
+                    with sync_server.receiver_replay_window(self) as replay_watermark:
+                        replay_end, replay_epoch = replay_watermark
                         # A sequence beyond the captured tail indicates a stale
                         # pre-compaction cursor. Tail + 1 remains a valid live join.
                         if sync_from > replay_end + 1:
@@ -295,6 +354,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                             sync_from,
                             seq_end=replay_end,
                         )
+                        send_msg(
+                            self.request,
+                            make_replay_complete(replay_end, replay_epoch),
+                        )
                 except (OSError, TimeoutError):
                     LOG.info(
                         "Receiver disconnected during replay: %s",
@@ -309,7 +372,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if role == "receiver":
                 _set_send_timeout(self.request, _SEND_TIMEOUT_S)
             self.request.settimeout(None)
-            self._read_loop(sync_server)
+            if role == "emitter":
+                self._run_pipelined_read_loop(sync_server)
+            else:
+                self._read_loop(sync_server, None)
         finally:
             with sync_server.clients_lock:
                 sync_server.receivers.discard(self)
@@ -324,7 +390,33 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         state = sync_server.get_playback_state()
         sync_server.broadcast_message({"type": MSG_PLAYBACK_STATE, **state})
 
-    def _read_loop(self, sync_server: UsdSyncServer):
+    def _run_pipelined_read_loop(self, sync_server: UsdSyncServer) -> None:
+        """Read producer transactions while an ordered worker delivers results."""
+        results: queue.Queue[_PendingTransactionResult | None] = queue.Queue(
+            # One producer can fill one durable group, but cannot monopolize
+            # the coordinator with an arbitrarily deep per-connection backlog.
+            maxsize=max(1, sync_server.txn_batch_size),
+        )
+        worker = threading.Thread(
+            target=self._transaction_result_loop,
+            args=(sync_server, results),
+            name=f"ouc-results-{self._client_id}",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            self._read_loop(sync_server, results)
+        finally:
+            # FIFO placement after the last submitted request makes the result
+            # worker drain every commit/barrier even after an abrupt peer close.
+            results.put(None)
+            worker.join()
+
+    def _read_loop(
+        self,
+        sync_server: UsdSyncServer,
+        results: queue.Queue[_PendingTransactionResult | None] | None,
+    ):
         while True:
             try:
                 buf = recv_framed_rfile(self.rfile)
@@ -334,6 +426,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 break
             except TimeoutError:
                 continue
+
+            if sync_server.wire_metrics is not None:
+                sync_server.wire_metrics.record_transport(
+                    "client_ingress",
+                    len(buf) + 4,
+                )
 
             env = decode_envelope(buf)
             pt = env.PayloadType()
@@ -377,6 +475,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if not events:
                 continue
 
+            txn_id = int(txn_fb.TxnId())
+
             proposal_id = txn_fb.ProposalId()
             if proposal_id:
                 if sync_server.layer_mode is LayerMode.SHARED_STAGE:
@@ -388,56 +488,165 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
                 if wait > 0:
-                    send_msg(
-                        self.request,
-                        {
-                            "type": MSG_RATE_LIMITED,
-                            "retry_after": round(wait, 3),
-                        },
-                    )
+                    with self.send_lock:
+                        send_msg(
+                            self.request,
+                            {
+                                "type": MSG_RATE_LIMITED,
+                                "retry_after": round(wait, 3),
+                            },
+                        )
                     continue
 
-            sync_server.txn_barrier.acquire_shared()
+            if results is None:
+                LOG.warning("Receiver connection attempted to submit a transaction")
+                break
+
+            result = None
+            request = None
             try:
-                commit_guard = (
-                    sync_server._shared_stage_commit_lock
-                    if sync_server.layer_mode is LayerMode.SHARED_STAGE
-                    else nullcontext()
+                txn_layer_key = txn_fb.LayerKey()
+                if isinstance(txn_layer_key, bytes):
+                    txn_layer_key = txn_layer_key.decode("utf-8")
+                request = sync_server.submit_idempotent_txn(
+                    events,
+                    session_id=self._producer_session_id,
+                    txn_id=txn_id,
+                    client_id=self._client_id,
+                    origin=self._origin,
+                    client_addr=self._addr_key,
+                    layer=self._client_layer,
+                    layer_key=txn_layer_key or "",
                 )
-                with commit_guard:
-                    txn_layer_key = txn_fb.LayerKey()
-                    if isinstance(txn_layer_key, bytes):
-                        txn_layer_key = txn_layer_key.decode("utf-8")
-                    records = sync_server.process_txn(
-                        events,
-                        client_id=self._client_id,
-                        origin=self._origin,
-                        client_addr=self._addr_key,
-                        layer=self._client_layer,
-                        layer_key=txn_layer_key or "",
-                    )
+            except TransactionRejectedError as exc:
+                result = make_transaction_result(
+                    txn_id,
+                    status="rejected",
+                    expected_txn_id=exc.expected_txn_id,
+                    rejection_code=exc.code,
+                    reason=str(exc),
+                )
+            except (TypeError, ValueError) as exc:
+                result = make_transaction_result(
+                    txn_id,
+                    status="rejected",
+                    rejection_code="invalid_transaction",
+                    reason=str(exc),
+                )
+            results.put(
+                _PendingTransactionResult(
+                    request=request,
+                    result=result,
+                    txn_id=txn_id,
+                    event_count=len(events),
+                )
+            )
 
-                    sync_server.broadcast_transaction_views(
-                        records,
-                        exclude_origin=self._origin,
-                    )
+    def _transaction_result_loop(
+        self,
+        sync_server: UsdSyncServer,
+        results: queue.Queue[_PendingTransactionResult | None],
+    ) -> None:
+        delivery_failed = False
+        while True:
+            pending = results.get()
+            if pending is None:
+                return
+            outgoing: list[dict] = []
+            reached_end = False
+            processed = 0
+            max_batch = max(1, sync_server.txn_batch_size)
+            while pending is not None and processed < max_batch:
+                processed += 1
+                result = pending.result
+                if result is None:
+                    try:
+                        commit = sync_server.wait_for_transaction(pending.request)
+                        result = make_transaction_result(
+                            commit.txn_id,
+                            status="acknowledged",
+                        )
+                    except TransactionRejectedError as exc:
+                        result = make_transaction_result(
+                            pending.txn_id,
+                            status="rejected",
+                            expected_txn_id=exc.expected_txn_id,
+                            rejection_code=exc.code,
+                            reason=str(exc),
+                        )
+                    except (TypeError, ValueError) as exc:
+                        result = make_transaction_result(
+                            pending.txn_id,
+                            status="rejected",
+                            rejection_code="invalid_transaction",
+                            reason=str(exc),
+                        )
+                    except Exception:
+                        LOG.exception(
+                            "Transaction %s/%d failed without a protocol result",
+                            self._producer_session_id,
+                            pending.txn_id,
+                        )
+                        delivery_failed = True
+                        self._shutdown_request_socket()
+                        result = None
 
-                    # After load_payload, re-broadcast latest child state so
-                    # receivers re-apply authoritative TRS after re-import. Kept
-                    # inside the shared txn barrier so its extra seq/append_log/
-                    # broadcast can't interleave with a concurrent compaction/purge.
-                    for ev in events:
-                        if ev.get("k") == K_LOAD_PAYLOAD:
-                            sync_server.replay_children_after_load(ev["prim"])
-            finally:
-                sync_server.txn_barrier.release_shared()
+                if result is not None:
+                    if (
+                        result.get("status") == "acknowledged"
+                        and outgoing
+                        and outgoing[-1].get("status") == "acknowledged"
+                    ):
+                        outgoing[-1] = result
+                    else:
+                        outgoing.append(result)
+                    with sync_server.clients_lock:
+                        info = sync_server.clients.get(self._addr_key)
+                        if info:
+                            info.last_activity = time.time()
+                            if result.get("status") == "acknowledged":
+                                info.event_count += pending.event_count
 
-            # Update client activity tracking.
-            with sync_server.clients_lock:
-                info = sync_server.clients.get(self._addr_key)
-                if info:
-                    info.last_activity = time.time()
-                    info.event_count += len(events)
+                if processed >= max_batch:
+                    break
+                try:
+                    pending = results.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is None:
+                    reached_end = True
+                    break
+
+            if outgoing and not delivery_failed:
+                try:
+                    with self.send_lock:
+                        if sync_server.wire_metrics is None:
+                            _send_transaction_results(self.request, outgoing)
+                            sent_bytes = 0
+                        else:
+                            sent_bytes = _send_transaction_results(
+                                self.request,
+                                outgoing,
+                                measure=True,
+                            )
+                    if sent_bytes:
+                        sync_server.wire_metrics.record_transport(
+                            "producer_result_egress",
+                            sent_bytes,
+                            count=len(outgoing),
+                        )
+                except OSError:
+                    # Commit may be durable; reconnect replays the exact bytes.
+                    delivery_failed = True
+                    self._shutdown_request_socket()
+            if reached_end:
+                return
+
+    def _shutdown_request_socket(self) -> None:
+        try:
+            self.request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _handle_claim_playback(self, sync_server: UsdSyncServer, msg: dict):
         initial_time = msg.get("time")

@@ -72,11 +72,17 @@ def main():
     asset_fwd = asset_path.replace("\\", "/")
 
     emitter_sock = socket.create_connection(("127.0.0.1", port))
-    send_line(emitter_sock, make_hello("emitter"))
+    send_line(
+        emitter_sock,
+        make_hello(
+            "emitter",
+            client_id="manual",
+            producer_session_id="manual-reference-emitter",
+        ),
+    )
     send_line(
         emitter_sock,
         make_txn(
-            "manual",
             [
                 {"k": K_ENSURE_PRIM, "prim": "/World/Chair", "typeName": "Xform"},
                 {
@@ -85,6 +91,7 @@ def main():
                     "refs": [{"asset_path": asset_fwd, "prim_path": "/Model"}],
                 },
             ],
+            txn_id=1,
         ),
     )
     time.sleep(0.3)
@@ -128,11 +135,17 @@ def main():
     # ==================================================================
     print("\n[ManualThenMove] Sending emitter events (move simulation)...")
     emitter_sock2 = socket.create_connection(("127.0.0.1", port))
-    send_line(emitter_sock2, make_hello("emitter"))
+    send_line(
+        emitter_sock2,
+        make_hello(
+            "emitter",
+            client_id="emitter-move",
+            producer_session_id="manual-move-emitter",
+        ),
+    )
     send_line(
         emitter_sock2,
         make_txn(
-            "emitter-move",
             [
                 {"k": K_ENSURE_PRIM, "prim": "/World/Chair", "typeName": "Xform"},
                 {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Chair"},
@@ -157,6 +170,7 @@ def main():
                 {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_2", "typeName": "Mesh"},
                 {"k": K_ENSURE_PRIM, "prim": "/World/Chair/Leg_3", "typeName": "Mesh"},
             ],
+            txn_id=1,
         ),
     )
     time.sleep(0.3)

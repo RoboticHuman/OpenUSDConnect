@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 6
+        assert SCHEMA_VERSION == 8
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -92,6 +92,7 @@ class TestHello:
             "origin": "blender-1",
             "department": "anim",
             "token": "tok-abc",
+            "producer_session_id": "producer-1",
         }
         d, _ = _roundtrip(msg)
         assert d == msg
@@ -127,6 +128,18 @@ class TestHelloOk:
     def test_without_token(self):
         d, _ = _roundtrip({"type": "hello_ok"})
         assert d == {"type": "hello_ok"}
+
+
+class TestReplayComplete:
+    def test_roundtrip_and_zero_copy_access(self):
+        msg = {"type": "replay_complete", "head_seq": 42, "epoch": 7}
+        decoded, buf = _roundtrip(msg)
+        assert decoded == msg
+        env = decode_envelope(buf)
+        assert env.PayloadType() == PayloadType.ReplayComplete
+        _, complete = resolve_payload(env)
+        assert complete.HeadSeq() == 42
+        assert complete.Epoch() == 7
 
 
 class TestAuthRejected:
@@ -192,6 +205,23 @@ class TestTxnProposalId:
         )
         _, txn = resolve_payload(decode_envelope(buf))
         assert txn.ProposalId() in (b"prop-xyz", "prop-xyz")
+
+
+class TestTransactionIdentity:
+    def test_txn_and_result_roundtrip(self):
+        txn, _ = _roundtrip({
+            "type": "txn",
+            "events": [],
+            "txn_id": 9,
+        })
+        assert txn["txn_id"] == 9
+
+        result, _ = _roundtrip({
+            "type": "transaction_result",
+            "txn_id": 9,
+            "status": "acknowledged",
+        })
+        assert result["status"] == _fb.TransactionStatus.Acknowledged
 
 
 # ===================================================================

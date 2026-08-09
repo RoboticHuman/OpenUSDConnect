@@ -24,6 +24,7 @@ table Hello {
     token:string;             // TOFU auth token
     layered_replay:bool;      // receiver can reconstruct the logical authored-layer stack
     layer_mode:LayerMode = Managed;
+    producer_session_id:string; // emitter identity, bound to this connection
 }
 
 table HelloOk {
@@ -31,6 +32,7 @@ table HelloOk {
     stage_metadata:SetStageMetadata;  // snapshot of stage-level metadata (units + timeline)
     layered_replay:bool;      // server accepted logical-layer replay for this receiver
     layer_mode:LayerMode = Managed;
+    committed_through:ulong;  // highest durable txn for producer_session_id
 }
 
 table AuthRejected {
@@ -49,10 +51,40 @@ table HelloRejected {
 }
 
 table Txn {
-    client_id:string;
     events:[EventWrapper];
     proposal_id:string;       // if set, edits go to this proposal's muted layer, not the live layer
     layer_key:string;         // required for SharedStage transactions
+    txn_id:ulong;             // strictly ordered within the Hello-bound producer session
+}
+
+enum TransactionStatus : ubyte {
+    Acknowledged = 0,
+    Rejected = 1,
+}
+
+enum TransactionRejectionCode : ubyte {
+    None = 0,
+    InvalidIdentity = 1,
+    UnexpectedId = 2,
+    InvalidTransaction = 4,
+}
+
+// Server → producer cumulative result. Acknowledged means every transaction
+// through txn_id is durable for the session bound during Hello.
+table TransactionResult {
+    txn_id:ulong;
+    status:TransactionStatus = Acknowledged;
+    expected_txn_id:ulong;
+    rejection_code:TransactionRejectionCode = None;
+    reason:string;
+}
+
+// Marks the exact replay-to-live boundary for one receiver connection. Every
+// replay record through head_seq was sent before this frame while the
+// receiver's send lock was held; live broadcasts follow it on the same socket.
+table ReplayComplete {
+    head_seq:int;
+    epoch:ulong;
 }
 
 table BroadcastEvent {
@@ -183,6 +215,8 @@ union Payload {
     LayerStackState,
     HelloRejected,
     LayerGraphState,
+    TransactionResult,
+    ReplayComplete,
 }
 
 table Envelope {

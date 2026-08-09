@@ -71,6 +71,15 @@ def _send_ping(conn):
     send_framed(conn, encode_message({"type": "ping"}))
 
 
+def _send_replay_complete(conn, head_seq, epoch=1):
+    send_framed(
+        conn,
+        encode_message(
+            {"type": "replay_complete", "head_seq": head_seq, "epoch": epoch}
+        ),
+    )
+
+
 def _poll_until(predicate, timeout=2, interval=0.02):
     """Poll predicate() until truthy or timeout."""
     deadline = time.monotonic() + timeout
@@ -118,6 +127,65 @@ class TestReceiverThread:
             assert rt.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
         finally:
             _teardown(rt, conn, srv)
+
+    def test_replay_ready_only_after_preceding_frames_are_drained_and_applied(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            _send_event(conn, 1)
+            _send_replay_complete(conn, 1, epoch=4)
+            _poll_until(lambda: rt.last_seq == 1)
+            assert _poll_until(
+                lambda: rt._received_replay_complete is not None
+                and rt._received_replay_complete[2] == 4
+            )
+
+            assert not rt.synchronized
+            queued = rt.drain_queue()
+            assert len(queued) == 1
+            assert message_to_dict(queued[0])["type"] == "event"
+            assert rt.mark_replay_applied()
+            assert rt.synchronized
+            assert rt.replay_head_seq == 1
+            assert rt.replay_epoch == 4
+        finally:
+            _teardown(rt, conn, srv)
+
+    def test_reconnect_clears_ready_until_the_new_replay_marker_is_applied(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=True,
+            reconnect_base_delay=0.02,
+            reconnect_max_delay=0.05,
+        )
+        rt.start()
+        conn1 = _accept_and_hello(srv)
+        conn2 = None
+        try:
+            _send_replay_complete(conn1, 0, epoch=1)
+            _poll_until(lambda: rt._received_replay_complete is not None)
+            rt.drain_queue()
+            assert rt.mark_replay_applied()
+            assert rt.synchronized
+
+            conn1.close()
+            _poll_until(lambda: not rt.connected)
+            assert not rt.synchronized
+
+            conn2 = _accept_and_hello(srv, timeout=5)
+            _poll_until(lambda: rt.connected)
+            assert not rt.synchronized
+            _send_replay_complete(conn2, 0, epoch=1)
+            _poll_until(lambda: rt._received_replay_complete is not None)
+            rt.drain_queue()
+            assert rt.mark_replay_applied()
+            assert rt.synchronized
+        finally:
+            _teardown(rt, conn2 or conn1, srv)
 
     def test_negotiates_layered_replay(self):
         srv, port = _make_server()
@@ -380,6 +448,40 @@ class TestReconnection:
                 rt.stop()
                 rt.join(timeout=1)
                 srv.close()
+
+    def test_in_place_resync_clears_ready_until_new_watermark_is_applied(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
+        rt.start()
+        conn = _accept_and_hello(srv)
+        try:
+            _send_replay_complete(conn, 0, epoch=1)
+            assert _poll_until(lambda: rt._received_replay_complete is not None)
+            rt.drain_queue()
+            assert rt.mark_replay_applied()
+            assert rt.synchronized
+
+            send_framed(conn, encode_message({"type": "resync"}))
+            _send_event(conn, 1)
+            _send_replay_complete(conn, 1, epoch=2)
+            assert _poll_until(lambda: rt.last_seq == 1)
+            assert _poll_until(
+                lambda: rt._received_replay_complete is not None
+                and rt._received_replay_complete[2] == 2
+            )
+            assert not rt.synchronized
+
+            queued = rt.drain_queue()
+            assert [message_to_dict(raw)["type"] for raw in queued] == [
+                "resync",
+                "event",
+            ]
+            assert rt.mark_replay_applied()
+            assert rt.synchronized
+            assert rt.replay_head_seq == 1
+            assert rt.replay_epoch == 2
+        finally:
+            _teardown(rt, conn, srv)
 
     def test_requested_replay_rewinds_sequence_and_clears_queue(self):
         srv, port = _make_server()

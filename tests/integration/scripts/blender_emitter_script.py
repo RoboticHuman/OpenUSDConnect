@@ -47,7 +47,14 @@ def main():
 
     print(f"[Emitter] Connecting to 127.0.0.1:{port}")
     sock = socket.create_connection(("127.0.0.1", port))
-    send_line(sock, make_hello("emitter"))
+    send_line(
+        sock,
+        make_hello(
+            "emitter",
+            client_id="integration-test-emitter",
+            producer_session_id="blender-integration-emitter",
+        ),
+    )
 
     # Send events: create a Sphere, Cube, set transforms, set visibility
     events = [
@@ -73,7 +80,7 @@ def main():
         {"k": K_ENSURE_PRIM, "prim": "/World/TestXform", "typeName": "Xform"},
     ]
 
-    txn = make_txn("integration-test-emitter", events)
+    txn = make_txn(events, txn_id=1)
     send_line(sock, txn)
     print(f"[Emitter] Sent {len(events)} events")
 

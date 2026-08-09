@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 8
 
 
 class LayerMode(StrEnum):
@@ -36,6 +36,8 @@ MSG_PLAYBACK_CONTROL = "playback_control"
 MSG_PLAYBACK_STATE = "playback_state"
 MSG_LAYER_STACK_STATE = "layer_stack_state"
 MSG_LAYER_GRAPH_STATE = "layer_graph_state"
+MSG_TRANSACTION_RESULT = "transaction_result"
+MSG_REPLAY_COMPLETE = "replay_complete"
 
 # Event kind constants - use these instead of raw string literals.
 K_ENSURE_PRIM = "ensure_prim"

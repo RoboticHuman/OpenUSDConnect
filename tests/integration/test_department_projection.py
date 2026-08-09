@@ -287,11 +287,11 @@ def test_realtime_receiver_boundary_waits_for_pending_persistence(
     allow_persist = threading.Event()
     append_batch = sync_server.store.append_batch
 
-    def _blocked_append(records):
+    def _blocked_append(records, **kwargs):
         persist_started.set()
         if not allow_persist.wait(timeout=5):
             raise TimeoutError("test did not release persistence")
-        append_batch(records)
+        append_batch(records, **kwargs)
 
     monkeypatch.setattr(sync_server.store, "append_batch", _blocked_append)
     sender = EventSender(
@@ -313,10 +313,11 @@ def test_realtime_receiver_boundary_waits_for_pending_persistence(
         assert persist_started.wait(timeout=5)
 
         receiver.start()
-        assert receiver.wait_connected(timeout=5)
+        time.sleep(0.2)
         assert not receiver.drain_queue()
 
         allow_persist.set()
+        assert receiver.wait_connected(timeout=5)
         assert _wait_until(lambda: receiver.last_seq == 1)
         records = [message_to_dict(raw) for raw in receiver.drain_queue()]
         assert [record["event"] for record in records] == [event]

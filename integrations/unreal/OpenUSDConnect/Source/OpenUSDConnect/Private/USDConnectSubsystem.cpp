@@ -54,6 +54,7 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	bSuppressEmit.store(false);
+	bReplaySynchronized.store(false);
 
 	// Generate stable ClientId + session origin (same for both connections)
 	{
@@ -63,6 +64,7 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		const uint32  Hash      = FCrc::MemCrc32(TCHAR_TO_UTF8(*Combined), Combined.Len());
 		ClientId      = FString::Printf(TEXT("unreal-%08x-%s"), Hash, *MachineId);
 		SessionOrigin = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		NextProducerTxnId = 1;
 	}
 
 	// IMPORTANT: don't call Connect() here. Spawning FRunnableThreads from inside
@@ -91,9 +93,23 @@ void UUSDConnectSubsystem::Connect()
 void UUSDConnectSubsystem::StopClients()
 {
 	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
-	if (EmitClient) { EmitClient->StopAndWait(); EmitClient.Reset(); }
+	if (EmitClient)
+	{
+		const uint64 Pending = EmitClient->GetPendingTransactionCount();
+		if (Pending > 0 && !EmitClient->FlushPending(2.0))
+		{
+			UE_LOG(LogUSDConnectSubsystem, Warning,
+				TEXT("Disconnecting with %llu unacknowledged producer transactions"),
+				EmitClient->GetPendingTransactionCount());
+		}
+		EmitClient->StopAndWait();
+		EmitClient.Reset();
+	}
 	EmittedXformPrims.Reset();
 	LastEmitConnectionGeneration = 0;
+	bReplaySynchronized.store(false);
+	ReplayHeadSeq = 0;
+	ReplayEpoch = 0;
 
 	{
 		FScopeLock Lock(&EventQueueCS);
@@ -142,6 +158,18 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 				}
 			}
 		}
+	}
+
+	if (bStartReceiver && !Settings->Department.IsEmpty())
+	{
+		StopClients();
+		SetStatusMessage(
+			TEXT("unsupported_configuration"),
+			TEXT("Department receive mode requires managed layered replay, which the native Unreal plugin does not implement"));
+		UE_LOG(LogUSDConnectSubsystem, Error,
+			TEXT("Department '%s' rejected: native Unreal receivers do not support managed layered replay"),
+			*Settings->Department);
+		return;
 	}
 
 	const FString TargetToken = Settings->bPersistAuthTokens
@@ -267,6 +295,11 @@ void UUSDConnectSubsystem::Disconnect()
 	SetStatusMessage(TEXT("not_connected"), TEXT("Disconnected"));
 }
 
+bool UUSDConnectSubsystem::Flush(float TimeoutSeconds) const
+{
+	return !EmitClient || EmitClient->FlushPending(TimeoutSeconds);
+}
+
 void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 {
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
@@ -304,8 +337,18 @@ FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
 	Status.SnapshotSeq = ActiveSnapshotSeq;
 	Status.bReceiverStarted = bActiveReceiverStarted;
 	Status.bReceiverConnected = SyncClient && SyncClient->IsConnected();
+	Status.bReceiverSynchronized = bReplaySynchronized.load();
 	Status.bEmitterStarted = bActiveEmitterStarted;
 	Status.bEmitterConnected = EmitClient && EmitClient->IsConnected();
+	if (EmitClient)
+	{
+		Status.SubmittedTransactions = static_cast<int64>(EmitClient->GetSubmittedTransactionCount());
+		Status.AcknowledgedTransactions = static_cast<int64>(EmitClient->GetAcknowledgedTransactionCount());
+		Status.PendingTransactions = static_cast<int32>(FMath::Min<uint64>(
+			EmitClient->GetPendingTransactionCount(),
+			static_cast<uint64>(MAX_int32)));
+		Status.bRecoveryRequired = EmitClient->IsRecoveryRequired();
+	}
 	{
 		FScopeLock Lock(&StatusCS);
 		Status.AuthState = LastAuthState;
@@ -402,6 +445,33 @@ void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
 	}
 
 	SetStatusMessage(TEXT("connected"), FString::Printf(TEXT("%s connected"), *Role));
+}
+
+void UUSDConnectSubsystem::OnReceiverReplayStarted()
+{
+	bReplaySynchronized.store(false);
+}
+
+void UUSDConnectSubsystem::OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason)
+{
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, TxnId, Reason]()
+		{
+			if (WeakThis.IsValid())
+			{
+				WeakThis->OnEmitterTransactionRejected(TxnId, Reason);
+			}
+		});
+		return;
+	}
+
+	SetStatusMessage(
+		TEXT("recovery_required"),
+		Reason.IsEmpty()
+			? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
+			: FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason));
 }
 
 void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
@@ -669,6 +739,32 @@ void UUSDConnectSubsystem::DrainAndApply()
 		TUniquePtr<FUSDEventChangeBlock> RunBlock;
 		for (TArray<uint8>& Frame : Chunk)
 		{
+			const OpenUSDConnect::Envelope* Envelope = OUC::GetEnvelopeFromFrame(Frame);
+			if (Envelope && Envelope->payload_type() == OpenUSDConnect::Payload::Resync)
+			{
+				RunBlock.Reset();
+				bReplaySynchronized.store(false);
+				++Applied;
+				continue;
+			}
+			if (Envelope
+				&& Envelope->payload_type() == OpenUSDConnect::Payload::ReplayComplete)
+			{
+				RunBlock.Reset();
+				if (const OpenUSDConnect::ReplayComplete* Complete =
+					Envelope->payload_as_ReplayComplete())
+				{
+					ReplayHeadSeq = Complete->head_seq();
+					ReplayEpoch = Complete->epoch();
+					bReplaySynchronized.store(true);
+					UE_LOG(LogUSDConnectSubsystem, Log,
+						TEXT("Receiver replay applied through seq=%d epoch=%llu — publishing enabled"),
+						ReplayHeadSeq,
+						static_cast<unsigned long long>(ReplayEpoch));
+				}
+				++Applied;
+				continue;
+			}
 			if (FUSDEventApplier::FrameUsesChangeBlock(Frame))
 			{
 				if (!RunBlock)
@@ -738,6 +834,7 @@ void UUSDConnectSubsystem::DrainAndApply()
 void UUSDConnectSubsystem::DrainAndEmit()
 {
 	if (!EmitClient || !EmitClient->IsConnected()) return;
+	if (!bReplaySynchronized.load()) return;
 	if (bSuppressEmit.load()) return;
 
 	const uint64 ConnectionGeneration = EmitClient->GetConnectionGeneration();
@@ -815,7 +912,7 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 			TArray<FEmitXformTrs> Batch = { Xform };
 			const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(PrimPath);
 			TArray<uint8> Frame = BuildXformTxnFrame(
-				ClientId, Batch, bIncludeEnsureXformOps);
+				NextProducerTxnId, Batch, bIncludeEnsureXformOps);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
 				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); enqueueing"),
 				*PrimPath, Frame.Num(), Xform.Fields,
@@ -823,7 +920,8 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 				bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));
 			if (Frame.Num() > 0)
 			{
-				EmitClient->EnqueueFrame(MoveTemp(Frame));
+				EmitClient->EnqueueFrame(NextProducerTxnId, MoveTemp(Frame));
+				++NextProducerTxnId;
 				EmittedXformPrims.Add(PrimPath);
 			}
 		}
@@ -835,13 +933,15 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 		if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Vis))
 		{
 			TArray<FEmitVisibility> Batch = { Vis };
-			TArray<uint8> Frame = BuildVisibilityTxnFrame(ClientId, Batch);
+			TArray<uint8> Frame = BuildVisibilityTxnFrame(
+				NextProducerTxnId, Batch);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
 				TEXT("EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) — enqueueing"),
 				*PrimPath, Frame.Num(), Vis.bVisible ? 1 : 0);
 			if (Frame.Num() > 0)
 			{
-				EmitClient->EnqueueFrame(MoveTemp(Frame));
+				EmitClient->EnqueueFrame(NextProducerTxnId, MoveTemp(Frame));
+				++NextProducerTxnId;
 			}
 		}
 	}
@@ -857,13 +957,15 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 	}
 
 	TArray<FEmitConnectableInput> Batch = { MoveTemp(Event) };
-	TArray<uint8> Frame = BuildConnectableInputTxnFrame(ClientId, Batch);
+	TArray<uint8> Frame = BuildConnectableInputTxnFrame(
+		NextProducerTxnId, Batch);
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
 		TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes — enqueueing"),
 		*PrimPath, Batch[0].Inputs.Num(), Frame.Num());
 	if (Frame.Num() > 0)
 	{
-		EmitClient->EnqueueFrame(MoveTemp(Frame));
+		EmitClient->EnqueueFrame(NextProducerTxnId, MoveTemp(Frame));
+		++NextProducerTxnId;
 	}
 }
 
