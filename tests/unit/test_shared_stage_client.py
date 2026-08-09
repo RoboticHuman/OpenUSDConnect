@@ -76,7 +76,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
             "removed": False,
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
-        assert client.pending_event_count == 1
+        assert client.deferred_incoming_record_count == 1
 
         late = Sdf.Layer.CreateNew(str(tmp_path / "late.usda"))
         Sdf.CreatePrimInLayer(late, "/Late")
@@ -84,7 +84,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         mapped = client.refresh_asset_dependency()
 
         assert mapped == (child_key,)
-        assert client.pending_event_count == 0
+        assert client.deferred_incoming_record_count == 0
         assert late.GetAttributeAtPath("/Late.value").default == 8
     finally:
         client.close()

@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import pytest
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdGeom
 
+from openusdconnect import SyncUpdate
+from openusdconnect import coalescing as coalescing_module
+from openusdconnect.managed_client import ManagedClient
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
+
+
+def test_bidirectional_clients_share_one_update_result_contract():
+    assert SyncUpdate(received=1, sent=2, acknowledged=3, pending=4).pending == 4
 
 
 class _SenderStub:
@@ -16,14 +23,26 @@ class _SenderStub:
         self.results = iter(results)
         self.batches: list[list[dict]] = []
         self.disconnect_count = 0
+        self.pending_event_count = 0
+        self.recovery_required = False
+        self.transaction_error = ""
 
     def send_events(self, events: list[dict]) -> bool:
         self.batches.append(events)
-        return next(self.results)
+        accepted = next(self.results)
+        if accepted:
+            self.pending_event_count += len(events)
+        return accepted
+
+    def drain_acknowledged_event_count(self):
+        return 0
 
     def disconnect(self) -> None:
         self.connected = False
         self.disconnect_count += 1
+
+    def flush(self, timeout=None) -> bool:
+        return True
 
 
 def test_receiver_always_requests_full_layered_replay():
@@ -108,6 +127,198 @@ def test_publisher_retains_exact_batch_until_send_succeeds():
         assert sender.batches[2] is not sender.batches[1]
     finally:
         publisher.close()
+
+
+def _publisher_with_transform(monkeypatch, results):
+    clock = [0.0]
+    monkeypatch.setattr(coalescing_module, "monotonic", lambda: clock[0])
+    stage = Usd.Stage.CreateInMemory()
+    prim = UsdGeom.Xform.Define(stage, "/World/Thing").GetPrim()
+    xformable = UsdGeom.Xformable(prim)
+    translate = xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
+    xformable.AddOrientOp(UsdGeom.XformOp.PrecisionFloat)
+    xformable.AddScaleOp(UsdGeom.XformOp.PrecisionDouble)
+    publisher = UsdPublisher(
+        stage,
+        app_name="coalescing-publisher",
+        persist_token=False,
+        transform_coalesce_seconds=0.1,
+    )
+    sender = _SenderStub(results)
+    publisher._sender = sender
+    return publisher, sender, translate, clock
+
+
+def test_publisher_coalesces_latest_default_time_transform_before_submission(monkeypatch):
+    publisher, sender, translate, clock = _publisher_with_transform(
+        monkeypatch,
+        [True, True],
+    )
+    try:
+        translate.Set((1, 0, 0))
+        assert publisher.update() == 3  # definition and op-order barriers publish immediately
+
+        translate.Set((2, 0, 0))
+        assert publisher.update() == 0
+        translate.Set((3, 0, 0))
+        assert publisher.update() == 0
+        assert len(sender.batches) == 1
+        assert publisher.prepared_event_count == 1
+
+        clock[0] = 0.11
+        assert publisher.update() == 1
+        assert sender.batches[-1] == [
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Thing",
+                "fields": ["t"],
+                "t": [3.0, 0.0, 0.0],
+            }
+        ]
+    finally:
+        publisher.close()
+
+
+def test_publisher_coalesced_batch_survives_failure_and_reconnect(monkeypatch):
+    publisher, sender, translate, clock = _publisher_with_transform(
+        monkeypatch,
+        [True, False, True],
+    )
+    try:
+        translate.Set((1, 0, 0))
+        assert publisher.update() == 3
+
+        translate.Set((2, 0, 0))
+        assert publisher.update() == 0
+        clock[0] = 0.11
+        assert publisher.update() == 0
+        failed_batch = sender.batches[-1]
+
+        sender.connected = False
+        translate.Set((3, 0, 0))
+        assert publisher.update() == 0
+        sender.connected = True
+        assert publisher.update() == 1
+        assert sender.batches[-1] is failed_batch
+        assert sender.batches[-1][0]["t"] == [3.0, 0.0, 0.0]
+    finally:
+        publisher.close()
+
+
+def test_publisher_flush_forces_a_buffered_transform_to_sender(monkeypatch):
+    publisher, sender, translate, _clock = _publisher_with_transform(
+        monkeypatch,
+        [True, True],
+    )
+    try:
+        translate.Set((1, 0, 0))
+        assert publisher.update() == 3
+        translate.Set((2, 0, 0))
+        assert publisher.update() == 0
+
+        assert publisher.flush(timeout=1.0)
+        assert len(sender.batches) == 2
+        assert sender.batches[-1][0]["t"] == [2.0, 0.0, 0.0]
+    finally:
+        publisher.close()
+
+
+@pytest.mark.parametrize("value", [-0.1, float("inf"), float("nan")])
+def test_publisher_rejects_invalid_transform_coalesce_window(value):
+    with pytest.raises(ValueError, match="transform_coalesce_seconds"):
+        UsdPublisher(
+            Usd.Stage.CreateInMemory(),
+            app_name="invalid-coalescing-window",
+            persist_token=False,
+            transform_coalesce_seconds=value,
+        )
+
+
+def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
+    monkeypatch,
+):
+    stage = Usd.Stage.CreateInMemory()
+    client = ManagedClient(
+        stage,
+        app_name="readiness-gate",
+        persist_token=False,
+        reconnect=False,
+    )
+    sender = _SenderStub([True, True])
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    monkeypatch.setattr(client, "_connect_sender", lambda: None)
+    try:
+        prim = stage.DefinePrim("/World/Thing", "Xform")
+        value = prim.CreateAttribute("value", Sdf.ValueTypeNames.Int)
+        value.Set(1)
+
+        replaying = client.update()
+        assert replaying.sent == 0
+        assert sender.batches == []
+        assert not client.synchronized
+
+        client._receiver._synchronized_event.set()
+        first = client.update()
+        assert first.sent > 0
+        assert client.synchronized
+        assert sender.pending_event_count == first.sent
+
+        value.Set(2)
+        second = client.update()
+        assert second.sent > 0
+        assert len(sender.batches) == 2
+        assert second.acknowledged == 0
+        assert second.pending > first.pending
+    finally:
+        client.close()
+
+
+def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(coalescing_module, "monotonic", lambda: clock[0])
+    stage = Usd.Stage.CreateInMemory()
+    prim = UsdGeom.Xform.Define(stage, "/World/Thing").GetPrim()
+    xformable = UsdGeom.Xformable(prim)
+    translate = xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
+    xformable.AddOrientOp(UsdGeom.XformOp.PrecisionFloat)
+    xformable.AddScaleOp(UsdGeom.XformOp.PrecisionDouble)
+    client = ManagedClient(
+        stage,
+        app_name="managed-coalescing",
+        persist_token=False,
+        reconnect=False,
+        transform_coalesce_seconds=0.1,
+    )
+    sender = _SenderStub([True, True])
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    monkeypatch.setattr(client, "_connect_sender", lambda: None)
+    try:
+        translate.Set((1, 0, 0))
+        assert client.update().sent == 3
+        translate.Set((2, 0, 0))
+        assert client.update().sent == 0
+        translate.Set((3, 0, 0))
+        assert client.update().sent == 0
+
+        clock[0] = 0.11
+        assert client.update().sent == 1
+        assert sender.batches[-1] == [
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Thing",
+                "fields": ["t"],
+                "t": [3.0, 0.0, 0.0],
+            }
+        ]
+    finally:
+        client.close()
 
 
 def test_publisher_does_not_consume_edits_while_disconnected():

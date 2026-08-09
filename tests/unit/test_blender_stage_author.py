@@ -879,6 +879,65 @@ def test_blender_timer_retries_a_prepared_batch_after_reconnect(monkeypatch):
     send_pending.assert_called_once_with()
 
 
+def test_blender_connect_reuses_sender_with_unacknowledged_outbox(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.sock = None
+    sender.host = "127.0.0.1"
+    sender.port = 7200
+    sender.department = "animation"
+    sender.pending_transaction_count = 1
+    sender.connect.return_value = True
+    author = MagicMock()
+    emitter = MagicMock()
+    scene = MagicMock()
+    scene.usd_connect_emit_host = "127.0.0.1"
+    scene.usd_connect_emit_port = 7200
+    scene.usd_connect_department = "animation"
+    scene.usd_connect_auto_track = True
+    scene.usd_connect_net_emitter_running = False
+    context = MagicMock(scene=scene)
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    constructor = MagicMock()
+    monkeypatch.setattr(capture, "EventSender", constructor)
+    monkeypatch.setattr(capture, "_remove_handler", MagicMock())
+    monkeypatch.setattr(capture.bpy.app.timers, "register", MagicMock())
+    operator = capture.USD_CONNECT_OT_connect_emitter()
+    operator.report = MagicMock()
+
+    assert operator.execute(context) == {"FINISHED"}
+    sender.connect.assert_called_once_with()
+    constructor.assert_not_called()
+    assert capture._state.sender is sender
+
+
+def test_blender_disconnect_retains_outbox_when_flush_times_out(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.flush.return_value = False
+    sender.pending_transaction_count = 2
+    emitter = MagicMock()
+    scene = MagicMock()
+    context = MagicMock(scene=scene)
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    monkeypatch.setattr(capture._state, "author", MagicMock())
+    monkeypatch.setattr(capture, "_remove_handler", MagicMock())
+    operator = capture.USD_CONNECT_OT_disconnect_emitter()
+    operator.report = MagicMock()
+
+    assert operator.execute(context) == {"FINISHED"}
+    sender.flush.assert_called_once_with(timeout=2.0)
+    sender.disconnect.assert_called_once_with()
+    assert capture._state.sender is sender
+    operator.report.assert_called_once()
+    assert "retained" in operator.report.call_args.args[1]
+
+
 def test_receiver_rebuilds_logical_layers_from_full_replay():
     from integrations.blender import receiver_addon
 

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from pxr import Sdf, Usd
 
 from ._client_utils import (
+    SyncUpdate,
     client_origin,
     client_token_handlers,
     require_app_name,
@@ -34,14 +34,6 @@ LOG = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7200
-
-
-@dataclass(frozen=True, slots=True)
-class SharedStageUpdate:
-    """Work completed by one :meth:`SharedStageClient.update` call."""
-
-    received: int
-    sent: int
 
 
 class SharedStageClient:
@@ -151,6 +143,36 @@ class SharedStageClient:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
+    def synchronized(self) -> bool:
+        """Whether the local layer graph applied the server replay watermark."""
+        return (
+            not self._closed
+            and self._receiver.synchronized
+            and not self._sender.recovery_required
+        )
+
+    @property
+    def recovery_required(self) -> bool:
+        """Whether deterministic rejection requires local-state reconciliation."""
+        return self._sender.recovery_required
+
+    @property
+    def pending_event_count(self) -> int:
+        """Number of submitted events not yet durably acknowledged."""
+        return self._sender.pending_event_count
+
+    @property
+    def transaction_error(self) -> str:
+        """Terminal producer rejection, or an empty string."""
+        return self._sender.transaction_error
+
+    def flush(self, timeout: float | None = None) -> bool:
+        """Wait for every submitted layer edit to be durably committed."""
+        if self._closed:
+            raise RuntimeError("SharedStageClient is closed")
+        return self._sender.flush(timeout)
+
+    @property
     def graph_ready(self) -> bool:
         return self._graph.ready
 
@@ -175,7 +197,7 @@ class SharedStageClient:
         return self._tracker.prepared_event_count
 
     @property
-    def pending_event_count(self) -> int:
+    def deferred_incoming_record_count(self) -> int:
         return len(self._pending_records)
 
     @property
@@ -233,7 +255,7 @@ class SharedStageClient:
         self._connect_sender()
         return self._sender.connected
 
-    def update(self) -> SharedStageUpdate:
+    def update(self) -> SyncUpdate:
         """Apply queued authoritative records, then publish local layer edits."""
         if self._closed:
             raise RuntimeError("SharedStageClient is closed")
@@ -251,18 +273,24 @@ class SharedStageClient:
                 self._connect_sender()
             except (PermissionError, ConnectionError):
                 pass  # best-effort during update
-        if self._sender.connected and self._graph.ready:
+        if self._sender.connected and self._graph.ready and self.synchronized:
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
                 if not self._sender.send_events(events, layer_key=layer_key):
                     break
                 sent += len(events)
                 self._tracker.mark_prepared_sent(batch)
-        return SharedStageUpdate(received=received, sent=sent)
+        return SyncUpdate(
+            received=received,
+            sent=sent,
+            acknowledged=self._sender.drain_acknowledged_event_count(),
+            pending=self._sender.pending_event_count,
+        )
 
     def _apply_incoming(self) -> int:
         buffers = self._receiver.drain_queue()
         if not buffers:
+            self._receiver.mark_replay_applied()
             return 0
         result = decode_messages(
             buffers,
@@ -270,6 +298,7 @@ class SharedStageClient:
             numpy_arrays=True,
             clear_on_resync=True,
             preserve_envelopes=True,
+            require_contiguous=True,
         )
         if result.resync_requested:
             self._pending_records.clear()
@@ -302,6 +331,8 @@ class SharedStageClient:
         if result.errors:
             self._receiver.request_replay_from(self._last_seq + 1)
             LOG.warning("Shared-stage decode failed: %s", result.errors[0])
+        else:
+            self._receiver.mark_replay_applied()
         return applied
 
     def _apply_record(self, record: ReceivedEvent) -> bool:
@@ -401,4 +432,4 @@ class SharedStageClient:
         return False
 
 
-__all__ = ["SharedStageClient", "SharedStageUpdate"]
+__all__ = ["SharedStageClient"]

@@ -77,17 +77,30 @@ layer. Composed values supplied only by references, payloads, or weaker layers
 are not copied. A local override on a composed descendant is sent because that
 override is an authored opinion in the current edit target.
 
-Flush with `update()` before switching edit targets. One emitted transaction
-cannot own opinions from multiple USD layers.
+Call `update()` before switching edit targets. One emitted transaction cannot
+own opinions from multiple USD layers.
 
-`update()` retains an exact prepared batch until its socket write succeeds.
-Edits made while that batch is pending form the next batch. The publisher does
-not block an application tick to reconnect automatically; call `connect()`
-again after a disconnect. `prepared_event_count` reports only the retained
-transport batch; dirty edits that have not been built are not included.
-The returned event count confirms a transport write, not an authoritative
-server acknowledgement. Observe the corresponding receiver replay when an
-application needs end-to-end confirmation.
+`update()` is a nonblocking submission call: its returned event count means the
+bounded sender outbox owns those events, not that the server has committed
+them. A socket failure after an ambiguous write leaves the exact encoded
+transaction in that outbox. Reconnecting the same publisher resends it with the
+same producer session and transaction ID; the server either commits it once or
+returns its already-durable cumulative highwater.
+
+`prepared_event_count` is local work that has not entered the sender outbox.
+`pending_event_count` is submitted work not yet durably acknowledged, and
+`acknowledged_event_count` is the cumulative acknowledged event count. Use
+`flush(timeout)` only at an explicit durability checkpoint such as save,
+publish, or orderly shutdown. It reconnects and replays while time remains,
+returns `False` on timeout, and raises `TransactionRejectedError` after a
+deterministic rejection. `close()` does not silently turn every interactive
+update into a durability wait; call `flush()` first when shutdown must be
+lossless.
+
+The publisher does not block an application tick to reconnect automatically;
+call `connect()` again after a disconnect. Edits made while a transaction is
+pending form a later transaction and may continue to be submitted. The bounded
+outbox applies backpressure rather than growing without limit.
 
 Use `publish_current_edit_target()` when attaching a publisher after the stage
 was already authored. It publishes authored opinions in the current edit
@@ -136,6 +149,19 @@ sublayer below the receiver-owned managed block. Author into that layer, the
 root layer, or another application layer weaker than the managed block. The
 client rejects publishing from the strong session root or from a
 receiver-owned managed layer.
+
+`SyncUpdate.sent` is newly submitted work, `acknowledged` is work covered by
+cumulative acknowledgements since the previous `update()`, and `pending` is the
+current unacknowledged event count. `update()` never waits for an ACK. It also
+does not publish while receive replay is unsynchronized: after reconnect it
+first applies through the server's replay boundary, then resumes submission.
+This keeps viewport drags and animation streaming responsive without allowing a
+producer that has rolled back or fallen behind to keep authoring blindly.
+
+For high-frequency default-time transforms, set
+`transform_coalesce_seconds` to a small host-appropriate window. Only repeated
+TRS opinions for the same prim and time code are merged; structural edits,
+distinct time samples, and other event kinds remain ordering barriers.
 
 ## Bidirectional hosts
 
@@ -246,6 +272,11 @@ and publishes one transaction per changed layer. Changes are expressed as
 exact Sdf fields, so layer and prim metadata, custom attributes,
 relationships, targets, connections, time samples, variants, and removals do
 not require specialized event types.
+
+`SharedStageClient.update()` returns the same `SyncUpdate` type. Shared-stage
+publication is also gated on both the
+accepted layer graph and the receiver replay boundary. `flush(timeout)` is the
+explicit durability checkpoint.
 
 The synchronized graph begins at `stage.GetRootLayer()` and follows recursive
 `subLayerPaths`. The session layer and layers introduced only by references or

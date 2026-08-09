@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from .token_client import load_token, save_token
+
+
+@dataclass(frozen=True, slots=True)
+class SyncUpdate:
+    """Work completed by one bidirectional client update call."""
+
+    received: int
+    sent: int
+    acknowledged: int = 0
+    pending: int = 0
 
 
 def validate_layered_source(stage) -> None:
@@ -82,5 +93,6 @@ __all__ = [
     "client_token_handlers",
     "require_app_name",
     "resolve_client_token",
+    "SyncUpdate",
     "validate_layered_source",
 ]

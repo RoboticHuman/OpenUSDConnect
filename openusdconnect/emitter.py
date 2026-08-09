@@ -17,6 +17,7 @@ from typing import NamedTuple
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .asset_paths import transport_asset_identifier, value_contains_asset_path
+from .coalescing import merge_latest_transform_events
 from .connectable_attrs import (
     USDSHADE_INPUT_PREFIX,
     USDSHADE_OUTPUT_PREFIX,
@@ -4334,6 +4335,29 @@ class NoticeEmitter:
         if events:
             self._prepared_events = events
         return events
+
+    def prepare_coalesced_transform_events_for_send(
+        self,
+        eps_trs: float = 1e-9,
+    ) -> list[dict]:
+        """Return one retry-owned batch with redundant TRS values collapsed.
+
+        Unlike :meth:`prepare_events_for_send`, this opt-in publication path
+        consumes edits that arrive while an unsubmitted batch is retained.
+        Only transform values for the same prim and time code can replace an
+        earlier value; every other event is an ordering barrier.  The same
+        list object remains prepared until :meth:`mark_prepared_events_sent`.
+
+        Callers must use this only before ``EventSender.send_events`` accepts
+        the batch.  Submitted transactions are immutable and are never
+        coalesced.
+        """
+        if self._prepared_events is None:
+            return self.prepare_events_for_send(eps_trs)
+        incoming = self._build_events_for_dirty(eps_trs)
+        if incoming:
+            merge_latest_transform_events(self._prepared_events, incoming)
+        return self._prepared_events
 
     @property
     def prepared_event_count(self) -> int:

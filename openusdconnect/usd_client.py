@@ -23,6 +23,7 @@ from ._client_utils import (
 )
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
+from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
@@ -246,6 +247,7 @@ class UsdPublisher:
         attr_filter: Callable[[str], bool] | None = None,
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
+        transform_coalesce_seconds: float = 0.0,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -254,6 +256,7 @@ class UsdPublisher:
         self._host = host
         self._port = port
         self._persist_token = persist_token
+        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
         self._emitter = NoticeEmitter(
             stage,
             attr_filter=attr_filter,
@@ -300,8 +303,35 @@ class UsdPublisher:
 
     @property
     def prepared_event_count(self) -> int:
-        """Number of events retained after an unsuccessful transport write."""
+        """Number of events not yet accepted by the sender outbox."""
         return self._emitter.prepared_event_count
+
+    @property
+    def pending_event_count(self) -> int:
+        """Submitted events not yet durably acknowledged by the server."""
+        return self._sender.pending_event_count
+
+    @property
+    def acknowledged_event_count(self) -> int:
+        """Cumulative events durably acknowledged by the server."""
+        return self._sender.acknowledged_event_count
+
+    @property
+    def transaction_error(self) -> str:
+        """Terminal producer rejection, or an empty string."""
+        return self._sender.transaction_error
+
+    def flush(self, timeout: float | None = None) -> bool:
+        """Submit any coalesced transform, then wait for durable acknowledgement."""
+        if self._closed:
+            raise RuntimeError("UsdPublisher is closed")
+        if self._transform_coalescing.buffering:
+            if not self.connected and not self.connect():
+                return False
+            events = self._transform_coalescing.force(self._emitter)
+            if events and not self._send(events):
+                return False
+        return self._sender.flush(timeout)
 
     def connect(self) -> bool:
         """Connect synchronously; safe to call again after disconnection."""
@@ -321,8 +351,12 @@ class UsdPublisher:
             return 0
         if self._sender.send_events(events):
             self._emitter.mark_prepared_events_sent(events)
+            self._transform_coalescing.mark_submitted()
             return len(events)
         return 0
+
+    def _prepare_outgoing_events(self) -> list[dict]:
+        return self._transform_coalescing.prepare(self._emitter)
 
     def update(self) -> int:
         """Build and send one retryable batch of authored stage changes."""
@@ -330,7 +364,7 @@ class UsdPublisher:
             raise RuntimeError("UsdPublisher is closed")
         if not self.connected:
             return 0
-        return self._send(self._emitter.prepare_events_for_send())
+        return self._send(self._prepare_outgoing_events())
 
     def publish_current_edit_target(self) -> int:
         """Publish all opinions currently authored in the active edit target.

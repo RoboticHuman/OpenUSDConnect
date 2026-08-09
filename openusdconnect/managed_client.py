@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 
 from pxr import Sdf, Usd
 
 from ._client_utils import (
+    SyncUpdate,
     client_origin,
     client_token_handlers,
     require_app_name,
@@ -23,6 +23,7 @@ from ._client_utils import (
 )
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
+from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
@@ -32,14 +33,6 @@ LOG = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7200
-
-
-@dataclass(frozen=True, slots=True)
-class ManagedUpdate:
-    """Work completed by one :meth:`ManagedClient.update` call."""
-
-    received: int
-    sent: int
 
 
 class ManagedClient:
@@ -70,6 +63,7 @@ class ManagedClient:
         attr_filter: Callable[[str], bool] | None = None,
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
+        transform_coalesce_seconds: float = 0.0,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -87,6 +81,7 @@ class ManagedClient:
         self._persist_token = persist_token
         self._app_name = app_name
         self._authoring_layer = self._ensure_convergent_edit_target(stage, app_name)
+        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
 
         self._emitter = NoticeEmitter(
             stage,
@@ -171,6 +166,44 @@ class ManagedClient:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
+    def synchronized(self) -> bool:
+        """Whether the local stage applied replay through the server watermark."""
+        return (
+            not self._closed and self._receiver.synchronized and not self._sender.recovery_required
+        )
+
+    @property
+    def recovery_required(self) -> bool:
+        """Whether deterministic rejection requires local-state reconciliation."""
+        return self._sender.recovery_required
+
+    @property
+    def pending_event_count(self) -> int:
+        """Number of submitted events not yet durably acknowledged."""
+        return self._sender.pending_event_count
+
+    @property
+    def transaction_error(self) -> str:
+        """Terminal producer rejection, or an empty string."""
+        return self._sender.transaction_error
+
+    def flush(self, timeout: float | None = None) -> bool:
+        """Submit any coalesced transform, then wait for durable acknowledgement."""
+        if self._closed:
+            raise RuntimeError("ManagedClient is closed")
+        if self._transform_coalescing.buffering:
+            try:
+                self._connect_sender()
+            except (PermissionError, ConnectionError):
+                return False
+            if not self.synchronized:
+                return False
+            events = self._transform_coalescing.force(self._emitter)
+            if events and not self._send(events):
+                return False
+        return self._sender.flush(timeout)
+
+    @property
     def auth_rejected(self) -> bool:
         return self._receiver.auth_rejected or self._sender.auth_rejected
 
@@ -245,8 +278,12 @@ class ManagedClient:
             return 0
         if self._sender.send_events(events):
             self._emitter.mark_prepared_events_sent(events)
+            self._transform_coalescing.mark_submitted()
             return len(events)
         return 0
+
+    def _prepare_outgoing_events(self) -> list[dict]:
+        return self._transform_coalescing.prepare(self._emitter)
 
     def start_sender(self) -> bool:
         """Connect the sender explicitly for fail-fast error handling.
@@ -270,14 +307,19 @@ class ManagedClient:
         """Drive the shared playhead (leader only)."""
         return self._sender.send_playback_control(action, time=time, rate=rate)
 
-    def update(self) -> ManagedUpdate:
+    def update(self) -> SyncUpdate:
         """Apply incoming authoritative changes, then publish local edits."""
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
             raise RuntimeError("ManagedClient has not been started")
         if self._stage is None:
-            return ManagedUpdate(received=0, sent=0)
+            return SyncUpdate(
+                received=0,
+                sent=0,
+                acknowledged=self._sender.drain_acknowledged_event_count(),
+                pending=self._sender.pending_event_count,
+            )
         self._require_layered_replay()
 
         received = self._dispatcher.drain_and_apply()
@@ -287,11 +329,16 @@ class ManagedClient:
             self._connect_sender()
         except (PermissionError, ConnectionError):
             pass  # sender connection is best-effort during update
-        if self._sender.connected:
+        if self._sender.connected and self.synchronized:
             self._validate_authoring_target()
-            sent = self._send(self._emitter.prepare_events_for_send())
+            sent = self._send(self._prepare_outgoing_events())
 
-        return ManagedUpdate(received=received, sent=sent)
+        return SyncUpdate(
+            received=received,
+            sent=sent,
+            acknowledged=self._sender.drain_acknowledged_event_count(),
+            pending=self._sender.pending_event_count,
+        )
 
     def publish_current_edit_target(self) -> int:
         """Publish all opinions currently authored in the active edit target.
@@ -400,4 +447,4 @@ class ManagedClient:
         return False
 
 
-__all__ = ["ManagedClient", "ManagedUpdate"]
+__all__ = ["ManagedClient"]
