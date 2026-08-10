@@ -477,7 +477,7 @@ def test_single_commits_publish_in_durable_sequence_order(
         original_group_broadcast(transactions)
         if any(
             records and records[0][0]["seq"] == 2
-            for records, _exclude_origin in transactions
+            for records in transactions
         ):
             second_published.set()
 

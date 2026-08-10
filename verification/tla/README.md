@@ -54,17 +54,12 @@ stale rejection, and repair against the current graph identity.
 ### `TwoClientConvergence.tla`
 
 Two clients concurrently author the same logical field while the server picks
-the durable order. The model includes disconnect/replay and makes remote USD
-notice suppression explicit. With layered replay, it checks that both clients
-apply the complete order, converge to the server value, and never turn remote
-application into a producer submission.
-
-`TwoClientConvergenceFlatCounterexample.cfg` intentionally uses flat live
-origin filtering. TLC is expected to violate `QuiescentConvergence`: each
-author may apply only the peer's value and miss its own later place in the
-server order. This documents why origin filtering is not a convergence
-mechanism for bidirectional clients; such clients need complete ordered replay
-or an equivalent authoritative reconciliation step.
+the durable order. The model includes disconnect/replay, makes remote USD
+notice suppression explicit, and separates freezing a local delta from its
+later publication. Under the production contract, it checks that flat and
+layered clients retain prepared edits across authoritative application, receive
+a contiguous complete stream, converge to the server value, and never turn
+remote application into a producer submission.
 
 Run with the official `tla2tools.jar`:
 
@@ -89,8 +84,7 @@ TLC 2.19 results from 2026-08-10:
 | Coordinator: valid group or infrastructure fallback | 235 | 152 | 11 | No error |
 | Coordinator: invalid middle transaction fallback | 106 | 64 | 11 | No error |
 | Shared-layer revision/generation race | 63 | 46 | 9 | No error |
-| Two-client convergence with layered replay | 3,477 | 1,200 | 26 | No error |
-| Two-client flat origin filtering | 4,795 | 1,806 | 20 | Expected convergence counterexample |
+| Two-client convergence with complete commit stream | 4,421 | 1,492 | 28 | No error |
 
 These checks are exhaustive for their configured finite models, not unbounded
 proofs. They assume SQLite atomically persists each supplied event/progress

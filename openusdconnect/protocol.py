@@ -54,8 +54,9 @@ def make_hello(
         sync_from: Sequence number to replay from (receivers only).
         client_id: Per-connection identifier.
         origin: Session-level identifier shared by all connections from the
-            same DCC instance.  The server uses this to suppress echo --
-            events are not broadcast back to receivers with matching origin.
+            same DCC instance. Durable events still return to that origin as
+            part of the complete commit stream; integrations use the value for
+            attribution and local reconciliation.
         department: Optional department name (e.g. "animation", "lighting").
             Used by the server for layer ordering when per-client layers
             are enabled.

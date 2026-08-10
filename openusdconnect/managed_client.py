@@ -333,7 +333,7 @@ class ManagedClient:
         return self._sender.send_playback_control(action, time=time, rate=rate)
 
     def update(self) -> SyncUpdate:
-        """Apply incoming authoritative changes, then publish local edits."""
+        """Freeze local edits, apply the commit stream, then publish them."""
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
@@ -347,6 +347,13 @@ class ManagedClient:
             )
         self._require_layered_replay()
 
+        # A queued authoritative record may touch the same field as a newer
+        # local opinion. Freeze the local delta before dispatcher invalidation
+        # advances emitter baselines, then send that exact batch after the
+        # authoritative prefix has applied. SharedStageClient follows the same
+        # prepare/apply/restore ordering at the Sdf-layer level.
+        self._validate_authoring_target()
+        outgoing = self._prepare_outgoing_events()
         received = self._dispatcher.drain_and_apply()
 
         sent = 0
@@ -355,8 +362,7 @@ class ManagedClient:
         except (PermissionError, ConnectionError):
             pass  # sender connection is best-effort during update
         if self._sender.connected and self.synchronized:
-            self._validate_authoring_target()
-            sent = self._send(self._prepare_outgoing_events())
+            sent = self._send(outgoing)
 
         return SyncUpdate(
             received=received,

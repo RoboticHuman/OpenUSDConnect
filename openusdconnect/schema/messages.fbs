@@ -19,7 +19,7 @@ table Hello {
     protocol_version:int;
     sync_from:int;            // sequence number to replay from (receivers)
     client_id:string;
-    origin:string;            // session-level id for echo suppression
+    origin:string;            // session-level id for attribution/reconciliation
     department:string;
     token:string;             // TOFU auth token
     layered_replay:bool;      // receiver can reconstruct the logical authored-layer stack

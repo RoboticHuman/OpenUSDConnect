@@ -6,12 +6,14 @@ Two clients author conflicting values for one logical USD field.  The server
 chooses one durable total order, live delivery may be interrupted, and a
 reconnect replays every durable record after the client's applied cursor.
 
-DeliverOwnCommits models the receiver contract:
+Flat and layered receivers both apply the same complete server order,
+including the author's own committed record.  Receiver mode changes USD
+projection, not membership in the durable commit stream.
 
-* TRUE  -- layered replay.  The author receives its own committed record, so
-           every client applies the same complete server order.
-* FALSE -- flat live echo suppression.  The author's live record is omitted;
-           reconnect replay still includes all origins after the cursor.
+Local authoring is split into prepare and publish steps.  A prepared edit is
+retained while an earlier authoritative prefix applies, then published after
+the receiver returns to idle.  This models ManagedClient's freeze/apply/send
+ordering and exposes loss caused by recomputing the local delta after apply.
 
 Remote application is split into begin/mutate/notice/finish steps so the
 feedback guard is observable.  A remote USD notice is consumed while
@@ -22,18 +24,18 @@ last-writer-wins assignment to the same field, which is sufficient to expose
 ordering mistakes without modeling the full Sdf data model.
 ***************************************************************************)
 
-CONSTANTS ClientA, ClientB, NoEdit, DeliverOwnCommits
+CONSTANTS ClientA, ClientB, NoEdit
 
 Clients == {ClientA, ClientB}
 Edits == 1..2
 Values == {NoEdit} \cup Edits
 Phases == {"idle", "mutate", "notice", "finish"}
 
-Owner == [edit \in Edits |-> IF edit = 1 THEN ClientA ELSE ClientB]
 Frame == [seq : 1..2, edit : Edits]
 
 VARIABLES
     authored,             \* locally authored edits
+    prepared,             \* frozen local edits not yet published
     submitted,            \* producer submissions (local causes only)
     wire,                 \* submitted edits awaiting server order
     serverLog,            \* durable global order, represented by edit IDs
@@ -53,7 +55,7 @@ VARIABLES
     echoSubmissions
 
 vars == <<
-    authored, submitted, wire, serverLog, serverValue, connected,
+    authored, prepared, submitted, wire, serverLog, serverValue, connected,
     networkStable, queues, cursor, localValue, phase, applySeq, applyEdit,
     suppression, remoteNotices, handledRemoteNotices, localSubmissions,
     echoSubmissions
@@ -72,6 +74,7 @@ Init ==
     /\ ClientA # ClientB
     /\ NoEdit \notin Edits
     /\ authored = {}
+    /\ prepared = {}
     /\ submitted = {}
     /\ wire = {}
     /\ serverLog = <<>>
@@ -94,24 +97,37 @@ StabilizeNetwork ==
     /\ ~networkStable
     /\ networkStable' = TRUE
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, connected,
+        authored, prepared, submitted, wire, serverLog, serverValue, connected,
         queues, cursor, localValue, phase, applySeq, applyEdit, suppression,
         remoteNotices, handledRemoteNotices, localSubmissions, echoSubmissions
        >>
 
-Author(c) ==
+PrepareLocal(c) ==
     /\ phase[c] = "idle"
     /\ LET edit == IF c = ClientA THEN 1 ELSE 2
        IN /\ edit \notin authored
           /\ authored' = authored \cup {edit}
+          /\ prepared' = prepared \cup {edit}
+          /\ localValue' = [localValue EXCEPT ![c] = edit]
+    /\ UNCHANGED <<
+        submitted, wire, serverLog, serverValue, connected, networkStable,
+        queues, cursor, phase, applySeq, applyEdit, suppression, remoteNotices,
+        handledRemoteNotices, localSubmissions, echoSubmissions
+       >>
+
+PublishPrepared(c) ==
+    /\ phase[c] = "idle"
+    /\ LET edit == IF c = ClientA THEN 1 ELSE 2
+       IN /\ edit \in prepared
+          /\ edit \notin submitted
+          /\ prepared' = prepared \ {edit}
           /\ submitted' = submitted \cup {edit}
           /\ wire' = wire \cup {edit}
-          /\ localValue' = [localValue EXCEPT ![c] = edit]
     /\ localSubmissions' = [localSubmissions EXCEPT ![c] = @ + 1]
     /\ UNCHANGED <<
-        serverLog, serverValue, connected, networkStable, queues, cursor,
-        phase, applySeq, applyEdit, suppression, remoteNotices,
-        handledRemoteNotices, echoSubmissions
+        authored, serverLog, serverValue, connected, networkStable, queues,
+        cursor, localValue, phase, applySeq, applyEdit, suppression,
+        remoteNotices, handledRemoteNotices, echoSubmissions
        >>
 
 Commit(edit) ==
@@ -122,12 +138,11 @@ Commit(edit) ==
           /\ serverValue' = edit
           /\ queues' = [c \in Clients |->
                 IF connected[c]
-                   /\ (DeliverOwnCommits \/ c # Owner[edit])
                 THEN Append(queues[c], frame)
                 ELSE queues[c]]
     /\ wire' = wire \ {edit}
     /\ UNCHANGED <<
-        authored, submitted, connected, networkStable, cursor, localValue,
+        authored, prepared, submitted, connected, networkStable, cursor, localValue,
         phase, applySeq, applyEdit, suppression, remoteNotices,
         handledRemoteNotices, localSubmissions, echoSubmissions
        >>
@@ -139,7 +154,7 @@ Connect(c) ==
     /\ connected' = [connected EXCEPT ![c] = TRUE]
     /\ queues' = [queues EXCEPT ![c] = ReplayFrom(serverLog, cursor[c], 1)]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, networkStable,
+        authored, prepared, submitted, wire, serverLog, serverValue, networkStable,
         cursor, localValue, phase, applySeq, applyEdit, suppression,
         remoteNotices, handledRemoteNotices, localSubmissions, echoSubmissions
        >>
@@ -151,7 +166,7 @@ Disconnect(c) ==
     /\ connected' = [connected EXCEPT ![c] = FALSE]
     /\ queues' = [queues EXCEPT ![c] = <<>>]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, networkStable,
+        authored, prepared, submitted, wire, serverLog, serverValue, networkStable,
         cursor, localValue, phase, applySeq, applyEdit, suppression,
         remoteNotices, handledRemoteNotices, localSubmissions, echoSubmissions
        >>
@@ -167,7 +182,7 @@ BeginApply(c) ==
     /\ queues' = [queues EXCEPT ![c] = Tail(@)]
     /\ suppression' = [suppression EXCEPT ![c] = TRUE]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, connected,
+        authored, prepared, submitted, wire, serverLog, serverValue, connected,
         networkStable, cursor, localValue, remoteNotices,
         handledRemoteNotices, localSubmissions, echoSubmissions
        >>
@@ -179,7 +194,7 @@ ApplyMutation(c) ==
     /\ phase' = [phase EXCEPT ![c] = "notice"]
     /\ remoteNotices' = [remoteNotices EXCEPT ![c] = @ + 1]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, connected,
+        authored, prepared, submitted, wire, serverLog, serverValue, connected,
         networkStable, queues, applySeq, applyEdit, suppression,
         handledRemoteNotices, localSubmissions, echoSubmissions
        >>
@@ -190,7 +205,7 @@ ConsumeSuppressedNotice(c) ==
     /\ phase' = [phase EXCEPT ![c] = "finish"]
     /\ handledRemoteNotices' = [handledRemoteNotices EXCEPT ![c] = @ + 1]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, connected,
+        authored, prepared, submitted, wire, serverLog, serverValue, connected,
         networkStable, queues, cursor, localValue, applySeq, applyEdit,
         suppression, remoteNotices, localSubmissions, echoSubmissions
        >>
@@ -202,14 +217,15 @@ FinishApply(c) ==
     /\ applyEdit' = [applyEdit EXCEPT ![c] = NoEdit]
     /\ suppression' = [suppression EXCEPT ![c] = FALSE]
     /\ UNCHANGED <<
-        authored, submitted, wire, serverLog, serverValue, connected,
+        authored, prepared, submitted, wire, serverLog, serverValue, connected,
         networkStable, queues, cursor, localValue, remoteNotices,
         handledRemoteNotices, localSubmissions, echoSubmissions
        >>
 
 Next ==
     \/ StabilizeNetwork
-    \/ (\E c \in Clients: Author(c))
+    \/ (\E c \in Clients: PrepareLocal(c))
+    \/ (\E c \in Clients: PublishPrepared(c))
     \/ ServerCommit
     \/ (\E c \in Clients: Connect(c))
     \/ (\E c \in Clients: Disconnect(c))
@@ -222,7 +238,8 @@ Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ WF_vars(StabilizeNetwork)
-    /\ (\A c \in Clients: WF_vars(Author(c)))
+    /\ (\A c \in Clients: WF_vars(PrepareLocal(c)))
+    /\ (\A c \in Clients: WF_vars(PublishPrepared(c)))
     /\ WF_vars(ServerCommit)
     /\ (\A c \in Clients: WF_vars(Connect(c)))
     /\ (\A c \in Clients: WF_vars(BeginApply(c)))
@@ -232,6 +249,7 @@ Spec ==
 
 TypeOK ==
     /\ authored \subseteq Edits
+    /\ prepared \subseteq Edits
     /\ submitted \subseteq Edits
     /\ wire \subseteq Edits
     /\ serverLog \in Seq(Edits)
@@ -277,6 +295,20 @@ DeliveryStateIsSound ==
             /\ applySeq[c] \in 1..Len(serverLog)
             /\ serverLog[applySeq[c]] = applyEdit[c]
 
+CompleteStreamHasNoGaps ==
+    \A c \in Clients:
+        connected[c] =>
+            IF phase[c] = "mutate"
+            THEN /\ applySeq[c] = cursor[c] + 1
+                 /\ Len(queues[c]) = Len(serverLog) - cursor[c] - 1
+                 /\ \A index \in 1..Len(queues[c]):
+                        queues[c][index].seq = cursor[c] + index + 1
+            ELSE /\ Len(queues[c]) = Len(serverLog) - cursor[c]
+                 /\ \A index \in 1..Len(queues[c]):
+                        queues[c][index].seq = cursor[c] + index
+                 /\ (phase[c] \in {"notice", "finish"} =>
+                        applySeq[c] = cursor[c])
+
 RemoteApplyIsGuarded ==
     \A c \in Clients:
         /\ (phase[c] = "idle") = (~suppression[c])
@@ -284,16 +316,20 @@ RemoteApplyIsGuarded ==
         /\ remoteNotices[c] <= handledRemoteNotices[c] + 1
 
 NoRemoteEchoSubmission ==
-    /\ submitted = authored
+    /\ submitted \subseteq authored
     /\ \A c \in Clients:
         /\ echoSubmissions[c] = 0
-        /\ localSubmissions[c] = IF (IF c = ClientA THEN 1 ELSE 2) \in authored THEN 1 ELSE 0
+        /\ localSubmissions[c] = IF (IF c = ClientA THEN 1 ELSE 2) \in submitted THEN 1 ELSE 0
+
+PreparedLocalEditsAreRetained ==
+    prepared = authored \ submitted
 
 QuiescentConvergence ==
     (   /\ networkStable
         /\ authored = Edits
         /\ Len(serverLog) = 2
         /\ wire = {}
+        /\ prepared = {}
         /\ \A c \in Clients:
             /\ connected[c]
             /\ Len(queues[c]) = 0

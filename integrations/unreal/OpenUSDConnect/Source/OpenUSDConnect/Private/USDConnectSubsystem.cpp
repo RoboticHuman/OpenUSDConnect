@@ -889,10 +889,6 @@ void UUSDConnectSubsystem::DrainAndApply()
 				break;
 			}
 
-			const FString Origin = OUC::ToFString(Broadcast->origin());
-			const bool bOwnEcho = ProducerState
-				&& !Origin.IsEmpty()
-				&& Origin == ProducerState->GetSessionId();
 			if (FUSDEventApplier::FrameUsesChangeBlock(Frame))
 			{
 				if (!RunBlock)
@@ -906,8 +902,7 @@ void UUSDConnectSubsystem::DrainAndApply()
 			}
 			FString TouchedPrim;
 			OpenUSDConnect::EventPayload EventKind = OpenUSDConnect::EventPayload::NONE;
-			if (!bOwnEcho
-				&& !FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind))
+			if (!FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind))
 			{
 				RunBlock.Reset();
 				bNeedsReplay = true;

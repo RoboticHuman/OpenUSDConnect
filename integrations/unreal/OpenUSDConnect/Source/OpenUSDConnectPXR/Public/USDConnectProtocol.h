@@ -21,7 +21,7 @@ namespace OUC
 {
 	inline constexpr uint32 kMaxFrameSize = 16 * 1024 * 1024;  // 16 MiB
 	inline constexpr uint16 kSchemaVersion = 8;
-	inline constexpr int32 kProtocolVersion = 8;
+	inline constexpr int32 kProtocolVersion = 9;
 
 	inline FString ToFString(const ::flatbuffers::String* S)
 	{

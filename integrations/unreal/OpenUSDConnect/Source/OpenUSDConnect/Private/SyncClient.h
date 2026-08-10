@@ -69,7 +69,7 @@ private:
 	int32   Port;
 	FString Department;
 	FString ClientId;       // shared with FEmitClient
-	FString SessionOrigin;  // shared with FEmitClient — used for echo suppression
+	FString SessionOrigin;  // shared with FEmitClient for attribution/reconciliation
 	FString AuthToken;
 	float   ReconnectDelaySecs;
 	int32   LastReceivedSeq; // recv-thread only; validates the current socket stream

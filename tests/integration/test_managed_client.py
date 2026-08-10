@@ -224,6 +224,82 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         second.close()
 
 
+def test_managed_clients_apply_complete_commit_order_without_echo(live_server, tmp_path):
+    sync_server, port = live_server
+    stages = [_client_stage(tmp_path, name) for name in ("race-first", "race-second")]
+    clients = [
+        ManagedClient(
+            stage,
+            app_name=f"managed-race-{index}",
+            port=port,
+            persist_token=False,
+            reconnect=False,
+        )
+        for index, stage in enumerate(stages)
+    ]
+    try:
+        for client in clients:
+            client.start()
+            assert client.wait_connected(timeout=5)
+
+        first_attr = stages[0].DefinePrim("/World/Shared", "Xform").CreateAttribute(
+            "value",
+            Sdf.ValueTypeNames.Int,
+        )
+        first_attr.Set(0)
+        assert clients[0].update().sent > 0
+        assert _drain_until(
+            clients[1],
+            lambda: (
+                bool(stages[1].GetAttributeAtPath("/World/Shared.value"))
+                and stages[1].GetAttributeAtPath("/World/Shared.value").Get() == 0
+            ),
+        )
+
+        sent_kinds: list[list[str]] = [[], []]
+        for index, client in enumerate(clients):
+            original_send = client._send
+
+            def capture(events, *, _index=index, _send=original_send):
+                sent_kinds[_index].extend(event["k"] for event in events)
+                return _send(events)
+
+            client._send = capture
+
+        # Both opinions exist before either client processes the peer's commit.
+        stages[0].GetAttributeAtPath("/World/Shared.value").Set(10)
+        stages[1].GetAttributeAtPath("/World/Shared.value").Set(20)
+        assert clients[0].update().sent > 0
+        assert clients[1].update().sent > 0
+        assert clients[0].flush(timeout=5)
+        assert clients[1].flush(timeout=5)
+
+        committed_head = sync_server.store.get_max_seq()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for client in clients:
+                client.update()
+            if all(client.last_seq == committed_head for client in clients):
+                break
+            time.sleep(0.01)
+
+        authoritative = sync_server.stage.GetAttributeAtPath("/World/Shared.value").Get()
+        assert all(client.last_seq == committed_head for client in clients)
+        assert [
+            stage.GetAttributeAtPath("/World/Shared.value").Get() for stage in stages
+        ] == [authoritative, authoritative]
+
+        emitted_after_local_changes = [list(kinds) for kinds in sent_kinds]
+        assert all(emitted_after_local_changes)
+        for _ in range(10):
+            for client in clients:
+                client.update()
+        assert sent_kinds == emitted_after_local_changes
+    finally:
+        for client in clients:
+            client.close()
+
+
 def test_managed_client_rebinds_and_parks_the_emitter():
     old_stage = Usd.Stage.CreateInMemory("old.usda")
     new_stage = Usd.Stage.CreateInMemory("new.usda")

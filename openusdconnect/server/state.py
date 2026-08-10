@@ -2468,10 +2468,7 @@ class UsdSyncServer:
             rec_bin = self.append_log(rec)
             if self.wire_metrics is not None:
                 self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
-            self.broadcast_transaction_views(
-                [(rec, rec_bin)],
-                exclude_origin=origin,
-            )
+            self.broadcast_transaction_views([(rec, rec_bin)])
 
         LOG.info(
             "Replayed %d child events after load_payload %s",
@@ -2553,62 +2550,44 @@ class UsdSyncServer:
     def broadcast_transaction_views(
         self,
         records: list[tuple[dict, bytes]],
-        *,
-        exclude_origin: str | None = None,
     ) -> None:
-        """Deliver one authored transaction under each receiver contract.
-
-        Layered receivers always get every persisted authored record, including
-        records from their own origin, because omitting one would leave their
-        reconstructed layer incomplete. Flat receivers are limited to a single
-        unmuted collaboration layer, so they receive the same records with
-        origin echo suppression.
-        """
-        self.broadcast_transaction_group_views([(records, exclude_origin)])
+        """Deliver one authored transaction to the complete commit stream."""
+        self.broadcast_transaction_group_views([records])
 
     def broadcast_transaction_group_views(
         self,
-        transactions: list[
-            tuple[list[tuple[dict, bytes]], str | None]
-        ],
+        transactions: list[list[tuple[dict, bytes]]],
     ) -> None:
-        """Deliver a committed group with one send per layered receiver.
+        """Deliver a committed group as one complete ordered stream.
 
-        Flat receivers retain per-transaction origin echo suppression, while
-        layered receivers can consume the complete authored record stream as
-        one framed payload.  Framing still preserves individual message
-        boundaries and record order on the wire.
+        Every receiver consumes every durable USD record, including records
+        authored by the same origin. Origin is diagnostic metadata rather than
+        a delivery filter. This gives live delivery the same contract as replay
+        and lets every replica apply the server's total order.
         """
-        transactions = [
-            (records, exclude_origin)
-            for records, exclude_origin in transactions
-            if records
-        ]
+        transactions = [records for records in transactions if records]
         if not transactions:
             return
 
         all_records = [
             record
-            for records, _exclude_origin in transactions
+            for records in transactions
             for record, _encoded in records
         ]
-        transaction_payloads = [
-            (
-                frame_batch([encoded for _record, encoded in records]),
-                exclude_origin,
-            )
-            for records, exclude_origin in transactions
-        ]
-        all_payload = b"".join(payload for payload, _origin in transaction_payloads)
-
+        all_payload = frame_batch(
+            [
+                encoded
+                for records in transactions
+                for _record, encoded in records
+            ]
+        )
         if self.layer_mode is LayerMode.SHARED_STAGE:
-            self.broadcast_bytes(
-                all_payload,
-                all_records,
-                audience=_AUDIENCE_ALL,
-            )
+            self.broadcast_bytes(all_payload, all_records)
             return
 
+        # Keep the managed-mode receiver cohorts separate. They consume the
+        # same complete commit stream, while retaining independently captured
+        # target sets for their different replay/application contracts.
         has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
         if has_layered_receivers:
             self.broadcast_bytes(
@@ -2618,29 +2597,12 @@ class UsdSyncServer:
                 notify_listeners=False,
             )
         if has_flat_receivers:
-            # Echo suppression varies by receiving origin, not transaction.
-            # Build one ordered payload per distinct receiver origin so a
-            # durable group costs one socket write per receiver instead of one
-            # write per transaction per receiver. Message framing is unchanged.
-            targets_by_origin: dict[str | None, list] = {}
-            for handler in self._receiver_targets(audience=_AUDIENCE_FLAT):
-                targets_by_origin.setdefault(
-                    getattr(handler, "_origin", None), []
-                ).append(handler)
-            for receiver_origin, targets in targets_by_origin.items():
-                payload = (
-                    all_payload
-                    if not receiver_origin
-                    else b"".join(
-                        transaction_payload
-                        for transaction_payload, exclude_origin in transaction_payloads
-                        if exclude_origin != receiver_origin
-                    )
-                )
-                if payload:
-                    self._broadcast_queue.put(
-                        (payload, tuple(targets), receiver_origin, _AUDIENCE_FLAT)
-                    )
+            self.broadcast_bytes(
+                all_payload,
+                all_records,
+                audience=_AUDIENCE_FLAT,
+                notify_listeners=False,
+            )
         self._notify_event_listeners(all_records)
 
     @staticmethod
@@ -3147,10 +3109,7 @@ class UsdSyncServer:
     ) -> TransactionCommit:
         """Enqueue one durable commit before releasing global commit order."""
         try:
-            self.broadcast_transaction_views(
-                list(commit.records),
-                exclude_origin=origin,
-            )
+            self.broadcast_transaction_views(list(commit.records))
             for event in events:
                 if event.get("k") == K_LOAD_PAYLOAD:
                     self.replay_children_after_load(event["prim"])
@@ -3424,7 +3383,7 @@ class UsdSyncServer:
             try:
                 self.broadcast_transaction_group_views(
                     [
-                        (list(request.commit.records), request.origin)
+                        list(request.commit.records)
                         for request in pending
                     ]
                 )
@@ -3456,10 +3415,7 @@ class UsdSyncServer:
             # that loaded it, so it forms a boundary between broadcast groups.
             flush_pending()
             try:
-                self.broadcast_transaction_views(
-                    list(commit.records),
-                    exclude_origin=request.origin,
-                )
+                self.broadcast_transaction_views(list(commit.records))
                 for event in load_events:
                     self.replay_children_after_load(event["prim"])
             except Exception:
@@ -4040,9 +3996,9 @@ class UsdSyncServer:
     ):
         """Replay events from the event store in an inclusive sequence range.
 
-        All events are replayed regardless of origin — the receiver needs
-        its own prior edits (which share its origin) to restore state.
-        Origin filtering only applies to live broadcast to prevent echo.
+        All events are replayed regardless of origin, matching live delivery.
+        The receiver needs its own prior edits in the complete server order to
+        restore and converge state.
         Layered receivers get every persisted authored record with its logical
         layer target. Flat receivers are admitted only for a single unmuted
         collaboration layer, so both modes replay stored records directly.

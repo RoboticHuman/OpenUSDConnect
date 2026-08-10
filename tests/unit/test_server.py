@@ -1067,7 +1067,7 @@ class TestBroadcast:
         assert flat.request.getvalue()
         assert layered.request.getvalue() == b""
 
-    def test_layered_transaction_skips_flat_wire_but_not_listeners(
+    def test_transaction_uses_one_complete_stream_and_notifies_listeners(
         self,
         srv,
         monkeypatch,
@@ -1119,7 +1119,7 @@ class TestBroadcast:
         assert observed == [records[0][0]]
         assert layered.request.getvalue()
 
-    def test_layered_transaction_includes_the_authoring_origin(self, srv):
+    def test_transaction_includes_the_authoring_origin_for_every_receiver(self, srv):
         import io
 
         class FakeHandler:
@@ -1145,14 +1145,11 @@ class TestBroadcast:
             origin="shared-session",
         )
 
-        srv.broadcast_transaction_views(
-            records,
-            exclude_origin="shared-session",
-        )
+        srv.broadcast_transaction_views(records)
         srv._broadcast_queue.join()
 
         assert layered.request.getvalue()
-        assert flat.request.getvalue() == b""
+        assert flat.request.getvalue() == layered.request.getvalue()
 
     def test_grouped_layered_transactions_share_one_receiver_send(
         self,
@@ -1188,16 +1185,14 @@ class TestBroadcast:
             [{"k": "ensure_prim", "prim": "/Second", "typeName": "Xform"}]
         )
 
-        srv.broadcast_transaction_group_views(
-            [(first, "first-origin"), (second, "second-origin")]
-        )
+        srv.broadcast_transaction_group_views([first, second])
         srv._broadcast_queue.join()
 
         assert len(send_calls) == 1
         assert observed == [first[0][0], second[0][0]]
         assert layered.request.getvalue() == send_calls[0]
 
-    def test_grouped_flat_transactions_batch_per_receiver_origin(self, srv, monkeypatch):
+    def test_grouped_transactions_share_one_complete_payload(self, srv, monkeypatch):
         import io
 
         from openusdconnect.framing import recv_framed_rfile
@@ -1231,17 +1226,14 @@ class TestBroadcast:
             [{"k": "ensure_prim", "prim": "/SecondFlat", "typeName": "Xform"}]
         )
 
-        srv.broadcast_transaction_group_views(
-            [(first, "first-origin"), (second, "second-origin")]
-        )
+        srv.broadcast_transaction_group_views([first, second])
         srv._broadcast_queue.join()
 
-        # Three distinct receiving origins, not two transactions x four sockets.
-        assert len(send_calls) == 3
-        assert len(plain_a.request.getvalue()) == len(plain_b.request.getvalue())
+        assert len(send_calls) == 1
+        assert len(send_calls[0][1]) == 4
+        assert plain_a.request.getvalue() == plain_b.request.getvalue()
+        assert plain_a.request.getvalue() == author.request.getvalue()
         assert plain_a.request.getvalue() == other.request.getvalue()
-        assert author.request.getvalue()
-        assert len(author.request.getvalue()) < len(plain_a.request.getvalue())
 
         plain_a.request.seek(0)
         author.request.seek(0)
@@ -1249,13 +1241,17 @@ class TestBroadcast:
             message_to_dict(recv_framed_rfile(plain_a.request)),
             message_to_dict(recv_framed_rfile(plain_a.request)),
         ]
-        author_messages = [message_to_dict(recv_framed_rfile(author.request))]
+        author_messages = [
+            message_to_dict(recv_framed_rfile(author.request)),
+            message_to_dict(recv_framed_rfile(author.request)),
+        ]
         assert [message["event"]["prim"] for message in plain_messages] == [
             "/FirstFlat",
             "/SecondFlat",
         ]
         assert [message["event"]["prim"] for message in author_messages] == [
-            "/SecondFlat"
+            "/FirstFlat",
+            "/SecondFlat",
         ]
 
     def test_replayed_payload_children_follow_receiver_replay_mode(self, srv):
@@ -1290,12 +1286,12 @@ class TestBroadcast:
         srv.replay_children_after_load("/Payload")
         srv._broadcast_queue.join()
 
-        layered.request.seek(0)
-        replayed = message_to_dict(recv_framed_rfile(layered.request))
-        assert replayed["seq"] == records[0][0]["seq"] + 1
-        assert replayed["origin"] == "shared-session"
-        assert replayed["event"] == records[0][0]["event"]
-        assert flat.request.getvalue() == b""
+        for receiver in (flat, layered):
+            receiver.request.seek(0)
+            replayed = message_to_dict(recv_framed_rfile(receiver.request))
+            assert replayed["seq"] == records[0][0]["seq"] + 1
+            assert replayed["origin"] == "shared-session"
+            assert replayed["event"] == records[0][0]["event"]
 
 
 # ---------------------------------------------------------------------------

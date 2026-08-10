@@ -56,6 +56,8 @@ def test_native_unreal_reliability_architecture_stays_explicit():
     assert "OnReceiverReplayGenerationChanged" in subsystem
     assert "RequestReceiverReplay(" in subsystem
     assert "EventQueue.RemoveAt(0, ToDrop" not in subsystem
+    assert "bOwnEcho" not in subsystem
+    assert "FUSDEventApplier::ApplyFrame(Frame" in subsystem
     assert "static bool ApplyFrame" in applier
 
 

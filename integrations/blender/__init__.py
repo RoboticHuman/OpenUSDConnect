@@ -44,8 +44,8 @@ from openusdconnect.client_id import make_stable_client_id
 STABLE_CLIENT_ID = make_stable_client_id("blender")
 
 # Session-level origin identifier shared by emitter and receiver connections
-# from this Blender instance.  The server uses it to suppress echo — events
-# are not broadcast back to connections with the same origin.
+# from this Blender instance. Durable events return in the complete commit
+# stream; Blender's apply guard prevents those records from being re-emitted.
 # Random per session — unlike STABLE_CLIENT_ID, this changes on restart so
 # the server can distinguish multiple sessions from the same machine.
 SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"

@@ -347,7 +347,9 @@ class EventDispatcher:
             numpy_arrays=True,
             clear_on_resync=True,
             preserve_envelopes=self._layer_router is not None,
-            require_contiguous=self._layer_router is not None,
+            # Live and replay delivery are both complete commit streams. Flat
+            # projection changes routing, not stream membership.
+            require_contiguous=True,
         )
         for exc in result.errors:
             LOG.warning("Decode error: %s", exc)

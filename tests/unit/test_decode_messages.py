@@ -144,7 +144,7 @@ class TestDecodeMessages:
         assert isinstance(result.errors[0], SequenceGapError)
         assert (result.errors[0].expected, result.errors[0].received) == (1, 2)
 
-    def test_flat_decode_allows_origin_suppression_gaps(self):
+    def test_permissive_decode_can_skip_a_sequence_when_explicitly_requested(self):
         result = decode_messages([_event(2, "/Visible")])
 
         assert [event["prim"] for event in result.received] == ["/Visible"]

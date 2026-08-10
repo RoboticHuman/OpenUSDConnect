@@ -142,10 +142,9 @@ def test_callback_failure_does_not_publish_applied_cursor():
     assert receiver.replay_requests == [1]
 
 
-def test_layered_sequence_gap_is_not_applied_and_requests_missing_sequence():
+def test_sequence_gap_is_not_applied_and_requests_missing_sequence():
     stage = Usd.Stage.CreateInMemory()
     receiver = _QueuedReceiver([_event(2, "/World/TooNew")])
-    receiver.layered_replay_active = True
     dispatcher = EventDispatcher(
         receiver=receiver,
         adapter=UsdStageAdapter(stage),
