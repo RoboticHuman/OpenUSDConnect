@@ -110,6 +110,10 @@ class PreparedSublayers:
     mappings: tuple[tuple[Sdf.Layer, str], ...]
 
 
+class StaleLayerGraphError(ValueError):
+    """A valid authored edit targets an obsolete shared-layer graph."""
+
+
 class SharedLayerGraph(LayerKeyRouter):
     """Map portable layer keys onto one process's root-layer stack.
 
@@ -428,10 +432,12 @@ class SharedLayerGraph(LayerKeyRouter):
         if not self.authoritative:
             raise RuntimeError("only the authoritative graph can assign layer keys")
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         parent = self.layer_for(parent_key)
         if parent is None or parent_key not in self.reachable_layer_keys():
-            raise ValueError(f"unknown shared layer key {parent_key!r}")
+            raise StaleLayerGraphError(f"unknown shared layer key {parent_key!r}")
 
         entries = normalize_sublayer_entries(event.get("sublayers", ()))
         pending_by_identifier: dict[str, str] = {}
@@ -444,7 +450,7 @@ class SharedLayerGraph(LayerKeyRouter):
                 layer_key = self.key_for(child) or pending_by_identifier.get(child.identifier)
                 supplied_key = item.get("layer_key")
                 if layer_key and supplied_key and supplied_key != layer_key:
-                    raise ValueError(
+                    raise StaleLayerGraphError(
                         f"sublayer {item['authored_path']!r} has stale layer key {supplied_key!r}"
                     )
                 if layer_key is None:
@@ -470,9 +476,11 @@ class SharedLayerGraph(LayerKeyRouter):
         event = prepared.event
         expected_revision = self.revision + 1
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         if int(event.get("revision", 0)) != expected_revision:
-            raise ValueError(
+            raise StaleLayerGraphError(
                 f"expected layer graph revision {expected_revision}, got {event.get('revision', 0)}"
             )
         for layer, layer_key in prepared.mappings:
@@ -536,12 +544,14 @@ class SharedLayerGraph(LayerKeyRouter):
     def apply_sublayers(self, parent_key: str, event: dict) -> None:
         """Apply one canonical server event and advance local routing state."""
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         if parent_key not in self.reachable_layer_keys():
-            raise ValueError(f"unknown shared layer key {parent_key!r}")
+            raise StaleLayerGraphError(f"unknown shared layer key {parent_key!r}")
         expected_revision = self.revision + 1
         if int(event.get("revision", 0)) != expected_revision:
-            raise ValueError(
+            raise StaleLayerGraphError(
                 f"expected layer graph revision {expected_revision}, got {event.get('revision', 0)}"
             )
         parent = self.layer_for(parent_key)
@@ -568,6 +578,7 @@ class SharedLayerGraph(LayerKeyRouter):
 __all__ = [
     "PreparedSublayers",
     "SharedLayerGraph",
+    "StaleLayerGraphError",
     "apply_sublayer_entries",
     "normalize_sublayer_entries",
     "read_sublayer_entries",

@@ -26,6 +26,7 @@ class _SenderStub:
         self.pending_event_count = 0
         self.recovery_required = False
         self.transaction_error = ""
+        self.repaired: list[tuple[list[dict], str]] = []
 
     def send_events(self, events: list[dict]) -> bool:
         self.batches.append(events)
@@ -43,6 +44,15 @@ class _SenderStub:
 
     def flush(self, timeout=None) -> bool:
         return True
+
+    def connect(self) -> bool:
+        self.connected = True
+        return True
+
+    def repair_rejected_transaction(self, events: list[dict], *, layer_key="") -> int:
+        self.repaired.append((events, layer_key))
+        self.connected = False
+        return 7
 
 
 def test_receiver_always_requests_full_layered_replay():
@@ -339,6 +349,23 @@ def test_publisher_does_not_consume_edits_while_disconnected():
 
         sender.connected = True
         assert publisher.update() > 0
+    finally:
+        publisher.close()
+
+
+def test_publisher_repair_and_resume_reconnects_the_ordered_outbox():
+    publisher = UsdPublisher(
+        Usd.Stage.CreateInMemory(),
+        app_name="repair-publisher",
+        persist_token=False,
+    )
+    sender = _SenderStub([True])
+    publisher._sender = sender
+    events = [{"k": "set_visibility", "prim": "/World", "visible": True}]
+    try:
+        assert publisher.repair_and_resume(events) == 7
+        assert sender.repaired == [(events, "")]
+        assert sender.connected
     finally:
         publisher.close()
 

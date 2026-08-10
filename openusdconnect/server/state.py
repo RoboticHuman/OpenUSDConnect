@@ -68,7 +68,7 @@ from ..protocol_constants import (
     event_apply_tier,
 )
 from ..sdf_spec_delta import merge_spec_events
-from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph
+from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph, StaleLayerGraphError
 from ..usd_state import read_material_binding, read_variant_selections
 from ._txn_barrier import _TxnBarrier
 from .layer_stack import CollaborationLayerStack
@@ -3659,7 +3659,10 @@ class UsdSyncServer:
             raise ValueError("shared-stage transactions require layer_key")
         target = graph.layer_for(layer_key)
         if target is None or layer_key not in graph.reachable_layer_keys():
-            raise ValueError(f"unknown or unresolved shared layer key {layer_key!r}")
+            raise TransactionRejectedError(
+                "stale_layer_graph",
+                f"unknown or unresolved shared layer key {layer_key!r}",
+            )
         unsupported = {
             event.get("k")
             for event in events
@@ -3674,47 +3677,56 @@ class UsdSyncServer:
 
         prepared: PreparedSublayers | None = None
         canonical_events = []
-        for event in events:
-            if event.get("k") == K_SET_SUBLAYERS:
-                prepared = graph.canonicalize_sublayers(layer_key, event)
-                canonical = prepared.event
-            elif event.get("k") == K_REPLACE_SDF_LAYER_CONTENT:
-                canonical = dict(event)
-                validate_layer_content_replacement(canonical)
-            else:
-                canonical = dict(event)
-                validate_spec_delta(canonical)
-            if not validate_event(canonical):
-                raise ValueError(f"invalid shared-stage event {canonical.get('k')!r}")
-            canonical_events.append(canonical)
+        try:
+            for event in events:
+                if event.get("k") == K_SET_SUBLAYERS:
+                    prepared = graph.canonicalize_sublayers(layer_key, event)
+                    canonical = prepared.event
+                elif event.get("k") == K_REPLACE_SDF_LAYER_CONTENT:
+                    canonical = dict(event)
+                    validate_layer_content_replacement(canonical)
+                else:
+                    canonical = dict(event)
+                    validate_spec_delta(canonical)
+                if not validate_event(canonical):
+                    raise ValueError(f"invalid shared-stage event {canonical.get('k')!r}")
+                canonical_events.append(canonical)
+        except StaleLayerGraphError as exc:
+            raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
 
         routed_events = [(layer_key, event) for event in canonical_events]
-        with (
-            self.stage_lock,
-            Usd.EditContext(self.stage, Usd.EditTarget(target)),
-            graph.transaction(),
-        ):
-            for event in canonical_events:
-                if event.get("k") != K_SET_SDF_SPEC_FIELDS or not event.get("removed", False):
-                    continue
-                path = Sdf.Path(event["spec_path"])
-                spec = target.GetObjectAtPath(path)
-                if spec:
-                    event["fields"] = sorted(
-                        set(event.get("fields", ())) | {str(key) for key in spec.ListInfoKeys()}
+        try:
+            with (
+                self.stage_lock,
+                Usd.EditContext(self.stage, Usd.EditTarget(target)),
+                graph.transaction(),
+            ):
+                for event in canonical_events:
+                    if event.get("k") != K_SET_SDF_SPEC_FIELDS or not event.get(
+                        "removed", False
+                    ):
+                        continue
+                    path = Sdf.Path(event["spec_path"])
+                    spec = target.GetObjectAtPath(path)
+                    if spec:
+                        event["fields"] = sorted(
+                            set(event.get("fields", ()))
+                            | {str(key) for key in spec.ListInfoKeys()}
+                        )
+                with atomic_apply(self.stage):
+                    apply_events(self.stage, canonical_events, prevalidated=True)
+                    if prepared is not None:
+                        graph.accept_sublayers(prepared)
+                        routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
+                    records = self._persist_shared_events(
+                        routed_events,
+                        client_id=client_id,
+                        origin=origin,
+                        client_addr=client_addr,
+                        transaction_identity=transaction_identity,
                     )
-            with atomic_apply(self.stage):
-                apply_events(self.stage, canonical_events, prevalidated=True)
-                if prepared is not None:
-                    graph.accept_sublayers(prepared)
-                    routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
-                records = self._persist_shared_events(
-                    routed_events,
-                    client_id=client_id,
-                    origin=origin,
-                    client_addr=client_addr,
-                    transaction_identity=transaction_identity,
-                )
+        except StaleLayerGraphError as exc:
+            raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
         self._prim_count_dirty = True
         return records
 

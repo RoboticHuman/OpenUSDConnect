@@ -80,4 +80,31 @@ bool FOpenUSDConnectProducerEndpointIsolationTest::RunTest(const FString& Parame
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOpenUSDConnectProducerRejectionDispositionTest,
+	"OpenUSDConnect.Producer.RejectionDisposition",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FOpenUSDConnectProducerRejectionDispositionTest::RunTest(const FString& Parameters)
+{
+	FProducerEndpointState Conflict(TEXT("server"), 7200, TEXT(""), TEXT("conflict"));
+	Conflict.MarkRejected(1, 3, TEXT("obsolete layer graph"));
+	TestEqual(TEXT("stale graph is recoverable"),
+		Conflict.GetRecoveryDisposition(),
+		EUSDConnectRecoveryDisposition::RecoverableConflict);
+
+	FProducerEndpointState Invalid(TEXT("server"), 7200, TEXT(""), TEXT("invalid"));
+	Invalid.MarkRejected(1, 4, TEXT("invalid event"));
+	TestEqual(TEXT("malformed operation is an integration fault"),
+		Invalid.GetRecoveryDisposition(),
+		EUSDConnectRecoveryDisposition::InvalidOperation);
+
+	FProducerEndpointState Sequence(TEXT("server"), 7200, TEXT(""), TEXT("sequence"));
+	Sequence.MarkRejected(1, 2, TEXT("unexpected transaction id"));
+	TestEqual(TEXT("sequence contradiction is session-fatal"),
+		Sequence.GetRecoveryDisposition(),
+		EUSDConnectRecoveryDisposition::SessionFatal);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

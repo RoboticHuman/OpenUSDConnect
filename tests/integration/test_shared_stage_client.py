@@ -11,6 +11,8 @@ import pytest
 from pxr import Sdf, Usd
 
 from openusdconnect.protocol_constants import LayerMode
+from openusdconnect.recovery import RejectionDisposition
+from openusdconnect.sender import EventSender, TransactionRejectedError
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.shared_stage_client import SharedStageClient
@@ -416,7 +418,6 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
         thread.join(timeout=5)
         sync_server.shutdown()
         sync_server.store.close()
-
         restarted_stage = Usd.Stage.Open(str(tmp_path / "server" / "scene.usda"))
         sync_server = UsdSyncServer(
             stage=restarted_stage,
@@ -457,6 +458,63 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
     finally:
         first.close()
         second.close()
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
+def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
+    server_stage = _create_stage(tmp_path / "server")
+    sync_server = UsdSyncServer(
+        stage=server_stage,
+        log_path=str(tmp_path / "events.db"),
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0), ConnectionHandler, sync_server, max_workers=4
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    graph = sync_server.shared_layer_graph
+    child_key = next(
+        key for key in graph.reachable_layer_keys() if key != graph.root_layer_key
+    )
+    sender = EventSender(
+        "127.0.0.1",
+        tcp_server.server_address[1],
+        client_id="stale-layer-client",
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    try:
+        assert sender.connect()
+        sync_server.process_txn(
+            [
+                {
+                    "k": "set_sublayers",
+                    "prim": "/",
+                    "generation": graph.generation,
+                    "revision": 0,
+                    "sublayers": [],
+                }
+            ],
+            layer_key=graph.root_layer_key,
+        )
+        assert child_key not in graph.reachable_layer_keys()
+
+        assert sender.send_events(
+            [{"k": "replace_sdf_layer_content", "prim": "/", "fragment": "#usda 1.0\n"}],
+            layer_key=child_key,
+        )
+        with pytest.raises(TransactionRejectedError) as caught:
+            sender.flush(timeout=5)
+
+        assert caught.value.failure.code_name == "stale_layer_graph"
+        assert caught.value.failure.disposition is RejectionDisposition.RECOVERABLE_CONFLICT
+        assert sender.recovery_required
+    finally:
+        sender.disconnect()
         tcp_server.shutdown()
         tcp_server.server_close()
         thread.join(timeout=5)

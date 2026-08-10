@@ -223,6 +223,16 @@ class TestTransactionIdentity:
         })
         assert result["status"] == _fb.TransactionStatus.Acknowledged
 
+        rejected, _ = _roundtrip({
+            "type": "transaction_result",
+            "txn_id": 10,
+            "status": "rejected",
+            "rejection_code": "stale_layer_graph",
+            "reason": "obsolete topology",
+        })
+        assert rejected["rejection_code"] == _fb.TransactionRejectionCode.StaleLayerGraph
+        assert rejected["reason"] == "obsolete topology"
+
 
 # ===================================================================
 # Event-level tests — all 17 kinds

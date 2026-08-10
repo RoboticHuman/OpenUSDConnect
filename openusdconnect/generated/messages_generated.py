@@ -94,6 +94,7 @@ class TransactionRejectionCode(object):
     None_ = 0
     InvalidIdentity = 1
     UnexpectedId = 2
+    StaleLayerGraph = 3
     InvalidTransaction = 4
 
 

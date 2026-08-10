@@ -5,6 +5,7 @@
 #include "HAL/CriticalSection.h"
 #include "Containers/Set.h"
 #include "Delegates/IDelegateInstance.h"
+#include "USDConnectRecovery.h"
 #include <atomic>
 #include "USDConnectSubsystem.generated.h"
 
@@ -56,6 +57,10 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	bool bRecoveryRequired = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	EUSDConnectRecoveryDisposition RecoveryDisposition =
+		EUSDConnectRecoveryDisposition::None;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	FString AuthState;

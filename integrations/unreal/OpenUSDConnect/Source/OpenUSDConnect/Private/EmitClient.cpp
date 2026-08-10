@@ -95,6 +95,7 @@ bool FProducerEndpointState::AcceptServerHighwater(
 			HighestSubmitted);
 		bRecoveryRequired = true;
 		RecoveryReason = OutError;
+		RecoveryDisposition = EUSDConnectRecoveryDisposition::SessionFatal;
 		return false;
 	}
 	if (CommittedThrough < LastAcknowledgedTxnId)
@@ -105,6 +106,7 @@ bool FProducerEndpointState::AcceptServerHighwater(
 			CommittedThrough);
 		bRecoveryRequired = true;
 		RecoveryReason = OutError;
+		RecoveryDisposition = EUSDConnectRecoveryDisposition::SessionFatal;
 		return false;
 	}
 
@@ -137,13 +139,28 @@ void FProducerEndpointState::RetireThrough(uint64 AckId)
 	CompactLocked();
 }
 
-void FProducerEndpointState::MarkRejected(uint64 TxnId, const FString& Reason)
+void FProducerEndpointState::MarkRejected(
+	uint64 TxnId,
+	uint8 RejectionCode,
+	const FString& Reason)
 {
 	FScopeLock Lock(&StateCS);
 	bRecoveryRequired = true;
 	RecoveryReason = Reason.IsEmpty()
 		? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
 		: FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason);
+	if (RejectionCode == static_cast<uint8>(OpenUSDConnect::TransactionRejectionCode::StaleLayerGraph))
+	{
+		RecoveryDisposition = EUSDConnectRecoveryDisposition::RecoverableConflict;
+	}
+	else if (RejectionCode == static_cast<uint8>(OpenUSDConnect::TransactionRejectionCode::InvalidTransaction))
+	{
+		RecoveryDisposition = EUSDConnectRecoveryDisposition::InvalidOperation;
+	}
+	else
+	{
+		RecoveryDisposition = EUSDConnectRecoveryDisposition::SessionFatal;
+	}
 }
 
 uint64 FProducerEndpointState::GetSubmittedTransactionCount() const
@@ -174,6 +191,12 @@ FString FProducerEndpointState::GetRecoveryReason() const
 {
 	FScopeLock Lock(&StateCS);
 	return RecoveryReason;
+}
+
+EUSDConnectRecoveryDisposition FProducerEndpointState::GetRecoveryDisposition() const
+{
+	FScopeLock Lock(&StateCS);
+	return RecoveryDisposition;
 }
 
 void FProducerEndpointState::CompactLocked()
@@ -398,7 +421,10 @@ uint32 FEmitClient::Run()
 							UE_LOG(LogUSDEmit, Error,
 								TEXT("Transaction %llu rejected: %s"),
 								AckId, *Reason);
-							ProducerState->MarkRejected(AckId, Reason);
+							ProducerState->MarkRejected(
+								AckId,
+								static_cast<uint8>(Result->rejection_code()),
+								Reason);
 							if (Owner) { Owner->OnEmitterTransactionRejected(AckId, Reason); }
 							bShouldStop.store(true, std::memory_order_relaxed);
 							bShouldDisconnect = true;

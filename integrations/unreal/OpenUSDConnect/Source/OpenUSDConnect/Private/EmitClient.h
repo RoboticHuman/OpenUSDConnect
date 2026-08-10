@@ -5,6 +5,7 @@
 #include "HAL/RunnableThread.h"
 #include "HAL/CriticalSection.h"
 #include "Sockets.h"
+#include "USDConnectRecovery.h"
 #include <atomic>
 
 class UUSDConnectSubsystem;
@@ -44,13 +45,14 @@ public:
 	void MarkAllUnsent();
 	bool AcceptServerHighwater(uint64 CommittedThrough, FString& OutError);
 	void RetireThrough(uint64 AckId);
-	void MarkRejected(uint64 TxnId, const FString& Reason);
+	void MarkRejected(uint64 TxnId, uint8 RejectionCode, const FString& Reason);
 
 	uint64 GetSubmittedTransactionCount() const;
 	uint64 GetAcknowledgedTransactionCount() const;
 	uint64 GetPendingTransactionCount() const;
 	bool IsRecoveryRequired() const;
 	FString GetRecoveryReason() const;
+	EUSDConnectRecoveryDisposition GetRecoveryDisposition() const;
 
 private:
 	void CompactLocked();
@@ -70,6 +72,8 @@ private:
 	uint64 LastAcknowledgedTxnId = 0;
 	bool bRecoveryRequired = false;
 	FString RecoveryReason;
+	EUSDConnectRecoveryDisposition RecoveryDisposition =
+		EUSDConnectRecoveryDisposition::None;
 };
 
 /**

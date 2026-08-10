@@ -138,3 +138,42 @@ def test_update_restores_frozen_edits_when_replay_fails(tmp_path, monkeypatch):
         assert calls == ["prepare", "replay", "restore"]
     finally:
         client.close()
+
+
+def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
+    stage = _create_root(tmp_path / "root.usda")
+    client = SharedStageClient(stage, app_name="repair-client", persist_token=False)
+    original_sender = client._sender
+    repaired = []
+
+    class _RepairSender:
+        def repair_rejected_transaction(self, events, *, layer_key=""):
+            repaired.append((events, layer_key))
+            return 7
+
+    try:
+        client._graph.apply_state(
+            {
+                "type": "layer_graph_state",
+                "seq": 1,
+                "generation": "graph-1",
+                "revision": 1,
+                "root_layer_key": "layer:root",
+                "layers": [{"layer_key": "layer:root", "sublayers": []}],
+            }
+        )
+        client._sender = _RepairSender()
+        resumed = []
+        monkeypatch.setattr(client, "_connect_sender", lambda: resumed.append(True))
+        events = [{"k": "replace_sdf_layer_content", "fragment": "#usda 1.0\n"}]
+
+        assert client.repair_and_resume(events, layer=stage.GetRootLayer()) == 7
+        assert repaired == [(events, "layer:root")]
+        assert resumed == [True]
+
+        detached = Sdf.Layer.CreateAnonymous()
+        with pytest.raises(ValueError, match="not mapped"):
+            client.repair_and_resume(events, layer=detached)
+    finally:
+        client._sender = original_sender
+        client.close()

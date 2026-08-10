@@ -974,6 +974,11 @@ class _State:
 _state = _State()
 
 
+def get_emitter_sender() -> EventSender | None:
+    """Return the active network emitter for read-only UI status inspection."""
+    return _state.sender
+
+
 def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
@@ -1422,7 +1427,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 )
                 _state.sender = sender
             if not _state.sender.connect():
-                reason = (
+                reason = _state.sender.transaction_error or (
                     "auth rejected" if _state.sender.auth_rejected else "could not connect"
                 )
                 if _state.sender.auth_rejected:
@@ -1470,7 +1475,17 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
             _state.notice_emitter = None
         _state.author = None
         context.scene.usd_connect_net_emitter_running = False
-        if retained:
+        if (
+            retained
+            and _state.sender is not None
+            and _state.sender.recovery_required is True
+        ):
+            self.report(
+                {"ERROR"},
+                f"Emitter stopped with {retained} quarantined transaction(s): "
+                f"{_state.sender.transaction_error}",
+            )
+        elif retained:
             self.report(
                 {"WARNING"},
                 f"Emitter disconnected with {retained} transaction(s) retained; "

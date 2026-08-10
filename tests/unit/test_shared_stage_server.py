@@ -14,6 +14,8 @@ from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import LayerMode
 from openusdconnect.sdf_spec_delta import serialize_layer_content, serialize_spec_fields
 from openusdconnect.server.state import UsdSyncServer
+from openusdconnect.server.types import TransactionRejectedError
+from openusdconnect.shared_layer_graph import StaleLayerGraphError
 
 
 def _create_layer(path: Path, prim_path: str | None = None) -> Sdf.Layer:
@@ -306,8 +308,56 @@ def test_detached_layer_key_cannot_receive_more_opinions(tmp_path):
         server.process_txn([topology], layer_key=graph.root_layer_key)
 
         assert child_key not in graph.reachable_layer_keys()
-        with pytest.raises(ValueError, match="unknown or unresolved"):
+        with pytest.raises(TransactionRejectedError, match="unknown or unresolved") as caught:
             server.process_txn([_value_event(child, 3.0)], layer_key=child_key)
+        assert caught.value.code == "stale_layer_graph"
+
+
+def test_stale_topology_generation_is_a_recoverable_rejection(tmp_path):
+    base = _create_stage(tmp_path)
+    with _shared_server(base, tmp_path / "events.db") as server:
+        graph = server.shared_layer_graph
+        topology = {
+            "k": "set_sublayers",
+            "prim": "/",
+            "generation": "obsolete-generation",
+            "revision": 0,
+            "sublayers": [],
+        }
+
+        with pytest.raises(TransactionRejectedError) as caught:
+            server.process_txn([topology], layer_key=graph.root_layer_key)
+
+        assert caught.value.code == "stale_layer_graph"
+        assert list(server.stage.GetRootLayer().subLayerPaths) == ["./asset.usda"]
+
+
+def test_topology_that_becomes_stale_at_commit_is_rolled_back_and_recoverable(
+    tmp_path, monkeypatch
+):
+    base = _create_stage(tmp_path)
+    with _shared_server(base, tmp_path / "events.db") as server:
+        graph = server.shared_layer_graph
+        topology = {
+            "k": "set_sublayers",
+            "prim": "/",
+            "generation": graph.generation,
+            "revision": 0,
+            "sublayers": [],
+        }
+
+        def _become_stale(_prepared):
+            raise StaleLayerGraphError("layer graph changed before commit")
+
+        monkeypatch.setattr(graph, "accept_sublayers", _become_stale)
+
+        with pytest.raises(TransactionRejectedError) as caught:
+            server.process_txn([topology], layer_key=graph.root_layer_key)
+
+        assert caught.value.code == "stale_layer_graph"
+        assert list(server.stage.GetRootLayer().subLayerPaths) == ["./asset.usda"]
+        assert graph.revision == 1
+        assert server.store.get_count() == 1
 
 
 def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch):

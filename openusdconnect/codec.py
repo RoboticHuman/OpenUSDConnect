@@ -227,6 +227,7 @@ _TRANSACTION_REJECTION_TO_FB = {
     "none": TransactionRejectionCode.None_,
     "invalid_identity": TransactionRejectionCode.InvalidIdentity,
     "unexpected_id": TransactionRejectionCode.UnexpectedId,
+    "stale_layer_graph": TransactionRejectionCode.StaleLayerGraph,
     "invalid_transaction": TransactionRejectionCode.InvalidTransaction,
 }
 

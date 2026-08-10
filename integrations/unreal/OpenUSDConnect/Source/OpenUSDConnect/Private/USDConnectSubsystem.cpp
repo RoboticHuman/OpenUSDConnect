@@ -379,6 +379,7 @@ FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
 			ProducerState->GetPendingTransactionCount(),
 			static_cast<uint64>(MAX_int32)));
 		Status.bRecoveryRequired = ProducerState->IsRecoveryRequired();
+		Status.RecoveryDisposition = ProducerState->GetRecoveryDisposition();
 	}
 	{
 		FScopeLock Lock(&StatusCS);

@@ -6,9 +6,10 @@ import time
 
 import pytest
 
-from openusdconnect.codec import encode_message, message_to_dict
+from openusdconnect.codec import TransactionRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_transaction_result
+from openusdconnect.recovery import RejectionDisposition, TransactionFailure
 from openusdconnect.sender import EventSender, TransactionRejectedError
 
 
@@ -191,6 +192,9 @@ class TestEventSenderConnect:
                 sender.flush(timeout=2)
             assert sender.pending_transaction_count == 0
             assert sender.transaction_error
+            assert sender.transaction_failure.code_name == "unexpected_id"
+            assert sender.transaction_failure.expected_txn_id == 1
+            assert sender.recovery_disposition is RejectionDisposition.SESSION_FATAL
         finally:
             sender.disconnect()
             thread.join(timeout=2)
@@ -236,6 +240,8 @@ class TestEventSenderConnect:
             with pytest.raises(TransactionRejectedError, match="invalid first"):
                 sender.flush(timeout=2)
             assert sender.recovery_required
+            assert sender.transaction_failure.code_name == "invalid_transaction"
+            assert sender.recovery_disposition is RejectionDisposition.INVALID_OPERATION
             assert not sender.connected
             assert sender.pending_transaction_count == 1
             assert not sender.send_events([event])
@@ -243,3 +249,123 @@ class TestEventSenderConnect:
             sender.disconnect()
             thread.join(timeout=2)
             srv.close()
+
+    @pytest.mark.parametrize(
+        ("rejection_code", "expected"),
+        [
+            ("stale_layer_graph", RejectionDisposition.RECOVERABLE_CONFLICT),
+            ("invalid_transaction", RejectionDisposition.INVALID_OPERATION),
+            ("invalid_identity", RejectionDisposition.SESSION_FATAL),
+        ],
+    )
+    def test_rejection_exposes_recovery_disposition(self, rejection_code, expected):
+        srv, port = _make_server()
+        sender = EventSender("127.0.0.1", port, client_id="classified-client")
+
+        def _serve():
+            conn, _ = _accept_and_hello_ok(srv)
+            recv_framed(conn)
+            send_framed(
+                conn,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="rejected",
+                        rejection_code=rejection_code,
+                        reason="classified rejection",
+                    )
+                ),
+            )
+            time.sleep(0.05)
+            conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            assert sender.connect()
+            assert sender.send_events(
+                [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
+            )
+            with pytest.raises(TransactionRejectedError) as caught:
+                sender.flush(timeout=2)
+            assert caught.value.failure is sender.transaction_failure
+            assert sender.recovery_disposition is expected
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
+
+    def test_recoverable_rejection_reuses_boundary_before_later_transactions(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="retry-client",
+            session_id="retry-session",
+        )
+        observed = []
+
+        def _serve():
+            first, _ = _accept_and_hello_ok(srv)
+            observed.append(message_to_dict(recv_framed(first)))
+            observed.append(message_to_dict(recv_framed(first)))
+            send_framed(
+                first,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="rejected",
+                        rejection_code="stale_layer_graph",
+                        reason="layer was remapped",
+                    )
+                ),
+            )
+            first.close()
+
+            second, _ = _accept_and_hello_ok(srv)
+            observed.append(message_to_dict(recv_framed(second)))
+            observed.append(message_to_dict(recv_framed(second)))
+            send_framed(second, encode_message(make_transaction_result(2)))
+            time.sleep(0.05)
+            second.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        stale = {"k": "ensure_prim", "prim": "/World/Stale", "typeName": "Xform"}
+        later = {"k": "ensure_prim", "prim": "/World/Later", "typeName": "Xform"}
+        repaired = {"k": "ensure_prim", "prim": "/World/Repaired", "typeName": "Xform"}
+        try:
+            assert sender.connect()
+            assert sender.send_events([stale], layer_key="old-layer")
+            assert sender.send_events([later], layer_key="stable-layer")
+            with pytest.raises(TransactionRejectedError):
+                sender.flush(timeout=2)
+
+            assert (
+                sender.repair_rejected_transaction([repaired], layer_key="new-layer")
+                == 1
+            )
+            assert sender.connect()
+            assert sender.flush(timeout=2)
+
+            assert [txn["txn_id"] for txn in observed] == [1, 2, 1, 2]
+            assert observed[2]["layer_key"] == "new-layer"
+            assert observed[2]["events"] == [repaired]
+            assert observed[3] == observed[1]
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
+
+    def test_nonrecoverable_rejection_cannot_be_retried(self):
+        sender = EventSender("127.0.0.1", 1, client_id="fatal-client")
+        sender._failure = TransactionFailure(
+            txn_id=1,
+            code=TransactionRejectionCode.UnexpectedId,
+            reason="sequence gap",
+        )
+
+        with pytest.raises(RuntimeError, match="not recoverable"):
+            sender.repair_rejected_transaction(
+                [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
+            )

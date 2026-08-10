@@ -28,6 +28,7 @@ from .protocol import (
     make_txn,
 )
 from .protocol_constants import LayerMode
+from .recovery import RejectionDisposition, TransactionFailure
 from .transport import send_msg, send_raw
 
 LOG = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ class _PendingTransaction:
 
 class TransactionRejectedError(RuntimeError):
     """Raised by :meth:`EventSender.flush` after a server rejection."""
+
+    def __init__(self, failure: TransactionFailure):
+        super().__init__(str(failure))
+        self.failure = failure
 
 
 class EventSender:
@@ -108,7 +113,7 @@ class EventSender:
         self._acknowledged_transactions = 0
         self._acknowledged_events = 0
         self._acknowledged_events_since_drain = 0
-        self._fatal_error = ""
+        self._failure: TransactionFailure | None = None
         self._retry_after_until = 0.0
 
     @property
@@ -143,13 +148,25 @@ class EventSender:
     @property
     def transaction_error(self) -> str:
         with self._condition:
-            return self._fatal_error
+            return str(self._failure) if self._failure is not None else ""
+
+    @property
+    def transaction_failure(self) -> TransactionFailure | None:
+        """Structured terminal result for UI and recovery policy."""
+        with self._condition:
+            return self._failure
+
+    @property
+    def recovery_disposition(self) -> RejectionDisposition | None:
+        """Recommended response category for the current rejection."""
+        with self._condition:
+            return self._failure.disposition if self._failure is not None else None
 
     @property
     def recovery_required(self) -> bool:
         """Whether a deterministic rejection quarantined this producer session."""
         with self._condition:
-            return bool(self._fatal_error)
+            return self._failure is not None
 
     def connect(self) -> bool:
         """Handshake, start the result reader, and replay the exact outbox."""
@@ -157,7 +174,7 @@ class EventSender:
             with self._condition:
                 if self.sock is not None:
                     return True
-                if self._fatal_error or time.monotonic() < self._retry_after_until:
+                if self._failure is not None or time.monotonic() < self._retry_after_until:
                     return False
 
             self.auth_rejected = False
@@ -289,7 +306,7 @@ class EventSender:
         if not events:
             return False
         with self._condition:
-            if self.sock is None or self._fatal_error:
+            if self.sock is None or self._failure is not None:
                 return False
             if len(self._pending) >= self.max_pending_transactions:
                 return False
@@ -315,6 +332,49 @@ class EventSender:
             LOG.info("EventSender: send became ambiguous; retaining transaction", exc_info=True)
             self._close(expected=sock)
         return True
+
+    def repair_rejected_transaction(self, events: list, *, layer_key: str = "") -> int:
+        """Replace a recoverable rejected transaction at the same ordered ID.
+
+        The caller must first reconcile against current authoritative state and
+        rebuild the events for that state. This method deliberately performs no
+        semantic merge. It only restores the rejected sequence boundary ahead
+        of later quarantined transactions and returns the reused transaction ID.
+        Call :meth:`connect` afterwards to replay the repaired outbox.
+        """
+        if not events:
+            raise ValueError("repair events must not be empty")
+        with self._condition:
+            failure = self._failure
+            if failure is None:
+                raise RuntimeError("there is no rejected transaction to retry")
+            if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
+                raise RuntimeError(
+                    f"{failure.code_name} is {failure.disposition.value}, not recoverable"
+                )
+
+        # A rejection normally already closes this socket. Make the boundary
+        # explicit so a racing reader cannot leave a repaired outbox attached to
+        # the connection that delivered the rejection.
+        self.disconnect()
+        payload = encode_message(
+            make_txn(events, layer_key=layer_key, txn_id=failure.txn_id)
+        )
+        repaired = _PendingTransaction(payload, len(events))
+
+        with self._send_lock:
+            with self._condition:
+                if self._failure is not failure:
+                    raise RuntimeError("transaction rejection changed during recovery")
+                if failure.txn_id in self._pending:
+                    raise RuntimeError("rejected transaction is still present in the outbox")
+                pending = OrderedDict([(failure.txn_id, repaired)])
+                pending.update(self._pending)
+                self._pending = pending
+                self._failure = None
+                self._retry_after_until = 0.0
+                self._condition.notify_all()
+        return failure.txn_id
 
     def send_message(self, msg: dict) -> bool:
         """Send a non-transaction protocol message (not retained for replay)."""
@@ -349,8 +409,8 @@ class EventSender:
         deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
         while True:
             with self._condition:
-                if self._fatal_error:
-                    raise TransactionRejectedError(self._fatal_error)
+                if self._failure is not None:
+                    raise TransactionRejectedError(self._failure)
                 if not self._pending:
                     return True
                 connected = self.sock is not None
@@ -425,13 +485,15 @@ class EventSender:
                 self._pending.pop(txn_id, None)
                 code = int(result.RejectionCode())
                 reason = self._decode_string(result.Reason())
-                self._fatal_error = (
-                    f"transaction {txn_id} rejected (code {code}): "
-                    f"{reason or 'no reason supplied'}"
+                self._failure = TransactionFailure(
+                    txn_id=txn_id,
+                    code=code,
+                    reason=reason,
+                    expected_txn_id=int(result.ExpectedTxnId()),
                 )
                 # Later IDs in this session cannot overtake the rejected ID.
                 # Close immediately and retain them as quarantined evidence;
-                # reconnect is disabled by _fatal_error until explicit recovery.
+                # reconnect is disabled by _failure until explicit recovery.
                 rejected_socket = self.sock
             self._condition.notify_all()
         if rejected_socket is not None:

@@ -25,6 +25,7 @@ from .protocol_constants import (
     LayerMode,
 )
 from .receiver import ReceiverThread
+from .recovery import RejectionDisposition, TransactionFailure
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
 from .shared_layer_graph import SharedLayerGraph
@@ -165,6 +166,32 @@ class SharedStageClient:
     def transaction_error(self) -> str:
         """Terminal producer rejection, or an empty string."""
         return self._sender.transaction_error
+
+    @property
+    def transaction_failure(self) -> TransactionFailure | None:
+        """Structured rejection including its recovery disposition, if any."""
+        return self._sender.transaction_failure
+
+    @property
+    def recovery_disposition(self) -> RejectionDisposition | None:
+        """Recovery policy category for the current rejection, if any."""
+        return self._sender.recovery_disposition
+
+    def repair_and_resume(self, events: list[dict], *, layer: Sdf.Layer) -> int:
+        """Replace a recoverable layer transaction and resume its outbox.
+
+        The application must first apply authoritative incoming state and
+        rebuild *events* against *layer*. The layer must still be mapped by the
+        current graph; no semantic merge or layer redirection is inferred.
+        """
+        if self._closed:
+            raise RuntimeError("SharedStageClient is closed")
+        layer_key = self._graph.key_for(layer)
+        if not layer_key or layer_key not in self._graph.reachable_layer_keys():
+            raise ValueError("repair target layer is not mapped by the current graph")
+        txn_id = self._sender.repair_rejected_transaction(events, layer_key=layer_key)
+        self._connect_sender()
+        return txn_id
 
     def flush(self, timeout: float | None = None) -> bool:
         """Wait for every submitted layer edit to be durably committed."""

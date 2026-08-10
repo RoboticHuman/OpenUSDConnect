@@ -28,6 +28,7 @@ from .managed_client import ManagedClient
 from .protocol import make_hello, make_quit, make_txn
 from .protocol_constants import LayerMode
 from .receiver import ReceiverThread
+from .recovery import RejectionDisposition, TransactionFailure
 from .sender import EventSender, TransactionRejectedError
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
 from .shared_stage_client import SharedStageClient
@@ -47,11 +48,13 @@ __all__ = [
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
+    "RejectionDisposition",
     "ReceivedEvent",
     "ServerConfig",
     "SharedStageClient",
     "SyncUpdate",
     "TransactionRejectedError",
+    "TransactionFailure",
     "UsdPublisher",
     "UsdReceiver",
     "UsdStageAdapter",

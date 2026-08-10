@@ -27,6 +27,7 @@ from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
+from .recovery import RejectionDisposition, TransactionFailure
 from .sender import EventSender
 from .token_client import load_token
 
@@ -320,6 +321,34 @@ class UsdPublisher:
     def transaction_error(self) -> str:
         """Terminal producer rejection, or an empty string."""
         return self._sender.transaction_error
+
+    @property
+    def transaction_failure(self) -> TransactionFailure | None:
+        """Structured rejection including its recovery disposition, if any."""
+        return self._sender.transaction_failure
+
+    @property
+    def recovery_disposition(self) -> RejectionDisposition | None:
+        """Recovery policy category for the current rejection, if any."""
+        return self._sender.recovery_disposition
+
+    def repair_and_resume(self, events: list[dict]) -> int:
+        """Replace a recoverable transaction and resume its ordered outbox.
+
+        The application must first reconcile its stage with authoritative
+        state and rebuild *events* for that state. The repaired transaction is
+        assigned the original rejected ID; later quarantined transactions keep
+        their existing IDs and replay after it.
+        """
+        if self._closed:
+            raise RuntimeError("UsdPublisher is closed")
+        txn_id = self._sender.repair_rejected_transaction(events)
+        if not self.connect():
+            raise ConnectionError(
+                f"transaction {txn_id} repaired but reconnect to "
+                f"{self._host}:{self._port} failed; it remains queued"
+            )
+        return txn_id
 
     def flush(self, timeout: float | None = None) -> bool:
         """Submit any coalesced transform, then wait for durable acknowledgement."""

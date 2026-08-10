@@ -659,16 +659,18 @@ enum class TransactionRejectionCode : uint8_t {
   None = 0,
   InvalidIdentity = 1,
   UnexpectedId = 2,
+  StaleLayerGraph = 3,
   InvalidTransaction = 4,
   MIN = None,
   MAX = InvalidTransaction
 };
 
-inline const TransactionRejectionCode (&EnumValuesTransactionRejectionCode())[4] {
+inline const TransactionRejectionCode (&EnumValuesTransactionRejectionCode())[5] {
   static const TransactionRejectionCode values[] = {
     TransactionRejectionCode::None,
     TransactionRejectionCode::InvalidIdentity,
     TransactionRejectionCode::UnexpectedId,
+    TransactionRejectionCode::StaleLayerGraph,
     TransactionRejectionCode::InvalidTransaction
   };
   return values;
@@ -679,7 +681,7 @@ inline const char * const *EnumNamesTransactionRejectionCode() {
     "None",
     "InvalidIdentity",
     "UnexpectedId",
-    "",
+    "StaleLayerGraph",
     "InvalidTransaction",
     nullptr
   };
