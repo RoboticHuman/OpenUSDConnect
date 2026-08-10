@@ -10,6 +10,7 @@
 
 class FSyncClient;
 class FEmitClient;
+class FProducerEndpointState;
 class AUsdStageActor;
 
 USTRUCT(BlueprintType)
@@ -127,8 +128,8 @@ public:
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	FUSDConnectStatus GetStatus() const;
 
-	/** Called from FSyncClient background thread — pushes a raw BroadcastEvent frame */
-	void EnqueueEvent(TArray<uint8>&& RawBytes);
+	/** Called from FSyncClient background thread — pushes one replay-generation frame. */
+	void EnqueueEvent(uint64 ReplayGeneration, TArray<uint8>&& RawBytes);
 
 	/** Called from client background threads when the server issues a TOFU token. */
 	void OnClientTokenIssued(const FString& Token);
@@ -136,8 +137,8 @@ public:
 	/** Called from client background threads after HELLO_OK. */
 	void OnClientHelloOk(const FString& Role);
 
-	/** Called when a receiver handshake starts a new replay generation. */
-	void OnReceiverReplayStarted();
+	/** Select a receiver replay generation and discard queued frames from older streams. */
+	void OnReceiverReplayGenerationChanged(uint64 ReplayGeneration);
 
 	/** Called when the server deterministically rejects a producer transaction. */
 	void OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason);
@@ -152,6 +153,12 @@ public:
 		const FString& Reason);
 
 private:
+	struct FQueuedReceiverFrame
+	{
+		uint64 ReplayGeneration = 0;
+		TArray<uint8> Bytes;
+	};
+
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
@@ -163,6 +170,7 @@ private:
 	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
 	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department, const FString& Token) const;
 	void SetStatusMessage(const FString& AuthState, const FString& Message);
+	void RequestReceiverReplay(const FString& Reason);
 
 	void DrainAndApply();
 
@@ -181,10 +189,11 @@ private:
 	// --- Receiver ---
 	TSharedPtr<FSyncClient> SyncClient;
 	FCriticalSection EventQueueCS;
-	TArray<TArray<uint8>> EventQueue;
+	TArray<FQueuedReceiverFrame> EventQueue;
 
 	// --- Emitter ---
 	TSharedPtr<FEmitClient> EmitClient;
+	TSharedPtr<FProducerEndpointState> ProducerState;
 
 	/**
 	 * Transform prims whose structural xform-op prerequisite has been sent on
@@ -195,11 +204,6 @@ private:
 
 	/** Stable client ID shared by both receiver and emitter connections */
 	FString ClientId;
-	/** Random session origin shared by both connections */
-	FString SessionOrigin;
-	/** Strictly ordered durable producer transaction ID within SessionOrigin. */
-	uint64 NextProducerTxnId = 1;
-
 	/**
 	 * When true, Tick() will perform the auto-connect on the first tick that runs
 	 * AFTER the world is fully initialized. This avoids spawning TCP threads from
@@ -221,6 +225,7 @@ private:
 
 	/** New native transactions remain gated until replay is applied on the game thread. */
 	std::atomic<bool> bReplaySynchronized;
+	std::atomic<uint64> ActiveReplayGeneration;
 	int32 ReplayHeadSeq = 0;
 	uint64 ReplayEpoch = 0;
 

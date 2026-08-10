@@ -20,20 +20,182 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDEmit, Log, All);
 using namespace OUC;
 
 // ---------------------------------------------------------------------------
+FProducerEndpointState::FProducerEndpointState(
+	const FString& InHost,
+	int32 InPort,
+	const FString& InDepartment,
+	const FString& InSessionId)
+	: Host(InHost)
+	, Port(InPort)
+	, Department(InDepartment)
+	, SessionId(InSessionId)
+{
+}
+
+bool FProducerEndpointState::MatchesEndpoint(
+	const FString& InHost,
+	int32 InPort,
+	const FString& InDepartment) const
+{
+	return Host == InHost && Port == InPort && Department == InDepartment;
+}
+
+uint64 FProducerEndpointState::GetNextTransactionId() const
+{
+	FScopeLock Lock(&StateCS);
+	return NextTransactionId;
+}
+
+bool FProducerEndpointState::EnqueueFrame(uint64 TxnId, TArray<uint8>&& Frame)
+{
+	if (Frame.Num() == 0) return false;
+	FScopeLock Lock(&StateCS);
+	if (bRecoveryRequired || TxnId != NextTransactionId) return false;
+
+	FQueuedProducerTxn Queued;
+	Queued.TxnId = TxnId;
+	Queued.Frame = MakeShared<TArray<uint8>>(MoveTemp(Frame));
+	PendingTxns.Add(MoveTemp(Queued));
+	++NextTransactionId;
+	++SubmittedTransactionCount;
+	return true;
+}
+
+bool FProducerEndpointState::ClaimNextUnsent(FQueuedProducerTxn& OutTxn)
+{
+	FScopeLock Lock(&StateCS);
+	if (bRecoveryRequired || NextUnsentIndex >= PendingTxns.Num()) return false;
+	OutTxn = PendingTxns[NextUnsentIndex++];
+	return true;
+}
+
+void FProducerEndpointState::MarkAllUnsent()
+{
+	FScopeLock Lock(&StateCS);
+	NextUnsentIndex = PendingHead;
+}
+
+bool FProducerEndpointState::AcceptServerHighwater(
+	uint64 CommittedThrough,
+	FString& OutError)
+{
+	FScopeLock Lock(&StateCS);
+	if (bRecoveryRequired)
+	{
+		OutError = RecoveryReason;
+		return false;
+	}
+
+	const uint64 HighestSubmitted = NextTransactionId - 1;
+	if (CommittedThrough > HighestSubmitted)
+	{
+		OutError = FString::Printf(
+			TEXT("Server reports transaction %llu for producer session whose local highwater is %llu"),
+			CommittedThrough,
+			HighestSubmitted);
+		bRecoveryRequired = true;
+		RecoveryReason = OutError;
+		return false;
+	}
+	if (CommittedThrough < LastAcknowledgedTxnId)
+	{
+		OutError = FString::Printf(
+			TEXT("Server producer highwater regressed from %llu to %llu"),
+			LastAcknowledgedTxnId,
+			CommittedThrough);
+		bRecoveryRequired = true;
+		RecoveryReason = OutError;
+		return false;
+	}
+
+	uint64 Removed = 0;
+	while (PendingHead < PendingTxns.Num()
+		&& PendingTxns[PendingHead].TxnId <= CommittedThrough)
+	{
+		++PendingHead;
+		++Removed;
+	}
+	AcknowledgedTransactionCount += Removed;
+	LastAcknowledgedTxnId = FMath::Max(LastAcknowledgedTxnId, CommittedThrough);
+	NextUnsentIndex = FMath::Max(NextUnsentIndex, PendingHead);
+	CompactLocked();
+	return true;
+}
+
+void FProducerEndpointState::RetireThrough(uint64 AckId)
+{
+	FScopeLock Lock(&StateCS);
+	uint64 Removed = 0;
+	while (PendingHead < PendingTxns.Num() && PendingTxns[PendingHead].TxnId <= AckId)
+	{
+		++PendingHead;
+		++Removed;
+	}
+	AcknowledgedTransactionCount += Removed;
+	LastAcknowledgedTxnId = FMath::Max(LastAcknowledgedTxnId, AckId);
+	NextUnsentIndex = FMath::Max(NextUnsentIndex, PendingHead);
+	CompactLocked();
+}
+
+void FProducerEndpointState::MarkRejected(uint64 TxnId, const FString& Reason)
+{
+	FScopeLock Lock(&StateCS);
+	bRecoveryRequired = true;
+	RecoveryReason = Reason.IsEmpty()
+		? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
+		: FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason);
+}
+
+uint64 FProducerEndpointState::GetSubmittedTransactionCount() const
+{
+	FScopeLock Lock(&StateCS);
+	return SubmittedTransactionCount;
+}
+
+uint64 FProducerEndpointState::GetAcknowledgedTransactionCount() const
+{
+	FScopeLock Lock(&StateCS);
+	return AcknowledgedTransactionCount;
+}
+
+uint64 FProducerEndpointState::GetPendingTransactionCount() const
+{
+	FScopeLock Lock(&StateCS);
+	return static_cast<uint64>(PendingTxns.Num() - PendingHead);
+}
+
+bool FProducerEndpointState::IsRecoveryRequired() const
+{
+	FScopeLock Lock(&StateCS);
+	return bRecoveryRequired;
+}
+
+FString FProducerEndpointState::GetRecoveryReason() const
+{
+	FScopeLock Lock(&StateCS);
+	return RecoveryReason;
+}
+
+void FProducerEndpointState::CompactLocked()
+{
+	if (PendingHead < 1024 || PendingHead * 2 < PendingTxns.Num()) return;
+	PendingTxns.RemoveAt(0, PendingHead, EAllowShrinking::No);
+	NextUnsentIndex = FMath::Max(0, NextUnsentIndex - PendingHead);
+	PendingHead = 0;
+}
+
+// ---------------------------------------------------------------------------
 FEmitClient::FEmitClient(UUSDConnectSubsystem* InOwner,
-                         const FString& InHost, int32 InPort,
-                         const FString& InDepartment,
                          const FString& InClientId,
-                         const FString& InSessionOrigin,
+                         const TSharedRef<FProducerEndpointState>& InProducerState,
                          float InReconnectDelaySecs,
-                         const FString& InAuthToken)
-	: Owner(InOwner), Host(InHost), Port(InPort), Department(InDepartment)
-	, ClientId(InClientId), SessionOrigin(InSessionOrigin), AuthToken(InAuthToken)
+	const FString& InAuthToken)
+	: Owner(InOwner), ProducerState(InProducerState)
+	, ClientId(InClientId)
+	, AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
 	, Socket(nullptr), Thread(nullptr)
 	, bShouldStop(false), bConnected(false), ConnectionGeneration(0)
-	, SubmittedTransactionCount(0), AcknowledgedTransactionCount(0)
-	, PendingTransactionCount(0), bRecoveryRequired(false)
 {
 }
 
@@ -61,41 +223,25 @@ void FEmitClient::StopAndWait()
 bool FEmitClient::FlushPending(double TimeoutSeconds) const
 {
 	const double Deadline = FPlatformTime::Seconds() + FMath::Max(0.0, TimeoutSeconds);
-	while (PendingTransactionCount.load(std::memory_order_acquire) > 0
-		&& !bRecoveryRequired.load(std::memory_order_acquire)
+	while (ProducerState->GetPendingTransactionCount() > 0
+		&& !ProducerState->IsRecoveryRequired()
 		&& FPlatformTime::Seconds() < Deadline)
 	{
 		FPlatformProcess::Sleep(0.005f);
 	}
-	return PendingTransactionCount.load(std::memory_order_acquire) == 0;
+	return ProducerState->GetPendingTransactionCount() == 0
+		&& !ProducerState->IsRecoveryRequired();
 }
 
 bool FEmitClient::Init() { return true; }
 
 uint32 FEmitClient::Run()
 {
-	TArray<FQueuedProducerTxn> PendingTxns;
-	int32 PendingHead = 0;
-	auto RetireThrough = [this, &PendingTxns, &PendingHead](uint64 AckId)
-	{
-		uint64 Removed = 0;
-		while (PendingHead < PendingTxns.Num()
-			&& PendingTxns[PendingHead].TxnId <= AckId)
-		{
-			++PendingHead;
-			++Removed;
-		}
-		if (Removed > 0)
-		{
-			PendingTransactionCount.fetch_sub(Removed, std::memory_order_relaxed);
-			AcknowledgedTransactionCount.fetch_add(Removed, std::memory_order_relaxed);
-		}
-		if (PendingHead >= 1024 && PendingHead * 2 >= PendingTxns.Num())
-		{
-			PendingTxns.RemoveAt(0, PendingHead, EAllowShrinking::No);
-			PendingHead = 0;
-		}
-	};
+	const FString& Host = ProducerState->GetHost();
+	const int32 Port = ProducerState->GetPort();
+	const FString& Department = ProducerState->GetDepartment();
+	const FString& SessionOrigin = ProducerState->GetSessionId();
+	ProducerState->MarkAllUnsent();
 	while (!bShouldStop.load(std::memory_order_relaxed))
 	{
 		// --- Connect ---
@@ -165,7 +311,19 @@ uint32 FEmitClient::Run()
 			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
 			if (HelloOk)
 			{
-				RetireThrough(HelloOk->committed_through());
+				FString HighwaterError;
+				if (!ProducerState->AcceptServerHighwater(
+					HelloOk->committed_through(), HighwaterError))
+				{
+					UE_LOG(LogUSDEmit, Error, TEXT("Producer recovery required: %s"), *HighwaterError);
+					if (Owner)
+					{
+						Owner->OnEmitterTransactionRejected(
+							HelloOk->committed_through(), HighwaterError);
+					}
+					CloseSocket();
+					return 0;
+				}
 			}
 			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
 			if (Owner) { Owner->OnClientHelloOk(TEXT("emitter")); }
@@ -185,29 +343,21 @@ uint32 FEmitClient::Run()
 		float RateLimitDelay = 0.0f;
 		while (!bShouldStop.load(std::memory_order_relaxed) && !bShouldDisconnect)
 		{
-			// 1. Adopt queued frames into the thread-owned outbox, then send
-			// every item not yet written on this connection. Items remain until
-			// a committed/duplicate TransactionResult arrives.
+			// 1. Claim and send every endpoint-state transaction not yet written
+			// on this connection. Items remain owned by ProducerState until a
+			// committed/duplicate TransactionResult arrives.
 			bool bDidWork = false;
-			FQueuedProducerTxn Queued;
-			while (SendQueue.Dequeue(Queued))
+			FQueuedProducerTxn Pending;
+			while (ProducerState->ClaimNextUnsent(Pending))
 			{
-				PendingTxns.Add(MoveTemp(Queued));
-				bDidWork = true;
-			}
-			for (int32 PendingIndex = PendingHead;
-				PendingIndex < PendingTxns.Num(); ++PendingIndex)
-			{
-				FQueuedProducerTxn& Pending = PendingTxns[PendingIndex];
-				if (Pending.bSent) continue;
-				if (!SendAll(Pending.Frame.GetData(), Pending.Frame.Num()))
+				if (!Pending.Frame.IsValid()
+					|| !SendAll(Pending.Frame->GetData(), Pending.Frame->Num()))
 				{
 					UE_LOG(LogUSDEmit, Warning,
 						TEXT("Emitter send failed for txn %llu"), Pending.TxnId);
 					bShouldDisconnect = true;
 					break;
 				}
-				Pending.bSent = true;
 				bDidWork = true;
 			}
 			if (bShouldDisconnect) break;
@@ -248,14 +398,14 @@ uint32 FEmitClient::Run()
 							UE_LOG(LogUSDEmit, Error,
 								TEXT("Transaction %llu rejected: %s"),
 								AckId, *Reason);
-							bRecoveryRequired.store(true, std::memory_order_release);
+							ProducerState->MarkRejected(AckId, Reason);
 							if (Owner) { Owner->OnEmitterTransactionRejected(AckId, Reason); }
 							bShouldStop.store(true, std::memory_order_relaxed);
 							bShouldDisconnect = true;
 						}
 						else
 						{
-							RetireThrough(AckId);
+							ProducerState->RetireThrough(AckId);
 						}
 					}
 				}
@@ -279,11 +429,7 @@ uint32 FEmitClient::Run()
 
 		bConnected.store(false, std::memory_order_relaxed);
 		CloseSocket();
-		for (int32 PendingIndex = PendingHead;
-			PendingIndex < PendingTxns.Num(); ++PendingIndex)
-		{
-			PendingTxns[PendingIndex].bSent = false;
-		}
+		ProducerState->MarkAllUnsent();
 		if (!bShouldStop.load(std::memory_order_relaxed))
 		{
 			UE_LOG(LogUSDEmit, Log,
@@ -308,14 +454,9 @@ void FEmitClient::Exit()
 	CloseSocket();
 }
 
-void FEmitClient::EnqueueFrame(uint64 TxnId, TArray<uint8>&& Frame)
+bool FEmitClient::EnqueueFrame(uint64 TxnId, TArray<uint8>&& Frame)
 {
-	FQueuedProducerTxn Queued;
-	Queued.TxnId = TxnId;
-	Queued.Frame = MoveTemp(Frame);
-	SubmittedTransactionCount.fetch_add(1, std::memory_order_relaxed);
-	PendingTransactionCount.fetch_add(1, std::memory_order_relaxed);
-	SendQueue.Enqueue(MoveTemp(Queued));
+	return ProducerState->EnqueueFrame(TxnId, MoveTemp(Frame));
 }
 
 // ---------------------------------------------------------------------------

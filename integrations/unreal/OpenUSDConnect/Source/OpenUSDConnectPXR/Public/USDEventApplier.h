@@ -32,7 +32,7 @@ public:
 	 *        (empty for stage-scoped events).
 	 * @param OutEventKind  Optional: receives the wire event kind.
 	 */
-	static void ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+	static bool ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
 	                       FString* OutTouchedPrim = nullptr,
 	                       OpenUSDConnect::EventPayload* OutEventKind = nullptr);
 

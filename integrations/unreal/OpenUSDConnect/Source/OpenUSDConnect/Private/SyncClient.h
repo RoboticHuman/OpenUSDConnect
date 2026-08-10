@@ -17,10 +17,10 @@ class UUSDConnectSubsystem;
  *  2. Send Envelope{Hello, role="receiver"} with shared ClientId + SessionOrigin
  *  3. Read Envelope{HelloOk} — auth handshake
  *  4. Loop: read 4-byte big-endian length + FlatBuffers payload
- *       - BroadcastEvent → enqueue raw bytes (echo-suppressed by SessionOrigin)
+ *       - BroadcastEvent → validate contiguous receipt and enqueue raw bytes
  *       - Ping → ignore
  *       - RateLimited → sleep retry_after seconds
- *       - Resync → reset LastSeq (server will replay from 0)
+ *       - Resync → begin a new replay generation from sequence zero
  *  5. On error: close socket, wait ReconnectDelaySecs, goto 1.
  *
  * Stop signalling: setting bShouldStop + closing the socket unblocks any pending Recv.
@@ -50,12 +50,16 @@ public:
 	void StopAndWait();
 
 	bool IsConnected() const { return bConnected.load(std::memory_order_relaxed); }
+	int32 GetLastAppliedSeq() const { return LastAppliedSeq.load(std::memory_order_acquire); }
+	void MarkAppliedThrough(int32 Seq);
+	void ResetAppliedProgress();
+	void RequestReplayFromApplied();
 
 private:
 	bool RecvExact(uint8* Buf, int32 Needed);
 	bool RecvFrame(TArray<uint8>& OutFrame);
 	bool SendAll(const uint8* Data, int32 Len);
-	void HandleFrame(const TArray<uint8>& Frame);
+	bool HandleFrame(const TArray<uint8>& Frame);
 	void InterruptSocket();
 	void CloseSocket();
 
@@ -68,7 +72,9 @@ private:
 	FString SessionOrigin;  // shared with FEmitClient — used for echo suppression
 	FString AuthToken;
 	float   ReconnectDelaySecs;
-	int32   LastSeq;        // recv-thread only — no synchronization needed
+	int32   LastReceivedSeq; // recv-thread only; validates the current socket stream
+	std::atomic<int32> LastAppliedSeq; // game-thread durable replay cursor
+	uint64 ReplayGeneration = 0; // recv-thread only
 
 	FSocket*         Socket;
 	FCriticalSection SocketCS;

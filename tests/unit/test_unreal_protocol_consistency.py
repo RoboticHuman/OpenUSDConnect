@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from integrations.unreal.test_scenario import _preview_surface_events
 from openusdconnect.codec import SCHEMA_VERSION
 from openusdconnect.protocol_constants import PROTOCOL_VERSION
 
@@ -28,65 +29,34 @@ def test_unreal_wire_versions_match_python_core():
     assert protocol and int(protocol.group(1)) == PROTOCOL_VERSION
 
 
-def test_native_unreal_emitter_keeps_outbox_across_reconnect_until_ack():
+def test_native_unreal_reliability_architecture_stays_explicit():
     root = Path(__file__).resolve().parents[2]
-    source = (
-        root
-        / "integrations"
-        / "unreal"
-        / "OpenUSDConnect"
-        / "Source"
-        / "OpenUSDConnect"
-        / "Private"
-        / "EmitClient.cpp"
+    plugin = root / "integrations" / "unreal" / "OpenUSDConnect" / "Source"
+    emitter = (
+        plugin / "OpenUSDConnect" / "Private" / "EmitClient.h"
+    ).read_text(encoding="utf-8")
+    receiver = (
+        plugin / "OpenUSDConnect" / "Private" / "SyncClient.h"
+    ).read_text(encoding="utf-8")
+    subsystem = (
+        plugin / "OpenUSDConnect" / "Private" / "USDConnectSubsystem.cpp"
+    ).read_text(encoding="utf-8")
+    subsystem_header = (
+        plugin / "OpenUSDConnect" / "Public" / "USDConnectSubsystem.h"
+    ).read_text(encoding="utf-8")
+    applier = (
+        plugin / "OpenUSDConnectPXR" / "Public" / "USDEventApplier.h"
     ).read_text(encoding="utf-8")
 
-    outbox = source.index("TArray<FQueuedProducerTxn> PendingTxns;")
-    retire = source.index("auto RetireThrough", outbox)
-    connect_loop = source.index("while (!bShouldStop.load", outbox)
-    acknowledge = source.index("payload_as_TransactionResult", connect_loop)
-    cumulative_remove = source.index("RetireThrough(AckId)", acknowledge)
-    reconnect_reset = source.index("bSent = false", cumulative_remove)
-
-    assert outbox < retire < connect_loop < acknowledge < cumulative_remove < reconnect_reset
-    assert "PendingTxns.Add(MoveTemp(Queued))" in source[connect_loop:acknowledge]
-    assert "PendingTxns[PendingHead].TxnId <= AckId" in source[retire:connect_loop]
-    assert "HelloOk->committed_through()" in source[connect_loop:acknowledge]
-
-
-def test_native_unreal_emitter_drains_results_and_exposes_recovery_status():
-    root = Path(__file__).resolve().parents[2]
-    plugin = root / "integrations" / "unreal" / "OpenUSDConnect" / "Source" / "OpenUSDConnect"
-    source = (plugin / "Private" / "EmitClient.cpp").read_text(encoding="utf-8")
-    header = (plugin / "Private" / "EmitClient.h").read_text(encoding="utf-8")
-    subsystem = (plugin / "Public" / "USDConnectSubsystem.h").read_text(encoding="utf-8")
-
-    assert "MaxResultsPerIteration = 256" in source
-    assert "ResultIndex < MaxResultsPerIteration" in source
-    assert "PendingTransactionCount.fetch_sub" in source
-    assert "bRecoveryRequired.store(true" in source
-    assert "GetPendingTransactionCount" in header
-    assert "PendingTransactions" in subsystem
-    assert "bRecoveryRequired" in subsystem
-
-
-def test_native_unreal_emitter_exposes_bounded_durability_flush():
-    root = Path(__file__).resolve().parents[2]
-    plugin = root / "integrations" / "unreal" / "OpenUSDConnect" / "Source" / "OpenUSDConnect"
-    source = (plugin / "Private" / "EmitClient.cpp").read_text(encoding="utf-8")
-    header = (plugin / "Private" / "EmitClient.h").read_text(encoding="utf-8")
-    subsystem_header = (plugin / "Public" / "USDConnectSubsystem.h").read_text(
-        encoding="utf-8"
-    )
-    subsystem_source = (plugin / "Private" / "USDConnectSubsystem.cpp").read_text(
-        encoding="utf-8"
-    )
-
-    assert "bool FEmitClient::FlushPending(double TimeoutSeconds) const" in source
-    assert "PendingTransactionCount.load(std::memory_order_acquire)" in source
-    assert "bool FlushPending(double TimeoutSeconds) const" in header
-    assert "bool Flush(float TimeoutSeconds = 5.0f) const" in subsystem_header
-    assert "EmitClient->FlushPending(2.0)" in subsystem_source
+    assert "class FProducerEndpointState" in emitter
+    assert "TSharedPtr<FProducerEndpointState> ProducerState" in subsystem_header
+    assert "NextProducerTxnId" not in subsystem_header
+    assert "LastAppliedSeq" in receiver
+    assert "TArray<FQueuedReceiverFrame> EventQueue" in subsystem_header
+    assert "OnReceiverReplayGenerationChanged" in subsystem
+    assert "RequestReceiverReplay(" in subsystem
+    assert "EventQueue.RemoveAt(0, ToDrop" not in subsystem
+    assert "static bool ApplyFrame" in applier
 
 
 def test_native_unreal_department_receiver_fails_closed():
@@ -106,3 +76,19 @@ def test_native_unreal_department_receiver_fails_closed():
     reject = source.index('TEXT("unsupported_configuration")', guard)
     start_receiver = source.index("if (bStartReceiver)", reject)
     assert guard < reject < start_receiver
+
+
+def test_real_editor_scenario_exercises_compiled_instancing_appliers():
+    _baseline, initial, updates = _preview_surface_events("color.jpg", "roughness.jpg")
+
+    instanceable = [event for event in initial if event["k"] == "set_instanceable"]
+    point_instancers = [
+        event for event in (*initial, *updates) if event["k"] == "set_point_instancer"
+    ]
+
+    assert instanceable == [
+        {"k": "set_instanceable", "prim": "/World/InstanceBall", "instanceable": True}
+    ]
+    assert len(point_instancers) == 2
+    assert point_instancers[0]["fields"] == ["prototypes", "proto_indices", "positions"]
+    assert point_instancers[1]["fields"] == ["positions"]
