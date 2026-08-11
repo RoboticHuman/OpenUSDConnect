@@ -67,16 +67,16 @@ def _pump(cycles=50, delay=0.05):
     from integrations.blender import receiver_addon
 
     for i in range(cycles):
-        # Drain receiver via the dispatcher.  ``_drain_and_process`` lazily
+        # Drain receiver via the dispatcher. ``_drain_and_apply_remote_events`` lazily
         # builds the dispatcher on first call when ``_RECEIVER`` is set
         # directly (test setup bypasses the start_receiver operator).
         if receiver_addon._RECEIVER is not None:
-            receiver_addon._set_applying_remote(True)
+            receiver_addon._set_remote_apply_guard(True)
             try:
-                receiver_addon._drain_and_process()
+                receiver_addon._drain_and_apply_remote_events()
                 bpy.context.view_layer.update()
             finally:
-                receiver_addon._set_applying_remote(False)
+                receiver_addon._set_remote_apply_guard(False)
 
         # Force depsgraph + emitter
         bpy.context.view_layer.update()

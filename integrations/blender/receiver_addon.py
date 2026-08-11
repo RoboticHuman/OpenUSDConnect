@@ -22,6 +22,12 @@ except Exception:
 
 from openusdconnect import token_client
 from openusdconnect.dispatcher import EventDispatcher
+from openusdconnect.protocol_constants import (
+    K_ENSURE_PRIM,
+    K_ENSURE_XFORM_OPS,
+    K_SET_GPRIM_ATTRS,
+    K_SET_XFORM_TRS,
+)
 from openusdconnect.receiver import ReceiverThread
 
 from . import SESSION_ORIGIN as _ORIGIN
@@ -36,29 +42,31 @@ _MIRROR_STAGE = None
 _MIRROR_SOURCE = ""
 _MIRROR_ENDPOINT: tuple[str, int] | None = None
 _MIRROR_LAYERED_REPLAY: bool | None = None
-_QUEUE_TIMER_REGISTERED = False
-# Prim paths that need emitter cache seeding after view_layer.update().
-_pending_seed_paths: set[str] = set()
-# Shader prim paths whose reverse-sync baselines need seeding after apply.
-_pending_shader_seed_paths: set[str] = set()
+_RECEIVER_TIMER_REGISTERED = False
+# Imported prim roots whose emitter caches need seeding after view_layer.update().
+_pending_import_seed_paths: set[str] = set()
+# Applied prim paths whose evaluated transform baselines must be refreshed.
+_pending_object_baseline_paths: set[str] = set()
+# Shader prim paths whose reverse-sync state must be refreshed after apply.
+_pending_shader_baseline_paths: set[str] = set()
 # Feedback loop guard: set True while applying remote events
 _APPLYING_REMOTE = False
 # Track last sequence number across reconnects
 _LAST_SEQ: int = 0
 # Lazy-cached reference to the capture module (avoids per-call import overhead)
-_capture_mod = None
+_capture_module = None
 
 
-def _get_capture_mod():
-    global _capture_mod
-    if _capture_mod is None:
+def _get_capture_module():
+    global _capture_module
+    if _capture_module is None:
         try:
             from . import capture
 
-            _capture_mod = capture
+            _capture_module = capture
         except ImportError:
             pass
-    return _capture_mod
+    return _capture_module
 
 
 def _ensure_scene_props():
@@ -108,9 +116,9 @@ def _ensure_adapter():
     up_axis = "Y"  # default — most USD scenes are Y-up
     source_stage = _MIRROR_STAGE
     if source_stage is None:
-        cap = _get_capture_mod()
-        if cap is not None and getattr(cap, "_state", None) is not None:
-            author = getattr(cap._state, "author", None)
+        capture_module = _get_capture_module()
+        if capture_module is not None and getattr(capture_module, "_state", None) is not None:
+            author = getattr(capture_module._state, "author", None)
             source_stage = author.stage if author is not None else None
     if source_stage is not None:
         from pxr import UsdGeom
@@ -121,9 +129,9 @@ def _ensure_adapter():
 
 
 def _configured_base_path() -> str:
-    cap = _get_capture_mod()
-    if cap is not None and getattr(cap, "_state", None) is not None:
-        author = getattr(cap._state, "author", None)
+    capture_module = _get_capture_module()
+    if capture_module is not None and getattr(capture_module, "_state", None) is not None:
+        author = getattr(capture_module._state, "author", None)
         if author is not None:
             return os.path.abspath(author.base_usd_path)
     scene = bpy.context.scene
@@ -207,17 +215,18 @@ def _discard_replay_state() -> None:
     _MIRROR_SOURCE = ""
     _MIRROR_ENDPOINT = None
     _MIRROR_LAYERED_REPLAY = None
-    _pending_seed_paths.clear()
-    _pending_shader_seed_paths.clear()
+    _pending_import_seed_paths.clear()
+    _pending_object_baseline_paths.clear()
+    _pending_shader_baseline_paths.clear()
 
 
-def _set_applying_remote(value: bool):
+def _set_remote_apply_guard(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
     global _APPLYING_REMOTE
     _APPLYING_REMOTE = value
-    cap = _get_capture_mod()
-    if cap is not None:
-        cap.set_emitter_feedback_guard(value)
+    capture_module = _get_capture_module()
+    if capture_module is not None:
+        capture_module.set_emitter_feedback_guard(value)
 
 
 def _stop_receiver_thread(receiver: ReceiverThread) -> None:
@@ -237,7 +246,7 @@ def _store_last_sequence(scene, value: int) -> None:
         LOG.debug("Could not persist receiver sequence", exc_info=True)
 
 
-def _seed_shader_maps(author, adapter, prim_path: str):
+def _refresh_shader_reverse_sync_state(author, adapter, prim_path: str):
     """Seed the author's reverse-sync state for shaders at or under prim_path.
 
     Multi-node shaders: copy the adapter's cached ``input_map`` socket dicts
@@ -374,7 +383,7 @@ def _apply_pending_playback_state() -> None:
     """Drain the latest PlaybackState onto the Blender timeline.
 
     Called from the queue timer (main thread) under the
-    ``_set_applying_remote`` guard so the resulting depsgraph_update_post
+    ``_set_remote_apply_guard`` so the resulting depsgraph_update_post
     callbacks don't echo the frame change back to the server.
     """
     global _LATEST_PLAYBACK_STATE
@@ -425,30 +434,54 @@ def _on_imported(prim_paths: list[str]) -> None:
     in the timer cycle (after view_layer.update) so matrices reflect
     the final evaluated state.
     """
-    _pending_seed_paths.update(prim_paths)
+    _pending_import_seed_paths.update(prim_paths)
 
 
 def _on_applied(prim_paths: list[str]) -> None:
-    """Collect applied prim paths that hold shader state for baseline seeding.
+    """Collect applied shader paths for post-evaluation baseline refresh.
 
-    Filtered to paths the adapter's registry knows as shaders, so transform
-    spam never reaches the seeding loop.  Seeding itself is deferred to the
-    timer cycle alongside the import seeding.
+    Shader baseline work is filtered to paths known by the adapter registry.
     """
     if _ADAPTER is None:
         return
     registry = _ADAPTER._registry
-    _pending_shader_seed_paths.update(
-        pp for pp in prim_paths if registry.get_shader(pp)
+    _pending_shader_baseline_paths.update(
+        prim_path for prim_path in prim_paths if registry.get_shader(prim_path)
     )
+
+
+_OBJECT_DIRTYING_EVENT_KINDS = frozenset(
+    {K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_GPRIM_ATTRS},
+)
+
+
+def _on_applied_events(events: list[dict]) -> None:
+    """Collect object paths that may fire delayed depsgraph callbacks.
+
+    Filtering here keeps the post-evaluation refresh O(changed object paths)
+    even for transactions containing large material or shader networks.
+    """
+    for event in events:
+        kind = event.get("k")
+        prim_path = event.get("prim")
+        if not prim_path:
+            continue
+        if kind in _OBJECT_DIRTYING_EVENT_KINDS:
+            _pending_object_baseline_paths.add(prim_path)
+            continue
+        if kind == K_ENSURE_PRIM:
+            type_name = event.get("typeName", "Xform")
+            if type_name != "DomeLight" and type_name not in BlenderAdapter._NON_SCENE_TYPES:
+                _pending_object_baseline_paths.add(prim_path)
 
 
 def _on_resync() -> None:
     """Reset the adapter so all caches (including _imported_refs) are clean."""
     global _ADAPTER
     LOG.info("Server requested resync — resetting adapter")
-    _pending_seed_paths.clear()
-    _pending_shader_seed_paths.clear()
+    _pending_import_seed_paths.clear()
+    _pending_object_baseline_paths.clear()
+    _pending_shader_baseline_paths.clear()
     mirror_stage = _ensure_mirror_stage(reset=True)
     _ADAPTER = None
     if _DISPATCHER is not None:
@@ -469,10 +502,11 @@ def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
         on_imported=_on_imported,
         on_resync=_on_resync,
         on_applied=_on_applied,
+        on_applied_events=_on_applied_events,
     )
 
 
-def _drain_and_process() -> int:
+def _drain_and_apply_remote_events() -> int:
     """Apply one queued batch through the receiver's layered USD mirror."""
     global _LAST_SEQ, _DISPATCHER
     if _RECEIVER is None:
@@ -488,14 +522,14 @@ def _drain_and_process() -> int:
     _DISPATCHER.adapter.mirror_stage = mirror_stage
 
     _DISPATCHER.last_seq = _LAST_SEQ
-    applied = _DISPATCHER.drain_and_apply()
+    applied_count = _DISPATCHER.drain_and_apply()
     _LAST_SEQ = _DISPATCHER.last_seq
-    return applied
+    return applied_count
 
 
-def _process_queue_timer():
+def _apply_received_events_timer():
     """Apply queued events and refresh Blender under the feedback guard."""
-    global _QUEUE_TIMER_REGISTERED, _RECEIVER
+    global _RECEIVER_TIMER_REGISTERED, _RECEIVER
     if _RECEIVER is None:
         return None  # Unregister timer
 
@@ -505,7 +539,7 @@ def _process_queue_timer():
         receiver = _RECEIVER
         _RECEIVER = None
         _stop_receiver_thread(receiver)
-        _QUEUE_TIMER_REGISTERED = False
+        _RECEIVER_TIMER_REGISTERED = False
         scene = bpy.context.scene
         if scene is not None:
             scene.usd_connect_recv_running = False
@@ -513,14 +547,14 @@ def _process_queue_timer():
 
     # Hold the feedback guard for the entire batch INCLUDING view_layer.update()
     # so the depsgraph handler doesn't echo received changes back to the server.
-    _set_applying_remote(True)
+    _set_remote_apply_guard(True)
     try:
-        applied = _drain_and_process()
+        applied_count = _drain_and_apply_remote_events()
         # Apply the latest PlaybackState (if any) under the same guard so
         # frame_set's recursive depsgraph eval stays suppressed.
         _apply_pending_playback_state()
 
-        if applied > 0:
+        if applied_count > 0:
             # Refresh viewport once after processing all events (not per-event)
             try:
                 if bpy.context.view_layer:
@@ -533,21 +567,46 @@ def _process_queue_timer():
             # before the update captures stale matrices that won't match the
             # next depsgraph evaluation, causing the emitter to re-process
             # every imported object.
-            if _pending_seed_paths or _pending_shader_seed_paths:
-                cap = _get_capture_mod()
-                if cap is not None:
-                    for pp in _pending_seed_paths:
-                        cap.seed_emitter_caches_for_import(pp)
+            if (
+                _pending_import_seed_paths
+                or _pending_object_baseline_paths
+                or _pending_shader_baseline_paths
+            ):
+                capture_module = _get_capture_module()
+                if capture_module is not None:
+                    changed_objects_by_prim = {}
+                    if _ADAPTER is not None:
+                        registry = _ADAPTER._registry
+                        for prim_path in _pending_object_baseline_paths:
+                            obj = registry.find(prim_path)
+                            if obj is not None:
+                                changed_objects_by_prim[prim_path] = obj
+                    capture_module.refresh_transform_baselines_after_remote_apply(
+                        changed_objects_by_prim,
+                    )
+                    for prim_path in _pending_import_seed_paths:
+                        capture_module.seed_emitter_caches_for_import(prim_path)
                     # Seed reverse-sync shader state (input maps + value
                     # baselines) for imported subtrees and applied shader
                     # prims so the emitter can read values back.
-                    if cap._state.author is not None and _ADAPTER is not None:
-                        for pp in _pending_seed_paths | _pending_shader_seed_paths:
-                            _seed_shader_maps(cap._state.author, _ADAPTER, pp)
-                _pending_seed_paths.clear()
-                _pending_shader_seed_paths.clear()
+                    if (
+                        capture_module._state.author is not None
+                        and _ADAPTER is not None
+                    ):
+                        for prim_path in (
+                            _pending_import_seed_paths
+                            | _pending_shader_baseline_paths
+                        ):
+                            _refresh_shader_reverse_sync_state(
+                                capture_module._state.author,
+                                _ADAPTER,
+                                prim_path,
+                            )
+                _pending_import_seed_paths.clear()
+                _pending_object_baseline_paths.clear()
+                _pending_shader_baseline_paths.clear()
     finally:
-        _set_applying_remote(False)
+        _set_remote_apply_guard(False)
 
     scene = bpy.context.scene
     if scene:
@@ -556,15 +615,15 @@ def _process_queue_timer():
     return 0.01  # Run again in 10ms
 
 
-def _unregister_queue_timer() -> None:
-    global _QUEUE_TIMER_REGISTERED
+def _unregister_receiver_timer() -> None:
+    global _RECEIVER_TIMER_REGISTERED
     if (
         BPY_AVAILABLE
-        and _QUEUE_TIMER_REGISTERED
-        and bpy.app.timers.is_registered(_process_queue_timer)
+        and _RECEIVER_TIMER_REGISTERED
+        and bpy.app.timers.is_registered(_apply_received_events_timer)
     ):
-        bpy.app.timers.unregister(_process_queue_timer)
-    _QUEUE_TIMER_REGISTERED = False
+        bpy.app.timers.unregister(_apply_received_events_timer)
+    _RECEIVER_TIMER_REGISTERED = False
 
 
 class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
@@ -573,7 +632,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
     bl_description = "Connect to the sync server and receive scene edits"
 
     def execute(self, context):
-        global _RECEIVER, _DISPATCHER, _QUEUE_TIMER_REGISTERED, _LAST_SEQ, _ADAPTER
+        global _RECEIVER, _DISPATCHER, _RECEIVER_TIMER_REGISTERED, _LAST_SEQ, _ADAPTER
         global _MIRROR_ENDPOINT, _MIRROR_LAYERED_REPLAY
         if _RECEIVER is not None:
             self.report({"INFO"}, "Receiver already running")
@@ -636,9 +695,9 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             _DISPATCHER.last_seq = _LAST_SEQ
             _MIRROR_ENDPOINT = (host, port)
             _MIRROR_LAYERED_REPLAY = plan.layered_replay
-            if not _QUEUE_TIMER_REGISTERED:
-                bpy.app.timers.register(_process_queue_timer, first_interval=0.01)
-                _QUEUE_TIMER_REGISTERED = True
+            if not _RECEIVER_TIMER_REGISTERED:
+                bpy.app.timers.register(_apply_received_events_timer, first_interval=0.01)
+                _RECEIVER_TIMER_REGISTERED = True
             scene.usd_connect_recv_running = True
             self.report(
                 {"INFO"},
@@ -651,7 +710,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             if _RECEIVER is not None:
                 _stop_receiver_thread(_RECEIVER)
                 _RECEIVER = None
-            _unregister_queue_timer()
+            _unregister_receiver_timer()
             scene.usd_connect_recv_running = False
             self.report({"ERROR"}, f"Failed to start receiver: {exc}")
             return {"CANCELLED"}
@@ -669,7 +728,7 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
             _RECEIVER = None
             _stop_receiver_thread(receiver)
             _store_last_sequence(context.scene, _LAST_SEQ)
-        _unregister_queue_timer()
+        _unregister_receiver_timer()
         context.scene.usd_connect_recv_running = False
         self.report({"INFO"}, f"Receiver stopped at seq={_LAST_SEQ}")
         return {"FINISHED"}
@@ -677,10 +736,10 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
 
 def _get_active_sender():
     """Locate the EventSender owned by the capture module, if any."""
-    cap = _get_capture_mod()
-    if cap is None:
+    capture_module = _get_capture_module()
+    if capture_module is None:
         return None
-    state = getattr(cap, "_state", None)
+    state = getattr(capture_module, "_state", None)
     if state is None:
         return None
     return getattr(state, "sender", None)
@@ -837,7 +896,7 @@ def unregister():
         _RECEIVER = None
         _stop_receiver_thread(receiver)
     _discard_replay_state()
-    _unregister_queue_timer()
+    _unregister_receiver_timer()
     if BPY_AVAILABLE:
         if _frame_change_to_playback_control in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.remove(_frame_change_to_playback_control)

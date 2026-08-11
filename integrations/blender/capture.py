@@ -1043,6 +1043,36 @@ def seed_emitter_caches_for_import(prim_path: str):
         ne.seed_prim_cache(author.stage, prim_path)
 
 
+def refresh_transform_baselines_after_remote_apply(
+    changed_objects_by_prim: dict[str, object],
+) -> int:
+    """Accept evaluated remote transforms as the emitter's new baseline.
+
+    Blender may deliver ``depsgraph_update_post`` callbacks after the receiver's
+    synchronous feedback guard has ended.  Refreshing tagged objects after the
+    guarded ``view_layer.update()`` makes those delayed callbacks compare equal
+    instead of re-authoring received transforms as new local edits.
+
+    User interaction cannot run concurrently with this main-thread refresh, so
+    the next actual user edit still differs from the stored matrix and emits in
+    the normal way.  Returns the number of tagged objects refreshed.
+    """
+    author = _state.author
+    if author is None or not changed_objects_by_prim:
+        return 0
+
+    refreshed = 0
+    for prim_path, obj in changed_objects_by_prim.items():
+        if obj is None:
+            continue
+        src = getattr(obj, "matrix_basis", obj.matrix_world)
+        author._last_matrix[obj.name] = tuple(v for row in src for v in row)
+        author._prim_refs[prim_path] = obj
+        author._used_prim_paths.add(prim_path)
+        refreshed += 1
+    return refreshed
+
+
 def _reset_stage_author():
     if _state.author is not None:
         try:
