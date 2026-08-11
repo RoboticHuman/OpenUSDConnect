@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 
 
 class LayerMode(StrEnum):

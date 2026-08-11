@@ -42,7 +42,6 @@ from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
 from .shared_stage_client import (
     SharedRecoveryAssessment,
     SharedRecoveryLayer,
-    SharedRecoveryResult,
     SharedStageClient,
 )
 from .usd_client import UsdPublisher, UsdReceiver
@@ -74,7 +73,6 @@ __all__ = [
     "ServerConfig",
     "SharedRecoveryAssessment",
     "SharedRecoveryLayer",
-    "SharedRecoveryResult",
     "SharedStageClient",
     "SyncUpdate",
     "TransactionRejectedError",

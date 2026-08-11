@@ -10,6 +10,7 @@ from pxr import Ar, Sdf, Usd
 
 from openusdconnect.shared_layer_graph import (
     SharedLayerGraph,
+    StaleLayerGraphError,
     apply_sublayer_entries,
     normalize_sublayer_entries,
 )
@@ -165,7 +166,7 @@ def test_new_sublayer_recursively_declares_descendant_keys(tmp_path):
     records.extend(server.discover_sublayer_states(prepared.mappings))
 
     assert len(records) == 3
-    assert [event["revision"] for _key, event in records] == [2, 3, 4]
+    assert [event["revision"] for _key, event in records] == [2, 1, 1]
     for layer_key, event in records:
         client.apply_sublayers(layer_key, event)
 
@@ -205,3 +206,57 @@ def test_cycles_are_finite_and_preserve_both_edges(tmp_path):
     assert len(keys) == 2
     assert graph.sublayers_for(keys[0])[0]["layer_key"] == keys[1]
     assert graph.sublayers_for(keys[1])[0]["layer_key"] == keys[0]
+
+
+def test_prepared_topology_edits_on_different_parents_do_not_conflict(tmp_path):
+    child = _create_layer(tmp_path / "child.usda")
+    root = _create_layer(tmp_path / "root.usda")
+    root.subLayerPaths.append("./child.usda")
+    root.Save()
+    graph = SharedLayerGraph(Usd.Stage.Open(root.identifier), authoritative=True)
+    child_key = next(
+        key for key in graph.reachable_layer_keys() if key != graph.root_layer_key
+    )
+
+    root_edit = graph.canonicalize_sublayers(
+        graph.root_layer_key,
+        graph.describe_sublayers(graph.stage.GetRootLayer()),
+    )
+    child_edit = graph.canonicalize_sublayers(
+        child_key,
+        graph.describe_sublayers(child),
+    )
+
+    graph.accept_sublayers(child_edit)
+    graph.accept_sublayers(root_edit)
+
+    assert graph.parent_revision(graph.root_layer_key) == 2
+    assert graph.parent_revision(child_key) == 2
+    assert graph.revision == 3
+
+
+def test_prepared_topology_edits_on_the_same_parent_still_conflict(tmp_path):
+    root = _create_layer(tmp_path / "root.usda")
+    graph = SharedLayerGraph(Usd.Stage.Open(root.identifier), authoritative=True)
+    event = graph.describe_sublayers(graph.stage.GetRootLayer())
+    first = graph.canonicalize_sublayers(graph.root_layer_key, event)
+    second = graph.canonicalize_sublayers(graph.root_layer_key, event)
+
+    graph.accept_sublayers(first)
+
+    with pytest.raises(StaleLayerGraphError, match="parent topology revision"):
+        graph.accept_sublayers(second)
+
+
+def test_new_generation_preserves_keys_and_resets_parent_revisions(tmp_path):
+    stage = _create_equivalent_stage(tmp_path)
+    graph = SharedLayerGraph(stage, authoritative=True)
+    previous_generation = graph.generation
+    previous_keys = graph.reachable_layer_keys()
+
+    graph.start_new_generation()
+
+    assert graph.generation != previous_generation
+    assert graph.reachable_layer_keys() == previous_keys
+    assert graph.revision == 1
+    assert {graph.parent_revision(key) for key in previous_keys} == {1}

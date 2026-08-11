@@ -60,10 +60,13 @@ and an invalid middle transaction whose valid neighbors must still commit.
 
 ### `SharedLayerGraphRace.tla`
 
-A shared-stage topology edit races a revision or generation change between
-preparation and commit. It checks atomic graph/stage/log updates, mutation-free
-stale rejection, repair against the current graph identity, and session
-abandonment only after no unreconciled local opinion intersects the live graph.
+Shared-stage topology edits race same-parent and unrelated-parent commits,
+generation-changing compaction, persistence failure, detach, restart, repair,
+and abandonment. The model checks that unrelated parents do not create false
+conflicts, same-parent edits still conflict, durable logical layer keys survive
+detach and generation changes, graph/stage/log/identity updates are atomic, and
+rejected work either repairs against the current parent identity or is safely
+abandoned.
 
 ### `TwoClientConvergence.tla`
 
@@ -93,7 +96,7 @@ The following results describe the model and configuration files in the commit
 that contains this snapshot. Regenerate the table after changing a `.tla` or
 `.cfg` file, or when adopting a different TLC version.
 
-TLC 2.19 results from 2026-08-11:
+TLC2 2026.07.31.184830 results from 2026-08-11:
 
 | Model and scenario | Generated | Distinct | Depth | Result |
 |---|---:|---:|---:|---|
@@ -104,7 +107,7 @@ TLC 2.19 results from 2026-08-11:
 | Receiver: one-frame queue, replay apply failure | 1,168 | 352 | 22 | No error |
 | Coordinator: valid group or infrastructure fallback | 235 | 152 | 11 | No error |
 | Coordinator: invalid middle transaction fallback | 106 | 64 | 11 | No error |
-| Shared-layer revision/generation race and recovery | 201 | 142 | 9 | No error |
+| Shared-layer parent revision, stable identity, and recovery | 3,262 | 2,288 | 13 | No error |
 | Two-client convergence with complete commit stream | 4,421 | 1,492 | 28 | No error |
 
 These checks are exhaustive for their configured finite models, not unbounded
@@ -113,3 +116,9 @@ batch and that TCP preserves frame order within one live socket. They do not
 model USD composition semantics, database corruption, process-memory
 corruption, performance, or administrative replacement of durable producer
 progress.
+
+External shared-stage recovery also assumes that the integration reconciles
+every reported source layer before abandoning the rejected session. The Python
+client verifies incident identity and a fresh sequence/topology checkpoint, but
+cannot prove that an application-specific USD merge removed every conflicting
+opinion. The model treats that semantic reconciliation as an environment action.

@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 8
+        assert SCHEMA_VERSION == 9
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -140,6 +140,40 @@ class TestReplayComplete:
         _, complete = resolve_payload(env)
         assert complete.HeadSeq() == 42
         assert complete.Epoch() == 7
+
+
+class TestLayerGraphState:
+    def test_parent_revisions_round_trip(self):
+        msg = {
+            "type": "layer_graph_state",
+            "seq": 17,
+            "generation": "generation-a",
+            "revision": 4,
+            "root_layer_key": "layer:root",
+            "layers": [
+                {
+                    "layer_key": "layer:root",
+                    "revision": 3,
+                    "sublayers": [
+                        {
+                            "authored_path": "./asset.usda",
+                            "offset": 0.0,
+                            "scale": 1.0,
+                            "layer_key": "layer:asset",
+                        }
+                    ],
+                },
+                {
+                    "layer_key": "layer:asset",
+                    "revision": 1,
+                    "sublayers": [],
+                },
+            ],
+        }
+
+        decoded, _ = _roundtrip(msg)
+
+        assert decoded == msg
 
 
 class TestAuthRejected:

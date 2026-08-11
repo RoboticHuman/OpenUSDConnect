@@ -159,7 +159,7 @@ EventPayloadType = _fb.EventPayload
 SdfSpecKindType = _fb.SdfSpecKind
 LayerModeType = _fb.LayerMode
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -713,6 +713,7 @@ def _encode_layer_graph_state(b, msg):
         _fb.SharedLayerStateAddLayerKey(b, layer_key)
         if sublayers is not None:
             _fb.SharedLayerStateAddSublayers(b, sublayers)
+        _fb.SharedLayerStateAddRevision(b, int(state["revision"]))
         layer_offsets.append(_fb.SharedLayerStateEnd(b))
 
     layers = None
@@ -1788,6 +1789,7 @@ def _dict_layer_graph_state(state, msg_type):
         layers.append(
             {
                 "layer_key": _str(item.LayerKey()) or "",
+                "revision": int(item.Revision()),
                 "sublayers": [
                     _dict_sublayer_entry(item.Sublayers(i)) for i in range(item.SublayersLength())
                 ],

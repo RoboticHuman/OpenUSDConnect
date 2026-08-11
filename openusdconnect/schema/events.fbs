@@ -300,7 +300,7 @@ table ReplaceSdfLayerContent {
 table SetSublayers {
     prim:string;            // always "/"; retained for uniform event routing
     generation:string;
-    revision:ulong;         // server-assigned graph revision; 0 on client input
+    revision:ulong;         // server-assigned revision for this parent; 0 on client input
     sublayers:[SublayerEntry];
 }
 

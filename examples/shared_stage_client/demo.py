@@ -79,7 +79,7 @@ def main() -> int:
                 return 1
             time.sleep(0.01)
 
-        if not client.is_layer_mapped(content):
+        if not client.is_layer_reachable(content):
             print("content layer is outside the synchronized graph", file=sys.stderr)
             return 1
 

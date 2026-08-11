@@ -82,6 +82,8 @@ def test_restart_and_compaction_restore_exact_target_layer(tmp_path):
     base = _create_stage(tmp_path)
     db = tmp_path / "events.db"
     with _shared_server(base, db) as server:
+        original_generation = server.shared_layer_graph.generation
+        original_keys = set(server.shared_layer_graph.reachable_layer_keys())
         child_key = _child_key(server)
         child = server.shared_layer_graph.layer_for(child_key)
         records = server.process_txn(
@@ -93,13 +95,87 @@ def test_restart_and_compaction_restore_exact_target_layer(tmp_path):
         assert child.GetAttributeAtPath("/World.value").default == 5.0
         server.compact_log()
         assert server.store.get_count() == 2
+        compacted_generation = server.shared_layer_graph.generation
+        assert compacted_generation != original_generation
+        assert set(server.shared_layer_graph.reachable_layer_keys()) == original_keys
 
     with _shared_server(base, db) as restored:
         child = restored.shared_layer_graph.layer_for(_child_key(restored))
         assert child.GetAttributeAtPath("/World.value").default == 5.0
+        assert set(restored.shared_layer_graph.reachable_layer_keys()) == original_keys
+        assert restored.shared_layer_graph.generation == compacted_generation
         first = message_to_dict(restored.store.get_all_asc()[0][1])
         assert first["type"] == "layer_graph_state"
         assert first["seq"] == 1
+        assert restored.store.get_count() == 2
+
+
+def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
+    base = _create_stage(tmp_path)
+    db = tmp_path / "detached-identity.db"
+    with _shared_server(base, db) as server:
+        graph = server.shared_layer_graph
+        original_child_key = _child_key(server)
+        server.process_txn(
+            [
+                {
+                    "k": "set_sublayers",
+                    "prim": "/",
+                    "generation": graph.generation,
+                    "revision": 0,
+                    "sublayers": [],
+                }
+            ],
+            layer_key=graph.root_layer_key,
+        )
+        server.compact_log()
+        assert original_child_key not in graph.reachable_layer_keys()
+
+    with _shared_server(base, db) as restored:
+        graph = restored.shared_layer_graph
+        assert original_child_key not in graph.reachable_layer_keys()
+        records = restored.process_txn(
+            [
+                {
+                    "k": "set_sublayers",
+                    "prim": "/",
+                    "generation": graph.generation,
+                    "revision": 0,
+                    "sublayers": [{"authored_path": "./asset.usda"}],
+                }
+            ],
+            layer_key=graph.root_layer_key,
+        )
+
+        assert records[0][0]["event"]["sublayers"][0]["layer_key"] == original_child_key
+        assert original_child_key in graph.reachable_layer_keys()
+
+
+def test_failed_compaction_does_not_rotate_graph_identity(tmp_path, monkeypatch):
+    base = _create_stage(tmp_path)
+    with _shared_server(base, tmp_path / "failed-compaction.db") as server:
+        graph = server.shared_layer_graph
+        generation = graph.generation
+        revision = graph.revision
+        parent_revisions = {
+            key: graph.parent_revision(key) for key in graph.reachable_layer_keys()
+        }
+        rows = server.store.get_all_asc()
+
+        def _fail(_records, **_kwargs):
+            raise RuntimeError("injected shared compaction failure")
+
+        monkeypatch.setattr(server.store, "clear_and_rewrite", _fail)
+
+        with pytest.raises(RuntimeError, match="injected shared compaction failure"):
+            server.compact_log()
+
+        assert graph.generation == generation
+        assert graph.revision == revision
+        assert {
+            key: graph.parent_revision(key) for key in graph.reachable_layer_keys()
+        } == parent_revisions
+        assert server.store.get_all_asc() == rows
 
 
 def test_layer_content_replacement_supersedes_prior_deltas_during_compaction(tmp_path):
@@ -203,7 +279,7 @@ def test_new_sublayer_transaction_emits_complete_recursive_routing(tmp_path):
         records = server.process_txn([event], layer_key=graph.root_layer_key)
 
         assert len(records) == 3
-        assert [record[0]["event"]["revision"] for record in records] == [2, 3, 4]
+        assert [record[0]["event"]["revision"] for record in records] == [2, 1, 1]
         assert len({record[0]["layer_key"] for record in records}) == 3
         assert len(graph.reachable_layer_keys()) == 3
         assert graph.layer_for(graph.sublayers_for(graph.root_layer_key)[0]["layer_key"])
@@ -360,6 +436,42 @@ def test_topology_that_becomes_stale_at_commit_is_rolled_back_and_recoverable(
         assert server.store.get_count() == 1
 
 
+def test_topology_persistence_failure_rolls_back_new_layer_identity(
+    tmp_path, monkeypatch
+):
+    _create_layer(tmp_path / "child.usda", "/Child")
+    root = _create_layer(tmp_path / "root.usda")
+    with _shared_server(root.identifier, tmp_path / "identity-rollback.db") as server:
+        graph = server.shared_layer_graph
+        identities = graph.identity_records()
+        durable_identities = server.store.get_layer_identities()
+
+        def _fail(*_args, **_kwargs):
+            raise RuntimeError("injected identity commit failure")
+
+        monkeypatch.setattr(server.store, "append_batch", _fail)
+
+        with pytest.raises(RuntimeError, match="injected identity commit failure"):
+            server.process_txn(
+                [
+                    {
+                        "k": "set_sublayers",
+                        "prim": "/",
+                        "generation": graph.generation,
+                        "revision": 0,
+                        "sublayers": [{"authored_path": "./child.usda"}],
+                    }
+                ],
+                layer_key=graph.root_layer_key,
+            )
+
+        assert list(server.stage.GetRootLayer().subLayerPaths) == []
+        assert graph.identity_records() == identities
+        assert server.store.get_layer_identities() == durable_identities
+        assert server.store.get_count() == 1
+        assert server._next_seq == 2
+
+
 def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch):
     _create_layer(tmp_path / "first.usda", "/First")
     _create_layer(tmp_path / "second.usda", "/Second")
@@ -402,7 +514,7 @@ def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch
         assert not second.is_alive()
 
         records = [message_to_dict(row[1]) for row in server.store.get_all_asc()[1:]]
-        assert [record["event"]["revision"] for record in records] == [2, 3, 4, 5]
+        assert [record["event"]["revision"] for record in records] == [2, 1, 3, 1]
 
 
 def test_compaction_preserves_relative_asset_text(tmp_path):
@@ -451,5 +563,5 @@ def test_server_refresh_publishes_newly_resolved_layer_keys(tmp_path):
         assert len(graph.reachable_layer_keys()) == 2
         assert server.store.get_count() == 3
         records = [message_to_dict(row[1]) for row in server.store.get_all_asc()[1:]]
-        assert [record["event"]["revision"] for record in records] == [2, 3]
+        assert [record["event"]["revision"] for record in records] == [2, 1]
         assert records[0]["event"]["sublayers"][0]["authored_path"] == "./late.usda"

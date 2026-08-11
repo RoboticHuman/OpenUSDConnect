@@ -181,6 +181,7 @@ table LayerStackState {
 table SharedLayerState {
     layer_key:string;
     sublayers:[SublayerEntry];
+    revision:ulong;             // topology revision for this parent layer
 }
 
 table LayerGraphState {

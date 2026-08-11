@@ -14,8 +14,10 @@ import pxr
 import pytest
 from pxr import Sdf, Usd
 
+from openusdconnect import ClientPhase
 from openusdconnect.protocol_constants import LayerMode
 from openusdconnect.recovery import RejectionDisposition
+from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.sender import EventSender, TransactionRejectedError
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -76,6 +78,57 @@ def _value_at(stage: Usd.Stage, path: str) -> int | None:
 
 def _value(stage: Usd.Stage) -> int | None:
     return _value_at(stage, "/World.value")
+
+
+def _attribute_value_event(path: str, value: int) -> dict:
+    source = Sdf.Layer.CreateAnonymous("shared-recovery-value")
+    prim = Sdf.CreatePrimInLayer(source, Sdf.Path(path).GetPrimPath())
+    attr = Sdf.AttributeSpec(
+        prim,
+        Sdf.Path(path).name,
+        Sdf.ValueTypeNames.Int,
+    )
+    attr.default = value
+    fields = [str(key) for key in attr.ListInfoKeys()]
+    return {
+        "k": "set_sdf_spec_fields",
+        "prim": str(Sdf.Path(path).GetPrimPath()),
+        "spec_path": path,
+        "spec_kind": "attribute",
+        "fields": fields,
+        "fragment": serialize_spec_fields(
+            source,
+            path,
+            "attribute",
+            fields,
+            stabilize_asset_paths=False,
+        ),
+        "removed": False,
+    }
+
+
+def _commit_and_broadcast(
+    sync_server: UsdSyncServer,
+    events: list[dict],
+    layer_key: str,
+):
+    sync_server.txn_barrier.acquire_shared()
+    try:
+        records = sync_server.process_txn(events, layer_key=layer_key)
+        sync_server.broadcast_transaction_views(records)
+        return records
+    finally:
+        sync_server.txn_barrier.release_shared()
+
+
+def _wait_for_receiver_queue(client: SharedStageClient, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with client._receiver._incoming_lock:
+            if client._receiver._incoming:
+                return True
+        time.sleep(0.01)
+    return False
 
 
 def _create_ref_stage(directory: Path) -> Usd.Stage:
@@ -162,7 +215,13 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         second.start()
         assert first.connect(timeout=2)
         assert second.connect(timeout=2)
-        assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
+        assert _pump_until(
+            [first, second],
+            lambda: all(
+                client.status.phase is ClientPhase.READY
+                for client in (first, second)
+            ),
+        )
         first_stage.SetEditTarget(
             Usd.EditTarget(first_stage.GetLayerStack(includeSessionLayers=False)[1])
         )
@@ -209,7 +268,7 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         )
 
         first_extra = first_stage.GetLayerStack(includeSessionLayers=False)[2]
-        assert first.is_layer_mapped(first_extra)
+        assert first.is_layer_reachable(first_extra)
         first_stage.SetEditTarget(Usd.EditTarget(first_extra))
         first_stage.GetAttributeAtPath("/Extra.amount").Set(7)
         assert first.update().submitted_events == 1
@@ -316,7 +375,13 @@ def test_reference_override_and_payload_arcs_sync_via_sdf_deltas(tmp_path):
         second.start()
         assert first.connect(timeout=2)
         assert second.connect(timeout=2)
-        assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
+        assert _pump_until(
+            [first, second],
+            lambda: all(
+                client.status.phase is ClientPhase.READY
+                for client in (first, second)
+            ),
+        )
 
         # Reference content composes in both clients; payloads start unloaded.
         assert _value_at(first_stage, "/World/Ref.value") == 1
@@ -414,7 +479,13 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
         second.start()
         assert first.connect(timeout=2)
         assert second.connect(timeout=2)
-        assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
+        assert _pump_until(
+            [first, second],
+            lambda: all(
+                client.status.phase is ClientPhase.READY
+                for client in (first, second)
+            ),
+        )
 
         for stage in (first_stage, second_stage):
             stage.SetEditTarget(Usd.EditTarget(stage.GetLayerStack(includeSessionLayers=False)[1]))
@@ -428,8 +499,8 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
         # keepalive: senders are cleanly detached (quit) and receivers drop
         # their sockets, resuming from their last sequence on reconnect.
         for client in (first, second):
-            client.sender.disconnect()
-            client.receiver.request_replay_from(client.last_seq + 1)
+            client._sender.disconnect()
+            client._receiver.request_replay_from(client.last_seq + 1)
         tcp_server.shutdown()
         tcp_server.server_close()
         thread.join(timeout=5)
@@ -578,6 +649,47 @@ def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
         sync_server.store.close()
 
 
+def _create_detached_layer_recovery_incident(
+    client: SharedStageClient,
+    client_stage: Usd.Stage,
+    sync_server: UsdSyncServer,
+) -> tuple[Sdf.Layer, str]:
+    client_child = client_stage.GetLayerStack(includeSessionLayers=False)[1]
+    child_key = client._graph.key_for(client_child)
+    assert child_key
+    client_stage.SetEditTarget(Usd.EditTarget(client_child))
+    client_stage.GetAttributeAtPath("/World.value").Set(77)
+    client._tracker.prepare_local_changes()
+    routed = client._tracker.next_routed_batch()
+    assert routed is not None
+    batch, routed_key, events = routed
+    assert routed_key == child_key
+
+    server_graph = sync_server.shared_layer_graph
+    sync_server.process_txn(
+        [
+            {
+                "k": "set_sublayers",
+                "prim": "/",
+                "generation": server_graph.generation,
+                "revision": (
+                    server_graph.parent_revision(server_graph.root_layer_key) + 1
+                ),
+                "sublayers": [],
+            }
+        ],
+        layer_key=server_graph.root_layer_key,
+    )
+    assert child_key not in server_graph.reachable_layer_keys()
+
+    assert client._sender.send_events(events, layer_key=routed_key)
+    client._tracker.mark_prepared_sent(batch)
+    with pytest.raises(TransactionRejectedError) as caught:
+        client.flush(timeout=5)
+    assert caught.value.failure.code_name == "stale_layer_graph"
+    return client_child, child_key
+
+
 @pytest.mark.parametrize("rebind", [False, True], ids=["detached", "fresh-stage"])
 def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, rebind):
     server_stage = _create_stage(tmp_path / "server")
@@ -602,52 +714,29 @@ def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, reb
     try:
         client.start()
         assert client.connect(timeout=2)
-        assert _pump_until([client], lambda: client.graph_ready and client.synchronized)
-
-        client_child = client_stage.GetLayerStack(includeSessionLayers=False)[1]
-        child_key = client._graph.key_for(client_child)
-        assert child_key
-        client_stage.SetEditTarget(Usd.EditTarget(client_child))
-        client_stage.GetAttributeAtPath("/World.value").Set(77)
-        client._tracker.prepare_local_changes()
-        routed = client._tracker.next_routed_batch()
-        assert routed is not None
-        batch, routed_key, events = routed
-        assert routed_key == child_key
-
-        server_graph = sync_server.shared_layer_graph
-        sync_server.process_txn(
-            [
-                {
-                    "k": "set_sublayers",
-                    "prim": "/",
-                    "generation": server_graph.generation,
-                    "revision": 0,
-                    "sublayers": [],
-                }
-            ],
-            layer_key=server_graph.root_layer_key,
+        assert _pump_until(
+            [client],
+            lambda: client.status.phase is ClientPhase.READY,
         )
-        assert child_key not in server_graph.reachable_layer_keys()
 
-        assert client.sender.send_events(events, layer_key=routed_key)
-        client._tracker.mark_prepared_sent(batch)
-        with pytest.raises(TransactionRejectedError) as caught:
-            client.flush(timeout=5)
-        assert caught.value.failure.code_name == "stale_layer_graph"
+        client_child, child_key = _create_detached_layer_recovery_incident(
+            client,
+            client_stage,
+            sync_server,
+        )
 
         if rebind:
             fresh_stage = _create_stage(tmp_path / "fresh")
             result = client.recover_use_server(
-                fresh_stage,
+                clean_stage=fresh_stage,
                 session_id="detached-recovery-replacement",
                 timeout=5,
             )
             assert client.stage is fresh_stage
         else:
-            assessment = client.assess_recovery(timeout=5)
+            assessment = client.refresh_recovery_assessment(timeout=5)
             assert assessment.all_layers_detached
-            result = client.complete_external_recovery(
+            result = client.complete_recovery(
                 assessment,
                 session_id="detached-recovery-replacement",
             )
@@ -655,19 +744,168 @@ def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, reb
 
         assert result.recovery_artifact.failure.code_name == "stale_layer_graph"
         assert result.recovery_artifact.layer_keys == (child_key,)
-        assert len(result.preserved_layers) == 1
-        preserved = result.preserved_layers[0]
-        assert result.assessment.layers[0].rejected_layer_key == child_key
+        assert len(result.rejected_snapshots) == 1
+        preserved = result.rejected_snapshots[0]
+        assert result.layers[0].rejected_layer_key == child_key
         assert preserved.GetAttributeAtPath("/World.value").default == 77
-        assert not client.is_layer_mapped(client_child)
+        assert not client.is_layer_reachable(client_child)
         assert not client_stage.GetAttributeAtPath("/World.value")
         assert client_stage.GetEditTarget().GetLayer() is client_stage.GetRootLayer()
-        assert not client.recovery_required
-        assert client.sender.session_id == "detached-recovery-replacement"
-        assert client.sender.connected is rebind
+        assert client.status.phase is not ClientPhase.RECOVERY_REQUIRED
+        assert client._sender.session_id == "detached-recovery-replacement"
+        assert client._sender.connected is rebind
 
         client.update()
-        assert client.sender.connected
+        assert client._sender.connected
+    finally:
+        client.close()
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
+def test_external_recovery_checkpoint_defers_new_content_until_update_resumes(tmp_path):
+    server_stage = _create_stage(tmp_path / "server")
+    client_stage = _create_stage(tmp_path / "client")
+    sync_server = UsdSyncServer(
+        stage=server_stage,
+        log_path=str(tmp_path / "events.db"),
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0), ConnectionHandler, sync_server, max_workers=4
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    client = SharedStageClient(
+        client_stage,
+        app_name="external-recovery-content-checkpoint",
+        port=tcp_server.server_address[1],
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        client.start()
+        assert client.connect(timeout=2)
+        assert _pump_until(
+            [client],
+            lambda: client.status.phase is ClientPhase.READY,
+        )
+        _create_detached_layer_recovery_incident(client, client_stage, sync_server)
+
+        assessment = client.refresh_recovery_assessment(timeout=5)
+        checkpoint_seq = client.last_seq
+        root_key = sync_server.shared_layer_graph.root_layer_key
+        _commit_and_broadcast(
+            sync_server,
+            [_attribute_value_event("/RecoveryMarker.value", 12)],
+            root_key,
+        )
+        assert _wait_for_receiver_queue(client)
+
+        # The receive thread keeps working, but the stage-thread checkpoint
+        # stays fixed until the integration completes its reconciliation.
+        assert client.last_seq == checkpoint_seq
+        assert not client_stage.GetAttributeAtPath("/RecoveryMarker.value")
+        result = client.complete_recovery(assessment)
+        assert result.checkpoint_seq == checkpoint_seq
+
+        assert _pump_until(
+            [client],
+            lambda: _value_at(client_stage, "/RecoveryMarker.value") == 12,
+        )
+        assert client.last_seq > checkpoint_seq
+        assert _value_at(server_stage, "/RecoveryMarker.value") == 12
+    finally:
+        client.close()
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
+@pytest.mark.parametrize(
+    ("reconcile_detached", "expected_client_value"),
+    [(False, 77), (True, 1)],
+    ids=["unreconciled", "reconciled"],
+)
+def test_external_recovery_reconciles_detached_layer_before_queued_reattachment(
+    tmp_path,
+    reconcile_detached,
+    expected_client_value,
+):
+    server_stage = _create_stage(tmp_path / "server")
+    client_stage = _create_stage(tmp_path / "client")
+    sync_server = UsdSyncServer(
+        stage=server_stage,
+        log_path=str(tmp_path / "events.db"),
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0), ConnectionHandler, sync_server, max_workers=4
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    client = SharedStageClient(
+        client_stage,
+        app_name="external-recovery-topology-checkpoint",
+        port=tcp_server.server_address[1],
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        client.start()
+        assert client.connect(timeout=2)
+        assert _pump_until(
+            [client],
+            lambda: client.status.phase is ClientPhase.READY,
+        )
+        client_child, child_key = _create_detached_layer_recovery_incident(
+            client,
+            client_stage,
+            sync_server,
+        )
+
+        assessment = client.refresh_recovery_assessment(timeout=5)
+        assert assessment.all_layers_detached
+        if reconcile_detached:
+            client_child.GetAttributeAtPath("/World.value").default = 1
+
+        server_graph = sync_server.shared_layer_graph
+        _commit_and_broadcast(
+            sync_server,
+            [
+                {
+                    "k": "set_sublayers",
+                    "prim": "/",
+                    "generation": server_graph.generation,
+                    "revision": (
+                        server_graph.parent_revision(server_graph.root_layer_key) + 1
+                    ),
+                    "sublayers": [
+                        {
+                            "authored_path": "./asset.usda",
+                            "offset": 0.0,
+                            "scale": 1.0,
+                            "layer_key": child_key,
+                        }
+                    ],
+                }
+            ],
+            server_graph.root_layer_key,
+        )
+        assert _wait_for_receiver_queue(client)
+
+        client.complete_recovery(assessment)
+        client.update()
+
+        assert client.is_layer_reachable(client_child)
+        assert client._graph.key_for(client_child) == child_key
+        assert _value(client_stage) == expected_client_value
+        assert _value(server_stage) == 1
     finally:
         client.close()
         tcp_server.shutdown()
@@ -709,7 +947,12 @@ def test_three_clients_concurrently_edit_distinct_layers(tmp_path):
         for client in clients:
             client.start()
         assert all(client.connect(timeout=2) for client in clients)
-        assert _pump_until(clients, lambda: all(client.graph_ready for client in clients))
+        assert _pump_until(
+            clients,
+            lambda: all(
+                client.status.phase is ClientPhase.READY for client in clients
+            ),
+        )
 
         # One client per layer: root, first sublayer, second sublayer.
         for stage, index in zip(stages, (0, 1, 2), strict=True):
@@ -717,7 +960,7 @@ def test_three_clients_concurrently_edit_distinct_layers(tmp_path):
                 Usd.EditTarget(stage.GetLayerStack(includeSessionLayers=False)[index])
             )
         assert all(
-            client.is_layer_mapped(stage.GetLayerStack(includeSessionLayers=False)[index])
+            client.is_layer_reachable(stage.GetLayerStack(includeSessionLayers=False)[index])
             for client, stage, index in zip(clients, stages, (0, 1, 2), strict=True)
         )
         stages[0].GetAttributeAtPath("/Root.value").Set(1)

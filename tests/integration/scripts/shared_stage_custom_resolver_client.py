@@ -64,7 +64,7 @@ def main() -> int:
                 content_spec = content.GetAttributeAtPath("/World.value")
                 raise RuntimeError(
                     "first custom-resolver edit was not committed: "
-                    f"update={update!r}, mapped={client.is_layer_mapped(content)}, "
+                    f"update={update!r}, mapped={client.is_layer_reachable(content)}, "
                     f"prepared={client.prepared_event_count}, value={value.Get()!r}, "
                     f"content_default={content_spec.default if content_spec else None!r}, "
                     f"dirty={content.dirty}, editable={content.permissionToEdit}, "
@@ -79,7 +79,7 @@ def main() -> int:
             if update.submitted_events != 1 or not client.flush(timeout=5):
                 raise RuntimeError(
                     "second custom-resolver edit was not committed: "
-                    f"update={update!r}, mapped={client.is_layer_mapped(content)}, "
+                    f"update={update!r}, mapped={client.is_layer_reachable(content)}, "
                     f"prepared={client.prepared_event_count}, value={value.Get()!r}"
                 )
 

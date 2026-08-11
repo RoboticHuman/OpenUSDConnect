@@ -14,7 +14,7 @@ import os
 import queue
 import threading
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from pxr import Ar, Sdf, Usd, UsdGeom
@@ -26,7 +26,7 @@ from ..emitter import (
     read_references,
     read_stage_metadata,
 )
-from ..event_store import EventStore, ProducerProgress, SqliteEventStore
+from ..event_store import EventStore, LayerIdentity, ProducerProgress, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
     COLLABORATION_LAYER_KINDS,
@@ -429,8 +429,9 @@ class UsdSyncServer:
         # same lock also covers live enqueue: a later durable sequence must
         # never become visible before an earlier one.
         self._transaction_commit_lock = threading.RLock()
-        # Shared graph revisions participate in the same global persisted/live
-        # sequence order as managed transactions.
+        # Shared topology commits participate in the same global persisted/live
+        # sequence order as managed transactions. Conflict detection itself is
+        # per parent layer inside SharedLayerGraph.
         self._shared_stage_commit_lock = self._transaction_commit_lock
         self.txn_batch_size = max(1, int(txn_batch_size))
         self.txn_batch_delay = max(0.0, float(txn_batch_delay))
@@ -558,18 +559,29 @@ class UsdSyncServer:
 
         self.shared_layer_graph: SharedLayerGraph | None = None
         if self.layer_mode is LayerMode.SHARED_STAGE:
+            existing_graph_log = self.store.get_count() > 0
             self.shared_layer_graph = SharedLayerGraph(
                 self.stage,
-                authoritative=self.store.get_count() == 0,
+                authoritative=not existing_graph_log,
             )
-            if self.store.get_count() == 0:
-                seq = self.assign_seq()
-                self.append_log(self.shared_layer_graph.state_message(seq=seq))
+            if not existing_graph_log:
+                self._append_shared_graph_baseline()
 
         # Rebuild stage from the event log so the composed stage matches
         # what receivers would get on replay.
         self._replay_log_into_stage()
         if self.shared_layer_graph is not None:
+            if existing_graph_log:
+                identities = self.store.get_layer_identities()
+                if not identities:
+                    raise ValueError(
+                        "shared-stage database has no durable layer identity registry; "
+                        "recreate databases written before this protocol version"
+                    )
+                self.shared_layer_graph.restore_identity_records(
+                    (identity.identifier, identity.layer_key)
+                    for identity in identities
+                )
             self.shared_layer_graph.authoritative = True
             self.refresh_shared_layer_dependencies()
 
@@ -1894,8 +1906,7 @@ class UsdSyncServer:
         recreates.
         """
         sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
-        records = []
-        first_event_seq = 1
+        graph = None
         if self.layer_mode is LayerMode.SHARED_STAGE:
             graph = self.shared_layer_graph
             if graph is None:
@@ -1904,17 +1915,38 @@ class UsdSyncServer:
             sorted_entries = [
                 entry for entry in sorted_entries if entry[1].get("layer_key") in reachable
             ]
-            graph_record = graph.state_message(seq=1)
-            records.append((1, encode_message(graph_record), None, MSG_LAYER_GRAPH_STATE, None))
-            first_event_seq = 2
 
-        for seq, (ev, meta, _stamp) in enumerate(sorted_entries, start=first_event_seq):
-            rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
-            rec.update(meta)
-            records.append(
-                (seq, encode_message(rec), meta.get("client_id"), ev.get("k"), ev.get("prim"))
-            )
-        self.store.clear_and_rewrite(records)
+        graph_transaction = graph.transaction() if graph is not None else nullcontext()
+        with graph_transaction:
+            records = []
+            first_event_seq = 1
+            if graph is not None:
+                # Compaction is the clean revision-domain boundary: the log is
+                # replaced by one new baseline while durable logical keys stay
+                # unchanged.
+                graph.start_new_generation()
+                graph_record = graph.state_message(seq=1)
+                records.append(
+                    (1, encode_message(graph_record), None, MSG_LAYER_GRAPH_STATE, None)
+                )
+                first_event_seq = 2
+
+            for seq, (ev, meta, _stamp) in enumerate(
+                sorted_entries,
+                start=first_event_seq,
+            ):
+                rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
+                rec.update(meta)
+                records.append(
+                    (
+                        seq,
+                        encode_message(rec),
+                        meta.get("client_id"),
+                        ev.get("k"),
+                        ev.get("prim"),
+                    )
+                )
+            self.store.clear_and_rewrite(records)
         with self._seq_lock:
             self._event_count = len(records)
             self._next_seq = len(records) + 1
@@ -2364,6 +2396,45 @@ class UsdSyncServer:
         finally:
             self.txn_barrier.release_exclusive()
 
+    def _shared_layer_identity_updates(
+        self,
+        layer_keys: set[str] | tuple[str, ...],
+    ) -> tuple[LayerIdentity, ...]:
+        graph = self.shared_layer_graph
+        if graph is None:
+            raise RuntimeError("shared layer identity requires shared-stage mode")
+        identities = []
+        for layer_key in sorted(set(layer_keys)):
+            identifier = graph.identifier_for_key(layer_key)
+            if identifier is not None:
+                identities.append(
+                    LayerIdentity(identifier=identifier, layer_key=layer_key)
+                )
+        return tuple(identities)
+
+    def _append_shared_graph_baseline(self) -> None:
+        """Persist the initial graph baseline and its stable keys atomically."""
+        graph = self.shared_layer_graph
+        if graph is None:
+            raise RuntimeError("shared graph baseline requires shared-stage mode")
+        record = graph.state_message(seq=self.assign_seq())
+        record_bin = encode_message(record)
+        self.append_log_batch(
+            [
+                (
+                    record["seq"],
+                    record_bin,
+                    None,
+                    MSG_LAYER_GRAPH_STATE,
+                    None,
+                )
+            ],
+            layer_identities=tuple(
+                LayerIdentity(identifier, layer_key)
+                for identifier, layer_key in graph.identity_records()
+            ),
+        )
+
     def append_log(self, rec: dict) -> bytes:
         """Append an event record and return its encoded representation.
 
@@ -2382,6 +2453,7 @@ class UsdSyncServer:
         tuples: list[tuple[int, bytes, str | None, str | None, str | None]],
         *,
         producer_progress: tuple[ProducerProgress, ...] = (),
+        layer_identities: tuple[LayerIdentity, ...] = (),
     ):
         """Persist pre-serialized event records.
 
@@ -2389,12 +2461,26 @@ class UsdSyncServer:
         In strict mode, writes synchronously (caller blocks until DB commit).
         In realtime mode, enqueues for async write (caller returns immediately).
         """
-        if self._persist_queue is not None and not producer_progress:
+        if (
+            self._persist_queue is not None
+            and not producer_progress
+            and not layer_identities
+        ):
             self._persist_queue.put(tuples)
         else:
             # A transaction result is acknowledged only after the atomic
             # event+producer-progress commit returns, including in realtime mode.
-            self.store.append_batch(tuples, producer_progress=producer_progress)
+            if layer_identities:
+                self.store.append_batch(
+                    tuples,
+                    producer_progress=producer_progress,
+                    layer_identities=layer_identities,
+                )
+            else:
+                self.store.append_batch(
+                    tuples,
+                    producer_progress=producer_progress,
+                )
             with self._seq_lock:
                 self._event_count += len(tuples)
 
@@ -3651,6 +3737,8 @@ class UsdSyncServer:
             raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
 
         routed_events = [(layer_key, event) for event in canonical_events]
+        with self._seq_lock:
+            first_reserved_seq = self._next_seq
         try:
             with (
                 self.stage_lock,
@@ -3682,7 +3770,13 @@ class UsdSyncServer:
                         transaction_identity=transaction_identity,
                     )
         except StaleLayerGraphError as exc:
+            with self._seq_lock:
+                self._next_seq = first_reserved_seq
             raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
+        except Exception:
+            with self._seq_lock:
+                self._next_seq = first_reserved_seq
+            raise
         self._prim_count_dirty = True
         return records
 
@@ -3731,9 +3825,25 @@ class UsdSyncServer:
                 session_id,
                 txn_id,
             ),)
+        topology_keys = set()
+        for event_layer_key, event in routed_events:
+            if event.get("k") != K_SET_SUBLAYERS:
+                continue
+            topology_keys.add(event_layer_key)
+            topology_keys.update(
+                entry["layer_key"]
+                for entry in event.get("sublayers", ())
+                if entry.get("layer_key")
+            )
+        layer_identities = (
+            self._shared_layer_identity_updates(topology_keys)
+            if topology_keys
+            else ()
+        )
         self.append_log_batch(
             persist_tuples,
             producer_progress=producer_progress,
+            layer_identities=layer_identities,
         )
         return records
 

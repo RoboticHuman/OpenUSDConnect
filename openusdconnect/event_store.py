@@ -30,6 +30,14 @@ class ProducerProgress:
     committed_through: int
 
 
+@dataclass(frozen=True, slots=True)
+class LayerIdentity:
+    """Durable server-local identifier for one shared-stage layer key."""
+
+    identifier: str
+    layer_key: str
+
+
 class EventStore(ABC):
     """Abstract interface for persisting and querying the event log."""
 
@@ -44,11 +52,17 @@ class EventStore(ABC):
     @abstractmethod
     def append_batch(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]], *,
-                     producer_progress: tuple[ProducerProgress, ...] = ()) -> None:
-        """Persist records and producer progress in one database transaction.
+                     producer_progress: tuple[ProducerProgress, ...] = (),
+                     layer_identities: tuple[LayerIdentity, ...] = ()) -> None:
+        """Persist records, producer progress, and layer identities atomically.
 
         Each record is (seq, record_bin, client_id, kind, prim).
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_layer_identities(self) -> tuple[LayerIdentity, ...]:
+        """Return every durable shared-stage layer identity."""
         raise NotImplementedError
 
     @abstractmethod
@@ -172,6 +186,20 @@ class SqliteEventStore(EventStore):
                 PRIMARY KEY (client_id, session_id)
             )
         """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS shared_layer_identities (
+                identifier TEXT PRIMARY KEY,
+                layer_key TEXT NOT NULL UNIQUE
+            )
+        """)
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS shared_layer_identity_is_immutable
+            BEFORE UPDATE OF layer_key ON shared_layer_identities
+            WHEN OLD.layer_key <> NEW.layer_key
+            BEGIN
+                SELECT RAISE(ABORT, 'shared layer identity cannot be remapped');
+            END
+        """)
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -189,8 +217,9 @@ class SqliteEventStore(EventStore):
 
     def append_batch(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]], *,
-                     producer_progress: tuple[ProducerProgress, ...] = ()) -> None:
-        if not records and not producer_progress:
+                     producer_progress: tuple[ProducerProgress, ...] = (),
+                     layer_identities: tuple[LayerIdentity, ...] = ()) -> None:
+        if not records and not producer_progress and not layer_identities:
             return
         with self._lock:
             try:
@@ -210,10 +239,28 @@ class SqliteEventStore(EventStore):
                         for progress in producer_progress
                     ],
                 )
+                if layer_identities:
+                    self._conn.executemany(
+                        "INSERT INTO shared_layer_identities(identifier, layer_key)"
+                        " VALUES (?, ?) ON CONFLICT(identifier) DO UPDATE SET"
+                        " layer_key = excluded.layer_key",
+                        [
+                            (identity.identifier, identity.layer_key)
+                            for identity in layer_identities
+                        ],
+                    )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def get_layer_identities(self) -> tuple[LayerIdentity, ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT identifier, layer_key FROM shared_layer_identities"
+                " ORDER BY identifier"
+            ).fetchall()
+        return tuple(LayerIdentity(str(row[0]), str(row[1])) for row in rows)
 
     def get_producer_progress(self, client_id: str, session_id: str) -> int:
         with self._lock:

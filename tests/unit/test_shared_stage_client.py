@@ -99,6 +99,7 @@ def _bind_child_graph(client: SharedStageClient, child_key: str = "layer:child")
             "layers": [
                 {
                     "layer_key": "layer:root",
+                    "revision": 1,
                     "sublayers": [
                         {
                             "authored_path": root.subLayerPaths[0],
@@ -108,7 +109,7 @@ def _bind_child_graph(client: SharedStageClient, child_key: str = "layer:child")
                         }
                     ],
                 },
-                {"layer_key": child_key, "sublayers": []},
+                {"layer_key": child_key, "revision": 1, "sublayers": []},
             ],
         }
     )
@@ -196,7 +197,30 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
         assert client.status.pending_events == 2
 
         sender.connected = True
+        assert client.status.phase is ClientPhase.CONNECTING
+        client._graph.apply_state(
+            {
+                "type": "layer_graph_state",
+                "seq": 1,
+                "generation": "graph-1",
+                "revision": 1,
+                "root_layer_key": "layer:root",
+                "layers": [
+                    {"layer_key": "layer:root", "revision": 1, "sublayers": []}
+                ],
+            }
+        )
         assert client.status.phase is ClientPhase.READY
+
+        artifact = _stale_artifact("layer:root")
+        sender.transaction_failure = artifact.failure
+        sender.recovery_incident = make_recovery_incident(artifact)
+        sender.recovery_required = True
+        status = client.status
+        assert status.phase is ClientPhase.RECOVERY_REQUIRED
+        assert status.failure is artifact.failure
+        assert status.recovery.failure is artifact.failure
+        assert status.reason == str(artifact.failure)
     finally:
         client._sender = original_sender
         client.close()
@@ -220,6 +244,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
                 "layers": [
                     {
                         "layer_key": root_key,
+                        "revision": 1,
                         "sublayers": [
                             {
                                 "authored_path": "./late.usda",
@@ -229,7 +254,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
                             }
                         ],
                     },
-                    {"layer_key": child_key, "sublayers": []},
+                    {"layer_key": child_key, "revision": 1, "sublayers": []},
                 ],
             }
         )
@@ -253,15 +278,15 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
             "removed": False,
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
-        assert client.deferred_incoming_record_count == 1
+        assert client.deferred_event_count == 1
 
         late = Sdf.Layer.CreateNew(str(tmp_path / "late.usda"))
         Sdf.CreatePrimInLayer(late, "/Late")
         late.Save()
-        mapped = client.refresh_asset_dependency()
+        mapped = client.refresh_layer_graph()
 
         assert mapped == (child_key,)
-        assert client.deferred_incoming_record_count == 0
+        assert client.deferred_event_count == 0
         assert late.GetAttributeAtPath("/Late.value").default == 8
     finally:
         client.close()
@@ -339,7 +364,9 @@ def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
                 "generation": "graph-1",
                 "revision": 1,
                 "root_layer_key": "layer:root",
-                "layers": [{"layer_key": "layer:root", "sublayers": []}],
+                "layers": [
+                    {"layer_key": "layer:root", "revision": 1, "sublayers": []}
+                ],
             }
         )
         client._sender = _RepairSender()
@@ -401,25 +428,22 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
 
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _detach)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         assert assessment.all_layers_detached
-        result = client.complete_external_recovery(
+        result = client.complete_recovery(
             assessment,
             session_id="replacement-session",
         )
 
         assert result.recovery_artifact.producer_session_id == "stale-session"
         assert result.checkpoint_seq == 2
-        assert len(result.preserved_layers) == 1
-        preserved = result.preserved_layers[0]
-        assert result.assessment.layers[0].rejected_layer_key == "layer:child"
-        assert result.assessment.layers[0].source_identifier == child.identifier
+        assert len(result.rejected_snapshots) == 1
+        preserved = result.rejected_snapshots[0]
+        assert result.layers[0].rejected_layer_key == "layer:child"
+        assert result.layers[0].source_layer is child
         assert preserved.GetPrimAtPath("/Local/Rejected")
         assert sender.abandoned_session_ids == ["replacement-session"]
-        assert not client.is_layer_mapped(child)
-        assert client.last_recovery_result is result
-        client.dismiss_recovery_result()
-        assert client.last_recovery_result is None
+        assert not client.is_layer_reachable(child)
     finally:
         client._sender = original_sender
         client.close()
@@ -438,7 +462,7 @@ def test_shared_use_server_refuses_a_quarantined_reachable_layer(tmp_path, monke
     client._started = True
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         assert assessment.recovery_artifact is sender.recovery_artifact
         assert assessment.unchanged_mapping_layers == assessment.layers
         assert assessment.detached_layers == ()
@@ -446,10 +470,8 @@ def test_shared_use_server_refuses_a_quarantined_reachable_layer(tmp_path, monke
         assert assessment.source_unavailable_layers == ()
         assert not assessment.all_layers_detached
         assert client.recovery_artifact is sender.recovery_artifact
-        assert client.recovery_assessment is assessment
         assert sender.abandoned_session_ids == []
         assert sender.recovery_required
-        assert client.last_recovery_result is None
     finally:
         client._sender = original_sender
         client.close()
@@ -466,7 +488,9 @@ def test_shared_assessment_reports_an_unavailable_source_layer(tmp_path, monkeyp
             "generation": "graph-1",
             "revision": 1,
             "root_layer_key": "layer:root",
-            "layers": [{"layer_key": "layer:root", "sublayers": []}],
+            "layers": [
+                {"layer_key": "layer:root", "revision": 1, "sublayers": []}
+            ],
         }
     )
     sender = _RecoverySender(_stale_artifact("layer:missing"))
@@ -474,11 +498,11 @@ def test_shared_assessment_reports_an_unavailable_source_layer(tmp_path, monkeyp
     client._started = True
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         assert assessment.source_unavailable_layers == assessment.layers
         assert assessment.layers[0].source_unavailable
-        assert assessment.layers[0].source_identifier is None
-        assert assessment.layers[0].preserved_layer is None
+        assert assessment.layers[0].source_layer is None
+        assert assessment.layers[0].rejected_snapshot is None
         assert not assessment.all_layers_detached
         assert sender.recovery_required
     finally:
@@ -496,7 +520,7 @@ def test_shared_recovery_commands_distinguish_expected_policy_failures(
     client._started = True
     try:
         with pytest.raises(RecoveryError) as no_incident:
-            client.assess_recovery()
+            client.refresh_recovery_assessment()
         assert no_incident.value.code == "no_incident"
 
         invalid = _stale_artifact("layer:root")
@@ -511,13 +535,12 @@ def test_shared_recovery_commands_distinguish_expected_policy_failures(
         )
         client._sender = _RecoverySender(invalid)
         with pytest.raises(RecoveryError) as wrong_kind:
-            client.assess_recovery()
+            client.refresh_recovery_assessment()
         assert wrong_kind.value.code == "wrong_recovery_kind"
 
         client._sender = _RecoverySender(_stale_artifact("layer:root"))
-        with pytest.raises(RecoveryError) as missing_assessment:
-            client.complete_external_recovery()
-        assert missing_assessment.value.code == "assessment_required"
+        with pytest.raises(TypeError, match="assessment"):
+            client.complete_recovery()
 
         client._graph.apply_state(
             {
@@ -526,13 +549,15 @@ def test_shared_recovery_commands_distinguish_expected_policy_failures(
                 "generation": "graph-1",
                 "revision": 1,
                 "root_layer_key": "layer:root",
-                "layers": [{"layer_key": "layer:root", "sublayers": []}],
+                "layers": [
+                    {"layer_key": "layer:root", "revision": 1, "sublayers": []}
+                ],
             }
         )
         monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         with pytest.raises(RecoveryError) as not_synchronized:
-            client.complete_external_recovery(assessment)
+            client.complete_recovery(assessment)
         assert not_synchronized.value.code == "stage_not_synchronized"
     finally:
         client._sender = original_sender
@@ -560,10 +585,9 @@ def test_shared_use_server_keeps_incident_when_checkpoint_refresh_fails(
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _timeout)
     try:
         with pytest.raises(TimeoutError, match="injected checkpoint timeout"):
-            client.assess_recovery()
+            client.refresh_recovery_assessment()
         assert sender.abandoned_session_ids == []
         assert sender.recovery_required
-        assert client.last_recovery_result is None
     finally:
         client._sender = original_sender
         client.close()
@@ -607,7 +631,7 @@ def test_shared_use_server_keeps_session_when_a_suffix_layer_is_still_live(
 
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _detach_child)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         assert [layer.rejected_layer_key for layer in assessment.detached_layers] == [
             "layer:child"
         ]
@@ -651,6 +675,7 @@ def test_shared_use_server_refuses_automatic_layer_key_redirection(
                 "layers": [
                     {
                         "layer_key": "layer:new-root",
+                        "revision": 1,
                         "sublayers": [
                             {
                                 "authored_path": "./child.usda",
@@ -660,14 +685,18 @@ def test_shared_use_server_refuses_automatic_layer_key_redirection(
                             }
                         ],
                     },
-                    {"layer_key": "layer:new-child", "sublayers": []},
+                    {
+                        "layer_key": "layer:new-child",
+                        "revision": 1,
+                        "sublayers": [],
+                    },
                 ],
             }
         )
 
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _remap)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         remapped = assessment.remapped_layers
         assert len(remapped) == 1
         assert remapped[0].current_layer_key == "layer:new-child"
@@ -696,20 +725,19 @@ def test_shared_external_recovery_completes_a_structured_reachable_assessment(
     client._receiver._synchronized_event.set()
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         assert not assessment.all_layers_detached
 
-        result = client.complete_external_recovery(
+        result = client.complete_recovery(
             assessment,
             session_id="external-replacement",
         )
 
-        assert result.assessment is assessment
+        assert result is assessment
         assert result.recovery_artifact is assessment.recovery_artifact
         assert sender.abandoned_session_ids == ["external-replacement"]
         assert not sender.recovery_required
-        assert client.recovery_assessment is None
-        assert client.last_recovery_result is result
+        assert client._last_recovery_assessment is None
     finally:
         client._sender = original_sender
         client.close()
@@ -733,12 +761,12 @@ def test_shared_external_recovery_rejects_an_assessment_from_another_incident(
     client._receiver._synchronized_event.set()
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         sender.recovery_artifact = _stale_artifact("layer:child")
         sender.transaction_failure = sender.recovery_artifact.failure
 
         with pytest.raises(RecoveryError, match="does not match") as error:
-            client.complete_external_recovery(assessment)
+            client.complete_recovery(assessment)
         assert error.value.code == "stale_assessment"
         assert sender.abandoned_session_ids == []
     finally:
@@ -764,11 +792,11 @@ def test_shared_external_recovery_rejects_a_stale_graph_assessment(
     client._receiver._synchronized_event.set()
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
-        assessment = client.assess_recovery()
+        assessment = client.refresh_recovery_assessment()
         client._last_seq += 1
 
         with pytest.raises(RecoveryError, match="assessment is stale") as error:
-            client.complete_external_recovery(assessment)
+            client.complete_recovery(assessment)
         assert error.value.code == "stale_assessment"
         assert sender.abandoned_session_ids == []
         assert sender.recovery_required
@@ -812,25 +840,26 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _refresh)
     try:
         with pytest.raises(RecoveryError, match="different clean stage") as error:
-            client.recover_use_server(old_stage)
+            client.recover_use_server(clean_stage=old_stage)
         assert error.value.code == "invalid_clean_stage"
         assert calls == []
         shared_stage = Usd.Stage.Open(old_stage.GetRootLayer())
         with pytest.raises(RecoveryError, match="shares loaded layers") as error:
-            client.recover_use_server(shared_stage)
+            client.recover_use_server(clean_stage=shared_stage)
         assert error.value.code == "shared_loaded_layers"
         assert calls == []
 
         result = client.recover_use_server(
-            fresh_stage,
+            clean_stage=fresh_stage,
             session_id="rebind-replacement",
         )
 
         assert calls == [old_stage, fresh_stage]
         assert client.stage is fresh_stage
-        assert client.graph_ready
+        assert client._graph.ready
         assert result.checkpoint_seq == 4
-        assert result.preserved_layers[0].GetPrimAtPath("/Rejected")
+        assert result.rejected_snapshots[0].GetPrimAtPath("/Rejected")
+        assert result.layers[0].source_layer is old_child
         assert sender.abandoned_session_ids == ["rebind-replacement"]
         assert not sender.recovery_required
         assert sender.connected
@@ -851,7 +880,9 @@ def test_shared_rebind_recovery_preflights_the_clean_stage(tmp_path, monkeypatch
             "generation": "graph-1",
             "revision": 1,
             "root_layer_key": "layer:root",
-            "layers": [{"layer_key": "layer:root", "sublayers": []}],
+            "layers": [
+                {"layer_key": "layer:root", "revision": 1, "sublayers": []}
+            ],
         }
     )
     sender = _RecoverySender(_stale_artifact("layer:root"))
@@ -865,10 +896,64 @@ def test_shared_rebind_recovery_preflights_the_clean_stage(tmp_path, monkeypatch
     clean_stage.SetEditTarget(Usd.EditTarget(clean_stage.GetSessionLayer()))
     try:
         with pytest.raises(RecoveryError, match="outside the root/sublayer graph") as error:
-            client.recover_use_server(clean_stage)
+            client.recover_use_server(clean_stage=clean_stage)
 
         assert error.value.code == "invalid_clean_stage"
         assert client.stage is old_stage
+        assert sender.recovery_required
+        assert sender.abandoned_session_ids == []
+    finally:
+        client._sender = original_sender
+        client.close()
+
+
+def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
+    tmp_path,
+    monkeypatch,
+):
+    child = Sdf.Layer.CreateNew(str(tmp_path / "child.usda"))
+    Sdf.CreatePrimInLayer(child, "/Rejected")
+    child.Save()
+    old_stage = _create_root(tmp_path / "old-root.usda")
+    old_stage.GetRootLayer().subLayerPaths.append("./child.usda")
+    client = SharedStageClient(
+        old_stage,
+        app_name="shared-detached-overlap",
+        persist_token=False,
+    )
+    original_sender = client._sender
+    bound_child = _bind_child_graph(client)
+    assert bound_child is child
+    client._graph.apply_sublayers(
+        "layer:root",
+        {
+            "k": "set_sublayers",
+            "prim": "/",
+            "generation": "graph-1",
+            "revision": 2,
+            "sublayers": [],
+        },
+    )
+    client._tracker.sync_graph(force=True)
+    assert child not in old_stage.GetLayerStack(includeSessionLayers=False)
+
+    sender = _RecoverySender(_stale_artifact("layer:child"))
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver._synchronized_event.set()
+    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+
+    clean_stage = _create_root(tmp_path / "clean-root.usda")
+    clean_stage.GetRootLayer().subLayerPaths.append("./child.usda")
+    assert child in clean_stage.GetLayerStack(includeSessionLayers=False)
+    try:
+        with pytest.raises(RecoveryError, match="shares loaded layers") as error:
+            client.recover_use_server(clean_stage=clean_stage)
+
+        assert error.value.code == "shared_loaded_layers"
+        assert client.stage is old_stage
+        assert client._last_recovery_assessment.layers[0].source_layer is child
         assert sender.recovery_required
         assert sender.abandoned_session_ids == []
     finally:

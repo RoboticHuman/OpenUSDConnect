@@ -1,8 +1,8 @@
 """Shared layer-key routing state and lifecycle for mode-specific routers.
 
 Portable protocol layer keys map to local ``Sdf.Layer`` objects. The
-generation/revision pair scopes authoritative state so a restarted server
-can renumber revisions without a receiver misreading them.
+generation/revision pair scopes authoritative baselines across explicit
+revision-domain changes such as log compaction.
 """
 
 from __future__ import annotations
@@ -78,11 +78,11 @@ class LayerKeyRouter(ABC):
     def apply_state(self, state: dict) -> bool:
         """Apply one authoritative state, guarded by generation/revision.
 
-        Returns ``False`` for an older or duplicate state in the same server
-        generation. Revisions may restart when the server process changes;
+        Returns ``False`` for an older or duplicate state in the same
+        generation. An authoritative generation change may restart revisions;
         ``generation`` scopes the comparison without acting as persistent
-        layer identity. The generation/revision pair and ``ready`` flag
-        commit only when the subclass reconciliation succeeds.
+        layer identity. The generation/revision pair and ``ready`` flag commit
+        only when the subclass reconciliation succeeds.
         """
         generation = str(state.get("generation") or "")
         revision = int(state.get("revision", 0))

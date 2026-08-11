@@ -2,160 +2,355 @@
 EXTENDS Integers, Sequences, TLC
 
 (***************************************************************************
-Bounded abstraction of a shared-stage topology edit prepared before the server
-commit lock. A competing revision or generation change may make that prepared
-edit stale. Stale rejection must not alter the graph, abstract stage, durable
-state, global sequence, or log. Repair binds a replacement edit to the current
-generation/revision before it may commit. Alternatively, a clean-stage rebind
-or integration-owned reconciliation removes every local conflict that still
-intersects the authoritative graph before the old session is abandoned.
+Bounded abstraction of shared-stage topology commits. Each parent layer has
+its own optimistic revision while a graph generation scopes all revisions.
+An unrelated-parent commit must not invalidate prepared work; a same-parent
+commit or compaction generation change must. Logical layer keys are durable
+even while a layer is detached, and event/log/identity persistence is atomic.
 ***************************************************************************)
 
 CONSTANTS Root, LayerA, LayerB
 
 Layers == {Root, LayerA, LayerB}
-MaxLog == 4
-GraphState == SUBSET Layers
-LogRecord == [seq : 1..MaxLog, generation : 1..2, revision : 1..3,
-              state : GraphState]
+Parents == {Root, LayerA}
+MaxLog == 5
+TopologyState == [Parents -> SUBSET Layers]
+ParentRevisionState == [Parents -> 1..4]
+LogRecord == [
+    seq : 1..MaxLog,
+    kind : {"baseline", "topology"},
+    generation : 1..2,
+    graphRevision : 1..4,
+    parent : Parents,
+    parentRevision : 1..4,
+    topology : TopologyState,
+    knownKeys : SUBSET Layers
+]
 
 VARIABLES
     phase,
     networkStable,
     generation,
-    revision,
-    reachable,
-    stageState,
-    durableState,
+    graphRevision,
+    parentRevision,
+    topology,
+    stageTopology,
+    durableTopology,
+    knownKeys,
+    durableKnownKeys,
     nextSeq,
     log,
     preparedGeneration,
-    preparedRevision,
+    preparedParentRevision,
     preparedTarget,
     preparedProposal,
     rejectedGeneration,
-    rejectedRevision,
-    rejectedState,
+    rejectedGraphRevision,
+    rejectedParentRevision,
+    rejectedTopology,
+    rejectedKnownKeys,
     rejectedNextSeq,
+    rejectedLog,
+    failedGeneration,
+    failedGraphRevision,
+    failedParentRevision,
+    failedTopology,
+    failedKnownKeys,
+    failedNextSeq,
+    failedLog,
+    failureInjected,
     artifactTargets,
     localConflicts,
-    abandoned
+    abandoned,
+    unrelatedRaced,
+    generationResetSeen,
+    preResetKnownKeys
 
 vars == <<
-    phase, networkStable, generation, revision, reachable, stageState,
-    durableState, nextSeq, log, preparedGeneration, preparedRevision,
-    preparedTarget, preparedProposal, rejectedGeneration, rejectedRevision,
-    rejectedState, rejectedNextSeq, artifactTargets, localConflicts, abandoned
+    phase, networkStable, generation, graphRevision, parentRevision,
+    topology, stageTopology, durableTopology, knownKeys, durableKnownKeys,
+    nextSeq, log, preparedGeneration, preparedParentRevision,
+    preparedTarget, preparedProposal, rejectedGeneration,
+    rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+    rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+    failedGraphRevision, failedParentRevision, failedTopology,
+    failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+    artifactTargets, localConflicts, abandoned, unrelatedRaced,
+    generationResetSeen, preResetKnownKeys
 >>
 
-InitialState == {Root, LayerA}
-CompetingState == {Root, LayerB}
-RepairedState == {Root, LayerA, LayerB}
+InitialTopology == [parent \in Parents |-> IF parent = Root THEN {LayerA} ELSE {}]
+InitialParentRevisions == [parent \in Parents |-> 1]
+InitialKnownKeys == {Root, LayerA}
+
+Reachable(state) ==
+    {Root} \cup state[Root]
+        \cup UNION {state[parent] : parent \in Parents \cap ({Root} \cup state[Root])}
+
+InitialRecord == [
+    seq |-> 1,
+    kind |-> "baseline",
+    generation |-> 1,
+    graphRevision |-> 1,
+    parent |-> Root,
+    parentRevision |-> 1,
+    topology |-> InitialTopology,
+    knownKeys |-> InitialKnownKeys
+]
 
 Init ==
     /\ Root # LayerA /\ Root # LayerB /\ LayerA # LayerB
     /\ phase = "idle"
     /\ networkStable = FALSE
     /\ generation = 1
-    /\ revision = 1
-    /\ reachable = InitialState
-    /\ stageState = InitialState
-    /\ durableState = InitialState
-    /\ nextSeq = 1
-    /\ log = <<>>
+    /\ graphRevision = 1
+    /\ parentRevision = InitialParentRevisions
+    /\ topology = InitialTopology
+    /\ stageTopology = InitialTopology
+    /\ durableTopology = InitialTopology
+    /\ knownKeys = InitialKnownKeys
+    /\ durableKnownKeys = InitialKnownKeys
+    /\ nextSeq = 2
+    /\ log = <<InitialRecord>>
     /\ preparedGeneration = 1
-    /\ preparedRevision = 1
+    /\ preparedParentRevision = 1
     /\ preparedTarget = Root
-    /\ preparedProposal = InitialState
+    /\ preparedProposal = InitialTopology[Root]
     /\ rejectedGeneration = 1
-    /\ rejectedRevision = 1
-    /\ rejectedState = InitialState
-    /\ rejectedNextSeq = 1
+    /\ rejectedGraphRevision = 1
+    /\ rejectedParentRevision = InitialParentRevisions
+    /\ rejectedTopology = InitialTopology
+    /\ rejectedKnownKeys = InitialKnownKeys
+    /\ rejectedNextSeq = 2
+    /\ rejectedLog = <<InitialRecord>>
+    /\ failedGeneration = 1
+    /\ failedGraphRevision = 1
+    /\ failedParentRevision = InitialParentRevisions
+    /\ failedTopology = InitialTopology
+    /\ failedKnownKeys = InitialKnownKeys
+    /\ failedNextSeq = 2
+    /\ failedLog = <<InitialRecord>>
+    /\ failureInjected = FALSE
     /\ artifactTargets \in {{LayerA}, {LayerA, Root}}
     /\ localConflicts = artifactTargets
     /\ abandoned = FALSE
+    /\ unrelatedRaced = FALSE
+    /\ generationResetSeen = FALSE
+    /\ preResetKnownKeys = InitialKnownKeys
 
 StabilizeNetwork ==
     /\ ~networkStable
     /\ networkStable' = TRUE
     /\ UNCHANGED <<
-        phase, generation, revision, reachable, stageState, durableState,
-        nextSeq, log, preparedGeneration, preparedRevision, preparedTarget,
-        preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
-        abandoned
+        phase, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, unrelatedRaced,
+        generationResetSeen, preResetKnownKeys
        >>
 
 Prepare ==
     /\ phase = "idle"
     /\ phase' = "prepared"
     /\ preparedGeneration' = generation
-    /\ preparedRevision' = revision
-    /\ preparedTarget' = LayerA
-    /\ preparedProposal' = CompetingState
+    /\ preparedParentRevision' = parentRevision[Root]
+    /\ preparedTarget' = Root
+    /\ preparedProposal' = {LayerA, LayerB}
+    /\ unrelatedRaced' = FALSE
     /\ UNCHANGED <<
-        networkStable, generation, revision, reachable, stageState,
-        durableState, nextSeq, log, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
-        abandoned
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, rejectedGeneration, rejectedGraphRevision,
+        rejectedParentRevision, rejectedTopology, rejectedKnownKeys,
+        rejectedNextSeq, rejectedLog, failedGeneration, failedGraphRevision,
+        failedParentRevision, failedTopology, failedKnownKeys,
+        failedNextSeq, failedLog, failureInjected, artifactTargets,
+        localConflicts, abandoned, generationResetSeen, preResetKnownKeys
        >>
 
-AppendGraphCommit(newGeneration, newRevision, newState) ==
-    /\ reachable' = newState
-    /\ stageState' = newState
-    /\ durableState' = newState
-    /\ generation' = newGeneration
-    /\ revision' = newRevision
+AppendTopologyCommit(parent, newTopology, newParentRevision, newKnownKeys) ==
+    /\ generation' = generation
+    /\ graphRevision' = graphRevision + 1
+    /\ parentRevision' = newParentRevision
+    /\ topology' = newTopology
+    /\ stageTopology' = newTopology
+    /\ durableTopology' = newTopology
+    /\ knownKeys' = newKnownKeys
+    /\ durableKnownKeys' = newKnownKeys
     /\ log' = Append(
         log,
-        [seq |-> nextSeq, generation |-> newGeneration,
-         revision |-> newRevision, state |-> newState]
+        [seq |-> nextSeq, kind |-> "topology", generation |-> generation,
+         graphRevision |-> graphRevision + 1, parent |-> parent,
+         parentRevision |-> newParentRevision[parent],
+         topology |-> newTopology, knownKeys |-> newKnownKeys]
        )
     /\ nextSeq' = nextSeq + 1
 
-ConcurrentRevision ==
+ConcurrentOtherParent ==
     /\ phase = "prepared"
     /\ ~networkStable
-    /\ revision < 2
-    /\ nextSeq < MaxLog
-    /\ AppendGraphCommit(generation, revision + 1, CompetingState)
+    /\ graphRevision < 3
+    /\ parentRevision[LayerA] < 3
+    /\ nextSeq <= MaxLog
+    /\ LET newTopology == [topology EXCEPT ![LayerA] = {LayerB}]
+           newParentRevision == [parentRevision EXCEPT ![LayerA] = @ + 1]
+       IN AppendTopologyCommit(
+            LayerA,
+            newTopology,
+            newParentRevision,
+            knownKeys \cup {LayerB}
+          )
+    /\ unrelatedRaced' = (
+        /\ preparedGeneration = generation
+        /\ preparedParentRevision = parentRevision[preparedTarget]
+        /\ preparedTarget \in Reachable(topology)
+       )
     /\ UNCHANGED <<
-        phase, networkStable, preparedGeneration, preparedRevision,
+        phase, networkStable, preparedGeneration, preparedParentRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
-        localConflicts, abandoned
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, generationResetSeen,
+        preResetKnownKeys
        >>
 
-ConcurrentGenerationReset ==
+ConcurrentSameParent ==
+    /\ phase = "prepared"
+    /\ ~networkStable
+    /\ graphRevision < 3
+    /\ parentRevision[Root] < 3
+    /\ nextSeq <= MaxLog
+    /\ LET newTopology == [topology EXCEPT ![Root] = {LayerB}]
+           newParentRevision == [parentRevision EXCEPT ![Root] = @ + 1]
+       IN AppendTopologyCommit(
+            Root,
+            newTopology,
+            newParentRevision,
+            knownKeys \cup {LayerB}
+          )
+    /\ unrelatedRaced' = FALSE
+    /\ UNCHANGED <<
+        phase, networkStable, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, generationResetSeen,
+        preResetKnownKeys
+       >>
+
+CompactToNewGeneration ==
     /\ phase = "prepared"
     /\ ~networkStable
     /\ generation = 1
-    /\ nextSeq < MaxLog
-    /\ AppendGraphCommit(2, 1, CompetingState)
+    /\ generation' = 2
+    /\ graphRevision' = 1
+    /\ parentRevision' = [parent \in Parents |-> 1]
+    /\ topology' = topology
+    /\ stageTopology' = topology
+    /\ durableTopology' = topology
+    /\ knownKeys' = knownKeys
+    /\ durableKnownKeys' = knownKeys
+    /\ nextSeq' = 2
+    /\ log' = <<[
+        seq |-> 1, kind |-> "baseline", generation |-> 2,
+        graphRevision |-> 1, parent |-> Root,
+        parentRevision |-> 1, topology |-> topology,
+        knownKeys |-> knownKeys
+       ]>>
+    /\ unrelatedRaced' = FALSE
+    /\ generationResetSeen' = TRUE
+    /\ preResetKnownKeys' = knownKeys
     /\ UNCHANGED <<
-        phase, networkStable, preparedGeneration, preparedRevision,
+        phase, networkStable, preparedGeneration, preparedParentRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
-        localConflicts, abandoned
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned
        >>
 
 PreparedIsCurrent ==
     /\ preparedGeneration = generation
-    /\ preparedRevision = revision
-    /\ preparedTarget \in reachable
+    /\ preparedParentRevision = parentRevision[preparedTarget]
+    /\ preparedTarget \in Reachable(topology)
 
 CommitPrepared ==
     /\ phase = "prepared"
     /\ PreparedIsCurrent
-    /\ revision < 3
+    /\ graphRevision < 4
+    /\ parentRevision[preparedTarget] < 4
     /\ nextSeq <= MaxLog
     /\ phase' = "done"
-    /\ AppendGraphCommit(generation, revision + 1, preparedProposal)
+    /\ LET newTopology == [topology EXCEPT ![preparedTarget] = preparedProposal]
+           newParentRevision == [parentRevision EXCEPT ![preparedTarget] = @ + 1]
+       IN AppendTopologyCommit(
+            preparedTarget,
+            newTopology,
+            newParentRevision,
+            knownKeys \cup preparedProposal
+          )
     /\ UNCHANGED <<
-        networkStable, preparedGeneration, preparedRevision, preparedTarget,
-        preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
-        abandoned
+        networkStable, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, unrelatedRaced,
+        generationResetSeen, preResetKnownKeys
+       >>
+
+PersistenceFailure ==
+    /\ phase = "prepared"
+    /\ PreparedIsCurrent
+    /\ ~failureInjected
+    /\ phase' = "retry"
+    /\ failedGeneration' = generation
+    /\ failedGraphRevision' = graphRevision
+    /\ failedParentRevision' = parentRevision
+    /\ failedTopology' = topology
+    /\ failedKnownKeys' = knownKeys
+    /\ failedNextSeq' = nextSeq
+    /\ failedLog' = log
+    /\ failureInjected' = TRUE
+    /\ UNCHANGED <<
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, artifactTargets,
+        localConflicts, abandoned, unrelatedRaced, generationResetSeen,
+        preResetKnownKeys
+       >>
+
+RetryAfterFailure ==
+    /\ phase = "retry"
+    /\ phase' = "prepared"
+    /\ preparedGeneration' = generation
+    /\ preparedParentRevision' = parentRevision[Root]
+    /\ preparedTarget' = Root
+    /\ preparedProposal' = {LayerA, LayerB}
+    /\ unrelatedRaced' = FALSE
+    /\ UNCHANGED <<
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, rejectedGeneration, rejectedGraphRevision,
+        rejectedParentRevision, rejectedTopology, rejectedKnownKeys,
+        rejectedNextSeq, rejectedLog, failedGeneration, failedGraphRevision,
+        failedParentRevision, failedTopology, failedKnownKeys,
+        failedNextSeq, failedLog, failureInjected, artifactTargets,
+        localConflicts, abandoned, generationResetSeen, preResetKnownKeys
        >>
 
 RejectStale ==
@@ -163,28 +358,40 @@ RejectStale ==
     /\ ~PreparedIsCurrent
     /\ phase' = "rejected"
     /\ rejectedGeneration' = generation
-    /\ rejectedRevision' = revision
-    /\ rejectedState' = reachable
+    /\ rejectedGraphRevision' = graphRevision
+    /\ rejectedParentRevision' = parentRevision
+    /\ rejectedTopology' = topology
+    /\ rejectedKnownKeys' = knownKeys
     /\ rejectedNextSeq' = nextSeq
+    /\ rejectedLog' = log
     /\ UNCHANGED <<
-        networkStable, generation, revision, reachable, stageState,
-        durableState, nextSeq, log, preparedGeneration, preparedRevision,
-        preparedTarget, preparedProposal, artifactTargets, localConflicts,
-        abandoned
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, unrelatedRaced,
+        generationResetSeen, preResetKnownKeys
        >>
 
 Repair ==
     /\ phase = "rejected"
     /\ phase' = "repaired"
     /\ preparedGeneration' = generation
-    /\ preparedRevision' = revision
+    /\ preparedParentRevision' = parentRevision[Root]
     /\ preparedTarget' = Root
-    /\ preparedProposal' = RepairedState
+    /\ preparedProposal' = {LayerA, LayerB}
     /\ UNCHANGED <<
-        networkStable, generation, revision, reachable, stageState,
-        durableState, nextSeq, log, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
-        abandoned
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, rejectedGeneration, rejectedGraphRevision,
+        rejectedParentRevision, rejectedTopology, rejectedKnownKeys,
+        rejectedNextSeq, rejectedLog, failedGeneration, failedGraphRevision,
+        failedParentRevision, failedTopology, failedKnownKeys,
+        failedNextSeq, failedLog, failureInjected, artifactTargets,
+        localConflicts, abandoned, unrelatedRaced, generationResetSeen,
+        preResetKnownKeys
        >>
 
 ReconcileExternal ==
@@ -192,46 +399,71 @@ ReconcileExternal ==
     /\ phase' = "reconciled"
     /\ localConflicts' = {}
     /\ UNCHANGED <<
-        networkStable, generation, revision, reachable, stageState,
-        durableState, nextSeq, log, preparedGeneration, preparedRevision,
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, preparedGeneration, preparedParentRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
-        abandoned
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, abandoned, unrelatedRaced, generationResetSeen,
+        preResetKnownKeys
        >>
 
 AbandonResolved ==
     /\ phase \in {"rejected", "reconciled"}
-    /\ localConflicts \cap reachable = {}
+    /\ localConflicts \cap Reachable(topology) = {}
     /\ phase' = "done"
     /\ abandoned' = TRUE
     /\ UNCHANGED <<
-        networkStable, generation, revision, reachable, stageState,
-        durableState, nextSeq, log, preparedGeneration, preparedRevision,
+        networkStable, generation, graphRevision, parentRevision, topology,
+        stageTopology, durableTopology, knownKeys, durableKnownKeys,
+        nextSeq, log, preparedGeneration, preparedParentRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
-        localConflicts
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, unrelatedRaced,
+        generationResetSeen, preResetKnownKeys
        >>
 
 CommitRepaired ==
     /\ phase = "repaired"
     /\ PreparedIsCurrent
-    /\ revision < 3
+    /\ graphRevision < 4
+    /\ parentRevision[preparedTarget] < 4
     /\ nextSeq <= MaxLog
     /\ phase' = "done"
-    /\ AppendGraphCommit(generation, revision + 1, preparedProposal)
+    /\ LET newTopology == [topology EXCEPT ![preparedTarget] = preparedProposal]
+           newParentRevision == [parentRevision EXCEPT ![preparedTarget] = @ + 1]
+       IN AppendTopologyCommit(
+            preparedTarget,
+            newTopology,
+            newParentRevision,
+            knownKeys \cup preparedProposal
+          )
     /\ UNCHANGED <<
-        networkStable, preparedGeneration, preparedRevision, preparedTarget,
-        preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
-        abandoned
+        networkStable, preparedGeneration, preparedParentRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedGraphRevision, rejectedParentRevision, rejectedTopology,
+        rejectedKnownKeys, rejectedNextSeq, rejectedLog, failedGeneration,
+        failedGraphRevision, failedParentRevision, failedTopology,
+        failedKnownKeys, failedNextSeq, failedLog, failureInjected,
+        artifactTargets, localConflicts, abandoned, unrelatedRaced,
+        generationResetSeen, preResetKnownKeys
        >>
 
 Next ==
     \/ StabilizeNetwork
     \/ Prepare
-    \/ ConcurrentRevision
-    \/ ConcurrentGenerationReset
+    \/ ConcurrentOtherParent
+    \/ ConcurrentSameParent
+    \/ CompactToNewGeneration
     \/ CommitPrepared
+    \/ PersistenceFailure
+    \/ RetryAfterFailure
     \/ RejectStale
     \/ Repair
     \/ ReconcileExternal
@@ -243,39 +475,63 @@ Spec ==
     /\ [][Next]_vars
     /\ WF_vars(StabilizeNetwork)
     /\ WF_vars(Prepare)
-    /\ WF_vars(CommitPrepared \/ RejectStale)
+    /\ WF_vars(CommitPrepared \/ PersistenceFailure \/ RejectStale)
+    /\ WF_vars(RetryAfterFailure)
     /\ WF_vars(Repair)
     /\ WF_vars(ReconcileExternal)
     /\ WF_vars(AbandonResolved)
     /\ WF_vars(CommitRepaired)
 
 TypeOK ==
-    /\ phase \in {"idle", "prepared", "rejected", "reconciled", "repaired", "done"}
+    /\ phase \in {"idle", "prepared", "retry", "rejected", "reconciled", "repaired", "done"}
     /\ networkStable \in BOOLEAN
     /\ generation \in 1..2
-    /\ revision \in 1..3
-    /\ reachable \in GraphState
-    /\ stageState \in GraphState
-    /\ durableState \in GraphState
+    /\ graphRevision \in 1..4
+    /\ parentRevision \in ParentRevisionState
+    /\ topology \in TopologyState
+    /\ stageTopology \in TopologyState
+    /\ durableTopology \in TopologyState
+    /\ knownKeys \in SUBSET Layers
+    /\ durableKnownKeys \in SUBSET Layers
     /\ nextSeq \in 1..(MaxLog + 1)
     /\ log \in Seq(LogRecord)
     /\ preparedGeneration \in 1..2
-    /\ preparedRevision \in 1..3
-    /\ preparedTarget \in Layers
-    /\ preparedProposal \in GraphState
+    /\ preparedParentRevision \in 1..4
+    /\ preparedTarget \in Parents
+    /\ preparedProposal \in SUBSET Layers
     /\ rejectedGeneration \in 1..2
-    /\ rejectedRevision \in 1..3
-    /\ rejectedState \in GraphState
+    /\ rejectedGraphRevision \in 1..4
+    /\ rejectedParentRevision \in ParentRevisionState
+    /\ rejectedTopology \in TopologyState
+    /\ rejectedKnownKeys \in SUBSET Layers
     /\ rejectedNextSeq \in 1..(MaxLog + 1)
+    /\ rejectedLog \in Seq(LogRecord)
+    /\ failedGeneration \in 1..2
+    /\ failedGraphRevision \in 1..4
+    /\ failedParentRevision \in ParentRevisionState
+    /\ failedTopology \in TopologyState
+    /\ failedKnownKeys \in SUBSET Layers
+    /\ failedNextSeq \in 1..(MaxLog + 1)
+    /\ failedLog \in Seq(LogRecord)
+    /\ failureInjected \in BOOLEAN
     /\ artifactTargets \in SUBSET Layers
     /\ LayerA \in artifactTargets
     /\ localConflicts \in SUBSET artifactTargets
     /\ abandoned \in BOOLEAN
+    /\ unrelatedRaced \in BOOLEAN
+    /\ generationResetSeen \in BOOLEAN
+    /\ preResetKnownKeys \in SUBSET Layers
 
-RootIsAlwaysReachable == Root \in reachable
+RootIsAlwaysReachable == Root \in Reachable(topology)
 
-StageGraphAndDurabilityAreAtomic ==
-    reachable = stageState /\ stageState = durableState
+StageGraphIdentityAndDurabilityAreAtomic ==
+    /\ topology = stageTopology
+    /\ stageTopology = durableTopology
+    /\ knownKeys = durableKnownKeys
+
+ReachableLayersHaveStableKeys == Reachable(topology) \subseteq knownKeys
+
+DetachedIdentityIsRetained == LayerA \in knownKeys
 
 LogSequenceIsContiguous ==
     /\ Len(log) = nextSeq - 1
@@ -284,27 +540,47 @@ LogSequenceIsContiguous ==
 LatestLogMatchesGraph ==
     Len(log) > 0 =>
         /\ log[Len(log)].generation = generation
-        /\ log[Len(log)].revision = revision
-        /\ log[Len(log)].state = reachable
+        /\ log[Len(log)].graphRevision = graphRevision
+        /\ log[Len(log)].topology = topology
+        /\ log[Len(log)].knownKeys = knownKeys
+
+UnrelatedParentCommitDoesNotStalePrepared ==
+    phase = "prepared" /\ unrelatedRaced => PreparedIsCurrent
+
+GenerationResetPreservesKnownKeys ==
+    generationResetSeen => preResetKnownKeys \subseteq knownKeys
 
 StaleRejectionDoesNotMutateState ==
     phase = "rejected" =>
         /\ generation = rejectedGeneration
-        /\ revision = rejectedRevision
-        /\ reachable = rejectedState
-        /\ stageState = rejectedState
-        /\ durableState = rejectedState
+        /\ graphRevision = rejectedGraphRevision
+        /\ parentRevision = rejectedParentRevision
+        /\ topology = rejectedTopology
+        /\ stageTopology = rejectedTopology
+        /\ durableTopology = rejectedTopology
+        /\ knownKeys = rejectedKnownKeys
+        /\ durableKnownKeys = rejectedKnownKeys
         /\ nextSeq = rejectedNextSeq
-        /\ Len(log) = rejectedNextSeq - 1
+        /\ log = rejectedLog
 
-RepairedEditUsesCurrentIdentity ==
-    phase = "repaired" =>
-        /\ preparedGeneration = generation
-        /\ preparedRevision = revision
-        /\ preparedTarget \in reachable
+PersistenceFailureDoesNotMutateState ==
+    phase = "retry" =>
+        /\ generation = failedGeneration
+        /\ graphRevision = failedGraphRevision
+        /\ parentRevision = failedParentRevision
+        /\ topology = failedTopology
+        /\ stageTopology = failedTopology
+        /\ durableTopology = failedTopology
+        /\ knownKeys = failedKnownKeys
+        /\ durableKnownKeys = failedKnownKeys
+        /\ nextSeq = failedNextSeq
+        /\ log = failedLog
+
+RepairedEditUsesCurrentParentIdentity ==
+    phase = "repaired" => PreparedIsCurrent
 
 AbandonmentRequiresNoLiveLocalConflict ==
-    abandoned => localConflicts \cap reachable = {}
+    abandoned => localConflicts \cap Reachable(topology) = {}
 
 EventuallyResolves == <> (phase = "done")
 

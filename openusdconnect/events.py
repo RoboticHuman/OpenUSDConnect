@@ -369,7 +369,7 @@ class ReplaceSdfLayerContent(TypedDict):
 
 
 class SetSublayers(TypedDict):
-    """Replace the complete ordered sublayer list of the targeted layer."""
+    """Replace one layer's sublayers at its authoritative parent revision."""
 
     k: Literal["set_sublayers"]
     prim: Literal["/"]

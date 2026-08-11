@@ -32,9 +32,7 @@ from .receiver import ReceiverThread
 from .recovery import (
     RecoveryArtifact,
     RecoveryError,
-    RecoveryIncident,
     RejectionDisposition,
-    TransactionFailure,
 )
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
@@ -52,15 +50,15 @@ class SharedRecoveryLayer:
     """One quarantined layer classified against the current graph."""
 
     rejected_layer_key: str
-    source_identifier: str | None
+    source_layer: Sdf.Layer | None
     current_layer_key: str | None
     reachable: bool
-    preserved_layer: Sdf.Layer | None
+    rejected_snapshot: Sdf.Layer | None
 
     @property
     def source_unavailable(self) -> bool:
         """Whether the rejected layer could not be identified locally."""
-        return self.source_identifier is None
+        return self.source_layer is None
 
     @property
     def detached(self) -> bool:
@@ -107,22 +105,13 @@ class SharedRecoveryAssessment:
     def all_layers_detached(self) -> bool:
         return bool(self.layers) and all(layer.detached for layer in self.layers)
 
-
-@dataclass(frozen=True, slots=True)
-class SharedRecoveryResult:
-    """Preserved shared-stage state after abandoning a stale session."""
-
-    recovery_artifact: RecoveryArtifact
-    assessment: SharedRecoveryAssessment
-    checkpoint_seq: int
-
     @property
-    def preserved_layers(self) -> tuple[Sdf.Layer, ...]:
-        """Captured local layers with unavailable entries omitted."""
+    def rejected_snapshots(self) -> tuple[Sdf.Layer, ...]:
+        """Captured rejected state with unavailable entries omitted."""
         return tuple(
-            layer.preserved_layer
-            for layer in self.assessment.layers
-            if layer.preserved_layer is not None
+            layer.rejected_snapshot
+            for layer in self.layers
+            if layer.rejected_snapshot is not None
         )
 
 
@@ -202,7 +191,6 @@ class SharedStageClient:
         self._last_seq = 0
         self._pending_records: list[ReceivedEvent] = []
         self._last_recovery_assessment: SharedRecoveryAssessment | None = None
-        self._last_recovery_result: SharedRecoveryResult | None = None
         self._started = False
         self._closed = False
 
@@ -233,7 +221,12 @@ class SharedStageClient:
             phase = ClientPhase.CLOSED
         elif failure is not None:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.auth_rejected or self.connection_rejected:
+        elif (
+            self._receiver.auth_rejected
+            or self._sender.auth_rejected
+            or self._receiver.hello_rejected
+            or self._sender.hello_rejected
+        ):
             phase = ClientPhase.REJECTED
         elif self._receiver.connected and not self._receiver.synchronized:
             phase = ClientPhase.REPLAYING
@@ -258,16 +251,6 @@ class SharedStageClient:
         )
 
     @property
-    def sender(self):
-        """The underlying :class:`EventSender`."""
-        return self._sender
-
-    @property
-    def receiver(self):
-        """The underlying :class:`ReceiverThread`."""
-        return self._receiver
-
-    @property
     def connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
@@ -276,14 +259,10 @@ class SharedStageClient:
         """Whether the local layer graph applied the server replay watermark."""
         return (
             not self._closed
+            and self._graph.ready
             and self._receiver.synchronized
             and not self._sender.recovery_required
         )
-
-    @property
-    def recovery_required(self) -> bool:
-        """Whether deterministic rejection requires local-state reconciliation."""
-        return self._sender.recovery_required
 
     @property
     def pending_event_count(self) -> int:
@@ -291,43 +270,9 @@ class SharedStageClient:
         return self._sender.pending_event_count
 
     @property
-    def transaction_error(self) -> str:
-        """Terminal producer rejection, or an empty string."""
-        return self._sender.transaction_error
-
-    @property
-    def transaction_failure(self) -> TransactionFailure | None:
-        """Structured rejection including its recovery disposition, if any."""
-        return self._sender.transaction_failure
-
-    @property
-    def recovery_incident(self) -> RecoveryIncident | None:
-        """Structured recovery summary for polling and host UI."""
-        return self._sender.recovery_incident
-
-    @property
     def recovery_artifact(self) -> RecoveryArtifact | None:
         """Exact quarantined transactions for integration-owned recovery."""
         return self._sender.recovery_artifact
-
-    @property
-    def recovery_assessment(self) -> SharedRecoveryAssessment | None:
-        """Current authoritative layer classification for the active incident."""
-        return self._last_recovery_assessment
-
-    @property
-    def last_recovery_result(self) -> SharedRecoveryResult | None:
-        """Most recent preserved recovery data, retained until dismissed."""
-        return self._last_recovery_result
-
-    def dismiss_recovery_result(self) -> None:
-        """Release references held for the most recently resolved incident."""
-        self._last_recovery_result = None
-
-    @property
-    def recovery_disposition(self) -> RejectionDisposition | None:
-        """Recovery policy category for the current rejection, if any."""
-        return self._sender.recovery_disposition
 
     def repair_and_resume(self, events: list[dict], *, layer: Sdf.Layer) -> int:
         """Replace a recoverable layer transaction and resume its outbox.
@@ -354,7 +299,7 @@ class SharedStageClient:
             )
         return txn_id
 
-    def assess_recovery(
+    def refresh_recovery_assessment(
         self,
         *,
         timeout: float | None = 10.0,
@@ -372,32 +317,31 @@ class SharedStageClient:
         for layer_key in artifact.layer_keys:
             prior = previous_layers.get(layer_key)
             layer = None
-            preserved = None
+            rejected_snapshot = None
             if prior is not None:
-                preserved = prior.preserved_layer
-                if prior.source_identifier is not None:
-                    layer = Sdf.Layer.Find(prior.source_identifier)
+                rejected_snapshot = prior.rejected_snapshot
+                layer = prior.source_layer
             if layer is None:
                 layer = self._graph.layer_for(layer_key)
-            if layer is not None and preserved is None:
-                preserved = Sdf.Layer.CreateAnonymous(
+            if layer is not None and rejected_snapshot is None:
+                rejected_snapshot = Sdf.Layer.CreateAnonymous(
                     "openusdconnect-recovery-shared-layer"
                 )
-                preserved.TransferContent(layer)
-            captured.append((layer_key, layer, preserved))
+                rejected_snapshot.TransferContent(layer)
+            captured.append((layer_key, layer, rejected_snapshot))
 
         self._refresh_recovery_checkpoint(timeout)
         reachable = set(self._graph.reachable_layer_keys())
         layers = []
-        for rejected_key, layer, preserved in captured:
+        for rejected_key, layer, rejected_snapshot in captured:
             current_key = self._graph.key_for(layer) if layer is not None else None
             layers.append(
                 SharedRecoveryLayer(
                     rejected_layer_key=rejected_key,
-                    source_identifier=layer.identifier if layer is not None else None,
+                    source_layer=layer,
                     current_layer_key=current_key,
                     reachable=current_key in reachable if current_key is not None else False,
-                    preserved_layer=preserved,
+                    rejected_snapshot=rejected_snapshot,
                 )
             )
         assessment = SharedRecoveryAssessment(
@@ -412,11 +356,11 @@ class SharedStageClient:
 
     def recover_use_server(
         self,
-        stage: Usd.Stage,
         *,
+        clean_stage: Usd.Stage,
         session_id: str | None = None,
         timeout: float | None = 10.0,
-    ) -> SharedRecoveryResult:
+    ) -> SharedRecoveryAssessment:
         """Select server state by replaying onto a clean equivalent stage.
 
         Shared stages use application-owned file layers. The event log cannot
@@ -427,40 +371,16 @@ class SharedStageClient:
         Producer reconnect is attempted within the same timeout budget; if it
         cannot complete, the normal update loop retries.
         """
-        if not isinstance(stage, Usd.Stage):
-            raise TypeError("SharedStageClient requires a Usd.Stage")
-        if stage is self._stage:
-            raise RecoveryError(
-                "invalid_clean_stage",
-                "Use Server recovery requires a different clean stage",
-            )
-        if Sdf.Layer.IsAnonymousLayerIdentifier(stage.GetRootLayer().identifier):
-            raise RecoveryError(
-                "invalid_clean_stage",
-                "Use Server recovery requires a portable root layer",
-            )
-        current_identifiers = {
-            layer.identifier
-            for layer in self._stage.GetLayerStack(includeSessionLayers=False)
-        }
-        replacement_identifiers = {
-            layer.identifier for layer in stage.GetLayerStack(includeSessionLayers=False)
-        }
-        overlap = current_identifiers & replacement_identifiers
-        if overlap:
-            raise RecoveryError(
-                "shared_loaded_layers",
-                "Use Server recovery stage shares loaded layers with the rejected "
-                f"stage: {sorted(overlap)!r}"
-            )
+        self._validate_clean_recovery_stage(clean_stage)
         deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
-        assessment = self.assess_recovery(timeout=timeout)
-        self._rebind_stage_for_recovery(stage)
+        assessment = self.refresh_recovery_assessment(timeout=timeout)
+        self._validate_clean_recovery_stage(clean_stage, assessment=assessment)
+        self._rebind_stage_for_recovery(clean_stage)
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         self._refresh_recovery_checkpoint(remaining)
         assessment = self._reclassify_recovery_assessment(assessment)
         self._last_recovery_assessment = assessment
-        result = self.complete_external_recovery(
+        result = self.complete_recovery(
             assessment,
             session_id=session_id,
         )
@@ -468,12 +388,59 @@ class SharedStageClient:
         self._resume_sender_after_recovery(remaining)
         return result
 
-    def complete_external_recovery(
+    def _validate_clean_recovery_stage(
         self,
+        clean_stage: Usd.Stage,
+        *,
         assessment: SharedRecoveryAssessment | None = None,
+    ) -> None:
+        """Reject replacement stages that reuse any rejected live layer."""
+        if not isinstance(clean_stage, Usd.Stage):
+            raise TypeError("SharedStageClient requires a Usd.Stage")
+        if clean_stage is self._stage:
+            raise RecoveryError(
+                "invalid_clean_stage",
+                "Use Server recovery requires a different clean stage",
+            )
+        if Sdf.Layer.IsAnonymousLayerIdentifier(clean_stage.GetRootLayer().identifier):
+            raise RecoveryError(
+                "invalid_clean_stage",
+                "Use Server recovery requires a portable root layer",
+            )
+
+        rejected_layers = list(
+            self._stage.GetLayerStack(includeSessionLayers=False)
+        )
+        if assessment is not None:
+            rejected_layers.extend(
+                item.source_layer
+                for item in assessment.layers
+                if item.source_layer is not None
+            )
+        replacement_layers = list(
+            clean_stage.GetLayerStack(includeSessionLayers=False)
+        )
+        rejected_identifiers = {layer.identifier for layer in rejected_layers}
+        rejected_object_ids = {id(layer) for layer in rejected_layers}
+        overlap = {
+            replacement.identifier
+            for replacement in replacement_layers
+            if replacement.identifier in rejected_identifiers
+            or id(replacement) in rejected_object_ids
+        }
+        if overlap:
+            raise RecoveryError(
+                "shared_loaded_layers",
+                "Use Server recovery stage shares loaded layers with the rejected "
+                f"stage: {sorted(overlap)!r}"
+            )
+
+    def complete_recovery(
+        self,
+        assessment: SharedRecoveryAssessment,
         *,
         session_id: str | None = None,
-    ) -> SharedRecoveryResult:
+    ) -> SharedRecoveryAssessment:
         """Finish after an integration has explicitly reconciled its stage.
 
         This method does not infer or verify USD merge semantics. The caller
@@ -481,17 +448,11 @@ class SharedStageClient:
         verifies that *assessment* belongs to the active incident and that the
         receive side is again at a usable authoritative checkpoint.
         """
-        assessment = assessment or self._last_recovery_assessment
-        if assessment is None:
-            raise RecoveryError(
-                "assessment_required",
-                "assess_recovery() must run before external completion",
-            )
         self._validate_recovery_assessment(assessment)
         if not self._graph.ready or not self._receiver.synchronized:
             raise RecoveryError(
                 "stage_not_synchronized",
-                "shared stage must be synchronized before external recovery completes",
+                "shared stage must be synchronized before recovery completes",
             )
         return self._complete_recovery(assessment, session_id=session_id)
 
@@ -532,7 +493,7 @@ class SharedStageClient:
         ):
             raise RecoveryError(
                 "stale_assessment",
-                "recovery assessment is stale; assess and reconcile the current graph",
+                "recovery assessment is stale; refresh and reconcile the current graph",
             )
 
     def _reclassify_recovery_assessment(
@@ -543,19 +504,15 @@ class SharedStageClient:
         reachable = set(self._graph.reachable_layer_keys())
         layers = []
         for prior in assessment.layers:
-            source = (
-                Sdf.Layer.Find(prior.source_identifier)
-                if prior.source_identifier is not None
-                else None
-            )
+            source = prior.source_layer
             current_key = self._graph.key_for(source) if source is not None else None
             layers.append(
                 SharedRecoveryLayer(
                     rejected_layer_key=prior.rejected_layer_key,
-                    source_identifier=prior.source_identifier,
+                    source_layer=source,
                     current_layer_key=current_key,
                     reachable=current_key in reachable if current_key is not None else False,
-                    preserved_layer=prior.preserved_layer,
+                    rejected_snapshot=prior.rejected_snapshot,
                 )
             )
         return SharedRecoveryAssessment(
@@ -571,20 +528,12 @@ class SharedStageClient:
         assessment: SharedRecoveryAssessment,
         *,
         session_id: str | None,
-    ) -> SharedRecoveryResult:
+    ) -> SharedRecoveryAssessment:
         self._validate_recovery_assessment(assessment)
-        recovery_artifact = self._sender.abandon_rejected_session(
-            session_id=session_id
-        )
-        result = SharedRecoveryResult(
-            recovery_artifact=recovery_artifact,
-            assessment=assessment,
-            checkpoint_seq=self._last_seq,
-        )
+        self._sender.abandon_rejected_session(session_id=session_id)
         self._last_recovery_assessment = None
-        self._last_recovery_result = result
         self._tracker.sync_graph(force=True)
-        return result
+        return assessment
 
     def _resume_sender_after_recovery(self, timeout: float | None) -> None:
         """Best-effort producer reconnect after state recovery has committed."""
@@ -623,18 +572,6 @@ class SharedStageClient:
         return self._sender.flush(timeout)
 
     @property
-    def graph_ready(self) -> bool:
-        return self._graph.ready
-
-    @property
-    def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected or self._sender.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected or self._sender.hello_rejected
-
-    @property
     def stage_metadata(self) -> dict:
         return dict(self._receiver.stage_metadata)
 
@@ -647,15 +584,15 @@ class SharedStageClient:
         return self._tracker.prepared_event_count
 
     @property
-    def deferred_incoming_record_count(self) -> int:
+    def deferred_event_count(self) -> int:
         return len(self._pending_records)
 
     @property
-    def pending_layer_keys(self) -> tuple[str, ...]:
+    def deferred_layer_keys(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(record.layer_key or "" for record in self._pending_records))
 
-    def is_layer_mapped(self, layer: Sdf.Layer) -> bool:
-        """Return whether *layer* can be targeted by shared-stage transactions."""
+    def is_layer_reachable(self, layer: Sdf.Layer) -> bool:
+        """Return whether *layer* is reachable in the synchronized root graph."""
         layer_key = self._graph.key_for(layer)
         return bool(layer_key and layer_key in self._graph.reachable_layer_keys())
 
@@ -858,12 +795,8 @@ class SharedStageClient:
         self._pending_records = retained
         return applied
 
-    def refresh_asset_dependency(self, asset_path: str | None = None) -> tuple[str, ...]:
-        """Retry unresolved graph edges under this stage's resolver context.
-
-        ``asset_path`` is accepted for API consistency with the managed-mode
-        clients; shared-stage graph edges are not filtered by asset path.
-        """
+    def refresh_layer_graph(self) -> tuple[str, ...]:
+        """Retry unresolved graph edges under this stage's resolver context."""
         with self._tracker.suppressed():
             mapped = self._graph.refresh_dependencies()
             self._tracker.sync_graph(force=True)
@@ -927,6 +860,7 @@ class SharedStageClient:
             if self._receiver.is_alive():
                 LOG.warning("SharedStageClient receiver did not stop within 2 seconds")
         self._tracker.close()
+        self._last_recovery_assessment = None
         self._closed = True
 
     def __enter__(self) -> SharedStageClient:
@@ -940,6 +874,5 @@ class SharedStageClient:
 __all__ = [
     "SharedRecoveryAssessment",
     "SharedRecoveryLayer",
-    "SharedRecoveryResult",
     "SharedStageClient",
 ]

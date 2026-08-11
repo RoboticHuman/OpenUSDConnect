@@ -5769,13 +5769,17 @@ struct SharedLayerState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_LAYER_KEY = 4,
-    VT_SUBLAYERS = 6
+    VT_SUBLAYERS = 6,
+    VT_REVISION = 8
   };
   const ::flatbuffers::String *layer_key() const {
     return GetPointer<const ::flatbuffers::String *>(VT_LAYER_KEY);
   }
   const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *>(VT_SUBLAYERS);
+  }
+  uint64_t revision() const {
+    return GetField<uint64_t>(VT_REVISION, 0);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -5785,6 +5789,7 @@ struct SharedLayerState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_SUBLAYERS) &&
            verifier.VerifyVector(sublayers()) &&
            verifier.VerifyVectorOfTables(sublayers()) &&
+           VerifyField<uint64_t>(verifier, VT_REVISION, 8) &&
            verifier.EndTable();
   }
 };
@@ -5798,6 +5803,9 @@ struct SharedLayerStateBuilder {
   }
   void add_sublayers(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers) {
     fbb_.AddOffset(SharedLayerState::VT_SUBLAYERS, sublayers);
+  }
+  void add_revision(uint64_t revision) {
+    fbb_.AddElement<uint64_t>(SharedLayerState::VT_REVISION, revision, 0);
   }
   explicit SharedLayerStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -5813,8 +5821,10 @@ struct SharedLayerStateBuilder {
 inline ::flatbuffers::Offset<SharedLayerState> CreateSharedLayerState(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> layer_key = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>> sublayers = 0,
+    uint64_t revision = 0) {
   SharedLayerStateBuilder builder_(_fbb);
+  builder_.add_revision(revision);
   builder_.add_sublayers(sublayers);
   builder_.add_layer_key(layer_key);
   return builder_.Finish();
@@ -5828,13 +5838,15 @@ struct SharedLayerState::Traits {
 inline ::flatbuffers::Offset<SharedLayerState> CreateSharedLayerStateDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *layer_key = nullptr,
-    const std::vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers = nullptr) {
+    const std::vector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>> *sublayers = nullptr,
+    uint64_t revision = 0) {
   auto layer_key__ = layer_key ? _fbb.CreateString(layer_key) : 0;
   auto sublayers__ = sublayers ? _fbb.CreateVector<::flatbuffers::Offset<OpenUSDConnect::SublayerEntry>>(*sublayers) : 0;
   return OpenUSDConnect::CreateSharedLayerState(
       _fbb,
       layer_key__,
-      sublayers__);
+      sublayers__,
+      revision);
 }
 
 struct LayerGraphState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

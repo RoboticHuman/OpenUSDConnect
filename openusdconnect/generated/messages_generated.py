@@ -4100,8 +4100,15 @@ class SharedLayerState(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         return o == 0
 
+    # SharedLayerState
+    def Revision(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def SharedLayerStateStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def SharedLayerStateAddLayerKey(builder, layerKey):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
@@ -4111,6 +4118,9 @@ def SharedLayerStateAddSublayers(builder, sublayers):
 
 def SharedLayerStateStartSublayersVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SharedLayerStateAddRevision(builder, revision):
+    builder.PrependUint64Slot(2, revision, 0)
 
 def SharedLayerStateEnd(builder):
     return builder.EndObject()

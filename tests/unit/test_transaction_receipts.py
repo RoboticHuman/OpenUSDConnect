@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from openusdconnect.event_store import ProducerProgress, SqliteEventStore
+from openusdconnect.event_store import LayerIdentity, ProducerProgress, SqliteEventStore
 from openusdconnect.server.state import UsdSyncServer
 from openusdconnect.server.types import TransactionRejectedError
 
@@ -97,6 +97,38 @@ def test_grouped_records_and_multiple_producers_commit_atomically(tmp_path):
         )
     assert store.get_all_asc() == [(1, b"one"), (2, b"two")]
     assert store.get_producer_progress("c", "session") == 0
+    store.close()
+
+
+def test_layer_identity_updates_are_atomic_and_survive_log_rewrite(tmp_path):
+    store = SqliteEventStore(str(tmp_path / "layer-identities.db"))
+    first = LayerIdentity("/show/asset.usda", "layer:asset")
+    store.append_batch(
+        [(1, b"one", None, "layer_graph_state", None)],
+        layer_identities=(first,),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.append_batch(
+            [(1, b"duplicate", None, "layer_graph_state", None)],
+            layer_identities=(LayerIdentity("/show/other.usda", "layer:other"),),
+        )
+
+    assert store.get_layer_identities() == (first,)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.append_batch(
+            [],
+            layer_identities=(LayerIdentity("/show/alias.usda", "layer:asset"),),
+        )
+    assert store.get_layer_identities() == (first,)
+    with pytest.raises(sqlite3.IntegrityError, match="cannot be remapped"):
+        store.append_batch(
+            [],
+            layer_identities=(LayerIdentity("/show/asset.usda", "layer:replacement"),),
+        )
+    assert store.get_layer_identities() == (first,)
+    store.clear_and_rewrite([(1, b"compacted", None, "layer_graph_state", None)])
+    assert store.get_layer_identities() == (first,)
     store.close()
 
 
