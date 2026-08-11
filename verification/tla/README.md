@@ -70,10 +70,10 @@ abandonment only after no unreconciled local opinion intersects the live graph.
 Two clients concurrently author the same logical field while the server picks
 the durable order. The model includes disconnect/replay, makes remote USD
 notice suppression explicit, and separates freezing a local delta from its
-later publication. Under the production contract, it checks that flat and
-layered clients retain prepared edits across authoritative application, receive
-a contiguous complete stream, converge to the server value, and never turn
-remote application into a producer submission.
+later publication. Under the modeled synchronization contract, it checks that
+flat and layered clients retain prepared edits across authoritative application,
+receive a contiguous complete stream, converge to the server value, and never
+turn remote application into a producer submission.
 
 Run with the official `tla2tools.jar`:
 
@@ -86,6 +86,12 @@ java -XX:+UseParallelGC -cp C:\path\to\tla2tools.jar tlc2.TLC `
 
 `-deadlock` disables TLC's deadlock report because the completed state is
 intentionally quiescent and the temporal specification permits stuttering.
+
+## Last verified snapshot
+
+The following results describe the model and configuration files in the commit
+that contains this snapshot. Regenerate the table after changing a `.tla` or
+`.cfg` file, or when adopting a different TLC version.
 
 TLC 2.19 results from 2026-08-11:
 

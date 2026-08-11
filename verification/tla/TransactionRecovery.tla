@@ -2,10 +2,8 @@
 EXTENDS Integers, Sequences, TLC
 
 (***************************************************************************
-This is a bounded abstraction of one OpenUSDConnect producer session.
-
-It models the protocol-critical behavior implemented by EventSender and the
-server transaction coordinator:
+This is a bounded abstraction of one OpenUSDConnect producer session and its
+interaction with the server transaction coordinator:
 
 * producer transaction IDs are assigned monotonically;
 * the server commits only committedThrough + 1;

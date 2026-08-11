@@ -2,7 +2,7 @@
 EXTENDS FiniteSets, Integers, Sequences, TLC
 
 (***************************************************************************
-Bounded receiver model shared by the Python and Unreal implementations.
+Bounded model of a receiver that queues network frames for stage-owning code.
 
 The server exposes an ordered durable log. A connection captures replayHead,
 delivers its replay prefix, then a ReplayComplete(replayHead) marker, followed

@@ -12,8 +12,8 @@ projection, not membership in the durable commit stream.
 
 Local authoring is split into prepare and publish steps.  A prepared edit is
 retained while an earlier authoritative prefix applies, then published after
-the receiver returns to idle.  This models ManagedClient's freeze/apply/send
-ordering and exposes loss caused by recomputing the local delta after apply.
+the receiver returns to idle.  This models the client freeze/apply/send ordering
+and exposes loss caused by recomputing the local delta after apply.
 
 Remote application is split into begin/mutate/notice/finish steps so the
 feedback guard is observable.  A remote USD notice is consumed while
