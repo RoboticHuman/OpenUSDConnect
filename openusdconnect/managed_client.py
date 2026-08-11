@@ -3,17 +3,20 @@
 ``ManagedClient`` composes the emitter, sender, receiver, and dispatcher so a
 USD-native application authors and observes one stage. It is the managed-mode
 counterpart of ``SharedStageClient`` with the same lifecycle shape
-(``start`` / ``wait_connected`` / ``update`` / ``close``).
+(``start`` / ``connect`` / ``update`` / ``close``).
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 
 from pxr import Sdf, Usd
 
 from ._client_utils import (
+    ClientPhase,
+    ClientStatus,
     SyncUpdate,
     client_origin,
     client_token_handlers,
@@ -132,6 +135,40 @@ class ManagedClient:
         return self._stage
 
     @property
+    def status(self) -> ClientStatus:
+        """Current transport, replay, durability, and recovery state."""
+        failure = self._sender.transaction_failure
+        reason = str(failure) if failure is not None else (
+            self._sender.rejection_reason or self._receiver.rejection_reason
+        )
+        if self._closed:
+            phase = ClientPhase.CLOSED
+        elif failure is not None:
+            phase = ClientPhase.RECOVERY_REQUIRED
+        elif self.auth_rejected or self.connection_rejected:
+            phase = ClientPhase.REJECTED
+        elif self._receiver.connected and not self._receiver.synchronized:
+            phase = ClientPhase.REPLAYING
+        elif self.connected and self.synchronized:
+            phase = ClientPhase.READY
+        elif self._started:
+            phase = ClientPhase.CONNECTING
+        else:
+            phase = ClientPhase.OFFLINE
+        return ClientStatus(
+            phase=phase,
+            connected=self.connected,
+            synchronized=self.synchronized,
+            receiver_connected=self._receiver.connected,
+            sender_connected=self._sender.connected,
+            prepared_events=self.prepared_event_count,
+            pending_events=self.pending_event_count,
+            acknowledged_events=self._sender.acknowledged_event_count,
+            failure=failure,
+            reason=reason,
+        )
+
+    @property
     def sender(self):
         """The underlying :class:`EventSender`. Read access is safe; mutating
         configuration on this object is at your own risk."""
@@ -209,7 +246,11 @@ class ManagedClient:
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         txn_id = self._sender.repair_rejected_transaction(events)
-        self._connect_sender()
+        if not self._connect_sender():
+            raise ConnectionError(
+                f"transaction {txn_id} repaired but reconnect to "
+                f"{self._host}:{self._port} failed; it remains queued"
+            )
         return txn_id
 
     def flush(self, timeout: float | None = None) -> bool:
@@ -264,39 +305,44 @@ class ManagedClient:
             self._started = True
         return self
 
-    def wait_connected(self, timeout: float | None = None) -> bool:
-        """Wait for the handshake; queued replay still requires ``update``."""
-        if not self._started:
-            raise RuntimeError("ManagedClient has not been started")
+    def connect(self, timeout: float | None = None) -> bool:
+        """Start and complete both handshakes within ``timeout``.
+
+        Queued replay still requires :meth:`update` on the stage-owning thread.
+        """
+        self.start()
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
         connected = self._receiver.wait_connected(timeout)
         if connected:
             self._require_layered_replay()
-            self._connect_sender()
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            return self._connect_sender(timeout=remaining)
         elif self._receiver.auth_rejected:
             raise PermissionError("authentication rejected")
         elif self._receiver.hello_rejected:
             raise ConnectionError(self._receiver.rejection_reason or "connection rejected")
-        return connected and self.connected
+        return False
 
     def _require_layered_replay(self) -> None:
         if self._receiver.connected and not self._receiver.layered_replay_active:
             self.close()
             raise RuntimeError("server did not negotiate required layered replay")
 
-    def _connect_sender(self) -> None:
+    def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
-            return
+            return True
         if self._sender.token is None:
             if self._receiver.token is not None:
                 self._sender.token = self._receiver.token
             elif self._persist_token:
                 self._sender.token = resolve_client_token(self._host, self._port, None, True)
-        if not self._sender.connect():
+        if not self._sender.connect(timeout=timeout):
             if self._sender.auth_rejected:
                 raise PermissionError("sender authentication rejected")
             if self._sender.hello_rejected:
                 raise ConnectionError(self._sender.rejection_reason or "sender connection rejected")
-            raise ConnectionError(f"could not connect sender to {self._host}:{self._port}")
+            return False
+        return True
 
     def _send(self, events: list[dict]) -> int:
         if not events:
@@ -309,14 +355,6 @@ class ManagedClient:
 
     def _prepare_outgoing_events(self) -> list[dict]:
         return self._transform_coalescing.prepare(self._emitter)
-
-    def start_sender(self) -> bool:
-        """Connect the sender explicitly for fail-fast error handling.
-
-        Sender connection is otherwise best-effort during :meth:`update`.
-        """
-        self._connect_sender()
-        return self._sender.connected
 
     def claim_playback(self, time: float | None = None) -> bool:
         """Request the shared-playback leader role."""
@@ -340,10 +378,10 @@ class ManagedClient:
             raise RuntimeError("ManagedClient has not been started")
         if self._stage is None:
             return SyncUpdate(
-                received=0,
-                sent=0,
-                acknowledged=self._sender.drain_acknowledged_event_count(),
-                pending=self._sender.pending_event_count,
+                applied_events=0,
+                submitted_events=0,
+                acknowledged_events=self._sender.drain_acknowledged_event_count(),
+                pending_events=self._sender.pending_event_count,
             )
         self._require_layered_replay()
 
@@ -365,10 +403,10 @@ class ManagedClient:
             sent = self._send(outgoing)
 
         return SyncUpdate(
-            received=received,
-            sent=sent,
-            acknowledged=self._sender.drain_acknowledged_event_count(),
-            pending=self._sender.pending_event_count,
+            applied_events=received,
+            submitted_events=sent,
+            acknowledged_events=self._sender.drain_acknowledged_event_count(),
+            pending_events=self._sender.pending_event_count,
         )
 
     def publish_current_edit_target(self) -> int:

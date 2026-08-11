@@ -63,10 +63,9 @@ def main() -> int:
         persist_token=False,
         delegate_bridge_path=args.delegate_bridge_path,
     ) as client:
-        if not client.wait_connected(timeout=5):
+        if not client.connect(timeout=5):
             print("server is unavailable", file=sys.stderr)
             return 1
-        client.start_sender()
 
         deadline = time.monotonic() + 5.0
         while not client.is_layer_mapped(content):
@@ -99,8 +98,8 @@ def main() -> int:
                 position_attr = stage.GetAttributeAtPath(f"{SPHERE_PATH}.xformOp:translate")
                 position = position_attr.Get() if position_attr else None
                 print(
-                    f"seq={client.last_seq} received={update.received} "
-                    f"sent={update.sent} position={position}"
+                    f"seq={client.last_seq} applied={update.applied_events} "
+                    f"submitted={update.submitted_events} position={position}"
                 )
                 next_report = now + 1.0
             next_tick += interval

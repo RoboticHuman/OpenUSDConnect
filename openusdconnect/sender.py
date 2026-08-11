@@ -168,13 +168,23 @@ class EventSender:
         with self._condition:
             return self._failure is not None
 
-    def connect(self) -> bool:
-        """Handshake, start the result reader, and replay the exact outbox."""
+    def connect(self, timeout: float | None = None) -> bool:
+        """Handshake, start the result reader, and replay the exact outbox.
+
+        ``timeout`` bounds this attempt and never extends the configured
+        handshake timeout.
+        """
         with self._connect_lock:
             with self._condition:
                 if self.sock is not None:
                     return True
                 if self._failure is not None or time.monotonic() < self._retry_after_until:
+                    return False
+
+            connect_timeout = self.handshake_timeout
+            if timeout is not None:
+                connect_timeout = min(connect_timeout, max(timeout, 0.0))
+                if connect_timeout <= 0.0:
                     return False
 
             self.auth_rejected = False
@@ -183,7 +193,7 @@ class EventSender:
             sock: socket.socket | None = None
             try:
                 sock = socket.create_connection(
-                    (self.host, self.port), timeout=self.handshake_timeout
+                    (self.host, self.port), timeout=connect_timeout
                 )
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 send_msg(

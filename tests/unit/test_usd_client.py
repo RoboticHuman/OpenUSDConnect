@@ -5,20 +5,28 @@ from __future__ import annotations
 import pytest
 from pxr import Sdf, Usd, UsdGeom
 
-from openusdconnect import SyncUpdate
+from openusdconnect import ClientPhase, SyncUpdate, TransactionFailure
 from openusdconnect import coalescing as coalescing_module
 from openusdconnect.managed_client import ManagedClient
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
 
 
 def test_bidirectional_clients_share_one_update_result_contract():
-    assert SyncUpdate(received=1, sent=2, acknowledged=3, pending=4).pending == 4
+    update = SyncUpdate(
+        applied_events=1,
+        submitted_events=2,
+        acknowledged_events=3,
+        pending_events=4,
+    )
+    assert update.pending_events == 4
 
 
 class _SenderStub:
     def __init__(self, results: list[bool]):
         self.connected = True
         self.auth_rejected = False
+        self.hello_rejected = False
+        self.rejection_reason = ""
         self.token = None
         self.results = iter(results)
         self.batches: list[list[dict]] = []
@@ -26,6 +34,9 @@ class _SenderStub:
         self.pending_event_count = 0
         self.recovery_required = False
         self.transaction_error = ""
+        self.transaction_failure = None
+        self.acknowledged_event_count = 0
+        self.connect_timeouts: list[float | None] = []
         self.repaired: list[tuple[list[dict], str]] = []
 
     def send_events(self, events: list[dict]) -> bool:
@@ -45,7 +56,8 @@ class _SenderStub:
     def flush(self, timeout=None) -> bool:
         return True
 
-    def connect(self) -> bool:
+    def connect(self, timeout=None) -> bool:
+        self.connect_timeouts.append(timeout)
         self.connected = True
         return True
 
@@ -69,6 +81,86 @@ def test_receiver_always_requests_full_layered_replay():
             receiver.update()
     finally:
         receiver.close()
+
+
+def test_receiver_status_distinguishes_connecting_replay_and_ready():
+    receiver = UsdReceiver(
+        Usd.Stage.CreateInMemory(),
+        app_name="status-receiver",
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        assert receiver.status.phase is ClientPhase.OFFLINE
+        receiver._started = True
+        assert receiver.status.phase is ClientPhase.CONNECTING
+        receiver._receiver.connected = True
+        assert receiver.status.phase is ClientPhase.REPLAYING
+        receiver._receiver._synchronized_event.set()
+        assert receiver.status.phase is ClientPhase.READY
+        assert receiver.status.receiver_connected is True
+        assert receiver.status.sender_connected is None
+    finally:
+        receiver.close()
+    assert receiver.status.phase is ClientPhase.CLOSED
+
+
+def test_publisher_context_start_is_nonblocking_and_connect_is_explicit():
+    publisher = UsdPublisher(
+        Usd.Stage.CreateInMemory(),
+        app_name="lifecycle-publisher",
+        persist_token=False,
+    )
+    sender = _SenderStub([])
+    sender.connected = False
+    publisher._sender = sender
+
+    with publisher as entered:
+        assert entered is publisher
+        assert sender.connect_timeouts == []
+        assert publisher.status.phase is ClientPhase.OFFLINE
+        assert publisher.connect(timeout=0.25)
+        assert sender.connect_timeouts == [0.25]
+        assert publisher.status.phase is ClientPhase.READY
+
+        sender.connected = False
+        sender.transaction_failure = TransactionFailure(1, 0, "repair required")
+        assert publisher.status.phase is ClientPhase.RECOVERY_REQUIRED
+        assert "repair required" in publisher.status.reason
+
+    assert publisher.status.phase is ClientPhase.CLOSED
+
+
+def test_managed_status_exposes_partial_connection_and_event_counts():
+    client = ManagedClient(
+        Usd.Stage.CreateInMemory(),
+        app_name="status-managed",
+        persist_token=False,
+        reconnect=False,
+    )
+    sender = _SenderStub([])
+    sender.connected = False
+    sender.pending_event_count = 4
+    sender.acknowledged_event_count = 7
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    try:
+        status = client.status
+        assert status.phase is ClientPhase.CONNECTING
+        assert status.connected is False
+        assert status.synchronized is True
+        assert status.receiver_connected is True
+        assert status.sender_connected is False
+        assert status.pending_events == 4
+        assert status.acknowledged_events == 7
+
+        sender.connected = True
+        assert client.status.phase is ClientPhase.READY
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("composition_preserving", [False, True])
@@ -266,22 +358,22 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
         value.Set(1)
 
         replaying = client.update()
-        assert replaying.sent == 0
+        assert replaying.submitted_events == 0
         assert sender.batches == []
         assert not client.synchronized
 
         client._receiver._synchronized_event.set()
         first = client.update()
-        assert first.sent > 0
+        assert first.submitted_events > 0
         assert client.synchronized
-        assert sender.pending_event_count == first.sent
+        assert sender.pending_event_count == first.submitted_events
 
         value.Set(2)
         second = client.update()
-        assert second.sent > 0
+        assert second.submitted_events > 0
         assert len(sender.batches) == 2
-        assert second.acknowledged == 0
-        assert second.pending > first.pending
+        assert second.acknowledged_events == 0
+        assert second.pending_events > first.pending_events
     finally:
         client.close()
 
@@ -311,14 +403,14 @@ def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatc
     monkeypatch.setattr(client, "_connect_sender", lambda: None)
     try:
         translate.Set((1, 0, 0))
-        assert client.update().sent == 3
+        assert client.update().submitted_events == 3
         translate.Set((2, 0, 0))
-        assert client.update().sent == 0
+        assert client.update().submitted_events == 0
         translate.Set((3, 0, 0))
-        assert client.update().sent == 0
+        assert client.update().submitted_events == 0
 
         clock[0] = 0.11
-        assert client.update().sent == 1
+        assert client.update().submitted_events == 1
         assert sender.batches[-1] == [
             {
                 "k": "set_xform_trs",
@@ -468,17 +560,3 @@ def test_app_name_is_required():
         UsdPublisher(stage, app_name=" ", persist_token=False)
     with pytest.raises(ValueError, match="app_name"):
         UsdReceiver(stage, app_name=" ", persist_token=False)
-
-
-def test_failed_publisher_context_entry_releases_the_emitter(monkeypatch):
-    publisher = UsdPublisher(
-        Usd.Stage.CreateInMemory(),
-        app_name="test-publisher",
-        persist_token=False,
-    )
-    monkeypatch.setattr(publisher, "connect", lambda: False)
-
-    with pytest.raises(ConnectionError, match="could not connect"):
-        publisher.__enter__()
-    with pytest.raises(RuntimeError, match="is closed"):
-        publisher.update()

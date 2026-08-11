@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from pxr import Sdf, Usd
 
 from ._client_utils import (
+    ClientPhase,
+    ClientStatus,
     SyncUpdate,
     client_origin,
     client_token_handlers,
@@ -130,6 +133,40 @@ class SharedStageClient:
         return self._stage
 
     @property
+    def status(self) -> ClientStatus:
+        """Current transport, replay, durability, and recovery state."""
+        failure = self._sender.transaction_failure
+        reason = str(failure) if failure is not None else (
+            self._sender.rejection_reason or self._receiver.rejection_reason
+        )
+        if self._closed:
+            phase = ClientPhase.CLOSED
+        elif failure is not None:
+            phase = ClientPhase.RECOVERY_REQUIRED
+        elif self.auth_rejected or self.connection_rejected:
+            phase = ClientPhase.REJECTED
+        elif self._receiver.connected and not self._receiver.synchronized:
+            phase = ClientPhase.REPLAYING
+        elif self.connected and self.synchronized:
+            phase = ClientPhase.READY
+        elif self._started:
+            phase = ClientPhase.CONNECTING
+        else:
+            phase = ClientPhase.OFFLINE
+        return ClientStatus(
+            phase=phase,
+            connected=self.connected,
+            synchronized=self.synchronized,
+            receiver_connected=self._receiver.connected,
+            sender_connected=self._sender.connected,
+            prepared_events=self.prepared_event_count,
+            pending_events=self.pending_event_count,
+            acknowledged_events=self._sender.acknowledged_event_count,
+            failure=failure,
+            reason=reason,
+        )
+
+    @property
     def sender(self):
         """The underlying :class:`EventSender`."""
         return self._sender
@@ -190,7 +227,11 @@ class SharedStageClient:
         if not layer_key or layer_key not in self._graph.reachable_layer_keys():
             raise ValueError("repair target layer is not mapped by the current graph")
         txn_id = self._sender.repair_rejected_transaction(events, layer_key=layer_key)
-        self._connect_sender()
+        if not self._connect_sender():
+            raise ConnectionError(
+                f"transaction {txn_id} repaired but reconnect to "
+                f"{self._host}:{self._port} failed; it remains queued"
+            )
         return txn_id
 
     def flush(self, timeout: float | None = None) -> bool:
@@ -247,10 +288,10 @@ class SharedStageClient:
             self._started = True
         return self
 
-    def wait_connected(self, timeout: float | None = None) -> bool:
-        """Wait for the receiver handshake and shared-stage mode negotiation."""
-        if not self._started:
-            raise RuntimeError("SharedStageClient has not been started")
+    def connect(self, timeout: float | None = None) -> bool:
+        """Start and complete both shared-stage handshakes within ``timeout``."""
+        self.start()
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
         if not self._receiver.wait_connected(timeout):
             if self._receiver.auth_rejected:
                 raise PermissionError("shared-stage receiver authentication rejected")
@@ -261,26 +302,22 @@ class SharedStageClient:
             return False
         if self._receiver.layer_mode_active is not LayerMode.SHARED_STAGE:
             raise RuntimeError("server did not negotiate shared-stage mode")
-        self._connect_sender()
-        return self.connected
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        return self._connect_sender(timeout=remaining)
 
-    def _connect_sender(self) -> None:
+    def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
-            return
+            return True
         self._sender.token = self._receiver.token
-        if not self._sender.connect():
+        if not self._sender.connect(timeout=timeout):
             if self._sender.auth_rejected:
                 raise PermissionError("shared-stage sender authentication rejected")
             if self._sender.hello_rejected:
                 raise ConnectionError(
                     self._sender.rejection_reason or "shared-stage sender rejected"
                 )
-            raise ConnectionError(f"could not connect sender to {self._host}:{self._port}")
-
-    def start_sender(self) -> bool:
-        """Connect the sender explicitly for fail-fast error handling."""
-        self._connect_sender()
-        return self._sender.connected
+            return False
+        return True
 
     def update(self) -> SyncUpdate:
         """Apply queued authoritative records, then publish local layer edits."""
@@ -308,10 +345,10 @@ class SharedStageClient:
                 sent += len(events)
                 self._tracker.mark_prepared_sent(batch)
         return SyncUpdate(
-            received=received,
-            sent=sent,
-            acknowledged=self._sender.drain_acknowledged_event_count(),
-            pending=self._sender.pending_event_count,
+            applied_events=received,
+            submitted_events=sent,
+            acknowledged_events=self._sender.drain_acknowledged_event_count(),
+            pending_events=self._sender.pending_event_count,
         )
 
     def _apply_incoming(self) -> int:

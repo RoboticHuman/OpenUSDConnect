@@ -8,6 +8,19 @@ need only one direction. All three provide lifecycle and retry behavior while
 leaving stage ownership and the application event loop under the host's
 control.
 
+All high-level clients use the same lifecycle. Context entry calls the
+nonblocking `start()` operation; call `connect(timeout)` when the application
+needs the applicable transport handshakes to complete or fail explicitly.
+Receiving clients can be connected while still replaying because authoritative
+records must be applied by `update()` on the stage-owning thread.
+
+`client.status` returns an immutable `ClientStatus` snapshot. Its phase is one
+of `OFFLINE`, `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`,
+`REJECTED`, or `CLOSED`. `receiver_connected` and `sender_connected` expose
+partial bidirectional connectivity and are `None` when that role is absent.
+Durability counters are cumulative in the status snapshot; the acknowledged
+count returned by `SyncUpdate` is the delta consumed by that update call.
+
 ## Receive into a stage
 
 ```python
@@ -18,7 +31,7 @@ from openusdconnect import UsdReceiver
 stage = Usd.Stage.Open("shot.usda")
 
 with UsdReceiver(stage, app_name="my-viewer") as receiver:
-    if not receiver.wait_connected(timeout=5):
+    if not receiver.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
 
     while application_is_running():
@@ -33,7 +46,7 @@ instead of falling back to flat application.
 
 Call `update()` on the thread that owns the stage. The network reader runs in
 the background, but it never mutates the stage itself.
-`wait_connected()` confirms the handshake only. Replay is applied by later
+`connect()` starts the client and confirms the handshake only. Replay is applied by later
 `update()` calls, so startup code should wait for the stage condition it needs.
 If the host replaces its stage, call `rebind_stage(new_stage)` on the owning
 thread. Managed layers move to the replacement and detach from the old stage.
@@ -67,6 +80,8 @@ with UsdPublisher(
     app_name="my-editor",
     department="layout",
 ) as publisher:
+    if not publisher.connect(timeout=5):
+        raise ConnectionError("OpenUSDConnect server is unavailable")
     sphere = UsdGeom.Sphere.Define(stage, "/World/Sphere")
     UsdGeom.Xformable(sphere).AddTranslateOp().Set(Gf.Vec3d(1, 2, 3))
     publisher.update()
@@ -127,7 +142,7 @@ with ManagedClient(
     app_name="my-editor",
     department="layout",
 ) as client:
-    if not client.wait_connected(timeout=5):
+    if not client.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
 
     sphere = UsdGeom.Sphere.Define(stage, "/World/Sphere")
@@ -150,9 +165,11 @@ root layer, or another application layer weaker than the managed block. The
 client rejects publishing from the strong session root or from a
 receiver-owned managed layer.
 
-`SyncUpdate.sent` is newly submitted work, `acknowledged` is work covered by
-cumulative acknowledgements since the previous `update()`, and `pending` is the
-current unacknowledged event count. `update()` never waits for an ACK. It also
+`SyncUpdate.submitted_events` is newly submitted work,
+`acknowledged_events` is work covered by cumulative acknowledgements since the
+previous `update()`, and `pending_events` is the current unacknowledged event
+count. `applied_events` is authoritative incoming work applied by this call.
+`update()` never waits for an ACK. It also
 does not publish while receive replay is unsynchronized: after reconnect it
 first applies through the server's replay boundary, then resumes submission.
 This keeps viewport drags and animation streaming responsive without allowing a
@@ -226,7 +243,7 @@ from openusdconnect import SharedStageClient
 stage = Usd.Stage.Open("asset://show/shot/shot.usda", resolver_context)
 
 with SharedStageClient(stage, app_name="shot-editor") as client:
-    if not client.wait_connected(timeout=5):
+    if not client.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
 
     while application_is_running():
@@ -261,10 +278,10 @@ If its bounded local queue fills, pending records are coalesced into one exact
 current-content replacement per affected layer. That rare recovery transaction
 has whole-layer conflict scope; ordinary edits remain field-level.
 
-`wait_connected()` completes both receive and send handshakes, including an
+`connect()` completes both receive and send handshakes, including an
 in-memory TOFU token handoff when token persistence is disabled. Code that does
-not call `wait_connected()` may connect the sender explicitly with
-`start_sender()` or let the first `update()` retry it best-effort.
+not call `connect()` may use `start()` to launch only the background receiver;
+the first `update()` retries the sender best-effort after the receive handshake.
 
 Call `update()` on the thread that owns the stage. It freezes local authored
 changes, applies sequenced server records, restores concurrent local changes,

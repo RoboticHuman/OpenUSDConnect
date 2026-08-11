@@ -55,7 +55,7 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
 
     try:
         with client:
-            if not client.wait_connected(timeout=5):
+            if not client.connect(timeout=5):
                 print("could not connect", file=sys.stderr)
                 return 1
 
@@ -64,7 +64,7 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
             sphere.CreateDisplayColorAttr([Gf.Vec3f(0.08, 0.45, 1.0)])
             translate = UsdGeom.Xformable(sphere).AddTranslateOp()
             translate.Set(Gf.Vec3d(0.0, 1.25, 0.0))
-            if client.update().sent == 0:
+            if client.update().submitted_events == 0:
                 print("initial sphere batch was not sent", file=sys.stderr)
                 return 1
 
@@ -102,7 +102,8 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
                     peer = stage.GetPrimAtPath(PEER_CUBE_PATH)
                     print(
                         f"  seq={client.last_seq} "
-                        f"received={update.received} sent={update.sent} "
+                        f"applied={update.applied_events} "
+                        f"submitted={update.submitted_events} "
                         f"local_valid={bool(local)} "
                         f"peer_valid={bool(peer)}"
                     )

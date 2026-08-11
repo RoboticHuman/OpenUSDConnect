@@ -158,7 +158,7 @@ from openusdconnect import UsdReceiver
 
 stage = Usd.Stage.Open("scene.usda")
 with UsdReceiver(stage, app_name="my-viewer") as receiver:
-    if not receiver.wait_connected(timeout=5):
+    if not receiver.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
     while application_is_running():
         receiver.update()
@@ -225,7 +225,7 @@ from openusdconnect import SharedStageClient
 
 stage = Usd.Stage.Open("shot.usda")
 with SharedStageClient(stage, app_name="my-editor") as client:
-    if not client.wait_connected(timeout=5):
+    if not client.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
     while application_is_running():
         client.update()

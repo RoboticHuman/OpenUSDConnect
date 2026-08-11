@@ -143,8 +143,8 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
     try:
         first.start()
         second.start()
-        assert first.wait_connected(timeout=2)
-        assert second.wait_connected(timeout=2)
+        assert first.connect(timeout=2)
+        assert second.connect(timeout=2)
         assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
         first_stage.SetEditTarget(
             Usd.EditTarget(first_stage.GetLayerStack(includeSessionLayers=False)[1])
@@ -154,15 +154,15 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         )
 
         first_stage.GetAttributeAtPath("/World.value").Set(5)
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         assert _pump_until([first, second], lambda: _value(second_stage) == 5)
         assert _value(server_stage) == 5
 
         first_stage.GetAttributeAtPath("/World.value").SetDocumentation("remote metadata")
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         second_stage.GetAttributeAtPath("/World.value").Set(9)
         update = second.update()
-        assert update.sent == 1
+        assert update.submitted_events == 1
         assert _pump_until(
             [first, second],
             lambda: (
@@ -182,7 +182,7 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
             amount.default = 1
             extra.Save()
         first_stage.GetRootLayer().subLayerPaths.append("./extra.usda")
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         assert _pump_until(
             [first, second],
             lambda: all(
@@ -195,7 +195,7 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         assert first.is_layer_mapped(first_extra)
         first_stage.SetEditTarget(Usd.EditTarget(first_extra))
         first_stage.GetAttributeAtPath("/Extra.amount").Set(7)
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         assert _pump_until(
             [first, second],
             lambda: second_stage.GetAttributeAtPath("/Extra.amount").Get() == 7,
@@ -211,7 +211,7 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         second_extra = second_stage.GetLayerStack(includeSessionLayers=False)[2]
         second_stage.SetEditTarget(Usd.EditTarget(second_extra))
         second_stage.GetAttributeAtPath("/Extra.amount").Set(11)
-        assert second.update().sent == 1
+        assert second.update().submitted_events == 1
         assert _pump_until(
             [first, second],
             lambda: first_stage.GetAttributeAtPath("/Extra.amount").Get() == 11,
@@ -251,7 +251,7 @@ def test_managed_server_rejects_a_shared_stage_client(tmp_path):
     try:
         client.start()
         with pytest.raises(ConnectionError, match="server uses 'managed'"):
-            client.wait_connected(timeout=2)
+            client.connect(timeout=2)
     finally:
         client.close()
         tcp_server.shutdown()
@@ -297,8 +297,8 @@ def test_reference_override_and_payload_arcs_sync_via_sdf_deltas(tmp_path):
     try:
         first.start()
         second.start()
-        assert first.wait_connected(timeout=2)
-        assert second.wait_connected(timeout=2)
+        assert first.connect(timeout=2)
+        assert second.connect(timeout=2)
         assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
 
         # Reference content composes in both clients; payloads start unloaded.
@@ -312,7 +312,7 @@ def test_reference_override_and_payload_arcs_sync_via_sdf_deltas(tmp_path):
             Usd.EditTarget(first_stage.GetLayerStack(includeSessionLayers=False)[0])
         )
         first_stage.GetAttributeAtPath("/World/Ref.value").Set(5)
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         assert _pump_until(
             [first, second],
             lambda: _value_at(second_stage, "/World/Ref.value") == 5,
@@ -336,7 +336,7 @@ def test_reference_override_and_payload_arcs_sync_via_sdf_deltas(tmp_path):
             "./payload_asset.usda",
             "/PayloadTarget",
         )
-        assert first.update().sent >= 1
+        assert first.update().submitted_events >= 1
         assert _pump_until(
             [first, second],
             lambda: second_stage.GetRootLayer().GetPrimAtPath("/World/Payload2") is not None,
@@ -395,14 +395,14 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
     try:
         first.start()
         second.start()
-        assert first.wait_connected(timeout=2)
-        assert second.wait_connected(timeout=2)
+        assert first.connect(timeout=2)
+        assert second.connect(timeout=2)
         assert _pump_until([first, second], lambda: first.graph_ready and second.graph_ready)
 
         for stage in (first_stage, second_stage):
             stage.SetEditTarget(Usd.EditTarget(stage.GetLayerStack(includeSessionLayers=False)[1]))
         first_stage.GetAttributeAtPath("/World.value").Set(5)
-        assert first.update().sent == 1
+        assert first.update().submitted_events == 1
         assert _pump_until([first, second], lambda: _value(second_stage) == 5)
         assert _value(server_stage) == 5
 
@@ -553,7 +553,7 @@ def test_three_clients_concurrently_edit_distinct_layers(tmp_path):
     try:
         for client in clients:
             client.start()
-        assert all(client.wait_connected(timeout=2) for client in clients)
+        assert all(client.connect(timeout=2) for client in clients)
         assert _pump_until(clients, lambda: all(client.graph_ready for client in clients))
 
         # One client per layer: root, first sublayer, second sublayer.

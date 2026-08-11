@@ -5,18 +5,53 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 
+from .recovery import TransactionFailure
 from .token_client import load_token, save_token
+
+
+class ClientPhase(StrEnum):
+    """High-level lifecycle state shared by every client role."""
+
+    OFFLINE = "offline"
+    CONNECTING = "connecting"
+    REPLAYING = "replaying"
+    READY = "ready"
+    RECOVERY_REQUIRED = "recovery_required"
+    REJECTED = "rejected"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True, slots=True)
+class ClientStatus:
+    """Immutable client state suitable for application and UI polling.
+
+    A directional connection is ``None`` when that role is not present, which
+    distinguishes a receive-only or send-only client from a disconnected half
+    of a bidirectional client.
+    """
+
+    phase: ClientPhase
+    connected: bool
+    synchronized: bool
+    receiver_connected: bool | None = None
+    sender_connected: bool | None = None
+    prepared_events: int = 0
+    pending_events: int = 0
+    acknowledged_events: int = 0
+    failure: TransactionFailure | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class SyncUpdate:
     """Work completed by one bidirectional client update call."""
 
-    received: int
-    sent: int
-    acknowledged: int = 0
-    pending: int = 0
+    applied_events: int
+    submitted_events: int
+    acknowledged_events: int = 0
+    pending_events: int = 0
 
 
 def validate_layered_source(stage) -> None:
@@ -88,6 +123,8 @@ def client_token_handlers(
 
 
 __all__ = [
+    "ClientPhase",
+    "ClientStatus",
     "client_origin",
     "client_token_callback",
     "client_token_handlers",

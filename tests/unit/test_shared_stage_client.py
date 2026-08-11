@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pxr import Sdf, Usd
 
+from openusdconnect import ClientPhase
 from openusdconnect.codec import ReceivedEvent
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.shared_stage_client import SharedStageClient
@@ -23,6 +24,42 @@ def test_constructor_requires_a_stage_and_application_name():
         SharedStageClient(Usd.Stage.CreateInMemory(), app_name=" ", persist_token=False)
     with pytest.raises(ValueError, match="portable root layer"):
         SharedStageClient(Usd.Stage.CreateInMemory(), app_name="test", persist_token=False)
+
+
+def test_status_exposes_shared_stage_partial_connection(tmp_path):
+    client = SharedStageClient(
+        _create_root(tmp_path / "root.usda"),
+        app_name="status-client",
+        persist_token=False,
+    )
+    original_sender = client._sender
+
+    class _StatusSender:
+        connected = False
+        transaction_failure = None
+        rejection_reason = ""
+        auth_rejected = False
+        hello_rejected = False
+        pending_event_count = 2
+        acknowledged_event_count = 3
+        recovery_required = False
+
+    sender = _StatusSender()
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver._synchronized_event.set()
+    try:
+        assert client.status.phase is ClientPhase.CONNECTING
+        assert client.status.receiver_connected is True
+        assert client.status.sender_connected is False
+        assert client.status.pending_events == 2
+
+        sender.connected = True
+        assert client.status.phase is ClientPhase.READY
+    finally:
+        client._sender = original_sender
+        client.close()
 
 
 def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
@@ -164,7 +201,12 @@ def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
         )
         client._sender = _RepairSender()
         resumed = []
-        monkeypatch.setattr(client, "_connect_sender", lambda: resumed.append(True))
+
+        def _resume():
+            resumed.append(True)
+            return True
+
+        monkeypatch.setattr(client, "_connect_sender", _resume)
         events = [{"k": "replace_sdf_layer_content", "fragment": "#usda 1.0\n"}]
 
         assert client.repair_and_resume(events, layer=stage.GetRootLayer()) == 7

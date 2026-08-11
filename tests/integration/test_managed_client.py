@@ -93,7 +93,7 @@ def test_managed_client_tight_loop_round_trips_without_crash(live_server, tmp_pa
         reconnect=False,
     )
     client.start()
-    assert client.wait_connected(timeout=5)
+    assert client.connect(timeout=5)
 
     prim = stage.DefinePrim("/World/Test", "Xform")
     tr = UsdGeom.Xformable(prim).AddTranslateOp()
@@ -133,7 +133,7 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
         reconnect=False,
     )
     client.start()
-    assert client.wait_connected(timeout=5)
+    assert client.connect(timeout=5)
 
     counts: dict[str, int] = {}
     original_send = client._send
@@ -191,12 +191,12 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         assert second_stage.GetEditTarget().GetLayer() is second.authoring_layer
         first.start()
         second.start()
-        assert first.wait_connected(timeout=5)
-        assert second.wait_connected(timeout=5)
+        assert first.connect(timeout=5)
+        assert second.connect(timeout=5)
 
         prim = first_stage.DefinePrim("/World/Shared", "Xform")
         prim.CreateAttribute("value", Sdf.ValueTypeNames.Int).Set(1)
-        assert first.update().sent > 0
+        assert first.update().submitted_events > 0
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             first.update()
@@ -208,7 +208,7 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         assert second_stage.GetAttributeAtPath("/World/Shared.value").Get() == 1
 
         second_stage.GetAttributeAtPath("/World/Shared.value").Set(2)
-        assert second.update().sent > 0
+        assert second.update().submitted_events > 0
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             first.update()
@@ -240,14 +240,14 @@ def test_managed_clients_apply_complete_commit_order_without_echo(live_server, t
     try:
         for client in clients:
             client.start()
-            assert client.wait_connected(timeout=5)
+            assert client.connect(timeout=5)
 
         first_attr = stages[0].DefinePrim("/World/Shared", "Xform").CreateAttribute(
             "value",
             Sdf.ValueTypeNames.Int,
         )
         first_attr.Set(0)
-        assert clients[0].update().sent > 0
+        assert clients[0].update().submitted_events > 0
         assert _drain_until(
             clients[1],
             lambda: (
@@ -269,8 +269,8 @@ def test_managed_clients_apply_complete_commit_order_without_echo(live_server, t
         # Both opinions exist before either client processes the peer's commit.
         stages[0].GetAttributeAtPath("/World/Shared.value").Set(10)
         stages[1].GetAttributeAtPath("/World/Shared.value").Set(20)
-        assert clients[0].update().sent > 0
-        assert clients[1].update().sent > 0
+        assert clients[0].update().submitted_events > 0
+        assert clients[1].update().submitted_events > 0
         assert clients[0].flush(timeout=5)
         assert clients[1].flush(timeout=5)
 
@@ -354,7 +354,7 @@ def test_managed_client_hands_ephemeral_tofu_token_to_sender(tmp_path):
     )
     try:
         client.start()
-        assert client.wait_connected(timeout=5)
+        assert client.connect(timeout=5)
         assert client.connected
         assert client.receiver.token
         assert client.sender.token == client.receiver.token

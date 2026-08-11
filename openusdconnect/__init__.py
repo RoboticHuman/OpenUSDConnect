@@ -3,7 +3,7 @@
 Core library for replicating USD stage edits over a networked event protocol.
 """
 
-from ._client_utils import SyncUpdate
+from ._client_utils import ClientPhase, ClientStatus, SyncUpdate
 from .adapters import (
     DCCAdapter,
     MockAdapter,
@@ -38,6 +38,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DCCAdapter",
+    "ClientPhase",
+    "ClientStatus",
     "DecodeResult",
     "Event",
     "EventSender",

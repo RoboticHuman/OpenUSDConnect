@@ -101,6 +101,26 @@ class TestEventSenderConnect:
         assert sender.connect() is False
         assert sender.sock is None
 
+    def test_connect_timeout_never_extends_configured_handshake_timeout(self, monkeypatch):
+        observed = []
+
+        def _fail(_endpoint, *, timeout):
+            observed.append(timeout)
+            raise TimeoutError
+
+        monkeypatch.setattr(socket, "create_connection", _fail)
+        sender = EventSender(
+            "127.0.0.1",
+            7200,
+            client_id="timeout-client",
+            handshake_timeout=0.5,
+        )
+
+        assert sender.connect(timeout=0.1) is False
+        assert sender.connect(timeout=2.0) is False
+        assert sender.connect(timeout=0.0) is False
+        assert observed == [0.1, 0.5]
+
     def test_reconnect_replays_identical_bytes_until_duplicate_ack(self):
         srv, port = _make_server()
         sender = EventSender(

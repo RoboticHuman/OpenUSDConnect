@@ -14,6 +14,8 @@ from collections.abc import Callable, Sequence
 from pxr import Usd
 
 from ._client_utils import (
+    ClientPhase,
+    ClientStatus,
     client_origin,
     client_token_callback,
     client_token_handlers,
@@ -106,6 +108,29 @@ class UsdReceiver:
         return self._stage
 
     @property
+    def status(self) -> ClientStatus:
+        """Current receiver transport and replay state."""
+        if self._closed:
+            phase = ClientPhase.CLOSED
+        elif self.auth_rejected or self.connection_rejected:
+            phase = ClientPhase.REJECTED
+        elif self.synchronized:
+            phase = ClientPhase.READY
+        elif self.connected:
+            phase = ClientPhase.REPLAYING
+        elif self._started:
+            phase = ClientPhase.CONNECTING
+        else:
+            phase = ClientPhase.OFFLINE
+        return ClientStatus(
+            phase=phase,
+            connected=self.connected,
+            synchronized=self.synchronized,
+            receiver_connected=self._receiver.connected,
+            reason=self._receiver.rejection_reason,
+        )
+
+    @property
     def receiver(self):
         """The underlying :class:`ReceiverThread`."""
         return self._receiver
@@ -118,6 +143,10 @@ class UsdReceiver:
     @property
     def connected(self) -> bool:
         return not self._closed and self._receiver.connected
+
+    @property
+    def synchronized(self) -> bool:
+        return not self._closed and self._receiver.synchronized
 
     @property
     def layered_replay_active(self) -> bool:
@@ -154,10 +183,12 @@ class UsdReceiver:
             self._started = True
         return self
 
-    def wait_connected(self, timeout: float | None = None) -> bool:
-        """Wait for the handshake; queued replay still requires ``update``."""
-        if not self._started:
-            raise RuntimeError("UsdReceiver has not been started")
+    def connect(self, timeout: float | None = None) -> bool:
+        """Start and complete the receiver handshake within ``timeout``.
+
+        Queued replay still requires :meth:`update` on the stage-owning thread.
+        """
+        self.start()
         connected = self._receiver.wait_connected(timeout)
         if connected:
             self._require_layered_replay()
@@ -274,11 +305,42 @@ class UsdPublisher:
             on_token_issued=client_token_callback(host, port, persist_token),
         )
         self._closed = False
+        self._started = False
+        self._connecting = False
 
     @property
     def stage(self) -> Usd.Stage:
         """Application-owned stage observed for authored changes."""
         return self._stage
+
+    @property
+    def status(self) -> ClientStatus:
+        """Current publisher transport, durability, and recovery state."""
+        failure = self._sender.transaction_failure
+        reason = str(failure) if failure is not None else self._sender.rejection_reason
+        if self._closed:
+            phase = ClientPhase.CLOSED
+        elif failure is not None:
+            phase = ClientPhase.RECOVERY_REQUIRED
+        elif self._sender.auth_rejected or self._sender.hello_rejected:
+            phase = ClientPhase.REJECTED
+        elif self.connected:
+            phase = ClientPhase.READY
+        elif self._connecting:
+            phase = ClientPhase.CONNECTING
+        else:
+            phase = ClientPhase.OFFLINE
+        return ClientStatus(
+            phase=phase,
+            connected=self.connected,
+            synchronized=self.synchronized,
+            sender_connected=self._sender.connected,
+            prepared_events=self.prepared_event_count,
+            pending_events=self.pending_event_count,
+            acknowledged_events=self.acknowledged_event_count,
+            failure=failure,
+            reason=reason,
+        )
 
     @property
     def sender(self):
@@ -293,6 +355,11 @@ class UsdPublisher:
     @property
     def connected(self) -> bool:
         return not self._closed and self._sender.connected
+
+    @property
+    def synchronized(self) -> bool:
+        """Send-only clients are synchronized whenever their transport is connected."""
+        return self.connected
 
     @property
     def auth_rejected(self) -> bool:
@@ -362,13 +429,30 @@ class UsdPublisher:
                 return False
         return self._sender.flush(timeout)
 
-    def connect(self) -> bool:
-        """Connect synchronously; safe to call again after disconnection."""
+    def start(self) -> UsdPublisher:
+        """Enter the nonblocking lifecycle without opening a socket."""
         if self._closed:
             raise RuntimeError("UsdPublisher is closed")
+        self._started = True
+        return self
+
+    def connect(self, timeout: float | None = None) -> bool:
+        """Start and complete the publisher handshake within ``timeout``."""
+        self.start()
         if self._sender.token is None and self._persist_token:
             self._sender.token = load_token(self._host, self._port)
-        return self._sender.connect()
+        self._connecting = True
+        try:
+            connected = self._sender.connect(timeout=timeout)
+        finally:
+            self._connecting = False
+        if connected:
+            return True
+        if self._sender.auth_rejected:
+            raise PermissionError("publisher authentication rejected")
+        if self._sender.hello_rejected:
+            raise ConnectionError(self._sender.rejection_reason or "publisher connection rejected")
+        return False
 
     def disconnect(self) -> None:
         """Close the socket while retaining dirty and prepared emitter state."""
@@ -421,10 +505,7 @@ class UsdPublisher:
         self._closed = True
 
     def __enter__(self) -> UsdPublisher:
-        if not self.connect():
-            self.close()
-            raise ConnectionError(f"could not connect UsdPublisher to {self._host}:{self._port}")
-        return self
+        return self.start()
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.close()

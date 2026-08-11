@@ -5,7 +5,7 @@ that each open an equivalent file-backed USD stage. Where managed mode applies
 semantic event kinds over server-owned collaboration layers, shared stage mode
 treats each client's own file layers, root layer and sublayers alike, as the
 synchronized data. `SharedStageClient` is the entry point, with the same
-`start()` / `wait_connected()` / `update()` / `close()` lifecycle as
+`start()` / `connect()` / `update()` / `close()` lifecycle as
 `ManagedClient`.
 
 ## What shared stage does
