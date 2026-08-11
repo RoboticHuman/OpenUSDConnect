@@ -66,15 +66,20 @@ def _send_transaction_results(
     sock: socket.socket,
     results: list[dict],
     *,
-    measure: bool = False,
-) -> int:
-    """Send ordered results with one syscall when multiple are ready."""
-    if len(results) == 1 and not measure:
+    measure_bytes: bool = False,
+) -> int | None:
+    """Send ordered results and optionally return their framed byte count.
+
+    The unmeasured single-result path delegates to :func:`send_msg` so it
+    serializes exactly once. Unmeasured sends return ``None``; callers that
+    enable wire metrics request and receive the actual framed byte count.
+    """
+    if len(results) == 1 and not measure_bytes:
         send_msg(sock, results[0])
-        return 0
+        return None
     payload = frame_batch([encode_message(result) for result in results])
     sock.sendall(payload)
-    return len(payload)
+    return len(payload) if measure_bytes else None
 
 
 class ConnectionHandler(socketserver.StreamRequestHandler):
@@ -622,14 +627,14 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     with self.send_lock:
                         if sync_server.wire_metrics is None:
                             _send_transaction_results(self.request, outgoing)
-                            sent_bytes = 0
+                            sent_bytes = None
                         else:
                             sent_bytes = _send_transaction_results(
                                 self.request,
                                 outgoing,
-                                measure=True,
+                                measure_bytes=True,
                             )
-                    if sent_bytes:
+                    if sent_bytes is not None:
                         sync_server.wire_metrics.record_transport(
                             "producer_result_egress",
                             sent_bytes,

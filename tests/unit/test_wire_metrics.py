@@ -4,8 +4,12 @@ import io
 import threading
 import time
 
+from openusdconnect.codec import encode_message
+from openusdconnect.framing import frame_batch
+from openusdconnect.protocol import make_transaction_result
 from openusdconnect.protocol_constants import MSG_RESYNC
 from openusdconnect.sender import EventSender
+from openusdconnect.server import connection as connection_module
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.server.state import UsdSyncServer
 
@@ -15,6 +19,61 @@ EVENTS = [
     {"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"], "t": [1.0, 2.0, 3.0]},
     {"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"], "t": [4.0, 5.0, 6.0]},
 ]
+
+
+class _RecordingSocket:
+    def __init__(self):
+        self.payloads = []
+
+    def sendall(self, payload):
+        self.payloads.append(payload)
+
+
+def test_unmeasured_single_result_uses_fast_path_without_preencoding(monkeypatch):
+    sock = _RecordingSocket()
+    result = make_transaction_result(1)
+    sent = []
+
+    def record_send_msg(actual_sock, actual_result):
+        sent.append((actual_sock, actual_result))
+
+    def reject_preencoding(_result):
+        raise AssertionError("unmeasured single-result path encoded twice")
+
+    monkeypatch.setattr(connection_module, "send_msg", record_send_msg)
+    monkeypatch.setattr(connection_module, "encode_message", reject_preencoding)
+
+    measured_bytes = connection_module._send_transaction_results(sock, [result])
+
+    assert measured_bytes is None
+    assert sent == [(sock, result)]
+    assert sock.payloads == []
+
+
+def test_unmeasured_result_batch_returns_none_after_one_socket_write():
+    sock = _RecordingSocket()
+    results = [make_transaction_result(1), make_transaction_result(2)]
+    expected_payload = frame_batch([encode_message(result) for result in results])
+
+    measured_bytes = connection_module._send_transaction_results(sock, results)
+
+    assert measured_bytes is None
+    assert sock.payloads == [expected_payload]
+
+
+def test_measured_result_returns_actual_framed_byte_count():
+    sock = _RecordingSocket()
+    result = make_transaction_result(1)
+    expected_payload = frame_batch([encode_message(result)])
+
+    measured_bytes = connection_module._send_transaction_results(
+        sock,
+        [result],
+        measure_bytes=True,
+    )
+
+    assert measured_bytes == len(expected_payload)
+    assert sock.payloads == [expected_payload]
 
 
 def test_disabled_by_default():
