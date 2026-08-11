@@ -31,6 +31,7 @@ from .receiver import ReceiverThread
 from .recovery import (
     QuarantinedTransaction,
     RecoveryArtifact,
+    RecoveryError,
     RecoveryIncident,
     RecoveryKind,
     RejectionDisposition,
@@ -38,7 +39,12 @@ from .recovery import (
 )
 from .sender import EventSender, TransactionRejectedError
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
-from .shared_stage_client import SharedStageClient
+from .shared_stage_client import (
+    SharedRecoveryAssessment,
+    SharedRecoveryLayer,
+    SharedRecoveryResult,
+    SharedStageClient,
+)
 from .usd_client import UsdPublisher, UsdReceiver
 
 __version__ = "0.1.0"
@@ -60,11 +66,15 @@ __all__ = [
     "ReceiverThread",
     "QuarantinedTransaction",
     "RecoveryArtifact",
+    "RecoveryError",
     "RecoveryIncident",
     "RecoveryKind",
     "RejectionDisposition",
     "ReceivedEvent",
     "ServerConfig",
+    "SharedRecoveryAssessment",
+    "SharedRecoveryLayer",
+    "SharedRecoveryResult",
     "SharedStageClient",
     "SyncUpdate",
     "TransactionRejectedError",

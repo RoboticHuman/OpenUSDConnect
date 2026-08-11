@@ -14,7 +14,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect import SharedStageClient  # noqa: E402
+from openusdconnect import ClientPhase, SharedStageClient  # noqa: E402
 
 DEFAULT_STAGE = Path(__file__).with_name("scene.usda")
 SPHERE_PATH = "/World/SharedSphere"
@@ -68,12 +68,20 @@ def main() -> int:
             return 1
 
         deadline = time.monotonic() + 5.0
-        while not client.is_layer_mapped(content):
+        while client.status.phase is not ClientPhase.READY:
             client.update()
+            status = client.status
+            if status.phase in (ClientPhase.RECOVERY_REQUIRED, ClientPhase.REJECTED):
+                print(status.reason or status.phase.value, file=sys.stderr)
+                return 2
             if time.monotonic() >= deadline:
-                print("content layer was not mapped", file=sys.stderr)
+                print(f"client did not become ready: {status.phase.value}", file=sys.stderr)
                 return 1
             time.sleep(0.01)
+
+        if not client.is_layer_mapped(content):
+            print("content layer is outside the synchronized graph", file=sys.stderr)
+            return 1
 
         translate = None
         if args.author:
@@ -89,9 +97,15 @@ def main() -> int:
         interval = 1.0 / max(args.rate, 1.0)
         while args.seconds <= 0 or time.monotonic() - started < args.seconds:
             elapsed = time.monotonic() - started
-            if translate is not None:
+            if translate is not None and client.status.phase is ClientPhase.READY:
                 translate.Set(Gf.Vec3d(math.sin(elapsed) * 2.5, 1.0, 0.0))
             update = client.update()
+
+            if client.status.phase is ClientPhase.RECOVERY_REQUIRED:
+                failure = client.status.failure
+                detail = failure.reason if failure is not None else "transaction rejected"
+                print(f"recovery required: {detail}", file=sys.stderr)
+                return 2
 
             now = time.monotonic()
             if now >= next_report:

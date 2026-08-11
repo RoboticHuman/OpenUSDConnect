@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 
 import pytest
-from pxr import Sdf, Usd
+from pxr import Ar, Sdf, Usd
 
+import openusdconnect.sdf_delegate_bridge as sdf_delegate_bridge
 from openusdconnect.event_apply import apply_events
 from openusdconnect.sdf_delegate_bridge import (
     NativeDelegateTracker,
@@ -22,6 +23,37 @@ def bridge_path() -> Path:
     if not value:
         pytest.skip("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE is not configured")
     return Path(value)
+
+
+def test_native_tracker_binds_the_stage_context_while_registering_layers(
+    tmp_path,
+    monkeypatch,
+):
+    root = Sdf.Layer.CreateNew(str(tmp_path / "root.usda"))
+    root.Save()
+    context = Ar.DefaultResolverContext([str(tmp_path)])
+    stage = Usd.Stage.Open(root.identifier, context)
+    graph = SharedLayerGraph(stage)
+    observed_contexts = []
+
+    class _Bridge:
+        def __init__(self, _path, _identifiers, *, max_queued_bytes):
+            del max_queued_bytes
+            observed_contexts.append(Ar.GetResolver().GetCurrentContext())
+
+        def set_layers(self, _identifiers):
+            observed_contexts.append(Ar.GetResolver().GetCurrentContext())
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdf_delegate_bridge, "NativeDelegateTracker", _Bridge)
+    tracker = NativeSdfLayerChangeTracker(stage, graph, "unused")
+    try:
+        assert len(observed_contexts) == 2
+        assert all(item == stage.GetPathResolverContext() for item in observed_contexts)
+    finally:
+        tracker.close()
 
 
 def test_bridge_updates_layers_and_suppresses_authoritative_edits(bridge_path):

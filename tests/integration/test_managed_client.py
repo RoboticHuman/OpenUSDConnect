@@ -18,6 +18,7 @@ import time
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom
 
+from openusdconnect import ClientPhase
 from openusdconnect.managed_client import ManagedClient
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -164,12 +165,10 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
     assert counts["set_xform_trs"] == 50
 
 
-def test_managed_client_redirects_session_authoring_and_converges(live_server, tmp_path):
+def test_managed_client_owns_transient_authoring_and_converges(live_server, tmp_path):
     sync_server, port = live_server
     first_stage = _client_stage(tmp_path, "first")
     second_stage = _client_stage(tmp_path, "second")
-    first_stage.SetEditTarget(Usd.EditTarget(first_stage.GetSessionLayer()))
-    second_stage.SetEditTarget(Usd.EditTarget(second_stage.GetSessionLayer()))
     first = ManagedClient(
         first_stage,
         app_name="managed-first",
@@ -231,7 +230,6 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
 ):
     sync_server, port = live_server
     stage = _client_stage(tmp_path, "recovery")
-    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     client = ManagedClient(
         stage,
         app_name="managed-recovery",
@@ -268,6 +266,8 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
         assert not stage.GetPrimAtPath("/World/Rejected")
         assert client.sender.session_id == "managed-replacement-session"
         assert not client.recovery_required
+        assert client.connected
+        assert client.status.phase is ClientPhase.READY
         assert client.receiver.reconnect is False
         assert client.receiver.replay_head_seq == sync_server.store.get_max_seq()
 
@@ -361,8 +361,6 @@ def test_managed_clients_apply_complete_commit_order_without_echo(live_server, t
 def test_managed_client_rebinds_and_parks_the_emitter():
     old_stage = Usd.Stage.CreateInMemory("old.usda")
     new_stage = Usd.Stage.CreateInMemory("new.usda")
-    old_stage.SetEditTarget(Usd.EditTarget(old_stage.GetSessionLayer()))
-    new_stage.SetEditTarget(Usd.EditTarget(new_stage.GetSessionLayer()))
     client = ManagedClient(
         old_stage,
         app_name="managed-rebind",

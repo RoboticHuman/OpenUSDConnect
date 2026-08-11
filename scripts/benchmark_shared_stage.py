@@ -160,7 +160,11 @@ def main() -> None:
         encode_samples = []
         apply_samples = []
         target_graph = SharedLayerGraph(target_stage)
+        preflight_samples = []
         for _ in range(args.graph_iterations):
+            start = time.perf_counter_ns()
+            target_graph._validate_local_graph()
+            preflight_samples.append((time.perf_counter_ns() - start) / 1_000)
             start = time.perf_counter_ns()
             encode_message(baseline)
             encode_samples.append((time.perf_counter_ns() - start) / 1_000)
@@ -199,6 +203,7 @@ def main() -> None:
     _print_timing("accepted-delta baseline update", commit_samples)
     print(f"graph layers: {args.graph_layers + 1}")
     print(f"initial graph capture: {graph_capture:.2f} us")
+    _print_timing("client graph preflight", preflight_samples)
     _print_timing("idle graph tracker update", idle_samples)
     _print_timing("graph baseline encode", encode_samples)
     _print_timing("graph baseline apply", apply_samples)

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
 
-from pxr import Sdf, Usd
+from pxr import Ar, Sdf, Usd
 
 from .protocol_constants import (
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -533,11 +533,12 @@ class NativeSdfLayerChangeTracker:
         self._prepared: list[PreparedLayerBatch] = []
         self._suppression_depth = 0
         layers = graph.local_reachable_layers()
-        self._bridge = NativeDelegateTracker(
-            bridge_path,
-            [layer.identifier for layer in layers],
-            max_queued_bytes=max_queued_bytes,
-        )
+        with Ar.ResolverContextBinder(stage.GetPathResolverContext()):
+            self._bridge = NativeDelegateTracker(
+                bridge_path,
+                [layer.identifier for layer in layers],
+                max_queued_bytes=max_queued_bytes,
+            )
         self.sync_graph(force=True)
 
     @property
@@ -565,7 +566,8 @@ class NativeSdfLayerChangeTracker:
         # Content replacement can reset an SdfLayer's state delegate. Reassert
         # ownership after every graph/application cycle, even when reachability
         # did not change.
-        self._bridge.set_layers(list(current))
+        with Ar.ResolverContextBinder(self.stage.GetPathResolverContext()):
+            self._bridge.set_layers(list(current))
         reachable_ids = {id(layer) for layer in layers}
         self._pending = {
             layer_id: changes

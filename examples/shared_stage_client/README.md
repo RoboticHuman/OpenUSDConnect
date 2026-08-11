@@ -29,3 +29,7 @@ each process may use a different filesystem root or a custom `ArResolver`, as
 long as the root document and recursive sublayer graph resolve to equivalent
 assets. The demo does not save the changed layer; persistence remains an
 application decision.
+
+The author only changes the stage while `client.status.phase` is `READY`.
+During connection or replay it continues pumping `update()` without authoring;
+on a recoverable rejection it stops authoring and reports the server reason.

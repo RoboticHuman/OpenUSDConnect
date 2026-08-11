@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
+import pxr
 import pytest
 from pxr import Sdf, Usd
 
@@ -16,6 +20,19 @@ from openusdconnect.sender import EventSender, TransactionRejectedError
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.shared_stage_client import SharedStageClient
+
+
+def _find_usd_resolver_example_resources() -> Path | None:
+    """Locate the example resolver relative to the imported OpenUSD package."""
+    pxr_package = Path(pxr.__file__).resolve().parent
+    relative_resources = Path(
+        "share/usd/examples/plugin/usdResolverExample/resources"
+    )
+    for installation_root in (pxr_package, *pxr_package.parents):
+        resources = installation_root / relative_resources
+        if (resources / "plugInfo.json").is_file():
+            return resources
+    return None
 
 
 def _create_layer(path: Path, prim_path: str | None = None) -> Sdf.Layer:
@@ -465,6 +482,45 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
         sync_server.store.close()
 
 
+def test_two_clients_edit_custom_resolver_sublayers_through_local_contexts(
+    tmp_path,
+):
+    plugin_resources = _find_usd_resolver_example_resources()
+    if plugin_resources is None:
+        pytest.skip("OpenUSD usdResolverExample plugin was not built")
+    script = Path(__file__).with_name("scripts") / "shared_stage_custom_resolver_test.py"
+    process = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--workspace",
+            str(tmp_path),
+            "--plugin-resources",
+            str(plugin_resources),
+        ],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    assert process.returncode == 0, f"stdout:\n{process.stdout}\nstderr:\n{process.stderr}"
+    result_line = next(
+        line for line in process.stdout.splitlines() if line.startswith("RESULT:")
+    )
+    result = json.loads(result_line.removeprefix("RESULT:"))
+    assert [client["resolved_path"] for client in result["clients"]] == [
+        "asset:Scene/first/content.usda",
+        "asset:Scene/second/content.usda",
+    ]
+    assert all(client["phase"] == "ready" for client in result["clients"])
+    assert all(client["value"] == 11 for client in result["clients"])
+    assert result["server"] == {
+        "resolved_path": "asset:Scene/server/content.usda",
+        "value": 11,
+    }
+
+
 def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
     server_stage = _create_stage(tmp_path / "server")
     sync_server = UsdSyncServer(
@@ -515,6 +571,105 @@ def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
         assert sender.recovery_required
     finally:
         sender.disconnect()
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
+@pytest.mark.parametrize("rebind", [False, True], ids=["detached", "fresh-stage"])
+def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, rebind):
+    server_stage = _create_stage(tmp_path / "server")
+    client_stage = _create_stage(tmp_path / "client")
+    sync_server = UsdSyncServer(
+        stage=server_stage,
+        log_path=str(tmp_path / "events.db"),
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0), ConnectionHandler, sync_server, max_workers=4
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    client = SharedStageClient(
+        client_stage,
+        app_name="detached-recovery-client",
+        port=tcp_server.server_address[1],
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        client.start()
+        assert client.connect(timeout=2)
+        assert _pump_until([client], lambda: client.graph_ready and client.synchronized)
+
+        client_child = client_stage.GetLayerStack(includeSessionLayers=False)[1]
+        child_key = client._graph.key_for(client_child)
+        assert child_key
+        client_stage.SetEditTarget(Usd.EditTarget(client_child))
+        client_stage.GetAttributeAtPath("/World.value").Set(77)
+        client._tracker.prepare_local_changes()
+        routed = client._tracker.next_routed_batch()
+        assert routed is not None
+        batch, routed_key, events = routed
+        assert routed_key == child_key
+
+        server_graph = sync_server.shared_layer_graph
+        sync_server.process_txn(
+            [
+                {
+                    "k": "set_sublayers",
+                    "prim": "/",
+                    "generation": server_graph.generation,
+                    "revision": 0,
+                    "sublayers": [],
+                }
+            ],
+            layer_key=server_graph.root_layer_key,
+        )
+        assert child_key not in server_graph.reachable_layer_keys()
+
+        assert client.sender.send_events(events, layer_key=routed_key)
+        client._tracker.mark_prepared_sent(batch)
+        with pytest.raises(TransactionRejectedError) as caught:
+            client.flush(timeout=5)
+        assert caught.value.failure.code_name == "stale_layer_graph"
+
+        if rebind:
+            fresh_stage = _create_stage(tmp_path / "fresh")
+            result = client.recover_use_server(
+                fresh_stage,
+                session_id="detached-recovery-replacement",
+                timeout=5,
+            )
+            assert client.stage is fresh_stage
+        else:
+            assessment = client.assess_recovery(timeout=5)
+            assert assessment.all_layers_detached
+            result = client.complete_external_recovery(
+                assessment,
+                session_id="detached-recovery-replacement",
+            )
+            assert client.stage is client_stage
+
+        assert result.transport_artifact.failure.code_name == "stale_layer_graph"
+        assert result.transport_artifact.layer_keys == (child_key,)
+        assert len(result.preserved_layers) == 1
+        preserved = result.preserved_layers[0]
+        assert preserved.rejected_layer_key == child_key
+        assert preserved.preserved_layer.GetAttributeAtPath("/World.value").default == 77
+        assert not client.is_layer_mapped(client_child)
+        assert not client_stage.GetAttributeAtPath("/World.value")
+        assert client_stage.GetEditTarget().GetLayer() is client_stage.GetRootLayer()
+        assert not client.recovery_required
+        assert client.sender.session_id == "detached-recovery-replacement"
+        assert client.sender.connected is rebind
+
+        client.update()
+        assert client.sender.connected
+    finally:
+        client.close()
         tcp_server.shutdown()
         tcp_server.server_close()
         thread.join(timeout=5)

@@ -33,6 +33,7 @@ from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
 from .recovery import (
     RecoveryArtifact,
+    RecoveryError,
     RecoveryIncident,
     RejectionDisposition,
     TransactionFailure,
@@ -54,7 +55,12 @@ class ManagedRecoveryResult:
 
 
 class ManagedClient:
-    """Bidirectional synchronization with server-owned collaboration layers."""
+    """Bidirectional sync through one client-owned transient authoring layer.
+
+    The stage edit target is moved to :attr:`authoring_layer` at construction
+    and after every rebind. Keeping all optimistic work in that layer makes
+    authoritative rollback and preservation deterministic.
+    """
 
     def __init__(
         self,
@@ -98,9 +104,7 @@ class ManagedClient:
         self._port = port
         self._persist_token = persist_token
         self._app_name = app_name
-        self._authoring_layer, self._owns_authoring_layer = (
-            self._ensure_convergent_edit_target(stage, app_name)
-        )
+        self._authoring_layer = self._create_authoring_layer(stage, app_name)
         self._last_recovery_result: ManagedRecoveryResult | None = None
         self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
 
@@ -209,12 +213,7 @@ class ManagedClient:
 
     @property
     def authoring_layer(self) -> Sdf.Layer | None:
-        """Application layer currently intended for local shared edits.
-
-        When the stage initially targets its strong session root, ManagedClient
-        creates a transient session sublayer instead. Authoritative managed
-        layers compose above that sublayer, so peer edits can converge.
-        """
+        """Client-owned transient layer for all local managed-mode edits."""
         return self._authoring_layer
 
     @property
@@ -254,6 +253,11 @@ class ManagedClient:
         return self._sender.recovery_incident
 
     @property
+    def recovery_artifact(self) -> RecoveryArtifact | None:
+        """Exact quarantined transactions for integration-owned recovery."""
+        return self._sender.recovery_artifact
+
+    @property
     def last_recovery_result(self) -> ManagedRecoveryResult | None:
         """Most recent preserved recovery data, retained until dismissed."""
         return self._last_recovery_result
@@ -270,9 +274,9 @@ class ManagedClient:
     ) -> ManagedRecoveryResult:
         """Discard local optimistic opinions and start a fresh producer session.
 
-        Automatic repair is intentionally limited to the transient authoring
-        layer created and owned by this client. Application-owned edit layers
-        require an integration-specific recovery handler or stage rebind.
+        Rejected work is preserved before the client-owned transient authoring
+        layer is cleared. The producer reconnect is attempted within the same
+        timeout budget; if it cannot complete, the normal update loop retries.
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
@@ -281,17 +285,22 @@ class ManagedClient:
         stage = self._stage
         authoring = self._authoring_layer
         if stage is None or authoring is None:
-            raise RuntimeError("ManagedClient has no bound stage to recover")
+            raise RecoveryError(
+                "stage_unavailable",
+                "ManagedClient has no bound stage to recover",
+            )
         if not self._sender.recovery_required:
-            raise RuntimeError("there is no recovery incident to resolve")
-        if not self._owns_authoring_layer:
-            raise RuntimeError(
-                "automatic Use Server recovery requires the client-owned "
-                "transient authoring layer"
+            raise RecoveryError(
+                "no_incident",
+                "there is no recovery incident to resolve",
             )
         if stage.GetEditTarget().GetLayer() is not authoring:
-            raise RuntimeError("the active edit target changed during recovery")
+            raise RecoveryError(
+                "edit_target_changed",
+                "the active edit target changed during recovery",
+            )
 
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
         self._refresh_recovery_checkpoint(timeout)
 
         preserved = Sdf.Layer.CreateAnonymous("openusdconnect-recovery-authoring")
@@ -315,7 +324,18 @@ class ManagedClient:
         finally:
             self._emitter.rebind_stage(stage)
         self._transform_coalescing.mark_submitted()
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        self._resume_sender_after_recovery(remaining)
         return result
+
+    def _resume_sender_after_recovery(self, timeout: float | None) -> None:
+        """Best-effort producer reconnect after state recovery has committed."""
+        try:
+            self._connect_sender(timeout=timeout)
+        except (PermissionError, ConnectionError):
+            # Recovery already completed and must not look rolled back. Status
+            # exposes rejection/offline state; update() retries ordinary loss.
+            pass
 
     def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
         """Replay through a new server head before resolving optimistic state."""
@@ -349,6 +369,7 @@ class ManagedClient:
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
+        self._require_recoverable_failure()
         txn_id = self._sender.repair_rejected_transaction(events)
         if not self._connect_sender():
             raise ConnectionError(
@@ -356,6 +377,17 @@ class ManagedClient:
                 f"{self._host}:{self._port} failed; it remains queued"
             )
         return txn_id
+
+    def _require_recoverable_failure(self) -> TransactionFailure:
+        failure = self._sender.transaction_failure
+        if failure is None:
+            raise RecoveryError("no_incident", "there is no recovery incident to resolve")
+        if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
+            raise RecoveryError(
+                "wrong_recovery_kind",
+                f"{failure.code_name} is {failure.disposition.value}, not recoverable",
+            )
+        return failure
 
     def flush(self, timeout: float | None = None) -> bool:
         """Submit any coalesced transform, then wait for durable acknowledgement."""
@@ -539,7 +571,7 @@ class ManagedClient:
         return self._send(self._emitter.prepare_snapshot_events_for_send())
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
-        """Move sending, receiving, and managed layers to a new stage.
+        """Move sending and receiving to a new stage and select a fresh authoring layer.
 
         Pass ``None`` to park: the receiver stays connected and the queue
         continues to fill, but ``update()`` returns zero until a new stage
@@ -555,47 +587,38 @@ class ManagedClient:
             self._emitter.cleanup()
             self._stage = None
             self._authoring_layer = None
-            self._owns_authoring_layer = False
             return
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
         self._dispatcher.adapter = adapter
         self._dispatcher.bind_layered_stage(stage)
-        self._authoring_layer, self._owns_authoring_layer = (
-            self._ensure_convergent_edit_target(stage, self._app_name)
-        )
+        self._authoring_layer = self._create_authoring_layer(stage, self._app_name)
         self._emitter.rebind_stage(stage)
         self._stage = stage
 
     @staticmethod
-    def _ensure_convergent_edit_target(
+    def _create_authoring_layer(
         stage: Usd.Stage,
         label: str,
-    ) -> tuple[Sdf.Layer, bool]:
-        """Return a convergent target and whether this client created it."""
-        edit_layer = stage.GetEditTarget().GetLayer()
+    ) -> Sdf.Layer:
+        """Create and select the one transient layer owned by this client."""
         session = stage.GetSessionLayer()
-        if edit_layer is not session:
-            return edit_layer, False
         authoring = Sdf.Layer.CreateAnonymous(f"openusdconnect-{label}-authoring")
         with Sdf.ChangeBlock():
             session.subLayerPaths.append(authoring.identifier)
         stage.SetEditTarget(Usd.EditTarget(authoring))
-        return authoring, True
+        return authoring
 
     def _validate_authoring_target(self) -> None:
         stage = self._stage
         if stage is None:
             return
         layer = stage.GetEditTarget().GetLayer()
-        if layer is stage.GetSessionLayer():
+        if layer is not self._authoring_layer:
             raise RuntimeError(
-                "ManagedClient cannot publish from the strong session root; "
-                "author into client.authoring_layer or another weaker layer"
+                "ManagedClient publishes only from client.authoring_layer; "
+                "restore that edit target before update()"
             )
-        router = self._dispatcher.layer_router
-        if router is not None and router.key_for(layer) is not None:
-            raise RuntimeError("ManagedClient cannot publish from a receiver-owned managed layer")
 
     def refresh_asset_dependency(
         self,

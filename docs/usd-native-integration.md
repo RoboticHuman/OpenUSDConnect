@@ -135,7 +135,6 @@ from pxr import Gf, Usd, UsdGeom
 from openusdconnect import ManagedClient
 
 stage = Usd.Stage.Open("shot.usda", session_layer)
-stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
 
 with ManagedClient(
     stage,
@@ -157,13 +156,13 @@ with ManagedClient(
 application's own edits, and returns the event counts for each direction.
 The dispatcher suppresses the emitter while authoritative records apply and
 invalidates its diff cache afterward, so the server's echo of the
-application's own edits is not re-published. The session root itself is
-stronger than all session sublayers, so `ManagedClient` redirects an initial
-session-root edit target into `client.authoring_layer`, a transient session
-sublayer below the receiver-owned managed block. Author into that layer, the
-root layer, or another application layer weaker than the managed block. The
-client rejects publishing from the strong session root or from a
-receiver-owned managed layer.
+application's own edits is not re-published. `ManagedClient` always creates
+`client.authoring_layer`, a transient session sublayer below the
+receiver-owned managed block, and makes it the stage's edit target. Keep that
+edit target while the client is active. This single owned layer makes
+authoritative recovery safe and predictable. Applications that intentionally
+author persistent or multiple custom layers should compose the lower-level
+`UsdPublisher` and `UsdReceiver` APIs instead.
 
 `SyncUpdate.submitted_events` is newly submitted work,
 `acknowledged_events` is work covered by cumulative acknowledgements since the
@@ -179,6 +178,27 @@ For high-frequency default-time transforms, set
 `transform_coalesce_seconds` to a small host-appropriate window. Only repeated
 TRS opinions for the same prim and time code are merged; structural edits,
 distinct time samples, and other event kinds remain ordering barriers.
+
+A deterministic rejection is reported through `update.recovery` and
+`client.status`; it does not interrupt an interactive update loop. The
+baseline **Use Server** operation preserves the rejected local layer, clears
+that transient layer, starts a fresh producer session, and attempts to restore
+producer connectivity within the supplied timeout:
+
+```python
+update = client.update()
+if update.recovery is not None:
+    result = client.recover_use_server(timeout=10)
+    result.preserved_authoring_layer.Export("rejected-work.usda")
+
+    # Usually READY immediately; update() retries if reconnect could not finish.
+    if not client.connected:
+        show_reconnecting()
+```
+
+An integration that semantically rebuilds the rejected operation can instead
+call `repair_and_resume(events)`, which reuses the rejected transaction ID and
+retains its ordered suffix.
 
 ## Bidirectional hosts
 
@@ -233,12 +253,15 @@ uv run openusdconnect-server \
   --layer-mode shared_stage
 ```
 
-Each client opens its local equivalent under its normal resolver context:
+Each client opens its local equivalent under its normal resolver context.
+`connect()` establishes both transports; replay may still be in progress, so
+gate shared editing on the high-level phase rather than individual transport
+or graph flags:
 
 ```python
 from pxr import Usd
 
-from openusdconnect import SharedStageClient
+from openusdconnect import ClientPhase, SharedStageClient
 
 stage = Usd.Stage.Open("asset://show/shot/shot.usda", resolver_context)
 
@@ -248,7 +271,23 @@ with SharedStageClient(stage, app_name="shot-editor") as client:
 
     while application_is_running():
         result = client.update()
+        status = client.status
+
+        if status.phase is ClientPhase.READY:
+            enable_shared_editing()
+        elif status.phase is ClientPhase.RECOVERY_REQUIRED:
+            disable_shared_editing()
+            show_recovery_choice(status.recovery, status.reason)
+        else:
+            disable_shared_editing()
+            show_connection_state(status.phase, status.reason)
 ```
+
+Construction rejects an anonymous root, an initial edit target outside the
+root/sublayer graph, and non-portable `subLayerPaths` in the currently
+resolvable graph. Errors name the offending layer. Missing sublayers are not
+rejected: OpenUSD may resolve them later after an asset or resolver refresh,
+and their keyed events remain pending.
 
 The default tracker is pure Python and keeps complete local layer snapshots so
 it works with any compatible OpenUSD Python package. Native USD applications
@@ -282,6 +321,10 @@ has whole-layer conflict scope; ordinary edits remain field-level.
 in-memory TOFU token handoff when token persistence is disabled. Code that does
 not call `connect()` may use `start()` to launch only the background receiver;
 the first `update()` retries the sender best-effort after the receive handshake.
+`ClientPhase.READY` is the single normal-operation signal: both transports are
+connected and the authoritative replay boundary has been applied. The lower
+level `connected`, `synchronized`, and `graph_ready` properties remain useful
+for diagnostics, but integrations should not reconstruct readiness from them.
 
 Call `update()` on the thread that owns the stage. It freezes local authored
 changes, applies sequenced server records, restores concurrent local changes,
@@ -294,6 +337,189 @@ not require specialized event types.
 publication is also gated on both the
 accepted layer graph and the receiver replay boundary. `flush(timeout)` is the
 explicit durability checkpoint.
+
+### Shared-stage transaction recovery
+
+A deterministic rejection sets `client.status.phase` to `RECOVERY_REQUIRED`
+and quarantines the rejected transaction plus its ordered suffix. Integrations
+can inspect `client.recovery_incident`, `client.transaction_failure`, and the
+exact `client.recovery_artifact` without reaching through the transport.
+
+Call `assess_recovery()` on the stage-owning thread to replay through a fresh
+server checkpoint and classify each quarantined layer:
+
+```python
+assessment = client.assess_recovery(timeout=5)
+
+assessment.detached_layers
+assessment.reachable_layers
+assessment.remapped_layers
+assessment.unresolved_layers
+assessment.all_layers_detached
+```
+
+Detachment is a fact, not permission to discard work: a later topology change
+can reattach the same file layer. The library therefore does not overwrite or
+clear application-owned layers in place. The baseline **Use Server** operation
+requires a clean equivalent stage and replays authoritative history onto it:
+
+```python
+clean_stage = open_equivalent_stage_with_distinct_layer_identifiers()
+result = client.recover_use_server(clean_stage, timeout=5)
+
+for layer in result.preserved_layers:
+    layer.preserved_layer.Export("rejected-work.usda")
+```
+
+Opening the same asset path again in the same process is generally not a clean
+stage: OpenUSD's layer registry can return the same loaded `Sdf.Layer`
+objects. For filesystem assets, use an isolated copy of the root/sublayer tree
+that preserves relative authored paths. Resolver-backed integrations should
+open an equivalent snapshot whose resolved layer identifiers do not overlap
+the rejected stage. `recover_use_server()` rejects overlap rather than
+silently clearing application-owned layers.
+
+A filesystem-backed integration can make that requirement explicit without
+putting copy policy into OpenUSDConnect:
+
+```python
+from pathlib import Path
+import shutil
+
+from pxr import Usd
+
+
+def open_filesystem_recovery_stage(baseline_tree, root_relative, destination):
+    baseline_tree = Path(baseline_tree).resolve()
+    destination = Path(destination).resolve()
+    shutil.copytree(baseline_tree, destination)
+    return Usd.Stage.Open(str(destination / root_relative))
+
+
+clean_stage = open_filesystem_recovery_stage(
+    "/projects/show/shot",
+    "shot.usda",
+    recovery_workspace / "authoritative-snapshot",
+)
+result = client.recover_use_server(clean_stage, timeout=5)
+replace_stage_in_host(client.stage)
+```
+
+`baseline_tree` must be the clean collaboration baseline, not a workspace to
+which rejected edits have already been saved. The server log is then replayed
+over that baseline to reconstruct the authoritative state.
+
+For a custom resolver, snapshot selection belongs in the resolver-facing
+integration. The snapshot must produce distinct layer identifiers, not merely
+open the live URI again under a second Python variable:
+
+```python
+checkpoint = request_authoritative_snapshot(client.last_seq)
+snapshot_root = make_snapshot_identifier(live_root_identifier, checkpoint)
+snapshot_context = make_snapshot_resolver_context(checkpoint)
+clean_stage = Usd.Stage.Open(snapshot_root, snapshot_context)
+
+result = client.recover_use_server(clean_stage, timeout=5)
+replace_stage_in_host(client.stage)
+```
+
+Here `make_snapshot_identifier()` and `make_snapshot_resolver_context()` are
+application/resolver functions. For example, a resolver may map a versioned
+`studio://snapshots/<checkpoint>/shot.usda` identifier to an immutable asset
+revision. Keeping the checkpoint in the identifier also prevents the OpenUSD
+layer registry from returning the rejected live layer.
+
+An integration that implements its own merge, export, or stage replacement
+can finish the producer-session rollover explicitly:
+
+```python
+assessment = client.assess_recovery(timeout=5)
+reconcile_application_stage(assessment)
+result = client.complete_external_recovery(assessment)
+```
+
+`complete_external_recovery()` verifies incident identity and receiver
+synchronization, but deliberately cannot infer whether application-specific
+USD reconciliation was semantically correct. To rebuild the rejected
+transaction at its original ordered ID instead, call
+`repair_and_resume(events, layer=current_layer)`. Resolved results remain in
+`client.last_recovery_result` until dismissed; the active classification is
+available as `client.recovery_assessment` until recovery completes or is
+reassessed. Baseline Use Server recovery attempts producer reconnection before
+returning; if it cannot finish within the remaining timeout, recovery remains
+resolved and the normal `update()` loop retries connectivity. External
+recovery completion remains state-only, so its caller should resume the normal
+update loop afterward.
+
+Explicit recovery commands report expected policy failures through one public
+exception with stable codes; normal `update()` calls continue to report a
+required recovery through `status.recovery` without raising it:
+
+```python
+from openusdconnect import RecoveryError
+
+try:
+    result = client.recover_use_server(clean_stage, timeout=5)
+except RecoveryError as exc:
+    if exc.code == "shared_loaded_layers":
+        clean_stage = open_isolated_stage_copy()
+    else:
+        show_recovery_error(exc.code, str(exc))
+except (TimeoutError, ConnectionError):
+    show_retry_later()
+```
+
+A complete UI flow can stay phase-driven and reserve exceptions for explicit
+button actions:
+
+```python
+def tick(client):
+    update = client.update()  # does not raise for an ordinary rejection
+    status = client.status
+    set_sync_badge(status.phase, status.pending_events)
+
+    if status.phase is ClientPhase.READY:
+        set_authoring_enabled(True)
+    elif status.phase is ClientPhase.RECOVERY_REQUIRED:
+        set_authoring_enabled(False)
+        show_recovery_panel(
+            incident=status.recovery,
+            reason=status.reason,
+            on_inspect=lambda: client.assess_recovery(timeout=5),
+        )
+    else:
+        set_authoring_enabled(False)
+    return update
+
+
+def choose_use_server(client):
+    try:
+        clean_stage = open_clean_equivalent_snapshot()
+        result = client.recover_use_server(clean_stage, timeout=5)
+    except RecoveryError as exc:
+        show_recovery_error(exc.code, str(exc))
+        return
+    except (TimeoutError, ConnectionError):
+        show_retry_later()
+        return
+
+    for index, layer in enumerate(result.preserved_layers):
+        offer_export(layer.preserved_layer, f"rejected-work-{index}.usda")
+    replace_stage_in_host(client.stage)
+```
+
+Specialized integrations can replace the Use Server button with merge/export
+logic based on `assess_recovery()`, then call
+`complete_external_recovery(assessment)`. That call only rolls the producer
+session forward after the integration has reconciled its application stage;
+it intentionally does not claim that an application-specific USD merge was
+semantically correct.
+
+The stable recovery codes are `no_incident`, `wrong_recovery_kind`,
+`assessment_required`, `stale_assessment`, `stage_not_synchronized`,
+`invalid_clean_stage`, `shared_loaded_layers`, `invalid_repair_target`,
+`local_changes_pending`, `transactions_pending`, `stage_unavailable`,
+and `edit_target_changed`.
 
 The synchronized graph begins at `stage.GetRootLayer()` and follows recursive
 `subLayerPaths`. The session layer and layers introduced only by references or

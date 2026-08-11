@@ -197,6 +197,31 @@ class SharedLayerGraph(LayerKeyRouter):
                     queue.append(child)
         return tuple(layers)
 
+    def _validate_local_graph(self) -> None:
+        """Reject authored topology that cannot be routed portably.
+
+        Missing assets remain valid: OpenUSD can resolve them later after an
+        asset or resolver refresh. This preflight only rejects unsupported
+        authored topology, and includes the owning layer in the error so a
+        client fails before opening network connections.
+        """
+        layers = self.local_reachable_layers()
+        for layer in layers:
+            try:
+                normalize_sublayer_entries(read_sublayer_entries(layer))
+            except ValueError as exc:
+                raise ValueError(
+                    f"shared-stage layer {layer.identifier!r} has invalid "
+                    f"sublayer topology: {exc}"
+                ) from exc
+        edit_layer = self.stage.GetEditTarget().GetLayer()
+        if all(layer.identifier != edit_layer.identifier for layer in layers):
+            raise ValueError(
+                f"shared-stage edit target {edit_layer.identifier!r} is outside "
+                "the root/sublayer graph; select a mapped file layer before "
+                "constructing SharedStageClient"
+            )
+
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Roll back routing state when a surrounding stage edit fails."""

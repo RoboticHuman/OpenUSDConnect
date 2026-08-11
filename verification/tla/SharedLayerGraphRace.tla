@@ -6,7 +6,9 @@ Bounded abstraction of a shared-stage topology edit prepared before the server
 commit lock. A competing revision or generation change may make that prepared
 edit stale. Stale rejection must not alter the graph, abstract stage, durable
 state, global sequence, or log. Repair binds a replacement edit to the current
-generation/revision before it may commit.
+generation/revision before it may commit. Alternatively, a clean-stage rebind
+or integration-owned reconciliation removes every local conflict that still
+intersects the authoritative graph before the old session is abandoned.
 ***************************************************************************)
 
 CONSTANTS Root, LayerA, LayerB
@@ -34,13 +36,16 @@ VARIABLES
     rejectedGeneration,
     rejectedRevision,
     rejectedState,
-    rejectedNextSeq
+    rejectedNextSeq,
+    artifactTargets,
+    localConflicts,
+    abandoned
 
 vars == <<
     phase, networkStable, generation, revision, reachable, stageState,
     durableState, nextSeq, log, preparedGeneration, preparedRevision,
     preparedTarget, preparedProposal, rejectedGeneration, rejectedRevision,
-    rejectedState, rejectedNextSeq
+    rejectedState, rejectedNextSeq, artifactTargets, localConflicts, abandoned
 >>
 
 InitialState == {Root, LayerA}
@@ -66,6 +71,9 @@ Init ==
     /\ rejectedRevision = 1
     /\ rejectedState = InitialState
     /\ rejectedNextSeq = 1
+    /\ artifactTargets \in {{LayerA}, {LayerA, Root}}
+    /\ localConflicts = artifactTargets
+    /\ abandoned = FALSE
 
 StabilizeNetwork ==
     /\ ~networkStable
@@ -74,7 +82,8 @@ StabilizeNetwork ==
         phase, generation, revision, reachable, stageState, durableState,
         nextSeq, log, preparedGeneration, preparedRevision, preparedTarget,
         preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq
+        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
+        abandoned
        >>
 
 Prepare ==
@@ -87,7 +96,8 @@ Prepare ==
     /\ UNCHANGED <<
         networkStable, generation, revision, reachable, stageState,
         durableState, nextSeq, log, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq
+        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
+        abandoned
        >>
 
 AppendGraphCommit(newGeneration, newRevision, newState) ==
@@ -112,7 +122,8 @@ ConcurrentRevision ==
     /\ UNCHANGED <<
         phase, networkStable, preparedGeneration, preparedRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq
+        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
+        localConflicts, abandoned
        >>
 
 ConcurrentGenerationReset ==
@@ -124,7 +135,8 @@ ConcurrentGenerationReset ==
     /\ UNCHANGED <<
         phase, networkStable, preparedGeneration, preparedRevision,
         preparedTarget, preparedProposal, rejectedGeneration,
-        rejectedRevision, rejectedState, rejectedNextSeq
+        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
+        localConflicts, abandoned
        >>
 
 PreparedIsCurrent ==
@@ -142,7 +154,8 @@ CommitPrepared ==
     /\ UNCHANGED <<
         networkStable, preparedGeneration, preparedRevision, preparedTarget,
         preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq
+        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
+        abandoned
        >>
 
 RejectStale ==
@@ -156,7 +169,8 @@ RejectStale ==
     /\ UNCHANGED <<
         networkStable, generation, revision, reachable, stageState,
         durableState, nextSeq, log, preparedGeneration, preparedRevision,
-        preparedTarget, preparedProposal
+        preparedTarget, preparedProposal, artifactTargets, localConflicts,
+        abandoned
        >>
 
 Repair ==
@@ -169,7 +183,33 @@ Repair ==
     /\ UNCHANGED <<
         networkStable, generation, revision, reachable, stageState,
         durableState, nextSeq, log, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq
+        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
+        abandoned
+       >>
+
+ReconcileExternal ==
+    /\ phase = "rejected"
+    /\ phase' = "reconciled"
+    /\ localConflicts' = {}
+    /\ UNCHANGED <<
+        networkStable, generation, revision, reachable, stageState,
+        durableState, nextSeq, log, preparedGeneration, preparedRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
+        abandoned
+       >>
+
+AbandonResolved ==
+    /\ phase \in {"rejected", "reconciled"}
+    /\ localConflicts \cap reachable = {}
+    /\ phase' = "done"
+    /\ abandoned' = TRUE
+    /\ UNCHANGED <<
+        networkStable, generation, revision, reachable, stageState,
+        durableState, nextSeq, log, preparedGeneration, preparedRevision,
+        preparedTarget, preparedProposal, rejectedGeneration,
+        rejectedRevision, rejectedState, rejectedNextSeq, artifactTargets,
+        localConflicts
        >>
 
 CommitRepaired ==
@@ -182,7 +222,8 @@ CommitRepaired ==
     /\ UNCHANGED <<
         networkStable, preparedGeneration, preparedRevision, preparedTarget,
         preparedProposal, rejectedGeneration, rejectedRevision,
-        rejectedState, rejectedNextSeq
+        rejectedState, rejectedNextSeq, artifactTargets, localConflicts,
+        abandoned
        >>
 
 Next ==
@@ -193,6 +234,8 @@ Next ==
     \/ CommitPrepared
     \/ RejectStale
     \/ Repair
+    \/ ReconcileExternal
+    \/ AbandonResolved
     \/ CommitRepaired
 
 Spec ==
@@ -202,10 +245,12 @@ Spec ==
     /\ WF_vars(Prepare)
     /\ WF_vars(CommitPrepared \/ RejectStale)
     /\ WF_vars(Repair)
+    /\ WF_vars(ReconcileExternal)
+    /\ WF_vars(AbandonResolved)
     /\ WF_vars(CommitRepaired)
 
 TypeOK ==
-    /\ phase \in {"idle", "prepared", "rejected", "repaired", "done"}
+    /\ phase \in {"idle", "prepared", "rejected", "reconciled", "repaired", "done"}
     /\ networkStable \in BOOLEAN
     /\ generation \in 1..2
     /\ revision \in 1..3
@@ -222,6 +267,10 @@ TypeOK ==
     /\ rejectedRevision \in 1..3
     /\ rejectedState \in GraphState
     /\ rejectedNextSeq \in 1..(MaxLog + 1)
+    /\ artifactTargets \in SUBSET Layers
+    /\ LayerA \in artifactTargets
+    /\ localConflicts \in SUBSET artifactTargets
+    /\ abandoned \in BOOLEAN
 
 RootIsAlwaysReachable == Root \in reachable
 
@@ -253,6 +302,9 @@ RepairedEditUsesCurrentIdentity ==
         /\ preparedGeneration = generation
         /\ preparedRevision = revision
         /\ preparedTarget \in reachable
+
+AbandonmentRequiresNoLiveLocalConflict ==
+    abandoned => localConflicts \cap reachable = {}
 
 EventuallyResolves == <> (phase = "done")
 

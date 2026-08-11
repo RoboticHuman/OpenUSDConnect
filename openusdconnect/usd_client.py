@@ -29,7 +29,13 @@ from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
-from .recovery import RecoveryIncident, RejectionDisposition, TransactionFailure
+from .recovery import (
+    RecoveryArtifact,
+    RecoveryError,
+    RecoveryIncident,
+    RejectionDisposition,
+    TransactionFailure,
+)
 from .sender import EventSender
 from .token_client import load_token
 
@@ -401,6 +407,11 @@ class UsdPublisher:
         return self._sender.recovery_incident
 
     @property
+    def recovery_artifact(self) -> RecoveryArtifact | None:
+        """Exact quarantined transactions for integration-owned recovery."""
+        return self._sender.recovery_artifact
+
+    @property
     def recovery_disposition(self) -> RejectionDisposition | None:
         """Recovery policy category for the current rejection, if any."""
         return self._sender.recovery_disposition
@@ -415,6 +426,14 @@ class UsdPublisher:
         """
         if self._closed:
             raise RuntimeError("UsdPublisher is closed")
+        failure = self._sender.transaction_failure
+        if failure is None:
+            raise RecoveryError("no_incident", "there is no recovery incident to resolve")
+        if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
+            raise RecoveryError(
+                "wrong_recovery_kind",
+                f"{failure.code_name} is {failure.disposition.value}, not recoverable",
+            )
         txn_id = self._sender.repair_rejected_transaction(events)
         if not self.connect():
             raise ConnectionError(

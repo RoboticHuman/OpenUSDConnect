@@ -62,7 +62,8 @@ and an invalid middle transaction whose valid neighbors must still commit.
 
 A shared-stage topology edit races a revision or generation change between
 preparation and commit. It checks atomic graph/stage/log updates, mutation-free
-stale rejection, and repair against the current graph identity.
+stale rejection, repair against the current graph identity, and session
+abandonment only after no unreconciled local opinion intersects the live graph.
 
 ### `TwoClientConvergence.tla`
 
@@ -97,7 +98,7 @@ TLC 2.19 results from 2026-08-11:
 | Receiver: one-frame queue, replay apply failure | 1,168 | 352 | 22 | No error |
 | Coordinator: valid group or infrastructure fallback | 235 | 152 | 11 | No error |
 | Coordinator: invalid middle transaction fallback | 106 | 64 | 11 | No error |
-| Shared-layer revision/generation race | 63 | 46 | 9 | No error |
+| Shared-layer revision/generation race and recovery | 201 | 142 | 9 | No error |
 | Two-client convergence with complete commit stream | 4,421 | 1,492 | 28 | No error |
 
 These checks are exhaustive for their configured finite models, not unbounded

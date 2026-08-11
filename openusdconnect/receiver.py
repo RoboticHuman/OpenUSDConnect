@@ -294,11 +294,15 @@ class ReceiverThread(threading.Thread):
                 )
                 continue
             except (IncompleteRead, MessageTooLarge):
-                if not self._stop_event.is_set():
+                with self._incoming_lock:
+                    current_generation = connection_generation == self._replay_generation
+                if not self._stop_event.is_set() and current_generation:
                     LOG.warning("ReceiverThread: framing error during read")
                 break
             except OSError:
-                if not self._stop_event.is_set():
+                with self._incoming_lock:
+                    current_generation = connection_generation == self._replay_generation
+                if not self._stop_event.is_set() and current_generation:
                     LOG.warning("ReceiverThread: socket error during read")
                 break
 

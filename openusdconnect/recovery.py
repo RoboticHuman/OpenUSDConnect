@@ -8,6 +8,14 @@ from enum import StrEnum
 from .codec import TransactionRejectionCode
 
 
+class RecoveryError(RuntimeError):
+    """Expected recovery-policy failure with a stable machine-readable code."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
 class RejectionDisposition(StrEnum):
     """What an application should do after a transaction is rejected."""
 
@@ -130,6 +138,7 @@ def make_recovery_incident(artifact: RecoveryArtifact) -> RecoveryIncident:
 __all__ = [
     "QuarantinedTransaction",
     "RecoveryArtifact",
+    "RecoveryError",
     "RecoveryIncident",
     "RecoveryKind",
     "RejectionDisposition",

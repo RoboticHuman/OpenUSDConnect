@@ -483,7 +483,7 @@ class TestReconnection:
         finally:
             _teardown(rt, conn, srv)
 
-    def test_requested_replay_rewinds_sequence_and_clears_queue(self):
+    def test_requested_replay_rewinds_sequence_and_clears_queue(self, caplog):
         srv, port = _make_server()
         rt = ReceiverThread(
             host="127.0.0.1",
@@ -500,6 +500,7 @@ class TestReconnection:
             _send_event(conn1, 2)
             assert _poll_until(lambda: rt.last_seq == 2)
 
+            caplog.set_level(logging.WARNING, logger="openusdconnect.receiver")
             rt.request_replay_from(2)
             assert rt.last_seq == 1
             assert len(rt.drain_queue()) == 0
@@ -515,6 +516,7 @@ class TestReconnection:
 
             _send_event(conn2, 2)
             assert _poll_until(lambda: rt.last_seq == 2)
+            assert "socket error during read" not in caplog.text
         finally:
             conn1.close()
             if conn2 is not None:
