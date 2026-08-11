@@ -127,6 +127,23 @@ class _PreparedTransaction:
     progress: ProducerProgress
 
 
+def _managed_rollback_paths(events: list[dict]) -> set[str]:
+    """Return every prim path a managed transaction can structurally change."""
+    paths = {
+        event["prim"]
+        for event in events
+        if event.get("k") not in NON_COLLABORATION_KINDS and event.get("prim")
+    }
+    for event in events:
+        if event.get("k") != K_RENAME_PRIM or not event.get("prim"):
+            continue
+        new_name = event.get("new_name")
+        if new_name and Sdf.Path.IsValidIdentifier(new_name):
+            source = Sdf.Path(event["prim"])
+            paths.add(str(source.GetParentPath().AppendChild(new_name)))
+    return paths
+
+
 def _layer_key_for_department(department: str | None) -> str:
     if not department:
         return _DEFAULT_LAYER_KEY
@@ -3427,11 +3444,7 @@ class UsdSyncServer:
         ):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        collaboration_paths = {
-            event.get("prim")
-            for event in request.events
-            if event.get("k") not in NON_COLLABORATION_KINDS and event.get("prim")
-        }
+        collaboration_paths = _managed_rollback_paths(request.events)
         has_session_events = any(
             event.get("k") in NON_COLLABORATION_KINDS for event in request.events
         )
@@ -3590,11 +3603,7 @@ class UsdSyncServer:
         # the full collaboration layer; session metadata uses a full snapshot.
         from ..event_apply import atomic_apply_layer
 
-        collaboration_paths = {
-            event.get("prim")
-            for event in events
-            if event.get("k") not in NON_COLLABORATION_KINDS and event.get("prim")
-        }
+        collaboration_paths = _managed_rollback_paths(events)
         has_session_events = any(
             event.get("k") in NON_COLLABORATION_KINDS for event in events
         )

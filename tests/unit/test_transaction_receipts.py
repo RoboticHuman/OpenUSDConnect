@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from openusdconnect.event_store import LayerIdentity, ProducerProgress, SqliteEventStore
-from openusdconnect.server.state import UsdSyncServer
+from openusdconnect.server.state import UsdSyncServer, _TransactionRequest
 from openusdconnect.server.types import TransactionRejectedError
 
 
@@ -276,6 +276,85 @@ def test_store_failure_rolls_back_usd_sequence_and_progress(tmp_path, monkeypatc
             server, "/World/Rollback", client="client", session="producer", txn_id=1
         )
         assert committed.status == "committed"
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+def test_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
+    server = UsdSyncServer(log_path=str(tmp_path / "rename-rollback.db"), txn_batch_size=1)
+    append_batch = server.store.append_batch
+
+    try:
+        _commit(server, "/World/Old", client="client", session="producer", txn_id=1)
+        before = server.edit_layer.ExportToString()
+
+        def fail_rename(records, *, producer_progress=()):
+            if producer_progress:
+                raise sqlite3.OperationalError("injected rename persistence failure")
+            return append_batch(records, producer_progress=producer_progress)
+
+        monkeypatch.setattr(server.store, "append_batch", fail_rename)
+        with pytest.raises(sqlite3.OperationalError, match="injected rename"):
+            server.process_idempotent_txn(
+                [{"k": "rename_prim", "prim": "/World/Old", "new_name": "New"}],
+                client_id="client",
+                session_id="producer",
+                txn_id=2,
+            )
+
+        assert server.edit_layer.ExportToString() == before
+        assert server.stage.GetPrimAtPath("/World/Old").IsValid()
+        assert not server.stage.GetPrimAtPath("/World/New").IsValid()
+        assert server.store.get_count() == 1
+        assert server.store.get_producer_progress("client", "producer") == 1
+        assert server._next_seq == 2
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
+    server = UsdSyncServer(log_path=str(tmp_path / "group-rename-rollback.db"))
+    server.apply_txn([_event("/World/Old")])
+    before = server.edit_layer.ExportToString()
+
+    def fail_group(_records, *, producer_progress=()):
+        raise sqlite3.OperationalError("injected grouped persistence failure")
+
+    monkeypatch.setattr(server.store, "append_batch", fail_group)
+    requests = [
+        _TransactionRequest(
+            events=[{"k": "rename_prim", "prim": "/World/Old", "new_name": "New"}],
+            session_id="session",
+            txn_id=1,
+            client_id="rename-client",
+            origin=None,
+            client_addr=None,
+            layer=None,
+            layer_key="",
+        ),
+        _TransactionRequest(
+            events=[_event("/World/Other")],
+            session_id="session",
+            txn_id=1,
+            client_id="other-client",
+            origin=None,
+            client_addr=None,
+            layer=None,
+            layer_key="",
+        ),
+    ]
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected grouped"):
+            server._commit_managed_transaction_group(requests)
+
+        assert server.edit_layer.ExportToString() == before
+        assert server.stage.GetPrimAtPath("/World/Old").IsValid()
+        assert not server.stage.GetPrimAtPath("/World/New").IsValid()
+        assert not server.stage.GetPrimAtPath("/World/Other").IsValid()
+        assert server.store.get_count() == 0
+        assert server._next_seq == 1
     finally:
         server.shutdown()
         server.store.close()
