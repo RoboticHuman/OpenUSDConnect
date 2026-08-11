@@ -408,13 +408,13 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
             session_id="replacement-session",
         )
 
-        assert result.transport_artifact.producer_session_id == "stale-session"
+        assert result.recovery_artifact.producer_session_id == "stale-session"
         assert result.checkpoint_seq == 2
         assert len(result.preserved_layers) == 1
         preserved = result.preserved_layers[0]
-        assert preserved.rejected_layer_key == "layer:child"
-        assert preserved.source_identifier == child.identifier
-        assert preserved.preserved_layer.GetPrimAtPath("/Local/Rejected")
+        assert result.assessment.layers[0].rejected_layer_key == "layer:child"
+        assert result.assessment.layers[0].source_identifier == child.identifier
+        assert preserved.GetPrimAtPath("/Local/Rejected")
         assert sender.abandoned_session_ids == ["replacement-session"]
         assert not client.is_layer_mapped(child)
         assert client.last_recovery_result is result
@@ -439,11 +439,11 @@ def test_shared_use_server_refuses_a_quarantined_reachable_layer(tmp_path, monke
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
         assessment = client.assess_recovery()
-        assert assessment.transport_artifact is sender.recovery_artifact
-        assert assessment.reachable_layers == assessment.layers
+        assert assessment.recovery_artifact is sender.recovery_artifact
+        assert assessment.unchanged_mapping_layers == assessment.layers
         assert assessment.detached_layers == ()
         assert assessment.remapped_layers == ()
-        assert assessment.unresolved_layers == ()
+        assert assessment.source_unavailable_layers == ()
         assert not assessment.all_layers_detached
         assert client.recovery_artifact is sender.recovery_artifact
         assert client.recovery_assessment is assessment
@@ -455,7 +455,7 @@ def test_shared_use_server_refuses_a_quarantined_reachable_layer(tmp_path, monke
         client.close()
 
 
-def test_shared_assessment_reports_an_unresolved_quarantined_layer(tmp_path, monkeypatch):
+def test_shared_assessment_reports_an_unavailable_source_layer(tmp_path, monkeypatch):
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="shared-unresolved-recovery", persist_token=False)
     original_sender = client._sender
@@ -475,7 +475,8 @@ def test_shared_assessment_reports_an_unresolved_quarantined_layer(tmp_path, mon
     monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
     try:
         assessment = client.assess_recovery()
-        assert assessment.unresolved_layers == assessment.layers
+        assert assessment.source_unavailable_layers == assessment.layers
+        assert assessment.layers[0].source_unavailable
         assert assessment.layers[0].source_identifier is None
         assert assessment.layers[0].preserved_layer is None
         assert not assessment.all_layers_detached
@@ -610,7 +611,10 @@ def test_shared_use_server_keeps_session_when_a_suffix_layer_is_still_live(
         assert [layer.rejected_layer_key for layer in assessment.detached_layers] == [
             "layer:child"
         ]
-        assert [layer.rejected_layer_key for layer in assessment.reachable_layers] == [
+        assert [
+            layer.rejected_layer_key
+            for layer in assessment.unchanged_mapping_layers
+        ] == [
             "layer:root"
         ]
         assert sender.abandoned_session_ids == []
@@ -701,7 +705,7 @@ def test_shared_external_recovery_completes_a_structured_reachable_assessment(
         )
 
         assert result.assessment is assessment
-        assert result.transport_artifact is assessment.transport_artifact
+        assert result.recovery_artifact is assessment.recovery_artifact
         assert sender.abandoned_session_ids == ["external-replacement"]
         assert not sender.recovery_required
         assert client.recovery_assessment is None
@@ -826,7 +830,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
         assert client.stage is fresh_stage
         assert client.graph_ready
         assert result.checkpoint_seq == 4
-        assert result.preserved_layers[0].preserved_layer.GetPrimAtPath("/Rejected")
+        assert result.preserved_layers[0].GetPrimAtPath("/Rejected")
         assert sender.abandoned_session_ids == ["rebind-replacement"]
         assert not sender.recovery_required
         assert sender.connected

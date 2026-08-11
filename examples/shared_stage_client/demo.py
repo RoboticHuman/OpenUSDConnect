@@ -61,7 +61,7 @@ def main() -> int:
         host=args.host,
         port=args.port,
         persist_token=False,
-        delegate_bridge_path=args.delegate_bridge_path,
+        delegate_bridge_path=args.sdf_notice_bridge,
     ) as client:
         if not client.connect(timeout=5):
             print("server is unavailable", file=sys.stderr)

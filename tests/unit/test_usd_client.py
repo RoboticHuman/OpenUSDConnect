@@ -21,9 +21,10 @@ def test_bidirectional_clients_share_one_update_result_contract():
     update = SyncUpdate(
         applied_events=1,
         submitted_events=2,
-        acknowledged_events=3,
+        acknowledged_events_delta=3,
         pending_events=4,
     )
+    assert update.acknowledged_events_delta == 3
     assert update.pending_events == 4
 
 
@@ -179,7 +180,7 @@ def test_managed_status_exposes_partial_connection_and_event_counts():
         assert status.receiver_connected is True
         assert status.sender_connected is False
         assert status.pending_events == 4
-        assert status.acknowledged_events == 7
+        assert status.acknowledged_events_total == 7
 
         sender.connected = True
         assert client.status.phase is ClientPhase.READY
@@ -233,7 +234,7 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
         assert client.recovery_artifact is artifact
         result = client.recover_use_server(session_id="replacement-session")
 
-        assert result.transport_artifact is artifact
+        assert result.recovery_artifact is artifact
         assert result.preserved_authoring_layer.GetPrimAtPath("/World/Local")
         assert not authoring.GetPrimAtPath("/World/Local")
         assert stage.GetEditTarget().GetLayer() is authoring
@@ -376,7 +377,7 @@ def test_managed_use_server_retains_result_when_emitter_reattach_fails():
             client.recover_use_server(session_id="replacement-session")
         result = client.last_recovery_result
         assert result is not None
-        assert result.transport_artifact is artifact
+        assert result.recovery_artifact is artifact
         assert result.preserved_authoring_layer.GetPrimAtPath("/World/Local")
     finally:
         client.close()
@@ -591,7 +592,7 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
         second = client.update()
         assert second.submitted_events > 0
         assert len(sender.batches) == 2
-        assert second.acknowledged_events == 0
+        assert second.acknowledged_events_delta == 0
         assert second.pending_events > first.pending_events
     finally:
         client.close()

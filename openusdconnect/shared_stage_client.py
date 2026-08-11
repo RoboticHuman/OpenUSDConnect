@@ -58,12 +58,13 @@ class SharedRecoveryLayer:
     preserved_layer: Sdf.Layer | None
 
     @property
-    def unresolved(self) -> bool:
+    def source_unavailable(self) -> bool:
+        """Whether the rejected layer could not be identified locally."""
         return self.source_identifier is None
 
     @property
     def detached(self) -> bool:
-        return not self.unresolved and not self.reachable
+        return not self.source_unavailable and not self.reachable
 
     @property
     def remapped(self) -> bool:
@@ -78,22 +79,19 @@ class SharedRecoveryLayer:
 class SharedRecoveryAssessment:
     """Authoritative classification for integration-owned recovery policy."""
 
-    transport_artifact: RecoveryArtifact
+    recovery_artifact: RecoveryArtifact
     layers: tuple[SharedRecoveryLayer, ...]
     checkpoint_seq: int
     graph_generation: str
     graph_revision: int
 
     @property
-    def artifact(self) -> RecoveryArtifact:
-        return self.transport_artifact
-
-    @property
     def detached_layers(self) -> tuple[SharedRecoveryLayer, ...]:
         return tuple(layer for layer in self.layers if layer.detached)
 
     @property
-    def reachable_layers(self) -> tuple[SharedRecoveryLayer, ...]:
+    def unchanged_mapping_layers(self) -> tuple[SharedRecoveryLayer, ...]:
+        """Layers still reachable through their original protocol keys."""
         return tuple(layer for layer in self.layers if layer.reachable and not layer.remapped)
 
     @property
@@ -101,8 +99,9 @@ class SharedRecoveryAssessment:
         return tuple(layer for layer in self.layers if layer.remapped)
 
     @property
-    def unresolved_layers(self) -> tuple[SharedRecoveryLayer, ...]:
-        return tuple(layer for layer in self.layers if layer.unresolved)
+    def source_unavailable_layers(self) -> tuple[SharedRecoveryLayer, ...]:
+        """Rejected layer keys whose source layers are no longer identifiable."""
+        return tuple(layer for layer in self.layers if layer.source_unavailable)
 
     @property
     def all_layers_detached(self) -> bool:
@@ -113,14 +112,17 @@ class SharedRecoveryAssessment:
 class SharedRecoveryResult:
     """Preserved shared-stage state after abandoning a stale session."""
 
-    transport_artifact: RecoveryArtifact
+    recovery_artifact: RecoveryArtifact
     assessment: SharedRecoveryAssessment
     checkpoint_seq: int
 
     @property
-    def preserved_layers(self) -> tuple[SharedRecoveryLayer, ...]:
+    def preserved_layers(self) -> tuple[Sdf.Layer, ...]:
+        """Captured local layers with unavailable entries omitted."""
         return tuple(
-            layer for layer in self.assessment.layers if layer.preserved_layer is not None
+            layer.preserved_layer
+            for layer in self.assessment.layers
+            if layer.preserved_layer is not None
         )
 
 
@@ -249,7 +251,7 @@ class SharedStageClient:
             sender_connected=self._sender.connected,
             prepared_events=self.prepared_event_count,
             pending_events=self.pending_event_count,
-            acknowledged_events=self._sender.acknowledged_event_count,
+            acknowledged_events_total=self._sender.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
@@ -361,7 +363,7 @@ class SharedStageClient:
         artifact = self._require_recoverable_artifact()
         previous = self._last_recovery_assessment
         previous_layers = {}
-        if previous is not None and previous.transport_artifact is artifact:
+        if previous is not None and previous.recovery_artifact is artifact:
             previous_layers = {
                 layer.rejected_layer_key: layer for layer in previous.layers
             }
@@ -399,7 +401,7 @@ class SharedStageClient:
                 )
             )
         assessment = SharedRecoveryAssessment(
-            transport_artifact=artifact,
+            recovery_artifact=artifact,
             layers=tuple(layers),
             checkpoint_seq=self._last_seq,
             graph_generation=self._graph.generation,
@@ -518,7 +520,7 @@ class SharedStageClient:
         assessment: SharedRecoveryAssessment,
     ) -> None:
         artifact = self._require_recoverable_artifact()
-        if assessment.transport_artifact is not artifact:
+        if assessment.recovery_artifact is not artifact:
             raise RecoveryError(
                 "stale_assessment",
                 "recovery assessment does not match the active incident",
@@ -557,7 +559,7 @@ class SharedStageClient:
                 )
             )
         return SharedRecoveryAssessment(
-            transport_artifact=assessment.transport_artifact,
+            recovery_artifact=assessment.recovery_artifact,
             layers=tuple(layers),
             checkpoint_seq=self._last_seq,
             graph_generation=self._graph.generation,
@@ -571,11 +573,11 @@ class SharedStageClient:
         session_id: str | None,
     ) -> SharedRecoveryResult:
         self._validate_recovery_assessment(assessment)
-        transport_artifact = self._sender.abandon_rejected_session(
+        recovery_artifact = self._sender.abandon_rejected_session(
             session_id=session_id
         )
         result = SharedRecoveryResult(
-            transport_artifact=transport_artifact,
+            recovery_artifact=recovery_artifact,
             assessment=assessment,
             checkpoint_seq=self._last_seq,
         )
@@ -727,7 +729,7 @@ class SharedStageClient:
         return SyncUpdate(
             applied_events=received,
             submitted_events=sent,
-            acknowledged_events=self._sender.drain_acknowledged_event_count(),
+            acknowledged_events_delta=self._sender.drain_acknowledged_event_count(),
             pending_events=self._sender.pending_event_count,
             recovery=self._sender.recovery_incident,
         )

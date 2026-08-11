@@ -29,7 +29,8 @@ class ClientStatus:
 
     A directional connection is ``None`` when that role is not present, which
     distinguishes a receive-only or send-only client from a disconnected half
-    of a bidirectional client.
+    of a bidirectional client. ``acknowledged_events_total`` is cumulative for
+    the lifetime of the client instance, including producer-session recovery.
     """
 
     phase: ClientPhase
@@ -39,7 +40,7 @@ class ClientStatus:
     sender_connected: bool | None = None
     prepared_events: int = 0
     pending_events: int = 0
-    acknowledged_events: int = 0
+    acknowledged_events_total: int = 0
     failure: TransactionFailure | None = None
     recovery: RecoveryIncident | None = None
     reason: str = ""
@@ -47,11 +48,15 @@ class ClientStatus:
 
 @dataclass(frozen=True, slots=True)
 class SyncUpdate:
-    """Work completed by one bidirectional client update call."""
+    """Work completed by one bidirectional client update call.
+
+    ``acknowledged_events_delta`` is consumed by this update and therefore is
+    not a cumulative counter.
+    """
 
     applied_events: int
     submitted_events: int
-    acknowledged_events: int = 0
+    acknowledged_events_delta: int = 0
     pending_events: int = 0
     recovery: RecoveryIncident | None = None
 

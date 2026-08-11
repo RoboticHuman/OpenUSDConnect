@@ -18,8 +18,10 @@ records must be applied by `update()` on the stage-owning thread.
 of `OFFLINE`, `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`,
 `REJECTED`, or `CLOSED`. `receiver_connected` and `sender_connected` expose
 partial bidirectional connectivity and are `None` when that role is absent.
-Durability counters are cumulative in the status snapshot; the acknowledged
-count returned by `SyncUpdate` is the delta consumed by that update call.
+`ClientStatus.acknowledged_events_total` is cumulative for the client instance;
+`prepared_events` and `pending_events` are current gauges.
+`SyncUpdate.acknowledged_events_delta` is the delta consumed by that update
+call.
 
 ## Receive into a stage
 
@@ -165,9 +167,11 @@ author persistent or multiple custom layers should compose the lower-level
 `UsdPublisher` and `UsdReceiver` APIs instead.
 
 `SyncUpdate.submitted_events` is newly submitted work,
-`acknowledged_events` is work covered by cumulative acknowledgements since the
-previous `update()`, and `pending_events` is the current unacknowledged event
-count. `applied_events` is authoritative incoming work applied by this call.
+`acknowledged_events_delta` is work covered by cumulative acknowledgements
+since the previous `update()`, and `pending_events` is the current
+unacknowledged event count. `ClientStatus.acknowledged_events_total` is the
+cumulative acknowledged count. `applied_events` is authoritative incoming work
+applied by this call.
 `update()` never waits for an ACK. It also
 does not publish while receive replay is unsynchronized: after reconnect it
 first applies through the server's replay boundary, then resumes submission.
@@ -352,11 +356,16 @@ server checkpoint and classify each quarantined layer:
 assessment = client.assess_recovery(timeout=5)
 
 assessment.detached_layers
-assessment.reachable_layers
+assessment.unchanged_mapping_layers
 assessment.remapped_layers
-assessment.unresolved_layers
+assessment.source_unavailable_layers
 assessment.all_layers_detached
 ```
+
+`unchanged_mapping_layers` remain reachable through the same protocol key.
+`remapped_layers` are reachable under a different key, while
+`source_unavailable_layers` could not be associated with a local source layer
+and should not be confused with an `ArResolver` lookup failure.
 
 Detachment is a fact, not permission to discard work: a later topology change
 can reattach the same file layer. The library therefore does not overwrite or
@@ -368,7 +377,7 @@ clean_stage = open_equivalent_stage_with_distinct_layer_identifiers()
 result = client.recover_use_server(clean_stage, timeout=5)
 
 for layer in result.preserved_layers:
-    layer.preserved_layer.Export("rejected-work.usda")
+    layer.Export("rejected-work.usda")
 ```
 
 Opening the same asset path again in the same process is generally not a clean
@@ -504,7 +513,7 @@ def choose_use_server(client):
         return
 
     for index, layer in enumerate(result.preserved_layers):
-        offer_export(layer.preserved_layer, f"rejected-work-{index}.usda")
+        offer_export(layer, f"rejected-work-{index}.usda")
     replace_stage_in_host(client.stage)
 ```
 

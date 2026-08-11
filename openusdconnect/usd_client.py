@@ -343,7 +343,7 @@ class UsdPublisher:
             sender_connected=self._sender.connected,
             prepared_events=self.prepared_event_count,
             pending_events=self.pending_event_count,
-            acknowledged_events=self.acknowledged_event_count,
+            acknowledged_events_total=self.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,

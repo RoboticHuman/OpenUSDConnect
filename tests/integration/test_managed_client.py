@@ -261,7 +261,7 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
         assert not sync_server.stage.GetPrimAtPath("/World/Rejected")
 
         recovered = client.recover_use_server(session_id="managed-replacement-session")
-        assert recovered.transport_artifact.producer_session_id == rejected_session
+        assert recovered.recovery_artifact.producer_session_id == rejected_session
         assert recovered.preserved_authoring_layer.GetPrimAtPath("/World/Rejected")
         assert not stage.GetPrimAtPath("/World/Rejected")
         assert client.sender.session_id == "managed-replacement-session"

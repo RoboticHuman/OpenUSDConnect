@@ -50,7 +50,7 @@ _DEFAULT_PORT = 7200
 class ManagedRecoveryResult:
     """Preserved local state returned after selecting authoritative state."""
 
-    transport_artifact: RecoveryArtifact
+    recovery_artifact: RecoveryArtifact
     preserved_authoring_layer: Sdf.Layer
 
 
@@ -184,7 +184,7 @@ class ManagedClient:
             sender_connected=self._sender.connected,
             prepared_events=self.prepared_event_count,
             pending_events=self.pending_event_count,
-            acknowledged_events=self._sender.acknowledged_event_count,
+            acknowledged_events_total=self._sender.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
@@ -311,7 +311,7 @@ class ManagedClient:
                 authoring.Clear()
             transactions = self._sender.abandon_rejected_session(session_id=session_id)
             result = ManagedRecoveryResult(
-                transport_artifact=transactions,
+                recovery_artifact=transactions,
                 preserved_authoring_layer=preserved,
             )
             # Store before reattaching the emitter. If reattachment raises,
@@ -516,7 +516,7 @@ class ManagedClient:
             return SyncUpdate(
                 applied_events=0,
                 submitted_events=0,
-                acknowledged_events=self._sender.drain_acknowledged_event_count(),
+                acknowledged_events_delta=self._sender.drain_acknowledged_event_count(),
                 pending_events=self._sender.pending_event_count,
                 recovery=self._sender.recovery_incident,
             )
@@ -542,7 +542,7 @@ class ManagedClient:
         return SyncUpdate(
             applied_events=received,
             submitted_events=sent,
-            acknowledged_events=self._sender.drain_acknowledged_event_count(),
+            acknowledged_events_delta=self._sender.drain_acknowledged_event_count(),
             pending_events=self._sender.pending_event_count,
             recovery=self._sender.recovery_incident,
         )

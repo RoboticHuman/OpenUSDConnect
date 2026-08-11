@@ -653,12 +653,12 @@ def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, reb
             )
             assert client.stage is client_stage
 
-        assert result.transport_artifact.failure.code_name == "stale_layer_graph"
-        assert result.transport_artifact.layer_keys == (child_key,)
+        assert result.recovery_artifact.failure.code_name == "stale_layer_graph"
+        assert result.recovery_artifact.layer_keys == (child_key,)
         assert len(result.preserved_layers) == 1
         preserved = result.preserved_layers[0]
-        assert preserved.rejected_layer_key == child_key
-        assert preserved.preserved_layer.GetAttributeAtPath("/World.value").default == 77
+        assert result.assessment.layers[0].rejected_layer_key == child_key
+        assert preserved.GetAttributeAtPath("/World.value").default == 77
         assert not client.is_layer_mapped(client_child)
         assert not client_stage.GetAttributeAtPath("/World.value")
         assert client_stage.GetEditTarget().GetLayer() is client_stage.GetRootLayer()
