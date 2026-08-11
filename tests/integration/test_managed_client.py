@@ -224,6 +224,64 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         second.close()
 
 
+def test_managed_client_recovers_rejection_with_fresh_producer_session(
+    live_server,
+    tmp_path,
+    monkeypatch,
+):
+    sync_server, port = live_server
+    stage = _client_stage(tmp_path, "recovery")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    client = ManagedClient(
+        stage,
+        app_name="managed-recovery",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    original_apply = sync_server.apply_txn
+
+    def reject_marked_transaction(events, *args, **kwargs):
+        if any(event.get("prim") == "/World/Rejected" for event in events):
+            raise ValueError("injected invalid managed transaction")
+        return original_apply(events, *args, **kwargs)
+
+    monkeypatch.setattr(sync_server, "apply_txn", reject_marked_transaction)
+    try:
+        client.start()
+        assert client.connect(timeout=5)
+        assert _drain_until(client, lambda: client.synchronized)
+        rejected_session = client.sender.session_id
+
+        stage.DefinePrim("/World/Rejected", "Xform")
+        assert client.update().submitted_events > 0
+        assert _drain_until(client, lambda: client.recovery_required)
+        incident = client.recovery_incident
+        assert incident is not None
+        assert incident.producer_session_id == rejected_session
+        assert incident.event_count > 0
+        assert not sync_server.stage.GetPrimAtPath("/World/Rejected")
+
+        recovered = client.recover_use_server(session_id="managed-replacement-session")
+        assert recovered.transport_artifact.producer_session_id == rejected_session
+        assert recovered.preserved_authoring_layer.GetPrimAtPath("/World/Rejected")
+        assert not stage.GetPrimAtPath("/World/Rejected")
+        assert client.sender.session_id == "managed-replacement-session"
+        assert not client.recovery_required
+        assert client.receiver.reconnect is False
+        assert client.receiver.replay_head_seq == sync_server.store.get_max_seq()
+
+        stage.DefinePrim("/World/AfterRecovery", "Xform")
+        assert _drain_until(
+            client,
+            lambda: bool(sync_server.stage.GetPrimAtPath("/World/AfterRecovery")),
+        )
+        assert client.sender.session_id != rejected_session
+        assert not sync_server.stage.GetPrimAtPath("/World/Rejected")
+    finally:
+        client.close()
+
+
 def test_managed_clients_apply_complete_commit_order_without_echo(live_server, tmp_path):
     sync_server, port = live_server
     stages = [_client_stage(tmp_path, name) for name in ("race-first", "race-second")]

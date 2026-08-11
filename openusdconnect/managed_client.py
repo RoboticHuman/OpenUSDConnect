@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from pxr import Sdf, Usd
 
@@ -30,13 +31,26 @@ from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
-from .recovery import RejectionDisposition, TransactionFailure
+from .recovery import (
+    RecoveryArtifact,
+    RecoveryIncident,
+    RejectionDisposition,
+    TransactionFailure,
+)
 from .sender import EventSender
 
 LOG = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7200
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedRecoveryResult:
+    """Preserved local state returned after selecting authoritative state."""
+
+    transport_artifact: RecoveryArtifact
+    preserved_authoring_layer: Sdf.Layer
 
 
 class ManagedClient:
@@ -84,7 +98,10 @@ class ManagedClient:
         self._port = port
         self._persist_token = persist_token
         self._app_name = app_name
-        self._authoring_layer = self._ensure_convergent_edit_target(stage, app_name)
+        self._authoring_layer, self._owns_authoring_layer = (
+            self._ensure_convergent_edit_target(stage, app_name)
+        )
+        self._last_recovery_result: ManagedRecoveryResult | None = None
         self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
 
         self._emitter = NoticeEmitter(
@@ -165,6 +182,7 @@ class ManagedClient:
             pending_events=self.pending_event_count,
             acknowledged_events=self._sender.acknowledged_event_count,
             failure=failure,
+            recovery=self._sender.recovery_incident,
             reason=reason,
         )
 
@@ -229,6 +247,92 @@ class ManagedClient:
     def transaction_failure(self) -> TransactionFailure | None:
         """Structured rejection including its recovery disposition, if any."""
         return self._sender.transaction_failure
+
+    @property
+    def recovery_incident(self) -> RecoveryIncident | None:
+        """Structured recovery summary for polling and host UI."""
+        return self._sender.recovery_incident
+
+    @property
+    def last_recovery_result(self) -> ManagedRecoveryResult | None:
+        """Most recent preserved recovery data, retained until dismissed."""
+        return self._last_recovery_result
+
+    def dismiss_recovery_result(self) -> None:
+        """Release references held for the most recently resolved incident."""
+        self._last_recovery_result = None
+
+    def recover_use_server(
+        self,
+        *,
+        session_id: str | None = None,
+        timeout: float | None = 10.0,
+    ) -> ManagedRecoveryResult:
+        """Discard local optimistic opinions and start a fresh producer session.
+
+        Automatic repair is intentionally limited to the transient authoring
+        layer created and owned by this client. Application-owned edit layers
+        require an integration-specific recovery handler or stage rebind.
+        """
+        if self._closed:
+            raise RuntimeError("ManagedClient is closed")
+        if not self._started:
+            raise RuntimeError("ManagedClient has not been started")
+        stage = self._stage
+        authoring = self._authoring_layer
+        if stage is None or authoring is None:
+            raise RuntimeError("ManagedClient has no bound stage to recover")
+        if not self._sender.recovery_required:
+            raise RuntimeError("there is no recovery incident to resolve")
+        if not self._owns_authoring_layer:
+            raise RuntimeError(
+                "automatic Use Server recovery requires the client-owned "
+                "transient authoring layer"
+            )
+        if stage.GetEditTarget().GetLayer() is not authoring:
+            raise RuntimeError("the active edit target changed during recovery")
+
+        self._refresh_recovery_checkpoint(timeout)
+
+        preserved = Sdf.Layer.CreateAnonymous("openusdconnect-recovery-authoring")
+        preserved.TransferContent(authoring)
+        self._emitter.cleanup()
+        try:
+            with Sdf.ChangeBlock():
+                authoring.Clear()
+            transactions = self._sender.abandon_rejected_session(session_id=session_id)
+            result = ManagedRecoveryResult(
+                transport_artifact=transactions,
+                preserved_authoring_layer=preserved,
+            )
+            # Store before reattaching the emitter. If reattachment raises,
+            # integrations can still inspect or export the preserved work.
+            self._last_recovery_result = result
+        except Exception:
+            with Sdf.ChangeBlock():
+                authoring.TransferContent(preserved)
+            raise
+        finally:
+            self._emitter.rebind_stage(stage)
+        self._transform_coalescing.mark_submitted()
+        return result
+
+    def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
+        """Replay through a new server head before resolving optimistic state."""
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        reconnect = self._receiver.reconnect
+        self._receiver.reconnect = True
+        try:
+            self._receiver.request_replay_from(self._dispatcher.last_seq + 1)
+            while True:
+                self._dispatcher.drain_and_apply()
+                if self._receiver.synchronized:
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("authoritative recovery replay timed out")
+                time.sleep(0.01)
+        finally:
+            self._receiver.reconnect = reconnect
 
     @property
     def recovery_disposition(self) -> RejectionDisposition | None:
@@ -382,6 +486,7 @@ class ManagedClient:
                 submitted_events=0,
                 acknowledged_events=self._sender.drain_acknowledged_event_count(),
                 pending_events=self._sender.pending_event_count,
+                recovery=self._sender.recovery_incident,
             )
         self._require_layered_replay()
 
@@ -407,6 +512,7 @@ class ManagedClient:
             submitted_events=sent,
             acknowledged_events=self._sender.drain_acknowledged_event_count(),
             pending_events=self._sender.pending_event_count,
+            recovery=self._sender.recovery_incident,
         )
 
     def publish_current_edit_target(self) -> int:
@@ -449,27 +555,33 @@ class ManagedClient:
             self._emitter.cleanup()
             self._stage = None
             self._authoring_layer = None
+            self._owns_authoring_layer = False
             return
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
         self._dispatcher.adapter = adapter
         self._dispatcher.bind_layered_stage(stage)
-        self._authoring_layer = self._ensure_convergent_edit_target(stage, self._app_name)
+        self._authoring_layer, self._owns_authoring_layer = (
+            self._ensure_convergent_edit_target(stage, self._app_name)
+        )
         self._emitter.rebind_stage(stage)
         self._stage = stage
 
     @staticmethod
-    def _ensure_convergent_edit_target(stage: Usd.Stage, label: str) -> Sdf.Layer:
-        """Return a target weaker than receiver-owned managed layers."""
+    def _ensure_convergent_edit_target(
+        stage: Usd.Stage,
+        label: str,
+    ) -> tuple[Sdf.Layer, bool]:
+        """Return a convergent target and whether this client created it."""
         edit_layer = stage.GetEditTarget().GetLayer()
         session = stage.GetSessionLayer()
         if edit_layer is not session:
-            return edit_layer
+            return edit_layer, False
         authoring = Sdf.Layer.CreateAnonymous(f"openusdconnect-{label}-authoring")
         with Sdf.ChangeBlock():
             session.subLayerPaths.append(authoring.identifier)
         stage.SetEditTarget(Usd.EditTarget(authoring))
-        return authoring
+        return authoring, True
 
     def _validate_authoring_target(self) -> None:
         stage = self._stage

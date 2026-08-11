@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .recovery import TransactionFailure
+from .recovery import RecoveryIncident, TransactionFailure
 from .token_client import load_token, save_token
 
 
@@ -41,6 +41,7 @@ class ClientStatus:
     pending_events: int = 0
     acknowledged_events: int = 0
     failure: TransactionFailure | None = None
+    recovery: RecoveryIncident | None = None
     reason: str = ""
 
 
@@ -52,6 +53,7 @@ class SyncUpdate:
     submitted_events: int
     acknowledged_events: int = 0
     pending_events: int = 0
+    recovery: RecoveryIncident | None = None
 
 
 def validate_layered_source(stage) -> None:

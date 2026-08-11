@@ -28,7 +28,14 @@ from .protocol import (
     make_txn,
 )
 from .protocol_constants import LayerMode
-from .recovery import RejectionDisposition, TransactionFailure
+from .recovery import (
+    QuarantinedTransaction,
+    RecoveryArtifact,
+    RecoveryIncident,
+    RejectionDisposition,
+    TransactionFailure,
+    make_recovery_incident,
+)
 from .transport import send_msg, send_raw
 
 LOG = logging.getLogger(__name__)
@@ -41,6 +48,7 @@ _MAX_PENDING_TRANSACTIONS = 10_000
 class _PendingTransaction:
     payload: bytes
     event_count: int
+    layer_key: str = ""
 
 
 class TransactionRejectedError(RuntimeError):
@@ -114,6 +122,8 @@ class EventSender:
         self._acknowledged_events = 0
         self._acknowledged_events_since_drain = 0
         self._failure: TransactionFailure | None = None
+        self._recovery_artifact: RecoveryArtifact | None = None
+        self._recovery_incident: RecoveryIncident | None = None
         self._retry_after_until = 0.0
 
     @property
@@ -155,6 +165,18 @@ class EventSender:
         """Structured terminal result for UI and recovery policy."""
         with self._condition:
             return self._failure
+
+    @property
+    def recovery_incident(self) -> RecoveryIncident | None:
+        """Immutable summary suitable for status polling and host UI."""
+        with self._condition:
+            return self._recovery_incident
+
+    @property
+    def recovery_artifact(self) -> RecoveryArtifact | None:
+        """Exact quarantined bytes for inspection or application-owned export."""
+        with self._condition:
+            return self._recovery_artifact
 
     @property
     def recovery_disposition(self) -> RejectionDisposition | None:
@@ -328,7 +350,7 @@ class EventSender:
                     txn_id=txn_id,
                 )
             )
-            self._pending[txn_id] = _PendingTransaction(payload, len(events))
+            self._pending[txn_id] = _PendingTransaction(payload, len(events), layer_key)
             self._next_txn_id += 1
             sock = self.sock
 
@@ -370,21 +392,57 @@ class EventSender:
         payload = encode_message(
             make_txn(events, layer_key=layer_key, txn_id=failure.txn_id)
         )
-        repaired = _PendingTransaction(payload, len(events))
+        repaired = _PendingTransaction(payload, len(events), layer_key)
 
         with self._send_lock:
             with self._condition:
                 if self._failure is not failure:
                     raise RuntimeError("transaction rejection changed during recovery")
-                if failure.txn_id in self._pending:
-                    raise RuntimeError("rejected transaction is still present in the outbox")
-                pending = OrderedDict([(failure.txn_id, repaired)])
-                pending.update(self._pending)
-                self._pending = pending
+                if failure.txn_id not in self._pending:
+                    raise RuntimeError("rejected transaction is missing from the outbox")
+                self._pending[failure.txn_id] = repaired
                 self._failure = None
+                self._recovery_artifact = None
+                self._recovery_incident = None
                 self._retry_after_until = 0.0
                 self._condition.notify_all()
         return failure.txn_id
+
+    def abandon_rejected_session(self, *, session_id: str | None = None) -> RecoveryArtifact:
+        """Discard a rejected session's outbox and return its preserved evidence.
+
+        This is a transport-level recovery boundary. The caller must reconcile
+        its USD stage before reconnecting or submitting rebuilt intent with the
+        new producer session.
+        """
+        replacement = session_id or uuid.uuid4().hex
+        if not replacement or len(replacement) > 128:
+            raise ValueError("session_id must contain 1-128 characters")
+
+        with self._condition:
+            failure = self._failure
+            artifact = self._recovery_artifact
+            previous_session_id = self.session_id
+            if failure is None or artifact is None:
+                raise RuntimeError("there is no rejected producer session to abandon")
+            if replacement == previous_session_id:
+                raise ValueError("replacement session_id must differ from rejected session")
+
+        self.disconnect()
+        with self._send_lock:
+            with self._condition:
+                if self._failure is not failure or self._recovery_artifact is not artifact:
+                    raise RuntimeError("transaction rejection changed during recovery")
+                self._pending.clear()
+                self.session_id = replacement
+                self._next_txn_id = 1
+                self._failure = None
+                self._recovery_artifact = None
+                self._recovery_incident = None
+                self._retry_after_until = 0.0
+                self.rejection_reason = ""
+                self._condition.notify_all()
+        return artifact
 
     def send_message(self, msg: dict) -> bool:
         """Send a non-transaction protocol message (not retained for replay)."""
@@ -492,7 +550,6 @@ class EventSender:
             if status_value == TransactionStatus.Acknowledged:
                 self._acknowledge_through_locked(txn_id)
             else:
-                self._pending.pop(txn_id, None)
                 code = int(result.RejectionCode())
                 reason = self._decode_string(result.Reason())
                 self._failure = TransactionFailure(
@@ -501,8 +558,25 @@ class EventSender:
                     reason=reason,
                     expected_txn_id=int(result.ExpectedTxnId()),
                 )
+                self._recovery_artifact = RecoveryArtifact(
+                    producer_session_id=self.session_id,
+                    failure=self._failure,
+                    transactions=tuple(
+                        QuarantinedTransaction(
+                            txn_id=pending_txn_id,
+                            payload=pending.payload,
+                            event_count=pending.event_count,
+                            layer_key=pending.layer_key,
+                        )
+                        for pending_txn_id, pending in self._pending.items()
+                    ),
+                )
+                self._recovery_incident = make_recovery_incident(
+                    self._recovery_artifact
+                )
                 # Later IDs in this session cannot overtake the rejected ID.
-                # Close immediately and retain them as quarantined evidence;
+                # Close immediately and retain the rejected transaction plus
+                # its later suffix as quarantined evidence;
                 # reconnect is disabled by _failure until explicit recovery.
                 rejected_socket = self.sock
             self._condition.notify_all()

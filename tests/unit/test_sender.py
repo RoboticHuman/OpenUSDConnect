@@ -210,7 +210,7 @@ class TestEventSenderConnect:
             assert not sender.send_events([event])
             with pytest.raises(TransactionRejectedError, match="injected rejection"):
                 sender.flush(timeout=2)
-            assert sender.pending_transaction_count == 0
+            assert sender.pending_transaction_count == 1
             assert sender.transaction_error
             assert sender.transaction_failure.code_name == "unexpected_id"
             assert sender.transaction_failure.expected_txn_id == 1
@@ -263,7 +263,18 @@ class TestEventSenderConnect:
             assert sender.transaction_failure.code_name == "invalid_transaction"
             assert sender.recovery_disposition is RejectionDisposition.INVALID_OPERATION
             assert not sender.connected
-            assert sender.pending_transaction_count == 1
+            assert sender.pending_transaction_count == 2
+            incident = sender.recovery_incident
+            assert incident is not None
+            assert incident.incident_id == "quarantine-session:1"
+            assert incident.transaction_ids == (1, 2)
+            assert incident.transaction_count == 2
+            assert incident.event_count == 2
+            artifact = sender.recovery_artifact
+            assert artifact is not None
+            assert artifact.producer_session_id == "quarantine-session"
+            assert [transaction.txn_id for transaction in artifact.transactions] == [1, 2]
+            assert all(transaction.payload for transaction in artifact.transactions)
             assert not sender.send_events([event])
         finally:
             sender.disconnect()
@@ -389,3 +400,73 @@ class TestEventSenderConnect:
             sender.repair_rejected_transaction(
                 [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
             )
+
+    def test_abandon_rejected_session_never_replays_its_suffix(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="abandon-client",
+            session_id="rejected-session",
+        )
+        observed = []
+
+        def _serve():
+            first, first_hello = _accept_and_hello_ok(srv)
+            observed.append(first_hello)
+            observed.append(message_to_dict(recv_framed(first)))
+            observed.append(message_to_dict(recv_framed(first)))
+            send_framed(
+                first,
+                encode_message(
+                    make_transaction_result(
+                        1,
+                        status="rejected",
+                        rejection_code="invalid_transaction",
+                        reason="injected failure",
+                    )
+                ),
+            )
+            first.close()
+
+            second, second_hello = _accept_and_hello_ok(srv)
+            observed.append(second_hello)
+            rebuilt = message_to_dict(recv_framed(second))
+            observed.append(rebuilt)
+            send_framed(second, encode_message(make_transaction_result(1)))
+            time.sleep(0.05)
+            second.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        rejected = {"k": "ensure_prim", "prim": "/World/Rejected", "typeName": "Xform"}
+        suffix = {"k": "ensure_prim", "prim": "/World/Suffix", "typeName": "Xform"}
+        rebuilt = {"k": "ensure_prim", "prim": "/World/Rebuilt", "typeName": "Xform"}
+        try:
+            assert sender.connect()
+            assert sender.send_events([rejected])
+            assert sender.send_events([suffix])
+            with pytest.raises(TransactionRejectedError):
+                sender.flush(timeout=2)
+
+            artifact = sender.recovery_artifact
+            assert artifact is not None
+            assert sender.abandon_rejected_session(session_id="replacement-session") is artifact
+            assert sender.session_id == "replacement-session"
+            assert sender.pending_transaction_count == 0
+            assert not sender.recovery_required
+            assert sender.recovery_incident is None
+
+            assert sender.connect()
+            assert sender.send_events([rebuilt])
+            assert sender.flush(timeout=2)
+
+            assert observed[0]["producer_session_id"] == "rejected-session"
+            assert [observed[1]["txn_id"], observed[2]["txn_id"]] == [1, 2]
+            assert observed[3]["producer_session_id"] == "replacement-session"
+            assert observed[4]["txn_id"] == 1
+            assert observed[4]["events"] == [rebuilt]
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()

@@ -30,6 +30,19 @@ Two configurations exercise a five-transaction session:
 - `TransactionRecoveryFirst.cfg`: transaction 1 is rejected;
 - `TransactionRecovery.cfg`: transaction 3 is rejected after earlier commits.
 
+### `RecoverySessionRollover.tla`
+
+Authoritative-state recovery after a deterministic rejection. The rejected
+transaction and its queued suffix are preserved as an artifact while their
+producer session is permanently abandoned. A new producer session can begin
+at transaction 1 only after replay reaches a fresh server checkpoint and the
+client selects that authoritative state.
+
+The model checks that the abandoned suffix never commits, the old session
+cannot advance after abandonment, the recovery artifact stays complete, and
+new-session transactions commit exactly once in order. Weak fairness also
+checks that recovery reaches the ready state and the new session completes.
+
 ### `ReceiverSynchronization.tla`
 
 Replay and live frames flowing through a bounded receiver queue into the
@@ -73,12 +86,13 @@ java -XX:+UseParallelGC -cp C:\path\to\tla2tools.jar tlc2.TLC `
 `-deadlock` disables TLC's deadlock report because the completed state is
 intentionally quiescent and the temporal specification permits stuttering.
 
-TLC 2.19 results from 2026-08-10:
+TLC 2.19 results from 2026-08-11:
 
 | Model and scenario | Generated | Distinct | Depth | Result |
 |---|---:|---:|---:|---|
 | Transaction recovery: reject transaction 1 | 1,669 | 634 | 25 | No error |
 | Transaction recovery: reject transaction 3 | 929 | 372 | 25 | No error |
+| Recovery session rollover: reject transaction 2 | 13 | 12 | 11 | No error |
 | Receiver: three-frame queue, live apply failure | 1,771 | 516 | 22 | No error |
 | Receiver: one-frame queue, replay apply failure | 1,168 | 352 | 22 | No error |
 | Coordinator: valid group or infrastructure fallback | 235 | 152 | 11 | No error |

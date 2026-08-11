@@ -28,7 +28,7 @@ from .protocol_constants import (
     LayerMode,
 )
 from .receiver import ReceiverThread
-from .recovery import RejectionDisposition, TransactionFailure
+from .recovery import RecoveryIncident, RejectionDisposition, TransactionFailure
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
 from .shared_layer_graph import SharedLayerGraph
@@ -163,6 +163,7 @@ class SharedStageClient:
             pending_events=self.pending_event_count,
             acknowledged_events=self._sender.acknowledged_event_count,
             failure=failure,
+            recovery=self._sender.recovery_incident,
             reason=reason,
         )
 
@@ -208,6 +209,11 @@ class SharedStageClient:
     def transaction_failure(self) -> TransactionFailure | None:
         """Structured rejection including its recovery disposition, if any."""
         return self._sender.transaction_failure
+
+    @property
+    def recovery_incident(self) -> RecoveryIncident | None:
+        """Structured recovery summary for polling and host UI."""
+        return self._sender.recovery_incident
 
     @property
     def recovery_disposition(self) -> RejectionDisposition | None:
@@ -349,6 +355,7 @@ class SharedStageClient:
             submitted_events=sent,
             acknowledged_events=self._sender.drain_acknowledged_event_count(),
             pending_events=self._sender.pending_event_count,
+            recovery=self._sender.recovery_incident,
         )
 
     def _apply_incoming(self) -> int:

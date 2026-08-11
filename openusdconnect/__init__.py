@@ -24,11 +24,18 @@ from .emitter import NoticeEmitter
 from .event_apply import apply_event, apply_events, atomic_apply
 from .events import Event
 from .layer_key_router import LayerKeyRouter
-from .managed_client import ManagedClient
+from .managed_client import ManagedClient, ManagedRecoveryResult
 from .protocol import make_hello, make_quit, make_txn
 from .protocol_constants import LayerMode
 from .receiver import ReceiverThread
-from .recovery import RejectionDisposition, TransactionFailure
+from .recovery import (
+    QuarantinedTransaction,
+    RecoveryArtifact,
+    RecoveryIncident,
+    RecoveryKind,
+    RejectionDisposition,
+    TransactionFailure,
+)
 from .sender import EventSender, TransactionRejectedError
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
 from .shared_stage_client import SharedStageClient
@@ -47,9 +54,14 @@ __all__ = [
     "LayerKeyRouter",
     "LayerMode",
     "ManagedClient",
+    "ManagedRecoveryResult",
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
+    "QuarantinedTransaction",
+    "RecoveryArtifact",
+    "RecoveryIncident",
+    "RecoveryKind",
     "RejectionDisposition",
     "ReceivedEvent",
     "ServerConfig",

@@ -7,7 +7,13 @@ from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect import ClientPhase, SyncUpdate, TransactionFailure
 from openusdconnect import coalescing as coalescing_module
+from openusdconnect.codec import TransactionRejectionCode
 from openusdconnect.managed_client import ManagedClient
+from openusdconnect.recovery import (
+    QuarantinedTransaction,
+    RecoveryArtifact,
+    make_recovery_incident,
+)
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
 
 
@@ -35,9 +41,12 @@ class _SenderStub:
         self.recovery_required = False
         self.transaction_error = ""
         self.transaction_failure = None
+        self.recovery_incident = None
+        self.recovery_artifact = None
         self.acknowledged_event_count = 0
         self.connect_timeouts: list[float | None] = []
         self.repaired: list[tuple[list[dict], str]] = []
+        self.abandoned_session_ids: list[str | None] = []
 
     def send_events(self, events: list[dict]) -> bool:
         self.batches.append(events)
@@ -48,6 +57,17 @@ class _SenderStub:
 
     def drain_acknowledged_event_count(self):
         return 0
+
+    def abandon_rejected_session(self, *, session_id=None):
+        if self.recovery_artifact is None:
+            raise RuntimeError("there is no rejected producer session to abandon")
+        artifact = self.recovery_artifact
+        self.abandoned_session_ids.append(session_id)
+        self.recovery_required = False
+        self.transaction_failure = None
+        self.recovery_incident = None
+        self.recovery_artifact = None
+        return artifact
 
     def disconnect(self) -> None:
         self.connected = False
@@ -159,6 +179,165 @@ def test_managed_status_exposes_partial_connection_and_event_counts():
 
         sender.connected = True
         assert client.status.phase is ClientPhase.READY
+    finally:
+        client.close()
+
+
+def test_managed_use_server_preserves_and_clears_owned_authoring_layer():
+    stage = Usd.Stage.CreateInMemory()
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    client = ManagedClient(
+        stage,
+        app_name="managed-recovery",
+        persist_token=False,
+        reconnect=False,
+    )
+    authoring = client.authoring_layer
+    assert authoring is not None
+    stage.DefinePrim("/World/Local", "Xform")
+
+    sender = _SenderStub([])
+    failure = TransactionFailure(
+        txn_id=1,
+        code=TransactionRejectionCode.InvalidTransaction,
+        reason="injected invalid operation",
+    )
+    artifact = RecoveryArtifact(
+        producer_session_id="rejected-session",
+        failure=failure,
+        transactions=(
+            QuarantinedTransaction(
+                txn_id=1,
+                payload=b"encoded-transaction",
+                event_count=1,
+            ),
+        ),
+    )
+    sender.recovery_required = True
+    sender.transaction_failure = failure
+    sender.recovery_artifact = artifact
+    sender.recovery_incident = make_recovery_incident(artifact)
+    client._sender = sender
+    client._started = True
+    client._refresh_recovery_checkpoint = lambda timeout: None
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    try:
+        result = client.recover_use_server(session_id="replacement-session")
+
+        assert result.transport_artifact is artifact
+        assert result.preserved_authoring_layer.GetPrimAtPath("/World/Local")
+        assert not authoring.GetPrimAtPath("/World/Local")
+        assert stage.GetEditTarget().GetLayer() is authoring
+        assert sender.abandoned_session_ids == ["replacement-session"]
+        assert client.recovery_incident is None
+        assert client.last_recovery_result is result
+        client.dismiss_recovery_result()
+        assert client.last_recovery_result is None
+    finally:
+        client.close()
+
+
+def test_managed_use_server_refuses_application_owned_edit_layer():
+    stage = Usd.Stage.CreateInMemory()
+    client = ManagedClient(
+        stage,
+        app_name="managed-custom-recovery",
+        persist_token=False,
+        reconnect=False,
+    )
+    stage.DefinePrim("/World/Local", "Xform")
+    sender = _SenderStub([])
+    sender.recovery_required = True
+    client._sender = sender
+    client._started = True
+    client._refresh_recovery_checkpoint = lambda timeout: None
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    try:
+        with pytest.raises(RuntimeError, match="client-owned"):
+            client.recover_use_server()
+        assert stage.GetPrimAtPath("/World/Local")
+    finally:
+        client.close()
+
+
+def test_managed_use_server_restores_local_layer_when_session_abandonment_fails():
+    stage = Usd.Stage.CreateInMemory()
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    client = ManagedClient(
+        stage,
+        app_name="managed-recovery-rollback",
+        persist_token=False,
+        reconnect=False,
+    )
+    authoring = client.authoring_layer
+    assert authoring is not None
+    stage.DefinePrim("/World/Local", "Xform")
+    sender = _SenderStub([])
+    sender.recovery_required = True
+
+    def _fail_abandonment(*, session_id=None):
+        raise RuntimeError("injected abandonment failure")
+
+    sender.abandon_rejected_session = _fail_abandonment
+    client._sender = sender
+    client._started = True
+    client._refresh_recovery_checkpoint = lambda timeout: None
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    try:
+        with pytest.raises(RuntimeError, match="injected abandonment failure"):
+            client.recover_use_server()
+        assert authoring.GetPrimAtPath("/World/Local")
+        assert client.last_recovery_result is None
+    finally:
+        client.close()
+
+
+def test_managed_use_server_retains_result_when_emitter_reattach_fails():
+    stage = Usd.Stage.CreateInMemory()
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    client = ManagedClient(
+        stage,
+        app_name="managed-recovery-reattach",
+        persist_token=False,
+        reconnect=False,
+    )
+    stage.DefinePrim("/World/Local", "Xform")
+    sender = _SenderStub([])
+    failure = TransactionFailure(
+        txn_id=1,
+        code=TransactionRejectionCode.InvalidTransaction,
+        reason="injected invalid operation",
+    )
+    artifact = RecoveryArtifact(
+        producer_session_id="rejected-session",
+        failure=failure,
+        transactions=(QuarantinedTransaction(1, b"encoded", 1),),
+    )
+    sender.recovery_required = True
+    sender.transaction_failure = failure
+    sender.recovery_artifact = artifact
+    sender.recovery_incident = make_recovery_incident(artifact)
+    client._sender = sender
+    client._started = True
+    client._refresh_recovery_checkpoint = lambda timeout: None
+
+    def _fail_reattach(stage):
+        raise RuntimeError("injected emitter reattach failure")
+
+    client._emitter.rebind_stage = _fail_reattach
+    try:
+        with pytest.raises(RuntimeError, match="injected emitter reattach failure"):
+            client.recover_use_server(session_id="replacement-session")
+        result = client.last_recovery_result
+        assert result is not None
+        assert result.transport_artifact is artifact
+        assert result.preserved_authoring_layer.GetPrimAtPath("/World/Local")
     finally:
         client.close()
 

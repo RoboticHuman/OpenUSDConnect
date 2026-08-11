@@ -16,6 +16,12 @@ class RejectionDisposition(StrEnum):
     INVALID_OPERATION = "invalid_operation"
 
 
+class RecoveryKind(StrEnum):
+    """Machine-readable category for a client recovery incident."""
+
+    TRANSACTION_REJECTED = "transaction_rejected"
+
+
 _CODE_NAMES = {
     TransactionRejectionCode.InvalidIdentity: "invalid_identity",
     TransactionRejectionCode.UnexpectedId: "unexpected_id",
@@ -55,4 +61,78 @@ class TransactionFailure:
         )
 
 
-__all__ = ["RejectionDisposition", "TransactionFailure"]
+@dataclass(frozen=True, slots=True)
+class QuarantinedTransaction:
+    """Exact encoded transaction retained after a deterministic rejection."""
+
+    txn_id: int
+    payload: bytes
+    event_count: int
+    layer_key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryArtifact:
+    """Transport evidence needed to inspect, export, or rebuild local intent."""
+
+    producer_session_id: str
+    failure: TransactionFailure
+    transactions: tuple[QuarantinedTransaction, ...]
+
+    @property
+    def event_count(self) -> int:
+        return sum(transaction.event_count for transaction in self.transactions)
+
+    @property
+    def layer_keys(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                transaction.layer_key
+                for transaction in self.transactions
+                if transaction.layer_key
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryIncident:
+    """Immutable, UI-safe summary of work quarantined by a rejection."""
+
+    incident_id: str
+    kind: RecoveryKind
+    failure: TransactionFailure
+    producer_session_id: str
+    transaction_ids: tuple[int, ...]
+    event_count: int
+    layer_keys: tuple[str, ...]
+
+    @property
+    def transaction_count(self) -> int:
+        return len(self.transaction_ids)
+
+
+def make_recovery_incident(artifact: RecoveryArtifact) -> RecoveryIncident:
+    """Build a factual public summary for a rejected producer outbox."""
+
+    return RecoveryIncident(
+        incident_id=f"{artifact.producer_session_id}:{artifact.failure.txn_id}",
+        kind=RecoveryKind.TRANSACTION_REJECTED,
+        failure=artifact.failure,
+        producer_session_id=artifact.producer_session_id,
+        transaction_ids=tuple(
+            transaction.txn_id for transaction in artifact.transactions
+        ),
+        event_count=artifact.event_count,
+        layer_keys=artifact.layer_keys,
+    )
+
+
+__all__ = [
+    "QuarantinedTransaction",
+    "RecoveryArtifact",
+    "RecoveryIncident",
+    "RecoveryKind",
+    "RejectionDisposition",
+    "TransactionFailure",
+    "make_recovery_incident",
+]

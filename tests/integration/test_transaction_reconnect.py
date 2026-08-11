@@ -369,7 +369,7 @@ def test_pipeline_rejection_preserves_result_order_and_quarantines_suffix(
 
         assert _wait_until(lambda: sender.recovery_required)
         assert sender.drain_acknowledged_event_count() == 1
-        assert sender.pending_transaction_count == 1
+        assert sender.pending_transaction_count == 2
         assert state.store.get_count() == 1
         assert state.stage.GetPrimAtPath("/World/Reject1")
         assert not state.stage.GetPrimAtPath("/World/Reject2")

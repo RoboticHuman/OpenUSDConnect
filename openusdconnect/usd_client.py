@@ -29,7 +29,7 @@ from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
-from .recovery import RejectionDisposition, TransactionFailure
+from .recovery import RecoveryIncident, RejectionDisposition, TransactionFailure
 from .sender import EventSender
 from .token_client import load_token
 
@@ -339,6 +339,7 @@ class UsdPublisher:
             pending_events=self.pending_event_count,
             acknowledged_events=self.acknowledged_event_count,
             failure=failure,
+            recovery=self._sender.recovery_incident,
             reason=reason,
         )
 
@@ -393,6 +394,11 @@ class UsdPublisher:
     def transaction_failure(self) -> TransactionFailure | None:
         """Structured rejection including its recovery disposition, if any."""
         return self._sender.transaction_failure
+
+    @property
+    def recovery_incident(self) -> RecoveryIncident | None:
+        """Structured recovery summary for polling and host UI."""
+        return self._sender.recovery_incident
 
     @property
     def recovery_disposition(self) -> RejectionDisposition | None:

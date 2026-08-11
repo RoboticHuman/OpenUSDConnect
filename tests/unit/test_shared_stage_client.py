@@ -43,6 +43,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
         pending_event_count = 2
         acknowledged_event_count = 3
         recovery_required = False
+        recovery_incident = None
 
     sender = _StatusSender()
     client._sender = sender
