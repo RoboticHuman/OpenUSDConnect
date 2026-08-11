@@ -52,7 +52,6 @@ table HelloRejected {
 
 table Txn {
     events:[EventWrapper];
-    proposal_id:string;       // if set, edits go to this proposal's muted layer, not the live layer
     layer_key:string;         // required for SharedStage transactions
     txn_id:ulong;             // strictly ordered within the Hello-bound producer session
 }
@@ -104,16 +103,6 @@ table Compact {}
 table Ping {}
 
 table Quit {}
-
-table CreateProposal {
-    target_department:string;
-    events:[EventWrapper];
-    description:string;
-}
-
-table ProposalCreated {
-    proposal_id:string;
-}
 
 table RateLimited {
     retry_after:float;
@@ -206,8 +195,6 @@ union Payload {
     Compact,
     Ping,
     Quit,
-    CreateProposal,
-    ProposalCreated,
     RateLimited,
     ClaimPlayback,
     PlaybackClaimed,

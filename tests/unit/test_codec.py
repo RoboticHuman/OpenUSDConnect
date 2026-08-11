@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 9
+        assert SCHEMA_VERSION == 10
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -214,31 +214,6 @@ class TestRateLimited:
     def test_roundtrip(self):
         d, _ = _roundtrip({"type": "rate_limited", "retry_after": 1.5})
         assert abs(d["retry_after"] - 1.5) < 0.01
-
-
-class TestProposalCreated:
-    def test_roundtrip(self):
-        d, _ = _roundtrip({"type": "proposal_created", "proposal_id": "p-123"})
-        assert d["proposal_id"] == "p-123"
-
-
-class TestTxnProposalId:
-    def test_roundtrip_with_proposal_id(self):
-        msg = {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-abc"}
-        d, _ = _roundtrip(msg)
-        assert d["proposal_id"] == "prop-abc"
-
-    def test_absent_when_not_set(self):
-        d, _ = _roundtrip({"type": "txn", "client_id": "c1", "events": []})
-        assert "proposal_id" not in d
-
-    def test_zero_copy_accessor(self):
-        # The connection handler reads txn.ProposalId() to route proposal edits.
-        buf = encode_message(
-            {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-xyz"}
-        )
-        _, txn = resolve_payload(decode_envelope(buf))
-        assert txn.ProposalId() in (b"prop-xyz", "prop-xyz")
 
 
 class TestTransactionIdentity:
@@ -723,25 +698,6 @@ class TestBroadcastEvent:
         assert d["seq"] == 42
         assert d["event"]["k"] == "set_visibility"
         assert d["origin"] == "blender-1"
-
-
-# ===================================================================
-# CreateProposal
-# ===================================================================
-
-
-class TestCreateProposal:
-    def test_roundtrip(self):
-        msg = {
-            "type": "create_proposal",
-            "target_department": "lighting",
-            "events": [{"k": "set_visibility", "prim": "/World/X", "visible": False}],
-            "description": "hide for lighting pass",
-        }
-        d, _ = _roundtrip(msg)
-        assert d["target_department"] == "lighting"
-        assert d["events"][0]["visible"] is False
-        assert d["description"] == "hide for lighting pass"
 
 
 # ===================================================================

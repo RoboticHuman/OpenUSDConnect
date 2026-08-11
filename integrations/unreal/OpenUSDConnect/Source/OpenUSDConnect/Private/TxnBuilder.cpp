@@ -19,7 +19,6 @@ static TArray<uint8> FinishTxnFrame(
 		Builder,
 		Builder.CreateVector(Events),
 		0,
-		0,
 		TxnId);
 
 	Builder.Finish(OpenUSDConnect::CreateEnvelope(

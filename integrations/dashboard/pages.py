@@ -162,7 +162,7 @@ def setup_pages(srv: UsdSyncServer):
             ).props("flat round dense size=sm")
             refresh_all_btn.tooltip(
                 "Refresh ALL panels on the auto-refresh timer, including the "
-                "manual ones (composed stage, prim tree, proposals)"
+                "manual ones (composed stage and prim tree)"
             )
             ui.button(
                 icon="dark_mode",
@@ -181,7 +181,6 @@ def setup_pages(srv: UsdSyncServer):
         _build_status_cards(srv, register_refresh)
         _build_operations(srv)
         _build_layer_stack(srv, register_refresh, register_full_refresh)
-        _build_proposals_panel(srv, register_refresh, register_full_refresh)
         _build_clients_table(srv, register_refresh)
         _build_wire_metrics(srv, register_refresh)
         _build_prim_tree(srv, on_focus=_focus_prim,
@@ -916,112 +915,6 @@ def _build_layer_card(
                         )
 
 
-def _build_proposals_panel(srv: UsdSyncServer, register_refresh=None,
-                           register_full_refresh=None):
-    """Cross-department edit proposals panel."""
-    with ui.row().classes("items-center gap-2 mb-1"):
-        ui.label("PROPOSALS").classes(
-            "text-xs font-semibold dash-muted uppercase"
-        )
-        ui.button(
-            icon="refresh",
-            on_click=lambda: _refresh_proposals(),
-        ).props("flat round dense size=sm").tooltip("Refresh")
-
-    proposal_container = ui.column().classes("w-full mb-4")
-
-    def _refresh_proposals():
-        proposals = srv.list_proposals()
-        proposal_container.clear()
-        with proposal_container:
-            pending = [p for p in proposals if p["status"] == "pending"]
-            if not pending:
-                ui.label("No pending proposals").classes("dash-muted text-sm")
-                return
-
-            for p in pending:
-                _build_proposal_card(p)
-
-    def _build_proposal_card(p):
-        pid = p["proposal_id"]
-        with ui.card().classes("w-full p-3"):
-            with ui.row().classes("items-center w-full gap-2"):
-                ui.icon("rate_review", size="xs").classes("dash-accent")
-                # Title: first line of description or proposal ID
-                title = (p["description"] or pid).split("\n")[0]
-                ui.label(title).classes("font-semibold text-sm flex-1")
-                ui.badge(p["status"], color="warning").props("dense")
-
-            with ui.row().classes("items-center gap-3 text-xs dash-muted mt-1"):
-                ui.label(f"From: {p['from_client']}")
-                if p.get("from_department"):
-                    ui.badge(p["from_department"]).props("dense outline")
-                ui.icon("arrow_forward", size="xs")
-                ui.badge(
-                    p["target_department"], color="primary",
-                ).props("dense")
-
-            # Full description (multi-line body after the title)
-            desc = p.get("description", "")
-            body = "\n".join(desc.split("\n")[1:]).strip()
-            if body:
-                ui.label(body).classes("text-xs dash-muted mt-1").style(
-                    "white-space: pre-wrap"
-                )
-
-            # Proposal USDA content
-            usda = p.get("layer_usda", "")
-            lines = usda.strip().split("\n")
-            has_content = len(lines) > 1
-            if has_content:
-                with ui.expansion("View changes", icon="code").classes(
-                    "w-full mt-1"
-                ).props("dense"):
-                    ui.label(usda).classes("usda-viewer")
-
-            # Action buttons
-            with ui.row().classes("gap-2 mt-2"):
-                ui.button(
-                    "Approve", icon="check",
-                    on_click=lambda pid=pid: _approve(pid),
-                ).props("dense no-caps size=sm color=positive")
-                ui.button(
-                    "Reject", icon="close",
-                    on_click=lambda pid=pid: _reject(pid),
-                ).props("dense no-caps size=sm color=negative")
-
-    def _approve(pid):
-        if srv.approve_proposal(pid):
-            ui.notify(f"Approved: {pid}", type="positive")
-        else:
-            ui.notify("Approval failed", type="negative")
-        _refresh_proposals()
-
-    def _reject(pid):
-        if srv.reject_proposal(pid):
-            ui.notify(f"Rejected: {pid}", type="warning")
-        else:
-            ui.notify("Rejection failed", type="negative")
-        _refresh_proposals()
-
-    _refresh_proposals()
-
-    _last_proposal_count = {"value": srv.get_proposal_count()}
-
-    def _check_proposals():
-        count = srv.get_proposal_count()
-        if count != _last_proposal_count["value"]:
-            _last_proposal_count["value"] = count
-            _refresh_proposals()
-
-    if register_refresh:
-        register_refresh(_check_proposals)
-    if register_full_refresh:
-        # The light timer only reacts to count changes; the full pass
-        # also picks up status/content changes on existing proposals.
-        register_full_refresh(_refresh_proposals)
-
-
 def _build_clients_table(srv: UsdSyncServer, register_refresh=None):
     """Client roster."""
     ui.label("CLIENTS").classes("text-xs font-semibold dash-muted uppercase mb-1")
@@ -1440,27 +1333,3 @@ def _register_api_routes(srv: UsdSyncServer):
     def api_token_revoke(client_id: str):
         ok = srv.revoke_token(client_id)
         return {"ok": ok}
-
-    # -- Proposal endpoints ------------------------------------------------
-
-    @app.get("/api/proposals")
-    def api_proposals(department: str | None = None):
-        return srv.list_proposals(department=department)
-
-    @app.post("/api/proposals")
-    async def api_proposal_create(request: Request):
-        body = await request.json()
-        pid = srv.create_proposal(
-            body.get("from_client", ""),
-            body.get("target_department", ""),
-            body.get("description", ""),
-        )
-        return {"proposal_id": pid}
-
-    @app.post("/api/proposals/{proposal_id}/approve")
-    def api_proposal_approve(proposal_id: str):
-        return {"ok": srv.approve_proposal(proposal_id)}
-
-    @app.post("/api/proposals/{proposal_id}/reject")
-    def api_proposal_reject(proposal_id: str):
-        return {"ok": srv.reject_proposal(proposal_id)}

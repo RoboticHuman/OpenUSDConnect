@@ -253,7 +253,7 @@ Notes:
   snapshot exactly.
 - Translate mode also rejects authored USD properties outside the supported
   event subset, and it is disabled while any non-default collaboration layer
-  or proposal is active.
+  is active.
 
 ## Blender Live-Open
 

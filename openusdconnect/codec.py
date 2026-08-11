@@ -65,7 +65,6 @@ from .protocol_constants import (
     MSG_AUTH_REJECTED,
     MSG_CLAIM_PLAYBACK,
     MSG_COMPACT,
-    MSG_CREATE_PROPOSAL,
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
@@ -77,7 +76,6 @@ from .protocol_constants import (
     MSG_PLAYBACK_CONTROL,
     MSG_PLAYBACK_REJECTED,
     MSG_PLAYBACK_STATE,
-    MSG_PROPOSAL_CREATED,
     MSG_QUIT,
     MSG_RATE_LIMITED,
     MSG_REPLAY_COMPLETE,
@@ -107,8 +105,6 @@ Resync = _fb.Resync
 Compact = _fb.Compact
 Ping = _fb.Ping
 Quit = _fb.Quit
-CreateProposal = _fb.CreateProposal
-ProposalCreated = _fb.ProposalCreated
 RateLimited = _fb.RateLimited
 EventWrapper = _fb.EventWrapper
 EnsurePrim = _fb.EnsurePrim
@@ -159,7 +155,7 @@ EventPayloadType = _fb.EventPayload
 SdfSpecKindType = _fb.SdfSpecKind
 LayerModeType = _fb.LayerMode
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -178,8 +174,6 @@ _MSG_TYPE_TO_PAYLOAD = {
     MSG_COMPACT: PayloadType.Compact,
     MSG_PING: PayloadType.Ping,
     MSG_QUIT: PayloadType.Quit,
-    MSG_CREATE_PROPOSAL: PayloadType.CreateProposal,
-    MSG_PROPOSAL_CREATED: PayloadType.ProposalCreated,
     MSG_RATE_LIMITED: PayloadType.RateLimited,
     MSG_CLAIM_PLAYBACK: PayloadType.ClaimPlayback,
     MSG_PLAYBACK_CLAIMED: PayloadType.PlaybackClaimed,
@@ -246,8 +240,6 @@ _PAYLOAD_TO_CLASS = {
     PayloadType.Compact: Compact,
     PayloadType.Ping: Ping,
     PayloadType.Quit: Quit,
-    PayloadType.CreateProposal: CreateProposal,
-    PayloadType.ProposalCreated: ProposalCreated,
     PayloadType.RateLimited: RateLimited,
     PayloadType.ClaimPlayback: ClaimPlayback,
     PayloadType.PlaybackClaimed: PlaybackClaimed,
@@ -491,7 +483,6 @@ def _encode_hello_rejected(b, msg):
 
 
 def _encode_txn(b, msg):
-    proposal_id = b.CreateString(msg["proposal_id"]) if msg.get("proposal_id") else None
     layer_key = b.CreateString(msg["layer_key"]) if msg.get("layer_key") else None
     event_offsets = [_encode_event_wrapper(b, ev) for ev in msg["events"]]
     _fb.TxnStartEventsVector(b, len(event_offsets))
@@ -500,8 +491,6 @@ def _encode_txn(b, msg):
     events_vec = b.EndVector()
     _fb.TxnStart(b)
     _fb.TxnAddEvents(b, events_vec)
-    if proposal_id is not None:
-        _fb.TxnAddProposalId(b, proposal_id)
     if layer_key is not None:
         _fb.TxnAddLayerKey(b, layer_key)
     if msg.get("txn_id"):
@@ -572,32 +561,6 @@ def _encode_ping(b, _msg):
 def _encode_quit(b, _msg):
     _fb.QuitStart(b)
     return _fb.QuitEnd(b)
-
-
-def _encode_create_proposal(b, msg):
-    target = b.CreateString(msg["target_department"])
-    desc = b.CreateString(msg.get("description", ""))
-    events = msg.get("events", [])
-    events_vec = None
-    if events:
-        event_offsets = [_encode_event_wrapper(b, ev) for ev in events]
-        _fb.CreateProposalStartEventsVector(b, len(event_offsets))
-        for off in reversed(event_offsets):
-            b.PrependUOffsetTRelative(off)
-        events_vec = b.EndVector()
-    _fb.CreateProposalStart(b)
-    _fb.CreateProposalAddTargetDepartment(b, target)
-    if events_vec is not None:
-        _fb.CreateProposalAddEvents(b, events_vec)
-    _fb.CreateProposalAddDescription(b, desc)
-    return _fb.CreateProposalEnd(b)
-
-
-def _encode_proposal_created(b, msg):
-    pid = b.CreateString(msg["proposal_id"])
-    _fb.ProposalCreatedStart(b)
-    _fb.ProposalCreatedAddProposalId(b, pid)
-    return _fb.ProposalCreatedEnd(b)
 
 
 def _encode_rate_limited(b, msg):
@@ -746,8 +709,6 @@ _ENCODE_DISPATCH = {
     MSG_COMPACT: _encode_compact,
     MSG_PING: _encode_ping,
     MSG_QUIT: _encode_quit,
-    MSG_CREATE_PROPOSAL: _encode_create_proposal,
-    MSG_PROPOSAL_CREATED: _encode_proposal_created,
     MSG_RATE_LIMITED: _encode_rate_limited,
     MSG_CLAIM_PLAYBACK: _encode_claim_playback,
     MSG_PLAYBACK_CLAIMED: _encode_playback_claimed,
@@ -1512,7 +1473,7 @@ def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> di
     """
     envelope = decode_envelope(buf)
     msg_type, obj = resolve_payload(envelope)
-    if msg_type in (MSG_TXN, MSG_EVENT, MSG_CREATE_PROPOSAL):
+    if msg_type in (MSG_TXN, MSG_EVENT):
         return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type, numpy_arrays=numpy_arrays)
     return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type)
 
@@ -1822,9 +1783,6 @@ def _dict_txn(t, msg_type, numpy_arrays=False):
         event_to_dict(t.Events(i), numpy_arrays=numpy_arrays) for i in range(t.EventsLength())
     ]
     msg = {"type": msg_type, "events": events}
-    pid = _str(t.ProposalId())
-    if pid:
-        msg["proposal_id"] = pid
     layer_key = _str(t.LayerKey())
     if layer_key:
         msg["layer_key"] = layer_key
@@ -1876,22 +1834,6 @@ def _dict_empty(_obj, msg_type):
     return {"type": msg_type}
 
 
-def _dict_create_proposal(cp, msg_type, numpy_arrays=False):
-    events = [
-        event_to_dict(cp.Events(i), numpy_arrays=numpy_arrays) for i in range(cp.EventsLength())
-    ]
-    return {
-        "type": msg_type,
-        "target_department": _str(cp.TargetDepartment()),
-        "events": events,
-        "description": _str(cp.Description()) or "",
-    }
-
-
-def _dict_proposal_created(pc, msg_type):
-    return {"type": msg_type, "proposal_id": _str(pc.ProposalId())}
-
-
 def _dict_rate_limited(rl, msg_type):
     return {"type": msg_type, "retry_after": rl.RetryAfter()}
 
@@ -1909,8 +1851,6 @@ _DICT_DECODE_DISPATCH = {
     MSG_COMPACT: _dict_empty,
     MSG_PING: _dict_empty,
     MSG_QUIT: _dict_empty,
-    MSG_CREATE_PROPOSAL: _dict_create_proposal,
-    MSG_PROPOSAL_CREATED: _dict_proposal_created,
     MSG_RATE_LIMITED: _dict_rate_limited,
     MSG_CLAIM_PLAYBACK: _dict_claim_playback,
     MSG_PLAYBACK_CLAIMED: _dict_playback_claimed,

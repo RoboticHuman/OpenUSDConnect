@@ -267,25 +267,6 @@ class TestSnapshotToken:
         assert dept_srv.delete_layer("alice")
         assert dept_srv.get_snapshot_token() == (epoch + 1, seq)
 
-    def test_epoch_bumps_on_proposal_reject(self, dept_srv):
-        dept_srv.get_or_create_client_layer("lead", "layout")
-        proposal_id = dept_srv.create_proposal("alice", "layout")
-        epoch, seq = dept_srv.get_snapshot_token()
-        assert dept_srv.reject_proposal(proposal_id)
-        assert dept_srv.get_snapshot_token() == (epoch + 1, seq)
-
-    def test_epoch_bumps_on_proposal_approve(self, dept_srv):
-        dept_srv.get_or_create_client_layer("lead", "layout")
-        proposal_id = dept_srv.create_proposal("alice", "layout")
-        assert dept_srv.apply_proposal_txn(
-            proposal_id,
-            [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}],
-        )
-        epoch, _seq = dept_srv.get_snapshot_token()
-        assert dept_srv.approve_proposal(proposal_id)
-        assert dept_srv.get_snapshot_token() == (epoch + 1, 1)
-
-
 # ---------------------------------------------------------------------------
 # Read side
 # ---------------------------------------------------------------------------
@@ -780,18 +761,6 @@ class TestWriteTranslate:
             translate_vfile.write(translate_vfile.read())
 
         assert "collaboration layers: review" in srv.last_vfs_write_analysis["notes"][0]
-
-    def test_pending_proposals_disable_translate(self, srv, translate_vfile):
-        proposal_id = srv.create_proposal("alice", "layout")
-        count = srv.get_event_count()
-
-        with pytest.raises(UnsupportedVfsWriteError):
-            translate_vfile.write(_stage_bytes([("/World", "Xform")]))
-
-        assert srv.get_event_count() == count
-        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
-        assert proposal_id in srv.last_vfs_write_analysis["notes"][0]
-
 
 class TestDavResourceLifecycle:
     def test_read_metadata_and_content_use_one_pinned_snapshot(self):

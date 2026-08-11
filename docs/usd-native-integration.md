@@ -583,7 +583,7 @@ The server event log remains authoritative for unsaved edits, but neither the
 server nor `SharedStageClient` calls `Sdf.Layer.Save()`. Applications retain
 control over file or database persistence and conflict policy. A shared-stage
 server requires a portable root layer and does not accept department routing,
-managed layered replay, proposals, VFS composition, or purge.
+managed layered replay, VFS composition, or purge.
 
 ## Asset and resolver requirements
 
@@ -612,7 +612,7 @@ storage.
 
 The existing `NoticeEmitter`, `EventSender`, `ReceiverThread`, and
 `EventDispatcher` APIs remain public for DCC adapters, flat live-snapshot
-continuation on single-layer servers, playback control, proposals, and custom
+continuation on single-layer servers, playback control, and custom
 scheduling. `ReceiverThread` requests layered replay by default; callers must
 pass `layered_replay=False` to select the constrained flat contract. New
 USD-native clients should begin with `ManagedClient` unless they need a

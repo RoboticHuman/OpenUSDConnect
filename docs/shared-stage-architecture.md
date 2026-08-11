@@ -44,7 +44,7 @@ Managed mode (`ManagedClient`, `UsdPublisher`, `UsdReceiver`) has the server own
 the collaboration data model. Client edits land in server-owned collaboration
 layers stacked above the app's base stage, and flow over semantic event kinds
 (`ensure_prim`, `set_xform_trs`, `set_material_binding`, ...) that DCC adapters,
-the dashboard, the MCP server, departments, and proposals consume. The emitter
+the dashboard, the MCP server, and department policies consume. The emitter
 diffs composed stage state, and the dispatcher pipelines receive-side
 application.
 
@@ -71,7 +71,7 @@ is the deliverable.
 Choose managed mode when the server owns the collaboration data model: semantic
 event kinds must reach non-USD consumers (DCC adapters, the dashboard, the MCP
 server), collaboration content should live above the base stage rather than in
-it, or features like departments, proposals, and playback leadership are
+it, or features like departments and playback leadership are
 required. Managed mode trades exact SDF fidelity for semantic, consumer-friendly
 events.
 

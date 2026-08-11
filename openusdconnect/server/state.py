@@ -1,9 +1,8 @@
 """UsdSyncServer: authoritative state for the sync protocol.
 
 Holds the in-memory ``Usd.Stage``, the collaboration layer stack, the SQLite
-event log, the broadcast and persistence threads, the TOFU token store, and
-proposal bookkeeping. Network handling lives in ``connection.py``; the CLI
-lives in ``cli.py``.
+event log, the broadcast and persistence threads, and the TOFU token store.
+Network handling lives in ``connection.py``; the CLI lives in ``cli.py``.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from ..emitter import (
 from ..event_store import EventStore, LayerIdentity, ProducerProgress, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
-    COLLABORATION_LAYER_KINDS,
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -76,7 +74,6 @@ from .types import (
     AmbiguousVfsWriteError,
     ClientInfo,
     InvalidVfsWriteError,
-    Proposal,
     ReplayModeConflictError,
     StaleVfsWriteError,
     TransactionCommit,
@@ -483,10 +480,6 @@ class UsdSyncServer:
 
             _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
             self.token_store = TokenStore(_token_path)
-
-        # Cross-department edit proposals
-        self.proposals_lock = threading.Lock()
-        self.proposals: dict[str, Proposal] = {}
 
         # Cached prim count — invalidated on structural events to avoid
         # full Traverse on every dashboard poll.
@@ -1079,229 +1072,6 @@ class UsdSyncServer:
         if not self.token_store:
             return []
         return self.token_store.get_all()
-
-    # -- Proposals (cross-department edit requests) ----------------------
-
-    def create_proposal(
-        self,
-        from_client: str,
-        target_department: str,
-        description: str = "",
-    ) -> str:
-        """Create a proposal targeting another department.
-
-        Creates a muted layer for the proposal. The proposer sends txns
-        targeting this proposal_id. The target department reviews in the
-        dashboard.
-
-        Returns the proposal_id.
-        """
-        if self.layer_mode is LayerMode.SHARED_STAGE:
-            raise RuntimeError("department proposals are unavailable in shared-stage mode")
-        import uuid
-
-        proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
-        from_dept = self._client_departments.get(from_client)
-
-        with self.stage_lock:
-            layer = Sdf.Layer.CreateAnonymous(f"proposal-{proposal_id}")
-            session = self.stage.GetSessionLayer()
-            # Insert at the end (weakest) so preview doesn't accidentally
-            # override real layers.
-            session.subLayerPaths.append(layer.identifier)
-            self.stage.MuteLayer(layer.identifier)
-
-        proposal = Proposal(
-            proposal_id=proposal_id,
-            from_client=from_client,
-            from_department=from_dept,
-            target_department=target_department,
-            description=description,
-            layer=layer,
-        )
-        with self.proposals_lock:
-            self.proposals[proposal_id] = proposal
-        LOG.info(
-            "Proposal %s created: %s → %s (%s)",
-            proposal_id,
-            from_client,
-            target_department,
-            description,
-        )
-        return proposal_id
-
-    def list_proposals(
-        self,
-        department: str | None = None,
-        include_usda: bool = True,
-    ) -> list[dict]:
-        """List proposals, optionally filtered by target department.
-
-        If department is None, returns all proposals (admin view).
-        Set include_usda=False to skip expensive ExportToString().
-        """
-        with self.proposals_lock:
-            snapshot = list(self.proposals.values())
-        result = []
-        for p in snapshot:
-            if department and p.target_department != department:
-                continue
-            entry = {
-                "proposal_id": p.proposal_id,
-                "from_client": p.from_client,
-                "from_department": p.from_department,
-                "target_department": p.target_department,
-                "description": p.description,
-                "status": p.status,
-                "created_at": p.created_at,
-            }
-            if include_usda:
-                entry["layer_usda"] = p.layer.ExportToString()
-            result.append(entry)
-        return result
-
-    def approve_proposal(self, proposal_id: str) -> bool:
-        """Approve a proposal — replay events into target department layer.
-
-        Replays the accumulated events through apply_txn targeting the
-        department layer. This handles stage mutation, broadcast, and log
-        persistence through the same path as normal transactions.
-        Then removes the proposal layer.
-        """
-        self.txn_barrier.acquire_shared()
-        try:
-            return self._approve_proposal_inner(proposal_id)
-        finally:
-            self.txn_barrier.release_shared()
-
-    def _approve_proposal_inner(self, proposal_id: str) -> bool:
-        with self.proposals_lock:
-            p = self.proposals.get(proposal_id)
-        if not p or p.status != "pending":
-            return False
-
-        target_layer = self.resolve_layer(p.target_department)
-        if not target_layer:
-            LOG.warning(
-                "Cannot approve proposal %s — target department '%s' has no layer",
-                proposal_id,
-                p.target_department,
-            )
-            return False
-
-        if p.events:
-            self.apply_txn(p.events, layer=target_layer)
-
-            records: list[tuple[dict, bytes]] = []
-            persist_tuples = []
-            for ev in p.events:
-                # department is the TARGET: the merge authored these opinions
-                # into the target department's layer, so replay must too.
-                rec = {
-                    "type": MSG_EVENT,
-                    "seq": self.assign_seq(),
-                    "event": ev,
-                    "client_id": p.from_client,
-                    "origin": f"proposal-{p.proposal_id}",
-                }
-                if ev.get("k") not in NON_COLLABORATION_KINDS:
-                    rec["layer_key"] = _layer_key_for_department(
-                        p.target_department,
-                    )
-                rec_bin = encode_message(rec)
-                records.append((rec, rec_bin))
-                persist_tuples.append(
-                    (
-                        rec["seq"],
-                        rec_bin,
-                        p.from_client,
-                        ev.get("k"),
-                        ev.get("prim"),
-                    )
-                )
-            self.append_log_batch(persist_tuples)
-            self.broadcast_transaction_views(records)
-
-        # Remove proposal layer from session
-        with self.stage_lock:
-            self.stage.UnmuteLayer(p.layer.identifier)
-            session = self.stage.GetSessionLayer()
-            idx = list(session.subLayerPaths).index(p.layer.identifier)
-            del session.subLayerPaths[idx]
-
-        p.status = "approved"
-        self.bump_snapshot_epoch(f"approve_proposal:{proposal_id}")
-        LOG.info("Proposal %s approved — merged into %s", proposal_id, p.target_department)
-        return True
-
-    def reject_proposal(self, proposal_id: str) -> bool:
-        """Reject a proposal — discard the layer."""
-        with self.proposals_lock:
-            p = self.proposals.get(proposal_id)
-        if not p or p.status != "pending":
-            return False
-
-        with self.stage_lock:
-            self.stage.MuteLayer(p.layer.identifier)
-            session = self.stage.GetSessionLayer()
-            idx = list(session.subLayerPaths).index(p.layer.identifier)
-            del session.subLayerPaths[idx]
-
-        p.status = "rejected"
-        self.bump_snapshot_epoch(f"reject_proposal:{proposal_id}")
-        LOG.info("Proposal %s rejected", proposal_id)
-        return True
-
-    def get_proposal_count(self) -> int:
-        """Thread-safe proposal count for dashboard polling."""
-        with self.proposals_lock:
-            return len(self.proposals)
-
-    def get_proposal_layer(self, proposal_id: str) -> Sdf.Layer | None:
-        """Get the layer for a proposal (for txn routing)."""
-        with self.proposals_lock:
-            p = self.proposals.get(proposal_id)
-        if p and p.status == "pending":
-            return p.layer
-        return None
-
-    def apply_proposal_txn(self, proposal_id: str, events: list[dict]) -> bool:
-        """Apply a txn to a pending proposal's muted layer (no broadcast).
-
-        Muted layers can't be an edit target, so unmute for the write and
-        re-mute after — the opinions stay out of composition. Events also
-        accumulate on the proposal for the merge + log replay on approval.
-        """
-        if self.layer_mode is LayerMode.SHARED_STAGE:
-            return False
-        from ..event_apply import apply_events
-
-        with self.proposals_lock:
-            p = self.proposals.get(proposal_id)
-        if not p or p.status != "pending":
-            return False
-        unsupported = sorted(
-            {
-                event.get("k", "")
-                for event in events
-                if event.get("k") not in COLLABORATION_LAYER_KINDS
-            }
-        )
-        if unsupported:
-            LOG.warning(
-                "Proposal %s contains non-collaboration events: %s",
-                proposal_id,
-                ", ".join(repr(kind) for kind in unsupported),
-            )
-            return False
-        with self.stage_lock:
-            self.stage.UnmuteLayer(p.layer.identifier)
-            self.stage.SetEditTarget(Usd.EditTarget(p.layer))
-            apply_events(self.stage, events, op_cache=self._op_cache_for(p.layer))
-            self.stage.MuteLayer(p.layer.identifier)
-        p.events.extend(events)
-        LOG.debug("Applied %d events to proposal %s", len(events), proposal_id)
-        return True
 
     # -- Per-client layer management ------------------------------------
 
@@ -2137,13 +1907,6 @@ class UsdSyncServer:
                     and _department_for_layer_key(layer_key) is None
                 ]
                 before_types = _stage_prim_types(self.stage)
-            with self.proposals_lock:
-                pending_proposals = sorted(
-                    proposal_id
-                    for proposal_id, proposal in self.proposals.items()
-                    if proposal.status == "pending"
-                )
-
             uploaded_types = _stage_prim_types(uploaded_stage)
             before_paths = set(before_types)
             uploaded_paths = set(uploaded_types)
@@ -2175,25 +1938,23 @@ class UsdSyncServer:
                     notes=status_notes,
                 )
 
-            if department_layers or additional_layers or pending_proposals:
+            if department_layers or additional_layers:
                 details = []
                 if department_layers:
                     details.append(f"department layers: {', '.join(department_layers)}")
                 if additional_layers:
                     details.append(f"collaboration layers: {', '.join(additional_layers)}")
-                if pending_proposals:
-                    details.append(f"pending proposals: {', '.join(pending_proposals)}")
                 analysis = _analysis(
                     "unsupported_rejected",
                     [
                         "translate write fallback is disabled while non-default "
-                        f"collaboration or proposal layers are active ({'; '.join(details)})"
+                        f"collaboration layers are active ({'; '.join(details)})"
                     ],
                 )
                 self.last_vfs_write_analysis = analysis.to_dict()
                 raise UnsupportedVfsWriteError(
                     "VFS translate writes are disabled while non-default "
-                    "collaboration or proposal layers are active"
+                    "collaboration layers are active"
                 )
 
             if uploaded_meta is None:

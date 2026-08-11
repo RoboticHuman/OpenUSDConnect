@@ -9,12 +9,11 @@ from .cli import ServerConfig, VfsConfig, main, run_server
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .rate_limit import TokenBucket
 from .state import UsdSyncServer
-from .types import ClientInfo, Proposal
+from .types import ClientInfo
 
 __all__ = [
     "ClientInfo",
     "ConnectionHandler",
-    "Proposal",
     "ServerConfig",
     "ThreadedTCPServer",
     "TokenBucket",

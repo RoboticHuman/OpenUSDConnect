@@ -109,19 +109,17 @@ class Payload(object):
     Compact = 7
     Ping = 8
     Quit = 9
-    CreateProposal = 10
-    ProposalCreated = 11
-    RateLimited = 12
-    ClaimPlayback = 13
-    PlaybackClaimed = 14
-    PlaybackRejected = 15
-    PlaybackControl = 16
-    PlaybackState = 17
-    LayerStackState = 18
-    HelloRejected = 19
-    LayerGraphState = 20
-    TransactionResult = 21
-    ReplayComplete = 22
+    RateLimited = 10
+    ClaimPlayback = 11
+    PlaybackClaimed = 12
+    PlaybackRejected = 13
+    PlaybackControl = 14
+    PlaybackState = 15
+    LayerStackState = 16
+    HelloRejected = 17
+    LayerGraphState = 18
+    TransactionResult = 19
+    ReplayComplete = 20
 
 
 class AttrValue(object):
@@ -3163,28 +3161,21 @@ class Txn(object):
         return o == 0
 
     # Txn
-    def ProposalId(self):
+    def LayerKey(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
     # Txn
-    def LayerKey(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-    # Txn
     def TxnId(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
 def TxnStart(builder):
-    builder.StartObject(4)
+    builder.StartObject(3)
 
 def TxnAddEvents(builder, events):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(events), 0)
@@ -3192,14 +3183,11 @@ def TxnAddEvents(builder, events):
 def TxnStartEventsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def TxnAddProposalId(builder, proposalId):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(proposalId), 0)
-
 def TxnAddLayerKey(builder, layerKey):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
 
 def TxnAddTxnId(builder, txnId):
-    builder.PrependUint64Slot(3, txnId, 0)
+    builder.PrependUint64Slot(2, txnId, 0)
 
 def TxnEnd(builder):
     return builder.EndObject()
@@ -3517,118 +3505,6 @@ def QuitStart(builder):
     builder.StartObject(0)
 
 def QuitEnd(builder):
-    return builder.EndObject()
-
-
-
-class CreateProposal(object):
-    __slots__ = ['_tab']
-
-    @classmethod
-    def GetRootAs(cls, buf, offset=0):
-        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = CreateProposal()
-        x.Init(buf, n + offset)
-        return x
-
-    @classmethod
-    def GetRootAsCreateProposal(cls, buf, offset=0):
-        """This method is deprecated. Please switch to GetRootAs."""
-        return cls.GetRootAs(buf, offset)
-    # CreateProposal
-    def Init(self, buf, pos):
-        self._tab = flatbuffers.table.Table(buf, pos)
-
-    # CreateProposal
-    def TargetDepartment(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-    # CreateProposal
-    def Events(self, j):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            x = self._tab.Vector(o)
-            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
-            x = self._tab.Indirect(x)
-            obj = EventWrapper()
-            obj.Init(self._tab.Bytes, x)
-            return obj
-        return None
-
-    # CreateProposal
-    def EventsLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            return self._tab.VectorLen(o)
-        return 0
-
-    # CreateProposal
-    def EventsIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        return o == 0
-
-    # CreateProposal
-    def Description(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-def CreateProposalStart(builder):
-    builder.StartObject(3)
-
-def CreateProposalAddTargetDepartment(builder, targetDepartment):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(targetDepartment), 0)
-
-def CreateProposalAddEvents(builder, events):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(events), 0)
-
-def CreateProposalStartEventsVector(builder, numElems):
-    return builder.StartVector(4, numElems, 4)
-
-def CreateProposalAddDescription(builder, description):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(description), 0)
-
-def CreateProposalEnd(builder):
-    return builder.EndObject()
-
-
-
-class ProposalCreated(object):
-    __slots__ = ['_tab']
-
-    @classmethod
-    def GetRootAs(cls, buf, offset=0):
-        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = ProposalCreated()
-        x.Init(buf, n + offset)
-        return x
-
-    @classmethod
-    def GetRootAsProposalCreated(cls, buf, offset=0):
-        """This method is deprecated. Please switch to GetRootAs."""
-        return cls.GetRootAs(buf, offset)
-    # ProposalCreated
-    def Init(self, buf, pos):
-        self._tab = flatbuffers.table.Table(buf, pos)
-
-    # ProposalCreated
-    def ProposalId(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-def ProposalCreatedStart(builder):
-    builder.StartObject(1)
-
-def ProposalCreatedAddProposalId(builder, proposalId):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(proposalId), 0)
-
-def ProposalCreatedEnd(builder):
     return builder.EndObject()
 
 

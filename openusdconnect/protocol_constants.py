@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 
 
 class LayerMode(StrEnum):
@@ -26,8 +26,6 @@ MSG_RESYNC = "resync"
 MSG_COMPACT = "compact"
 MSG_PING = "ping"
 MSG_QUIT = "quit"
-MSG_CREATE_PROPOSAL = "create_proposal"
-MSG_PROPOSAL_CREATED = "proposal_created"
 MSG_RATE_LIMITED = "rate_limited"
 MSG_CLAIM_PLAYBACK = "claim_playback"
 MSG_PLAYBACK_CLAIMED = "playback_claimed"

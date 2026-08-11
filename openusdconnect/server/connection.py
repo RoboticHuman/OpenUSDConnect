@@ -35,7 +35,6 @@ from ..protocol_constants import (
     MSG_PLAYBACK_CLAIMED,
     MSG_PLAYBACK_REJECTED,
     MSG_PLAYBACK_STATE,
-    MSG_PROPOSAL_CREATED,
     MSG_RATE_LIMITED,
     MSG_RESYNC,
     PROTOCOL_VERSION,
@@ -449,14 +448,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 sync_server.compact_log()
                 continue
 
-            if pt == PayloadType.CreateProposal:
-                if sync_server.layer_mode is LayerMode.SHARED_STAGE:
-                    LOG.warning("Shared-stage client requested a department proposal")
-                    break
-                msg = message_to_dict(buf)
-                self._handle_create_proposal(sync_server, msg)
-                continue
-
             if pt == PayloadType.ClaimPlayback:
                 msg = message_to_dict(buf)
                 self._handle_claim_playback(sync_server, msg)
@@ -481,14 +472,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 continue
 
             txn_id = int(txn_fb.TxnId())
-
-            proposal_id = txn_fb.ProposalId()
-            if proposal_id:
-                if sync_server.layer_mode is LayerMode.SHARED_STAGE:
-                    LOG.warning("Shared-stage client targeted a department proposal")
-                    break
-                sync_server.apply_proposal_txn(proposal_id.decode(), events)
-                continue
 
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
@@ -693,26 +676,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             )
             return
         sync_server.broadcast_message({"type": MSG_PLAYBACK_STATE, **payload})
-
-    def _handle_create_proposal(self, sync_server: UsdSyncServer, msg: dict):
-        """Handle a create_proposal message from an emitter."""
-        target = msg.get("target_department", "")
-        desc = msg.get("description", "")
-        if not target:
-            return
-        pid = sync_server.create_proposal(
-            self._client_id or "",
-            target,
-            desc,
-        )
-        send_msg(
-            self.request,
-            {
-                "type": MSG_PROPOSAL_CREATED,
-                "proposal_id": pid,
-            },
-        )
-
 
 class ThreadedTCPServer(socketserver.TCPServer):
     allow_reuse_address = True

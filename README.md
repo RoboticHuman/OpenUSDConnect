@@ -52,7 +52,6 @@ not used as that mirror.
 - SQLite event log with late-join replay (sync from any sequence) and log compaction
 - WebDAV/UNC live-open endpoint that serves a normal-looking USD snapshot
 - Per-department shared layers with configurable strength ordering
-- Cross-department edit proposals (propose, approve, reject)
 - TOFU (trust-on-first-use) token authentication and per-client rate limiting
 - Single-leader playback synchronization (a shared playhead)
 - Optional web admin dashboard with a live prim tree and event inspector

@@ -98,19 +98,12 @@ def make_hello(
 
 def make_txn(
     events: list[Event],
-    proposal_id: str = "",
     *,
     layer_key: str = "",
     txn_id: int = 0,
 ) -> dict:
-    """Build a transaction message.
-
-    With *proposal_id*, the server routes the edits to that proposal's muted
-    layer instead of the client's live layer.
-    """
+    """Build a transaction message."""
     msg = {"type": MSG_TXN, "events": events}
-    if proposal_id:
-        msg["proposal_id"] = proposal_id
     if layer_key:
         msg["layer_key"] = layer_key
     if txn_id:
