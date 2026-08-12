@@ -544,7 +544,7 @@ class SharedLayerGraph(LayerKeyRouter):
             "k": K_SET_SUBLAYERS,
             "prim": "/",
             "generation": self.generation,
-            "revision": 0,
+            "revision": self.parent_revision(layer_key),
             "sublayers": [dict(entry) for entry in entries],
         }
 
@@ -559,6 +559,13 @@ class SharedLayerGraph(LayerKeyRouter):
         parent = self.layer_for(parent_key)
         if parent is None or parent_key not in self.reachable_layer_keys():
             raise StaleLayerGraphError(f"unknown shared layer key {parent_key!r}")
+        current_revision = self.parent_revision(parent_key)
+        submitted_revision = int(event.get("revision", 0))
+        if submitted_revision != current_revision:
+            raise StaleLayerGraphError(
+                f"expected base parent topology revision {current_revision}, "
+                f"got {submitted_revision}"
+            )
 
         entries = normalize_sublayer_entries(event.get("sublayers", ()))
         pending_by_identifier: dict[str, str] = {}
@@ -591,7 +598,7 @@ class SharedLayerGraph(LayerKeyRouter):
             "k": K_SET_SUBLAYERS,
             "prim": "/",
             "generation": self.generation,
-            "revision": self.parent_revision(parent_key) + 1,
+            "revision": current_revision + 1,
             "sublayers": canonical,
         }
         return PreparedSublayers(parent_key, canonical_event, tuple(mappings))

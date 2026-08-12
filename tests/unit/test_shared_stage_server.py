@@ -122,7 +122,7 @@ def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
                     "k": "set_sublayers",
                     "prim": "/",
                     "generation": graph.generation,
-                    "revision": 0,
+                    "revision": graph.parent_revision(graph.root_layer_key),
                     "sublayers": [],
                 }
             ],
@@ -140,7 +140,7 @@ def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
                     "k": "set_sublayers",
                     "prim": "/",
                     "generation": graph.generation,
-                    "revision": 0,
+                    "revision": graph.parent_revision(graph.root_layer_key),
                     "sublayers": [{"authored_path": "./asset.usda"}],
                 }
             ],
@@ -273,7 +273,7 @@ def test_new_sublayer_transaction_emits_complete_recursive_routing(tmp_path):
             "k": "set_sublayers",
             "prim": "/",
             "generation": graph.generation,
-            "revision": 0,
+            "revision": graph.parent_revision(graph.root_layer_key),
             "sublayers": [{"authored_path": "./child.usda", "offset": 4.0, "scale": 0.5}],
         }
         records = server._commit_events([event], layer_key=graph.root_layer_key)
@@ -377,7 +377,7 @@ def test_detached_layer_key_cannot_receive_more_opinions(tmp_path):
             "k": "set_sublayers",
             "prim": "/",
             "generation": graph.generation,
-            "revision": 0,
+            "revision": graph.parent_revision(graph.root_layer_key),
             "sublayers": [],
         }
 
@@ -397,7 +397,7 @@ def test_stale_topology_generation_is_a_recoverable_rejection(tmp_path):
             "k": "set_sublayers",
             "prim": "/",
             "generation": "obsolete-generation",
-            "revision": 0,
+            "revision": graph.parent_revision(graph.root_layer_key),
             "sublayers": [],
         }
 
@@ -418,7 +418,7 @@ def test_topology_that_becomes_stale_at_commit_is_rolled_back_and_recoverable(
             "k": "set_sublayers",
             "prim": "/",
             "generation": graph.generation,
-            "revision": 0,
+            "revision": graph.parent_revision(graph.root_layer_key),
             "sublayers": [],
         }
 
@@ -458,7 +458,7 @@ def test_topology_persistence_failure_rolls_back_new_layer_identity(
                         "k": "set_sublayers",
                         "prim": "/",
                         "generation": graph.generation,
-                        "revision": 0,
+                        "revision": graph.parent_revision(graph.root_layer_key),
                         "sublayers": [{"authored_path": "./child.usda"}],
                     }
                 ],
@@ -472,7 +472,9 @@ def test_topology_persistence_failure_rolls_back_new_layer_identity(
         assert server._next_seq == 2
 
 
-def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch):
+def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
+    tmp_path, monkeypatch
+):
     _create_layer(tmp_path / "first.usda", "/First")
     _create_layer(tmp_path / "second.usda", "/Second")
     root = _create_layer(tmp_path / "root.usda")
@@ -489,19 +491,25 @@ def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch
 
         monkeypatch.setattr(server, "_persist_shared_events", _delayed_persist)
 
+        base_revision = graph.parent_revision(graph.root_layer_key)
+        failures = []
+
         def _replace(path: str) -> None:
-            server._commit_events(
-                [
-                    {
-                        "k": "set_sublayers",
-                        "prim": "/",
-                        "generation": graph.generation,
-                        "revision": 0,
-                        "sublayers": [{"authored_path": path}],
-                    }
-                ],
-                layer_key=graph.root_layer_key,
-            )
+            try:
+                server._commit_events(
+                    [
+                        {
+                            "k": "set_sublayers",
+                            "prim": "/",
+                            "generation": graph.generation,
+                            "revision": base_revision,
+                            "sublayers": [{"authored_path": path}],
+                        }
+                    ],
+                    layer_key=graph.root_layer_key,
+                )
+            except TransactionRejectedError as exc:
+                failures.append(exc)
 
         first = threading.Thread(target=_replace, args=("./first.usda",))
         second = threading.Thread(target=_replace, args=("./second.usda",))
@@ -514,7 +522,10 @@ def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch
         assert not second.is_alive()
 
         records = [message_to_dict(row[1]) for row in server.store.get_all_asc()[1:]]
-        assert [record["event"]["revision"] for record in records] == [2, 1, 3, 1]
+        assert [record["event"]["revision"] for record in records] == [2, 1]
+        assert len(failures) == 1
+        assert failures[0].code == "stale_layer_graph"
+        assert "base parent topology revision" in str(failures[0])
 
 
 def test_compaction_preserves_relative_asset_text(tmp_path):

@@ -64,6 +64,49 @@ class PreparedLayerBatch:
     change_serial: int
 
 
+def _bind_topology_base(
+    batch: PreparedLayerBatch,
+    graph: SharedLayerGraph,
+) -> PreparedLayerBatch:
+    """Freeze topology events against the graph revision they were prepared on."""
+    if not graph.ready:
+        return batch
+    layer_key = graph.key_for(batch.layer)
+    if not layer_key:
+        return batch
+    generation = graph.generation
+    revision = graph.parent_revision(layer_key)
+    bound = []
+    for index, event in enumerate(batch.events):
+        if event.get("k") != K_SET_SUBLAYERS or event.get("generation"):
+            bound.append(event)
+            continue
+        routed = dict(event)
+        routed["generation"] = generation
+        routed["revision"] = revision
+        routed["sublayers"] = [dict(entry) for entry in event["sublayers"]]
+        bound.append(routed)
+        bound.extend(batch.events[index + 1 :])
+        return PreparedLayerBatch(
+            events=tuple(bound),
+            layer=batch.layer,
+            layer_identifier=batch.layer_identifier,
+            change_serial=batch.change_serial,
+        )
+    return batch
+
+
+def _copy_prepared_events(batch: PreparedLayerBatch) -> list[dict]:
+    """Copy a batch without sharing mutable topology entries with apply code."""
+    events = []
+    for event in batch.events:
+        copied = dict(event)
+        if copied.get("k") == K_SET_SUBLAYERS:
+            copied["sublayers"] = [dict(entry) for entry in event["sublayers"]]
+        events.append(copied)
+    return events
+
+
 def _topology_snapshot(layer: Sdf.Layer) -> tuple[tuple[str, float, float], ...]:
     return tuple(
         (entry["authored_path"], entry["offset"], entry["scale"])
@@ -498,11 +541,14 @@ class SdfLayerChangeTracker:
                         batch.layer_identifier: index for index, batch in enumerate(self._prepared)
                     }
                 continue
-            batch = PreparedLayerBatch(
-                events=tuple(events),
-                layer=layer,
-                layer_identifier=identifier,
-                change_serial=self._change_serials[identifier],
+            batch = _bind_topology_base(
+                PreparedLayerBatch(
+                    events=tuple(events),
+                    layer=layer,
+                    layer_identifier=identifier,
+                    change_serial=self._change_serials[identifier],
+                ),
+                self.graph,
             )
             if prepared_index is None:
                 self._prepared.append(batch)
@@ -514,23 +560,20 @@ class SdfLayerChangeTracker:
         return tuple(self._prepared)
 
     def _events_for(self, batch: PreparedLayerBatch) -> list[dict]:
-        events = []
-        for event in batch.events:
-            routed = dict(event)
-            if routed.get("k") == K_SET_SUBLAYERS:
-                routed["generation"] = self.graph.generation
-                routed["sublayers"] = [dict(entry) for entry in event["sublayers"]]
-            events.append(routed)
-        return events
+        return _copy_prepared_events(batch)
 
     def next_routed_batch(self) -> tuple[PreparedLayerBatch, str, list[dict]] | None:
         """Return the next prepared batch whose layer has an authoritative key."""
         if not self.graph.ready:
             return None
         reachable = set(self.graph.reachable_layer_keys())
-        for batch in self._prepared:
+        for index, batch in enumerate(self._prepared):
             layer_key = self.graph.key_for(batch.layer)
             if layer_key and layer_key in reachable:
+                bound = _bind_topology_base(batch, self.graph)
+                if bound is not batch:
+                    batch = bound
+                    self._prepared[index] = batch
                 return batch, layer_key, self._events_for(batch)
         return None
 

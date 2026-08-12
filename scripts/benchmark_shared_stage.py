@@ -182,7 +182,7 @@ def main() -> None:
                 "k": "set_sublayers",
                 "prim": "/",
                 "generation": source_graph.generation,
-                "revision": 0,
+                "revision": source_graph.parent_revision(source_graph.root_layer_key),
                 "sublayers": entries,
             }
             start = time.perf_counter_ns()

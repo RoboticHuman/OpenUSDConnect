@@ -302,6 +302,83 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
         sync_server.store.close()
 
 
+def test_two_clients_reject_same_parent_topology_edit_prepared_on_stale_revision(
+    tmp_path,
+):
+    directories = [tmp_path / name for name in ("server", "first", "second")]
+    server_stage, first_stage, second_stage = [
+        _create_stage(directory) for directory in directories
+    ]
+    for directory in directories:
+        _create_layer(directory / "first.usda", "/First")
+        _create_layer(directory / "second.usda", "/Second")
+
+    sync_server = UsdSyncServer(
+        stage=server_stage,
+        log_path=str(tmp_path / "events.db"),
+        layer_mode=LayerMode.SHARED_STAGE,
+    )
+    tcp_server = ThreadedTCPServer(
+        ("127.0.0.1", 0),
+        ConnectionHandler,
+        sync_server,
+        max_workers=8,
+    )
+    thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+    thread.start()
+    port = tcp_server.server_address[1]
+    first = SharedStageClient(
+        first_stage,
+        app_name="topology-race-first",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    second = SharedStageClient(
+        second_stage,
+        app_name="topology-race-second",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        first.start()
+        second.start()
+        assert first.connect(timeout=2)
+        assert second.connect(timeout=2)
+        assert _pump_until(
+            [first, second],
+            lambda: all(client.status.phase is ClientPhase.READY for client in (first, second)),
+        )
+
+        first_stage.GetRootLayer().subLayerPaths.append("./first.usda")
+        second_stage.GetRootLayer().subLayerPaths.append("./second.usda")
+
+        assert first.update().submitted_events == 1
+        assert first.flush(timeout=5)
+        assert second.update().submitted_events == 1
+        with pytest.raises(TransactionRejectedError) as caught:
+            second.flush(timeout=5)
+
+        assert caught.value.failure.code_name == "stale_layer_graph"
+        assert caught.value.failure.disposition is RejectionDisposition.RECOVERABLE_CONFLICT
+        assert list(server_stage.GetRootLayer().subLayerPaths) == [
+            "./asset.usda",
+            "./first.usda",
+        ]
+        assert sync_server.shared_layer_graph.parent_revision(
+            sync_server.shared_layer_graph.root_layer_key
+        ) == 2
+    finally:
+        first.close()
+        second.close()
+        tcp_server.shutdown()
+        tcp_server.server_close()
+        thread.join(timeout=5)
+        sync_server.shutdown()
+        sync_server.store.close()
+
+
 def test_managed_server_rejects_a_shared_stage_client(tmp_path):
     server_stage = _create_stage(tmp_path / "server")
     client_stage = _create_stage(tmp_path / "client")
@@ -622,7 +699,7 @@ def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
                     "k": "set_sublayers",
                     "prim": "/",
                     "generation": graph.generation,
-                    "revision": 0,
+                    "revision": graph.parent_revision(graph.root_layer_key),
                     "sublayers": [],
                 }
             ],
@@ -672,9 +749,7 @@ def _create_detached_layer_recovery_incident(
                 "k": "set_sublayers",
                 "prim": "/",
                 "generation": server_graph.generation,
-                "revision": (
-                    server_graph.parent_revision(server_graph.root_layer_key) + 1
-                ),
+                "revision": server_graph.parent_revision(server_graph.root_layer_key),
                 "sublayers": [],
             }
         ],
@@ -882,8 +957,8 @@ def test_external_recovery_reconciles_detached_layer_before_queued_reattachment(
                     "k": "set_sublayers",
                     "prim": "/",
                     "generation": server_graph.generation,
-                    "revision": (
-                        server_graph.parent_revision(server_graph.root_layer_key) + 1
+                    "revision": server_graph.parent_revision(
+                        server_graph.root_layer_key
                     ),
                     "sublayers": [
                         {

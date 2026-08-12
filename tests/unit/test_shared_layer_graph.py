@@ -156,7 +156,7 @@ def test_new_sublayer_recursively_declares_descendant_keys(tmp_path):
         "k": "set_sublayers",
         "prim": "/",
         "generation": server.generation,
-        "revision": 0,
+        "revision": server.parent_revision(server.root_layer_key),
         "sublayers": [{"authored_path": "./child.usda", "offset": 3.0, "scale": -2.0}],
     }
     prepared = server.canonicalize_sublayers(server.root_layer_key, request)
@@ -246,6 +246,17 @@ def test_prepared_topology_edits_on_the_same_parent_still_conflict(tmp_path):
 
     with pytest.raises(StaleLayerGraphError, match="parent topology revision"):
         graph.accept_sublayers(second)
+
+
+def test_stale_base_parent_revision_is_rejected_before_canonicalization(tmp_path):
+    root = _create_layer(tmp_path / "root.usda")
+    graph = SharedLayerGraph(Usd.Stage.Open(root.identifier), authoritative=True)
+    event = graph.describe_sublayers(graph.stage.GetRootLayer())
+    first = graph.canonicalize_sublayers(graph.root_layer_key, event)
+    graph.accept_sublayers(first)
+
+    with pytest.raises(StaleLayerGraphError, match="base parent topology revision"):
+        graph.canonicalize_sublayers(graph.root_layer_key, event)
 
 
 def test_new_generation_preserves_keys_and_resets_parent_revisions(tmp_path):
