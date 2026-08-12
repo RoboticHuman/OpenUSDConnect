@@ -842,9 +842,9 @@ def test_referenced_descendant_override_survives_server_log_replay(tmp_path):
 
     server = UsdSyncServer(log_path=db_path)
     try:
-        server.process_txn(emitter.snapshot_events(), client_id="source")
+        server._commit_events(emitter.snapshot_events(), client_id="source")
         UsdGeom.Sphere(source.GetPrimAtPath("/World/Ref/Geom")).GetRadiusAttr().Set(7.0)
-        server.process_txn(emitter.build_events_for_dirty(), client_id="source")
+        server._commit_events(emitter.build_events_for_dirty(), client_id="source")
     finally:
         emitter.cleanup()
         server.shutdown()

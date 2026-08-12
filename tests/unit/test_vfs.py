@@ -98,12 +98,12 @@ def vset(srv):
 
 def _send(srv, events):
     """Apply events through the same path a TCP txn takes (seq + persist)."""
-    srv.process_txn(events, client_id="test-client", origin="test-origin")
+    srv._commit_events(events, client_id="test-client", origin="test-origin")
 
 
 def _send_to_layer(srv, layer, events, client_id="test-client"):
     """Apply events to an explicit edit layer and persist them."""
-    srv.process_txn(events, client_id=client_id, origin="test-origin", layer=layer)
+    srv._commit_events(events, client_id=client_id, origin="test-origin", layer=layer)
 
 
 def _open_stage(data: bytes) -> Usd.Stage:

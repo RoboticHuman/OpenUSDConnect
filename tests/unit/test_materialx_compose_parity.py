@@ -297,7 +297,7 @@ def _compare_trs(stage_a, stage_b, prim_path, eps=1e-6):
 
 
 def _server_process_and_replay(srv, events):
-    srv.process_txn(events)
+    srv._commit_events(events)
     rows = srv.store.get_all_asc()
     return [message_to_dict(r[1])["event"] for r in rows]
 

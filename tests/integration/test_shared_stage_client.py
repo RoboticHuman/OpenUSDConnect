@@ -114,7 +114,7 @@ def _commit_and_broadcast(
 ):
     sync_server.txn_barrier.acquire_shared()
     try:
-        records = sync_server.process_txn(events, layer_key=layer_key)
+        records = sync_server._commit_events(events, layer_key=layer_key)
         sync_server.broadcast_transaction_views(records)
         return records
     finally:
@@ -616,7 +616,7 @@ def test_detached_layer_rejection_is_reported_as_recoverable_conflict(tmp_path):
     )
     try:
         assert sender.connect()
-        sync_server.process_txn(
+        sync_server._commit_events(
             [
                 {
                     "k": "set_sublayers",
@@ -666,7 +666,7 @@ def _create_detached_layer_recovery_incident(
     assert routed_key == child_key
 
     server_graph = sync_server.shared_layer_graph
-    sync_server.process_txn(
+    sync_server._commit_events(
         [
             {
                 "k": "set_sublayers",

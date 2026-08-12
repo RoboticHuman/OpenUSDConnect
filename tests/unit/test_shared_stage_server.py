@@ -86,7 +86,7 @@ def test_restart_and_compaction_restore_exact_target_layer(tmp_path):
         original_keys = set(server.shared_layer_graph.reachable_layer_keys())
         child_key = _child_key(server)
         child = server.shared_layer_graph.layer_for(child_key)
-        records = server.process_txn(
+        records = server._commit_events(
             [_value_event(child, 5.0)],
             layer_key=child_key,
             client_id="test-client",
@@ -116,7 +116,7 @@ def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
     with _shared_server(base, db) as server:
         graph = server.shared_layer_graph
         original_child_key = _child_key(server)
-        server.process_txn(
+        server._commit_events(
             [
                 {
                     "k": "set_sublayers",
@@ -134,7 +134,7 @@ def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
     with _shared_server(base, db) as restored:
         graph = restored.shared_layer_graph
         assert original_child_key not in graph.reachable_layer_keys()
-        records = restored.process_txn(
+        records = restored._commit_events(
             [
                 {
                     "k": "set_sublayers",
@@ -184,7 +184,7 @@ def test_layer_content_replacement_supersedes_prior_deltas_during_compaction(tmp
     with _shared_server(base, db) as server:
         graph = server.shared_layer_graph
         root = graph.layer_for(graph.root_layer_key)
-        server.process_txn(
+        server._commit_events(
             [
                 {
                     "k": "set_sdf_spec_fields",
@@ -206,7 +206,7 @@ def test_layer_content_replacement_supersedes_prior_deltas_during_compaction(tmp
             "fragment": serialize_layer_content(replacement),
         }
 
-        server.process_txn([event], layer_key=graph.root_layer_key)
+        server._commit_events([event], layer_key=graph.root_layer_key)
         assert root.GetPrimAtPath("/Transient") is None
         assert root.GetPrimAtPath("/Final").documentation == "complete state"
         assert list(root.subLayerPaths) == ["./asset.usda"]
@@ -232,8 +232,8 @@ def test_generic_property_removal_supersedes_concrete_property_delta(tmp_path):
     with _shared_server(base, db) as server:
         child_key = _child_key(server)
         child = server.shared_layer_graph.layer_for(child_key)
-        server.process_txn([_value_event(child, 5.0)], layer_key=child_key)
-        server.process_txn(
+        server._commit_events([_value_event(child, 5.0)], layer_key=child_key)
+        server._commit_events(
             [
                 {
                     "k": "set_sdf_spec_fields",
@@ -276,7 +276,7 @@ def test_new_sublayer_transaction_emits_complete_recursive_routing(tmp_path):
             "revision": 0,
             "sublayers": [{"authored_path": "./child.usda", "offset": 4.0, "scale": 0.5}],
         }
-        records = server.process_txn([event], layer_key=graph.root_layer_key)
+        records = server._commit_events([event], layer_key=graph.root_layer_key)
 
         assert len(records) == 3
         assert [record[0]["event"]["revision"] for record in records] == [2, 1, 1]
@@ -328,7 +328,7 @@ def test_layer_strength_is_composed_by_openusd_not_event_arrival(tmp_path):
             "removed": False,
         }
 
-        server.process_txn([event], layer_key=weak_key)
+        server._commit_events([event], layer_key=weak_key)
 
         assert radius.default == 9.0
         assert UsdGeom.Sphere(server.stage.GetPrimAtPath("/Sphere")).GetRadiusAttr().Get() == 2.0
@@ -340,7 +340,7 @@ def test_modes_reject_ambiguous_layer_routing(tmp_path):
     managed = UsdSyncServer(base_usd_path=base, log_path=str(tmp_path / "managed.db"))
     try:
         with pytest.raises(ValueError, match="arbitrary layer key"):
-            managed.process_txn([event], layer_key="layer:root")
+            managed._commit_events([event], layer_key="layer:root")
     finally:
         managed.shutdown()
         managed.store.close()
@@ -348,9 +348,9 @@ def test_modes_reject_ambiguous_layer_routing(tmp_path):
     with _shared_server(base, tmp_path / "shared.db") as shared:
         child = shared.shared_layer_graph.layer_for(_child_key(shared))
         with pytest.raises(ValueError, match="require layer_key"):
-            shared.process_txn([_value_event(child, 3.0)])
+            shared._commit_events([_value_event(child, 3.0)])
         with pytest.raises(ValueError, match="unsupported shared-stage events"):
-            shared.process_txn(
+            shared._commit_events(
                 [event],
                 layer_key=shared.shared_layer_graph.root_layer_key,
             )
@@ -381,11 +381,11 @@ def test_detached_layer_key_cannot_receive_more_opinions(tmp_path):
             "sublayers": [],
         }
 
-        server.process_txn([topology], layer_key=graph.root_layer_key)
+        server._commit_events([topology], layer_key=graph.root_layer_key)
 
         assert child_key not in graph.reachable_layer_keys()
         with pytest.raises(TransactionRejectedError, match="unknown or unresolved") as caught:
-            server.process_txn([_value_event(child, 3.0)], layer_key=child_key)
+            server._commit_events([_value_event(child, 3.0)], layer_key=child_key)
         assert caught.value.code == "stale_layer_graph"
 
 
@@ -402,7 +402,7 @@ def test_stale_topology_generation_is_a_recoverable_rejection(tmp_path):
         }
 
         with pytest.raises(TransactionRejectedError) as caught:
-            server.process_txn([topology], layer_key=graph.root_layer_key)
+            server._commit_events([topology], layer_key=graph.root_layer_key)
 
         assert caught.value.code == "stale_layer_graph"
         assert list(server.stage.GetRootLayer().subLayerPaths) == ["./asset.usda"]
@@ -428,7 +428,7 @@ def test_topology_that_becomes_stale_at_commit_is_rolled_back_and_recoverable(
         monkeypatch.setattr(graph, "accept_sublayers", _become_stale)
 
         with pytest.raises(TransactionRejectedError) as caught:
-            server.process_txn([topology], layer_key=graph.root_layer_key)
+            server._commit_events([topology], layer_key=graph.root_layer_key)
 
         assert caught.value.code == "stale_layer_graph"
         assert list(server.stage.GetRootLayer().subLayerPaths) == ["./asset.usda"]
@@ -452,7 +452,7 @@ def test_topology_persistence_failure_rolls_back_new_layer_identity(
         monkeypatch.setattr(server.store, "append_batch", _fail)
 
         with pytest.raises(RuntimeError, match="injected identity commit failure"):
-            server.process_txn(
+            server._commit_events(
                 [
                     {
                         "k": "set_sublayers",
@@ -490,7 +490,7 @@ def test_concurrent_topology_revisions_keep_sequence_order(tmp_path, monkeypatch
         monkeypatch.setattr(server, "_persist_shared_events", _delayed_persist)
 
         def _replace(path: str) -> None:
-            server.process_txn(
+            server._commit_events(
                 [
                     {
                         "k": "set_sublayers",
@@ -541,7 +541,7 @@ def test_compaction_preserves_relative_asset_text(tmp_path):
             ),
             "removed": False,
         }
-        server.process_txn([event], layer_key=root_key)
+        server._commit_events([event], layer_key=root_key)
         server.compact_log()
         compacted = message_to_dict(server.store.get_all_asc()[1][1])
         assert "@./textures/albedo.exr@" in compacted["event"]["fragment"]

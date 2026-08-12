@@ -124,7 +124,7 @@ def main():
     post_sender = None
 
     try:
-        srv.process_txn(
+        srv._commit_events(
             [
                 {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
                 {"k": "ensure_prim", "prim": "/World/PreImport", "typeName": "Cube"},

@@ -281,6 +281,112 @@ def test_store_failure_rolls_back_usd_sequence_and_progress(tmp_path, monkeypatc
         server.store.close()
 
 
+def test_private_commit_helper_rolls_back_usd_and_sequence(tmp_path, monkeypatch):
+    server = UsdSyncServer(log_path=str(tmp_path / "private-rollback.db"))
+    append_batch = server.store.append_batch
+    try:
+        server._commit_events([_event("/World/Old")], client_id="seed")
+        before = server.edit_layer.ExportToString()
+
+        def fail_once(records, *, producer_progress=()):
+            raise sqlite3.OperationalError("injected private commit failure")
+
+        monkeypatch.setattr(server.store, "append_batch", fail_once)
+        with pytest.raises(sqlite3.OperationalError, match="injected private"):
+            server._commit_events(
+                [{"k": "rename_prim", "prim": "/World/Old", "new_name": "New"}],
+                client_id="maintenance",
+            )
+
+        assert server.edit_layer.ExportToString() == before
+        assert server.stage.GetPrimAtPath("/World/Old").IsValid()
+        assert not server.stage.GetPrimAtPath("/World/New").IsValid()
+        assert server.store.get_count() == 1
+        assert server._next_seq == 2
+
+        monkeypatch.setattr(server.store, "append_batch", append_batch)
+        records = server._commit_events([_event("/World/After")], client_id="maintenance")
+        assert records[0][0]["seq"] == 2
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+def test_private_commit_cannot_overtake_failed_identified_commit(tmp_path, monkeypatch):
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "private-serialized.db"),
+        txn_batch_size=1,
+    )
+    append_batch = server.store.append_batch
+    identified_persisting = threading.Event()
+    release_failure = threading.Event()
+    private_started = threading.Event()
+    private_persisting = threading.Event()
+    identified_errors = []
+    private_errors = []
+    private_records = []
+
+    def controlled_append(records, *, producer_progress=()):
+        if producer_progress:
+            identified_persisting.set()
+            assert release_failure.wait(timeout=5)
+            raise sqlite3.OperationalError("injected identified commit failure")
+        private_persisting.set()
+        return append_batch(records, producer_progress=producer_progress)
+
+    def commit_identified():
+        try:
+            _commit(
+                server,
+                "/World/Rejected",
+                client="client",
+                session="session",
+                txn_id=1,
+            )
+        except BaseException as exc:
+            identified_errors.append(exc)
+
+    def commit_private():
+        private_started.set()
+        try:
+            private_records.extend(
+                server._commit_events([_event("/World/Private")], client_id="maintenance")
+            )
+        except BaseException as exc:
+            private_errors.append(exc)
+
+    monkeypatch.setattr(server.store, "append_batch", controlled_append)
+    identified = threading.Thread(target=commit_identified)
+    private = threading.Thread(target=commit_private)
+    try:
+        identified.start()
+        assert identified_persisting.wait(timeout=5)
+        private.start()
+        assert private_started.wait(timeout=5)
+        assert not private_persisting.wait(timeout=0.1)
+
+        release_failure.set()
+        identified.join(timeout=5)
+        private.join(timeout=5)
+        assert not identified.is_alive()
+        assert not private.is_alive()
+
+        assert len(identified_errors) == 1
+        assert isinstance(identified_errors[0], sqlite3.OperationalError)
+        assert private_errors == []
+        assert private_records[0][0]["seq"] == 1
+        assert [seq for seq, _payload in server.store.get_all_asc()] == [1]
+        assert not server.stage.GetPrimAtPath("/World/Rejected").IsValid()
+        assert server.stage.GetPrimAtPath("/World/Private").IsValid()
+        assert server._next_seq == 2
+    finally:
+        release_failure.set()
+        identified.join(timeout=5)
+        private.join(timeout=5)
+        server.shutdown()
+        server.store.close()
+
+
 def test_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
     server = UsdSyncServer(log_path=str(tmp_path / "rename-rollback.db"), txn_batch_size=1)
     append_batch = server.store.append_batch

@@ -79,13 +79,13 @@ def test_measured_result_returns_actual_framed_byte_count():
 def test_disabled_by_default():
     s = UsdSyncServer(log_path=":memory:")
     assert s.wire_metrics is None
-    s.process_txn(EVENTS, client_id="c1", origin="o1", client_addr="a:1")
+    s._commit_events(EVENTS, client_id="c1", origin="o1", client_addr="a:1")
     assert s.get_wire_metrics() == {"enabled": False}
 
 
 def test_records_per_kind_on_txn():
     s = UsdSyncServer(log_path=":memory:", wire_metrics=True)
-    s.process_txn(EVENTS, client_id="c1", origin="o1", client_addr="a:1")
+    s._commit_events(EVENTS, client_id="c1", origin="o1", client_addr="a:1")
     m = s.get_wire_metrics()
     assert m["enabled"] is True
     kinds = m["kinds"]

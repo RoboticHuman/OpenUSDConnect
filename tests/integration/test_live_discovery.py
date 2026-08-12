@@ -64,7 +64,7 @@ def vfs_tree(tmp_path, free_port):
 
 
 def _send(srv, events):
-    srv.process_txn(events, client_id="test-client", origin="test-origin")
+    srv._commit_events(events, client_id="test-client", origin="test-origin")
 
 
 def test_is_remote():

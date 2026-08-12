@@ -152,11 +152,14 @@ class TestApplyTxn:
 
 
 # ---------------------------------------------------------------------------
-# process_txn routing
+# Private in-process commit routing
 # ---------------------------------------------------------------------------
 
 
-class TestProcessTxnRouting:
+class TestPrivateCommitRouting:
+    def test_unidentified_commit_entry_point_is_not_public(self, srv):
+        assert not hasattr(srv, "process_txn")
+
     def test_record_uses_actual_edit_target_instead_of_cached_client_layer(
         self,
         srv,
@@ -166,7 +169,7 @@ class TestProcessTxnRouting:
             department="animation",
         )
 
-        records = srv.process_txn(
+        records = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/World/New", "typeName": "Xform"}],
             client_id="artist",
             layer=srv.edit_layer,
@@ -184,7 +187,7 @@ class TestProcessTxnRouting:
             ValueError,
             match="not a managed collaboration layer",
         ):
-            srv.process_txn(
+            srv._commit_events(
                 [
                     {
                         "k": "ensure_prim",
@@ -1110,7 +1113,7 @@ class TestBroadcast:
             "prim": "/LayeredOnly",
             "typeName": "Xform",
         }
-        records = srv.process_txn([event])
+        records = srv._commit_events([event])
 
         srv.broadcast_transaction_views(records)
         srv._broadcast_queue.join()
@@ -1139,7 +1142,7 @@ class TestBroadcast:
             "prim": "/LayeredEcho",
             "typeName": "Xform",
         }
-        records = srv.process_txn(
+        records = srv._commit_events(
             [event],
             client_id="author",
             origin="shared-session",
@@ -1178,10 +1181,10 @@ class TestBroadcast:
             return send_to_all(payload, **kwargs)
 
         monkeypatch.setattr(srv, "_send_to_all", observe_send)
-        first = srv.process_txn(
+        first = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/First", "typeName": "Xform"}]
         )
-        second = srv.process_txn(
+        second = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/Second", "typeName": "Xform"}]
         )
 
@@ -1219,10 +1222,10 @@ class TestBroadcast:
             return send_to_all(payload, **kwargs)
 
         monkeypatch.setattr(srv, "_send_to_all", observe_send)
-        first = srv.process_txn(
+        first = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/FirstFlat", "typeName": "Xform"}]
         )
-        second = srv.process_txn(
+        second = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/SecondFlat", "typeName": "Xform"}]
         )
 
@@ -1271,7 +1274,7 @@ class TestBroadcast:
         flat = FakeHandler(False)
         layered = FakeHandler(True)
         srv.receivers.update((flat, layered))
-        records = srv.process_txn(
+        records = srv._commit_events(
             [
                 {
                     "k": "ensure_prim",

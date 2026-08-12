@@ -2935,7 +2935,7 @@ class UsdSyncServer:
 
             first_reserved_seq = self._next_seq
             try:
-                records = self.process_txn(
+                records = self._process_txn_locked(
                     events,
                     client_id=client_id,
                     origin=origin,
@@ -3291,7 +3291,38 @@ class UsdSyncServer:
             )
         flush_pending()
 
-    def process_txn(
+    def _commit_events(
+        self,
+        events: list[dict],
+        *,
+        client_id: str | None = None,
+        origin: str | None = None,
+        client_addr: str | None = None,
+        layer: Sdf.Layer | None = None,
+        layer_key: str = "",
+    ) -> list[tuple[dict, bytes]]:
+        """Commit events for in-process tests and maintenance utilities.
+
+        Network producers must use :meth:`submit_idempotent_txn`. This private
+        helper deliberately omits producer identity and acknowledgements, but
+        still participates in the maintenance barrier, global commit order,
+        atomic USD rollback, and synchronous durable persistence.
+        """
+        self.txn_barrier.acquire_shared()
+        try:
+            with self._transaction_commit_lock:
+                return self._process_txn_locked(
+                    events,
+                    client_id=client_id,
+                    origin=origin,
+                    client_addr=client_addr,
+                    layer=layer,
+                    layer_key=layer_key,
+                )
+        finally:
+            self.txn_barrier.release_shared()
+
+    def _process_txn_locked(
         self,
         events: list[dict],
         *,
@@ -3302,14 +3333,7 @@ class UsdSyncServer:
         layer_key: str = "",
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply, seq-assign, encode, and persist a transaction.
-
-        Runs apply_txn, assigns monotonic sequence numbers, encodes each
-        event as a FlatBuffers record, and batches the persist to the
-        event store. Callers that need txn_barrier coordination (e.g.
-        ConnectionHandler around broadcast) must acquire/release the
-        shared lock themselves — this method does not, so it stays
-        composable with broader critical sections.
+        """Apply and durably persist events inside the global commit lock.
 
         Returns encoded broadcast records in input order. Callers that only
         need authoritative state plus a populated log may ignore the result.
@@ -3321,15 +3345,14 @@ class UsdSyncServer:
         if self.layer_mode is LayerMode.SHARED_STAGE:
             if layer is not None:
                 raise ValueError("managed layer routing is unavailable in shared-stage mode")
-            with self._shared_stage_commit_lock:
-                return self._process_shared_txn(
-                    events,
-                    layer_key=layer_key,
-                    client_id=client_id,
-                    origin=origin,
-                    client_addr=client_addr,
-                    transaction_identity=transaction_identity,
-                )
+            return self._process_shared_txn(
+                events,
+                layer_key=layer_key,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                transaction_identity=transaction_identity,
+            )
         if layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
         shared_only = {
@@ -3347,18 +3370,6 @@ class UsdSyncServer:
         if layer_key is None and any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        if transaction_identity is None:
-            records, persist_tuples = self._encode_managed_txn_records(
-                events,
-                client_id=client_id,
-                origin=origin,
-                client_addr=client_addr,
-                layer_key=layer_key,
-            )
-            self.apply_txn(events, layer=target_layer)
-            self.append_log_batch(persist_tuples)
-            return records
-
         # Keep the USD mutation inside the durable failure boundary. Scoped
         # snapshots make rollback proportional to touched prims rather than to
         # the full collaboration layer; session metadata uses a full snapshot.
@@ -3368,40 +3379,57 @@ class UsdSyncServer:
         has_session_events = any(
             event.get("k") in NON_COLLABORATION_KINDS for event in events
         )
-        records, persist_tuples = self._encode_managed_txn_records(
-            events,
-            client_id=client_id,
-            origin=origin,
-            client_addr=client_addr,
-            layer_key=layer_key,
-        )
-        if not client_id:
-            raise ValueError("idempotent transaction persistence requires client_id")
-        session_id, txn_id = transaction_identity
-        progress = ProducerProgress(
-            client_id,
-            session_id,
-            txn_id,
-        )
-        with self.stage_lock:
-            original_target = self.stage.GetEditTarget()
-            try:
-                with ExitStack() as rollback:
-                    if collaboration_paths:
-                        rollback.enter_context(
-                            atomic_apply_layer(target_layer, collaboration_paths)
-                        )
-                    if has_session_events:
-                        rollback.enter_context(
-                            atomic_apply_layer(self.stage.GetSessionLayer())
-                        )
-                    self.apply_txn(events, layer=target_layer)
-                    self.append_log_batch(
-                        persist_tuples,
-                        producer_progress=(progress,),
+        with self._seq_lock:
+            first_reserved_seq = self._next_seq
+        try:
+            records, persist_tuples = self._encode_managed_txn_records(
+                events,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                layer_key=layer_key,
+            )
+            producer_progress: tuple[ProducerProgress, ...] = ()
+            if transaction_identity is not None:
+                if not client_id:
+                    raise ValueError(
+                        "idempotent transaction persistence requires client_id"
                     )
-            finally:
-                self.stage.SetEditTarget(original_target)
+                session_id, txn_id = transaction_identity
+                producer_progress = (
+                    ProducerProgress(client_id, session_id, txn_id),
+                )
+
+            with self.stage_lock:
+                original_target = self.stage.GetEditTarget()
+                try:
+                    with ExitStack() as rollback:
+                        if collaboration_paths:
+                            rollback.enter_context(
+                                atomic_apply_layer(target_layer, collaboration_paths)
+                            )
+                        if has_session_events:
+                            rollback.enter_context(
+                                atomic_apply_layer(self.stage.GetSessionLayer())
+                            )
+                        self.apply_txn(events, layer=target_layer)
+                        # In-process commits have no producer progress to force
+                        # the synchronous EventStore path in realtime mode.
+                        # Persist them directly so rollback remains meaningful.
+                        self.store.append_batch(
+                            persist_tuples,
+                            producer_progress=producer_progress,
+                        )
+                        with self._seq_lock:
+                            self._event_count += len(persist_tuples)
+                finally:
+                    self.stage.SetEditTarget(original_target)
+        except Exception:
+            with self._seq_lock:
+                self._next_seq = first_reserved_seq
+            self.op_cache.clear()
+            self._op_cache_layer = None
+            raise
         return records
 
     def _encode_managed_txn_records(

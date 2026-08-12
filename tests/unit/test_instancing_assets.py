@@ -1,7 +1,7 @@
 """Livelink parity for real instancing assets.
 
 Drives the full pipeline minus TCP, with the repo's production assets:
-emitter.snapshot_events -> server.process_txn (apply + log, FlatBuffers
+emitter.snapshot_events -> private in-process commit (apply + log, FlatBuffers
 records) -> log replay -> receiver.apply_events. Assertions are scoped to
 instancing state so unrelated asset features don't make these brittle.
 
@@ -48,7 +48,7 @@ def srv(tmp_path):
 
 def _replay_through_server(srv, src_stage):
     emitter = NoticeEmitter(src_stage)
-    srv.process_txn(emitter.snapshot_events())
+    srv._commit_events(emitter.snapshot_events())
     rows = srv.store.get_all_asc()
     receiver = Usd.Stage.CreateInMemory()
     apply_events(receiver, [message_to_dict(r[1], numpy_arrays=True)["event"] for r in rows])
