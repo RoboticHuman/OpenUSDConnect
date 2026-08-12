@@ -281,6 +281,66 @@ def test_store_failure_rolls_back_usd_sequence_and_progress(tmp_path, monkeypatc
         server.store.close()
 
 
+def test_store_failure_does_not_publish_prim_or_instancing_indexes(
+    tmp_path, monkeypatch
+):
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "tracking-rollback.db"),
+        txn_batch_size=1,
+    )
+    append_batch = server.store.append_batch
+    failed = False
+
+    def fail_once(records, *, producer_progress=()):
+        nonlocal failed
+        if producer_progress and not failed:
+            failed = True
+            raise sqlite3.OperationalError("injected tracking persistence failure")
+        return append_batch(records, producer_progress=producer_progress)
+
+    events = [
+        {"k": "ensure_prim", "prim": "/World/Rollback", "typeName": "PointInstancer"},
+        {"k": "set_instanceable", "prim": "/World/Rollback", "instanceable": True},
+    ]
+    before = (
+        dict(server._prim_paths),
+        set(server._instanceable_paths),
+        set(server._point_instancer_paths),
+        server._prim_count_dirty,
+    )
+    monkeypatch.setattr(server.store, "append_batch", fail_once)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected tracking"):
+            server.process_idempotent_txn(
+                events,
+                client_id="client",
+                session_id="producer",
+                txn_id=1,
+            )
+
+        assert not server.stage.GetPrimAtPath("/World/Rollback").IsValid()
+        assert (
+            server._prim_paths,
+            server._instanceable_paths,
+            server._point_instancer_paths,
+            server._prim_count_dirty,
+        ) == before
+
+        committed = server.process_idempotent_txn(
+            events,
+            client_id="client",
+            session_id="producer",
+            txn_id=1,
+        )
+        assert committed.status == "committed"
+        assert server._prim_paths["/World/Rollback"] == "PointInstancer"
+        assert server._instanceable_paths == {"/World/Rollback"}
+        assert server._point_instancer_paths == {"/World/Rollback"}
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
 def test_private_commit_helper_rolls_back_usd_and_sequence(tmp_path, monkeypatch):
     server = UsdSyncServer(log_path=str(tmp_path / "private-rollback.db"))
     append_batch = server.store.append_batch
@@ -424,6 +484,12 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
     server = UsdSyncServer(log_path=str(tmp_path / "group-rename-rollback.db"))
     server.apply_txn([_event("/World/Old")])
     before = server.edit_layer.ExportToString()
+    before_tracking = (
+        dict(server._prim_paths),
+        set(server._instanceable_paths),
+        set(server._point_instancer_paths),
+        server._prim_count_dirty,
+    )
 
     def fail_group(_records, *, producer_progress=()):
         raise sqlite3.OperationalError("injected grouped persistence failure")
@@ -459,6 +525,12 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
         assert server.stage.GetPrimAtPath("/World/Old").IsValid()
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert not server.stage.GetPrimAtPath("/World/Other").IsValid()
+        assert (
+            server._prim_paths,
+            server._instanceable_paths,
+            server._point_instancer_paths,
+            server._prim_count_dirty,
+        ) == before_tracking
         assert server.store.get_count() == 0
         assert server._next_seq == 1
     finally:

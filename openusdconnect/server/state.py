@@ -886,6 +886,16 @@ class UsdSyncServer:
             else:
                 self._instanceable_paths.discard(prim)
 
+    def _update_prim_tracking(self, events: list[dict]) -> None:
+        """Publish dashboard indexes for successfully applied events."""
+        for event in events:
+            kind = event.get("k")
+            if kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                self._prim_count_dirty = True
+                self._track_prim_event(event)
+            elif kind == K_SET_INSTANCEABLE:
+                self._track_prim_event(event)
+
     def _replay_log_into_stage(self):
         """Apply all events from the event store to restore stage on startup.
 
@@ -2761,7 +2771,13 @@ class UsdSyncServer:
             finally:
                 self._persist_queue.task_done()
 
-    def apply_txn(self, events: list[dict], layer: Sdf.Layer | None = None) -> None:
+    def apply_txn(
+        self,
+        events: list[dict],
+        layer: Sdf.Layer | None = None,
+        *,
+        update_tracking: bool = True,
+    ) -> None:
         """Apply a transaction to the stage.
 
         Layer opinions are authored into *layer* (defaults to
@@ -2826,13 +2842,8 @@ class UsdSyncServer:
                 if was_muted:
                     self.stage.MuteLayer(target.identifier)
 
-            for ev in events:
-                k = ev.get("k")
-                if k in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
-                    self._prim_count_dirty = True
-                    self._track_prim_event(ev)
-                elif k == K_SET_INSTANCEABLE:
-                    self._track_prim_event(ev)
+            if update_tracking:
+                self._update_prim_tracking(events)
 
     def process_idempotent_txn(
         self,
@@ -3137,6 +3148,7 @@ class UsdSyncServer:
                                 self.apply_txn(
                                     transaction.request.events,
                                     layer=transaction.target_layer,
+                                    update_tracking=False,
                                 )
                             progress_by_producer = {
                                 (transaction.progress.client_id, transaction.progress.session_id):
@@ -3151,6 +3163,8 @@ class UsdSyncServer:
                                 ],
                                 producer_progress=tuple(progress_by_producer.values()),
                             )
+                            for transaction in prepared:
+                                self._update_prim_tracking(transaction.request.events)
                             for producer, progress in progress_by_producer.items():
                                 self._producer_progress_cache[producer] = (
                                     progress.committed_through
@@ -3425,7 +3439,11 @@ class UsdSyncServer:
                             rollback.enter_context(
                                 atomic_apply_layer(self.stage.GetSessionLayer())
                             )
-                        self.apply_txn(events, layer=target_layer)
+                        self.apply_txn(
+                            events,
+                            layer=target_layer,
+                            update_tracking=False,
+                        )
                         # In-process commits have no producer progress to force
                         # the synchronous EventStore path in realtime mode.
                         # Persist them directly so rollback remains meaningful.
@@ -3433,6 +3451,7 @@ class UsdSyncServer:
                             persist_tuples,
                             producer_progress=producer_progress,
                         )
+                        self._update_prim_tracking(events)
                         with self._seq_lock:
                             self._event_count += len(persist_tuples)
                 finally:
