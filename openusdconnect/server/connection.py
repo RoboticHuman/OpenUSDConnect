@@ -476,14 +476,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
                 if wait > 0:
-                    with self.send_lock:
-                        send_msg(
-                            self.request,
-                            {
-                                "type": MSG_RATE_LIMITED,
-                                "retry_after": round(wait, 3),
-                            },
-                        )
+                    self._send_control_response(
+                        {
+                            "type": MSG_RATE_LIMITED,
+                            "retry_after": round(wait, 3),
+                        }
+                    )
                     continue
 
             if results is None:
@@ -529,6 +527,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     event_count=len(events),
                 )
             )
+
+    def _send_control_response(self, message: dict) -> None:
+        """Serialize a read-loop response with asynchronous txn results."""
+        with self.send_lock:
+            send_msg(self.request, message)
 
     def _transaction_result_loop(
         self,
@@ -643,8 +646,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             initial_time=initial_time,
         )
         if not granted:
-            send_msg(
-                self.request,
+            self._send_control_response(
                 {
                     "type": MSG_PLAYBACK_REJECTED,
                     "reason": "another client holds the playback leader role",
@@ -652,8 +654,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 },
             )
             return
-        send_msg(
-            self.request,
+        self._send_control_response(
             {"type": MSG_PLAYBACK_CLAIMED, "leader_client_id": current_leader},
         )
         self._broadcast_playback_state(sync_server)
@@ -666,8 +667,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             float(msg.get("rate", 1.0)),
         )
         if not ok:
-            send_msg(
-                self.request,
+            self._send_control_response(
                 {
                     "type": MSG_PLAYBACK_REJECTED,
                     "reason": str(payload),
