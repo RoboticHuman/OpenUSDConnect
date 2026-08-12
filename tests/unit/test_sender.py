@@ -66,6 +66,63 @@ class TestEventSenderConnect:
                 conn.close()
             srv.close()
 
+    def test_concurrent_calls_preserve_transaction_id_wire_order(self, monkeypatch):
+        """Socket order must match IDs even when the second caller wins the race."""
+
+        class _SecondCallerFirstLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._state_lock = threading.Lock()
+                self._calls = 0
+                self._second_released = threading.Event()
+
+            def __enter__(self):
+                with self._state_lock:
+                    self._calls += 1
+                    call = self._calls
+                if call == 1:
+                    assert self._second_released.wait(timeout=2)
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self._lock.release()
+                with self._state_lock:
+                    if self._calls >= 2 and not self._second_released.is_set():
+                        self._second_released.set()
+
+        sender = EventSender("127.0.0.1", 1, client_id="concurrent-client")
+        sender.sock = object()
+        sender._send_lock = _SecondCallerFirstLock()
+        wire_txn_ids = []
+        monkeypatch.setattr(
+            "openusdconnect.sender.send_raw",
+            lambda _sock, payload: wire_txn_ids.append(
+                message_to_dict(payload)["txn_id"]
+            ),
+        )
+
+        results = []
+        threads = [
+            threading.Thread(
+                target=lambda prim=prim: results.append(
+                    sender.send_events(
+                        [{"k": "ensure_prim", "prim": prim, "typeName": "Xform"}]
+                    )
+                )
+            )
+            for prim in ("/World/First", "/World/Second")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert results == [True, True]
+        assert wire_txn_ids == [1, 2]
+        assert list(sender._pending) == [1, 2]
+
     def test_socket_has_nodelay(self):
         """Interactive txn frames are small; Nagle must not delay them."""
         srv, port = _make_server()

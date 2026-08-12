@@ -337,31 +337,36 @@ class EventSender:
         """
         if not events:
             return False
-        with self._condition:
-            if self.sock is None or self._failure is not None:
-                return False
-            if len(self._pending) >= self.max_pending_transactions:
-                return False
-            txn_id = self._next_txn_id
-            payload = encode_message(
-                make_txn(
-                    events,
-                    layer_key=layer_key,
-                    txn_id=txn_id,
-                )
-            )
-            self._pending[txn_id] = _PendingTransaction(payload, len(events), layer_key)
-            self._next_txn_id += 1
-            sock = self.sock
-
         try:
+            # Transaction identity and wire order are one operation. Without
+            # this outer lock, concurrent callers can allocate IDs 1 then 2
+            # but acquire the socket lock and transmit them as 2 then 1.
             with self._send_lock:
                 with self._condition:
-                    current = self.sock
-                if current is sock and current is not None:
-                    send_raw(current, payload)
+                    if self.sock is None or self._failure is not None:
+                        return False
+                    if len(self._pending) >= self.max_pending_transactions:
+                        return False
+                    txn_id = self._next_txn_id
+                    payload = encode_message(
+                        make_txn(
+                            events,
+                            layer_key=layer_key,
+                            txn_id=txn_id,
+                        )
+                    )
+                    self._pending[txn_id] = _PendingTransaction(
+                        payload, len(events), layer_key
+                    )
+                    self._next_txn_id += 1
+                    sock = self.sock
+                if sock is not None:
+                    send_raw(sock, payload)
         except OSError:
-            LOG.info("EventSender: send became ambiguous; retaining transaction", exc_info=True)
+            LOG.info(
+                "EventSender: send became ambiguous; retaining transaction",
+                exc_info=True,
+            )
             self._close(expected=sock)
         return True
 
