@@ -30,6 +30,8 @@ class _TxnBarrier:
 
     def acquire_exclusive(self):
         with self._cond:
+            while self._exclusive:
+                self._cond.wait()
             self._exclusive = True
             while self._readers > 0:
                 self._cond.wait()
