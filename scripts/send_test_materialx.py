@@ -31,10 +31,15 @@ def main():
 
     s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
 
-    send_msg(s, make_hello("emitter"))
+    send_msg(
+        s,
+        make_hello(
+            "emitter", client_id="cli", producer_session_id="materialx-test-cli"
+        ),
+    )
     send_msg(s, {
         "type": "txn",
-        "client_id": "cli",
+        "txn_id": 1,
         "events": [
             {"k": "ensure_prim", "prim": "/World/Teapot", "typeName": "Xform"},
             {

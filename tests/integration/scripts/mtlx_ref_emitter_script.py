@@ -27,10 +27,17 @@ def main():
 
     s = socket.create_connection(("127.0.0.1", args.port), timeout=5)
 
-    send_msg(s, make_hello("emitter"))
+    send_msg(
+        s,
+        make_hello(
+            "emitter",
+            client_id="mtlx_ref_emitter",
+            producer_session_id="mtlx-reference-emitter",
+        ),
+    )
     send_msg(s, {
         "type": "txn",
-        "client_id": "mtlx_ref_emitter",
+        "txn_id": 1,
         "events": [
             {"k": "ensure_prim", "prim": "/World/Teapot", "typeName": "Xform"},
             {"k": "ensure_xform_ops", "prim": "/World/Teapot"},

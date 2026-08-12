@@ -85,6 +85,19 @@ class HelloRejectionCode(object):
     LayerModeMismatch = 2
 
 
+class TransactionStatus(object):
+    Acknowledged = 0
+    Rejected = 1
+
+
+class TransactionRejectionCode(object):
+    None_ = 0
+    InvalidIdentity = 1
+    UnexpectedId = 2
+    StaleLayerGraph = 3
+    InvalidTransaction = 4
+
+
 class Payload(object):
     NONE = 0
     Hello = 1
@@ -96,17 +109,17 @@ class Payload(object):
     Compact = 7
     Ping = 8
     Quit = 9
-    CreateProposal = 10
-    ProposalCreated = 11
-    RateLimited = 12
-    ClaimPlayback = 13
-    PlaybackClaimed = 14
-    PlaybackRejected = 15
-    PlaybackControl = 16
-    PlaybackState = 17
-    LayerStackState = 18
-    HelloRejected = 19
-    LayerGraphState = 20
+    RateLimited = 10
+    ClaimPlayback = 11
+    PlaybackClaimed = 12
+    PlaybackRejected = 13
+    PlaybackControl = 14
+    PlaybackState = 15
+    LayerStackState = 16
+    HelloRejected = 17
+    LayerGraphState = 18
+    TransactionResult = 19
+    ReplayComplete = 20
 
 
 class AttrValue(object):
@@ -2899,8 +2912,15 @@ class Hello(object):
             return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
         return 0
 
+    # Hello
+    def ProducerSessionId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def HelloStart(builder):
-    builder.StartObject(9)
+    builder.StartObject(10)
 
 def HelloAddRole(builder, role):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(role), 0)
@@ -2928,6 +2948,9 @@ def HelloAddLayeredReplay(builder, layeredReplay):
 
 def HelloAddLayerMode(builder, layerMode):
     builder.PrependUint8Slot(8, layerMode, 0)
+
+def HelloAddProducerSessionId(builder, producerSessionId):
+    builder.PrependUOffsetTRelativeSlot(9, flatbuffers.number_types.UOffsetTFlags.py_type(producerSessionId), 0)
 
 def HelloEnd(builder):
     return builder.EndObject()
@@ -2983,8 +3006,15 @@ class HelloOk(object):
             return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
         return 0
 
+    # HelloOk
+    def CommittedThrough(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def HelloOkStart(builder):
-    builder.StartObject(4)
+    builder.StartObject(5)
 
 def HelloOkAddToken(builder, token):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(token), 0)
@@ -2997,6 +3027,9 @@ def HelloOkAddLayeredReplay(builder, layeredReplay):
 
 def HelloOkAddLayerMode(builder, layerMode):
     builder.PrependUint8Slot(3, layerMode, 0)
+
+def HelloOkAddCommittedThrough(builder, committedThrough):
+    builder.PrependUint64Slot(4, committedThrough, 0)
 
 def HelloOkEnd(builder):
     return builder.EndObject()
@@ -3104,15 +3137,8 @@ class Txn(object):
         self._tab = flatbuffers.table.Table(buf, pos)
 
     # Txn
-    def ClientId(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-    # Txn
     def Events(self, j):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             x = self._tab.Vector(o)
             x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
@@ -3124,49 +3150,168 @@ class Txn(object):
 
     # Txn
     def EventsLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         if o != 0:
             return self._tab.VectorLen(o)
         return 0
 
     # Txn
     def EventsIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         return o == 0
 
     # Txn
-    def ProposalId(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+    def LayerKey(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         if o != 0:
             return self._tab.String(o + self._tab.Pos)
         return None
 
     # Txn
-    def LayerKey(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+    def TxnId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
 
 def TxnStart(builder):
-    builder.StartObject(4)
-
-def TxnAddClientId(builder, clientId):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(clientId), 0)
+    builder.StartObject(3)
 
 def TxnAddEvents(builder, events):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(events), 0)
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(events), 0)
 
 def TxnStartEventsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
 
-def TxnAddProposalId(builder, proposalId):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(proposalId), 0)
-
 def TxnAddLayerKey(builder, layerKey):
-    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
+
+def TxnAddTxnId(builder, txnId):
+    builder.PrependUint64Slot(2, txnId, 0)
 
 def TxnEnd(builder):
+    return builder.EndObject()
+
+
+
+class TransactionResult(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = TransactionResult()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsTransactionResult(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # TransactionResult
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # TransactionResult
+    def TxnId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+    # TransactionResult
+    def Status(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
+        return 0
+
+    # TransactionResult
+    def ExpectedTxnId(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+    # TransactionResult
+    def RejectionCode(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
+        return 0
+
+    # TransactionResult
+    def Reason(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(12))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def TransactionResultStart(builder):
+    builder.StartObject(5)
+
+def TransactionResultAddTxnId(builder, txnId):
+    builder.PrependUint64Slot(0, txnId, 0)
+
+def TransactionResultAddStatus(builder, status):
+    builder.PrependUint8Slot(1, status, 0)
+
+def TransactionResultAddExpectedTxnId(builder, expectedTxnId):
+    builder.PrependUint64Slot(2, expectedTxnId, 0)
+
+def TransactionResultAddRejectionCode(builder, rejectionCode):
+    builder.PrependUint8Slot(3, rejectionCode, 0)
+
+def TransactionResultAddReason(builder, reason):
+    builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
+
+def TransactionResultEnd(builder):
+    return builder.EndObject()
+
+
+
+class ReplayComplete(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ReplayComplete()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsReplayComplete(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ReplayComplete
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ReplayComplete
+    def HeadSeq(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int32Flags, o + self._tab.Pos)
+        return 0
+
+    # ReplayComplete
+    def Epoch(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+def ReplayCompleteStart(builder):
+    builder.StartObject(2)
+
+def ReplayCompleteAddHeadSeq(builder, headSeq):
+    builder.PrependInt32Slot(0, headSeq, 0)
+
+def ReplayCompleteAddEpoch(builder, epoch):
+    builder.PrependUint64Slot(1, epoch, 0)
+
+def ReplayCompleteEnd(builder):
     return builder.EndObject()
 
 
@@ -3360,118 +3505,6 @@ def QuitStart(builder):
     builder.StartObject(0)
 
 def QuitEnd(builder):
-    return builder.EndObject()
-
-
-
-class CreateProposal(object):
-    __slots__ = ['_tab']
-
-    @classmethod
-    def GetRootAs(cls, buf, offset=0):
-        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = CreateProposal()
-        x.Init(buf, n + offset)
-        return x
-
-    @classmethod
-    def GetRootAsCreateProposal(cls, buf, offset=0):
-        """This method is deprecated. Please switch to GetRootAs."""
-        return cls.GetRootAs(buf, offset)
-    # CreateProposal
-    def Init(self, buf, pos):
-        self._tab = flatbuffers.table.Table(buf, pos)
-
-    # CreateProposal
-    def TargetDepartment(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-    # CreateProposal
-    def Events(self, j):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            x = self._tab.Vector(o)
-            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
-            x = self._tab.Indirect(x)
-            obj = EventWrapper()
-            obj.Init(self._tab.Bytes, x)
-            return obj
-        return None
-
-    # CreateProposal
-    def EventsLength(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        if o != 0:
-            return self._tab.VectorLen(o)
-        return 0
-
-    # CreateProposal
-    def EventsIsNone(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
-        return o == 0
-
-    # CreateProposal
-    def Description(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-def CreateProposalStart(builder):
-    builder.StartObject(3)
-
-def CreateProposalAddTargetDepartment(builder, targetDepartment):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(targetDepartment), 0)
-
-def CreateProposalAddEvents(builder, events):
-    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(events), 0)
-
-def CreateProposalStartEventsVector(builder, numElems):
-    return builder.StartVector(4, numElems, 4)
-
-def CreateProposalAddDescription(builder, description):
-    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(description), 0)
-
-def CreateProposalEnd(builder):
-    return builder.EndObject()
-
-
-
-class ProposalCreated(object):
-    __slots__ = ['_tab']
-
-    @classmethod
-    def GetRootAs(cls, buf, offset=0):
-        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
-        x = ProposalCreated()
-        x.Init(buf, n + offset)
-        return x
-
-    @classmethod
-    def GetRootAsProposalCreated(cls, buf, offset=0):
-        """This method is deprecated. Please switch to GetRootAs."""
-        return cls.GetRootAs(buf, offset)
-    # ProposalCreated
-    def Init(self, buf, pos):
-        self._tab = flatbuffers.table.Table(buf, pos)
-
-    # ProposalCreated
-    def ProposalId(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
-        if o != 0:
-            return self._tab.String(o + self._tab.Pos)
-        return None
-
-def ProposalCreatedStart(builder):
-    builder.StartObject(1)
-
-def ProposalCreatedAddProposalId(builder, proposalId):
-    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(proposalId), 0)
-
-def ProposalCreatedEnd(builder):
     return builder.EndObject()
 
 
@@ -3943,8 +3976,15 @@ class SharedLayerState(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
         return o == 0
 
+    # SharedLayerState
+    def Revision(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def SharedLayerStateStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def SharedLayerStateAddLayerKey(builder, layerKey):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(layerKey), 0)
@@ -3954,6 +3994,9 @@ def SharedLayerStateAddSublayers(builder, sublayers):
 
 def SharedLayerStateStartSublayersVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def SharedLayerStateAddRevision(builder, revision):
+    builder.PrependUint64Slot(2, revision, 0)
 
 def SharedLayerStateEnd(builder):
     return builder.EndObject()

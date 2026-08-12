@@ -34,11 +34,14 @@ def log(msg):
 
 
 def send_cli_events(events):
+    global _cli_txn_id
     from openusdconnect.protocol import make_hello
     from openusdconnect.transport import send_line
     s = _socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=5)
-    send_line(s, make_hello("emitter", client_id="e2e_cli"))
-    send_line(s, {"type": "txn", "client_id": "e2e_cli", "events": events})
+    send_line(s, make_hello(
+        "emitter", client_id="e2e_cli", producer_session_id="simpleasset-reverse-e2e"))
+    _cli_txn_id += 1
+    send_line(s, {"type": "txn", "events": events, "txn_id": _cli_txn_id})
     s.close()
 
 
@@ -60,6 +63,8 @@ def query_db_events(kind_filter=None):
         conn.close()
 
 
+_cli_txn_id = 0
+_cli_txn_id = 0
 _step = 0
 _retries = 0
 _initial_event_count = 0

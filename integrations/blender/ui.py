@@ -72,10 +72,22 @@ def _draw_emitter_section(layout, scene):
     if scene.usd_connect_auto_track:
         col.prop(scene, "usd_connect_auto_track_root")
 
+    from . import capture
+
+    sender = capture.get_emitter_sender()
     row = box.row()
     if scene.usd_connect_net_emitter_running:
         row.operator("usd_connect.disconnect_emitter", icon="PAUSE")
-        box.label(text="Emitter connected", icon="CHECKMARK")
+        if sender is not None and sender.recovery_required is True:
+            box.label(text="Publishing paused: recovery required", icon="ERROR")
+            box.label(text=sender.recovery_disposition.value.replace("_", " ").title())
+            box.label(text=sender.transaction_error)
+        elif sender is not None and sender.connected:
+            box.label(text="Emitter connected", icon="CHECKMARK")
+        else:
+            box.label(text="Emitter reconnecting", icon="FILE_REFRESH")
+        if sender is not None and sender.pending_transaction_count:
+            box.label(text=f"Pending transactions: {sender.pending_transaction_count}")
     else:
         row.operator("usd_connect.connect_emitter", icon="PLAY")
 

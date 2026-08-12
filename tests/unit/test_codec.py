@@ -48,7 +48,7 @@ class TestSchemaVersion:
     def test_current_schema_version(self):
         from openusdconnect.codec import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 6
+        assert SCHEMA_VERSION == 10
 
     @pytest.mark.parametrize("version", [0, 1])
     def test_incompatible_version_is_rejected(self, version):
@@ -92,6 +92,7 @@ class TestHello:
             "origin": "blender-1",
             "department": "anim",
             "token": "tok-abc",
+            "producer_session_id": "producer-1",
         }
         d, _ = _roundtrip(msg)
         assert d == msg
@@ -127,6 +128,52 @@ class TestHelloOk:
     def test_without_token(self):
         d, _ = _roundtrip({"type": "hello_ok"})
         assert d == {"type": "hello_ok"}
+
+
+class TestReplayComplete:
+    def test_roundtrip_and_zero_copy_access(self):
+        msg = {"type": "replay_complete", "head_seq": 42, "epoch": 7}
+        decoded, buf = _roundtrip(msg)
+        assert decoded == msg
+        env = decode_envelope(buf)
+        assert env.PayloadType() == PayloadType.ReplayComplete
+        _, complete = resolve_payload(env)
+        assert complete.HeadSeq() == 42
+        assert complete.Epoch() == 7
+
+
+class TestLayerGraphState:
+    def test_parent_revisions_round_trip(self):
+        msg = {
+            "type": "layer_graph_state",
+            "seq": 17,
+            "generation": "generation-a",
+            "revision": 4,
+            "root_layer_key": "layer:root",
+            "layers": [
+                {
+                    "layer_key": "layer:root",
+                    "revision": 3,
+                    "sublayers": [
+                        {
+                            "authored_path": "./asset.usda",
+                            "offset": 0.0,
+                            "scale": 1.0,
+                            "layer_key": "layer:asset",
+                        }
+                    ],
+                },
+                {
+                    "layer_key": "layer:asset",
+                    "revision": 1,
+                    "sublayers": [],
+                },
+            ],
+        }
+
+        decoded, _ = _roundtrip(msg)
+
+        assert decoded == msg
 
 
 class TestAuthRejected:
@@ -169,29 +216,31 @@ class TestRateLimited:
         assert abs(d["retry_after"] - 1.5) < 0.01
 
 
-class TestProposalCreated:
-    def test_roundtrip(self):
-        d, _ = _roundtrip({"type": "proposal_created", "proposal_id": "p-123"})
-        assert d["proposal_id"] == "p-123"
+class TestTransactionIdentity:
+    def test_txn_and_result_roundtrip(self):
+        txn, _ = _roundtrip({
+            "type": "txn",
+            "events": [],
+            "txn_id": 9,
+        })
+        assert txn["txn_id"] == 9
 
+        result, _ = _roundtrip({
+            "type": "transaction_result",
+            "txn_id": 9,
+            "status": "acknowledged",
+        })
+        assert result["status"] == _fb.TransactionStatus.Acknowledged
 
-class TestTxnProposalId:
-    def test_roundtrip_with_proposal_id(self):
-        msg = {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-abc"}
-        d, _ = _roundtrip(msg)
-        assert d["proposal_id"] == "prop-abc"
-
-    def test_absent_when_not_set(self):
-        d, _ = _roundtrip({"type": "txn", "client_id": "c1", "events": []})
-        assert "proposal_id" not in d
-
-    def test_zero_copy_accessor(self):
-        # The connection handler reads txn.ProposalId() to route proposal edits.
-        buf = encode_message(
-            {"type": "txn", "client_id": "c1", "events": [], "proposal_id": "prop-xyz"}
-        )
-        _, txn = resolve_payload(decode_envelope(buf))
-        assert txn.ProposalId() in (b"prop-xyz", "prop-xyz")
+        rejected, _ = _roundtrip({
+            "type": "transaction_result",
+            "txn_id": 10,
+            "status": "rejected",
+            "rejection_code": "stale_layer_graph",
+            "reason": "obsolete topology",
+        })
+        assert rejected["rejection_code"] == _fb.TransactionRejectionCode.StaleLayerGraph
+        assert rejected["reason"] == "obsolete topology"
 
 
 # ===================================================================
@@ -649,25 +698,6 @@ class TestBroadcastEvent:
         assert d["seq"] == 42
         assert d["event"]["k"] == "set_visibility"
         assert d["origin"] == "blender-1"
-
-
-# ===================================================================
-# CreateProposal
-# ===================================================================
-
-
-class TestCreateProposal:
-    def test_roundtrip(self):
-        msg = {
-            "type": "create_proposal",
-            "target_department": "lighting",
-            "events": [{"k": "set_visibility", "prim": "/World/X", "visible": False}],
-            "description": "hide for lighting pass",
-        }
-        d, _ = _roundtrip(msg)
-        assert d["target_department"] == "lighting"
-        assert d["events"][0]["visible"] is False
-        assert d["description"] == "hide for lighting pass"
 
 
 # ===================================================================

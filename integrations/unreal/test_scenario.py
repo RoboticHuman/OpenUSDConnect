@@ -300,6 +300,34 @@ def _preview_surface_events(
             "fields": ["t"],
             "t": [1.5, 0.75, -1.0],
         },
+        {"k": "ensure_prim", "prim": "/World/Prototypes", "typeName": "Scope"},
+        {"k": "ensure_prim", "prim": "/World/Prototypes/Ball", "typeName": "Xform"},
+        {
+            "k": "ensure_prim",
+            "prim": "/World/Prototypes/Ball/Geom",
+            "typeName": "Sphere",
+        },
+        {
+            "k": "set_gprim_attrs",
+            "prim": "/World/Prototypes/Ball/Geom",
+            "attrs": {"radius": 0.3},
+        },
+        {"k": "ensure_prim", "prim": "/World/InstanceBall", "typeName": "Xform"},
+        {
+            "k": "set_reference",
+            "prim": "/World/InstanceBall",
+            "refs": [{"asset_path": "", "prim_path": "/World/Prototypes/Ball"}],
+        },
+        {"k": "set_instanceable", "prim": "/World/InstanceBall", "instanceable": True},
+        {"k": "ensure_prim", "prim": "/World/BallInstancer", "typeName": "PointInstancer"},
+        {
+            "k": "set_point_instancer",
+            "prim": "/World/BallInstancer",
+            "fields": ["prototypes", "proto_indices", "positions"],
+            "prototypes": ["/World/Prototypes/Ball"],
+            "proto_indices": [0, 0, 0],
+            "positions": [[-1.5, 0.3, -2.0], [0.0, 0.3, -2.0], [1.5, 0.3, -2.0]],
+        },
         {"k": "ensure_prim", "prim": "/World/Looks/Live", "typeName": "Material"},
         {
             "k": "ensure_prim",
@@ -423,6 +451,12 @@ def _preview_surface_events(
             "fields": ["t"],
             "t": [2.25, 1.0, -0.5],
         },
+        {
+            "k": "set_point_instancer",
+            "prim": "/World/BallInstancer",
+            "fields": ["positions"],
+            "positions": [[-2.0, 0.5, -2.0], [0.0, 1.0, -2.0], [2.0, 0.5, -2.0]],
+        },
         {"k": "set_visibility", "prim": "/World/TexturedPanel", "visible": True},
     ]
     return baseline, initial, updates
@@ -457,9 +491,9 @@ def create_scenario(work_dir: Path, *, port: int, python_executable: Path) -> Un
         "./textures/brass_color.jpg",
         "./textures/brass_roughness.jpg",
     )
-    baseline = message_to_dict(encode_message(make_txn("unreal-test", baseline)))["events"]
-    initial = message_to_dict(encode_message(make_txn("unreal-test", initial)))["events"]
-    updates = message_to_dict(encode_message(make_txn("unreal-test", updates)))["events"]
+    baseline = message_to_dict(encode_message(make_txn(baseline)))["events"]
+    initial = message_to_dict(encode_message(make_txn(initial)))["events"]
+    updates = message_to_dict(encode_message(make_txn(updates)))["events"]
     apply_events(stage, baseline)
     stage.GetRootLayer().Save()
     expected = Usd.Stage.Open(str(base_stage))

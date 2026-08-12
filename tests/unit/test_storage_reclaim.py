@@ -76,7 +76,7 @@ def _heavy_server(tmp_path, name, **kw):
          "attrs": {"points": [[float(i), 0.0, 0.0]] * 3000}}
         for i in range(40)
     ]
-    srv.process_txn(events, client_id="c", origin="o", client_addr="a:1")
+    srv._commit_events(events, client_id="c", origin="o", client_addr="a:1")
     return srv, db
 
 

@@ -14,6 +14,7 @@ from openusdconnect.connectable_attrs import (
 from openusdconnect.protocol import (
     make_hello,
     make_quit,
+    make_replay_complete,
     make_txn,
 )
 from openusdconnect.protocol_constants import (
@@ -35,6 +36,7 @@ from openusdconnect.protocol_constants import (
     K_UNLOAD_PAYLOAD,
     MSG_HELLO,
     MSG_QUIT,
+    MSG_REPLAY_COMPLETE,
     MSG_TXN,
     PROTOCOL_VERSION,
     SESSION_LAYER_KINDS,
@@ -96,11 +98,12 @@ class TestConnectableAttrHelpers:
 
 class TestMessageConstruction:
     def test_make_hello_emitter(self):
-        msg = make_hello("emitter")
+        msg = make_hello("emitter", producer_session_id="producer-1")
         assert msg["type"] == MSG_HELLO
         assert msg["role"] == "emitter"
         assert msg["protocol_version"] == PROTOCOL_VERSION
         assert "sync_from" not in msg
+        assert msg["producer_session_id"] == "producer-1"
 
     def test_make_hello_receiver_with_sync(self):
         msg = make_hello("receiver", sync_from=5)
@@ -128,17 +131,29 @@ class TestMessageConstruction:
 
     def test_make_txn(self):
         events = [{"k": K_ENSURE_PRIM, "prim": "/World/Foo", "typeName": "Xform"}]
-        msg = make_txn("client-1", events)
+        msg = make_txn(events)
         assert msg["type"] == MSG_TXN
-        assert msg["client_id"] == "client-1"
         assert msg["events"] == events
 
-        targeted = make_txn("client-1", events, layer_key="layer:root")
+        targeted = make_txn(events, layer_key="layer:root")
         assert targeted["layer_key"] == "layer:root"
+
+        identified = make_txn(events, txn_id=42)
+        assert identified["txn_id"] == 42
 
     def test_make_quit(self):
         msg = make_quit()
         assert msg["type"] == MSG_QUIT
+
+    def test_make_replay_complete(self):
+        msg = make_replay_complete(42, 3)
+        assert msg == {
+            "type": MSG_REPLAY_COMPLETE,
+            "head_seq": 42,
+            "epoch": 3,
+        }
+        with pytest.raises(ValueError, match="cannot be negative"):
+            make_replay_complete(-1, 0)
 
 
 def test_every_event_kind_has_one_target_domain():

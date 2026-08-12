@@ -32,6 +32,9 @@ DEPARTMENTS = "lighting,animation,layout"
 DB_PATH = "demo_layer_dashboard.db"
 
 
+_TXN_IDS = {}
+
+
 def connect_emitter(port, client_id, origin, department):
     """Connect an emitter socket and send hello."""
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
@@ -42,6 +45,7 @@ def connect_emitter(port, client_id, origin, department):
             client_id=client_id,
             origin=origin,
             department=department,
+            producer_session_id=origin,
         ),
     )
     # Read hello_ok response
@@ -51,13 +55,18 @@ def connect_emitter(port, client_id, origin, department):
     except Exception:
         pass
     s.settimeout(5)
+    _TXN_IDS[s.fileno()] = 0
     return s
 
 
 def send_txn(sock, client_id, events, proposal_id=None):
-    msg = {"type": "txn", "client_id": client_id, "events": events}
+    fileno = sock.fileno()
+    msg = {"type": "txn", "events": events}
     if proposal_id:
         msg["proposal_id"] = proposal_id
+    else:
+        _TXN_IDS[fileno] = _TXN_IDS.get(fileno, 0) + 1
+        msg["txn_id"] = _TXN_IDS[fileno]
     send_msg(sock, msg)
 
 

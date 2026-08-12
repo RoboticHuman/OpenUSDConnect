@@ -12,13 +12,14 @@ using namespace OUC;
 
 static TArray<uint8> FinishTxnFrame(
 	flatbuffers::FlatBufferBuilder& Builder,
-	const FString& ClientId,
+	uint64 TxnId,
 	const std::vector<flatbuffers::Offset<OpenUSDConnect::EventWrapper>>& Events)
 {
 	const auto Txn = OpenUSDConnect::CreateTxn(
 		Builder,
-		Builder.CreateString(TCHAR_TO_UTF8(*ClientId)),
-		Builder.CreateVector(Events));
+		Builder.CreateVector(Events),
+		0,
+		TxnId);
 
 	Builder.Finish(OpenUSDConnect::CreateEnvelope(
 		Builder,
@@ -33,7 +34,7 @@ static TArray<uint8> FinishTxnFrame(
 // Build Envelope { Txn { events: [EventWrapper{SetXformTrs}, ...] } }
 // ---------------------------------------------------------------------------
 TArray<uint8> BuildXformTxnFrame(
-	const FString& ClientId,
+	uint64 TxnId,
 	const TArray<FEmitXformTrs>& Xforms,
 	bool bIncludeEnsureXformOps)
 {
@@ -69,13 +70,15 @@ TArray<uint8> BuildXformTxnFrame(
 			Builder, OpenUSDConnect::EventPayload::SetXformTrs, Trs.Union()));
 	}
 
-	return FinishTxnFrame(Builder, ClientId, Events);
+	return FinishTxnFrame(Builder, TxnId, Events);
 }
 
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetVisibility}, ...] } }
 // ---------------------------------------------------------------------------
-TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmitVisibility>& Visibilities)
+TArray<uint8> BuildVisibilityTxnFrame(
+	uint64 TxnId,
+	const TArray<FEmitVisibility>& Visibilities)
 {
 	if (Visibilities.IsEmpty()) return {};
 
@@ -95,13 +98,15 @@ TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmi
 			Builder, OpenUSDConnect::EventPayload::SetVisibility, Vis.Union()));
 	}
 
-	return FinishTxnFrame(Builder, ClientId, Events);
+	return FinishTxnFrame(Builder, TxnId, Events);
 }
 
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetConnectableInput}, ...] } }
 // ---------------------------------------------------------------------------
-TArray<uint8> BuildConnectableInputTxnFrame(const FString& ClientId, const TArray<FEmitConnectableInput>& InEvents)
+TArray<uint8> BuildConnectableInputTxnFrame(
+	uint64 TxnId,
+	const TArray<FEmitConnectableInput>& InEvents)
 {
 	if (InEvents.IsEmpty()) return {};
 
@@ -158,5 +163,5 @@ TArray<uint8> BuildConnectableInputTxnFrame(const FString& ClientId, const TArra
 			Builder, OpenUSDConnect::EventPayload::SetConnectableInput, Ci.Union()));
 	}
 
-	return FinishTxnFrame(Builder, ClientId, Events);
+	return FinishTxnFrame(Builder, TxnId, Events);
 }

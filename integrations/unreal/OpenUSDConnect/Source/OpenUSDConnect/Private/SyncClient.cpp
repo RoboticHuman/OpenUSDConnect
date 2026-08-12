@@ -37,7 +37,8 @@ FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
 	, SessionOrigin(InSessionOrigin)
 	, AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
-	, LastSeq(InInitialLastSeq)
+	, LastReceivedSeq(InInitialLastSeq)
+	, LastAppliedSeq(InInitialLastSeq)
 	, Socket(nullptr)
 	, Thread(nullptr)
 	, bShouldStop(false)
@@ -142,7 +143,8 @@ uint32 FSyncClient::Run()
 		bHasAnnouncedFailure = false;
 
 		// --- Send HELLO ---
-		const int32 SyncFrom = LastSeq > 0 ? LastSeq + 1 : 1;
+		LastReceivedSeq = LastAppliedSeq.load(std::memory_order_acquire);
+		const int32 SyncFrom = LastReceivedSeq > 0 ? LastReceivedSeq + 1 : 1;
 		UE_LOG(LogUSDConnect, Log,
 			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"),
 			*Host, Port, SyncFrom);
@@ -204,6 +206,8 @@ uint32 FSyncClient::Run()
 			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
 			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
 			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
+			++ReplayGeneration;
+			if (Owner) { Owner->OnReceiverReplayGenerationChanged(ReplayGeneration); }
 			if (Owner) { Owner->OnClientHelloOk(TEXT("receiver")); }
 			if (!IssuedToken.IsEmpty())
 			{
@@ -220,7 +224,11 @@ uint32 FSyncClient::Run()
 		{
 			TArray<uint8> Frame;
 			if (!RecvFrame(Frame)) break;
-			HandleFrame(Frame);
+			if (!HandleFrame(Frame)) break;
+		}
+		if (!bShouldStop.load(std::memory_order_relaxed) && Owner)
+		{
+			Owner->OnReceiverReplayGenerationChanged(ReplayGeneration + 1);
 		}
 
 		bConnected.store(false, std::memory_order_relaxed);
@@ -240,6 +248,26 @@ uint32 FSyncClient::Run()
 void FSyncClient::Stop()
 {
 	bShouldStop.store(true, std::memory_order_relaxed);
+	InterruptSocket();
+}
+
+void FSyncClient::MarkAppliedThrough(int32 Seq)
+{
+	int32 Current = LastAppliedSeq.load(std::memory_order_acquire);
+	while (Seq > Current
+		&& !LastAppliedSeq.compare_exchange_weak(
+			Current, Seq, std::memory_order_release, std::memory_order_acquire))
+	{
+	}
+}
+
+void FSyncClient::ResetAppliedProgress()
+{
+	LastAppliedSeq.store(0, std::memory_order_release);
+}
+
+void FSyncClient::RequestReplayFromApplied()
+{
 	InterruptSocket();
 }
 
@@ -331,34 +359,48 @@ bool FSyncClient::SendAll(const uint8* Data, int32 Len)
 	return true;
 }
 
-void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
+bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 {
 	const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
+	if (!Env)
+	{
+		UE_LOG(LogUSDConnect, Error, TEXT("Invalid receiver frame — requesting replay"));
+		return false;
+	}
 	const OpenUSDConnect::Payload PType =
-		Env ? Env->payload_type() : OpenUSDConnect::Payload::NONE;
+		Env->payload_type();
 
 	if (PType == OpenUSDConnect::Payload::BroadcastEvent)
 	{
-		if (const OpenUSDConnect::BroadcastEvent* BcEvent = Env->payload_as_BroadcastEvent())
+		const OpenUSDConnect::BroadcastEvent* BcEvent = Env->payload_as_BroadcastEvent();
+		if (!BcEvent)
 		{
-			const int32 Seq = BcEvent->seq();
-			if (Seq > LastSeq) LastSeq = Seq;
-
-			// Echo suppression: skip events we originated (server broadcasts them back).
-			const FString Origin = ToFString(BcEvent->origin());
-			if (!Origin.IsEmpty() && Origin == SessionOrigin)
-			{
-				return;
-			}
-
-			UE_LOG(LogUSDConnect, Verbose,
-				TEXT("Received BroadcastEvent seq=%d origin='%s'"), Seq, *Origin);
+			UE_LOG(LogUSDConnect, Error, TEXT("Invalid BroadcastEvent — requesting replay"));
+			return false;
 		}
+		const int32 Seq = BcEvent->seq();
+		if (Seq <= LastReceivedSeq)
+		{
+			UE_LOG(LogUSDConnect, Verbose, TEXT("Ignoring duplicate receiver seq=%d"), Seq);
+			return true;
+		}
+		const int32 ExpectedSeq = LastReceivedSeq + 1;
+		if (Seq != ExpectedSeq)
+		{
+			UE_LOG(LogUSDConnect, Error,
+				TEXT("Receiver sequence gap: expected=%d received=%d — requesting replay"),
+				ExpectedSeq, Seq);
+			return false;
+		}
+		LastReceivedSeq = Seq;
+		const FString Origin = ToFString(BcEvent->origin());
+		UE_LOG(LogUSDConnect, Verbose,
+			TEXT("Received BroadcastEvent seq=%d origin='%s'"), Seq, *Origin);
 
 		TArray<uint8> Copy = Frame;
 		if (Owner)
 		{
-			Owner->EnqueueEvent(MoveTemp(Copy));
+			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
 		}
 	}
 	else if (PType == OpenUSDConnect::Payload::Ping)
@@ -376,7 +418,25 @@ void FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	else if (PType == OpenUSDConnect::Payload::Resync)
 	{
 		UE_LOG(LogUSDConnect, Log, TEXT("Resync received — resetting seq counter"));
-		LastSeq = 0;
+		LastReceivedSeq = 0;
+		++ReplayGeneration;
+		if (Owner)
+		{
+			Owner->OnReceiverReplayGenerationChanged(ReplayGeneration);
+			TArray<uint8> Copy = Frame;
+			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
+		}
+	}
+	else if (PType == OpenUSDConnect::Payload::ReplayComplete)
+	{
+		// Keep the marker in the same FIFO as BroadcastEvent frames. The game
+		// thread declares READY only after every preceding replay frame applied.
+		TArray<uint8> Copy = Frame;
+		if (Owner)
+		{
+			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
+		}
 	}
 	// Handshake responses do not appear in the receive loop.
+	return true;
 }

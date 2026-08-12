@@ -1,11 +1,9 @@
-"""Server-side dataclasses: connected-client metadata and edit proposals."""
+"""Server-side dataclasses and error types."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-
-from pxr import Sdf
 
 
 @dataclass
@@ -20,22 +18,6 @@ class ClientInfo:
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     event_count: int = 0
-
-
-@dataclass
-class Proposal:
-    """Metadata for a cross-department edit proposal."""
-
-    proposal_id: str
-    from_client: str
-    from_department: str | None
-    target_department: str
-    description: str
-    layer: Sdf.Layer
-    status: str = "pending"  # pending, approved, rejected
-    created_at: float = field(default_factory=time.time)
-    events: list = field(default_factory=list)  # accumulated events for log persistence
-
 
 class VfsWriteRejectedError(RuntimeError):
     """Base class for VFS write fallback rejections."""
@@ -59,6 +41,24 @@ class UnsupportedVfsWriteError(VfsWriteRejectedError):
 
 class ReplayModeConflictError(RuntimeError):
     """Raised when a layer-stack change is incompatible with a flat receiver."""
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionCommit:
+    """Server outcome for a durable producer transaction."""
+
+    status: str
+    txn_id: int
+    records: tuple = ()
+
+
+class TransactionRejectedError(ValueError):
+    """A transaction identity or payload cannot be accepted."""
+
+    def __init__(self, code: str, reason: str, *, expected_txn_id: int = 0):
+        super().__init__(reason)
+        self.code = code
+        self.expected_txn_id = expected_txn_id
 
 
 @dataclass(frozen=True)

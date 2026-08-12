@@ -10,16 +10,20 @@
  * each value event is preceded by its structural xform-op prerequisite.
  */
 TArray<uint8> BuildXformTxnFrame(
-	const FString& ClientId,
+	uint64 TxnId,
 	const TArray<FEmitXformTrs>& Xforms,
 	bool bIncludeEnsureXformOps = false);
 
 /**
  * Encode a batch of SetVisibility events into a complete Envelope{Txn} frame.
  */
-TArray<uint8> BuildVisibilityTxnFrame(const FString& ClientId, const TArray<FEmitVisibility>& Visibilities);
+TArray<uint8> BuildVisibilityTxnFrame(
+	uint64 TxnId,
+	const TArray<FEmitVisibility>& Visibilities);
 
 /**
  * Encode a batch of SetConnectableInput events into a complete Envelope{Txn} frame.
  */
-TArray<uint8> BuildConnectableInputTxnFrame(const FString& ClientId, const TArray<FEmitConnectableInput>& Events);
+TArray<uint8> BuildConnectableInputTxnFrame(
+	uint64 TxnId,
+	const TArray<FEmitConnectableInput>& Events);

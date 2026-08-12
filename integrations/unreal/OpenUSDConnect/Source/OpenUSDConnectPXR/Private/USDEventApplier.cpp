@@ -1590,10 +1590,10 @@ bool FUSDEventApplier::FrameUsesChangeBlock(const TArray<uint8>& RawFrame)
 // ---------------------------------------------------------------------------
 // FUSDEventApplier::ApplyFrame
 // ---------------------------------------------------------------------------
-void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+bool FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
                                   FString* OutTouchedPrim, OpenUSDConnect::EventPayload* OutEventKind)
 {
-	if (!StageActor || RawFrame.Num() < 8) return;
+	if (!StageActor || RawFrame.Num() < 8) return false;
 
 #if USE_USD_SDK
 	pxr::UsdStageRefPtr PxrStage =
@@ -1602,11 +1602,11 @@ void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	{
 		UE_LOG(LogUSDEventApplier, Warning,
 			TEXT("No USD stage open on AUsdStageActor — skipping event"));
-		return;
+		return false;
 	}
 
 	const OpenUSDConnect::EventWrapper* Wrapper = GetFrameEventWrapper(RawFrame);
-	if (!Wrapper) return;
+	if (!Wrapper) return false;
 
 	if (OutEventKind)
 	{
@@ -1632,8 +1632,10 @@ void FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	{
 		DispatchEvent(PxrStage, Wrapper);
 	}
+	return true;
 #else
 	UE_LOG(LogUSDEventApplier, Warning,
 		TEXT("USD SDK not available — cannot apply USD events"));
+	return false;
 #endif
 }

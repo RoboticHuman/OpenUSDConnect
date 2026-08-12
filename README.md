@@ -52,7 +52,6 @@ not used as that mirror.
 - SQLite event log with late-join replay (sync from any sequence) and log compaction
 - WebDAV/UNC live-open endpoint that serves a normal-looking USD snapshot
 - Per-department shared layers with configurable strength ordering
-- Cross-department edit proposals (propose, approve, reject)
 - TOFU (trust-on-first-use) token authentication and per-client rate limiting
 - Single-leader playback synchronization (a shared playhead)
 - Optional web admin dashboard with a live prim tree and event inspector
@@ -158,7 +157,7 @@ from openusdconnect import UsdReceiver
 
 stage = Usd.Stage.Open("scene.usda")
 with UsdReceiver(stage, app_name="my-viewer") as receiver:
-    if not receiver.wait_connected(timeout=5):
+    if not receiver.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
     while application_is_running():
         receiver.update()
@@ -225,7 +224,7 @@ from openusdconnect import SharedStageClient
 
 stage = Usd.Stage.Open("shot.usda")
 with SharedStageClient(stage, app_name="my-editor") as client:
-    if not client.wait_connected(timeout=5):
+    if not client.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
     while application_is_running():
         client.update()

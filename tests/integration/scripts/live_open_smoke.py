@@ -124,7 +124,7 @@ def main():
     post_sender = None
 
     try:
-        srv.process_txn(
+        srv._commit_events(
             [
                 {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
                 {"k": "ensure_prim", "prim": "/World/PreImport", "typeName": "Cube"},
@@ -223,7 +223,7 @@ def main():
 
             deadline = time.monotonic() + 8.0
             while time.monotonic() < deadline and _find_prim_object("/World/PostImport") is None:
-                receiver_addon._drain_and_process()
+                receiver_addon._drain_and_apply_remote_events()
                 try:
                     bpy.context.view_layer.update()
                 except RuntimeError:

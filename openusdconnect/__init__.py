@@ -3,6 +3,7 @@
 Core library for replicating USD stage edits over a networked event protocol.
 """
 
+from ._client_utils import ClientPhase, ClientStatus, SyncUpdate
 from .adapters import (
     DCCAdapter,
     MockAdapter,
@@ -23,19 +24,34 @@ from .emitter import NoticeEmitter
 from .event_apply import apply_event, apply_events, atomic_apply
 from .events import Event
 from .layer_key_router import LayerKeyRouter
-from .managed_client import ManagedClient, ManagedUpdate
+from .managed_client import ManagedClient, ManagedRecoveryResult
 from .protocol import make_hello, make_quit, make_txn
 from .protocol_constants import LayerMode
 from .receiver import ReceiverThread
-from .sender import EventSender
+from .recovery import (
+    QuarantinedTransaction,
+    RecoveryArtifact,
+    RecoveryError,
+    RecoveryIncident,
+    RecoveryKind,
+    RejectionDisposition,
+    TransactionFailure,
+)
+from .sender import EventSender, TransactionRejectedError
 from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
-from .shared_stage_client import SharedStageClient, SharedStageUpdate
+from .shared_stage_client import (
+    SharedRecoveryAssessment,
+    SharedRecoveryLayer,
+    SharedStageClient,
+)
 from .usd_client import UsdPublisher, UsdReceiver
 
 __version__ = "0.1.0"
 
 __all__ = [
     "DCCAdapter",
+    "ClientPhase",
+    "ClientStatus",
     "DecodeResult",
     "Event",
     "EventSender",
@@ -43,14 +59,24 @@ __all__ = [
     "LayerKeyRouter",
     "LayerMode",
     "ManagedClient",
-    "ManagedUpdate",
+    "ManagedRecoveryResult",
     "MockAdapter",
     "NoticeEmitter",
     "ReceiverThread",
+    "QuarantinedTransaction",
+    "RecoveryArtifact",
+    "RecoveryError",
+    "RecoveryIncident",
+    "RecoveryKind",
+    "RejectionDisposition",
     "ReceivedEvent",
     "ServerConfig",
+    "SharedRecoveryAssessment",
+    "SharedRecoveryLayer",
     "SharedStageClient",
-    "SharedStageUpdate",
+    "SyncUpdate",
+    "TransactionRejectedError",
+    "TransactionFailure",
     "UsdPublisher",
     "UsdReceiver",
     "UsdStageAdapter",

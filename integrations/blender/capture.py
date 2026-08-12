@@ -974,6 +974,11 @@ class _State:
 _state = _State()
 
 
+def get_emitter_sender() -> EventSender | None:
+    """Return the active network emitter for read-only UI status inspection."""
+    return _state.sender
+
+
 def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
@@ -1036,6 +1041,36 @@ def seed_emitter_caches_for_import(prim_path: str):
     # --- Seed NoticeEmitter caches from emitter's stage ---
     if ne is not None:
         ne.seed_prim_cache(author.stage, prim_path)
+
+
+def refresh_transform_baselines_after_remote_apply(
+    changed_objects_by_prim: dict[str, object],
+) -> int:
+    """Accept evaluated remote transforms as the emitter's new baseline.
+
+    Blender may deliver ``depsgraph_update_post`` callbacks after the receiver's
+    synchronous feedback guard has ended.  Refreshing tagged objects after the
+    guarded ``view_layer.update()`` makes those delayed callbacks compare equal
+    instead of re-authoring received transforms as new local edits.
+
+    User interaction cannot run concurrently with this main-thread refresh, so
+    the next actual user edit still differs from the stored matrix and emits in
+    the normal way.  Returns the number of tagged objects refreshed.
+    """
+    author = _state.author
+    if author is None or not changed_objects_by_prim:
+        return 0
+
+    refreshed = 0
+    for prim_path, obj in changed_objects_by_prim.items():
+        if obj is None:
+            continue
+        src = getattr(obj, "matrix_basis", obj.matrix_world)
+        author._last_matrix[obj.name] = tuple(v for row in src for v in row)
+        author._prim_refs[prim_path] = obj
+        author._used_prim_paths.add(prim_path)
+        refreshed += 1
+    return refreshed
 
 
 def _reset_stage_author():
@@ -1370,6 +1405,24 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
         if _state.sender is not None and _state.sender.sock is not None:
             self.report({"INFO"}, "Already connected")
             return {"CANCELLED"}
+        sender = _state.sender
+        if sender is not None:
+            same_endpoint = (
+                sender.host == scene.usd_connect_emit_host
+                and sender.port == scene.usd_connect_emit_port
+                and sender.department == (scene.usd_connect_department or None)
+            )
+            if not same_endpoint and sender.pending_transaction_count:
+                self.report(
+                    {"ERROR"},
+                    "Unacknowledged transactions belong to the previous endpoint; "
+                    "reconnect there or explicitly discard them before changing servers",
+                )
+                return {"CANCELLED"}
+            if not same_endpoint:
+                sender.disconnect()
+                _state.sender = None
+                sender = None
         try:
             if _state.author is None:
                 _state.author = BlenderStageAuthor(
@@ -1385,24 +1438,26 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
             if _state.notice_emitter is None:
                 _state.notice_emitter = NoticeEmitter(_state.author.stage)
 
-            _state.sender = EventSender(
-                host=scene.usd_connect_emit_host,
-                port=scene.usd_connect_emit_port,
-                client_id=STABLE_CLIENT_ID,
-                origin=SESSION_ORIGIN,
-                department=scene.usd_connect_department or None,
-                token=token_client.load_token(
-                    scene.usd_connect_emit_host,
-                    scene.usd_connect_emit_port,
-                ),
-                on_token_issued=lambda token: token_client.save_token(
-                    scene.usd_connect_emit_host,
-                    scene.usd_connect_emit_port,
-                    token,
-                ),
-            )
+            if sender is None:
+                sender = EventSender(
+                    host=scene.usd_connect_emit_host,
+                    port=scene.usd_connect_emit_port,
+                    client_id=STABLE_CLIENT_ID,
+                    origin=SESSION_ORIGIN,
+                    department=scene.usd_connect_department or None,
+                    token=token_client.load_token(
+                        scene.usd_connect_emit_host,
+                        scene.usd_connect_emit_port,
+                    ),
+                    on_token_issued=lambda token: token_client.save_token(
+                        scene.usd_connect_emit_host,
+                        scene.usd_connect_emit_port,
+                        token,
+                    ),
+                )
+                _state.sender = sender
             if not _state.sender.connect():
-                reason = (
+                reason = _state.sender.transaction_error or (
                     "auth rejected" if _state.sender.auth_rejected else "could not connect"
                 )
                 if _state.sender.auth_rejected:
@@ -1410,7 +1465,8 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                         scene.usd_connect_emit_host,
                         scene.usd_connect_emit_port,
                     )
-                _state.sender = None
+                if not _state.sender.pending_transaction_count:
+                    _state.sender = None
                 self.report({"ERROR"}, f"Connection failed: {reason}")
                 return {"CANCELLED"}
 
@@ -1433,15 +1489,40 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
 
     def execute(self, context):
         _remove_handler()
+        retained = 0
         if _state.sender is not None:
+            try:
+                flushed = _state.sender.flush(timeout=2.0)
+            except Exception as exc:
+                flushed = False
+                LOG.error("Emitter flush failed during disconnect: %s", exc)
             _state.sender.disconnect()
-            _state.sender = None
+            retained = _state.sender.pending_transaction_count
+            if flushed or not retained:
+                _state.sender = None
         if _state.notice_emitter is not None:
             _state.notice_emitter.cleanup()
             _state.notice_emitter = None
         _state.author = None
         context.scene.usd_connect_net_emitter_running = False
-        self.report({"INFO"}, "Emitter disconnected")
+        if (
+            retained
+            and _state.sender is not None
+            and _state.sender.recovery_required is True
+        ):
+            self.report(
+                {"ERROR"},
+                f"Emitter stopped with {retained} quarantined transaction(s): "
+                f"{_state.sender.transaction_error}",
+            )
+        elif retained:
+            self.report(
+                {"WARNING"},
+                f"Emitter disconnected with {retained} transaction(s) retained; "
+                "Connect again to retry",
+            )
+        else:
+            self.report({"INFO"}, "Emitter disconnected")
         return {"FINISHED"}
 
 

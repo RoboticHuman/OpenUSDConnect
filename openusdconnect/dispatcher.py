@@ -291,6 +291,7 @@ class EventDispatcher:
         self.on_applied = on_applied
         self.on_applied_events = on_applied_events
         self._last_seq = 0
+        self._applying_seq: int | None = None
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LayerKeyRouter | None = None
@@ -303,6 +304,17 @@ class EventDispatcher:
     @last_seq.setter
     def last_seq(self, value: int) -> None:
         self._last_seq = value
+
+    @property
+    def applying_seq(self) -> int:
+        """Candidate batch tail visible to callbacks during a successful apply.
+
+        Unlike :attr:`last_seq`, this value is not an authoritative applied
+        cursor until the whole pipeline returns successfully. Callback users
+        that label their own derived state with the current batch may read it
+        without causing reconnect logic to observe premature progress.
+        """
+        return self._applying_seq if self._applying_seq is not None else self._last_seq
 
     @property
     def layer_router(self) -> LayerKeyRouter | None:
@@ -319,6 +331,9 @@ class EventDispatcher:
             return 0
         bufs = self.receiver.drain_queue()
         if not bufs:
+            mark_replay_applied = getattr(self.receiver, "mark_replay_applied", None)
+            if mark_replay_applied is not None:
+                mark_replay_applied()
             return 0
         self._sync_layer_router()
 
@@ -332,27 +347,51 @@ class EventDispatcher:
             numpy_arrays=True,
             clear_on_resync=True,
             preserve_envelopes=self._layer_router is not None,
+            # Live and replay delivery are both complete commit streams. Flat
+            # projection changes routing, not stream membership.
+            require_contiguous=True,
         )
-        if result.resync_requested:
-            self._clear_asset_dependencies()
-            if self.on_resync is not None:
-                self.on_resync()
         for exc in result.errors:
             LOG.warning("Decode error: %s", exc)
 
+        previous_seq = self._last_seq
+        recovery_seq = 0 if result.resync_requested else previous_seq
+        self._applying_seq = result.last_seq
+        try:
+            if result.resync_requested:
+                self._clear_asset_dependencies()
+                if self.on_resync is not None:
+                    self.on_resync()
+            if self._layer_router is not None:
+                applied = self._apply_layered(
+                    result.received_records,
+                    layer_stack_states=result.layer_stack_states,
+                    reset_layers=result.resync_requested,
+                )
+            else:
+                events = result.received
+                applied = self._apply(events) if events else 0
+        except Exception:
+            # drain_queue() transferred ownership of every raw frame to this
+            # consumer. If USD, an adapter, resolver work, invalidation, or a
+            # callback fails, recover the entire drained suffix from the last
+            # cursor that was known to have applied successfully.
+            self._last_seq = recovery_seq
+            self.receiver.request_replay_from(recovery_seq + 1)
+            raise
+        finally:
+            self._applying_seq = None
+
+        # Publish the authoritative cursor only after the complete apply
+        # pipeline, including callbacks and emitter invalidation, succeeds.
         self._last_seq = result.last_seq
-        if self._layer_router is not None:
-            applied = self._apply_layered(
-                result.received_records,
-                layer_stack_states=result.layer_stack_states,
-                reset_layers=result.resync_requested,
-            )
-        else:
-            events = result.received
-            applied = self._apply(events) if events else 0
 
         if result.errors:
-            self.receiver.request_replay_from(result.last_seq + 1)
+            self.receiver.request_replay_from(self._last_seq + 1)
+        else:
+            mark_replay_applied = getattr(self.receiver, "mark_replay_applied", None)
+            if mark_replay_applied is not None:
+                mark_replay_applied()
 
         return applied
 

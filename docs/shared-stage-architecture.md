@@ -5,7 +5,7 @@ that each open an equivalent file-backed USD stage. Where managed mode applies
 semantic event kinds over server-owned collaboration layers, shared stage mode
 treats each client's own file layers, root layer and sublayers alike, as the
 synchronized data. `SharedStageClient` is the entry point, with the same
-`start()` / `wait_connected()` / `update()` / `close()` lifecycle as
+`start()` / `connect()` / `update()` / `close()` lifecycle as
 `ManagedClient`.
 
 ## What shared stage does
@@ -44,7 +44,7 @@ Managed mode (`ManagedClient`, `UsdPublisher`, `UsdReceiver`) has the server own
 the collaboration data model. Client edits land in server-owned collaboration
 layers stacked above the app's base stage, and flow over semantic event kinds
 (`ensure_prim`, `set_xform_trs`, `set_material_binding`, ...) that DCC adapters,
-the dashboard, the MCP server, departments, and proposals consume. The emitter
+the dashboard, the MCP server, and department policies consume. The emitter
 diffs composed stage state, and the dispatcher pipelines receive-side
 application.
 
@@ -71,7 +71,7 @@ is the deliverable.
 Choose managed mode when the server owns the collaboration data model: semantic
 event kinds must reach non-USD consumers (DCC adapters, the dashboard, the MCP
 server), collaboration content should live above the base stage rather than in
-it, or features like departments, proposals, and playback leadership are
+it, or features like departments and playback leadership are
 required. Managed mode trades exact SDF fidelity for semantic, consumer-friendly
 events.
 
@@ -103,9 +103,10 @@ Server side, one shared transaction is serialized by a commit lock, validated
 (`validate_spec_delta`, `validate_layer_content_replacement`), and applied to
 the mirror stage under `atomic_apply` plus a graph transaction that rolls back
 routing state on failure. Topology events are canonicalized first: the server
-assigns authoritative child layer keys, bumps the graph revision, and discovers
-routing state for newly reachable descendant layers. Every canonical event is
-then seq-assigned, persisted, and broadcast to all clients in order.
+assigns authoritative child layer keys, advances the edited parent layer's
+topology revision, and discovers routing state for newly reachable descendant
+layers. Every canonical event is then seq-assigned, persisted, and broadcast to
+all clients in order.
 
 ## Protocol design
 
@@ -113,13 +114,20 @@ Layer keys. The server's authoritative graph assigns each layer an opaque key
 of the form `layer:{uuid4.hex}`. Sublayer entries on the wire carry
 `authored_path`, `offset`, `scale`, and once mapped, the child `layer_key`.
 Keys are the only layer identity on the wire; `Sdf.Layer.identifier` stays
-local.
+local. The authoritative server persists its identifier-to-key assignments in
+a normalized SQLite table. This registry retains detached layers, so the same
+logical layer receives the same key if it is later reattached or the server
+restarts. Identifier strings remain server-local and are never sent to clients.
 
 Generation and revision. The graph is versioned by a `generation` /
-`revision` pair. `generation` is a fresh random identity per server start;
-`revision` is a positive integer bumped by one for every canonical topology
-event. The pair scopes topology state so a restarted server can renumber
-revisions without a receiver misreading an old event as current.
+`revision` pair for baseline ordering, while every mapped parent layer also has
+its own positive topology revision. A normal server restart restores the
+generation, revisions, and stable key registry from the database. Log
+compaction creates a new generation and resets the reachable per-parent
+revisions because it replaces the old history with one authoritative baseline;
+the durable layer keys do not change. Per-parent revisions let edits to
+unrelated layer stacks commit independently without weakening conflict
+detection for two concurrent edits to the same parent.
 
 Event kinds. Three kinds carry shared-stage content:
 
@@ -134,12 +142,14 @@ Event kinds. Three kinds carry shared-stage content:
   field-by-field diff, such as after resync or complex re-organization.
 - `set_sublayers`: replaces one parent layer's authored sublayer list. Carries
   `generation` and a client-side `revision` of 0; the server canonicalizes it
-  to the authoritative `revision + 1` with child keys assigned, and re-broadcasts
-  the canonical event. At most one per transaction.
+  to the targeted parent's authoritative `revision + 1` with child keys
+  assigned, and re-broadcasts the canonical event. At most one per transaction.
 
-Baseline. The server appends one `layer_graph_state` message to the log at
-startup: a sequenced snapshot of the whole reachable graph with `generation`,
-`revision`, `root_layer_key`, and each layer's sublayer entries. Every replay
-therefore begins with a fresh baseline. Clients bind `root_layer_key` to their
-local root layer, materialize sublayer entries without resolving assets, and
-only then can route and apply records.
+Baseline. A new shared-stage database begins with one `layer_graph_state`
+message: a sequenced snapshot of the whole reachable graph with `generation`,
+the baseline `revision`, `root_layer_key`, and each layer's sublayer entries and
+parent revision. Compaction atomically replaces the log with a new-generation
+baseline. Every replay therefore begins with a complete baseline, while an
+ordinary restart reuses the existing one rather than growing the log. Clients
+bind `root_layer_key` to their local root layer, materialize sublayer entries
+without resolving assets, and only then can route and apply records.

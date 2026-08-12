@@ -39,13 +39,13 @@ are rejected during argument parsing.
 ## Server layer modes
 
 `openusdconnect-server --layer-mode managed` is the default. It provides
-receiver-owned collaboration layers, department policy, proposals, and VFS
-live-open workflows.
+receiver-owned collaboration layers, department policy, and VFS live-open
+workflows.
 
 `--layer-mode shared_stage` instead routes exact authored changes to equivalent
 file-backed root and sublayers opened by every process. It requires `--base`
-and cannot be combined with departments, VFS, `--export-diff`, proposals, or
-purge. Managed and shared-stage clients are rejected when they connect to a
+and cannot be combined with departments, VFS, `--export-diff`, or purge.
+Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
 
 ## Development Commands

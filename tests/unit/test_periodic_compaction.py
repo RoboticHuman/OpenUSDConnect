@@ -50,7 +50,7 @@ def test_periodic_compaction_compacts_and_then_idles(tmp_path):
     srv = UsdSyncServer(log_path=str(tmp_path / "pc.db"), compact_interval=0.2)
     calls = _instrument(srv)
     try:
-        srv.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
         before = srv.get_event_count()
         assert before == len(EVENTS)
 
@@ -72,7 +72,7 @@ def test_runtime_enable_and_disable(tmp_path):
     calls = _instrument(srv)
     try:
         assert srv._compact_thread is None
-        srv.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         srv.set_compact_interval(0.2)
         assert _poll(lambda: len(calls) >= 1), "runtime enable never compacted"
@@ -81,7 +81,7 @@ def test_runtime_enable_and_disable(tmp_path):
         srv.set_compact_interval(0)
         time.sleep(0.25)  # drain a tick already in flight before the disable
         settled = len(calls)
-        srv.process_txn(
+        srv._commit_events(
             [{"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"],
               "t": [99.0, 0.0, 0.0]}],
             client_id="c", origin="o", client_addr="a:1",
@@ -99,7 +99,7 @@ def test_txn_during_compaction_survives_via_delta_merge(tmp_path):
 
     srv = UsdSyncServer(log_path=str(tmp_path / "delta.db"))
     try:
-        srv.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         phase1_started = threading.Event()
         original_build = srv._build_compacted
@@ -115,16 +115,12 @@ def test_txn_during_compaction_survives_via_delta_merge(tmp_path):
         compactor.start()
         assert phase1_started.wait(timeout=5)
 
-        # Mid-compaction txn, through the same barrier the connection uses.
-        srv.txn_barrier.acquire_shared()
-        try:
-            srv.process_txn(
-                [{"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"],
-                  "t": [123.0, 0.0, 0.0]}],
-                client_id="c", origin="o", client_addr="a:1",
-            )
-        finally:
-            srv.txn_barrier.release_shared()
+        # The private in-process helper owns the same barrier as network work.
+        srv._commit_events(
+            [{"k": "set_xform_trs", "prim": "/World/A", "fields": ["t"],
+              "t": [123.0, 0.0, 0.0]}],
+            client_id="c", origin="o", client_addr="a:1",
+        )
         compactor.join(timeout=10)
         assert not compactor.is_alive(), "compaction deadlocked"
 
@@ -153,7 +149,7 @@ def test_shorter_interval_takes_effect_promptly(tmp_path):
     srv = UsdSyncServer(log_path=str(tmp_path / "short.db"), compact_interval=300)
     calls = _instrument(srv)
     try:
-        srv.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
         srv.set_compact_interval(0.2)
         assert _poll(lambda: len(calls) >= 1, timeout=3), (
             "still waiting out the previous 300s period"
@@ -167,7 +163,7 @@ def test_startup_compacts_preexisting_log(tmp_path):
     """A server started with an interval compacts an inherited backlog."""
     db = str(tmp_path / "pre.db")
     srv1 = UsdSyncServer(log_path=db)
-    srv1.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+    srv1._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
     srv1.shutdown()
     srv1.store.close()
 
@@ -204,7 +200,7 @@ def test_purge_resets_idle_marker(tmp_path):
     srv = UsdSyncServer(log_path=str(tmp_path / "purge.db"), compact_interval=0.2)
     calls = _instrument(srv)
     try:
-        srv.process_txn(EVENTS, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
         assert _poll(lambda: len(calls) >= 1)
         srv.purge()
         time.sleep(0.25)  # drain a tick already in flight before the purge

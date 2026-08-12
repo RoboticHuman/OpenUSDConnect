@@ -1389,7 +1389,11 @@ def test_texture_swap_reverse_sync(r):
     shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(path_a))
 
     # Post-apply seeding: baseline the tracked node from its current state.
-    receiver_addon._seed_shader_maps(author, adapter, "/World/Looks/SwapMat")
+    receiver_addon._refresh_shader_reverse_sync_state(
+        author,
+        adapter,
+        "/World/Looks/SwapMat",
+    )
     seeded = author._last_shader_values.get(tex_path)
     if not seeded or os.path.normcase(seeded.get("file", "")) != os.path.normcase(
         os.path.normpath(path_a)

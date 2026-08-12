@@ -140,16 +140,23 @@ def main():
     # -----------------------------------------------------------------
     print(f"\n[RefEmitter] Connecting to 127.0.0.1:{port}")
     sock = socket.create_connection(("127.0.0.1", port))
-    send_line(sock, make_hello("emitter"))
+    send_line(
+        sock,
+        make_hello(
+            "emitter",
+            client_id="ref-test-emitter",
+            producer_session_id="reference-test-emitter",
+        ),
+    )
 
     if phase1_events:
-        send_line(sock, make_txn("ref-test-emitter", phase1_events))
+        send_line(sock, make_txn(phase1_events, txn_id=1))
         print(f"[RefEmitter] Sent txn1: {len(phase1_events)} events (initial)")
 
     time.sleep(0.3)
 
     if phase2_events:
-        send_line(sock, make_txn("ref-test-emitter", phase2_events))
+        send_line(sock, make_txn(phase2_events, txn_id=2))
         print(f"[RefEmitter] Sent txn2: {len(phase2_events)} events (movement)")
 
     time.sleep(0.5)

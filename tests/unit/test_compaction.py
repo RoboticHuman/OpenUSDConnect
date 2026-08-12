@@ -744,7 +744,7 @@ class TestGeometryHeavyLog:
                 "k": "set_gprim_attrs", "prim": "/World/M",
                 "attrs": {"points": (base + np.float32(i)).tolist()},
             })
-        srv.process_txn(events, client_id="c", origin="o", client_addr="a:1")
+        srv._commit_events(events, client_id="c", origin="o", client_addr="a:1")
 
         t0 = time.perf_counter()
         srv.compact_log()

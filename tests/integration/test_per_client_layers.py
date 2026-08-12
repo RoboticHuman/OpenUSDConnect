@@ -34,7 +34,7 @@ def _emit_events(srv, client_id, events, department=None):
     """Simulate an emitter through the production txn path: create layer,
     apply, persist (records carry the portable layer key for replay)."""
     layer = srv.get_or_create_client_layer(client_id, department=department)
-    srv.process_txn(events, client_id=client_id, layer=layer)
+    srv._commit_events(events, client_id=client_id, layer=layer)
 
 
 def _read_translate(stage, prim_path):
@@ -146,7 +146,7 @@ class TestLayerIsolation:
         assert srv.stage.GetSessionLayer().pseudoRoot.GetInfo("upAxis") == "Z"
         department = srv.client_layers["animator"]
         assert not department.pseudoRoot.HasInfo("upAxis")
-        assert srv.stage.GetEditTarget().GetLayer().identifier == department.identifier
+        assert srv.stage.GetEditTarget().GetLayer() is srv.edit_layer
         _seq, encoded = srv.store.get_all_asc()[0]
         assert "layer_key" not in message_to_dict(encoded)
 
@@ -607,7 +607,7 @@ class TestReplayWithClientLayers:
         srv2 = UsdSyncServer(log_path=db)
         try:
             animation = srv2.resolve_layer("animation")
-            records = srv2.process_txn(
+            records = srv2._commit_events(
                 [
                     {
                         "k": K_ENSURE_PRIM,

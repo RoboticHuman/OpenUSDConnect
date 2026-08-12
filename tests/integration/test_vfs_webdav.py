@@ -22,6 +22,7 @@ from pxr import Sdf, Usd
 pytest.importorskip("wsgidav")
 
 from openusdconnect.codec import message_to_dict  # noqa: E402
+from openusdconnect.managed_client import ManagedClient  # noqa: E402
 from openusdconnect.receiver import ReceiverThread  # noqa: E402
 from openusdconnect.sender import EventSender  # noqa: E402
 from openusdconnect.server import UsdSyncServer  # noqa: E402
@@ -181,7 +182,7 @@ def _file_path():
 
 
 def _send(srv, events):
-    srv.process_txn(events, client_id="test-client", origin="test-origin")
+    srv._commit_events(events, client_id="test-client", origin="test-origin")
 
 
 def _open_stage(data: bytes) -> Usd.Stage:
@@ -772,6 +773,66 @@ class TestUsdLayerImport:
 
 
 class TestSnapshotReplayContract:
+    def test_translated_put_restores_live_client_readiness_and_publishing(
+        self,
+        vfs_translate,
+    ):
+        srv, dav = vfs_translate
+        tcp_server = ThreadedTCPServer(
+            ("127.0.0.1", 0),
+            ConnectionHandler,
+            srv,
+            max_workers=4,
+        )
+        tcp_thread = threading.Thread(target=tcp_server.serve_forever, daemon=True)
+        tcp_thread.start()
+        stage = Usd.Stage.CreateInMemory()
+        client = ManagedClient(
+            stage,
+            app_name="vfs-replacement-receiver",
+            port=tcp_server.server_address[1],
+            persist_token=False,
+            reconnect=False,
+        )
+
+        def pump_until_ready():
+            client.update()
+            return client.synchronized
+
+        try:
+            client.start()
+            assert client.connect(timeout=2)
+            assert _wait_until(pump_until_ready)
+
+            status, _, snapshot = dav.get(_file_path())
+            assert status == 200
+            uploaded = _open_stage(snapshot)
+            uploaded.DefinePrim("/Root/FromVfsPut", "Sphere")
+            status, _, _ = dav.put(
+                _file_path(),
+                uploaded.GetRootLayer().ExportToString().encode("utf-8"),
+            )
+            assert 200 <= status < 300
+
+            assert _wait_until(lambda: client.connected and not client.synchronized)
+            assert _wait_until(
+                lambda: pump_until_ready()
+                and bool(stage.GetPrimAtPath("/Root/FromVfsPut"))
+            )
+            assert (client.receiver.replay_epoch, client.receiver.replay_head_seq) == (
+                srv.get_snapshot_token()
+            )
+
+            stage.DefinePrim("/Root/PublishedAfterVfs", "Cube")
+            assert client.update().submitted_events > 0
+            assert client.flush(timeout=2)
+            assert srv.stage.GetPrimAtPath("/Root/PublishedAfterVfs")
+        finally:
+            client.close()
+            tcp_server.shutdown()
+            tcp_server.server_close()
+            tcp_thread.join(timeout=5)
+
     def test_cli_does_not_start_vfs_when_sync_bind_fails(self, tmp_path):
         from openusdconnect.server.cli import ServerConfig, VfsConfig, run_server
 

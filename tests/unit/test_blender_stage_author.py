@@ -879,6 +879,151 @@ def test_blender_timer_retries_a_prepared_batch_after_reconnect(monkeypatch):
     send_pending.assert_called_once_with()
 
 
+def test_remote_apply_refreshes_only_matching_transform_baselines(monkeypatch):
+    from integrations.blender import capture
+
+    remote = MockBlenderObject(
+        "Remote",
+        loc=(4, 5, 6),
+        prim_path="/World/Remote",
+    )
+    unrelated = MockBlenderObject(
+        "Unrelated",
+        loc=(7, 8, 9),
+        prim_path="/World/Unrelated",
+    )
+    untagged = MockBlenderObject("Untagged", loc=(1, 2, 3))
+    monkeypatch.setattr(
+        capture.bpy.data,
+        "objects",
+        _BlenderObjectList([remote, unrelated, untagged]),
+    )
+    author = MagicMock()
+    author._last_matrix = {"Unrelated": ("unchanged",)}
+    author._prim_refs = {}
+    author._used_prim_paths = set()
+    monkeypatch.setattr(capture._state, "author", author)
+
+    refreshed = capture.refresh_transform_baselines_after_remote_apply(
+        {"/World/Remote": remote},
+    )
+
+    assert refreshed == 1
+    assert author._last_matrix["Remote"] == tuple(
+        value for row in remote.matrix_world for value in row
+    )
+    assert author._last_matrix["Unrelated"] == ("unchanged",)
+    assert author._prim_refs == {"/World/Remote": remote}
+    assert author._used_prim_paths == {"/World/Remote"}
+
+
+def test_user_edit_after_remote_baseline_refresh_still_emits(monkeypatch):
+    from integrations.blender import capture
+
+    remote = MockBlenderObject(
+        "Remote",
+        loc=(4, 5, 6),
+        prim_path="/World/Remote",
+    )
+    objects = _BlenderObjectList([remote])
+    monkeypatch.setattr(capture.bpy.data, "objects", objects)
+    author, emitter = _make_author_and_emitter(auto_track=False)
+    monkeypatch.setattr(capture._state, "author", author)
+
+    assert (
+        capture.refresh_transform_baselines_after_remote_apply(
+            {"/World/Remote": remote},
+        )
+        == 1
+    )
+    remote.matrix_world = _Matrix(loc=(5, 5, 6))
+
+    events = _get_events(author, emitter, [MockDepsgraphUpdate(remote)])
+
+    assert any(event["k"] == K_SET_XFORM_TRS for event in events)
+
+
+def test_receiver_tracks_only_object_events_for_delayed_transform_refresh(monkeypatch):
+    from integrations.blender import receiver_addon
+
+    pending = set()
+    monkeypatch.setattr(receiver_addon, "_pending_object_baseline_paths", pending)
+
+    receiver_addon._on_applied_events(
+        [
+            {"k": "set_xform_trs", "prim": "/World/A"},
+            {"k": "ensure_prim", "prim": "/World/B", "typeName": "Xform"},
+            {
+                "k": "ensure_prim",
+                "prim": "/World/Looks/Material",
+                "typeName": "Material",
+            },
+            {"k": "set_connectable_input", "prim": "/World/Looks/Material/Shader"},
+        ],
+    )
+
+    assert pending == {"/World/A", "/World/B"}
+
+
+def test_blender_connect_reuses_sender_with_unacknowledged_outbox(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.sock = None
+    sender.host = "127.0.0.1"
+    sender.port = 7200
+    sender.department = "animation"
+    sender.pending_transaction_count = 1
+    sender.connect.return_value = True
+    author = MagicMock()
+    emitter = MagicMock()
+    scene = MagicMock()
+    scene.usd_connect_emit_host = "127.0.0.1"
+    scene.usd_connect_emit_port = 7200
+    scene.usd_connect_department = "animation"
+    scene.usd_connect_auto_track = True
+    scene.usd_connect_net_emitter_running = False
+    context = MagicMock(scene=scene)
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    constructor = MagicMock()
+    monkeypatch.setattr(capture, "EventSender", constructor)
+    monkeypatch.setattr(capture, "_remove_handler", MagicMock())
+    monkeypatch.setattr(capture.bpy.app.timers, "register", MagicMock())
+    operator = capture.USD_CONNECT_OT_connect_emitter()
+    operator.report = MagicMock()
+
+    assert operator.execute(context) == {"FINISHED"}
+    sender.connect.assert_called_once_with()
+    constructor.assert_not_called()
+    assert capture._state.sender is sender
+
+
+def test_blender_disconnect_retains_outbox_when_flush_times_out(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.flush.return_value = False
+    sender.pending_transaction_count = 2
+    emitter = MagicMock()
+    scene = MagicMock()
+    context = MagicMock(scene=scene)
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "notice_emitter", emitter)
+    monkeypatch.setattr(capture._state, "author", MagicMock())
+    monkeypatch.setattr(capture, "_remove_handler", MagicMock())
+    operator = capture.USD_CONNECT_OT_disconnect_emitter()
+    operator.report = MagicMock()
+
+    assert operator.execute(context) == {"FINISHED"}
+    sender.flush.assert_called_once_with(timeout=2.0)
+    sender.disconnect.assert_called_once_with()
+    assert capture._state.sender is sender
+    operator.report.assert_called_once()
+    assert "retained" in operator.report.call_args.args[1]
+
+
 def test_receiver_rebuilds_logical_layers_from_full_replay():
     from integrations.blender import receiver_addon
 
@@ -931,8 +1076,17 @@ def test_receiver_discards_retained_replay_state(monkeypatch):
     monkeypatch.setattr(receiver_addon, "_MIRROR_SOURCE", "/old/base.usda")
     monkeypatch.setattr(receiver_addon, "_MIRROR_ENDPOINT", ("127.0.0.1", 7200))
     monkeypatch.setattr(receiver_addon, "_MIRROR_LAYERED_REPLAY", True)
-    monkeypatch.setattr(receiver_addon, "_pending_seed_paths", {"/World"})
-    monkeypatch.setattr(receiver_addon, "_pending_shader_seed_paths", {"/Material"})
+    monkeypatch.setattr(receiver_addon, "_pending_import_seed_paths", {"/World"})
+    monkeypatch.setattr(
+        receiver_addon,
+        "_pending_object_baseline_paths",
+        {"/World/Remote"},
+    )
+    monkeypatch.setattr(
+        receiver_addon,
+        "_pending_shader_baseline_paths",
+        {"/Material"},
+    )
 
     receiver_addon._discard_replay_state()
 
@@ -943,8 +1097,9 @@ def test_receiver_discards_retained_replay_state(monkeypatch):
     assert receiver_addon._MIRROR_SOURCE == ""
     assert receiver_addon._MIRROR_ENDPOINT is None
     assert receiver_addon._MIRROR_LAYERED_REPLAY is None
-    assert receiver_addon._pending_seed_paths == set()
-    assert receiver_addon._pending_shader_seed_paths == set()
+    assert receiver_addon._pending_import_seed_paths == set()
+    assert receiver_addon._pending_object_baseline_paths == set()
+    assert receiver_addon._pending_shader_baseline_paths == set()
 
 
 def test_receiver_thread_cleanup_tolerates_unstarted_thread():

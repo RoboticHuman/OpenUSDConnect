@@ -233,7 +233,7 @@ def test_detached_layer_edits_are_outside_the_shared_root_graph(tmp_path):
     root.subLayerPaths.append("./child.usda")
     root.Save()
     stage = Usd.Stage.Open(root)
-    _graph, tracker = _root_tracker(stage)
+    graph, tracker = _root_tracker(stage)
     try:
         with Sdf.ChangeBlock():
             value.default = 2
@@ -244,6 +244,19 @@ def test_detached_layer_edits_are_outside_the_shared_root_graph(tmp_path):
         assert len(batches) == 1
         assert batches[0].layer is root
         assert [event["k"] for event in batches[0].events] == ["set_sublayers"]
+        topology = batches[0].events[0]
+        assert topology["generation"] == graph.generation
+        assert topology["revision"] == 1
+
+        graph.accept_sublayers(
+            graph.canonicalize_sublayers(
+                graph.root_layer_key,
+                graph.describe_sublayers(root),
+            )
+        )
+        routed = tracker.next_routed_batch()
+        assert routed is not None
+        assert routed[2][0]["revision"] == 1
     finally:
         tracker.close()
 

@@ -4,11 +4,15 @@ Exercises snapshot generation, embedded connection metadata, cache/etag
 invalidation, write policy, and the browsable multi-file VFS directory.
 """
 
+import io
 import json
+import threading
 
 import pytest
 from pxr import Sdf, Usd, UsdLux
 
+from openusdconnect.codec import message_to_dict
+from openusdconnect.framing import recv_framed_rfile
 from openusdconnect.protocol_constants import PROTOCOL_VERSION
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.types import (
@@ -98,12 +102,12 @@ def vset(srv):
 
 def _send(srv, events):
     """Apply events through the same path a TCP txn takes (seq + persist)."""
-    srv.process_txn(events, client_id="test-client", origin="test-origin")
+    srv._commit_events(events, client_id="test-client", origin="test-origin")
 
 
 def _send_to_layer(srv, layer, events, client_id="test-client"):
     """Apply events to an explicit edit layer and persist them."""
-    srv.process_txn(events, client_id=client_id, origin="test-origin", layer=layer)
+    srv._commit_events(events, client_id=client_id, origin="test-origin", layer=layer)
 
 
 def _open_stage(data: bytes) -> Usd.Stage:
@@ -266,25 +270,6 @@ class TestSnapshotToken:
         epoch, seq = dept_srv.get_snapshot_token()
         assert dept_srv.delete_layer("alice")
         assert dept_srv.get_snapshot_token() == (epoch + 1, seq)
-
-    def test_epoch_bumps_on_proposal_reject(self, dept_srv):
-        dept_srv.get_or_create_client_layer("lead", "layout")
-        proposal_id = dept_srv.create_proposal("alice", "layout")
-        epoch, seq = dept_srv.get_snapshot_token()
-        assert dept_srv.reject_proposal(proposal_id)
-        assert dept_srv.get_snapshot_token() == (epoch + 1, seq)
-
-    def test_epoch_bumps_on_proposal_approve(self, dept_srv):
-        dept_srv.get_or_create_client_layer("lead", "layout")
-        proposal_id = dept_srv.create_proposal("alice", "layout")
-        assert dept_srv.apply_proposal_txn(
-            proposal_id,
-            [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}],
-        )
-        epoch, _seq = dept_srv.get_snapshot_token()
-        assert dept_srv.approve_proposal(proposal_id)
-        assert dept_srv.get_snapshot_token() == (epoch + 1, 1)
-
 
 # ---------------------------------------------------------------------------
 # Read side
@@ -512,6 +497,49 @@ class TestWriteTranslate:
         fetched = _open_stage(translate_vfile.read())
         assert fetched.GetPrimAtPath("/World/New")
         assert not fetched.GetPrimAtPath("/World/Old")
+
+    def test_write_broadcasts_one_complete_replacement_boundary(
+        self,
+        srv,
+        translate_vfile,
+    ):
+        class CaptureRequest:
+            def __init__(self):
+                self.payloads = []
+
+            def sendall(self, payload):
+                self.payloads.append(payload)
+
+        class CaptureReceiver:
+            def __init__(self):
+                self.request = CaptureRequest()
+                self.client_address = ("vfs-capture", 1)
+                self.send_lock = threading.Lock()
+                self._layered_replay = False
+
+        receiver = CaptureReceiver()
+        srv.receivers.add(receiver)
+        uploaded = _open_stage(translate_vfile.read())
+        uploaded.DefinePrim("/Root/Replacement", "Sphere")
+
+        translate_vfile.write(uploaded.GetRootLayer().ExportToString().encode("utf-8"))
+        srv._broadcast_queue.join()
+
+        assert len(receiver.request.payloads) == 1
+        stream = io.BytesIO(receiver.request.payloads[0])
+        messages = []
+        while stream.tell() < len(stream.getvalue()):
+            messages.append(message_to_dict(recv_framed_rfile(stream)))
+
+        epoch, head_seq = srv.get_snapshot_token()
+        assert messages[0]["type"] == "resync"
+        assert all(message["type"] == "event" for message in messages[1:-1])
+        assert messages[-1] == {
+            "type": "replay_complete",
+            "head_seq": head_seq,
+            "epoch": epoch,
+        }
+        assert head_seq == len(messages) - 2
 
     def test_sink_translates_on_commit(self, srv, translate_vfile):
         sink = translate_vfile.open_write_sink()
@@ -780,18 +808,6 @@ class TestWriteTranslate:
             translate_vfile.write(translate_vfile.read())
 
         assert "collaboration layers: review" in srv.last_vfs_write_analysis["notes"][0]
-
-    def test_pending_proposals_disable_translate(self, srv, translate_vfile):
-        proposal_id = srv.create_proposal("alice", "layout")
-        count = srv.get_event_count()
-
-        with pytest.raises(UnsupportedVfsWriteError):
-            translate_vfile.write(_stage_bytes([("/World", "Xform")]))
-
-        assert srv.get_event_count() == count
-        assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
-        assert proposal_id in srv.last_vfs_write_analysis["notes"][0]
-
 
 class TestDavResourceLifecycle:
     def test_read_metadata_and_content_use_one_pinned_snapshot(self):

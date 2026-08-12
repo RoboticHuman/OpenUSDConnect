@@ -33,7 +33,7 @@ def test_macos_native_mount_reads_virtual_usd(tmp_path, free_port):
     handle = run_vfs_server(provider, "127.0.0.1", free_port, share="usd")
     mount_point = tmp_path / "mount"
     try:
-        server.process_txn(
+        server._commit_events(
             [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}],
             client_id="macos-mount-smoke",
             origin="macos-mount-smoke",

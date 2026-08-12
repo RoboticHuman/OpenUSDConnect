@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
 
-from pxr import Sdf, Usd
+from pxr import Ar, Sdf, Usd
 
 from .protocol_constants import (
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -25,7 +25,12 @@ from .protocol_constants import (
     SDF_SPEC_KIND_VARIANT,
     SDF_SPEC_KIND_VARIANT_SET,
 )
-from .sdf_layer_tracker import PreparedLayerBatch, sdf_event_sort_key
+from .sdf_layer_tracker import (
+    PreparedLayerBatch,
+    _bind_topology_base,
+    _copy_prepared_events,
+    sdf_event_sort_key,
+)
 from .sdf_spec_delta import (
     event_prim_path,
     serialize_layer_content,
@@ -533,11 +538,12 @@ class NativeSdfLayerChangeTracker:
         self._prepared: list[PreparedLayerBatch] = []
         self._suppression_depth = 0
         layers = graph.local_reachable_layers()
-        self._bridge = NativeDelegateTracker(
-            bridge_path,
-            [layer.identifier for layer in layers],
-            max_queued_bytes=max_queued_bytes,
-        )
+        with Ar.ResolverContextBinder(stage.GetPathResolverContext()):
+            self._bridge = NativeDelegateTracker(
+                bridge_path,
+                [layer.identifier for layer in layers],
+                max_queued_bytes=max_queued_bytes,
+            )
         self.sync_graph(force=True)
 
     @property
@@ -565,7 +571,8 @@ class NativeSdfLayerChangeTracker:
         # Content replacement can reset an SdfLayer's state delegate. Reassert
         # ownership after every graph/application cycle, even when reachability
         # did not change.
-        self._bridge.set_layers(list(current))
+        with Ar.ResolverContextBinder(self.stage.GetPathResolverContext()):
+            self._bridge.set_layers(list(current))
         reachable_ids = {id(layer) for layer in layers}
         self._pending = {
             layer_id: changes
@@ -643,11 +650,14 @@ class NativeSdfLayerChangeTracker:
                     }
                 del self._pending[layer_id]
                 continue
-            batch = PreparedLayerBatch(
-                events=events,
-                layer=changes.layer,
-                layer_identifier=changes.layer.identifier,
-                change_serial=changes.serial,
+            batch = _bind_topology_base(
+                PreparedLayerBatch(
+                    events=events,
+                    layer=changes.layer,
+                    layer_identifier=changes.layer.identifier,
+                    change_serial=changes.serial,
+                ),
+                self.graph,
             )
             if prepared_index is None:
                 self._prepared.append(batch)
@@ -657,22 +667,19 @@ class NativeSdfLayerChangeTracker:
         return tuple(self._prepared)
 
     def _events_for(self, batch: PreparedLayerBatch) -> list[dict]:
-        events = []
-        for event in batch.events:
-            routed = dict(event)
-            if routed["k"] == K_SET_SUBLAYERS:
-                routed["generation"] = self.graph.generation
-                routed["sublayers"] = [dict(entry) for entry in event["sublayers"]]
-            events.append(routed)
-        return events
+        return _copy_prepared_events(batch)
 
     def next_routed_batch(self) -> tuple[PreparedLayerBatch, str, list[dict]] | None:
         if not self.graph.ready:
             return None
         reachable = set(self.graph.reachable_layer_keys())
-        for batch in self._prepared:
+        for index, batch in enumerate(self._prepared):
             layer_key = self.graph.key_for(batch.layer)
             if layer_key and layer_key in reachable:
+                bound = _bind_topology_base(batch, self.graph)
+                if bound is not batch:
+                    batch = bound
+                    self._prepared[index] = batch
                 return batch, layer_key, self._events_for(batch)
         return None
 

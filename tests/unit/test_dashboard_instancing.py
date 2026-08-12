@@ -35,7 +35,7 @@ def srv(tmp_path):
 
 class TestInstancingTrackers:
     def test_ensure_prim_point_instancer_marks_set(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Xform", "typeName": "Xform"},
         ])
@@ -43,7 +43,7 @@ class TestInstancingTrackers:
         assert "/Xform" not in srv._point_instancer_paths
 
     def test_set_instanceable_toggles_set(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
             {"k": "set_reference", "prim": "/Inst",
@@ -52,13 +52,13 @@ class TestInstancingTrackers:
         ])
         assert srv._instanceable_paths == {"/Inst"}
 
-        srv.process_txn([
+        srv._commit_events([
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": False},
         ])
         assert srv._instanceable_paths == set()
 
     def test_delete_removes_from_all_trackers(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
@@ -69,7 +69,7 @@ class TestInstancingTrackers:
         assert srv._point_instancer_paths == set()
 
     def test_rename_preserves_flags(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
             {"k": "set_reference", "prim": "/Inst",
@@ -80,7 +80,7 @@ class TestInstancingTrackers:
         assert srv._instanceable_paths == {"/Renamed"}
 
     def test_compaction_rebuilds_trackers(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
@@ -102,7 +102,7 @@ class TestTreeFields:
     def test_get_prim_tree_has_children_after_index(self, srv):
         """Single-pass child counter must report has_children correctly
         across a multi-level hierarchy, leaf prims included."""
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/World", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/World/A", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/World/A/Leaf", "typeName": "Sphere"},
@@ -117,7 +117,7 @@ class TestTreeFields:
         assert rows["/Other"] is False
 
     def test_get_prim_tree_includes_flags(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
@@ -134,7 +134,7 @@ class TestTreeFields:
 
 class TestPrimDetailInstancing:
     def test_detail_reports_instance_flags(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/Inst", "typeName": "Xform"},
             {"k": "set_reference", "prim": "/Inst",
@@ -149,7 +149,7 @@ class TestPrimDetailInstancing:
         assert d["isInstanceProxy"] is False
 
     def test_detail_pointinstancer_block(self, srv):
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Protos", "typeName": "Scope"},
             {"k": "ensure_prim", "prim": "/Protos/A", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
@@ -190,13 +190,13 @@ class TestCounters:
             {"k": "set_instanceable", "prim": f"/I{i}", "instanceable": True}
             for i in range(3)
         ]
-        srv.process_txn(events)
+        srv._commit_events(events)
         assert srv.get_instance_count() == 3
 
     def test_get_prototype_count_grows_with_distinct_instancing_keys(self, srv):
         # No instances yet.
         assert srv.get_prototype_count() == 0
-        srv.process_txn([
+        srv._commit_events([
             {"k": "ensure_prim", "prim": "/Proto", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/I0", "typeName": "Xform"},
             {"k": "ensure_prim", "prim": "/I1", "typeName": "Xform"},

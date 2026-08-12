@@ -185,7 +185,7 @@ def _server_process_and_replay(srv, events):
 
     Returns the list of event dicts as a receiver would see them.
     """
-    srv.process_txn(events)
+    srv._commit_events(events)
 
     # Replay full log (what a new receiver would get)
     rows = srv.store.get_all_asc()

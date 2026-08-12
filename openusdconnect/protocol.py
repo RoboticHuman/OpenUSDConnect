@@ -18,6 +18,8 @@ from .protocol_constants import (
     MSG_HELLO,
     MSG_PLAYBACK_CONTROL,
     MSG_QUIT,
+    MSG_REPLAY_COMPLETE,
+    MSG_TRANSACTION_RESULT,
     MSG_TXN,
     PROTOCOL_VERSION,
     LayerMode,
@@ -29,6 +31,8 @@ __all__ = [
     "make_txn",
     "make_claim_playback",
     "make_playback_control",
+    "make_transaction_result",
+    "make_replay_complete",
 ]
 
 
@@ -41,6 +45,7 @@ def make_hello(
     token: str | None = None,
     layered_replay: bool | None = None,
     layer_mode: LayerMode | str = LayerMode.MANAGED,
+    producer_session_id: str | None = None,
 ) -> dict:
     """Build a hello message.
 
@@ -49,8 +54,9 @@ def make_hello(
         sync_from: Sequence number to replay from (receivers only).
         client_id: Per-connection identifier.
         origin: Session-level identifier shared by all connections from the
-            same DCC instance.  The server uses this to suppress echo --
-            events are not broadcast back to receivers with matching origin.
+            same DCC instance. Durable events still return to that origin as
+            part of the complete commit stream; integrations use the value for
+            attribution and local reconciliation.
         department: Optional department name (e.g. "animation", "lighting").
             Used by the server for layer ordering when per-client layers
             are enabled.
@@ -59,6 +65,8 @@ def make_hello(
             authored-layer stack instead of consuming only the composed view.
             Defaults to true for receivers and false for other roles.
         layer_mode: Managed collaboration layers or the shared root-layer graph.
+        producer_session_id: Ordered producer-session identity. Required for
+            emitter connections that submit ordinary transactions.
     """
     mode = LayerMode(layer_mode)
     if mode is LayerMode.SHARED_STAGE and department is not None:
@@ -83,27 +91,58 @@ def make_hello(
         msg["layered_replay"] = True
     if mode is not LayerMode.MANAGED:
         msg["layer_mode"] = mode.value
+    if producer_session_id is not None:
+        msg["producer_session_id"] = producer_session_id
     return msg
 
 
 def make_txn(
-    client_id: str,
     events: list[Event],
-    proposal_id: str = "",
     *,
     layer_key: str = "",
+    txn_id: int = 0,
 ) -> dict:
-    """Build a transaction message.
-
-    With *proposal_id*, the server routes the edits to that proposal's muted
-    layer instead of the client's live layer.
-    """
-    msg = {"type": MSG_TXN, "client_id": client_id, "events": events}
-    if proposal_id:
-        msg["proposal_id"] = proposal_id
+    """Build a transaction message."""
+    msg = {"type": MSG_TXN, "events": events}
     if layer_key:
         msg["layer_key"] = layer_key
+    if txn_id:
+        msg["txn_id"] = int(txn_id)
     return msg
+
+
+def make_transaction_result(
+    txn_id: int,
+    *,
+    status: str = "acknowledged",
+    expected_txn_id: int = 0,
+    rejection_code: str = "none",
+    reason: str = "",
+) -> dict:
+    """Build a cumulative durable producer result."""
+    msg = {
+        "type": MSG_TRANSACTION_RESULT,
+        "txn_id": int(txn_id),
+        "status": status,
+    }
+    if expected_txn_id:
+        msg["expected_txn_id"] = int(expected_txn_id)
+    if rejection_code != "none":
+        msg["rejection_code"] = rejection_code
+    if reason:
+        msg["reason"] = reason
+    return msg
+
+
+def make_replay_complete(head_seq: int, epoch: int) -> dict:
+    """Build the receiver replay-to-live synchronization watermark."""
+    if head_seq < 0 or epoch < 0:
+        raise ValueError("replay watermark values cannot be negative")
+    return {
+        "type": MSG_REPLAY_COMPLETE,
+        "head_seq": int(head_seq),
+        "epoch": int(epoch),
+    }
 
 
 def make_quit() -> dict:

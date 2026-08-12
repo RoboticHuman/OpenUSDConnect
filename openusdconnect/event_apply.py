@@ -1030,8 +1030,12 @@ class _AtomicApply:
 
     __slots__ = ("_layer", "_backup")
 
-    def __init__(self, stage: Usd.Stage):
-        self._layer = stage.GetEditTarget().GetLayer()
+    def __init__(self, stage_or_layer):
+        self._layer = (
+            stage_or_layer
+            if isinstance(stage_or_layer, Sdf.Layer)
+            else stage_or_layer.GetEditTarget().GetLayer()
+        )
         self._backup = None
 
     def __enter__(self):
@@ -1059,8 +1063,12 @@ class _ScopedAtomicApply:
 
     __slots__ = ("_layer", "_paths", "_backup", "_saved", "_created_roots")
 
-    def __init__(self, stage: Usd.Stage, prim_paths):
-        self._layer = stage.GetEditTarget().GetLayer()
+    def __init__(self, stage_or_layer, prim_paths):
+        self._layer = (
+            stage_or_layer
+            if isinstance(stage_or_layer, Sdf.Layer)
+            else stage_or_layer.GetEditTarget().GetLayer()
+        )
         self._paths = [Sdf.Path(p) for p in prim_paths if p]
         self._backup = None
         self._saved: list = []
@@ -1078,7 +1086,7 @@ class _ScopedAtomicApply:
                 continue
             if self._layer.GetPrimAtPath(path):
                 parent = path.GetParentPath()
-                if parent != Sdf.Path.absoluteRootPath:
+                if str(parent) and parent != Sdf.Path.absoluteRootPath:
                     Sdf.CreatePrimInLayer(self._backup, parent)
                 Sdf.CopySpec(self._layer, path, self._backup, path)
                 self._saved.append(path)
@@ -1130,3 +1138,12 @@ def atomic_apply(stage: Usd.Stage, prim_paths=None):
     if prim_paths is not None:
         return _ScopedAtomicApply(stage, prim_paths)
     return _AtomicApply(stage)
+
+
+def atomic_apply_layer(layer: Sdf.Layer, prim_paths=None):
+    """Atomic apply snapshot for a layer even while it is muted from a stage."""
+    if prim_paths is not None:
+        if any(Sdf.Path(path) == Sdf.Path.absoluteRootPath for path in prim_paths):
+            return _AtomicApply(layer)
+        return _ScopedAtomicApply(layer, prim_paths)
+    return _AtomicApply(layer)

@@ -936,12 +936,12 @@ def test_compaction_merges_fields_and_replays_exact_state(tmp_path):
     emitter = NoticeEmitter(source)
     server = UsdSyncServer(log_path=str(tmp_path / "sdf-delta.db"))
 
-    server.process_txn(emitter.snapshot_events())
+    server._commit_events(emitter.snapshot_events())
     attr.SetDocumentation("after initial value")
     attr.SetCustomData({"reviewed": True})
-    server.process_txn(emitter.build_events_for_dirty())
+    server._commit_events(emitter.build_events_for_dirty())
     attr.ClearDocumentation()
-    server.process_txn(emitter.build_events_for_dirty())
+    server._commit_events(emitter.build_events_for_dirty())
     server.compact_log()
 
     replay = [message_to_dict(record)["event"] for _seq, record in server.store.get_all_asc()]
@@ -972,15 +972,15 @@ def test_compaction_replays_layer_prim_and_variant_lifecycle(tmp_path):
     db = str(tmp_path / "sdf-spec-lifecycle.db")
     server = UsdSyncServer(log_path=db)
     try:
-        server.process_txn(emitter.snapshot_events())
+        server._commit_events(emitter.snapshot_events())
         source.GetRootLayer().documentation = "final layer documentation"
         world.SetDocumentation("final prim documentation")
         world.SetCustomData({"reviewed": True})
-        server.process_txn(emitter.build_events_for_dirty())
+        server._commit_events(emitter.build_events_for_dirty())
 
         variant_set = source.GetRootLayer().GetObjectAtPath("/World{look=}")
         variant_set.RemoveVariant(variant_set.variants["blue"])
-        server.process_txn(emitter.build_events_for_dirty())
+        server._commit_events(emitter.build_events_for_dirty())
         server.compact_log()
 
         replay = [message_to_dict(record)["event"] for _seq, record in server.store.get_all_asc()]

@@ -5,11 +5,13 @@
 #include "HAL/CriticalSection.h"
 #include "Containers/Set.h"
 #include "Delegates/IDelegateInstance.h"
+#include "USDConnectRecovery.h"
 #include <atomic>
 #include "USDConnectSubsystem.generated.h"
 
 class FSyncClient;
 class FEmitClient;
+class FProducerEndpointState;
 class AUsdStageActor;
 
 USTRUCT(BlueprintType)
@@ -36,10 +38,29 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
 	bool bReceiverConnected = false;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bReceiverSynchronized = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	bool bEmitterStarted = false;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	bool bEmitterConnected = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int64 SubmittedTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int64 AcknowledgedTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	int32 PendingTransactions = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	bool bRecoveryRequired = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	EUSDConnectRecoveryDisposition RecoveryDisposition =
+		EUSDConnectRecoveryDisposition::None;
 
 	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
 	FString AuthState;
@@ -100,6 +121,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
 	void Disconnect();
 
+	/** Wait until all submitted emitter transactions are durably acknowledged. */
+	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	bool Flush(float TimeoutSeconds = 5.0f) const;
+
 	/** True while the receiver TCP connection is established */
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	bool IsConnected() const;
@@ -108,14 +133,20 @@ public:
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	FUSDConnectStatus GetStatus() const;
 
-	/** Called from FSyncClient background thread — pushes a raw BroadcastEvent frame */
-	void EnqueueEvent(TArray<uint8>&& RawBytes);
+	/** Called from FSyncClient background thread — pushes one replay-generation frame. */
+	void EnqueueEvent(uint64 ReplayGeneration, TArray<uint8>&& RawBytes);
 
 	/** Called from client background threads when the server issues a TOFU token. */
 	void OnClientTokenIssued(const FString& Token);
 
 	/** Called from client background threads after HELLO_OK. */
 	void OnClientHelloOk(const FString& Role);
+
+	/** Select a receiver replay generation and discard queued frames from older streams. */
+	void OnReceiverReplayGenerationChanged(uint64 ReplayGeneration);
+
+	/** Called when the server deterministically rejects a producer transaction. */
+	void OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason);
 
 	/** Called from client background threads when auth is rejected. */
 	void OnClientAuthRejected(const FString& Role);
@@ -127,6 +158,12 @@ public:
 		const FString& Reason);
 
 private:
+	struct FQueuedReceiverFrame
+	{
+		uint64 ReplayGeneration = 0;
+		TArray<uint8> Bytes;
+	};
+
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
@@ -138,6 +175,7 @@ private:
 	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
 	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department, const FString& Token) const;
 	void SetStatusMessage(const FString& AuthState, const FString& Message);
+	void RequestReceiverReplay(const FString& Reason);
 
 	void DrainAndApply();
 
@@ -156,10 +194,11 @@ private:
 	// --- Receiver ---
 	TSharedPtr<FSyncClient> SyncClient;
 	FCriticalSection EventQueueCS;
-	TArray<TArray<uint8>> EventQueue;
+	TArray<FQueuedReceiverFrame> EventQueue;
 
 	// --- Emitter ---
 	TSharedPtr<FEmitClient> EmitClient;
+	TSharedPtr<FProducerEndpointState> ProducerState;
 
 	/**
 	 * Transform prims whose structural xform-op prerequisite has been sent on
@@ -170,9 +209,6 @@ private:
 
 	/** Stable client ID shared by both receiver and emitter connections */
 	FString ClientId;
-	/** Random session origin shared by both connections */
-	FString SessionOrigin;
-
 	/**
 	 * When true, Tick() will perform the auto-connect on the first tick that runs
 	 * AFTER the world is fully initialized. This avoids spawning TCP threads from
@@ -191,6 +227,12 @@ private:
 	 * the safer default and not on a hot path.
 	 */
 	std::atomic<bool> bSuppressEmit;
+
+	/** New native transactions remain gated until replay is applied on the game thread. */
+	std::atomic<bool> bReplaySynchronized;
+	std::atomic<uint64> ActiveReplayGeneration;
+	int32 ReplayHeadSeq = 0;
+	uint64 ReplayEpoch = 0;
 
 	/** Cached weak reference to the currently attached stage actor */
 	TWeakObjectPtr<AUsdStageActor> CachedStageActor;

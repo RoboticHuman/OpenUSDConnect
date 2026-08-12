@@ -18,6 +18,7 @@ import time
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom
 
+from openusdconnect import ClientPhase
 from openusdconnect.managed_client import ManagedClient
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -93,7 +94,7 @@ def test_managed_client_tight_loop_round_trips_without_crash(live_server, tmp_pa
         reconnect=False,
     )
     client.start()
-    assert client.wait_connected(timeout=5)
+    assert client.connect(timeout=5)
 
     prim = stage.DefinePrim("/World/Test", "Xform")
     tr = UsdGeom.Xformable(prim).AddTranslateOp()
@@ -133,7 +134,7 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
         reconnect=False,
     )
     client.start()
-    assert client.wait_connected(timeout=5)
+    assert client.connect(timeout=5)
 
     counts: dict[str, int] = {}
     original_send = client._send
@@ -164,12 +165,10 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
     assert counts["set_xform_trs"] == 50
 
 
-def test_managed_client_redirects_session_authoring_and_converges(live_server, tmp_path):
+def test_managed_client_owns_transient_authoring_and_converges(live_server, tmp_path):
     sync_server, port = live_server
     first_stage = _client_stage(tmp_path, "first")
     second_stage = _client_stage(tmp_path, "second")
-    first_stage.SetEditTarget(Usd.EditTarget(first_stage.GetSessionLayer()))
-    second_stage.SetEditTarget(Usd.EditTarget(second_stage.GetSessionLayer()))
     first = ManagedClient(
         first_stage,
         app_name="managed-first",
@@ -191,12 +190,12 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         assert second_stage.GetEditTarget().GetLayer() is second.authoring_layer
         first.start()
         second.start()
-        assert first.wait_connected(timeout=5)
-        assert second.wait_connected(timeout=5)
+        assert first.connect(timeout=5)
+        assert second.connect(timeout=5)
 
         prim = first_stage.DefinePrim("/World/Shared", "Xform")
         prim.CreateAttribute("value", Sdf.ValueTypeNames.Int).Set(1)
-        assert first.update().sent > 0
+        assert first.update().submitted_events > 0
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             first.update()
@@ -208,7 +207,7 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         assert second_stage.GetAttributeAtPath("/World/Shared.value").Get() == 1
 
         second_stage.GetAttributeAtPath("/World/Shared.value").Set(2)
-        assert second.update().sent > 0
+        assert second.update().submitted_events > 0
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             first.update()
@@ -224,11 +223,144 @@ def test_managed_client_redirects_session_authoring_and_converges(live_server, t
         second.close()
 
 
+def test_managed_client_recovers_rejection_with_fresh_producer_session(
+    live_server,
+    tmp_path,
+    monkeypatch,
+):
+    sync_server, port = live_server
+    stage = _client_stage(tmp_path, "recovery")
+    client = ManagedClient(
+        stage,
+        app_name="managed-recovery",
+        port=port,
+        persist_token=False,
+        reconnect=False,
+    )
+    original_apply = sync_server.apply_txn
+
+    def reject_marked_transaction(events, *args, **kwargs):
+        if any(event.get("prim") == "/World/Rejected" for event in events):
+            raise ValueError("injected invalid managed transaction")
+        return original_apply(events, *args, **kwargs)
+
+    monkeypatch.setattr(sync_server, "apply_txn", reject_marked_transaction)
+    try:
+        client.start()
+        assert client.connect(timeout=5)
+        assert _drain_until(client, lambda: client.synchronized)
+        rejected_session = client.sender.session_id
+
+        stage.DefinePrim("/World/Rejected", "Xform")
+        assert client.update().submitted_events > 0
+        assert _drain_until(client, lambda: client.recovery_required)
+        incident = client.recovery_incident
+        assert incident is not None
+        assert incident.producer_session_id == rejected_session
+        assert incident.event_count > 0
+        assert not sync_server.stage.GetPrimAtPath("/World/Rejected")
+
+        recovered = client.recover_use_server(session_id="managed-replacement-session")
+        assert recovered.recovery_artifact.producer_session_id == rejected_session
+        assert recovered.preserved_authoring_layer.GetPrimAtPath("/World/Rejected")
+        assert not stage.GetPrimAtPath("/World/Rejected")
+        assert client.sender.session_id == "managed-replacement-session"
+        assert not client.recovery_required
+        assert client.connected
+        assert client.status.phase is ClientPhase.READY
+        assert client.receiver.reconnect is False
+        assert client.receiver.replay_head_seq == sync_server.store.get_max_seq()
+
+        stage.DefinePrim("/World/AfterRecovery", "Xform")
+        assert _drain_until(
+            client,
+            lambda: bool(sync_server.stage.GetPrimAtPath("/World/AfterRecovery")),
+        )
+        assert client.sender.session_id != rejected_session
+        assert not sync_server.stage.GetPrimAtPath("/World/Rejected")
+    finally:
+        client.close()
+
+
+def test_managed_clients_apply_complete_commit_order_without_echo(live_server, tmp_path):
+    sync_server, port = live_server
+    stages = [_client_stage(tmp_path, name) for name in ("race-first", "race-second")]
+    clients = [
+        ManagedClient(
+            stage,
+            app_name=f"managed-race-{index}",
+            port=port,
+            persist_token=False,
+            reconnect=False,
+        )
+        for index, stage in enumerate(stages)
+    ]
+    try:
+        for client in clients:
+            client.start()
+            assert client.connect(timeout=5)
+
+        first_attr = stages[0].DefinePrim("/World/Shared", "Xform").CreateAttribute(
+            "value",
+            Sdf.ValueTypeNames.Int,
+        )
+        first_attr.Set(0)
+        assert clients[0].update().submitted_events > 0
+        assert _drain_until(
+            clients[1],
+            lambda: (
+                bool(stages[1].GetAttributeAtPath("/World/Shared.value"))
+                and stages[1].GetAttributeAtPath("/World/Shared.value").Get() == 0
+            ),
+        )
+
+        sent_kinds: list[list[str]] = [[], []]
+        for index, client in enumerate(clients):
+            original_send = client._send
+
+            def capture(events, *, _index=index, _send=original_send):
+                sent_kinds[_index].extend(event["k"] for event in events)
+                return _send(events)
+
+            client._send = capture
+
+        # Both opinions exist before either client processes the peer's commit.
+        stages[0].GetAttributeAtPath("/World/Shared.value").Set(10)
+        stages[1].GetAttributeAtPath("/World/Shared.value").Set(20)
+        assert clients[0].update().submitted_events > 0
+        assert clients[1].update().submitted_events > 0
+        assert clients[0].flush(timeout=5)
+        assert clients[1].flush(timeout=5)
+
+        committed_head = sync_server.store.get_max_seq()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for client in clients:
+                client.update()
+            if all(client.last_seq == committed_head for client in clients):
+                break
+            time.sleep(0.01)
+
+        authoritative = sync_server.stage.GetAttributeAtPath("/World/Shared.value").Get()
+        assert all(client.last_seq == committed_head for client in clients)
+        assert [
+            stage.GetAttributeAtPath("/World/Shared.value").Get() for stage in stages
+        ] == [authoritative, authoritative]
+
+        emitted_after_local_changes = [list(kinds) for kinds in sent_kinds]
+        assert all(emitted_after_local_changes)
+        for _ in range(10):
+            for client in clients:
+                client.update()
+        assert sent_kinds == emitted_after_local_changes
+    finally:
+        for client in clients:
+            client.close()
+
+
 def test_managed_client_rebinds_and_parks_the_emitter():
     old_stage = Usd.Stage.CreateInMemory("old.usda")
     new_stage = Usd.Stage.CreateInMemory("new.usda")
-    old_stage.SetEditTarget(Usd.EditTarget(old_stage.GetSessionLayer()))
-    new_stage.SetEditTarget(Usd.EditTarget(new_stage.GetSessionLayer()))
     client = ManagedClient(
         old_stage,
         app_name="managed-rebind",
@@ -278,7 +410,7 @@ def test_managed_client_hands_ephemeral_tofu_token_to_sender(tmp_path):
     )
     try:
         client.start()
-        assert client.wait_connected(timeout=5)
+        assert client.connect(timeout=5)
         assert client.connected
         assert client.receiver.token
         assert client.sender.token == client.receiver.token

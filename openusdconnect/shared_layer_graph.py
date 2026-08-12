@@ -110,6 +110,10 @@ class PreparedSublayers:
     mappings: tuple[tuple[Sdf.Layer, str], ...]
 
 
+class StaleLayerGraphError(ValueError):
+    """A valid authored edit targets an obsolete shared-layer graph."""
+
+
 class SharedLayerGraph(LayerKeyRouter):
     """Map portable layer keys onto one process's root-layer stack.
 
@@ -124,6 +128,12 @@ class SharedLayerGraph(LayerKeyRouter):
         self.authoritative = bool(authoritative)
         self.root_layer_key = ""
         self._states: dict[str, tuple[dict, ...]] = {}
+        self._parent_revisions: dict[str, int] = {}
+        # Server-local identifiers never cross the wire. Keeping every key
+        # ever assigned lets a detached layer recover the same protocol
+        # identity when it becomes reachable again.
+        self._identity_keys_by_identifier: dict[str, str] = {}
+        self._identity_identifiers_by_key: dict[str, str] = {}
 
         if self.authoritative:
             self._generation = uuid.uuid4().hex
@@ -132,6 +142,62 @@ class SharedLayerGraph(LayerKeyRouter):
             self.root_layer_key = _new_layer_key()
             self._bind_key(self.root_layer_key, stage.GetRootLayer())
             self._capture_reachable(assign_keys=True)
+
+    def _bind_key(self, layer_key: str, layer: Sdf.Layer) -> None:
+        registered_key = self._identity_keys_by_identifier.get(layer.identifier)
+        registered_identifier = self._identity_identifiers_by_key.get(layer_key)
+        if registered_key is not None and registered_key != layer_key:
+            raise ValueError(
+                f"local layer {layer.identifier!r} has durable keys "
+                f"{registered_key!r} and {layer_key!r}"
+            )
+        if registered_identifier is not None and registered_identifier != layer.identifier:
+            raise ValueError(
+                f"layer key {layer_key!r} has durable identifiers "
+                f"{registered_identifier!r} and {layer.identifier!r}"
+            )
+        super()._bind_key(layer_key, layer)
+        self._identity_keys_by_identifier[layer.identifier] = layer_key
+        self._identity_identifiers_by_key[layer_key] = layer.identifier
+
+    def parent_revision(self, layer_key: str) -> int:
+        """Return the topology revision for one currently declared parent."""
+        return self._parent_revisions.get(layer_key, 0)
+
+    def identity_records(self) -> tuple[tuple[str, str], ...]:
+        """Return all known server-local identifier/key pairs."""
+        return tuple(sorted(self._identity_keys_by_identifier.items()))
+
+    def identifier_for_key(self, layer_key: str) -> str | None:
+        """Return the server-local identifier remembered for one key."""
+        return self._identity_identifiers_by_key.get(layer_key)
+
+    def restore_identity_records(self, records: Iterable[tuple[str, str]]) -> None:
+        """Restore detached layer keys without opening their assets."""
+        for identifier, layer_key in records:
+            if not isinstance(identifier, str) or not identifier:
+                raise ValueError("shared layer identifiers must be non-empty strings")
+            if not isinstance(layer_key, str) or not layer_key:
+                raise ValueError("shared layer keys must be non-empty strings")
+            existing_key = self._identity_keys_by_identifier.get(identifier)
+            existing_identifier = self._identity_identifiers_by_key.get(layer_key)
+            if existing_key not in (None, layer_key) or existing_identifier not in (
+                None,
+                identifier,
+            ):
+                raise ValueError("durable shared layer identities conflict with graph replay")
+            self._identity_keys_by_identifier[identifier] = layer_key
+            self._identity_identifiers_by_key[layer_key] = identifier
+
+    def start_new_generation(self) -> None:
+        """Rotate the revision domain without changing logical layer keys."""
+        if not self.ready:
+            raise RuntimeError("shared layer graph has not received a baseline")
+        self._generation = uuid.uuid4().hex
+        self._revision = 1
+        self._parent_revisions = {
+            layer_key: 1 for layer_key in self.reachable_layer_keys()
+        }
 
     def sublayers_for(self, layer_key: str) -> tuple[dict, ...] | None:
         entries = self._states.get(layer_key)
@@ -193,6 +259,31 @@ class SharedLayerGraph(LayerKeyRouter):
                     queue.append(child)
         return tuple(layers)
 
+    def _validate_local_graph(self) -> None:
+        """Reject authored topology that cannot be routed portably.
+
+        Missing assets remain valid: OpenUSD can resolve them later after an
+        asset or resolver refresh. This preflight only rejects unsupported
+        authored topology, and includes the owning layer in the error so a
+        client fails before opening network connections.
+        """
+        layers = self.local_reachable_layers()
+        for layer in layers:
+            try:
+                normalize_sublayer_entries(read_sublayer_entries(layer))
+            except ValueError as exc:
+                raise ValueError(
+                    f"shared-stage layer {layer.identifier!r} has invalid "
+                    f"sublayer topology: {exc}"
+                ) from exc
+        edit_layer = self.stage.GetEditTarget().GetLayer()
+        if all(layer.identifier != edit_layer.identifier for layer in layers):
+            raise ValueError(
+                f"shared-stage edit target {edit_layer.identifier!r} is outside "
+                "the root/sublayer graph; select a mapped file layer before "
+                "constructing SharedStageClient"
+            )
+
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Roll back routing state when a surrounding stage edit fails."""
@@ -203,6 +294,9 @@ class SharedLayerGraph(LayerKeyRouter):
             dict(self._layers),
             dict(self._keys_by_identifier),
             dict(self._states),
+            dict(self._parent_revisions),
+            dict(self._identity_keys_by_identifier),
+            dict(self._identity_identifiers_by_key),
         )
         try:
             yield
@@ -214,6 +308,9 @@ class SharedLayerGraph(LayerKeyRouter):
                 self._layers,
                 self._keys_by_identifier,
                 self._states,
+                self._parent_revisions,
+                self._identity_keys_by_identifier,
+                self._identity_identifiers_by_key,
             ) = old
             raise
 
@@ -273,6 +370,10 @@ class SharedLayerGraph(LayerKeyRouter):
             states[layer_key] = entries
             queue.extend(children)
         self._states = states
+        self._parent_revisions = {
+            layer_key: self._parent_revisions.get(layer_key, 1)
+            for layer_key in states
+        }
 
     def state_message(self, *, seq: int) -> dict:
         """Return the complete reachable graph as a sequenced baseline."""
@@ -291,6 +392,7 @@ class SharedLayerGraph(LayerKeyRouter):
             "layers": [
                 {
                     "layer_key": layer_key,
+                    "revision": self._parent_revisions[layer_key],
                     "sublayers": [dict(entry) for entry in entries],
                 }
                 for layer_key in layer_keys
@@ -299,7 +401,9 @@ class SharedLayerGraph(LayerKeyRouter):
         }
 
     @staticmethod
-    def _validate_topology(message: dict) -> dict[str, tuple[dict, ...]]:
+    def _validate_topology(
+        message: dict,
+    ) -> tuple[dict[str, tuple[dict, ...]], dict[str, int]]:
         generation = message.get("generation")
         root_key = message.get("root_layer_key")
         revision = message.get("revision")
@@ -314,6 +418,7 @@ class SharedLayerGraph(LayerKeyRouter):
             raise ValueError("layer graph layers must be a list")
 
         states = {}
+        parent_revisions = {}
         for state in layers:
             if not isinstance(state, dict):
                 raise ValueError("layer graph states must be dictionaries")
@@ -321,6 +426,17 @@ class SharedLayerGraph(LayerKeyRouter):
             if not isinstance(layer_key, str) or not layer_key or layer_key in states:
                 raise ValueError("layer graph keys must be unique non-empty strings")
             states[layer_key] = normalize_sublayer_entries(state.get("sublayers", ()))
+            parent_revision = state.get("revision", 0)
+            if (
+                isinstance(parent_revision, bool)
+                or not isinstance(parent_revision, int)
+                or parent_revision < 1
+            ):
+                raise ValueError(
+                    "layer graph baseline requires positive per-parent revisions; "
+                    "recreate databases written before this protocol version"
+                )
+            parent_revisions[layer_key] = parent_revision
         if root_key not in states:
             raise ValueError("layer graph baseline does not contain its root layer")
         declared = set(states)
@@ -329,7 +445,7 @@ class SharedLayerGraph(LayerKeyRouter):
                 child_key = entry.get("layer_key")
                 if child_key and child_key not in declared:
                     raise ValueError(f"sublayer references undeclared layer key {child_key!r}")
-        return states
+        return states, parent_revisions
 
     def apply_state(self, message: dict) -> None:
         """Apply and route a complete authoritative graph baseline."""
@@ -337,7 +453,7 @@ class SharedLayerGraph(LayerKeyRouter):
             return
 
     def _apply_state_inner(self, state: dict) -> bool:
-        states = self._validate_topology(state)
+        states, parent_revisions = self._validate_topology(state)
         root_key = state["root_layer_key"]
         old = (
             self._generation,
@@ -346,6 +462,9 @@ class SharedLayerGraph(LayerKeyRouter):
             self._layers,
             self._keys_by_identifier,
             self._states,
+            self._parent_revisions,
+            dict(self._identity_keys_by_identifier),
+            dict(self._identity_identifiers_by_key),
         )
         backups: dict[str, tuple[dict, ...]] = {}
         self._generation = state["generation"]
@@ -353,7 +472,10 @@ class SharedLayerGraph(LayerKeyRouter):
         self.root_layer_key = root_key
         self._layers = {}
         self._keys_by_identifier = {}
+        self._identity_keys_by_identifier = {}
+        self._identity_identifiers_by_key = {}
         self._states = states
+        self._parent_revisions = parent_revisions
         self._bind_key(root_key, self.stage.GetRootLayer())
         try:
             self._materialize_states(backups=backups)
@@ -369,6 +491,9 @@ class SharedLayerGraph(LayerKeyRouter):
                 self._layers,
                 self._keys_by_identifier,
                 self._states,
+                self._parent_revisions,
+                self._identity_keys_by_identifier,
+                self._identity_identifiers_by_key,
             ) = old
             raise
         return True
@@ -419,7 +544,7 @@ class SharedLayerGraph(LayerKeyRouter):
             "k": K_SET_SUBLAYERS,
             "prim": "/",
             "generation": self.generation,
-            "revision": 0,
+            "revision": self.parent_revision(layer_key),
             "sublayers": [dict(entry) for entry in entries],
         }
 
@@ -428,10 +553,19 @@ class SharedLayerGraph(LayerKeyRouter):
         if not self.authoritative:
             raise RuntimeError("only the authoritative graph can assign layer keys")
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         parent = self.layer_for(parent_key)
         if parent is None or parent_key not in self.reachable_layer_keys():
-            raise ValueError(f"unknown shared layer key {parent_key!r}")
+            raise StaleLayerGraphError(f"unknown shared layer key {parent_key!r}")
+        current_revision = self.parent_revision(parent_key)
+        submitted_revision = int(event.get("revision", 0))
+        if submitted_revision != current_revision:
+            raise StaleLayerGraphError(
+                f"expected base parent topology revision {current_revision}, "
+                f"got {submitted_revision}"
+            )
 
         entries = normalize_sublayer_entries(event.get("sublayers", ()))
         pending_by_identifier: dict[str, str] = {}
@@ -441,10 +575,14 @@ class SharedLayerGraph(LayerKeyRouter):
             item = dict(entry)
             child = self._resolve(parent, item["authored_path"])
             if child is not None:
-                layer_key = self.key_for(child) or pending_by_identifier.get(child.identifier)
+                layer_key = (
+                    self.key_for(child)
+                    or pending_by_identifier.get(child.identifier)
+                    or self._identity_keys_by_identifier.get(child.identifier)
+                )
                 supplied_key = item.get("layer_key")
                 if layer_key and supplied_key and supplied_key != layer_key:
-                    raise ValueError(
+                    raise StaleLayerGraphError(
                         f"sublayer {item['authored_path']!r} has stale layer key {supplied_key!r}"
                     )
                 if layer_key is None:
@@ -460,7 +598,7 @@ class SharedLayerGraph(LayerKeyRouter):
             "k": K_SET_SUBLAYERS,
             "prim": "/",
             "generation": self.generation,
-            "revision": self.revision + 1,
+            "revision": current_revision + 1,
             "sublayers": canonical,
         }
         return PreparedSublayers(parent_key, canonical_event, tuple(mappings))
@@ -468,17 +606,21 @@ class SharedLayerGraph(LayerKeyRouter):
     def accept_sublayers(self, prepared: PreparedSublayers) -> None:
         """Commit routing state after its topology event applied successfully."""
         event = prepared.event
-        expected_revision = self.revision + 1
+        expected_revision = self.parent_revision(prepared.parent_key) + 1
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         if int(event.get("revision", 0)) != expected_revision:
-            raise ValueError(
-                f"expected layer graph revision {expected_revision}, got {event.get('revision', 0)}"
+            raise StaleLayerGraphError(
+                f"expected parent topology revision {expected_revision}, "
+                f"got {event.get('revision', 0)}"
             )
         for layer, layer_key in prepared.mappings:
             self._bind_key(layer_key, layer)
         self._states[prepared.parent_key] = normalize_sublayer_entries(event["sublayers"])
-        self._revision = expected_revision
+        self._parent_revisions[prepared.parent_key] = expected_revision
+        self._revision += 1
 
     def discover_sublayer_states(
         self,
@@ -532,17 +674,25 @@ class SharedLayerGraph(LayerKeyRouter):
             for layer_key, entries in self._states.items()
             if layer_key in reachable
         }
+        self._parent_revisions = {
+            layer_key: revision
+            for layer_key, revision in self._parent_revisions.items()
+            if layer_key in reachable
+        }
 
     def apply_sublayers(self, parent_key: str, event: dict) -> None:
         """Apply one canonical server event and advance local routing state."""
         if event.get("generation") != self.generation:
-            raise ValueError("sublayer event belongs to a different graph generation")
+            raise StaleLayerGraphError(
+                "sublayer event belongs to a different graph generation"
+            )
         if parent_key not in self.reachable_layer_keys():
-            raise ValueError(f"unknown shared layer key {parent_key!r}")
-        expected_revision = self.revision + 1
+            raise StaleLayerGraphError(f"unknown shared layer key {parent_key!r}")
+        expected_revision = self.parent_revision(parent_key) + 1
         if int(event.get("revision", 0)) != expected_revision:
-            raise ValueError(
-                f"expected layer graph revision {expected_revision}, got {event.get('revision', 0)}"
+            raise StaleLayerGraphError(
+                f"expected parent topology revision {expected_revision}, "
+                f"got {event.get('revision', 0)}"
             )
         parent = self.layer_for(parent_key)
         entries = normalize_sublayer_entries(event.get("sublayers", ()))
@@ -568,6 +718,7 @@ class SharedLayerGraph(LayerKeyRouter):
 __all__ = [
     "PreparedSublayers",
     "SharedLayerGraph",
+    "StaleLayerGraphError",
     "apply_sublayer_entries",
     "normalize_sublayer_entries",
     "read_sublayer_entries",

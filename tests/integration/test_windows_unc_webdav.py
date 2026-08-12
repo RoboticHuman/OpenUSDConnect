@@ -42,7 +42,7 @@ def test_windows_unc_path_reads_virtual_usd(tmp_path, free_port):
     )
     handle = run_vfs_server(provider, "127.0.0.1", free_port, share="usd")
     try:
-        srv.process_txn(
+        srv._commit_events(
             [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}],
             client_id="unc-smoke",
             origin="unc-smoke",

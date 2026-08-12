@@ -53,6 +53,8 @@ def main() -> int:
             department="lookdev",
             persist_token=False,
         ) as publisher:
+            if not publisher.connect(timeout=5):
+                raise ConnectionError("OpenUSDConnect server is unavailable")
             sent = publisher.publish_current_edit_target()
     except ConnectionError as exc:
         print(f"peer could not connect: {exc}", file=sys.stderr)

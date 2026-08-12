@@ -135,7 +135,7 @@ class ConnectionSession:
         """Stamp each applied prim with the current sequence so changes_since can
         report it. Coarse at drain granularity (a whole drain shares its final
         seq), which is fine for 'what changed since N' polling."""
-        seq = self.dispatcher.last_seq if self.dispatcher else 0
+        seq = self.dispatcher.applying_seq if self.dispatcher else 0
         for path in prim_paths:
             self._dirty[path] = seq
 

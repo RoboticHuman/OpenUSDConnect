@@ -16,8 +16,26 @@ import os
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ProducerProgress:
+    """Durable cumulative progress for one authenticated producer session."""
+
+    client_id: str
+    session_id: str
+    committed_through: int
+
+
+@dataclass(frozen=True, slots=True)
+class LayerIdentity:
+    """Durable server-local identifier for one shared-stage layer key."""
+
+    identifier: str
+    layer_key: str
 
 
 class EventStore(ABC):
@@ -33,11 +51,23 @@ class EventStore(ABC):
 
     @abstractmethod
     def append_batch(self, records: list[tuple[int, bytes, str | None,
-                       str | None, str | None]]) -> None:
-        """Persist multiple event records in a single transaction.
+                       str | None, str | None]], *,
+                     producer_progress: tuple[ProducerProgress, ...] = (),
+                     layer_identities: tuple[LayerIdentity, ...] = ()) -> None:
+        """Persist records, producer progress, and layer identities atomically.
 
         Each record is (seq, record_bin, client_id, kind, prim).
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_layer_identities(self) -> tuple[LayerIdentity, ...]:
+        """Return every durable shared-stage layer identity."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_producer_progress(self, client_id: str, session_id: str) -> int:
+        """Return the highest durable transaction ID for a producer session."""
         raise NotImplementedError
 
     @abstractmethod
@@ -97,7 +127,8 @@ class EventStore(ABC):
 
     @abstractmethod
     def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
-                       str | None, str | None]]) -> None:
+                       str | None, str | None]], *,
+                          clear_producers: bool = False) -> None:
         """Atomically replace all events with *records*.
 
         Each record is ``(seq, record_bin, client_id, kind, prim)``. If the
@@ -147,6 +178,28 @@ class SqliteEventStore(EventStore):
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_prim ON events(prim)"
         )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS producer_sessions (
+                client_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                committed_through INTEGER NOT NULL,
+                PRIMARY KEY (client_id, session_id)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS shared_layer_identities (
+                identifier TEXT PRIMARY KEY,
+                layer_key TEXT NOT NULL UNIQUE
+            )
+        """)
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS shared_layer_identity_is_immutable
+            BEFORE UPDATE OF layer_key ON shared_layer_identities
+            WHEN OLD.layer_key <> NEW.layer_key
+            BEGIN
+                SELECT RAISE(ABORT, 'shared layer identity cannot be remapped');
+            END
+        """)
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -163,16 +216,60 @@ class SqliteEventStore(EventStore):
             self._conn.commit()
 
     def append_batch(self, records: list[tuple[int, bytes, str | None,
-                       str | None, str | None]]) -> None:
-        if not records:
+                       str | None, str | None]], *,
+                     producer_progress: tuple[ProducerProgress, ...] = (),
+                     layer_identities: tuple[LayerIdentity, ...] = ()) -> None:
+        if not records and not producer_progress and not layer_identities:
             return
         with self._lock:
-            self._conn.executemany(
-                "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
-                " VALUES (?, ?, ?, ?, ?)",
-                records,
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.executemany(
+                    "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    records,
+                )
+                self._conn.executemany(
+                    "INSERT INTO producer_sessions(client_id, session_id, committed_through)"
+                    " VALUES (?, ?, ?) ON CONFLICT(client_id, session_id) DO UPDATE SET"
+                    " committed_through = MAX(producer_sessions.committed_through,"
+                    " excluded.committed_through)",
+                    [
+                        (progress.client_id, progress.session_id, progress.committed_through)
+                        for progress in producer_progress
+                    ],
+                )
+                if layer_identities:
+                    self._conn.executemany(
+                        "INSERT INTO shared_layer_identities(identifier, layer_key)"
+                        " VALUES (?, ?) ON CONFLICT(identifier) DO UPDATE SET"
+                        " layer_key = excluded.layer_key",
+                        [
+                            (identity.identifier, identity.layer_key)
+                            for identity in layer_identities
+                        ],
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_layer_identities(self) -> tuple[LayerIdentity, ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT identifier, layer_key FROM shared_layer_identities"
+                " ORDER BY identifier"
+            ).fetchall()
+        return tuple(LayerIdentity(str(row[0]), str(row[1])) for row in rows)
+
+    def get_producer_progress(self, client_id: str, session_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT committed_through FROM producer_sessions"
+                " WHERE client_id = ? AND session_id = ?",
+                (client_id, session_id),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def get_max_seq(self) -> int:
         with self._lock:
@@ -268,11 +365,14 @@ class SqliteEventStore(EventStore):
         return [r[0] for r in rows]
 
     def clear_and_rewrite(self, records: list[tuple[int, bytes, str | None,
-                       str | None, str | None]]) -> None:
+                       str | None, str | None]], *,
+                          clear_producers: bool = False) -> None:
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute("DELETE FROM events")
+                if clear_producers:
+                    self._conn.execute("DELETE FROM producer_sessions")
                 self._conn.executemany(
                     "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
                     " VALUES (?, ?, ?, ?, ?)",

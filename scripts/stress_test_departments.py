@@ -70,7 +70,60 @@ def _recv_one(sock):
     return message_to_dict(buf)
 
 
-def _connect_emitter(port, client_id, department):
+def _wait_for_transaction_results(
+    sock,
+    expected,
+    timeout=60,
+    submitted_at=None,
+    latency_sink=None,
+):
+    """Drain producer results until every submitted transaction is terminal."""
+    sock.settimeout(timeout)
+    acknowledged_through = 0
+    while acknowledged_through < expected:
+        message = _recv_one(sock)
+        if message and message.get("type") == "transaction_result":
+            if message.get("status") == 1:
+                raise RuntimeError(f"transaction rejected: {message}")
+            previous = acknowledged_through
+            acknowledged_through = max(acknowledged_through, int(message.get("txn_id", 0)))
+            if submitted_at is not None and latency_sink is not None:
+                now = time.perf_counter()
+                for txn_id in range(previous + 1, acknowledged_through + 1):
+                    started = submitted_at.pop(txn_id, None)
+                    if started is not None:
+                        latency_sink.append(now - started)
+    return acknowledged_through
+
+
+def _start_result_reader(sock, expected, submitted_at=None, latency_sink=None):
+    result = {}
+
+    def _read():
+        try:
+            result["count"] = _wait_for_transaction_results(
+                sock,
+                expected,
+                submitted_at=submitted_at,
+                latency_sink=latency_sink,
+            )
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _join_result_reader(thread, result, timeout=60):
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        raise TimeoutError("timed out waiting for durable transaction results")
+    if "error" in result:
+        raise result["error"]
+
+
+def _connect_emitter(port, client_id, department, session_id):
     s = socket.create_connection(("127.0.0.1", port), timeout=10)
     _send(
         s,
@@ -79,6 +132,7 @@ def _connect_emitter(port, client_id, department):
             client_id=client_id,
             origin=f"{client_id}-origin",
             department=department,
+            producer_session_id=session_id,
         ),
     )
     _recv_one(s)  # hello_ok
@@ -256,11 +310,29 @@ def _generate_clients(n_emitters, n_receivers, n_bidi):
 # Worker threads
 # ---------------------------------------------------------------------------
 
-def _emitter_worker(port, spec, iterations, barrier, connect_delay, errors, stats):
+def _emitter_worker(
+    port,
+    spec,
+    iterations,
+    barrier,
+    connect_delay,
+    errors,
+    stats,
+    submission_finished_at,
+    ack_latencies,
+):
     cid = spec["client_id"]
+    session_id = f"stress-{cid}"
     try:
         time.sleep(connect_delay)
-        sock = _connect_emitter(port, cid, spec["department"])
+        sock = _connect_emitter(port, cid, spec["department"], session_id)
+        submitted_at = {}
+        result_thread, result = _start_result_reader(
+            sock,
+            iterations * 2,
+            submitted_at,
+            ack_latencies,
+        )
         barrier.wait(timeout=30)
         txn_count = 0
         dept_idx = DEPT_LIST.index(spec["department"])
@@ -269,7 +341,8 @@ def _emitter_worker(port, spec, iterations, barrier, connect_delay, errors, stat
             base = spec["base"]
             t = (base[0] + i, base[1] + i, base[2] + i)
             private = spec["private_prim"]
-            _send(sock, {"type": "txn", "client_id": cid,
+            submitted_at[txn_count + 1] = time.perf_counter()
+            _send(sock, {"type": "txn", "txn_id": txn_count + 1,
                          "events": _make_trs_events(
                              private, t, first_encounter=private not in seen)})
             seen.add(private)
@@ -277,12 +350,15 @@ def _emitter_worker(port, spec, iterations, barrier, connect_delay, errors, stat
 
             shared = SHARED_PRIMS[i % len(SHARED_PRIMS)]
             st = (dept_idx * 100 + i, i, dept_idx)
-            _send(sock, {"type": "txn", "client_id": cid,
+            submitted_at[txn_count + 1] = time.perf_counter()
+            _send(sock, {"type": "txn", "txn_id": txn_count + 1,
                          "events": _make_trs_events(
                              shared, st, first_encounter=shared not in seen)})
             seen.add(shared)
             txn_count += 1
 
+        submission_finished_at[cid] = time.perf_counter()
+        _join_result_reader(result_thread, result)
         stats[cid] = txn_count
         _send(sock, {"type": "quit"})
         sock.close()
@@ -310,70 +386,13 @@ def _receiver_worker(port, spec, done_event, connect_delay, errors, stats):
         errors.append((cid, exc))
 
 
-def _bidi_worker(port, spec, iterations, barrier, done_event,
-                 connect_delay, errors, emit_stats, recv_stats):
-    cid = spec["client_id"]
-    try:
-        time.sleep(connect_delay)
-        emit_sock = _connect_emitter(port, cid, spec["department"])
-        recv_sock = _connect_receiver(port, f"{cid}-rx")
-
-        rx_count = [0]
-
-        def _rx():
-            while not done_event.is_set():
-                try:
-                    recv_framed(recv_sock)
-                    rx_count[0] += 1
-                except TimeoutError:
-                    if done_event.is_set():
-                        break
-                    continue
-                except (ConnectionError, OSError):
-                    break
-
-        rx_thread = threading.Thread(target=_rx, daemon=True)
-        rx_thread.start()
-
-        barrier.wait(timeout=30)
-        txn_count = 0
-        dept_idx = DEPT_LIST.index(spec["department"])
-        seen: set[str] = set()
-        for i in range(iterations):
-            base = spec["base"]
-            t = (base[0] + i, base[1] + i, base[2] + i)
-            private = spec["private_prim"]
-            _send(emit_sock, {"type": "txn", "client_id": cid,
-                              "events": _make_trs_events(
-                                  private, t, first_encounter=private not in seen)})
-            seen.add(private)
-            txn_count += 1
-
-            shared = SHARED_PRIMS[i % len(SHARED_PRIMS)]
-            st = (dept_idx * 100 + i, i, dept_idx)
-            _send(emit_sock, {"type": "txn", "client_id": cid,
-                              "events": _make_trs_events(
-                                  shared, st, first_encounter=shared not in seen)})
-            seen.add(shared)
-            txn_count += 1
-
-        emit_stats[cid] = txn_count
-        _send(emit_sock, {"type": "quit"})
-        emit_sock.close()
-
-        rx_thread.join(timeout=5)
-        recv_stats[cid] = rx_count[0]
-        recv_sock.close()
-    except Exception as exc:
-        errors.append((cid, exc))
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_output,
-               connect_existing, text_profile=False):
+               connect_existing, text_profile=False, txn_batch_size=128,
+               txn_batch_delay_ms=0.5):
     total_clients = n_emitters + n_receivers + n_bidi
     total_sockets = n_emitters + n_receivers + n_bidi * 2
 
@@ -400,6 +419,8 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
             "--port", str(SERVER_PORT),
             "--event-log", DB_PATH,
             "--departments", DEPARTMENTS,
+            "--txn-batch-size", str(txn_batch_size),
+            "--txn-batch-delay-ms", str(txn_batch_delay_ms),
         ]
         # Spawn the server.  py-spy's ``record -- <cmd>`` mode cannot
         # introspect a uv venv python (errors with "Failed to find python
@@ -470,6 +491,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
     print(f"  Clients: {n_emitters} emitters + {n_receivers} receivers + {n_bidi} bidi = {total_clients}")
     print(f"  TCP sockets: {total_sockets}")
     print(f"  Iterations per writer: {iterations}")
+    print(f"  Group commit: size={txn_batch_size}, delay={txn_batch_delay_ms:g} ms")
 
     emitters, receivers, bidis = _generate_clients(n_emitters, n_receivers, n_bidi)
 
@@ -479,12 +501,14 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
     errors = []
     emit_stats = {}
     recv_stats = {}
+    submission_finished_at = {}
+    ack_latencies = []
 
     try:
         print(f"\nConnecting {total_clients} clients (staggered)...")
 
         # Stagger connections to avoid overwhelming the server's accept queue.
-        # 0.02s between each = ~2 seconds for 100 clients.
+        # 0.02s between sockets avoids overwhelming the accept queue.
         delay_step = 0.02
         idx = 0
 
@@ -499,19 +523,36 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
 
         bidi_threads = []
         for spec in bidis:
-            t = threading.Thread(target=_bidi_worker,
-                                 args=(SERVER_PORT, spec, iterations, barrier,
-                                       done_event, idx * delay_step,
-                                       errors, emit_stats, recv_stats))
-            t.start()
-            bidi_threads.append(t)
+            # A product bidirectional client is two independent protocol
+            # connections. Keep those lifecycles independent here too so the
+            # durability timer never waits for receiver shutdown.
+            receiver_spec = {"client_id": f"{spec['client_id']}-rx"}
+            receiver_thread = threading.Thread(
+                target=_receiver_worker,
+                args=(SERVER_PORT, receiver_spec, done_event,
+                      idx * delay_step, errors, recv_stats),
+            )
+            receiver_thread.start()
+            rx_threads.append(receiver_thread)
+            idx += 1
+
+            emitter_thread = threading.Thread(
+                target=_emitter_worker,
+                args=(SERVER_PORT, spec, iterations, barrier,
+                      idx * delay_step, errors, emit_stats,
+                      submission_finished_at, ack_latencies),
+            )
+            emitter_thread.start()
+            bidi_threads.append(emitter_thread)
             idx += 1
 
         emit_threads = []
         for spec in emitters:
             t = threading.Thread(target=_emitter_worker,
                                  args=(SERVER_PORT, spec, iterations, barrier,
-                                       idx * delay_step, errors, emit_stats))
+                                       idx * delay_step, errors, emit_stats,
+                                       submission_finished_at,
+                                       ack_latencies))
             t.start()
             emit_threads.append(t)
             idx += 1
@@ -551,9 +592,25 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
 
         total_txns = sum(emit_stats.values())
         total_rx = sum(recv_stats.values())
+        submitted_elapsed = (
+            max(submission_finished_at.values()) - t0
+            if submission_finished_at
+            else elapsed
+        )
         print(f"\nResults ({elapsed:.2f}s):")
         print(f"  Total txns sent: {total_txns}")
-        print(f"  Throughput: {total_txns / elapsed:.0f} txn/s")
+        print(f"  Submission throughput: {total_txns / submitted_elapsed:.0f} txn/s")
+        print(f"  Durable throughput: {total_txns / elapsed:.0f} txn/s")
+        if ack_latencies:
+            ordered_latencies = sorted(ack_latencies)
+            median_latency = ordered_latencies[len(ordered_latencies) // 2]
+            p95_latency = ordered_latencies[int((len(ordered_latencies) - 1) * 0.95)]
+            print(
+                "  Ack latency: "
+                f"median={median_latency * 1000:.1f} ms "
+                f"p95={p95_latency * 1000:.1f} ms "
+                f"max={ordered_latencies[-1] * 1000:.1f} ms"
+            )
 
         per_dept = {}
         for spec in emitters + bidis:
@@ -703,6 +760,10 @@ def main():
                     help="Number of bidirectional clients (default: 20)")
     ap.add_argument("--iterations", type=positive_int, default=100,
                     help="Write iterations per writer (default: 100)")
+    ap.add_argument("--txn-batch-size", type=positive_int, default=128,
+                    help="Maximum transactions per durable commit (default: 128)")
+    ap.add_argument("--txn-batch-delay-ms", type=float, default=0.5,
+                    help="Maximum group collection delay in ms (default: 0.5)")
     ap.add_argument("--profile", action="store_true",
                     help="Launch server through py-spy producing an SVG flame "
                          "graph (needs Administrator on Windows)")
@@ -719,7 +780,9 @@ def main():
 
     ok = run_stress(args.emitters, args.receivers, args.bidi,
                     args.iterations, args.profile, args.profile_output,
-                    args.connect, text_profile=args.text_profile)
+                    args.connect, text_profile=args.text_profile,
+                    txn_batch_size=args.txn_batch_size,
+                    txn_batch_delay_ms=args.txn_batch_delay_ms)
     sys.exit(0 if ok else 1)
 
 

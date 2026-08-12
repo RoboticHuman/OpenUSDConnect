@@ -45,7 +45,7 @@ _stage = None  # Cached Usd.Stage reference
 _root_layer_id = ""  # Root layer identifier for staleness detection
 _root_layer_name = ""  # For stage re-lookup on lifecycle events
 _client_id: str = ""  # Per-session identifier
-_origin: str = ""  # Shared origin for echo suppression
+_origin: str = ""  # Shared origin for attribution and reconciliation
 _host: str = ""
 _port: int = 0
 _live_metadata: dict | None = None
@@ -269,7 +269,7 @@ def start(
             use its host/port and snapshot_seq for live sync.
         persist_tokens: Save and reuse TOFU auth tokens for token-required servers.
         client_id: Optional client identifier (auto-generated if None).
-        origin: Optional origin identifier for echo suppression.
+        origin: Optional session origin for attribution and reconciliation.
     """
     global _receiver, _sender, _dispatcher, _tick_handle
     global _root_layer_name, _client_id, _origin, _host, _port

@@ -47,7 +47,7 @@ def reconstruct(base_path: str, events: list[dict], *, edit_session: bool = True
         from openusdconnect.codec import encode_message, message_to_dict
         from openusdconnect.protocol import make_txn
 
-        events = message_to_dict(encode_message(make_txn("visualtest", events)))["events"]
+        events = message_to_dict(encode_message(make_txn(events)))["events"]
 
     stage = Usd.Stage.Open(base_path)
     if edit_session:

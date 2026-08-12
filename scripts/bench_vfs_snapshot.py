@@ -32,7 +32,7 @@ def _send_synthetic_prims(server: UsdSyncServer, count: int, batch_size: int = 5
             }
             for i in range(start, min(start + batch_size, count))
         ]
-        server.process_txn(events, client_id="bench", origin="bench")
+        server._commit_events(events, client_id="bench", origin="bench")
 
 
 def _measure(label: str, func) -> dict:
