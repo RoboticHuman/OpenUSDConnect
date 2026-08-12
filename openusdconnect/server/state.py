@@ -2151,17 +2151,30 @@ class UsdSyncServer:
             self.last_vfs_write_analysis = analysis.to_dict()
             self._maybe_reclaim_storage()
 
-            self.broadcast({"type": MSG_RESYNC, "reason": "vfs-write"})
-            if records:
-                record_dicts = [record for record, _record_bin in records]
-                record_bins = [record_bin for _record, record_bin in records]
-                if self.wire_metrics is not None:
-                    for record, record_bin in records:
-                        self.wire_metrics.record(record["event"].get("k", ""), len(record_bin))
-                self.broadcast_bytes(
-                    frame_batch(record_bins),
-                    record_dicts,
-                )
+            # Queue the reset, replacement records, and completion marker
+            # together so the same receivers observe them in order without
+            # another broadcast interleaving. ReplayComplete marks the new
+            # durable head and restores readiness, even with no records.
+            replay_epoch, replay_head = self.get_snapshot_token()
+            resync_bin = encode_message({"type": MSG_RESYNC, "reason": "vfs-write"})
+            complete_bin = encode_message(
+                {
+                    "type": MSG_REPLAY_COMPLETE,
+                    "head_seq": replay_head,
+                    "epoch": replay_epoch,
+                }
+            )
+            record_dicts = [record for record, _record_bin in records]
+            record_bins = [record_bin for _record, record_bin in records]
+            if self.wire_metrics is not None:
+                self.wire_metrics.record(MSG_RESYNC, len(resync_bin))
+                for record, record_bin in records:
+                    self.wire_metrics.record(record["event"].get("k", ""), len(record_bin))
+                self.wire_metrics.record(MSG_REPLAY_COMPLETE, len(complete_bin))
+            self.broadcast_bytes(
+                frame_batch([resync_bin, *record_bins, complete_bin]),
+                record_dicts,
+            )
             LOG.info(
                 "Translated VFS snapshot write into %d live events "
                 "(created=%d removed=%d type_changed=%d)",
