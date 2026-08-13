@@ -494,6 +494,8 @@ class ManagedClient:
 
     def claim_playback(self, time: float | None = None) -> bool:
         """Request the shared-playback leader role."""
+        if self._closed:
+            raise RuntimeError("ManagedClient is closed")
         return self._sender.claim_playback(time=time)
 
     def send_playback_control(
@@ -504,6 +506,8 @@ class ManagedClient:
         rate: float | None = None,
     ) -> bool:
         """Drive the shared playhead (leader only)."""
+        if self._closed:
+            raise RuntimeError("ManagedClient is closed")
         return self._sender.send_playback_control(action, time=time, rate=rate)
 
     def update(self) -> SyncUpdate:

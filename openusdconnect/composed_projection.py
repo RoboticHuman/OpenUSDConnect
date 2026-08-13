@@ -901,6 +901,7 @@ class ComposedChangeProjection:
         self._resync_prim_roots: set[str] = set()
         self._affected_prim_paths: set[str] = set()
         self._built_adapter_events: list[dict] | None = None
+        self._delivery_state = "open"
         self._notice_key = None
         self._prepare_reapplication_scope(
             reapply_all_composed=reapply_all_composed,
@@ -1511,6 +1512,8 @@ class ComposedChangeProjection:
 
     def build_events(self) -> list[dict]:
         """Return adapter events representing the post-transaction composition."""
+        if self._delivery_state != "open":
+            raise RuntimeError("projection events may only be built once")
         self.close()
         self._add_notice_candidates()
         if self._event_scene_paths:
@@ -1528,17 +1531,22 @@ class ComposedChangeProjection:
         for step in _PROJECTION_STEPS:
             adapter_events.extend(getattr(self, step.method_name)())
         self._built_adapter_events = adapter_events
+        self._delivery_state = "built"
         return adapter_events
 
     def commit(self) -> None:
         """Record that the built adapter events were delivered successfully."""
+        if self._delivery_state != "built":
+            raise RuntimeError("projection must be built before it can be committed")
         self.close()
         self._state.commit(self)
+        self._delivery_state = "committed"
 
     def require_full_reconcile(self) -> None:
         """Preserve the adapter baseline and widen the next transaction."""
         self.close()
         self._state.require_full_reconcile()
+        self._delivery_state = "failed"
 
     def _project_namespace_and_lifecycle(self) -> list[dict]:
         renames = self._project_renames()

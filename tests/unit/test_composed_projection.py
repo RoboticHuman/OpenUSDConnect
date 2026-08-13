@@ -265,6 +265,27 @@ def test_persistent_projection_state_reconciles_after_adapter_failure():
         settled.commit()
 
 
+def test_projection_rejects_commit_before_build():
+    stage = Usd.Stage.CreateInMemory()
+    projection = ComposedChangeProjection(stage, [])
+    try:
+        with pytest.raises(RuntimeError, match="must be built"):
+            projection.commit()
+    finally:
+        projection.close()
+
+
+def test_projection_events_can_only_be_built_once():
+    stage = Usd.Stage.CreateInMemory()
+    projection = ComposedChangeProjection(stage, [])
+    try:
+        assert projection.build_events() == []
+        with pytest.raises(RuntimeError, match="only be built once"):
+            projection.build_events()
+    finally:
+        projection.close()
+
+
 def test_shared_root_projection_pauses_after_resolver_refresh(caplog):
     stage = Usd.Stage.CreateInMemory()
     stage.DefinePrim("/World", "Xform")
@@ -296,6 +317,7 @@ def test_shared_root_projection_pauses_after_resolver_refresh(caplog):
     assert baseline_advances == [True]
     assert not state.native_scene_rebuild_required
     with ComposedChangeProjection(stage, [], state=state) as projection:
+        assert projection.build_events() == []
         projection.commit()
 
 

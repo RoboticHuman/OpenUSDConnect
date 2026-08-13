@@ -100,6 +100,52 @@ def _teardown(rt, conn, srv):
 
 
 class TestReceiverThread:
+    def test_terminal_transport_failure_wakes_connection_waiter(self, monkeypatch):
+        def _fail_connect(*_args, **_kwargs):
+            raise OSError("injected connection failure")
+
+        monkeypatch.setattr(socket, "create_connection", _fail_connect)
+        rt = ReceiverThread(host="127.0.0.1", port=1, reconnect=False)
+        rt.start()
+        try:
+            assert not rt.wait_connected(timeout=1)
+            rt.join(timeout=1)
+            assert not rt.is_alive()
+            assert isinstance(rt.connection_error, OSError)
+        finally:
+            rt.stop()
+            rt.join(timeout=1)
+
+    def test_token_callback_failure_does_not_abort_handshake(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(
+            host="127.0.0.1",
+            port=port,
+            reconnect=False,
+            on_token_issued=lambda _token: (_ for _ in ()).throw(
+                RuntimeError("injected callback failure")
+            ),
+        )
+        rt.start()
+        conn = _accept(srv)
+        try:
+            _recv_hello(conn)
+            send_framed(
+                conn,
+                encode_message(
+                    {
+                        "type": "hello_ok",
+                        "layered_replay": True,
+                        "token": "issued-token",
+                    }
+                ),
+            )
+            assert rt.wait_connected(timeout=1)
+            assert rt.connected
+            assert rt.token == "issued-token"
+        finally:
+            _teardown(rt, conn, srv)
+
     def test_connects_and_sends_hello(self):
         """ReceiverThread connects and sends a hello message."""
         srv, port = _make_server()

@@ -643,6 +643,20 @@ def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatc
         client.close()
 
 
+def test_managed_client_playback_commands_reject_a_closed_client():
+    client = ManagedClient(
+        Usd.Stage.CreateInMemory(),
+        app_name="closed-playback-client",
+        persist_token=False,
+    )
+    client.close()
+
+    with pytest.raises(RuntimeError, match="ManagedClient is closed"):
+        client.claim_playback()
+    with pytest.raises(RuntimeError, match="ManagedClient is closed"):
+        client.send_playback_control("play")
+
+
 def test_publisher_does_not_consume_edits_while_disconnected():
     stage = Usd.Stage.CreateInMemory()
     publisher = UsdPublisher(

@@ -132,6 +132,7 @@ class ReceiverThread(threading.Thread):
         self.hello_rejected = False
         self.rejection_code = HelloRejectionCode.Unspecified
         self.rejection_reason = ""
+        self.connection_error: Exception | None = None
         self.stage_metadata: dict = {}
 
     @property
@@ -184,9 +185,11 @@ class ReceiverThread(threading.Thread):
     def run(self):
         delay = self._reconnect_base_delay
         while not self._stop_event.is_set():
+            self.connection_error = None
             try:
                 self._connect_and_recv()
-            except Exception:
+            except Exception as exc:
+                self.connection_error = exc
                 if not self._stop_event.is_set():
                     LOG.exception("ReceiverThread: connection error")
             finally:
@@ -199,6 +202,10 @@ class ReceiverThread(threading.Thread):
                 or self.auth_rejected
                 or self.hello_rejected
             ):
+                # Authentication/negotiation paths signal this themselves.
+                # Transport and callback failures must do so here, otherwise
+                # wait_connected(None) can outlive a terminated thread.
+                self._handshake_event.set()
                 break
 
             self._handshake_event.clear()
@@ -373,7 +380,12 @@ class ReceiverThread(threading.Thread):
                             issued = issued.decode("utf-8")
                         self.token = issued
                         if self._on_token_issued:
-                            self._on_token_issued(issued)
+                            try:
+                                self._on_token_issued(issued)
+                            except Exception:
+                                LOG.exception(
+                                    "ReceiverThread: on_token_issued callback failed",
+                                )
                         LOG.info("ReceiverThread: token issued by server")
                     sm = ho.StageMetadata()
                     if sm is not None:

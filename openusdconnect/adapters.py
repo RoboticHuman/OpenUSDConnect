@@ -173,6 +173,12 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
 class DCCAdapter(ABC):
     """Abstract interface a receiving scene integration must implement.
 
+    Semantic methods return ``True`` when they performed or accepted an
+    operation and ``False`` for an intentional no-op. These booleans are
+    diagnostic; batch delivery fails only when an implementation raises. An
+    adapter that cannot leave its destination in the requested state must
+    raise an exception instead of returning ``False``.
+
     Subclasses that write directly into a ``Usd.Stage`` must override
     :meth:`targets_stage`. Adapters for an external scene, such as native DCC
     objects, inherit its default ``None`` result. That distinction controls
@@ -180,16 +186,25 @@ class DCCAdapter(ABC):
     stage or projects the mirror's composed result into a separate scene.
     """
 
-    def apply_event(self, event: dict):
-        """Route one protocol event dict to the matching adapter method."""
+    def apply_event(self, event: dict) -> bool:
+        """Route one known protocol event to the matching adapter method.
+
+        The boolean is the semantic method's diagnostic result. Unknown event
+        kinds are programmer/protocol errors and are never silently ignored.
+        """
         k = event["k"]
         extract = _DISPATCH.get(k)
         if extract is None:
-            return None
+            raise ValueError(f"unsupported adapter event kind {k!r}")
         return getattr(self, k)(**extract(event))
 
     def apply_events(self, events: list[dict]) -> int:
-        """Apply a batch of protocol events to this adapter."""
+        """Dispatch a batch, returning the number of events attempted.
+
+        Per-event ``False`` results remain intentional no-ops. Implementations
+        must raise to abort delivery; exceptions propagate to the dispatcher,
+        which retains/replays the unapplied sequence suffix.
+        """
         for event in events:
             self.apply_event(event)
         return len(events)

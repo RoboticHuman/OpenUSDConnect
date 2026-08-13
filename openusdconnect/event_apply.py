@@ -906,10 +906,11 @@ def _is_instance_proxy_target(stage: Usd.Stage, ev: dict) -> bool:
 def apply_event(stage: Usd.Stage, ev: Event) -> None:
     """Apply a single event dict to a USD stage."""
     spec = _events.get(ev.get("k"))
-    if spec is not None and spec.apply is not None:
-        if _is_instance_proxy_target(stage, ev):
-            return
-        spec.apply(stage, ev)
+    if spec is None or spec.apply is None:
+        raise ValueError(f"unsupported USD event kind {ev.get('k')!r}")
+    if _is_instance_proxy_target(stage, ev):
+        return
+    spec.apply(stage, ev)
 
 
 def apply_events(

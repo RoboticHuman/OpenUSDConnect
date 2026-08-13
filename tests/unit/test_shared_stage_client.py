@@ -292,6 +292,18 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         client.close()
 
 
+def test_refresh_layer_graph_rejects_a_closed_client(tmp_path):
+    client = SharedStageClient(
+        _create_root(tmp_path / "root.usda"),
+        app_name="closed-refresh-client",
+        persist_token=False,
+    )
+    client.close()
+
+    with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
+        client.refresh_layer_graph()
+
+
 def test_shared_record_requires_a_layer_key(tmp_path):
     client = SharedStageClient(
         _create_root(tmp_path / "root.usda"),

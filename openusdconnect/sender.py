@@ -233,53 +233,20 @@ class EventSender:
                 buf = recv_framed(sock)
                 env = decode_envelope(buf)
                 pt = env.PayloadType()
+                if not self._accept_handshake_response(sock, env, pt):
+                    self._close_socket_object(sock)
+                    return False
             except (OSError, IncompleteRead, MessageTooLarge, ValueError):
                 LOG.exception("EventSender: handshake failed")
                 self._close_socket_object(sock)
                 return False
-
-            if pt == PayloadType.AuthRejected:
-                _, rejected = resolve_payload(env)
-                self.rejection_reason = self._decode_string(rejected.Reason())
-                self.auth_rejected = True
+            except Exception:
+                # Resolver/plugin callbacks and malformed FlatBuffer accessors
+                # are outside the narrow transport exception family above, but
+                # they must still leave this sender disconnected.
+                LOG.exception("EventSender: unexpected handshake failure")
                 self._close_socket_object(sock)
                 return False
-            if pt == PayloadType.HelloRejected:
-                _, rejected = resolve_payload(env)
-                self.rejection_reason = (
-                    self._decode_string(rejected.Reason()) or "connection rejected"
-                )
-                self.hello_rejected = True
-                self._close_socket_object(sock)
-                return False
-            if pt != PayloadType.HelloOk:
-                LOG.error("EventSender: unexpected handshake response %s", pt)
-                self._close_socket_object(sock)
-                return False
-
-            _, hello_ok = resolve_payload(env)
-            self._acknowledge_through(int(hello_ok.CommittedThrough()))
-            active_mode = LayerMode("shared_stage" if hello_ok.LayerMode() else "managed")
-            if active_mode is not self.layer_mode:
-                self.rejection_reason = (
-                    f"server negotiated {active_mode.value} instead of {self.layer_mode.value}"
-                )
-                self._close_socket_object(sock)
-                return False
-            self.layer_mode_active = active_mode
-            issued = self._decode_string(hello_ok.Token())
-            if issued:
-                self.token = issued
-                if self._on_token_issued:
-                    self._on_token_issued(issued)
-            metadata = hello_ok.StageMetadata()
-            if metadata is not None:
-                decoded = _decode_stage_metadata_table(metadata)
-                if decoded:
-                    self.stage_metadata = decoded
-                    if self._on_stage_metadata:
-                        self._on_stage_metadata(decoded)
-            sock.settimeout(None)
 
             # Serialize publication of the socket with outbox replay. A new
             # send cannot overtake an older pending transaction here.
@@ -314,6 +281,69 @@ class EventSender:
                 len(pending_payloads),
             )
             return True
+
+    def _accept_handshake_response(self, sock: socket.socket, env, payload_type: int) -> bool:
+        """Validate one server hello and initialize connection metadata.
+
+        Application callbacks are observers. Their failure is logged but does
+        not invalidate an otherwise completed protocol handshake.
+        """
+        if payload_type == PayloadType.AuthRejected:
+            _, rejected = resolve_payload(env)
+            self.rejection_reason = self._decode_string(rejected.Reason())
+            self.auth_rejected = True
+            return False
+        if payload_type == PayloadType.HelloRejected:
+            _, rejected = resolve_payload(env)
+            self.rejection_reason = (
+                self._decode_string(rejected.Reason()) or "connection rejected"
+            )
+            self.hello_rejected = True
+            return False
+        if payload_type != PayloadType.HelloOk:
+            LOG.error("EventSender: unexpected handshake response %s", payload_type)
+            return False
+
+        _, hello_ok = resolve_payload(env)
+        self._acknowledge_through(int(hello_ok.CommittedThrough()))
+        active_mode = LayerMode("shared_stage" if hello_ok.LayerMode() else "managed")
+        if active_mode is not self.layer_mode:
+            self.rejection_reason = (
+                f"server negotiated {active_mode.value} instead of {self.layer_mode.value}"
+            )
+            return False
+        self.layer_mode_active = active_mode
+
+        issued = self._decode_string(hello_ok.Token())
+        if issued:
+            self.token = issued
+            self._notify_handshake_callback(
+                self._on_token_issued,
+                issued,
+                name="on_token_issued",
+            )
+
+        metadata = hello_ok.StageMetadata()
+        if metadata is not None:
+            decoded = _decode_stage_metadata_table(metadata)
+            if decoded:
+                self.stage_metadata = decoded
+                self._notify_handshake_callback(
+                    self._on_stage_metadata,
+                    decoded,
+                    name="on_stage_metadata",
+                )
+        sock.settimeout(None)
+        return True
+
+    @staticmethod
+    def _notify_handshake_callback(callback, value, *, name: str) -> None:
+        if callback is None:
+            return
+        try:
+            callback(value)
+        except Exception:
+            LOG.exception("EventSender: %s callback failed", name)
 
     def disconnect(self) -> None:
         """Close the socket while retaining unacknowledged transactions."""

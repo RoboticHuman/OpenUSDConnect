@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from openusdconnect import events
 from openusdconnect.adapters import _DISPATCH
+from openusdconnect.emitter import (
+    _EVENTS_ALREADY_PROVEN_LOCAL,
+    _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING,
+)
 from openusdconnect.protocol_constants import (
     ARC_KINDS,
     CREATE_KINDS,
@@ -144,3 +148,12 @@ def test_stage_sync_kinds_are_structural():
     assert STAGE_SYNC_KINDS <= STRUCTURAL_EVENT_KINDS, (
         f"value-tier stage-sync kinds: {STAGE_SYNC_KINDS - STRUCTURAL_EVENT_KINDS}"
     )
+
+
+def test_every_managed_event_has_an_explicit_local_opinion_policy():
+    assert not (
+        _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING & _EVENTS_ALREADY_PROVEN_LOCAL
+    )
+    assert (
+        _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING | _EVENTS_ALREADY_PROVEN_LOCAL
+    ) == MANAGED_KINDS

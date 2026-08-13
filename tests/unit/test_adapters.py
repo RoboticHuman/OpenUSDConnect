@@ -19,6 +19,19 @@ pytestmark_pxr = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available
 # ---------------------------------------------------------------------------
 
 
+def test_batch_false_result_is_an_intentional_noop_not_delivery_failure():
+    adapter = MockAdapter()
+
+    assert adapter.apply_events(
+        [{"k": "set_visibility", "prim": "/missing", "visible": True}]
+    ) == 1
+
+
+def test_unknown_adapter_event_is_rejected():
+    with pytest.raises(ValueError, match="unsupported adapter event kind"):
+        MockAdapter().apply_event({"k": "future_event", "prim": "/World"})
+
+
 class TestMockAdapterEnsurePrim:
     def test_creates_prim(self):
         a = MockAdapter()

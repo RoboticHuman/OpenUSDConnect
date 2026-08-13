@@ -86,6 +86,40 @@ from .xform_decompose import (
 # without triggering a snapshot diff.
 _WATCHED_STAGE_METADATA_FIELDS = frozenset(STAGE_METADATA_KEYS)
 
+# Every managed event built by NoticeEmitter must declare how edit-target
+# ownership affects it. The first group is handled field-by-field in
+# ``_filter_events_to_local_opinions``. The second is derived directly from
+# current-edit-target state or represents namespace/stage operations that do
+# not promote a weaker composed property value.
+_EVENTS_REQUIRING_LOCAL_OPINION_FILTERING = frozenset(
+    {
+        K_ENSURE_XFORM_OPS,
+        K_LOAD_PAYLOAD,
+        K_SET_CONNECTABLE_CONNECTION,
+        K_SET_CONNECTABLE_INPUT,
+        K_SET_GPRIM_ATTRS,
+        K_SET_INSTANCEABLE,
+        K_SET_MATERIAL_BINDING,
+        K_SET_PAYLOAD,
+        K_SET_POINT_INSTANCER,
+        K_SET_REFERENCE,
+        K_SET_SDF_SPEC_FIELDS,
+        K_SET_VARIANT_SELECTIONS,
+        K_SET_VISIBILITY,
+        K_SET_XFORM_TRS,
+        K_UNLOAD_PAYLOAD,
+    }
+)
+_EVENTS_ALREADY_PROVEN_LOCAL = frozenset(
+    {
+        K_DEACTIVATE_PRIM,
+        K_DELETE_PRIM,
+        K_ENSURE_PRIM,
+        K_RENAME_PRIM,
+        K_SET_STAGE_METADATA,
+    }
+)
+
 # Wire-event TRS field → xformOp name. Used by the targeted time-sample
 # invalidator so it can update the right cache slot without re-reading
 # the stage.
@@ -2253,7 +2287,10 @@ class NoticeEmitter:
                     filtered.append(event)
                 continue
 
-            filtered.append(event)
+            if kind in _EVENTS_ALREADY_PROVEN_LOCAL:
+                filtered.append(event)
+                continue
+            raise ValueError(f"missing local-opinion policy for event kind {kind!r}")
         return filtered
 
     def cleanup(self):
@@ -3445,6 +3482,247 @@ class NoticeEmitter:
             self._purge_caches(prim_path, preserve_sdf=True)
         return events
 
+    def _build_prim_structure_events(
+        self,
+        prim_path: str,
+        prim_cache: dict,
+        *,
+        first_encounter: bool,
+        local_definition_spec,
+        previous_prim_state: _LocalPrimState | None,
+        local_api_schemas,
+        local_properties: dict[str, set[str]],
+    ) -> list[dict]:
+        """Build definition, API-schema, and xform-stack events for one prim."""
+        events: list[dict] = []
+        local_definition_exists = local_definition_spec is not None
+        type_name = (
+            str(local_definition_spec.typeName) if local_definition_exists else ""
+        )
+
+        if first_encounter:
+            # An over normally needs no structural event because its definition
+            # composes through a weaker layer or arc. Applied API schemas are
+            # prim metadata, so an over carrying one still needs ensure_prim.
+            if local_definition_exists or local_api_schemas:
+                events.append(
+                    {
+                        "k": K_ENSURE_PRIM,
+                        "prim": prim_path,
+                        "typeName": type_name,
+                        "api_schemas": list(local_api_schemas),
+                    }
+                )
+            if "xformOpOrder" in local_properties or any(
+                name.startswith("xformOp:") for name in local_properties
+            ):
+                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
+            self._know_prim(prim_path)
+        else:
+            definition_type_changed = (
+                local_definition_exists
+                and previous_prim_state is not None
+                and type_name != previous_prim_state.type_name
+            )
+            if definition_type_changed:
+                events.append(
+                    {
+                        "k": K_ENSURE_PRIM,
+                        "prim": prim_path,
+                        "typeName": type_name,
+                        "api_schemas": list(local_api_schemas),
+                    }
+                )
+
+            # Re-emit ensure_prim when applied schemas change. Empty schema
+            # sets are represented by exact Sdf field removal, not this
+            # additive handshake.
+            previous_api_schemas = prim_cache.get(_C_API_SCHEMAS)
+            if (
+                not definition_type_changed
+                and previous_api_schemas is not None
+                and local_api_schemas != previous_api_schemas
+                and local_api_schemas
+            ):
+                events.append(
+                    {
+                        "k": K_ENSURE_PRIM,
+                        "prim": prim_path,
+                        "typeName": type_name,
+                        "api_schemas": list(local_api_schemas),
+                    }
+                )
+
+        prim_cache[_C_API_SCHEMAS] = local_api_schemas
+        return events
+
+    def _build_prim_channel_events(
+        self,
+        prim_path: str,
+        prim,
+        prim_cache: dict,
+        dirty_attributes: set[str] | None,
+        local_property_sources: dict,
+    ) -> tuple[list[dict], set[str]]:
+        """Read applicable specialized channels and return their owned attrs."""
+        events: list[dict] = []
+        owned_attributes: set[str] = set()
+        for channel in self._channels:
+            if not channel.applies_to(prim):
+                continue
+            owned_attributes.update(channel.watched_attrs)
+            if not channel.needs_read(dirty_attributes):
+                continue
+
+            partial = False
+            current = None
+            if dirty_attributes:
+                current = channel.read_scoped(
+                    self.stage,
+                    prim_path,
+                    dirty_attributes,
+                )
+                partial = current is not None
+            if current is None:
+                if channel.uses_local_property_sources:
+                    current = channel.read_local(
+                        self.stage,
+                        prim_path,
+                        local_property_sources,
+                    )
+                else:
+                    current = channel.read(self.stage, prim_path)
+            if current is not None:
+                _emit_channel_events(
+                    channel,
+                    prim_path,
+                    current,
+                    prim_cache,
+                    events,
+                    partial,
+                )
+        return events, owned_attributes
+
+    def _build_default_xform_event(
+        self,
+        prim_path: str,
+        prim,
+        prim_cache: dict,
+        local_property_sources: dict,
+        dirty_attributes: set[str] | None,
+        eps_trs: float,
+    ) -> dict | None:
+        """Build the default-time canonical TRS delta for one xformable prim."""
+        if not UsdGeom.Xformable(prim).GetXformOpOrderAttr().IsAuthored():
+            return None
+
+        snapshot = self.snapshot_prim(prim_path)
+        if not _direct_edit_target_is_strongest(self.stage):
+            snapshot = _local_canonical_trs(
+                snapshot,
+                prim,
+                local_property_sources,
+                dirty_attributes,
+            )
+
+        previous_trs = prim_cache.get(_C_TRS, {})
+        fields: list[str] = []
+        event: dict = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
+        for field in ("t", "r", "s"):
+            if not near_list(snapshot[field], previous_trs.get(field), eps_trs):
+                fields.append(field)
+                event[field] = snapshot[field]
+        if not fields:
+            return None
+
+        prim_cache[_C_TRS] = {
+            "t": snapshot["t"],
+            "r": snapshot["r"],
+            "s": snapshot["s"],
+        }
+        return event
+
+    def _build_default_gprim_event(
+        self,
+        prim_path: str,
+        prim,
+        prim_cache: dict,
+        dirty_attribute_names: set[str],
+        owned_attributes: set[str],
+        local_property_sources: dict,
+        *,
+        is_resync: bool,
+    ) -> dict | None:
+        """Build generic default-time attribute values not owned by channels."""
+        previous_attributes = prim_cache.get(_C_GPRIM_ATTRS, {})
+        if not dirty_attribute_names and (not previous_attributes or is_resync):
+            for attribute in prim.GetAttributes():
+                attribute_name = attribute.GetName()
+                if (
+                    attribute.IsAuthored()
+                    and self._attr_filter(attribute_name)
+                    and attribute_name not in owned_attributes
+                    and not self._sdf_owns_attribute_value(prim, attribute_name)
+                ):
+                    dirty_attribute_names.add(attribute_name)
+
+        changed_attributes = {}
+        primvar_metadata: dict = {}
+        attribute_interpolation: dict = {}
+        for attribute_name in dirty_attribute_names:
+            if not self._attr_filter(attribute_name) or attribute_name in owned_attributes:
+                continue
+            if self._sdf_owns_attribute_value(prim, attribute_name):
+                continue
+            attribute = prim.GetAttribute(attribute_name)
+            if not attribute or not attribute.IsValid():
+                continue
+
+            value_source = local_property_sources.get(attribute_name, {}).get("default")
+            if isinstance(value_source, Sdf.AttributeSpec) and value_source.HasDefaultValue():
+                value = value_source.default
+                source_layer = value_source.layer
+            else:
+                value = attribute.Get()
+                source_layer = self.stage.GetEditTarget().GetLayer()
+                if value_contains_asset_path(value):
+                    source_layer = _attribute_default_source_layer(attribute)
+                    if source_layer is None:
+                        continue
+            transport_value = _usd_value_to_transport_python(
+                self.stage,
+                source_layer,
+                value,
+            )
+            if transport_value is None or values_equal(
+                transport_value,
+                previous_attributes.get(attribute_name),
+            ):
+                continue
+
+            changed_attributes[attribute_name] = transport_value
+            metadata, interpolation = attribute_event_metadata(
+                prim,
+                attribute_name,
+                attribute,
+            )
+            primvar_metadata.update(metadata)
+            attribute_interpolation.update(interpolation)
+
+        if not changed_attributes:
+            return None
+        event = {
+            "k": K_SET_GPRIM_ATTRS,
+            "prim": prim_path,
+            "attrs": changed_attributes,
+        }
+        if primvar_metadata:
+            event["primvar_meta"] = primvar_metadata
+        if attribute_interpolation:
+            event["attr_interp"] = attribute_interpolation
+        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attributes)
+        return event
+
     def _build_dirty_prim_events(
         self,
         prim_path: str,
@@ -3548,68 +3826,17 @@ class NoticeEmitter:
         else:
             local_api_schemas = pc.get(_C_API_SCHEMAS, _EMPTY_FIELDS)
 
-        # Structural events on first encounter
-        if first_encounter:
-            local_definition = local_definition_spec is not None
-            # An over normally needs no structural event: its defining prim
-            # already composes through a reference, payload, or weaker layer.
-            # Applied API schemas are prim metadata, so an over carrying one
-            # still uses ensure_prim as the existing additive API handshake.
-            if local_definition or local_api_schemas:
-                type_name = str(local_definition_spec.typeName) if local_definition else ""
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": type_name,
-                        "api_schemas": list(local_api_schemas),
-                    }
-                )
-            pc[_C_API_SCHEMAS] = local_api_schemas
-            if "xformOpOrder" in local_properties or any(
-                name.startswith("xformOp:") for name in local_properties
-            ):
-                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
-            self._know_prim(prim_path)
-        else:
-            current_type_name = (
-                str(local_definition_spec.typeName) if local_definition_spec is not None else ""
+        events.extend(
+            self._build_prim_structure_events(
+                prim_path,
+                pc,
+                first_encounter=first_encounter,
+                local_definition_spec=local_definition_spec,
+                previous_prim_state=previous_prim_state,
+                local_api_schemas=local_api_schemas,
+                local_properties=local_properties,
             )
-            definition_type_changed = (
-                local_definition_spec is not None
-                and previous_prim_state is not None
-                and current_type_name != previous_prim_state.type_name
-            )
-            if definition_type_changed:
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": current_type_name,
-                        "api_schemas": list(local_api_schemas),
-                    }
-                )
-            # Re-emit ensure_prim when the applied api_schemas change (e.g.
-            # ShapingAPI applied to an existing SphereLight to make it a spot).
-            last_apis = pc.get(_C_API_SCHEMAS)
-            current_apis = local_api_schemas
-            if (
-                not definition_type_changed
-                and last_apis is not None
-                and current_apis != last_apis
-                and current_apis
-            ):
-                local_definition = local_definition_spec is not None
-                type_name = str(local_definition_spec.typeName) if local_definition else ""
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": type_name,
-                        "api_schemas": list(current_apis),
-                    }
-                )
-            pc[_C_API_SCHEMAS] = current_apis
+        )
 
         # First encounter and resync both require a full channel read. The
         # dirty attr that woke the prim might be unrelated to already-authored
@@ -3618,34 +3845,14 @@ class NoticeEmitter:
         dirty_attrs = self._dirty_attrs.get(prim_path)
         if first_encounter or prim_path in self._notice_resynced_prims:
             dirty_attrs = None
-        # Attrs owned by a channel that applies to this prim. The global
-        # _attr_filter only excludes filter_attrs; the gprim scan and
-        # sample paths below additionally skip this per-prim set, which
-        # covers channels whose names collide with other schemas.
-        owned_attrs: set[str] = set()
-        for channel in self._channels:
-            if not channel.applies_to(prim):
-                continue
-            owned_attrs.update(channel.watched_attrs)
-            if not channel.needs_read(dirty_attrs):
-                continue
-            partial = False
-            current = None
-            if dirty_attrs:
-                current = channel.read_scoped(self.stage, prim_path, dirty_attrs)
-                partial = current is not None
-            if current is None:
-                if channel.uses_local_property_sources:
-                    current = channel.read_local(
-                        self.stage,
-                        prim_path,
-                        local_property_sources,
-                    )
-                else:
-                    current = channel.read(self.stage, prim_path)
-            if current is None:
-                continue
-            _emit_channel_events(channel, prim_path, current, pc, events, partial)
+        channel_events, owned_attrs = self._build_prim_channel_events(
+            prim_path,
+            prim,
+            pc,
+            dirty_attrs,
+            local_property_sources,
+        )
+        events.extend(channel_events)
 
         if local_field_changes:
             for name in local_field_changes:
@@ -3658,38 +3865,16 @@ class NoticeEmitter:
         if refresh_local_state or local_field_changes or dirty_property_names:
             pc[_C_LOCAL_PROPERTY_NAMES] = set(local_properties)
 
-        # TRS keeps a specialized path (not a PrimChannel): the diff needs a
-        # matrix decompose snapshot, which is only worth computing for prims
-        # with authored xform ops. Materials/Shaders/Scopes skip it.
-        xf = UsdGeom.Xformable(prim)
-        has_xform = xf.GetXformOpOrderAttr().IsAuthored()
-
-        if has_xform:
-            snap = self.snapshot_prim(prim_path)
-            if not _direct_edit_target_is_strongest(self.stage):
-                snap = _local_canonical_trs(
-                    snap,
-                    prim,
-                    local_property_sources,
-                    dirty_attrs,
-                )
-            last_trs = pc.get(_C_TRS, {})
-            fields = []
-            payload = {"k": K_SET_XFORM_TRS, "prim": prim_path, "fields": fields}
-
-            if not near_list(snap["t"], last_trs.get("t"), eps_trs):
-                fields.append("t")
-                payload["t"] = snap["t"]
-            if not near_list(snap["r"], last_trs.get("r"), eps_trs):
-                fields.append("r")
-                payload["r"] = snap["r"]
-            if not near_list(snap["s"], last_trs.get("s"), eps_trs):
-                fields.append("s")
-                payload["s"] = snap["s"]
-
-            if fields:
-                events.append(payload)
-                pc[_C_TRS] = {"t": snap["t"], "r": snap["r"], "s": snap["s"]}
+        xform_event = self._build_default_xform_event(
+            prim_path,
+            prim,
+            pc,
+            local_property_sources,
+            dirty_attrs,
+            eps_trs,
+        )
+        if xform_event is not None:
+            events.append(xform_event)
 
         # Gprim attribute diff + time-sample emission share the dirty-attr
         # bookkeeping. had_notice_detail records whether the names came from
@@ -3699,72 +3884,17 @@ class NoticeEmitter:
         sample_dirty = self._sample_dirty_attrs.pop(prim_path, set())
         had_notice_detail = bool(dirty_attr_names)
         self._notice_resynced_prims.discard(prim_path)
-        last_attrs = pc.get(_C_GPRIM_ATTRS, {})
-
-        # Full attr scan: needed on first encounter (cache empty) or
-        # after a resync notice (variant switch, structural change).
-        # Skipped for plain info-only changes to avoid reading thousands
-        # of mesh vertices every frame.
-        if not dirty_attr_names and (not last_attrs or is_resync):
-            for attr in prim.GetAttributes():
-                name = attr.GetName()
-                if (
-                    attr.IsAuthored()
-                    and self._attr_filter(name)
-                    and name not in owned_attrs
-                    and not self._sdf_owns_attribute_value(prim, name)
-                ):
-                    dirty_attr_names.add(name)
-
-        changed_attrs = {}
-        primvar_meta: dict = {}
-        attr_interp: dict = {}
-        for attr_name in dirty_attr_names:
-            # _dirty_attrs is unfiltered for channel gating; filter again
-            # here before emitting generic gprim attrs.
-            if not self._attr_filter(attr_name) or attr_name in owned_attrs:
-                continue
-            if self._sdf_owns_attribute_value(prim, attr_name):
-                continue
-            attr = prim.GetAttribute(attr_name)
-            if not attr or not attr.IsValid():
-                continue
-            value_source = local_property_sources.get(attr_name, {}).get("default")
-            if isinstance(value_source, Sdf.AttributeSpec) and value_source.HasDefaultValue():
-                value = value_source.default
-                source_layer = value_source.layer
-            else:
-                value = attr.Get()
-                source_layer = self.stage.GetEditTarget().GetLayer()
-                if value_contains_asset_path(value):
-                    source_layer = _attribute_default_source_layer(attr)
-                    if source_layer is None:
-                        continue
-            val = _usd_value_to_transport_python(
-                self.stage,
-                source_layer,
-                value,
-            )
-            if val is None:
-                continue
-            if not values_equal(val, last_attrs.get(attr_name)):
-                changed_attrs[attr_name] = val
-                pvm, ai = attribute_event_metadata(prim, attr_name, attr)
-                primvar_meta.update(pvm)
-                attr_interp.update(ai)
-
-        if changed_attrs:
-            ev = {
-                "k": K_SET_GPRIM_ATTRS,
-                "prim": prim_path,
-                "attrs": changed_attrs,
-            }
-            if primvar_meta:
-                ev["primvar_meta"] = primvar_meta
-            if attr_interp:
-                ev["attr_interp"] = attr_interp
-            events.append(ev)
-            pc.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attrs)
+        gprim_event = self._build_default_gprim_event(
+            prim_path,
+            prim,
+            pc,
+            dirty_attr_names,
+            owned_attrs,
+            local_property_sources,
+            is_resync=is_resync,
+        )
+        if gprim_event is not None:
+            events.append(gprim_event)
 
         # With per-attr notice detail, only attrs classified sample-dirty
         # need their sample tables re-read; a default-time drag on a

@@ -158,6 +158,40 @@ class TestEventSenderConnect:
         assert sender.connect() is False
         assert sender.sock is None
 
+    def test_token_callback_failure_does_not_poison_completed_handshake(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="callback-client",
+            on_token_issued=lambda _token: (_ for _ in ()).throw(
+                RuntimeError("injected callback failure")
+            ),
+        )
+        accepted = {}
+
+        def _serve():
+            conn = srv.accept()[0]
+            recv_framed(conn)
+            send_framed(
+                conn,
+                encode_message({"type": "hello_ok", "token": "issued-token"}),
+            )
+            accepted["conn"] = conn
+
+        thread = threading.Thread(target=_serve)
+        thread.start()
+        try:
+            assert sender.connect()
+            assert sender.connected
+            assert sender.token == "issued-token"
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            if conn := accepted.get("conn"):
+                conn.close()
+            srv.close()
+
     def test_connect_timeout_never_extends_configured_handshake_timeout(self, monkeypatch):
         observed = []
 

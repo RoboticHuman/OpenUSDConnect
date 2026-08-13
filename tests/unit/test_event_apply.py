@@ -49,6 +49,11 @@ def stage():
     return s
 
 
+def test_unknown_event_is_rejected(stage):
+    with pytest.raises(ValueError, match="unsupported USD event kind"):
+        apply_event(stage, {"k": "future_event", "prim": "/World"})
+
+
 class TestGetOrDefinePrim:
     def test_creates_new_prim(self, stage):
         prim = get_or_define_prim(stage, "/World/Sphere", "Sphere")

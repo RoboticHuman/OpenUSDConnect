@@ -797,6 +797,8 @@ class SharedStageClient:
 
     def refresh_layer_graph(self) -> tuple[str, ...]:
         """Retry unresolved graph edges under this stage's resolver context."""
+        if self._closed:
+            raise RuntimeError("SharedStageClient is closed")
         with self._tracker.suppressed():
             mapped = self._graph.refresh_dependencies()
             self._tracker.sync_graph(force=True)
