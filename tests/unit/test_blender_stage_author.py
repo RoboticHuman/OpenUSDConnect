@@ -10,7 +10,8 @@ import tempfile
 import types
 from unittest.mock import MagicMock
 
-from pxr import Sdf
+import pytest
+from pxr import Sdf, UsdGeom
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +400,46 @@ class TestAutoTrack:
         assert len(trs) == 1
         assert trs[0]["t"] == [1.0, 0.0, 0.0]
 
+    def test_seeded_remote_parent_is_authored_before_edited_child(self):
+        """A receive-side cache entry does not imply a local USD spec exists."""
+        world = MockBlenderObject("World", prim_path="/World", obj_type="EMPTY")
+        parent = MockBlenderObject(
+            "RemoteParent",
+            prim_path="/World/RemoteParent",
+            type_name="Xform",
+            obj_type="EMPTY",
+        )
+        child = MockBlenderObject(
+            "RemoteCube",
+            loc=(1, 0, 0),
+            prim_path="/World/RemoteParent/Cube",
+            type_name="Cube",
+        )
+        parent.parent = world
+        child.parent = parent
+        sys.modules["bpy"].data.objects = _BlenderObjectList([world, parent, child])
+        author, emitter = _make_author_and_emitter()
+        author._prim_refs.update(
+            {
+                "/World/RemoteParent": parent,
+                "/World/RemoteParent/Cube": child,
+            }
+        )
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(child)])
+
+        ensures = [event for event in events if event["k"] == K_ENSURE_PRIM]
+        assert [(event["prim"], event["typeName"]) for event in ensures] == [
+            ("/World/RemoteParent", "Xform"),
+            ("/World/RemoteParent/Cube", "Cube"),
+        ]
+        assert not [
+            event
+            for event in events
+            if event["prim"] == "/World/RemoteParent"
+            and event["k"] in {K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS}
+        ]
+
     def test_auto_track_disambiguates_collision(self):
         world = self._make_world_parent()
         existing = MockBlenderObject("Geom", prim_path="/World/Cube")
@@ -428,6 +469,49 @@ class TestAutoTrack:
         ensures = [e for e in events if e["k"] == K_ENSURE_PRIM]
         child_ensures = [e for e in ensures if e["prim"] == "/World/Sphere"]
         assert len(child_ensures) == 1
+
+
+def test_parametric_geometry_scale_is_not_authored_as_xform_scale():
+    """A receive/emit round trip must not multiply Cube sizing repeatedly."""
+    obj = MockBlenderObject(
+        "ChairLeg",
+        scl=(0.025, 0.025, 0.425),
+        prim_path="/World/ChairLeg",
+        type_name="Cube",
+    )
+    obj["usd_geom_scale"] = (0.5, 0.5, 0.5)
+    obj["usd_xform_scale"] = (0.05, 0.05, 0.85)
+    sys.modules["bpy"].data.objects = _BlenderObjectList([obj])
+    author, _emitter = _make_author_and_emitter()
+    UsdGeom.Cube.Define(author.stage, "/World/ChairLeg")
+    author._ensure_xform_ops("/World/ChairLeg")
+
+    author._author_xform("/World/ChairLeg", obj)
+
+    scale_op = next(
+        op
+        for op in UsdGeom.Xformable(author.stage.GetPrimAtPath("/World/ChairLeg"))
+        .GetOrderedXformOps()
+        if op.GetOpType() == UsdGeom.XformOp.TypeScale
+    )
+    # Blender Z-up (0.05, 0.05, 0.85) converts back to USD Y-up.
+    assert tuple(scale_op.Get()) == pytest.approx((0.05, 0.85, 0.05))
+
+
+def test_parametric_scale_round_trip_noise_keeps_previous_usd_value():
+    """Float32 display rounding must not make scale drift on every move."""
+    from integrations.blender.capture import _usd_xform_scale
+
+    obj = MockBlenderObject("ChairBackrest")
+    obj["usd_geom_scale"] = (0.5, 0.5, 0.5)
+    obj["usd_xform_scale"] = (0.42, 0.3, 0.04)
+
+    authored = _usd_xform_scale(
+        obj,
+        (0.210000008, 0.150000006, 0.0199999996),
+    )
+
+    assert authored == [0.42, 0.3, 0.04]
 
 
 class TestFirstEncounter:
@@ -707,6 +791,37 @@ class TestBlenderAssetArcProjection:
         stage.GetRootLayer().defaultPrim = name
         stage.GetRootLayer().Save()
         return str(path)
+
+    def test_native_composition_roots_cover_import_and_payload_lifecycle(self):
+        adapter = BlenderAdapter()
+
+        roots = adapter.native_composition_subtree_roots(
+            [
+                {"k": "set_reference", "prim": "/World/Reference", "refs": []},
+                {"k": "set_payload", "prim": "/World/Payload", "payloads": []},
+                {"k": "load_payload", "prim": "/World/Payload"},
+                {"k": "unload_payload", "prim": "/World/Unloaded"},
+            ]
+        )
+
+        assert roots == {
+            "/World/Reference",
+            "/World/Payload",
+            "/World/Unloaded",
+        }
+
+    def test_variant_owns_subtree_only_after_native_import(self, monkeypatch):
+        adapter = BlenderAdapter()
+        event = {
+            "k": "set_variant_selections",
+            "prim": "/World/Asset",
+            "selections": {"model": "B"},
+        }
+
+        assert adapter.native_composition_subtree_roots([event]) == set()
+
+        monkeypatch.setattr(adapter, "has_imported_children", lambda path: path == "/World/Asset")
+        assert adapter.native_composition_subtree_roots([event]) == {"/World/Asset"}
 
     def test_reference_projection_uses_composed_list_op(self, tmp_path):
         from pxr import Sdf, Usd

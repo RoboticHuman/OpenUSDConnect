@@ -96,6 +96,30 @@ class _ProjectionCandidates:
     arcs: set[tuple[str, str]] = dataclass_field(default_factory=set)
 
 
+def _copy_projection_candidates(source: _ProjectionCandidates) -> _ProjectionCandidates:
+    """Copy candidate membership so later notice additions retain provenance."""
+    return _ProjectionCandidates(
+        prims=set(source.prims),
+        types=set(source.types),
+        xforms=set(source.xforms),
+        gprim=defaultdict(set, {key: set(value) for key, value in source.gprim.items()}),
+        variants=set(source.variants),
+        materials=set(source.materials),
+        connectables=defaultdict(
+            set,
+            {key: set(value) for key, value in source.connectables.items()},
+        ),
+        active=set(source.active),
+        visibility=set(source.visibility),
+        instanceable=set(source.instanceable),
+        point_instancers=defaultdict(
+            set,
+            {key: set(value) for key, value in source.point_instancers.items()},
+        ),
+        arcs=set(source.arcs),
+    )
+
+
 @dataclass(slots=True)
 class _PrimProjectionValues:
     """Adapter-visible values read for one affected composed prim."""
@@ -887,6 +911,7 @@ class ComposedChangeProjection:
         extra_arc_candidates: Iterable[tuple[str, str]] = (),
         reapply_all_composed: bool = False,
         reapply_composed_paths: Iterable[str] = (),
+        native_composition_subtree_roots: Iterable[str] = (),
         reset: bool = False,
     ):
         self._stage = stage
@@ -903,6 +928,9 @@ class ComposedChangeProjection:
         self._built_adapter_events: list[dict] | None = None
         self._delivery_state = "open"
         self._notice_key = None
+        self._native_composition_subtree_roots = self._minimal_roots(
+            str(path) for path in native_composition_subtree_roots if path
+        )
         self._prepare_reapplication_scope(
             reapply_all_composed=reapply_all_composed,
             reapply_composed_paths=reapply_composed_paths,
@@ -915,6 +943,11 @@ class ComposedChangeProjection:
             initial_prim_paths,
             initial_scene_paths,
             extra_arc_candidates,
+        )
+        self._pre_notice_candidates = (
+            _copy_projection_candidates(self._candidates)
+            if self._native_composition_subtree_roots
+            else None
         )
         self._previous_values: _ProjectionValues | None = None
         if self._state.needs_full_reconcile:
@@ -974,6 +1007,15 @@ class ComposedChangeProjection:
             if old_path in self._reapply_composed_paths
         )
         self._subtree_roots = {path for pair in self._rename_pairs for path in pair[:2]}
+        self._explicit_lifecycle_paths = {
+            str(event["prim"])
+            for event in events
+            if event.get("prim")
+            and event.get("k") in {K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM}
+        }
+        self._explicit_lifecycle_paths.update(
+            new_path for _old_path, new_path, _event in self._rename_pairs
+        )
         for event in events:
             if event.get("k") == K_DELETE_PRIM and event.get("prim"):
                 self._subtree_roots.add(str(event["prim"]))
@@ -1001,6 +1043,13 @@ class ComposedChangeProjection:
             for old_path, new_path, _event in self._rename_pairs
             if old_path in self._local_lifecycle_paths
         )
+        self._local_requested_types = {
+            str(event["prim"]): str(event.get("typeName") or "")
+            for event in events
+            if event.get("k") == K_ENSURE_PRIM
+            and event.get("prim")
+            and str(event["prim"]) in self._local_lifecycle_paths
+        }
 
     def _prepare_scene_scope(
         self,
@@ -1505,6 +1554,116 @@ class ComposedChangeProjection:
         paths.update(key[0] for key in candidates.arcs)
         self._affected_prim_paths = {path for path in paths if path and path != "/"}
 
+    def _is_in_native_composition_subtree(self, prim_path: str) -> bool:
+        return any(
+            _path_is_at_or_below(prim_path, root)
+            for root in self._native_composition_subtree_roots
+        )
+
+    def _remove_native_owned_notice_candidates(self) -> None:
+        """Drop only candidates added by notices beneath native-import roots."""
+        if not self._native_composition_subtree_roots:
+            return
+
+        current = self._candidates
+        initial = self._pre_notice_candidates
+        if initial is None:
+            raise RuntimeError("native composition roots require candidate provenance")
+
+        def _prune_set(values, original, path_of):
+            values.difference_update(
+                {
+                    value
+                for value in values
+                if value not in original
+                and self._is_in_native_composition_subtree(path_of(value))
+                }
+            )
+
+        current.prims.difference_update(
+            {
+                prim_path
+                for prim_path in current.prims
+                if self._is_in_native_composition_subtree(prim_path)
+                and prim_path not in self._native_composition_subtree_roots
+                and prim_path not in self._explicit_lifecycle_paths
+                and prim_path not in initial.types
+            }
+        )
+        _prune_set(current.types, initial.types, lambda value: value)
+        _prune_set(current.xforms, initial.xforms, lambda value: value[0])
+        _prune_set(current.variants, initial.variants, lambda value: value)
+        _prune_set(current.materials, initial.materials, lambda value: value[0])
+        _prune_set(current.active, initial.active, lambda value: value)
+        _prune_set(current.visibility, initial.visibility, lambda value: value[0])
+        _prune_set(current.instanceable, initial.instanceable, lambda value: value)
+        _prune_set(current.arcs, initial.arcs, lambda value: value[0])
+
+        for values, original in (
+            (current.gprim, initial.gprim),
+            (current.connectables, initial.connectables),
+            (current.point_instancers, initial.point_instancers),
+        ):
+            for key in tuple(values):
+                if not self._is_in_native_composition_subtree(key[0]):
+                    continue
+                values[key].intersection_update(original.get(key, ()))
+                if not values[key]:
+                    del values[key]
+
+    def _order_native_composition_events(self, events: list[dict]) -> list[dict]:
+        """Place explicit descendant lifecycle after its native root import."""
+        if not self._native_composition_subtree_roots:
+            return events
+
+        control_kinds = {
+            K_SET_REFERENCE,
+            K_SET_PAYLOAD,
+            K_LOAD_PAYLOAD,
+            K_UNLOAD_PAYLOAD,
+            K_SET_VARIANT_SELECTIONS,
+        }
+        lifecycle_kinds = {K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM}
+        last_control = {}
+        for index, event in enumerate(events):
+            prim_path = str(event.get("prim") or "")
+            if event.get("k") not in control_kinds:
+                continue
+            for root in self._native_composition_subtree_roots:
+                if prim_path == root:
+                    last_control[root] = index
+
+        deferred = defaultdict(list)
+        retained = []
+        for index, event in enumerate(events):
+            prim_path = str(event.get("prim") or "")
+            owner = next(
+                (
+                    root
+                    for root in sorted(
+                        self._native_composition_subtree_roots,
+                        key=len,
+                        reverse=True,
+                    )
+                    if root in last_control
+                    and prim_path != root
+                    and _path_is_at_or_below(prim_path, root)
+                ),
+                None,
+            )
+            if owner is not None and event.get("k") in lifecycle_kinds:
+                deferred[owner].append(event)
+                continue
+            retained.append((index, event))
+
+        result = []
+        for index, event in retained:
+            result.append(event)
+            for root, control_index in last_control.items():
+                if control_index == index:
+                    result.extend(deferred[root])
+        return result
+
     def _previous_prim_values(self, prim_path: str) -> _PrimProjectionValues:
         if self._previous_values is None:
             raise RuntimeError("previous adapter values have not been captured")
@@ -1520,6 +1679,7 @@ class ComposedChangeProjection:
             self._add_scene_path_candidates(self._event_scene_paths)
         if self._subtree_roots:
             self._add_subtree_candidates(self._subtree_roots)
+        self._remove_native_owned_notice_candidates()
         self._record_affected_prim_paths()
         if (previous_stage := self._state.previous_stage) is not None:
             self._previous_values = self._capture_candidates(
@@ -1530,6 +1690,7 @@ class ComposedChangeProjection:
         adapter_events: list[dict] = []
         for step in _PROJECTION_STEPS:
             adapter_events.extend(getattr(self, step.method_name)())
+        adapter_events = self._order_native_composition_events(adapter_events)
         self._built_adapter_events = adapter_events
         self._delivery_state = "built"
         return adapter_events
@@ -1655,6 +1816,11 @@ class ComposedChangeProjection:
                 and self._should_reapply_composed(prim_path)
                 and not self._reset
                 and prim_path in self._local_lifecycle_paths
+                and (
+                    prim_path not in self._local_requested_types
+                    or after_type is None
+                    or self._local_requested_types[prim_path] != after_type[0]
+                )
             )
             schema_changed = prim_path in self._candidates.types and before_type != after_type
             ensure = {

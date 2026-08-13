@@ -1173,6 +1173,7 @@ def test_collapsed_import_parent_xform_alias_receives_early_event(r):
     """
     name = "test_collapsed_import_parent_xform_alias_receives_early_event"
     _clear_scene()
+    from integrations.blender.blender_adapter import _PROP_USD_XFORM_PRIM_PATH
     from integrations.blender.capture import USD_CONNECT_Hook, _ensure_scene_props
 
     _ensure_scene_props()
@@ -1187,6 +1188,13 @@ def test_collapsed_import_parent_xform_alias_receives_early_event(r):
         if parent_obj is None or parent_obj is not geom_obj:
             r.fail(name, "collapsed parent and Geom paths did not resolve to one object")
             return
+        if geom_obj.get(_PROP_USD_XFORM_PRIM_PATH) != "/World/Sphere":
+            r.fail(
+                name,
+                "collapsed object's transform owner is "
+                f"{geom_obj.get(_PROP_USD_XFORM_PRIM_PATH)!r}, expected /World/Sphere",
+            )
+            return
         before_count = len(bpy.data.objects)
         if not adapter.set_xform_trs("/World/Sphere", t=[0.0, 1.5, 0.0]):
             r.fail(name, "parent transform event was not applied")
@@ -1199,6 +1207,74 @@ def test_collapsed_import_parent_xform_alias_receives_early_event(r):
             return
         if len(bpy.data.objects) != before_count:
             r.fail(name, "ensure_prim created a duplicate parent Empty")
+            return
+    finally:
+        if registered_here:
+            bpy.utils.unregister_class(USD_CONNECT_Hook)
+    r.ok(name)
+
+
+def test_collapsed_import_reverse_capture_authors_parent_xform(r):
+    """Moving a collapsed imported gprim authors its parent Xform exactly once."""
+    from pxr import UsdGeom
+
+    from integrations.blender.capture import (
+        BlenderStageAuthor,
+        USD_CONNECT_Hook,
+        _ensure_scene_props,
+    )
+    from openusdconnect.emitter import NoticeEmitter
+    from openusdconnect.protocol_constants import K_SET_XFORM_TRS
+
+    name = "test_collapsed_import_reverse_capture_authors_parent_xform"
+    _clear_scene()
+    _ensure_scene_props()
+    registered_here = not hasattr(bpy.types, USD_CONNECT_Hook.__name__)
+    if registered_here:
+        bpy.utils.register_class(USD_CONNECT_Hook)
+    try:
+        base_path = os.path.join(project_root, "test_scene.usda")
+        bpy.ops.wm.usd_import(filepath=base_path)
+        adapter = BlenderAdapter()
+        cylinder = _find_by_prim(adapter, "/World/Cylinder/Geom")
+        if cylinder is None or _find_by_prim(adapter, "/World/Cylinder") is not cylinder:
+            r.fail(name, "Cylinder parent and Geom were not collapsed onto one object")
+            return
+
+        author = BlenderStageAuthor(base_usd_path=base_path)
+        author.enabled = True
+        emitter = NoticeEmitter(author.stage)
+
+        cylinder.location.x += 1.0
+        bpy.context.view_layer.update()
+
+        class _Update:
+            def __init__(self, obj):
+                self.id = obj
+
+        author.on_depsgraph_update([_Update(cylinder)])
+        events = [
+            event
+            for event in emitter.build_events_for_dirty()
+            if event["k"] == K_SET_XFORM_TRS
+        ]
+        parent_events = [event for event in events if event["prim"] == "/World/Cylinder"]
+        child_events = [event for event in events if event["prim"] == "/World/Cylinder/Geom"]
+        if not parent_events or child_events:
+            r.fail(
+                name,
+                f"expected parent-only transform event; parent={parent_events}, child={child_events}",
+            )
+            return
+
+        child = author.stage.GetPrimAtPath("/World/Cylinder/Geom")
+        if UsdGeom.Xformable(child).GetOrderedXformOps():
+            r.fail(name, "reverse capture authored transform ops on the Geom child")
+            return
+        world_t = UsdGeom.XformCache().GetLocalToWorldTransform(child).ExtractTranslation()
+        got = tuple(round(float(value), 6) for value in world_t)
+        if got != (1.0, 0.0, 2.0):
+            r.fail(name, f"composed Cylinder position={got}, expected (1.0, 0.0, 2.0)")
             return
     finally:
         if registered_here:
@@ -1432,6 +1508,82 @@ def test_texture_swap_reverse_sync(r):
     r.ok(name)
 
 
+def test_distinct_material_root_connections_use_exact_paths(r):
+    """Material-root output connections resolve the exact per-piece graph.
+
+    Two materials deliberately share the leaf name ``Wood``. Full USD paths
+    must keep their Blender materials separate, and a connection authored on
+    either Material prim must find that exact registered material instead of
+    walking past it to ``/World/Looks``.
+    """
+    name = "test_distinct_material_root_connections_use_exact_paths"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    cases = [
+        (
+            "/World/Chair/Seat",
+            "/World/Looks/Seat/Wood",
+            [0.4, 0.2, 0.1],
+        ),
+        (
+            "/World/Chair/Backrest",
+            "/World/Looks/Backrest/Wood",
+            [0.1, 0.2, 0.4],
+        ),
+    ]
+    materials = []
+    for object_path, material_path, color in cases:
+        shader_path = f"{material_path}/Surface"
+        adapter.ensure_prim(object_path, "Cube")
+        adapter.set_material_binding(object_path, material_path)
+        adapter.set_connectable_input(
+            shader_path,
+            "UsdPreviewSurface",
+            {"diffuseColor": color, "roughness": 0.5},
+            {"diffuseColor": "color3f", "roughness": "float"},
+        )
+        applied = adapter.set_connectable_connection(
+            material_path,
+            {
+                "outputs:surface": {
+                    "source_prim": shader_path,
+                    "source_attr": "outputs:surface",
+                }
+            },
+            [],
+        )
+        material = adapter._find_material_for_shader(material_path)
+        if not applied or material is None:
+            r.fail(name, f"material-root connection did not resolve {material_path}")
+            return
+        if material.get("usd_material_path") != material_path:
+            r.fail(
+                name,
+                f"resolved {material.name} with path {material.get('usd_material_path')!r} "
+                f"for {material_path}",
+            )
+            return
+        tagged_nodes = [
+            node
+            for node in material.node_tree.nodes
+            if node.get("usd_shader_path") == shader_path
+        ]
+        outputs = [
+            node
+            for node in material.node_tree.nodes
+            if node.type == "OUTPUT_MATERIAL"
+        ]
+        if not tagged_nodes or not outputs or not outputs[0].inputs["Surface"].is_linked:
+            r.fail(name, f"incomplete surface graph for {material_path}")
+            return
+        materials.append(material)
+
+    if materials[0] == materials[1]:
+        r.fail(name, "distinct full USD material paths reused one Blender material")
+        return
+    r.ok(name)
+
+
 def test_capture_camera_move_emits_trs_only(r):
     """After first encounter, moving the camera emits set_xform_trs but no
     camera attrs event (params unchanged → CameraAttrsChannel.diff is empty)."""
@@ -1614,12 +1766,14 @@ def main():
         test_set_gprim_attrs_camera_full_roundtrip,
         test_set_gprim_attrs_camera_receive_only_uses_scene_units,
         test_collapsed_import_parent_xform_alias_receives_early_event,
+        test_collapsed_import_reverse_capture_authors_parent_xform,
         test_set_gprim_attrs_camera_orthographic,
         test_set_gprim_attrs_camera_fstop_zero_disables_dof,
         test_capture_authors_camera_attrs_to_stage,
         test_capture_camera_move_emits_trs_only,
         test_capture_camera_lens_only_emits_attrs,
         test_texture_swap_reverse_sync,
+        test_distinct_material_root_connections_use_exact_paths,
     ]
 
     for t in tests:

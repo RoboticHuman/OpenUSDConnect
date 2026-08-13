@@ -48,6 +48,25 @@ def _get_bsdf_value(mat_name_contains, input_name):
     return None
 
 
+def _check_geometry_is_smooth(label):
+    obj = next(
+        (
+            candidate
+            for candidate in bpy.data.objects
+            if candidate.get("usd_prim_path") == "/World/Teapot/Geometry"
+        ),
+        None,
+    )
+    if obj is None or obj.type != "MESH" or obj.data is None:
+        harness._fail(f"{label}: Teapot geometry mesh not found")
+        return
+    flat_polygons = sum(not polygon.use_smooth for polygon in obj.data.polygons)
+    if flat_polygons:
+        harness._fail(f"{label}: {flat_polygons} flat-shaded polygons")
+        return
+    harness._pass(f"{label}: {len(obj.data.polygons)} smooth polygons")
+
+
 def _send_shader_edit(prim_path, info_id, inputs, input_types):
     """Send a set_shader_input event via CLI."""
     harness._send([{
@@ -91,6 +110,7 @@ def _run():
             harness.log("--- Phase 1: Default variant (Utah) ---")
             harness.check_binding("Geometry", "Ceramic")
             harness.check_connection("Ceramic", "Base Color", linked=True)
+            _check_geometry_is_smooth("Utah")
             _step = 3
             return 1.0
 
@@ -123,6 +143,7 @@ def _run():
             bound = _find_geometry_material()
             if bound and "Porcelain" in bound:
                 harness._pass(f"Fancy: bound to {bound}")
+                _check_geometry_is_smooth("Fancy")
                 _step = 7
                 return 1.0
             _retries += 1
@@ -162,6 +183,7 @@ def _run():
             bound = _find_geometry_material()
             if bound and "Ceramic" in bound:
                 harness._pass(f"Utah: rebound to {bound}")
+                _check_geometry_is_smooth("Utah again")
                 # Verify metallic edit survived the variant round-trip
                 harness.log("--- Phase 5b: Verify Ceramic metallic retained ---")
                 _check_value("Ceramic", "Metallic", 0.8)
@@ -186,6 +208,7 @@ def _run():
             bound = _find_geometry_material()
             if bound and "Porcelain" in bound:
                 harness._pass(f"Fancy again: bound to {bound}")
+                _check_geometry_is_smooth("Fancy again")
                 # Verify roughness edit survived
                 harness.log("--- Phase 6b: Verify PorcelainFlowers roughness retained ---")
                 _check_value("PorcelainFlowers", "Roughness", 0.3)

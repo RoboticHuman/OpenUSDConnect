@@ -299,6 +299,29 @@ class DCCAdapter(ABC):
         """
         return False
 
+    def native_composition_subtree_roots(self, events: list[dict]) -> set[str]:
+        """Return composition roots this batch materializes natively.
+
+        Some external-scene adapters implement references, loaded payloads,
+        or variants by asking the DCC's USD importer to build the complete
+        composed subtree. For those roots, composed projection must not also
+        synthesize notice-discovered descendant lifecycle, geometry, material,
+        and shader events: replaying them would overwrite the higher-fidelity
+        native import.
+
+        The declaration affects only candidates discovered indirectly from
+        USD composition notices. Explicit descendant edits in ``events`` are
+        still projected and delivered after the root composition operation.
+        Adapters that construct descendants solely from projected events must
+        keep the default empty result.
+
+        Implementations must return a root only when applying the batch's
+        composition event will import, re-import, or remove that subtree. As
+        with :meth:`apply_events`, failure to realize a declared operation must
+        raise rather than silently returning ``False``.
+        """
+        return set()
+
     @abstractmethod
     def delete_prim(self, prim_path: str) -> bool:
         raise NotImplementedError

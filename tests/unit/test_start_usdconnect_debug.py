@@ -42,3 +42,46 @@ def test_start_server_forwards_host_and_canonical_event_log(monkeypatch):
         "events.db",
     ]
     assert kwargs["cwd"] == str(launcher.REPO_ROOT)
+
+
+def test_start_blender_forwards_base_before_network_flags(monkeypatch):
+    launcher = _load_launcher()
+    calls = []
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    launcher._start_blender(
+        "blender",
+        "B",
+        "10.0.0.5",
+        7210,
+        "scene.usda",
+        0,
+        False,
+        True,
+        True,
+    )
+
+    command, kwargs = calls[0]
+    assert command == [
+        "blender",
+        "--python",
+        str(launcher.BOOTSTRAP_SCRIPT),
+        "--",
+        "--addon-zip",
+        str(launcher.ADDON_ZIP),
+        "--host",
+        "10.0.0.5",
+        "--port",
+        "7210",
+        "--base",
+        "scene.usda",
+        "--role",
+        "B",
+        "--start-emitter",
+        "--start-receiver",
+    ]
+    assert kwargs["cwd"] == str(launcher.REPO_ROOT)
