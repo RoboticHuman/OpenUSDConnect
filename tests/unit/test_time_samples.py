@@ -106,7 +106,10 @@ def test_wire_cost_no_time_is_baseline():
     Both must skip the FB optional slot entirely — proves the cost claim.
     """
     no_time = {
-        "k": K_SET_XFORM_TRS, "prim": "/A", "fields": ["t"], "t": [1.0, 2.0, 3.0],
+        "k": K_SET_XFORM_TRS,
+        "prim": "/A",
+        "fields": ["t"],
+        "t": [1.0, 2.0, 3.0],
     }
     explicit_none = dict(no_time)
     explicit_none["time"] = None
@@ -122,24 +125,39 @@ def test_wire_cost_no_time_is_baseline():
 
 def _fresh_stage_with_cube():
     stage = Usd.Stage.CreateInMemory()
-    apply_events(stage, [
-        {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
-        {"k": K_ENSURE_PRIM, "prim": "/World/Cube", "typeName": "Cube"},
-        {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Cube"},
-    ])
+    apply_events(
+        stage,
+        [
+            {"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"},
+            {"k": K_ENSURE_PRIM, "prim": "/World/Cube", "typeName": "Cube"},
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Cube"},
+        ],
+    )
     return stage
 
 
 def test_apply_time_sampled_trs():
     stage = _fresh_stage_with_cube()
-    apply_events(stage, [
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
-         "fields": ["t"], "t": [0.0, 0.0, 0.0]},
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
-         "fields": ["t"], "t": [10.0, 0.0, 0.0], "time": 24.0},
-        {"k": K_SET_XFORM_TRS, "prim": "/World/Cube",
-         "fields": ["t"], "t": [20.0, 0.0, 0.0], "time": 48.0},
-    ])
+    apply_events(
+        stage,
+        [
+            {"k": K_SET_XFORM_TRS, "prim": "/World/Cube", "fields": ["t"], "t": [0.0, 0.0, 0.0]},
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/Cube",
+                "fields": ["t"],
+                "t": [10.0, 0.0, 0.0],
+                "time": 24.0,
+            },
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/Cube",
+                "fields": ["t"],
+                "t": [20.0, 0.0, 0.0],
+                "time": 48.0,
+            },
+        ],
+    )
     cube = stage.GetPrimAtPath("/World/Cube")
     xf = UsdGeom.Xformable(cube)
     for op in xf.GetOrderedXformOps():
@@ -156,9 +174,12 @@ def test_apply_time_sampled_trs():
 
 def test_apply_time_sampled_visibility():
     stage = _fresh_stage_with_cube()
-    apply_events(stage, [
-        {"k": K_SET_VISIBILITY, "prim": "/World/Cube", "visible": False, "time": 30.0},
-    ])
+    apply_events(
+        stage,
+        [
+            {"k": K_SET_VISIBILITY, "prim": "/World/Cube", "visible": False, "time": 30.0},
+        ],
+    )
     vis = UsdGeom.Imageable(stage.GetPrimAtPath("/World/Cube")).GetVisibilityAttr()
     assert vis.GetTimeSamples() == [30.0]
     assert str(vis.Get(30.0)) == "invisible"
@@ -166,10 +187,13 @@ def test_apply_time_sampled_visibility():
 
 def test_apply_time_sampled_gprim_attr():
     stage = _fresh_stage_with_cube()
-    apply_events(stage, [
-        {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Cube", "attrs": {"size": 2.0}, "time": 12.0},
-        {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Cube", "attrs": {"size": 3.0}, "time": 24.0},
-    ])
+    apply_events(
+        stage,
+        [
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Cube", "attrs": {"size": 2.0}, "time": 12.0},
+            {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Cube", "attrs": {"size": 3.0}, "time": 24.0},
+        ],
+    )
     size_attr = stage.GetPrimAtPath("/World/Cube").GetAttribute("size")
     assert size_attr.GetTimeSamples() == [12.0, 24.0]
     assert size_attr.Get(12.0) == pytest.approx(2.0)
@@ -179,18 +203,27 @@ def test_apply_time_sampled_gprim_attr():
 def test_apply_time_sampled_connectable_input():
     stage = Usd.Stage.CreateInMemory()
     UsdLux.SphereLight.Define(stage, "/Light")
-    apply_events(stage, [
-        {
-            "k": K_SET_CONNECTABLE_INPUT, "prim": "/Light", "info_id": "",
-            "inputs": {"intensity": 100.0}, "input_types": {"intensity": "float"},
-            "time": 0.0,
-        },
-        {
-            "k": K_SET_CONNECTABLE_INPUT, "prim": "/Light", "info_id": "",
-            "inputs": {"intensity": 500.0}, "input_types": {"intensity": "float"},
-            "time": 24.0,
-        },
-    ])
+    apply_events(
+        stage,
+        [
+            {
+                "k": K_SET_CONNECTABLE_INPUT,
+                "prim": "/Light",
+                "info_id": "",
+                "inputs": {"intensity": 100.0},
+                "input_types": {"intensity": "float"},
+                "time": 0.0,
+            },
+            {
+                "k": K_SET_CONNECTABLE_INPUT,
+                "prim": "/Light",
+                "info_id": "",
+                "inputs": {"intensity": 500.0},
+                "input_types": {"intensity": "float"},
+                "time": 24.0,
+            },
+        ],
+    )
     light = UsdLux.SphereLight(stage.GetPrimAtPath("/Light"))
     intensity = light.GetIntensityAttr()
     assert intensity.GetTimeSamples() == [0.0, 24.0]
@@ -228,6 +261,85 @@ def test_emitter_emits_one_event_per_authored_sample():
     assert sampled[0]["t"] == pytest.approx([30.0, 0.0, 0.0])
 
 
+def test_emitter_reads_samples_from_variant_edit_target_spec_path():
+    """Layer sample queries must use the edit target's mapped spec path.
+
+    A variant edit target maps ``/Cube.size`` to a property below
+    ``/Cube{animation=keyed}``.  Looking up the scene path directly on the
+    layer misses the authored sample even though USD resolves it normally.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    variants = cube.GetPrim().GetVariantSets().AddVariantSet("animation")
+    variants.AddVariant("keyed")
+    variants.SetVariantSelection("keyed")
+    edit_target = variants.GetVariantEditTarget()
+    stage.SetEditTarget(edit_target)
+    emitter = NoticeEmitter(stage)
+
+    attr = cube.GetSizeAttr()
+    attr.Set(3.5, Usd.TimeCode(12.0))
+
+    spec_path = edit_target.MapToSpecPath(attr.GetPath())
+    assert spec_path != attr.GetPath()
+    assert edit_target.GetLayer().GetNumTimeSamplesForPath(spec_path) == 1
+    assert edit_target.GetLayer().GetNumTimeSamplesForPath(attr.GetPath()) == 0
+
+    events = emitter.build_events_for_dirty()
+    sampled = [
+        event
+        for event in events
+        if event.get("k") == K_SET_GPRIM_ATTRS
+        and event.get("time") == 12.0
+        and "size" in event.get("attrs", {})
+    ]
+    assert len(sampled) == 1
+    assert sampled[0]["attrs"]["size"] == pytest.approx(3.5)
+
+
+def test_emitter_reads_samples_from_reference_edit_target_spec_path():
+    """Reference edit targets map instance scene paths into the asset layer."""
+    asset_layer = Sdf.Layer.CreateAnonymous("sampled-asset")
+    asset_stage = Usd.Stage.Open(asset_layer)
+    UsdGeom.Cube.Define(asset_stage, "/Model")
+
+    shot_layer = Sdf.Layer.CreateAnonymous("sampled-shot")
+    stage = Usd.Stage.Open(shot_layer)
+    instance = stage.OverridePrim("/Instance")
+    instance.GetReferences().AddReference(asset_layer.identifier, "/Model")
+
+    reference_arc = next(
+        arc
+        for arc in Usd.PrimCompositionQuery.GetDirectRootLayerArcs(
+            instance,
+        ).GetCompositionArcs()
+        if arc.GetTargetLayer() == asset_layer
+    )
+    edit_target = Usd.EditTarget(asset_layer, reference_arc.GetTargetNode())
+    stage.SetEditTarget(edit_target)
+    emitter = NoticeEmitter(stage)
+
+    attr = UsdGeom.Cube(stage.GetPrimAtPath("/Instance")).GetSizeAttr()
+    attr.Set(4.25, Usd.TimeCode(18.0))
+
+    spec_path = edit_target.MapToSpecPath(attr.GetPath())
+    assert spec_path == Sdf.Path("/Model.size")
+    assert asset_layer.GetNumTimeSamplesForPath(spec_path) == 1
+    assert asset_layer.GetNumTimeSamplesForPath(attr.GetPath()) == 0
+
+    events = emitter.build_events_for_dirty()
+    sampled = [
+        event
+        for event in events
+        if event.get("k") == K_SET_GPRIM_ATTRS
+        and event.get("prim") == "/Instance"
+        and event.get("time") == 18.0
+        and "size" in event.get("attrs", {})
+    ]
+    assert len(sampled) == 1
+    assert sampled[0]["attrs"]["size"] == pytest.approx(4.25)
+
+
 def test_emitter_first_encounter_includes_all_existing_samples():
     """A pre-keyframed prim must replay every sample on first emit cycle."""
     stage = Usd.Stage.CreateInMemory()
@@ -239,10 +351,7 @@ def test_emitter_first_encounter_includes_all_existing_samples():
     emitter = NoticeEmitter(stage)
     emitter.mark_dirty("/Cube")
     events = emitter.build_events_for_dirty()
-    sampled = [
-        e for e in events
-        if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None
-    ]
+    sampled = [e for e in events if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None]
     assert {e["time"] for e in sampled} == {0.0, 10.0}
 
 
@@ -267,9 +376,7 @@ def test_emitter_emits_single_sample_attrs():
     light.GetIntensityAttr().Set(500.0, Usd.TimeCode(24.0))
 
     events = emitter.build_events_for_dirty()
-    by_kind = {
-        e["k"]: e for e in events if e.get("time") is not None
-    }
+    by_kind = {e["k"]: e for e in events if e.get("time") is not None}
     assert by_kind[K_SET_XFORM_TRS]["t"] == pytest.approx([10.0, 0.0, 0.0])
     assert by_kind[K_SET_GPRIM_ATTRS]["attrs"]["size"] == pytest.approx(2.0)
     assert by_kind[K_SET_VISIBILITY]["visible"] is False
@@ -293,17 +400,16 @@ def test_emitter_emits_orient_quaternion_samples():
     o_op = xf.AddOrientOp(precision=UsdGeom.XformOp.PrecisionFloat)
     # 90-degree rotation around X at frame 24.
     import math
+
     half = math.sin(math.radians(45.0))
-    o_op.Set(Gf.Quatf(math.cos(math.radians(45.0)), Gf.Vec3f(half, 0.0, 0.0)),
-             Usd.TimeCode(24.0))
+    o_op.Set(Gf.Quatf(math.cos(math.radians(45.0)), Gf.Vec3f(half, 0.0, 0.0)), Usd.TimeCode(24.0))
     o_op.Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)), Usd.TimeCode(48.0))
 
     events = emitter.build_events_for_dirty()
     sampled = [
-        e for e in events
-        if e.get("k") == K_SET_XFORM_TRS
-        and e.get("time") is not None
-        and e.get("fields") == ["r"]
+        e
+        for e in events
+        if e.get("k") == K_SET_XFORM_TRS and e.get("time") is not None and e.get("fields") == ["r"]
     ]
     assert len(sampled) == 2
     by_time = {e["time"]: e["r"] for e in sampled}
@@ -315,9 +421,13 @@ def test_emitter_emits_orient_quaternion_samples():
     assert by_time[48.0] == pytest.approx([1.0, 0.0, 0.0, 0.0])
 
     # Round-trip through codec to confirm the wire format survives.
-    raw = codec.encode_message({
-        "type": MSG_TXN, "client_id": "c", "events": [sampled[0]],
-    })
+    raw = codec.encode_message(
+        {
+            "type": MSG_TXN,
+            "client_id": "c",
+            "events": [sampled[0]],
+        }
+    )
     decoded = codec.message_to_dict(raw)["events"][0]
     assert decoded["fields"] == ["r"]
     assert decoded["r"] == pytest.approx(sampled[0]["r"])
@@ -408,8 +518,7 @@ def test_emitter_matrix_op_samples_decompose():
 
     events = emitter.build_events_for_dirty()
     timed = {
-        e["time"]: e for e in events
-        if e.get("k") == K_SET_XFORM_TRS and e.get("time") is not None
+        e["time"]: e for e in events if e.get("k") == K_SET_XFORM_TRS and e.get("time") is not None
     }
     assert set(timed) == {1.0, 2.0}
     assert sorted(timed[1.0]["fields"]) == ["r", "s", "t"]
@@ -583,10 +692,7 @@ def test_invalidate_set_gprim_attrs_refreshes_default_time_cache():
     # a change vs the server's 5.0, so it must emit.
     cube.GetSizeAttr().Set(1.0)
     out = emitter.build_events_for_dirty()
-    gprim_events = [
-        e for e in out
-        if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is None
-    ]
+    gprim_events = [e for e in out if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is None]
     assert any(e["attrs"].get("size") == 1.0 for e in gprim_events)
 
 
@@ -622,10 +728,7 @@ def test_emitter_layer_scoped_time_samples():
     cube.GetSizeAttr().Set(3.0, Usd.TimeCode(20.0))
 
     events = emitter.build_events_for_dirty()
-    sampled = [
-        e for e in events
-        if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None
-    ]
+    sampled = [e for e in events if e.get("k") == K_SET_GPRIM_ATTRS and e.get("time") is not None]
     sample_times = {e["time"] for e in sampled}
     # Must include B's actual keyframe (would be shadowed in the composed
     # view since A's layer has samples and is stronger).
@@ -663,10 +766,7 @@ def test_default_edit_does_not_reread_sample_tables(monkeypatch):
     t_op.Set(Gf.Vec3d(1, 2, 3))
     events = emitter.build_events_for_dirty()
     assert calls == []
-    default_trs = [
-        e for e in events
-        if e.get("k") == K_SET_XFORM_TRS and e.get("time") is None
-    ]
+    default_trs = [e for e in events if e.get("k") == K_SET_XFORM_TRS and e.get("time") is None]
     assert len(default_trs) == 1
 
     # Sample write: the table is re-read and only the changed key emits.
@@ -688,8 +788,10 @@ def test_emitter_invalidate_suppresses_reemit_after_remote_apply():
 
     # Simulate a remote time-sample event arriving and being applied.
     ev = {
-        "k": K_SET_GPRIM_ATTRS, "prim": "/Cube",
-        "attrs": {"size": 4.0}, "time": 5.0,
+        "k": K_SET_GPRIM_ATTRS,
+        "prim": "/Cube",
+        "attrs": {"size": 4.0},
+        "time": 5.0,
     }
     with emitter.suppressed():
         apply_events(stage, [ev])

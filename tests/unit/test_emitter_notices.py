@@ -520,6 +520,32 @@ class TestCleanup:
         assert len(emitter._prim_cache) == 0
         assert len(emitter._known_prims) == 0
 
+    def test_prim_cache_does_not_retain_sdf_spec_wrappers(self):
+        stage, emitter = _make_stage_and_emitter()
+        cube = UsdGeom.Cube.Define(stage, "/World/Cube")
+        cube.GetSizeAttr().Set(2.0)
+        xform = UsdGeom.Xformable(cube)
+        translate = xform.AddTranslateOp()
+        translate.Set(Gf.Vec3d(1.0, 2.0, 3.0))
+        emitter.build_events_for_dirty()
+
+        translate.Set(Gf.Vec3d(4.0, 5.0, 6.0))
+        emitter.build_events_for_dirty()
+
+        pending = [emitter._prim_cache]
+        retained_specs = []
+        while pending:
+            value = pending.pop()
+            if isinstance(value, (Sdf.PrimSpec, Sdf.PropertySpec)):
+                retained_specs.append(value)
+            elif isinstance(value, dict):
+                pending.extend(value.keys())
+                pending.extend(value.values())
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                pending.extend(value)
+
+        assert retained_specs == []
+
     def test_cleanup_idempotent(self):
         stage, emitter = _make_stage_and_emitter()
         emitter.cleanup()
@@ -1092,9 +1118,7 @@ class TestReferenceEmission:
 
         events = emitter.build_events_for_dirty()
         event = next(
-            ev
-            for ev in events
-            if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Blocked"
+            ev for ev in events if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Blocked"
         )
         assert event["refs"] == []
         assert event["list_op_authored"] is True
@@ -1141,16 +1165,17 @@ class TestReferenceEmission:
 
         events = emitter.build_events_for_dirty()
         event = next(
-            ev
-            for ev in events
-            if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Rich"
+            ev for ev in events if ev["k"] == K_SET_REFERENCE and ev["prim"] == "/World/Rich"
         )
         assert event["list_op_authored"] is True
         assert event["list_op_explicit"] is False
-        assert {
-            entry.get("list_position", "prepended")
-            for entry in event["refs"]
-        } == {"added", "prepended", "appended", "deleted", "ordered"}
+        assert {entry.get("list_position", "prepended") for entry in event["refs"]} == {
+            "added",
+            "prepended",
+            "appended",
+            "deleted",
+            "ordered",
+        }
 
         target = Usd.Stage.CreateInMemory()
         apply_event(target, event)
@@ -1321,16 +1346,16 @@ class TestGprimAttrEmission:
         stage, emitter = _make_stage_and_emitter()
         mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
         mesh.CreateExtentAttr(
-            Vt.Vec3fArray([
-                Gf.Vec3f(-1.0, -2.0, -3.0),
-                Gf.Vec3f(1.0, 2.0, 3.0),
-            ])
+            Vt.Vec3fArray(
+                [
+                    Gf.Vec3f(-1.0, -2.0, -3.0),
+                    Gf.Vec3f(1.0, 2.0, 3.0),
+                ]
+            )
         )
 
         events = emitter.build_events_for_dirty()
-        attr_evs = [
-            e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Mesh"
-        ]
+        attr_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS and e["prim"] == "/World/Mesh"]
         assert len(attr_evs) == 1
         assert np.allclose(
             attr_evs[0]["attrs"]["extent"],
@@ -1722,7 +1747,8 @@ class TestMaterialEmission:
 
         events = emitter.build_events_for_dirty()
         mul_conn_evs = [
-            e for e in events
+            e
+            for e in events
             if e["k"] == K_SET_CONNECTABLE_CONNECTION and e["prim"] == "/Mat/NG/mul"
         ]
         assert len(mul_conn_evs) == 1
