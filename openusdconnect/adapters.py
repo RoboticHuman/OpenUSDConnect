@@ -171,7 +171,14 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
 
 
 class DCCAdapter(ABC):
-    """Abstract interface a DCC integration must implement."""
+    """Abstract interface a receiving scene integration must implement.
+
+    Subclasses that write directly into a ``Usd.Stage`` must override
+    :meth:`targets_stage`. Adapters for an external scene, such as native DCC
+    objects, inherit its default ``None`` result. That distinction controls
+    whether layered dispatch applies authored events directly to the mirror
+    stage or projects the mirror's composed result into a separate scene.
+    """
 
     def apply_event(self, event: dict):
         """Route one protocol event dict to the matching adapter method."""
@@ -188,11 +195,22 @@ class DCCAdapter(ABC):
         return len(events)
 
     def targets_stage(self) -> Usd.Stage | None:
-        """Return the ``Usd.Stage`` this adapter writes to, or ``None``.
+        """Declare whether this adapter writes directly into a ``Usd.Stage``.
 
-        Stage-backed adapters override this; DCC-backed adapters return
-        ``None``. The dispatcher uses it to detect when its ``mirror_stage``
-        is the same instance and skip the otherwise-redundant mirror commit.
+        Return the exact stage instance mutated by :meth:`apply_events`, or
+        ``None`` when the adapter writes to an external/native scene. This is
+        an architectural capability declaration, not descriptive metadata.
+
+        During layered replay, returning the same object as the dispatcher's
+        mirror stage means OpenUSD itself provides composition, so events are
+        applied directly and composed projection is skipped. Returning
+        ``None`` or a different stage enables before/after composed projection
+        into the adapter's separate destination. Stage identity is tested with
+        ``is``; an equivalent stage opened from the same layers is still a
+        separate destination.
+
+        Stage-backed adapters must override this method. External-scene
+        adapters should inherit the default ``None`` result.
         """
         return None
 

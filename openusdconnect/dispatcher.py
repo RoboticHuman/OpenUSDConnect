@@ -182,7 +182,12 @@ class _SharedStageBinding:
 
 
 class _LayeredPreviousStage:
-    """Last layered USD state successfully delivered to a native adapter."""
+    """Last layered USD state successfully delivered to a native adapter.
+
+    The immutable base root is shared for low-cost composition. A live change
+    to a context-dependent resolver mapping therefore requires dispatcher
+    recreation, stage rebind, or destructive native-scene rebuild.
+    """
 
     def __init__(self):
         self._live_stage: Usd.Stage | None = None
@@ -510,6 +515,8 @@ class EventDispatcher:
         """
         if self.adapter is None:
             return 0
+        if self._projection_state is not None:
+            self._projection_state.ensure_native_projection_safe()
         bufs = self.receiver.drain_queue()
         if not bufs:
             return 0
@@ -559,6 +566,20 @@ class EventDispatcher:
             self._shared_stage.bind(stage)
             if self._projection_state is not None:
                 self._native_projection_state(stage)
+
+    @property
+    def native_scene_rebuild_required(self) -> bool:
+        """Whether resolver refresh made incremental native delivery unsafe."""
+        return bool(
+            self._projection_state
+            and self._projection_state.native_scene_rebuild_required
+        )
+
+    def acknowledge_native_scene_rebuilt(self) -> None:
+        """Advance the baseline and resume after native state reconstruction."""
+        if self._projection_state is None:
+            return
+        self._projection_state.acknowledge_native_scene_rebuilt()
 
     def unbind_stage(self) -> None:
         """Detach managed layers without closing the dispatcher.
@@ -631,6 +652,7 @@ class EventDispatcher:
                 advance_previous_stage=(
                     self._layered_previous_stage.advance_after_delivery
                 ),
+                resolver_refresh_requires_native_rebuild=True,
             )
         else:
             self._projection_state.bind(
@@ -639,6 +661,7 @@ class EventDispatcher:
                 advance_previous_stage=(
                     self._layered_previous_stage.advance_after_delivery
                 ),
+                resolver_refresh_requires_native_rebuild=True,
             )
         return self._projection_state
 
@@ -660,9 +683,11 @@ class EventDispatcher:
             raise RuntimeError("layered replay was not negotiated")
         stage = self._bind_layer_router()
         events = [record.event for record in records]
-        adapter_stage = self.adapter.targets_stage()
-        projects_to_native = adapter_stage is not stage
-        stage_adapter = UsdStageAdapter(stage) if projects_to_native else self.adapter
+        adapter_writes_to_mirror_stage = self.adapter.targets_stage() is stage
+        projects_to_external_scene = not adapter_writes_to_mirror_stage
+        stage_adapter = (
+            UsdStageAdapter(stage) if projects_to_external_scene else self.adapter
+        )
         local_origin = getattr(self.receiver, "origin", None)
         same_origin_paths = {
             str(record.event["prim"])
@@ -674,8 +699,12 @@ class EventDispatcher:
             if reset_layers or layer_stack_states
             else ((), ())
         )
-        projection_state = self._native_projection_state(stage) if projects_to_native else None
-        if projects_to_native and self._layered_previous_stage is not None:
+        projection_state = (
+            self._native_projection_state(stage)
+            if projects_to_external_scene
+            else None
+        )
+        if projects_to_external_scene and self._layered_previous_stage is not None:
             self._layered_previous_stage.prepare_delivery(
                 records,
                 layer_stack_states,
@@ -694,7 +723,7 @@ class EventDispatcher:
                 reapply_composed_paths=same_origin_paths,
                 reset=reset_layers,
             )
-            if projects_to_native
+            if projects_to_external_scene
             else None
         )
 

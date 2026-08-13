@@ -12,11 +12,12 @@ import pxr
 import pytest
 from pxr import Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
-from openusdconnect.adapters import MockAdapter
+from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.codec import encode_message
 from openusdconnect.composed_projection import (
     ComposedChangeProjection,
     ComposedProjectionState,
+    NativeSceneRebuildRequired,
 )
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.event_apply import apply_events
@@ -262,6 +263,112 @@ def test_persistent_projection_state_reconciles_after_adapter_failure():
     with ComposedChangeProjection(stage, [], state=state) as settled:
         assert settled.build_events() == []
         settled.commit()
+
+
+def test_shared_root_projection_pauses_after_resolver_refresh(caplog):
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World", "Xform")
+    previous = Usd.Stage.Open(
+        stage.GetRootLayer(),
+        Sdf.Layer.CreateAnonymous("previous-session.usda"),
+    )
+    baseline_advances = []
+    state = ComposedProjectionState(
+        stage,
+        previous_stage=previous,
+        advance_previous_stage=lambda: baseline_advances.append(True),
+        resolver_refresh_requires_native_rebuild=True,
+    )
+
+    class AffectedNotice:
+        @staticmethod
+        def AffectsContext(_context):
+            return True
+
+    state._on_resolver_changed(AffectedNotice(), None)
+
+    assert state.native_scene_rebuild_required
+    assert "incremental delivery is paused" in caplog.text
+    with pytest.raises(NativeSceneRebuildRequired, match="Recreate the receiver"):
+        ComposedChangeProjection(stage, [], state=state)
+
+    state.acknowledge_native_scene_rebuilt()
+    assert baseline_advances == [True]
+    assert not state.native_scene_rebuild_required
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        projection.commit()
+
+
+def test_dispatcher_does_not_drain_while_native_scene_rebuild_is_required():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World", "Xform")
+    receiver = _LayeredQueue(
+        [encode_message(_state(1, [(_STRONG_LAYER, "Strong", False)]))]
+    )
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=MockAdapter(),
+        mirror_stage=stage,
+    )
+    dispatcher.drain_and_apply()
+    state = dispatcher._projection_state
+
+    class AffectedNotice:
+        @staticmethod
+        def AffectsContext(_context):
+            return True
+
+    state._on_resolver_changed(AffectedNotice(), None)
+    pending = encode_message(_state(2, [(_STRONG_LAYER, "Strong", False)]))
+    receiver.messages = [pending]
+    last_seq = dispatcher.last_seq
+
+    assert dispatcher.native_scene_rebuild_required
+    with pytest.raises(NativeSceneRebuildRequired):
+        dispatcher.drain_and_apply()
+    assert receiver.messages == [pending]
+    assert dispatcher.last_seq == last_seq
+
+    dispatcher.acknowledge_native_scene_rebuilt()
+    assert not dispatcher.native_scene_rebuild_required
+    dispatcher.drain_and_apply()
+    assert receiver.messages == []
+    dispatcher.close()
+
+
+@pytest.mark.parametrize(
+    ("adapter_destination", "expects_composed_projection"),
+    [
+        ("same_stage", False),
+        ("external_scene", True),
+        ("different_stage", True),
+    ],
+)
+def test_adapter_target_stage_identity_selects_composed_projection(
+    adapter_destination,
+    expects_composed_projection,
+):
+    mirror_stage = Usd.Stage.CreateInMemory()
+    mirror_stage.DefinePrim("/World", "Xform")
+    if adapter_destination == "same_stage":
+        adapter = UsdStageAdapter(mirror_stage)
+    elif adapter_destination == "different_stage":
+        adapter = UsdStageAdapter(Usd.Stage.CreateInMemory())
+    else:
+        adapter = MockAdapter()
+
+    receiver = _LayeredQueue(
+        [encode_message(_state(1, [(_STRONG_LAYER, "Strong", False)]))]
+    )
+    dispatcher = EventDispatcher(
+        receiver=receiver,
+        adapter=adapter,
+        mirror_stage=mirror_stage,
+    )
+    dispatcher.drain_and_apply()
+
+    assert (dispatcher._projection_state is not None) is expects_composed_projection
+    dispatcher.close()
 
 
 def test_noop_commit_keeps_owned_previous_stage():

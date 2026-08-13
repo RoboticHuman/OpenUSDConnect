@@ -45,6 +45,16 @@ also replay their own authored records into an independent mirror so its
 reconstructed layer stack remains complete; the emitter's authoring stage is
 not used as that mirror.
 
+> [!IMPORTANT]
+> Changing a context-dependent `ArResolver` mapping while managed native
+> projection is running pauses incremental delivery. Recreate the
+> receiver/dispatcher, rebind a replacement stage, restart the integration, or
+> destructively rebuild the native scene and call
+> `acknowledge_native_scene_rebuilt()`. The dispatcher
+> exposes `native_scene_rebuild_required` and raises `NativeSceneRebuildRequired`
+> before draining more input, so this condition cannot silently desynchronize
+> the native scene. Ordinary authored USD changes remain incremental.
+
 ## Features
 
 ### Sync server

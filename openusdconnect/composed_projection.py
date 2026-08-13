@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -56,6 +57,21 @@ _TRAILING_DIRECT_KINDS = NATIVE_DIRECT_KINDS - _COMPOSITION_DIRECT_KINDS
 
 
 _PrimTime = tuple[str, float | None]
+LOG = logging.getLogger(__name__)
+
+
+class NativeSceneRebuildRequired(RuntimeError):
+    """Incremental delivery is paused until native state is reconstructed."""
+
+
+_NATIVE_REBUILD_MESSAGE = (
+    "the stage's resolver context changed while using shared-root native projection; "
+    "incremental delivery is paused because prior composed topology is no longer "
+    "available. Recreate the receiver/dispatcher and native scene, rebind a "
+    "replacement stage and reconstruct native state, restart the integration, "
+    "or rebuild the native scene and call "
+    "EventDispatcher.acknowledge_native_scene_rebuilt()."
+)
 
 
 @dataclass
@@ -353,6 +369,11 @@ class ComposedProjectionState:
     Layered dispatch may supply an externally managed previous stage.
     Standalone callers receive an internally managed one. Resolver-backed
     layer stacks are consolidated natively so asset paths remain anchored.
+
+    Resolver refresh has two deliberately different recovery states. An owned,
+    resolver-isolated previous stage retains the old composition and requests a
+    full reconcile. A shared-root external previous stage loses that history,
+    so incremental delivery stops until the native scene is rebuilt.
     """
 
     def __init__(
@@ -361,6 +382,7 @@ class ComposedProjectionState:
         *,
         previous_stage: Usd.Stage | None = None,
         advance_previous_stage: Callable[[], None] | None = None,
+        resolver_refresh_requires_native_rebuild: bool = False,
     ):
         self._live_stage: Usd.Stage | None = None
         self._external_previous_stage: Usd.Stage | None = None
@@ -369,16 +391,31 @@ class ComposedProjectionState:
         self._resolver_notice_key = None
         self._resolver_notice_callback = None
         self._needs_full_reconcile = False
+        self._resolver_refresh_requires_native_rebuild = False
+        self._native_scene_rebuild_required = False
         if stage is not None:
             self.bind(
                 stage,
                 previous_stage=previous_stage,
                 advance_previous_stage=advance_previous_stage,
+                resolver_refresh_requires_native_rebuild=(
+                    resolver_refresh_requires_native_rebuild
+                ),
             )
 
     @property
     def needs_full_reconcile(self) -> bool:
         return self._needs_full_reconcile
+
+    @property
+    def native_scene_rebuild_required(self) -> bool:
+        """Whether native delivery is paused until the scene is reconstructed."""
+        return self._native_scene_rebuild_required
+
+    def ensure_native_projection_safe(self) -> None:
+        """Raise before consuming input when incremental projection is unsafe."""
+        if self._native_scene_rebuild_required:
+            raise NativeSceneRebuildRequired(_NATIVE_REBUILD_MESSAGE)
 
     @property
     def live_stage(self) -> Usd.Stage | None:
@@ -395,7 +432,12 @@ class ComposedProjectionState:
     def _on_resolver_changed(self, notice, _sender) -> None:
         stage = self._live_stage
         if stage is not None and notice.AffectsContext(stage.GetPathResolverContext()):
-            self.require_full_reconcile()
+            if self._resolver_refresh_requires_native_rebuild:
+                if not self._native_scene_rebuild_required:
+                    LOG.error(_NATIVE_REBUILD_MESSAGE)
+                self._native_scene_rebuild_required = True
+            else:
+                self.require_full_reconcile()
 
     def _ensure_resolver_listener(self) -> None:
         if self._resolver_notice_key is None:
@@ -415,7 +457,9 @@ class ComposedProjectionState:
     def prepare(self, stage: Usd.Stage) -> None:
         if self._live_stage is not stage:
             self.bind(stage)
-        elif self._owned_previous_stage is not None:
+        else:
+            self.ensure_native_projection_safe()
+        if self._owned_previous_stage is not None:
             self._owned_previous_stage.sync_stage_controls()
 
     def bind(
@@ -424,6 +468,7 @@ class ComposedProjectionState:
         *,
         previous_stage: Usd.Stage | None = None,
         advance_previous_stage: Callable[[], None] | None = None,
+        resolver_refresh_requires_native_rebuild: bool = False,
     ) -> None:
         self._ensure_resolver_listener()
         if (
@@ -442,6 +487,9 @@ class ComposedProjectionState:
             and previous_stage is not None
         ):
             self._advance_external_previous_stage = advance_previous_stage
+            self._resolver_refresh_requires_native_rebuild = (
+                resolver_refresh_requires_native_rebuild
+            )
             return
         if self._owned_previous_stage is not None:
             self._owned_previous_stage.close()
@@ -452,6 +500,24 @@ class ComposedProjectionState:
             _OwnedAdapterStateStage(stage) if previous_stage is None else None
         )
         self._needs_full_reconcile = False
+        self._resolver_refresh_requires_native_rebuild = (
+            resolver_refresh_requires_native_rebuild
+        )
+        self._native_scene_rebuild_required = False
+
+    def acknowledge_native_scene_rebuilt(self) -> None:
+        """Advance the baseline and resume after native state reconstruction."""
+        if self._live_stage is None:
+            raise RuntimeError("composed projection state is not bound")
+        if not self._native_scene_rebuild_required:
+            return
+        if self._external_previous_stage is None:
+            raise RuntimeError("native rebuild guard requires an external previous stage")
+        if self._advance_external_previous_stage is None:
+            raise RuntimeError("external previous stage cannot advance")
+        self._advance_external_previous_stage()
+        self._native_scene_rebuild_required = False
+        self._needs_full_reconcile = False
 
     def close(self) -> None:
         if self._owned_previous_stage is not None:
@@ -461,6 +527,8 @@ class ComposedProjectionState:
         self._advance_external_previous_stage = None
         self._owned_previous_stage = None
         self._needs_full_reconcile = False
+        self._resolver_refresh_requires_native_rebuild = False
+        self._native_scene_rebuild_required = False
         if self._resolver_notice_key is not None:
             self._resolver_notice_key.Revoke()
             self._resolver_notice_key = None
