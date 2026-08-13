@@ -59,6 +59,46 @@ def _compute_local_trs(obj):
     return local_matrix.decompose()
 
 
+def _usd_xform_scale(obj, displayed_scale):
+    """Remove Blender-only primitive sizing from an object's display scale.
+
+    The adapter represents parametric USD geometry on Blender's unit meshes by
+    composing two independent USD quantities into ``Object.scale``::
+
+        displayed scale = primitive geometry scale * xformOp:scale
+
+    Reverse sync must invert that representation. Writing the displayed scale
+    directly to ``xformOp:scale`` makes every receive/emit round trip multiply
+    the primitive sizing again (a size-1 Cube halves on every cycle).
+    """
+    original = getattr(obj, "original", obj)
+    geometry_scale = original.get("usd_geom_scale", (1.0, 1.0, 1.0))
+    previous_xform_scale = original.get("usd_xform_scale", (1.0, 1.0, 1.0))
+    result = []
+    for displayed, geometry, previous in zip(
+        displayed_scale,
+        geometry_scale,
+        previous_xform_scale,
+        strict=True,
+    ):
+        geometry = float(geometry)
+        if abs(geometry) > 1e-12:
+            authored = float(displayed) / geometry
+            # Blender stores Object.scale as float32. Dividing that rounded
+            # display value by the geometry contribution can otherwise move
+            # the independent USD scale by a few ulps on every user update.
+            tolerance = 1e-6 * max(1.0, abs(float(previous)))
+            if abs(authored - float(previous)) <= tolerance:
+                authored = float(previous)
+            result.append(authored)
+        else:
+            # A zero-sized primitive has no invertible displayed scale. Keep
+            # the last independent USD xform contribution until it becomes
+            # representable again.
+            result.append(float(previous))
+    return result
+
+
 _USD_MESH_TYPES = ("Sphere", "Cube", "Cylinder", "Cone", "Capsule")
 
 
@@ -305,18 +345,23 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
 
         # Blender may map a collapsed parent Xform to an Object while mapping
         # the represented child Mesh/Camera/Light prim to that object's data.
-        # Resolve both forms before tagging so edits target the schema prim,
-        # not the collapsed parent.
+        # Preserve both identities: typed-schema edits target the deepest data
+        # prim, while object transforms target the prim mapped to the Object.
         owners_by_data: dict[int, list] = {}
         for obj in bpy.data.objects:
             data = getattr(obj, "data", None)
             if data is not None:
                 owners_by_data.setdefault(data.as_pointer(), []).append(obj)
 
-        from .blender_adapter import _PROP_USD_IMPORTED, _PROP_USD_PRIM_ALIASES
+        from .blender_adapter import (
+            _PROP_USD_IMPORTED,
+            _PROP_USD_PRIM_ALIASES,
+            _PROP_USD_XFORM_PRIM_PATH,
+        )
 
         object_tags: dict[int, tuple[tuple[int, int], object, str, str]] = {}
         object_paths: dict[int, set[str]] = {}
+        object_xform_paths: dict[int, set[str]] = {}
         for prim_path, data_blocks in prim_map.items():
             prim_path_str = str(prim_path)
             prim_type_name = ""
@@ -342,6 +387,8 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                 for obj in objects:
                     key = obj.as_pointer()
                     object_paths.setdefault(key, set()).add(prim_path_str)
+                    if data_owner == 0:
+                        object_xform_paths.setdefault(key, set()).add(prim_path_str)
                     current = object_tags.get(key)
                     if current is None or rank > current[0]:
                         object_tags[key] = (
@@ -360,6 +407,14 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             # Reference/payload imports are remapped later by BlenderAdapter;
             # their file-internal paths must not persist as scene aliases.
             if not USD_CONNECT_Hook._skip_root_inference:
+                xform_paths = object_xform_paths.get(obj.as_pointer(), set())
+                if xform_paths:
+                    obj[_PROP_USD_XFORM_PRIM_PATH] = max(
+                        xform_paths,
+                        key=lambda path: (path.count("/"), path),
+                    )
+                elif _PROP_USD_XFORM_PRIM_PATH in obj:
+                    del obj[_PROP_USD_XFORM_PRIM_PATH]
                 aliases = sorted(
                     path
                     for path in object_paths.get(obj.as_pointer(), set())
@@ -495,6 +550,23 @@ class BlenderStageAuthor:
             LOG.info("Auto-tracked %r -> %s (%s)", obj.name, prim_path, type_name)
         return prim_path, type_name
 
+    @staticmethod
+    def _resolve_xform_prim_path(obj, prim_path: str) -> str:
+        """Return the USD prim that owns ``obj``'s local transform.
+
+        A Blender USD import can represent a parent Xform and its typed child
+        with one object. ``usd_prim_path`` intentionally identifies the typed
+        child for geometry and material edits; the import hook records the
+        separately mapped transform owner when that collapse occurs.
+        """
+        from .blender_adapter import _PROP_USD_XFORM_PRIM_PATH
+
+        original = getattr(obj, "original", obj)
+        xform_prim_path = original.get(_PROP_USD_XFORM_PRIM_PATH)
+        if isinstance(xform_prim_path, str) and xform_prim_path:
+            return xform_prim_path
+        return prim_path
+
     def _is_under_unloaded_payload(self, prim_path: str) -> bool:
         """Check if prim_path is under a known unloaded payload root."""
         return any(prim_path.startswith(root + "/") for root in self._unloaded_payload_roots)
@@ -529,7 +601,9 @@ class BlenderStageAuthor:
             if not pp:
                 break
             if pp in self._prim_refs:
-                break  # already tracked — already has ops
+                prim = self.stage.GetPrimAtPath(pp)
+                if prim and prim.IsValid():
+                    break  # tracked and represented on the local author stage
             ancestors.append((ancestor, pp))
             ancestor = ancestor.parent
 
@@ -537,9 +611,10 @@ class BlenderStageAuthor:
         # depsgraph updates handle actual edits.
         for anc_obj, anc_path in reversed(ancestors):
             existed = bool(self.stage.GetPrimAtPath(anc_path))
+            was_tracked = anc_path in self._prim_refs
             tn = anc_obj.get("usd_type_name", "Xform")
             self._ensure_local_prim(anc_path, anc_obj, tn)
-            if not existed and not self._is_imported_object(anc_obj):
+            if not existed and not was_tracked and not self._is_imported_object(anc_obj):
                 self._ensure_xform_ops(anc_path)
                 self._author_xform(anc_path, anc_obj)
             self._prim_refs[anc_path] = anc_obj
@@ -585,7 +660,7 @@ class BlenderStageAuthor:
 
         tx, ty, tz = loc.x, loc.y, loc.z
         rw, rx, ry, rz = rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z
-        sx, sy, sz = scl.x, scl.y, scl.z
+        sx, sy, sz = _usd_xform_scale(obj, (scl.x, scl.y, scl.z))
 
         if self._needs_axis_conv and not parent_handles:
             # T and S always need Z-up → Y-up conversion.
@@ -873,6 +948,7 @@ class BlenderStageAuthor:
             prim_path, type_name = self._resolve_prim_path(obj)
             if not prim_path:
                 continue
+            xform_prim_path = self._resolve_xform_prim_path(obj, prim_path)
 
             # Store the *original* (non-evaluated) object reference for
             # deletion detection and identity lookups in _resolve_prim_path.
@@ -906,11 +982,20 @@ class BlenderStageAuthor:
                 tn = type_name if type_name else obj_orig.get("usd_type_name", "Xform")
                 self._ensure_local_prim(prim_path, obj_orig, tn)
 
+            # A collapsed import can use one Blender object for a parent Xform
+            # and a typed child. Ensure and author the object transform on its
+            # recorded USD owner without changing the typed child identity used
+            # by camera, geometry, and material capture.
+            xform_prim = self.stage.GetPrimAtPath(xform_prim_path)
+            if not xform_prim or not xform_prim.IsValid():
+                obj_orig = getattr(obj, "original", obj)
+                self._ensure_local_prim(xform_prim_path, obj_orig, "Xform")
+
             # ALWAYS ensure canonical xform ops before authoring
-            self._ensure_xform_ops(prim_path)
+            self._ensure_xform_ops(xform_prim_path)
 
             # Author TRS
-            self._author_xform(prim_path, obj)
+            self._author_xform(xform_prim_path, obj)
 
             if obj.type == "CAMERA":
                 self._author_camera_attrs(prim_path, obj)

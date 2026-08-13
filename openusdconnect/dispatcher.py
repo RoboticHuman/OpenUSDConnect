@@ -760,6 +760,9 @@ class EventDispatcher:
                 extra_scene_paths=stack_paths,
                 extra_arc_candidates=stack_arc_paths,
                 reapply_composed_paths=same_origin_paths,
+                native_composition_subtree_roots=(
+                    self.adapter.native_composition_subtree_roots(events)
+                ),
                 reset=reset_layers,
             )
             if projects_to_external_scene

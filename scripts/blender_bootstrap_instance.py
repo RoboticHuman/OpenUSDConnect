@@ -5,6 +5,7 @@ This script is intended to be passed to Blender with:
 
 It will:
 - install/enable the USD Connect addon from a zip
+- import the configured base USD through the addon's prim-tagging hook
 - apply host/port scene settings for emitter/receiver
 - optionally start emitter and/or receiver
 - optionally start debugpy and wait for VS Code attach
@@ -32,6 +33,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--addon-zip", required=True, help="Path to dist/usd_connect_blender.zip")
     parser.add_argument("--host", default="127.0.0.1", help="Sync server host")
     parser.add_argument("--port", type=int, default=7200, help="Sync server port")
+    parser.add_argument("--base", required=True, help="Base USD file to import")
     parser.add_argument("--role", default="instance", help="Label for logs")
     parser.add_argument("--debug-port", type=int, default=0, help="debugpy listen port; 0 disables")
     parser.add_argument("--wait-for-client", action="store_true", help="Wait for debugger attach")
@@ -76,8 +78,37 @@ def _write_addon_path() -> None:
         print(f"[USD Connect Bootstrap] could not write .blender_addon_path: {exc}")
 
 
-def _configure_scene(host: str, port: int) -> None:
+def _load_base_scene(base_usd: str) -> None:
+    """Import the authoritative base through the addon's tagging hook."""
+    base_usd = os.path.abspath(base_usd)
+    if not os.path.isfile(base_usd):
+        raise FileNotFoundError(f"Base USD file not found: {base_usd}")
+
+    # Live-enabled USD files may contain endpoint metadata. The debug launcher
+    # owns connection startup, so prevent the import operator from connecting
+    # before this script has applied its explicit host and port.
     scene = bpy.context.scene
+    if hasattr(scene, "usd_connect_live_auto_start_emitter"):
+        scene.usd_connect_live_auto_start_emitter = False
+    if hasattr(scene, "usd_connect_live_auto_start_receiver"):
+        scene.usd_connect_live_auto_start_receiver = False
+
+    # A debug instance should represent the USD base, not Blender's default
+    # cube/camera/light plus that base.
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+
+    result = bpy.ops.usd_connect.import_with_hook(filepath=base_usd)
+    if "FINISHED" not in result:
+        raise RuntimeError(f"Base USD import failed: {result}")
+    print(f"[USD Connect Bootstrap] Base USD imported: {base_usd}")
+
+
+def _configure_scene(host: str, port: int, base_usd: str) -> None:
+    scene = bpy.context.scene
+
+    if hasattr(scene, "usd_connect_base_usd_path"):
+        scene.usd_connect_base_usd_path = os.path.abspath(base_usd)
 
     if hasattr(scene, "usd_connect_emit_host"):
         scene.usd_connect_emit_host = host
@@ -192,7 +223,8 @@ def main() -> None:
     print(f"[USD Connect Bootstrap:{args.role}] starting")
 
     _ensure_addon(args.addon_zip)
-    _configure_scene(args.host, args.port)
+    _load_base_scene(args.base)
+    _configure_scene(args.host, args.port, args.base)
     _start_debugpy(args.debug_port, args.wait_for_client, args.role)
     _start_network_ops(args.start_emitter, args.start_receiver)
     _start_reload_watcher(args.addon_zip, args.role)

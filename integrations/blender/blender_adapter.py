@@ -32,6 +32,12 @@ from openusdconnect.axis_conversion import (
     yup_to_zup_vec,
 )
 from openusdconnect.connectable_attrs import output_attr, split_qualified_attr
+from openusdconnect.protocol_constants import (
+    K_LOAD_PAYLOAD,
+    K_SET_REFERENCE,
+    K_SET_VARIANT_SELECTIONS,
+    K_UNLOAD_PAYLOAD,
+)
 from openusdconnect.shader_connections import resolve_nodegraph_connection
 
 from .shader_mapper import create_default_registry
@@ -40,6 +46,11 @@ from .shader_mapper import create_default_registry
 _PROP_USD_IMPORTED = "_usd_imported"
 # Additional USD prim paths Blender collapsed onto the same object.
 _PROP_USD_PRIM_ALIASES = "_usd_prim_path_aliases"
+# USD prim whose local transform is represented by this Blender object.
+# Blender can collapse a parent Xform and its typed child onto one object;
+# geometry/material edits still use ``usd_prim_path``, while reverse-captured
+# object transforms must be authored on the parent Xform.
+_PROP_USD_XFORM_PRIM_PATH = "_usd_xform_prim_path"
 
 
 def _object_prim_paths(obj) -> tuple[str, ...]:
@@ -1280,21 +1291,25 @@ class BlenderAdapter(DCCAdapter):
     def _find_material_for_shader(self, prim_path: str, create: bool = False):
         """Find the Blender material that owns a shader prim path.
 
-        Walks up the prim path checking the registry cache first (O(1)),
-        then falls back to usd_material_path tag scan, then name match.
+        ``prim_path`` may identify either a shader below a material or the
+        material itself (for an ``outputs:surface`` connection). Walks from
+        that exact path toward the root, checking the registry cache first
+        (O(1)), then falls back to usd_material_path tag scan and name match.
         """
-        # Walk up the shader path to find the material ancestor
+        # Check the exact path first: output-side connections are authored on
+        # the Material prim rather than on one of its descendant shaders.
         path = prim_path
-        while "/" in path:
-            path = path.rsplit("/", 1)[0]
-            # O(1) registry lookup
+        while path:
             mat = self._registry.find_material(path)
             if mat:
                 return mat
+            if "/" not in path:
+                break
+            path = path.rsplit("/", 1)[0]
         # Fallback: scan all materials by usd_material_path tag
         for m in bpy.data.materials:
             mp = m.get("usd_material_path", "")
-            if mp and prim_path.startswith(mp + "/"):
+            if mp and (prim_path == mp or prim_path.startswith(mp + "/")):
                 self._registry.register_material(mp, m)
                 return m
         # Fallback: walk up path and match by name
@@ -2032,6 +2047,26 @@ class BlenderAdapter(DCCAdapter):
     def has_imported_children(self, prim_path: str) -> bool:
         """Return True when a reference/payload prim has imported DCC children."""
         return self._ref_children_exist(prim_path)
+
+    def native_composition_subtree_roots(self, events: list[dict]) -> set[str]:
+        """Declare roots whose descendants Blender's USD importer realizes."""
+        roots = {
+            str(event["prim"])
+            for event in events
+            if event.get("prim")
+            and event.get("k") in {K_SET_REFERENCE, K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD}
+        }
+        roots.update(
+            str(event["prim"])
+            for event in events
+            if event.get("k") == K_SET_VARIANT_SELECTIONS
+            and event.get("prim")
+            and (
+                self.has_imported_children(str(event["prim"]))
+                or str(event["prim"]) in roots
+            )
+        )
+        return roots
 
     def _remove_imported_ref_children(self, prim_path: str):
         """Remove child objects previously imported for a reference prim (keep container)."""

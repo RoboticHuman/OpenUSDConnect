@@ -17,6 +17,34 @@ ASSET = os.path.join(
 harness = TestHarness("BISHOP")
 
 _step = 0
+
+
+def _check_render_mesh_fidelity():
+    obj = next(
+        (
+            candidate
+            for candidate in bpy.data.objects
+            if candidate.get("usd_prim_path") == "/World/Bishop/Geom/Render"
+        ),
+        None,
+    )
+    if obj is None or obj.type != "MESH" or obj.data is None:
+        harness._fail("Bishop render mesh not found")
+        return
+    mesh = obj.data
+    if len(mesh.vertices) != 37464 or len(mesh.polygons) != 37528:
+        harness._fail(
+            f"Bishop mesh topology: {len(mesh.vertices)} verts, "
+            f"{len(mesh.polygons)} polygons",
+        )
+        return
+    flat_polygons = sum(not polygon.use_smooth for polygon in mesh.polygons)
+    if flat_polygons:
+        harness._fail(f"Bishop mesh has {flat_polygons} flat-shaded polygons")
+        return
+    harness._pass("Bishop native mesh fidelity: 37464 verts, 37528 smooth polygons")
+
+
 def _run():
     global _step
     if _step == 0:
@@ -40,6 +68,7 @@ def _run():
 
         # Binding
         harness.check_binding("Render", "M_Bishop_B")
+        _check_render_mesh_fidelity()
 
         # Shader maps seeded for reverse path
         harness.check_shader_maps_seeded("Bishop")

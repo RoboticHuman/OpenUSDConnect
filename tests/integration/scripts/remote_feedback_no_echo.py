@@ -14,6 +14,8 @@ PROJECT_ROOT = os.path.abspath(
 ADDON_ZIP = os.path.join(PROJECT_ROOT, "dist", "usd_connect_blender.zip")
 BASE_USD = os.path.join(PROJECT_ROOT, "test_scene.usda")
 SHADER_PATH = "/World/NoEchoLooks/Material/StandardSurface"
+PARAMETRIC_PARENT_PATH = "/World/NoEchoParametricParent"
+PARAMETRIC_PATH = f"{PARAMETRIC_PARENT_PATH}/Cube"
 INITIAL_ROUGHNESS = 0.2
 UPDATED_ROUGHNESS = 0.73
 
@@ -235,6 +237,110 @@ def _test_step():
             return 2.0
 
         if _step == 6:
+            _send_external(
+                [
+                    {
+                        "k": "ensure_prim",
+                        "prim": PARAMETRIC_PARENT_PATH,
+                        "typeName": "Xform",
+                    },
+                    {"k": "ensure_prim", "prim": PARAMETRIC_PATH, "typeName": "Cube"},
+                    {
+                        "k": "set_gprim_attrs",
+                        "prim": PARAMETRIC_PATH,
+                        "attrs": {"size": 1.0},
+                    },
+                    {"k": "ensure_xform_ops", "prim": PARAMETRIC_PATH},
+                    {
+                        "k": "set_xform_trs",
+                        "prim": PARAMETRIC_PATH,
+                        "fields": ["t", "s"],
+                        "t": [0.0, 0.0, 0.0],
+                        "s": [0.2, 0.4, 0.6],
+                    },
+                ],
+            )
+            log("remote parametric Cube transaction sent")
+            _retries = 0
+            _step = 7
+            return 0.2
+
+        if _step == 7:
+            scene = bpy.context.scene
+            if int(scene.usd_connect_recv_last_seq) < 13:
+                return _wait_or_fail(
+                    f"parametric Cube replay stalled at {scene.usd_connect_recv_last_seq}",
+                )
+            obj = next(
+                (
+                    candidate
+                    for candidate in bpy.data.objects
+                    if candidate.get("usd_prim_path") == PARAMETRIC_PATH
+                ),
+                None,
+            )
+            if obj is None:
+                raise RuntimeError("remote parametric Cube was not created")
+            expected_display_scale = (0.1, 0.2, 0.3)
+            if any(
+                abs(float(actual) - expected) > 1e-4
+                for actual, expected in zip(
+                    obj.scale,
+                    expected_display_scale,
+                    strict=True,
+                )
+            ):
+                raise RuntimeError(
+                    f"unexpected initial parametric scale: {tuple(obj.scale)}",
+                )
+            log(
+                "initial parametric state: "
+                f"geometry={obj.get('usd_geom_scale')} "
+                f"xform={obj.get('usd_xform_scale')}",
+            )
+            obj.location.x += 1.0
+            bpy.context.view_layer.update()
+            log("moved remote parametric Cube locally")
+            _retries = 0
+            _step = 8
+            return 0.2
+
+        if _step == 8:
+            scene = bpy.context.scene
+            if int(scene.usd_connect_recv_last_seq) < 17:
+                return _wait_or_fail(
+                    f"local parametric edit stalled at {scene.usd_connect_recv_last_seq}",
+                )
+            log("same-origin correction applied; waiting for delayed callbacks")
+            _step = 9
+            return 2.0
+
+        if _step == 9:
+            obj = next(
+                (
+                    candidate
+                    for candidate in bpy.data.objects
+                    if candidate.get("usd_prim_path") == PARAMETRIC_PATH
+                ),
+                None,
+            )
+            if obj is None:
+                raise RuntimeError("parametric Cube disappeared after correction")
+            expected_display_scale = (0.1, 0.2, 0.3)
+            if any(
+                abs(float(actual) - expected) > 1e-4
+                for actual, expected in zip(
+                    obj.scale,
+                    expected_display_scale,
+                    strict=True,
+                )
+            ):
+                raise RuntimeError(
+                    "parametric scale changed after round trip: "
+                    f"display={tuple(obj.scale)} "
+                    f"geometry={obj.get('usd_geom_scale')} "
+                    f"xform={obj.get('usd_xform_scale')}",
+                )
             if _sender is not None:
                 _sender.disconnect()
                 _sender = None

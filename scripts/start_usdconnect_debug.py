@@ -7,8 +7,8 @@ Usage:
     uv run python scripts/start_usdconnect_debug.py --wait-for-debugger
 
 Starts the sync server, builds the addon if needed, and launches one or
-two Blender instances with the bootstrap script.  Stops the server when
-all Blender instances exit.
+two Blender instances with the base USD imported by the bootstrap script.
+Stops the server when all Blender instances exit.
 """
 
 from __future__ import annotations
@@ -103,6 +103,7 @@ def _start_server(python: str, host: str, port: int,
 
 
 def _start_blender(blender_exe: str, role: str, host: str, port: int,
+                    base_usd: str,
                     debug_port: int, wait_for_debugger: bool,
                     start_emitter: bool, start_receiver: bool) -> subprocess.Popen:
     """Start a Blender instance with the bootstrap script."""
@@ -113,6 +114,7 @@ def _start_blender(blender_exe: str, role: str, host: str, port: int,
         "--addon-zip", str(ADDON_ZIP),
         "--host", host,
         "--port", str(port),
+        "--base", base_usd,
         "--role", role,
     ]
     if debug_port > 0:
@@ -166,7 +168,7 @@ def main(argv: list[str] | None = None):
         raise SystemExit(f"Blender executable not found: {blender_exe}")
     if not BOOTSTRAP_SCRIPT.exists():
         raise SystemExit(f"Bootstrap script not found: {BOOTSTRAP_SCRIPT}")
-    if not args.no_server and not pathlib.Path(base_usd).exists():
+    if not pathlib.Path(base_usd).exists():
         raise SystemExit(f"Base USD file not found: {base_usd}")
 
     _build_addon()
@@ -183,6 +185,7 @@ def main(argv: list[str] | None = None):
     # Start Blender A
     blender_a = _start_blender(
         blender_exe, "A", args.host, args.port,
+        base_usd,
         args.debug_port, args.wait_for_debugger,
         args.start_emitter, args.start_receiver,
     )
@@ -192,6 +195,7 @@ def main(argv: list[str] | None = None):
     if args.two_blenders:
         blender_b = _start_blender(
             blender_exe, "B", args.host, args.port,
+            base_usd,
             args.debug_port_b, args.wait_for_debugger,
             args.start_emitter, args.start_receiver,
         )

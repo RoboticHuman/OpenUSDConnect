@@ -981,6 +981,104 @@ def test_layered_dispatcher_does_not_rebuild_native_prim_for_local_api_edit():
     assert "MaterialBindingAPI" in native["api_schemas"]
 
 
+def test_layered_dispatcher_preserves_native_prim_for_matching_local_type():
+    stage = Usd.Stage.CreateInMemory()
+    receiver = _LayeredQueue(
+        [
+            encode_message(
+                _state(
+                    1,
+                    [
+                        (_STRONG_LAYER, "Strong", False),
+                        (_WEAK_LAYER, "Local", False),
+                    ],
+                )
+            ),
+            _event(
+                1,
+                _STRONG_LAYER,
+                {"k": "ensure_prim", "prim": "/World/Thing", "typeName": "Cube"},
+            ),
+        ]
+    )
+    receiver.origin = "local-origin"
+    adapter = MockAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter, mirror_stage=stage)
+    dispatcher.drain_and_apply()
+    adapter.get_prim("/World/Thing")["sentinel"] = True
+
+    receiver.messages = [
+        encode_message(
+            {
+                "type": "event",
+                "seq": 2,
+                "origin": "local-origin",
+                "layer_key": _WEAK_LAYER,
+                "event": {
+                    "k": "ensure_prim",
+                    "prim": "/World/Thing",
+                    "typeName": "Cube",
+                },
+            }
+        )
+    ]
+    dispatcher.drain_and_apply()
+
+    assert adapter.get_prim("/World/Thing")["sentinel"] is True
+
+
+def test_layered_dispatcher_rebuilds_native_prim_for_masked_local_type():
+    stage = Usd.Stage.CreateInMemory()
+    receiver = _LayeredQueue(
+        [
+            encode_message(
+                _state(
+                    1,
+                    [
+                        (_STRONG_LAYER, "Strong", False),
+                        (_WEAK_LAYER, "Local", False),
+                    ],
+                )
+            ),
+            _event(
+                1,
+                _STRONG_LAYER,
+                {"k": "ensure_prim", "prim": "/World/Thing", "typeName": "Cube"},
+            ),
+        ]
+    )
+    receiver.origin = "local-origin"
+    adapter = MockAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter, mirror_stage=stage)
+    dispatcher.drain_and_apply()
+
+    # Model the native application changing the object before its weaker local
+    # opinion returns from the server. The stronger Cube must win and replace it.
+    native = adapter.get_prim("/World/Thing")
+    native["typeName"] = "Sphere"
+    native["sentinel"] = True
+    receiver.messages = [
+        encode_message(
+            {
+                "type": "event",
+                "seq": 2,
+                "origin": "local-origin",
+                "layer_key": _WEAK_LAYER,
+                "event": {
+                    "k": "ensure_prim",
+                    "prim": "/World/Thing",
+                    "typeName": "Sphere",
+                },
+            }
+        )
+    ]
+    dispatcher.drain_and_apply()
+
+    corrected = adapter.get_prim("/World/Thing")
+    assert corrected["typeName"] == "Cube"
+    assert "sentinel" not in corrected
+
+
 def test_local_reapplication_does_not_rebuild_unrelated_remote_lifecycle():
     stage = Usd.Stage.CreateInMemory()
     receiver = _LayeredQueue(
@@ -1864,6 +1962,119 @@ def test_layered_dispatcher_projects_arcs_before_dependent_native_edits(tmp_path
     assert adapter.calls == [
         ("set_reference", "/World/Asset"),
         ("set_material_binding", "/World/Asset"),
+    ]
+
+
+def _native_import_projection_fixture(tmp_path):
+    asset_path = tmp_path / "native-import-asset.usda"
+    asset_stage = Usd.Stage.CreateNew(str(asset_path))
+    asset_stage.DefinePrim("/Asset", "Xform")
+    mesh = UsdGeom.Mesh.Define(asset_stage, "/Asset/Geom")
+    mesh.CreatePointsAttr([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    asset_stage.GetRootLayer().defaultPrim = "Asset"
+    asset_stage.GetRootLayer().Save()
+    return asset_path
+
+
+class _NativeImportRecordingAdapter(MockAdapter):
+    def __init__(self):
+        super().__init__()
+        self.applied = []
+
+    def native_composition_subtree_roots(self, events):
+        return {
+            event["prim"]
+            for event in events
+            if event.get("k") == "set_reference" and event.get("prim")
+        }
+
+    def apply_event(self, event):
+        self.applied.append((event["k"], event.get("prim")))
+        return super().apply_event(event)
+
+    def set_reference(self, prim_path, refs, **kwargs):
+        result = super().set_reference(prim_path, refs, **kwargs)
+        self.ensure_prim(f"{prim_path}/Geom", "Mesh")
+        return result
+
+
+def _native_import_dispatcher(asset_path, *extra_events):
+    stage = Usd.Stage.CreateInMemory()
+    events = [
+        {"k": "ensure_prim", "prim": "/World/Asset", "typeName": "Xform"},
+        {
+            "k": "set_reference",
+            "prim": "/World/Asset",
+            "refs": [{"asset_path": str(asset_path), "prim_path": "/Asset"}],
+        },
+        *extra_events,
+    ]
+    receiver = _LayeredQueue(
+        [
+            encode_message(_state(1, [(_BASE_LAYER, "Base", False)])),
+            *[
+                _event(index, _BASE_LAYER, event)
+                for index, event in enumerate(events, start=1)
+            ],
+        ]
+    )
+    adapter = _NativeImportRecordingAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter, mirror_stage=stage)
+    dispatcher.drain_and_apply()
+    return adapter
+
+
+def test_native_import_owns_notice_discovered_reference_subtree(tmp_path):
+    asset_path = _native_import_projection_fixture(tmp_path)
+
+    adapter = _native_import_dispatcher(asset_path)
+
+    assert adapter.applied == [
+        ("ensure_prim", "/World/Asset"),
+        ("set_reference", "/World/Asset"),
+    ]
+
+
+def test_native_import_preserves_explicit_descendant_value_edit(tmp_path):
+    asset_path = _native_import_projection_fixture(tmp_path)
+    points = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 2.0, 0.0)]
+
+    adapter = _native_import_dispatcher(
+        asset_path,
+        {
+            "k": "set_gprim_attrs",
+            "prim": "/World/Asset/Geom",
+            "attrs": {"points": points},
+        },
+    )
+
+    assert adapter.applied == [
+        ("ensure_prim", "/World/Asset"),
+        ("set_reference", "/World/Asset"),
+        ("set_gprim_attrs", "/World/Asset/Geom"),
+    ]
+    actual_points = adapter.get_prim("/World/Asset/Geom")["gprim_attrs"]["points"]
+    assert [tuple(point) for point in actual_points] == points
+
+
+def test_native_import_precedes_explicit_new_descendant(tmp_path):
+    asset_path = _native_import_projection_fixture(tmp_path)
+
+    adapter = _native_import_dispatcher(
+        asset_path,
+        {
+            "k": "ensure_prim",
+            "prim": "/World/Asset/AddedLocally",
+            "typeName": "Xform",
+        },
+    )
+
+    assert adapter.applied == [
+        ("ensure_prim", "/World/Asset"),
+        ("set_reference", "/World/Asset"),
+        ("ensure_prim", "/World/Asset/AddedLocally"),
     ]
 
 
