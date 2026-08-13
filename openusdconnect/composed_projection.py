@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import cast
 
-from pxr import Sdf, Usd, UsdGeom, UsdShade
+from pxr import Sdf, Tf, Usd, UsdGeom, UsdShade
 
 from .protocol_constants import (
     EVENT_KEYS,
@@ -79,22 +79,160 @@ class _ProjectionCandidates:
     arcs: set[tuple[str, str]] = dataclass_field(default_factory=set)
 
 
-@dataclass(frozen=True)
+@dataclass(slots=True)
+class _PrimProjectionBaseline:
+    """Adapter-visible state retained for one composed prim."""
+
+    valid: bool = False
+    type_state: tuple[str, tuple[str, ...]] | None = None
+    xforms: dict[float | None, object | None] | None = None
+    gprim: dict[float | None, dict[str, object]] | None = None
+    variants: dict[str, str] | None = None
+    materials: dict[str, str] | None = None
+    connectables: dict[float | None, dict] | None = None
+    active: bool | None = None
+    visibility: dict[float | None, bool | None] | None = None
+    instanceable: bool | None = None
+    point_instancers: dict[float | None, dict[str, object]] | None = None
+    arcs: dict[str, list[dict]] | None = None
+
+
+@dataclass(slots=True)
 class _ProjectionBaseline:
     """Selected composed state captured immediately before a transaction."""
 
-    valid: dict[str, bool]
-    types: dict[str, tuple[str, tuple[str, ...]] | None]
-    xforms: dict[_PrimTime, object | None]
-    gprim: dict[_PrimTime, dict[str, object]]
-    variants: dict[str, dict[str, str]]
-    materials: dict[tuple[str, str], str]
-    connectables: dict[_PrimTime, dict]
-    active: dict[str, bool | None]
-    visibility: dict[_PrimTime, bool | None]
-    instanceable: dict[str, bool | None]
-    point_instancers: dict[_PrimTime, dict[str, object]]
-    arcs: dict[tuple[str, str], list[dict]]
+    prims: dict[str, _PrimProjectionBaseline] = dataclass_field(default_factory=dict)
+
+    def ensure(self, prim_path: str) -> _PrimProjectionBaseline:
+        state = self.prims.get(prim_path)
+        if state is None:
+            state = _PrimProjectionBaseline()
+            self.prims[prim_path] = state
+        return state
+
+
+_EMPTY_PRIM_BASELINE = _PrimProjectionBaseline()
+
+
+def _path_is_at_or_below(path: str, root: str) -> bool:
+    return root == "/" or path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _is_projectable_prim(prim: Usd.Prim) -> bool:
+    """Return whether a composed prim belongs in an external native scene."""
+    if not (
+        prim
+        and prim.IsValid()
+        and not prim.IsPseudoRoot()
+        and not prim.IsAbstract()
+        and not prim.IsInPrototype()
+    ):
+        return False
+    # Empty typeless ancestors created implicitly by DefinePrim only provide
+    # namespace. Native adapters create that hierarchy while ensuring the
+    # first representable descendant, so emitting a separate object would be
+    # both redundant and a behavior change from direct event projection.
+    return bool(prim.GetTypeName() or prim.GetAuthoredProperties() or not tuple(prim.GetChildren()))
+
+
+class ComposedProjectionState:
+    """Persistent native-visible state for one mirror stage and adapter.
+
+    ``Usd.Notice.ObjectsChanged`` identifies composed consumers only after a
+    layer mutation has occurred. Keeping the last successfully-applied native
+    state makes those post-change paths diffable without accessing the stage's
+    private Pcp cache or scanning every prim for each transaction.
+    """
+
+    def __init__(self, stage: Usd.Stage | None = None):
+        self._stage: Usd.Stage | None = None
+        self._baseline: _ProjectionBaseline | None = None
+        self._needs_full_reconcile = False
+        if stage is not None:
+            self.bind(stage)
+
+    @property
+    def baseline(self) -> _ProjectionBaseline:
+        if self._baseline is None:
+            raise RuntimeError("composed projection state is not bound")
+        return self._baseline
+
+    @property
+    def needs_full_reconcile(self) -> bool:
+        return self._needs_full_reconcile
+
+    def bind(self, stage: Usd.Stage) -> None:
+        if stage is self._stage and self._baseline is not None:
+            return
+        self._stage = stage
+        self._baseline = ComposedChangeProjection._capture_scope(
+            stage,
+            ("/",),
+            recurse=True,
+        )
+        self._needs_full_reconcile = False
+
+    def close(self) -> None:
+        self._stage = None
+        self._baseline = None
+        self._needs_full_reconcile = False
+
+    def require_full_reconcile(self) -> None:
+        """Keep the last adapter baseline but widen the next projection."""
+        if self._baseline is not None:
+            self._needs_full_reconcile = True
+
+    def commit(self, projection: ComposedChangeProjection) -> None:
+        """Advance the baseline after the native adapter applied successfully."""
+        if projection._state is not self:
+            raise ValueError("projection belongs to a different persistent state")
+        stage = projection._stage
+        if stage is not self._stage:
+            raise ValueError("projection stage no longer matches persistent state")
+
+        subtree_roots = set(projection._resync_prim_roots)
+        exact_paths = set(projection._affected_prim_paths)
+        exact_paths = {
+            path
+            for path in exact_paths
+            if not any(_path_is_at_or_below(path, root) for root in subtree_roots)
+        }
+
+        if not subtree_roots and not exact_paths:
+            self._needs_full_reconcile = False
+            return
+
+        if "/" in subtree_roots:
+            self._baseline = ComposedChangeProjection._capture_scope(
+                stage,
+                ("/",),
+                recurse=True,
+            )
+            self._needs_full_reconcile = False
+            return
+
+        if subtree_roots:
+            removed_paths = {
+                path
+                for path in self.baseline.prims
+                if any(_path_is_at_or_below(path, root) for root in subtree_roots)
+            }
+            for path in removed_paths:
+                self.baseline.prims.pop(path, None)
+            self.baseline.prims.update(
+                ComposedChangeProjection._capture_scope(
+                    stage, subtree_roots, recurse=True
+                ).prims
+            )
+        if exact_paths:
+            for path in exact_paths:
+                self.baseline.prims.pop(path, None)
+            self.baseline.prims.update(
+                ComposedChangeProjection._capture_scope(
+                    stage, exact_paths, recurse=False
+                ).prims
+            )
+        self._needs_full_reconcile = False
 
 
 @dataclass(frozen=True)
@@ -194,9 +332,7 @@ _PROJECTION_STEPS = (
 )
 
 _PROJECTOR_EVENT_KINDS = frozenset().union(*(step.event_kinds for step in _PROJECTION_STEPS))
-_PROJECTOR_EVENT_OWNERS = Counter(
-    kind for step in _PROJECTION_STEPS for kind in step.event_kinds
-)
+_PROJECTOR_EVENT_OWNERS = Counter(kind for step in _PROJECTION_STEPS for kind in step.event_kinds)
 
 if any(
     (step.candidate_name is None) != (step.collector_name is None) for step in _PROJECTION_STEPS
@@ -320,12 +456,20 @@ def _local_transforms(
     candidates: Iterable[tuple[str, float | None]],
 ) -> dict[tuple[str, float | None], object | None]:
     result: dict[tuple[str, float | None], object | None] = {}
+    times_by_prim: dict[str, list[float | None]] = defaultdict(list)
     for prim_path, time in candidates:
+        times_by_prim[prim_path].append(time)
+    for prim_path, times in times_by_prim.items():
         prim = stage.GetPrimAtPath(prim_path)
-        xformable = UsdGeom.Xformable(prim) if prim and prim.IsValid() else None
-        result[(prim_path, time)] = (
-            as_matrix(xformable.GetLocalTransformation(_time_code(time))) if xformable else None
-        )
+        xformable = UsdGeom.Xformable(prim) if _is_projectable_prim(prim) else None
+        if not xformable:
+            result.update(((prim_path, time), None) for time in times)
+            continue
+        ordered_ops = xformable.GetOrderedXformOps()
+        for time in times:
+            result[(prim_path, time)] = as_matrix(
+                xformable.GetLocalTransformation(ordered_ops, _time_code(time))
+            )
     return result
 
 
@@ -337,7 +481,7 @@ def _gprim_values(
     for (prim_path, time), names in candidates.items():
         prim = stage.GetPrimAtPath(prim_path)
         values = {}
-        if prim and prim.IsValid():
+        if _is_projectable_prim(prim):
             time_code = _time_code(time)
             for name in names:
                 attr = prim.GetAttribute(name)
@@ -359,7 +503,12 @@ def _composed_arc_entries(
     from .sdf_arc_state import serialize_reference_custom_data
 
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not _is_projectable_prim(prim):
+        return []
+    if payload:
+        if not prim.HasAuthoredPayloads():
+            return []
+    elif not prim.HasAuthoredReferences():
         return []
     query = Usd.PrimCompositionQuery.GetDirectRootLayerArcs(prim)
     query_filter = query.filter
@@ -408,6 +557,7 @@ class ComposedChangeProjection:
         stage: Usd.Stage,
         events: list[dict],
         *,
+        state: ComposedProjectionState | None = None,
         extra_scene_paths: Iterable[str | Sdf.Path] = (),
         extra_arc_candidates: Iterable[tuple[str, str]] = (),
         reapply_all_composed: bool = False,
@@ -417,7 +567,15 @@ class ComposedChangeProjection:
         self._stage = stage
         self._events = events
         self._validate_events(events)
+        self._state = state or ComposedProjectionState(stage)
+        self._state.bind(stage)
         self._reset = reset
+        self._resynced_paths: set[Sdf.Path] = set()
+        self._changed_info_paths: set[Sdf.Path] = set()
+        self._asset_resync_paths: set[Sdf.Path] = set()
+        self._resync_prim_roots: set[str] = set()
+        self._affected_prim_paths: set[str] = set()
+        self._notice_key = None
         self._prepare_reapplication_scope(
             reapply_all_composed=reapply_all_composed,
             reapply_composed_paths=reapply_composed_paths,
@@ -431,7 +589,34 @@ class ComposedChangeProjection:
             initial_scene_paths,
             extra_arc_candidates,
         )
-        self._before = self._capture_baseline()
+        self._before = self._state.baseline
+        if self._state.needs_full_reconcile:
+            self._resynced_paths.add(Sdf.Path.absoluteRootPath)
+            self._reapply_all_composed = True
+        self._notice_key = Tf.Notice.Register(
+            Usd.Notice.ObjectsChanged,
+            self._on_objects_changed,
+            stage,
+        )
+
+    def __enter__(self) -> ComposedChangeProjection:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if _exc_type is not None:
+            self.require_full_reconcile()
+        else:
+            self.close()
+
+    def close(self) -> None:
+        if self._notice_key is not None:
+            self._notice_key.Revoke()
+            self._notice_key = None
+
+    def _on_objects_changed(self, notice, _sender) -> None:
+        self._resynced_paths.update(notice.GetResyncedPaths())
+        self._changed_info_paths.update(notice.GetChangedInfoOnlyPaths())
+        self._asset_resync_paths.update(notice.GetResolvedAssetPathsResyncedPaths())
 
     @staticmethod
     def _validate_events(events: list[dict]) -> None:
@@ -461,12 +646,10 @@ class ComposedChangeProjection:
             for old_path, new_path, _event in self._rename_pairs
             if old_path in self._reapply_composed_paths
         )
-        self._subtree_roots = {
-            str(event["prim"])
-            for event in events
-            if event.get("k") == K_DELETE_PRIM and event.get("prim")
-        }
-        self._subtree_roots.update(path for pair in self._rename_pairs for path in pair[:2])
+        self._subtree_roots = {path for pair in self._rename_pairs for path in pair[:2]}
+        for event in events:
+            if event.get("k") == K_DELETE_PRIM and event.get("prim"):
+                self._subtree_roots.add(str(event["prim"]))
         self._local_lifecycle_paths = (
             {
                 str(event["prim"])
@@ -532,20 +715,132 @@ class ComposedChangeProjection:
     def _capture_baseline(self) -> _ProjectionBaseline:
         stage = self._stage
         candidates = self._candidates
-        return _ProjectionBaseline(
-            valid={path: bool(stage.GetPrimAtPath(path)) for path in candidates.prims},
-            types=self._read_types(candidates.types),
-            xforms=_local_transforms(stage, candidates.xforms),
-            gprim=_gprim_values(stage, candidates.gprim),
-            variants=self._read_variants(candidates.variants),
-            materials=self._read_materials(candidates.materials),
-            connectables=self._read_connectables(candidates.connectables),
-            active=self._read_active(candidates.active),
-            visibility=self._read_visibility(candidates.visibility),
-            instanceable=self._read_instanceable(candidates.instanceable),
-            point_instancers=self._read_point_instancers(candidates.point_instancers),
-            arcs=self._read_arcs(candidates.arcs),
-        )
+        result = _ProjectionBaseline()
+        for prim_path in candidates.prims:
+            result.ensure(prim_path).valid = _is_projectable_prim(
+                stage.GetPrimAtPath(prim_path)
+            )
+        for prim_path, value in self._read_types(candidates.types).items():
+            result.ensure(prim_path).type_state = value
+        for (prim_path, time), value in _local_transforms(
+            stage, candidates.xforms
+        ).items():
+            state = result.ensure(prim_path)
+            if state.xforms is None:
+                state.xforms = {}
+            state.xforms[time] = value
+        for (prim_path, time), values in _gprim_values(stage, candidates.gprim).items():
+            if values:
+                state = result.ensure(prim_path)
+                if state.gprim is None:
+                    state.gprim = {}
+                state.gprim[time] = values
+        for prim_path, values in self._read_variants(candidates.variants).items():
+            if values:
+                result.ensure(prim_path).variants = values
+        for (prim_path, purpose), value in self._read_materials(
+            candidates.materials
+        ).items():
+            if value:
+                state = result.ensure(prim_path)
+                if state.materials is None:
+                    state.materials = {}
+                state.materials[purpose] = value
+        for (prim_path, time), values in self._read_connectables(
+            candidates.connectables
+        ).items():
+            if values.get("info_id") or values.get("inputs") or values.get("connections"):
+                state = result.ensure(prim_path)
+                if state.connectables is None:
+                    state.connectables = {}
+                state.connectables[time] = values
+        for prim_path, value in self._read_active(candidates.active).items():
+            result.ensure(prim_path).active = value
+        for (prim_path, time), value in self._read_visibility(
+            candidates.visibility
+        ).items():
+            state = result.ensure(prim_path)
+            if state.visibility is None:
+                state.visibility = {}
+            state.visibility[time] = value
+        for prim_path, value in self._read_instanceable(candidates.instanceable).items():
+            result.ensure(prim_path).instanceable = value
+        for (prim_path, time), values in self._read_point_instancers(
+            candidates.point_instancers
+        ).items():
+            if values:
+                state = result.ensure(prim_path)
+                if state.point_instancers is None:
+                    state.point_instancers = {}
+                state.point_instancers[time] = values
+        for (prim_path, kind), values in self._read_arcs(candidates.arcs).items():
+            if values:
+                state = result.ensure(prim_path)
+                if state.arcs is None:
+                    state.arcs = {}
+                state.arcs[kind] = values
+        return result
+
+    @classmethod
+    def _capture_scope(
+        cls,
+        stage: Usd.Stage,
+        prim_paths: Iterable[str],
+        *,
+        recurse: bool,
+    ) -> _ProjectionBaseline:
+        """Capture complete adapter-visible state for selected prim scopes."""
+        capture = cls.__new__(cls)
+        capture._stage = stage
+        capture._candidates = _ProjectionCandidates()
+        if recurse:
+            capture._add_subtree_candidates(prim_paths)
+        else:
+            for prim_path in prim_paths:
+                capture._add_prim_candidates(stage.GetPrimAtPath(prim_path))
+        return capture._capture_baseline()
+
+    def _add_baseline_candidates(
+        self,
+        prim_paths: Iterable[str],
+        *,
+        recurse: bool,
+    ) -> None:
+        """Restore pre-change candidates that no longer exist on the stage."""
+        roots = tuple(prim_paths)
+        if not roots:
+            return
+
+        def included(path: str) -> bool:
+            return any(
+                _path_is_at_or_below(path, root) if recurse else path == root for root in roots
+            )
+
+        before = self._before
+        candidates = self._candidates
+        for prim_path, state in before.prims.items():
+            if not included(prim_path):
+                continue
+            candidates.prims.add(prim_path)
+            candidates.types.add(prim_path)
+            candidates.xforms.update((prim_path, time) for time in state.xforms or ())
+            for time, values in (state.gprim or {}).items():
+                candidates.gprim[(prim_path, time)].update(values)
+            if state.variants:
+                candidates.variants.add(prim_path)
+            candidates.materials.update(
+                (prim_path, purpose) for purpose in state.materials or ()
+            )
+            for time in state.connectables or ():
+                candidates.connectables[(prim_path, time)].add("*")
+            candidates.active.add(prim_path)
+            candidates.visibility.update(
+                (prim_path, time) for time in state.visibility or ()
+            )
+            candidates.instanceable.add(prim_path)
+            for time, values in (state.point_instancers or {}).items():
+                candidates.point_instancers[(prim_path, time)].update(values)
+            candidates.arcs.update((prim_path, kind) for kind in state.arcs or ())
 
     def _should_reapply_composed(self, prim_path: str) -> bool:
         return self._reapply_all_composed or prim_path in self._reapply_composed_paths
@@ -648,8 +943,7 @@ class ComposedChangeProjection:
                     name = str(path.name)
                     prim = self._stage.GetPrimAtPath(prim_path)
                     if (
-                        prim
-                        and prim.IsValid()
+                        _is_projectable_prim(prim)
                         and prim.IsA(UsdGeom.PointInstancer)
                         and name in POINT_INSTANCER_USD_TO_WIRE
                     ):
@@ -671,7 +965,9 @@ class ComposedChangeProjection:
                 continue
             path = _sdf_property_path(event)
             prim = self._stage.GetPrimAtPath(prim_path)
-            is_point_instancer = bool(prim and prim.IsValid() and prim.IsA(UsdGeom.PointInstancer))
+            is_point_instancer = bool(
+                _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer)
+            )
             if path is not None and is_point_instancer:
                 field = POINT_INSTANCER_USD_TO_WIRE.get(str(path.name))
                 if field:
@@ -706,7 +1002,12 @@ class ComposedChangeProjection:
                 result.add((str(event["prim"]), K_SET_PAYLOAD))
         return result
 
-    def _add_scene_path_candidates(self, paths: Iterable[Sdf.Path]) -> None:
+    def _add_scene_path_candidates(
+        self,
+        paths: Iterable[Sdf.Path],
+        *,
+        include_prim_state: bool = True,
+    ) -> None:
         xform_prims = set()
         seen_prims = set()
         for path in paths:
@@ -714,7 +1015,7 @@ class ComposedChangeProjection:
             if not prim_path or prim_path == "/":
                 continue
             prim = None
-            if prim_path not in seen_prims:
+            if include_prim_state and prim_path not in seen_prims:
                 seen_prims.add(prim_path)
                 self._candidates.prims.add(prim_path)
                 self._candidates.types.add(prim_path)
@@ -722,82 +1023,198 @@ class ComposedChangeProjection:
                 self._candidates.active.add(prim_path)
                 self._candidates.instanceable.add(prim_path)
                 prim = self._stage.GetPrimAtPath(prim_path)
-                if prim and prim.IsValid() and prim.IsA(UsdGeom.PointInstancer):
+                if _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer):
                     self._candidates.point_instancers[(prim_path, None)].add("inactive_ids")
             if not path.IsPropertyPath():
                 continue
 
-            name = str(path.name)
-            if name == "xformOpOrder" or name.startswith("xformOp:"):
-                self._candidates.xforms.add((prim_path, None))
-                xform_prims.add(prim_path)
-                continue
-
             prop = self._stage.GetPropertyAtPath(path)
-            sample_times = tuple(prop.GetTimeSamples()) if isinstance(prop, Usd.Attribute) else ()
-            if name == "visibility":
-                self._candidates.visibility.add((prim_path, None))
-                self._candidates.visibility.update((prim_path, time) for time in sample_times)
-            elif name == "info:id" or name.startswith(("inputs:", "outputs:")):
-                self._candidates.connectables[(prim_path, None)].add(
-                    "*" if name == "info:id" else name
-                )
-                if name.startswith("inputs:"):
-                    for time in sample_times:
-                        self._candidates.connectables[(prim_path, time)].add(name)
-            elif (purpose := _material_purpose_from_name(name)) is not None:
-                self._candidates.materials.add((prim_path, purpose))
-            elif (
-                (prim := prim or self._stage.GetPrimAtPath(prim_path))
-                and prim.IsValid()
-                and prim.IsA(UsdGeom.PointInstancer)
-                and (field := POINT_INSTANCER_USD_TO_WIRE.get(name))
-            ):
-                self._candidates.point_instancers[(prim_path, None)].add(field)
-                for time in sample_times:
-                    self._candidates.point_instancers[(prim_path, time)].add(field)
-            elif _is_gprim_property_name(name):
-                self._candidates.gprim[(prim_path, None)].add(name)
-                for time in sample_times:
-                    self._candidates.gprim[(prim_path, time)].add(name)
+            if self._add_property_candidate(prim_path, str(path.name), prop, prim):
+                xform_prims.add(prim_path)
 
         for prim_path in xform_prims:
             prim = self._stage.GetPrimAtPath(prim_path)
-            xformable = UsdGeom.Xformable(prim) if prim and prim.IsValid() else None
+            xformable = UsdGeom.Xformable(prim) if _is_projectable_prim(prim) else None
             if not xformable:
                 continue
-            sample_times = {
-                time
-                for op in xformable.GetOrderedXformOps()
-                for time in op.GetAttr().GetTimeSamples()
-            }
+            sample_times = xformable.GetTimeSamples()
             self._candidates.xforms.update((prim_path, time) for time in sample_times)
 
+    def _add_property_candidate(
+        self,
+        prim_path: str,
+        name: str,
+        prop: Usd.Property,
+        prim: Usd.Prim | None = None,
+    ) -> bool:
+        """Classify one authored property, returning whether it is an xform op."""
+        candidates = self._candidates
+        if name == "xformOpOrder" or name.startswith("xformOp:"):
+            candidates.xforms.add((prim_path, None))
+            return True
+
+        sample_times = tuple(prop.GetTimeSamples()) if isinstance(prop, Usd.Attribute) else ()
+        if name == "visibility":
+            candidates.visibility.add((prim_path, None))
+            candidates.visibility.update((prim_path, time) for time in sample_times)
+        elif name == "info:id" or name.startswith(("inputs:", "outputs:")):
+            candidates.connectables[(prim_path, None)].add("*" if name == "info:id" else name)
+            if name.startswith("inputs:"):
+                for time in sample_times:
+                    candidates.connectables[(prim_path, time)].add(name)
+        elif (purpose := _material_purpose_from_name(name)) is not None:
+            candidates.materials.add((prim_path, purpose))
+        elif (
+            _is_projectable_prim(prim := prim or self._stage.GetPrimAtPath(prim_path))
+            and prim.IsA(UsdGeom.PointInstancer)
+            and (field := POINT_INSTANCER_USD_TO_WIRE.get(name))
+        ):
+            candidates.point_instancers[(prim_path, None)].add(field)
+            for time in sample_times:
+                candidates.point_instancers[(prim_path, time)].add(field)
+        elif _is_gprim_property_name(name):
+            candidates.gprim[(prim_path, None)].add(name)
+            for time in sample_times:
+                candidates.gprim[(prim_path, time)].add(name)
+        return False
+
+    def _add_prim_candidates(self, prim: Usd.Prim) -> None:
+        if not _is_projectable_prim(prim):
+            return
+        prim_path = str(prim.GetPath())
+        candidates = self._candidates
+        candidates.prims.add(prim_path)
+        candidates.types.add(prim_path)
+        candidates.variants.add(prim_path)
+        candidates.active.add(prim_path)
+        candidates.instanceable.add(prim_path)
+        is_point_instancer = prim.IsA(UsdGeom.PointInstancer)
+        if is_point_instancer:
+            candidates.point_instancers[(prim_path, None)].add("inactive_ids")
+        if prim.HasAuthoredReferences():
+            candidates.arcs.add((prim_path, K_SET_REFERENCE))
+        if prim.HasAuthoredPayloads():
+            candidates.arcs.add((prim_path, K_SET_PAYLOAD))
+
+        has_xform = False
+        for prop in prim.GetAuthoredProperties():
+            has_xform |= self._add_property_candidate(
+                prim_path,
+                str(prop.GetName()),
+                prop,
+                prim,
+            )
+        if has_xform:
+            xformable = UsdGeom.Xformable(prim)
+            candidates.xforms.update(
+                (prim_path, time) for time in xformable.GetTimeSamples()
+            )
+
     def _add_subtree_candidates(self, roots: Iterable[str]) -> None:
-        paths = []
         for root in roots:
-            prim = self._stage.GetPrimAtPath(root)
+            prim = (
+                self._stage.GetPseudoRoot() if str(root) == "/" else self._stage.GetPrimAtPath(root)
+            )
             if not prim or not prim.IsValid():
                 continue
             for descendant in Usd.PrimRange.AllPrims(prim):
-                paths.append(descendant.GetPath())
-                self._candidates.arcs.update(
-                    (str(descendant.GetPath()), kind) for kind in (K_SET_REFERENCE, K_SET_PAYLOAD)
-                )
-                paths.extend(prop.GetPath() for prop in descendant.GetAuthoredProperties())
-        self._add_scene_path_candidates(paths)
+                self._add_prim_candidates(descendant)
+
+    @staticmethod
+    def _minimal_roots(paths: Iterable[str]) -> set[str]:
+        result: list[str] = []
+        for path in sorted(set(paths), key=lambda item: (item.count("/"), item)):
+            if any(_path_is_at_or_below(path, root) for root in result):
+                continue
+            result.append(path)
+        return set(result)
+
+    @staticmethod
+    def _notice_prim_path(path: Sdf.Path) -> str | None:
+        if path == Sdf.Path.absoluteRootPath:
+            return "/"
+        prim_path = path if path.IsPrimPath() else path.GetPrimPath()
+        return str(prim_path) if prim_path and prim_path != Sdf.Path.absoluteRootPath else None
+
+    def _add_notice_candidates(self) -> None:
+        subtree_roots = set(self._subtree_roots)
+        exact_paths: set[str] = set()
+        exact_scene_paths: set[Sdf.Path] = set()
+
+        for path in self._resynced_paths | self._asset_resync_paths:
+            prim_path = self._notice_prim_path(path)
+            if prim_path is None:
+                continue
+            if path == Sdf.Path.absoluteRootPath or path.IsPrimPath():
+                subtree_roots.add(prim_path)
+            else:
+                exact_paths.add(prim_path)
+                exact_scene_paths.add(path)
+
+        for path in self._changed_info_paths:
+            if prim_path := self._notice_prim_path(path):
+                exact_paths.add(prim_path)
+            exact_scene_paths.add(path)
+
+        self._resync_prim_roots = self._minimal_roots(subtree_roots)
+        exact_paths = {
+            path
+            for path in exact_paths
+            if not any(_path_is_at_or_below(path, root) for root in self._resync_prim_roots)
+        }
+
+        self._add_baseline_candidates(self._resync_prim_roots, recurse=True)
+        self._add_subtree_candidates(self._resync_prim_roots)
+        prim_scene_paths = {path for path in exact_scene_paths if not path.IsPropertyPath()}
+        property_scene_paths = exact_scene_paths - prim_scene_paths
+        self._add_scene_path_candidates(prim_scene_paths)
+        self._add_scene_path_candidates(
+            property_scene_paths,
+            include_prim_state=False,
+        )
+
+    def _record_affected_prim_paths(self) -> None:
+        candidates = self._candidates
+        paths = set(candidates.prims) | set(candidates.types)
+        paths.update(key[0] for key in candidates.xforms)
+        paths.update(key[0] for key in candidates.gprim)
+        paths.update(candidates.variants)
+        paths.update(key[0] for key in candidates.materials)
+        paths.update(key[0] for key in candidates.connectables)
+        paths.update(candidates.active)
+        paths.update(key[0] for key in candidates.visibility)
+        paths.update(candidates.instanceable)
+        paths.update(key[0] for key in candidates.point_instancers)
+        paths.update(key[0] for key in candidates.arcs)
+        self._affected_prim_paths = {path for path in paths if path and path != "/"}
+
+    def _before_state(self, prim_path: str) -> _PrimProjectionBaseline:
+        return self._before.prims.get(prim_path, _EMPTY_PRIM_BASELINE)
 
     def build_events(self) -> list[dict]:
         """Return adapter events representing the post-transaction composition."""
+        self.close()
+        self._add_notice_candidates()
         if self._event_scene_paths:
             self._add_scene_path_candidates(self._event_scene_paths)
         if self._subtree_roots:
             self._add_subtree_candidates(self._subtree_roots)
+        self._record_affected_prim_paths()
 
         projected: list[dict] = []
         for step in _PROJECTION_STEPS:
             projected.extend(getattr(self, step.method_name)())
         return projected
+
+    def commit(self) -> None:
+        """Record that the projected events reached the native adapter."""
+        self.close()
+        self._state.commit(self)
+
+    def require_full_reconcile(self) -> None:
+        """Preserve the adapter baseline and widen the next transaction."""
+        self.close()
+        self._state.require_full_reconcile()
 
     def _project_namespace_and_lifecycle(self) -> list[dict]:
         renames = self._project_renames()
@@ -829,7 +1246,7 @@ class ComposedChangeProjection:
         after = self._read_arcs(self._candidates.arcs)
         result = []
         for (prim_path, kind), entries in after.items():
-            before = self._before.arcs.get((prim_path, kind), [])
+            before = (self._before_state(prim_path).arcs or {}).get(kind, [])
             reapply_composed = self._should_reapply_composed(prim_path)
             if entries == before and not reapply_composed:
                 continue
@@ -856,7 +1273,7 @@ class ComposedChangeProjection:
             prim = self._stage.GetPrimAtPath(prim_path)
             result[prim_path] = (
                 (str(prim.GetTypeName()), tuple(prim.GetAppliedSchemas()))
-                if prim and prim.IsValid()
+                if _is_projectable_prim(prim)
                 else None
             )
         return result
@@ -864,11 +1281,11 @@ class ComposedChangeProjection:
     def _project_renames(self) -> list[tuple[str, str, dict]]:
         result = []
         for old_path, new_path, event in self._rename_pairs:
-            old_after = bool(self._stage.GetPrimAtPath(old_path))
-            new_after = bool(self._stage.GetPrimAtPath(new_path))
+            old_after = _is_projectable_prim(self._stage.GetPrimAtPath(old_path))
+            new_after = _is_projectable_prim(self._stage.GetPrimAtPath(new_path))
             if (
-                self._before.valid.get(old_path, False)
-                and not self._before.valid.get(new_path, False)
+                self._before_state(old_path).valid
+                and not self._before_state(new_path).valid
                 and not old_after
                 and new_after
             ):
@@ -890,9 +1307,10 @@ class ComposedChangeProjection:
             if prim_path in renamed_paths:
                 continue
             prim = self._stage.GetPrimAtPath(prim_path)
-            valid_after = bool(prim)
-            valid_before = self._before.valid.get(prim_path, False)
-            before_type = self._before.types.get(prim_path)
+            valid_after = _is_projectable_prim(prim)
+            before_state = self._before_state(prim_path)
+            valid_before = before_state.valid
+            before_type = before_state.type_state
             after_type = types_after.get(prim_path)
             type_changed = bool(
                 valid_before
@@ -906,7 +1324,7 @@ class ComposedChangeProjection:
                 and not self._reset
                 and prim_path in self._local_lifecycle_paths
             )
-            schema_changed = before_type != after_type
+            schema_changed = prim_path in self._candidates.types and before_type != after_type
             ensure = {
                 "k": K_ENSURE_PRIM,
                 "prim": prim_path,
@@ -933,9 +1351,9 @@ class ComposedChangeProjection:
         result = []
         for (prim_path, time), values in after.items():
             prim = self._stage.GetPrimAtPath(prim_path)
-            if not prim or not prim.IsValid():
+            if not _is_projectable_prim(prim):
                 continue
-            before = self._before.gprim.get((prim_path, time), {})
+            before = (self._before_state(prim_path).gprim or {}).get(time, {})
             selected = {
                 name: value
                 for name, value in values.items()
@@ -1003,9 +1421,9 @@ class ComposedChangeProjection:
         result = []
         for key, values in after.items():
             prim = self._stage.GetPrimAtPath(key[0])
-            if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.PointInstancer):
+            if not _is_projectable_prim(prim) or not prim.IsA(UsdGeom.PointInstancer):
                 continue
-            before = self._before.point_instancers.get(key, {})
+            before = (self._before_state(key[0]).point_instancers or {}).get(key[1], {})
             fields = sorted(
                 field
                 for field in self._candidates.point_instancers[key]
@@ -1040,9 +1458,9 @@ class ComposedChangeProjection:
         after = self._read_variants(self._candidates.variants)
         result = []
         for prim_path, selections in after.items():
-            if not self._stage.GetPrimAtPath(prim_path):
+            if not _is_projectable_prim(self._stage.GetPrimAtPath(prim_path)):
                 continue
-            before = self._before.variants.get(prim_path, {})
+            before = self._before_state(prim_path).variants or {}
             if not self._should_reapply_composed(prim_path) and selections == before:
                 continue
             projected = dict(selections)
@@ -1074,11 +1492,12 @@ class ComposedChangeProjection:
         after = self._read_materials(self._candidates.materials)
         result = []
         for key, material_path in after.items():
-            if not self._stage.GetPrimAtPath(key[0]):
+            if not _is_projectable_prim(self._stage.GetPrimAtPath(key[0])):
                 continue
             if (
                 not self._should_reapply_composed(key[0])
-                and self._before.materials.get(key, "") == material_path
+                and (self._before_state(key[0]).materials or {}).get(key[1], "")
+                == material_path
             ):
                 continue
             prim_path, purpose = key
@@ -1124,6 +1543,14 @@ class ComposedChangeProjection:
         for key, local_attrs in candidates.items():
             prim_path, time = key
             prim = self._stage.GetPrimAtPath(prim_path)
+            if not _is_projectable_prim(prim):
+                result[key] = {
+                    "info_id": "",
+                    "inputs": {},
+                    "types": {},
+                    "connections": {},
+                }
+                continue
             container_kind = connectable_kind(prim)
             state = {
                 "info_id": "",
@@ -1166,6 +1593,7 @@ class ComposedChangeProjection:
                     self._stage,
                     prim_path,
                 )
+                connections.update(state["connections"])
                 state = {
                     "info_id": info_id,
                     "inputs": inputs,
@@ -1187,9 +1615,9 @@ class ComposedChangeProjection:
         input_events = []
         connection_events = []
         for key, state in after.items():
-            if not self._stage.GetPrimAtPath(key[0]):
+            if not _is_projectable_prim(self._stage.GetPrimAtPath(key[0])):
                 continue
-            before = self._before.connectables.get(key, {})
+            before = (self._before_state(key[0]).connectables or {}).get(key[1], {})
             previous_inputs = before.get("inputs", {})
             changed_inputs = {
                 name: value
@@ -1237,7 +1665,7 @@ class ComposedChangeProjection:
         result = {}
         for prim_path in prim_paths:
             prim = self._stage.GetPrimAtPath(prim_path)
-            result[prim_path] = prim.IsActive() if prim and prim.IsValid() else None
+            result[prim_path] = prim.IsActive() if _is_projectable_prim(prim) else None
         return result
 
     def _project_active(self) -> list[dict]:
@@ -1250,9 +1678,10 @@ class ComposedChangeProjection:
             }
             for prim_path, active in after.items()
             if active is not None
+            and (active is False or self._before_state(prim_path).active is not None)
             and (
                 self._should_reapply_composed(prim_path)
-                or self._before.active.get(prim_path) != active
+                or self._before_state(prim_path).active != active
             )
         ]
 
@@ -1263,7 +1692,7 @@ class ComposedChangeProjection:
         result = {}
         for key in candidates:
             prim = self._stage.GetPrimAtPath(key[0])
-            imageable = UsdGeom.Imageable(prim) if prim and prim.IsValid() else None
+            imageable = UsdGeom.Imageable(prim) if _is_projectable_prim(prim) else None
             if not imageable:
                 result[key] = None
                 continue
@@ -1277,7 +1706,7 @@ class ComposedChangeProjection:
         for key, visible in after.items():
             if visible is None or (
                 not self._should_reapply_composed(key[0])
-                and self._before.visibility.get(key) == visible
+                and (self._before_state(key[0]).visibility or {}).get(key[1]) == visible
             ):
                 continue
             event = {
@@ -1294,7 +1723,7 @@ class ComposedChangeProjection:
         result = {}
         for prim_path in prim_paths:
             prim = self._stage.GetPrimAtPath(prim_path)
-            result[prim_path] = prim.IsInstanceable() if prim and prim.IsValid() else None
+            result[prim_path] = prim.IsInstanceable() if _is_projectable_prim(prim) else None
         return result
 
     def _project_instanceable(self) -> list[dict]:
@@ -1308,8 +1737,12 @@ class ComposedChangeProjection:
             for prim_path, instanceable in after.items()
             if instanceable is not None
             and (
+                instanceable is True
+                or self._before_state(prim_path).instanceable is not None
+            )
+            and (
                 self._should_reapply_composed(prim_path)
-                or self._before.instanceable.get(prim_path) != instanceable
+                or self._before_state(prim_path).instanceable != instanceable
             )
         ]
 
@@ -1328,12 +1761,12 @@ class ComposedChangeProjection:
         ):
             prim_path, time = key
             prim = self._stage.GetPrimAtPath(prim_path)
-            if not prim or not prim.IsValid():
+            if not _is_projectable_prim(prim):
                 continue
             xformable = UsdGeom.Xformable(prim)
             if not xformable:
                 continue
-            changed = self._before.xforms.get(key) != after.get(key)
+            changed = (self._before_state(prim_path).xforms or {}).get(time) != after.get(key)
             reapply_composed = self._should_reapply_composed(prim_path)
             if not (reapply_composed or changed or prim_path in ensure_ops):
                 continue
@@ -1374,6 +1807,7 @@ class ComposedChangeProjection:
             raise RuntimeError(f"event kind has no native projection policy: {kind!r}")
         return result
 
+
 def _validate_projection_steps() -> None:
     candidate_names = _ProjectionCandidates.__dataclass_fields__
     for step in _PROJECTION_STEPS:
@@ -1390,12 +1824,11 @@ def _validate_projection_steps() -> None:
             )
         if not hasattr(ComposedChangeProjection, step.collector_name):
             raise RuntimeError(
-                f"native projection step {step.name!r} has no collector "
-                f"{step.collector_name!r}"
+                f"native projection step {step.name!r} has no collector {step.collector_name!r}"
             )
 
 
 _validate_projection_steps()
 
 
-__all__ = ["ComposedChangeProjection"]
+__all__ = ["ComposedChangeProjection", "ComposedProjectionState"]

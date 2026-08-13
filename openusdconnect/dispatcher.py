@@ -131,9 +131,7 @@ class _SharedStageBinding:
         self._session_fields = {
             field: (
                 pseudo_root.HasInfo(field),
-                copy.deepcopy(pseudo_root.GetInfo(field))
-                if pseudo_root.HasInfo(field)
-                else None,
+                copy.deepcopy(pseudo_root.GetInfo(field)) if pseudo_root.HasInfo(field) else None,
             )
             for field in STAGE_METADATA_KEYS
         }
@@ -295,6 +293,7 @@ class EventDispatcher:
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LayerKeyRouter | None = None
         self._shared_stage = _SharedStageBinding()
+        self._projection_state = None
 
     @property
     def last_seq(self) -> int:
@@ -364,6 +363,8 @@ class EventDispatcher:
         with suppress_ctx:
             self._layer_router.bind(stage)
             self._shared_stage.bind(stage)
+            if self._projection_state is not None:
+                self._projection_state.bind(stage)
 
     def unbind_stage(self) -> None:
         """Detach managed layers without closing the dispatcher.
@@ -383,6 +384,9 @@ class EventDispatcher:
             self._shared_stage.close()
             if self._layer_router is not None:
                 self._layer_router.close()
+            if self._projection_state is not None:
+                self._projection_state.close()
+                self._projection_state = None
 
     def _sync_layer_router(self) -> None:
         """Match the local router to the receiver's negotiated capability."""
@@ -407,6 +411,15 @@ class EventDispatcher:
         router.bind(stage)
         self._shared_stage.bind(stage)
         return stage
+
+    def _native_projection_state(self, stage: Usd.Stage):
+        from .composed_projection import ComposedProjectionState
+
+        if self._projection_state is None:
+            self._projection_state = ComposedProjectionState(stage)
+        else:
+            self._projection_state.bind(stage)
+        return self._projection_state
 
     def _apply_layered(
         self,
@@ -444,6 +457,7 @@ class EventDispatcher:
             ComposedChangeProjection(
                 stage,
                 events,
+                state=self._native_projection_state(stage),
                 extra_scene_paths=stack_paths,
                 extra_arc_candidates=stack_arc_paths,
                 reapply_composed_paths=same_origin_paths,
@@ -461,8 +475,9 @@ class EventDispatcher:
             self._observe_asset_dependencies(run, edit_target=edit_target)
 
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        projection_ctx = projection if projection is not None else nullcontext()
         projected: list[dict] = []
-        with suppress_ctx:
+        with projection_ctx, suppress_ctx:
             if reset_layers:
                 self._shared_stage.reset()
                 router.clear()
@@ -511,6 +526,7 @@ class EventDispatcher:
                 projected = projection.build_events()
                 if projected:
                     self.adapter.apply_events(projected)
+                projection.commit()
 
             adapter_events = projected if projection is not None else events
             if self.on_imported is not None:
@@ -977,6 +993,7 @@ class EventDispatcher:
             projection = ComposedChangeProjection(
                 stage,
                 adapter_events,
+                state=self._native_projection_state(stage),
                 reapply_all_composed=True,
             )
         # A dependency can have been received while any local layer or mapped
@@ -985,6 +1002,8 @@ class EventDispatcher:
         # Snapshot every affected layer before mutating any of them so a stage
         # adapter failure rolls the complete multi-layer replay back.
         with ExitStack() as transaction:
+            if projection is not None:
+                transaction.enter_context(projection)
             snapshotted_layers: set[str] = set()
             for tracked_event, _local_events in replays:
                 layer = tracked_event.edit_target.GetLayer()
@@ -1013,13 +1032,14 @@ class EventDispatcher:
                     else:
                         apply_events(stage, local_events)
 
-        # DCC adapters consume the same events only after the mirror stage has
-        # committed. They do not expose USD edit targets themselves.
-        if not adapter_handles_stage:
-            assert projection is not None
-            adapter_events = projection.build_events()
-            if adapter_events:
-                self.adapter.apply_events(adapter_events)
+            # DCC adapters consume the same events only after the mirror stage
+            # has committed. They do not expose USD edit targets themselves.
+            if not adapter_handles_stage:
+                assert projection is not None
+                adapter_events = projection.build_events()
+                if adapter_events:
+                    self.adapter.apply_events(adapter_events)
+                projection.commit()
 
         for tracked_event, local_events in replays:
             if self.emitter is not None:

@@ -7,8 +7,13 @@ from pxr import Sdf, Usd, UsdShade
 
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import encode_message
-from openusdconnect.composed_projection import ComposedChangeProjection
+from openusdconnect.composed_projection import (
+    ComposedChangeProjection,
+    ComposedProjectionState,
+)
 from openusdconnect.dispatcher import EventDispatcher
+from openusdconnect.event_apply import apply_events
+from openusdconnect.sdf_spec_delta import serialize_spec_fields
 
 from .layered_replay_test_support import (
     _BASE_LAYER,
@@ -22,6 +27,266 @@ from .layered_replay_test_support import (
     _state,
     _xform_events,
 )
+
+
+def _exact_spec_event(
+    layer: Sdf.Layer,
+    spec_path: str,
+    spec_kind: str,
+    fields: list[str],
+) -> dict:
+    return {
+        "k": "set_sdf_spec_fields",
+        "prim": "/" if spec_kind == "layer" else spec_path,
+        "spec_path": spec_path,
+        "spec_kind": spec_kind,
+        "fields": fields,
+        "fragment": serialize_spec_fields(
+            layer,
+            spec_path,
+            spec_kind,
+            fields,
+            stabilize_asset_paths=False,
+        ),
+        "removed": False,
+    }
+
+
+@pytest.mark.parametrize("field", ["inheritPaths", "specializes"])
+def test_class_arc_field_projects_new_composed_subtree(field):
+    stage = Usd.Stage.CreateInMemory()
+    stage.CreateClassPrim("/Class")
+    child = stage.DefinePrim("/Class/Child", "Sphere")
+    child.GetAttribute("radius").Set(4.0)
+    stage.DefinePrim("/World", "Xform")
+
+    incoming = Sdf.Layer.CreateAnonymous("class-arc.usda")
+    incoming.TransferContent(stage.GetRootLayer())
+    incoming_stage = Usd.Stage.Open(incoming)
+    world = incoming_stage.GetPrimAtPath("/World")
+    if field == "inheritPaths":
+        world.GetInherits().AddInherit("/Class")
+    else:
+        world.GetSpecializes().AddSpecialize("/Class")
+    event = _exact_spec_event(incoming, "/World", "prim", [field])
+
+    projection = ComposedChangeProjection(stage, [event])
+    apply_events(stage, [event])
+    projected = projection.build_events()
+
+    assert stage.GetPrimAtPath("/World/Child")
+    assert any(item["k"] == "ensure_prim" and item["prim"] == "/World/Child" for item in projected)
+    assert any(
+        item["k"] == "set_gprim_attrs"
+        and item["prim"] == "/World/Child"
+        and item["attrs"]["radius"] == pytest.approx(4.0)
+        for item in projected
+    )
+    adapter = MockAdapter()
+    adapter.apply_events(projected)
+    assert adapter.get_prim("/World/Child")["gprim_attrs"]["radius"] == pytest.approx(4.0)
+
+    cleared = Sdf.Layer.CreateAnonymous("class-arc-cleared.usda")
+    cleared.TransferContent(stage.GetRootLayer())
+    cleared_stage = Usd.Stage.Open(cleared)
+    cleared_world = cleared_stage.GetPrimAtPath("/World")
+    if field == "inheritPaths":
+        cleared_world.GetInherits().ClearInherits()
+    else:
+        cleared_world.GetSpecializes().ClearSpecializes()
+    clear_event = _exact_spec_event(cleared, "/World", "prim", [field])
+
+    clear_projection = ComposedChangeProjection(stage, [clear_event])
+    apply_events(stage, [clear_event])
+    clear_projected = clear_projection.build_events()
+
+    assert not stage.GetPrimAtPath("/World/Child")
+    assert any(
+        item["k"] == "delete_prim" and item["prim"] == "/World/Child" for item in clear_projected
+    )
+    adapter.apply_events(clear_projected)
+    assert adapter.get_prim("/World/Child") == {}
+
+
+def test_layer_relocates_projects_old_and_new_composed_subtrees():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/Ref", "Xform")
+    child = stage.DefinePrim("/Ref/Child", "Sphere")
+    child.GetAttribute("radius").Set(5.0)
+    stage.DefinePrim("/World", "Xform").GetReferences().AddInternalReference("/Ref")
+    assert stage.GetPrimAtPath("/World/Child")
+
+    incoming = Sdf.Layer.CreateAnonymous("relocates.usda")
+    incoming.TransferContent(stage.GetRootLayer())
+    incoming.relocates = [
+        (Sdf.Path("/World/Child"), Sdf.Path("/World/Moved")),
+    ]
+    event = _exact_spec_event(incoming, "/", "layer", ["layerRelocates"])
+
+    projection = ComposedChangeProjection(stage, [event])
+    apply_events(stage, [event])
+    projected = projection.build_events()
+
+    assert not stage.GetPrimAtPath("/World/Child")
+    assert stage.GetPrimAtPath("/World/Moved")
+    assert any(item["k"] == "delete_prim" and item["prim"] == "/World/Child" for item in projected)
+    assert any(item["k"] == "ensure_prim" and item["prim"] == "/World/Moved" for item in projected)
+    assert any(
+        item["k"] == "set_gprim_attrs"
+        and item["prim"] == "/World/Moved"
+        and item["attrs"]["radius"] == pytest.approx(5.0)
+        for item in projected
+    )
+    adapter = MockAdapter()
+    adapter.ensure_prim("/World/Child", "Sphere")
+    adapter.set_gprim_attrs("/World/Child", {"radius": 5.0})
+    adapter.apply_events(projected)
+    assert adapter.get_prim("/World/Child") == {}
+    assert adapter.get_prim("/World/Moved")["gprim_attrs"]["radius"] == pytest.approx(5.0)
+
+    cleared = Sdf.Layer.CreateAnonymous("relocates-cleared.usda")
+    cleared.TransferContent(stage.GetRootLayer())
+    cleared.relocates = []
+    clear_event = _exact_spec_event(cleared, "/", "layer", ["layerRelocates"])
+
+    clear_projection = ComposedChangeProjection(stage, [clear_event])
+    apply_events(stage, [clear_event])
+    clear_projected = clear_projection.build_events()
+
+    assert stage.GetPrimAtPath("/World/Child")
+    assert not stage.GetPrimAtPath("/World/Moved")
+    assert any(
+        item["k"] == "ensure_prim" and item["prim"] == "/World/Child" for item in clear_projected
+    )
+    assert any(
+        item["k"] == "delete_prim" and item["prim"] == "/World/Moved" for item in clear_projected
+    )
+    adapter.apply_events(clear_projected)
+    assert adapter.get_prim("/World/Moved") == {}
+    assert adapter.get_prim("/World/Child")["gprim_attrs"]["radius"] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("field", ["inheritPaths", "specializes"])
+def test_class_arc_notice_projects_implied_consumer_without_class_artifacts(field):
+    stage = Usd.Stage.CreateInMemory()
+    stage.CreateClassPrim("/Class")
+    child = stage.DefinePrim("/Class/Child", "Sphere")
+    child.GetAttribute("radius").Set(6.0)
+    intermediate = stage.CreateClassPrim("/Intermediate")
+    world = stage.DefinePrim("/World", "Xform")
+    if field == "inheritPaths":
+        world.GetInherits().AddInherit(intermediate.GetPath())
+    else:
+        world.GetSpecializes().AddSpecialize(intermediate.GetPath())
+    assert not stage.GetPrimAtPath("/World/Child")
+
+    incoming = Sdf.Layer.CreateAnonymous("implied-class-arc.usda")
+    incoming.TransferContent(stage.GetRootLayer())
+    incoming_stage = Usd.Stage.Open(incoming)
+    incoming_intermediate = incoming_stage.GetPrimAtPath("/Intermediate")
+    if field == "inheritPaths":
+        incoming_intermediate.GetInherits().AddInherit("/Class")
+    else:
+        incoming_intermediate.GetSpecializes().AddSpecialize("/Class")
+    event = _exact_spec_event(incoming, "/Intermediate", "prim", [field])
+
+    projection = ComposedChangeProjection(stage, [event])
+    apply_events(stage, [event])
+    projected = projection.build_events()
+
+    assert stage.GetPrimAtPath("/World/Child")
+    assert any(item["k"] == "ensure_prim" and item["prim"] == "/World/Child" for item in projected)
+    assert any(
+        item["k"] == "set_gprim_attrs"
+        and item["prim"] == "/World/Child"
+        and item["attrs"]["radius"] == pytest.approx(6.0)
+        for item in projected
+    )
+    assert not any(
+        item.get("prim", "").startswith(("/Class", "/Intermediate")) for item in projected
+    )
+
+
+def test_whole_spec_removal_projects_delete_when_changed_fields_are_empty():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Thing", "Sphere")
+    event = {
+        "k": "set_sdf_spec_fields",
+        "prim": "/World/Thing",
+        "spec_path": "/World/Thing",
+        "spec_kind": "prim",
+        "fields": [],
+        "fragment": "",
+        "removed": True,
+    }
+
+    projection = ComposedChangeProjection(stage, [event])
+    apply_events(stage, [event])
+    projected = projection.build_events()
+
+    assert not stage.GetPrimAtPath("/World/Thing")
+    assert {item["prim"] for item in projected if item["k"] == "delete_prim"} == {"/World/Thing"}
+
+
+def test_persistent_projection_state_reconciles_after_adapter_failure():
+    stage = Usd.Stage.CreateInMemory()
+    sphere = stage.DefinePrim("/World/Thing", "Sphere")
+    sphere.GetAttribute("radius").Set(1.0)
+    state = ComposedProjectionState(stage)
+
+    with pytest.raises(RuntimeError, match="adapter failed"):
+        with ComposedChangeProjection(stage, [], state=state) as projection:
+            sphere.GetAttribute("radius").Set(2.0)
+            assert any(item["k"] == "set_gprim_attrs" for item in projection.build_events())
+            raise RuntimeError("adapter failed")
+
+    assert state.needs_full_reconcile
+    with ComposedChangeProjection(stage, [], state=state) as recovery:
+        projected = recovery.build_events()
+        assert any(
+            item["k"] == "set_gprim_attrs"
+            and item["prim"] == "/World/Thing"
+            and item["attrs"]["radius"] == pytest.approx(2.0)
+            for item in projected
+        )
+        recovery.commit()
+
+    assert not state.needs_full_reconcile
+    with ComposedChangeProjection(stage, [], state=state) as settled:
+        assert settled.build_events() == []
+        settled.commit()
+
+
+def test_persistent_projection_noop_commit_keeps_baseline_object():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Thing", "Sphere")
+    state = ComposedProjectionState(stage)
+    baseline = state.baseline
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        assert projection.build_events() == []
+        projection.commit()
+
+    assert state.baseline is baseline
+
+
+def test_persistent_projection_sparse_commit_replaces_only_affected_prim():
+    stage = Usd.Stage.CreateInMemory()
+    changed = stage.DefinePrim("/World/Changed", "Sphere")
+    untouched = stage.DefinePrim("/World/Untouched", "Sphere")
+    changed.GetAttribute("radius").Set(1.0)
+    untouched.GetAttribute("radius").Set(3.0)
+    state = ComposedProjectionState(stage)
+    changed_before = state.baseline.prims["/World/Changed"]
+    untouched_before = state.baseline.prims["/World/Untouched"]
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        changed.GetAttribute("radius").Set(2.0)
+        assert any(item["k"] == "set_gprim_attrs" for item in projection.build_events())
+        projection.commit()
+
+    assert state.baseline.prims["/World/Changed"] is not changed_before
+    assert state.baseline.prims["/World/Untouched"] is untouched_before
 
 
 def test_unknown_event_kind_cannot_bypass_native_projection():
