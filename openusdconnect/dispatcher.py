@@ -181,6 +181,199 @@ class _SharedStageBinding:
             self._events[new_key] = event
 
 
+class _LayeredProjectionShadow:
+    """Independent last-successful stage for native composed projection."""
+
+    def __init__(self):
+        self._live_stage: Usd.Stage | None = None
+        self._live_router: LayerKeyRouter | None = None
+        self._stage: Usd.Stage | None = None
+        self._router: LayerKeyRouter | None = None
+        self._incremental_prepared = False
+        self._pending_incremental = None
+
+    @property
+    def stage(self) -> Usd.Stage:
+        if self._stage is None:
+            raise RuntimeError("projection shadow is not bound")
+        return self._stage
+
+    def bind(self, live_stage: Usd.Stage, live_router: LayerKeyRouter) -> None:
+        if live_stage is self._live_stage and live_router is self._live_router:
+            shadow_stage = self.stage
+            population_mask = live_stage.GetPopulationMask()
+            if shadow_stage.GetPopulationMask() != population_mask:
+                shadow_stage.SetPopulationMask(population_mask)
+            load_rules = live_stage.GetLoadRules()
+            if shadow_stage.GetLoadRules() != load_rules:
+                shadow_stage.SetLoadRules(load_rules)
+            return
+        from pxr import Sdf, Usd
+
+        from ._managed_sublayers import replace_managed_sublayers
+        from .logical_layers import LogicalLayerRouter
+
+        self.close()
+        if not isinstance(live_router, LogicalLayerRouter):
+            raise TypeError("layered native projection requires a LogicalLayerRouter")
+
+        shadow_session = Sdf.Layer.CreateAnonymous("native-projection-shadow-session.usda")
+        shadow_session.TransferContent(live_stage.GetSessionLayer())
+        replace_managed_sublayers(
+            shadow_session,
+            [],
+            live_router.layer_identifiers,
+        )
+        shadow_stage = Usd.Stage.OpenMasked(
+            live_stage.GetRootLayer(),
+            shadow_session,
+            live_stage.GetPathResolverContext(),
+            live_stage.GetPopulationMask(),
+            Usd.Stage.LoadNone,
+        )
+        if shadow_stage is None:
+            raise RuntimeError("could not open native projection shadow stage")
+        shadow_router = LogicalLayerRouter(shadow_stage)
+        shadow_router.synchronize_from(live_router)
+        shadow_stage.SetLoadRules(live_stage.GetLoadRules())
+
+        self._live_stage = live_stage
+        self._live_router = live_router
+        self._stage = shadow_stage
+        self._router = shadow_router
+
+    def prepare_incremental(
+        self,
+        records: Sequence[ReceivedEvent],
+        layer_stack_states: Sequence[dict],
+        *,
+        force_full: bool,
+    ) -> None:
+        """Stage the authored batch that a successful commit should mirror."""
+        self._incremental_prepared = True
+        self._pending_incremental = (
+            None
+            if force_full
+            else (tuple(records), tuple(layer_stack_states))
+        )
+
+    def advance(self) -> None:
+        """Advance to the live authored state after native adapter success."""
+        try:
+            if self._incremental_prepared and self._pending_incremental is not None:
+                records, layer_stack_states = self._pending_incremental
+                self._advance_incremental(records, layer_stack_states)
+            else:
+                self._advance_full()
+        finally:
+            self._incremental_prepared = False
+            self._pending_incremental = None
+
+    def _advance_incremental(
+        self,
+        records: Sequence[ReceivedEvent],
+        layer_stack_states: Sequence[dict],
+    ) -> None:
+        from pxr import Usd
+
+        from .adapters import UsdStageAdapter
+        from .logical_layers import LogicalLayerRouter
+
+        live_stage = self._live_stage
+        live_router = self._live_router
+        shadow_stage = self._stage
+        shadow_router = self._router
+        if (
+            live_stage is None
+            or shadow_stage is None
+            or not isinstance(live_router, LogicalLayerRouter)
+            or not isinstance(shadow_router, LogicalLayerRouter)
+        ):
+            raise RuntimeError("projection shadow is not bound")
+
+        for state in layer_stack_states:
+            shadow_router.apply_state(state)
+
+        routed = []
+        update_load_rules = False
+        for record in records:
+            event = record.event
+            kind = event.get("k")
+            layer = (
+                None
+                if kind in NON_COLLABORATION_KINDS
+                else shadow_router.layer_for(record.layer_key)
+            )
+            routed.append((layer, event))
+            update_load_rules |= kind in {
+                K_LOAD_PAYLOAD,
+                K_RENAME_PRIM,
+                K_UNLOAD_PAYLOAD,
+            }
+
+        stage_adapter = UsdStageAdapter(shadow_stage)
+        layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
+        with shadow_router.writable(layers.values()):
+            start = 0
+            while start < len(routed):
+                layer = routed[start][0]
+                end = start + 1
+                while end < len(routed) and routed[end][0] is layer:
+                    end += 1
+                run = [event for _layer, event in routed[start:end]]
+                edit_target = Usd.EditTarget(
+                    shadow_stage.GetSessionLayer() if layer is None else layer
+                )
+                with Usd.EditContext(shadow_stage, edit_target):
+                    stage_adapter.apply_events(run)
+                start = end
+
+        if update_load_rules:
+            shadow_stage.SetLoadRules(live_stage.GetLoadRules())
+
+    def _advance_full(self) -> None:
+        from pxr import Sdf
+
+        from ._managed_sublayers import replace_managed_sublayers
+        from .logical_layers import LogicalLayerRouter
+
+        live_stage = self._live_stage
+        live_router = self._live_router
+        shadow_stage = self._stage
+        shadow_router = self._router
+        if (
+            live_stage is None
+            or shadow_stage is None
+            or not isinstance(live_router, LogicalLayerRouter)
+            or not isinstance(shadow_router, LogicalLayerRouter)
+        ):
+            raise RuntimeError("projection shadow is not bound")
+
+        shadow_session = shadow_stage.GetSessionLayer()
+        managed_identifiers = (
+            live_router.layer_identifiers | shadow_router.layer_identifiers
+        )
+        with Sdf.ChangeBlock():
+            shadow_session.TransferContent(live_stage.GetSessionLayer())
+            replace_managed_sublayers(
+                shadow_session,
+                [],
+                managed_identifiers,
+            )
+        shadow_router.synchronize_from(live_router)
+        shadow_stage.SetLoadRules(live_stage.GetLoadRules())
+
+    def close(self) -> None:
+        if self._router is not None:
+            self._router.close()
+        self._live_stage = None
+        self._live_router = None
+        self._stage = None
+        self._router = None
+        self._incremental_prepared = False
+        self._pending_incremental = None
+
+
 def _asset_paths(event: dict) -> tuple[str, ...]:
     kind = event.get("k")
     entries = event.get("refs", ()) if kind == K_SET_REFERENCE else event.get("payloads", ())
@@ -294,6 +487,7 @@ class EventDispatcher:
         self._layer_router: LayerKeyRouter | None = None
         self._shared_stage = _SharedStageBinding()
         self._projection_state = None
+        self._projection_shadow: _LayeredProjectionShadow | None = None
 
     @property
     def last_seq(self) -> int:
@@ -364,7 +558,7 @@ class EventDispatcher:
             self._layer_router.bind(stage)
             self._shared_stage.bind(stage)
             if self._projection_state is not None:
-                self._projection_state.bind(stage)
+                self._native_projection_state(stage)
 
     def unbind_stage(self) -> None:
         """Detach managed layers without closing the dispatcher.
@@ -387,6 +581,9 @@ class EventDispatcher:
             if self._projection_state is not None:
                 self._projection_state.close()
                 self._projection_state = None
+            if self._projection_shadow is not None:
+                self._projection_shadow.close()
+                self._projection_shadow = None
 
     def _sync_layer_router(self) -> None:
         """Match the local router to the receiver's negotiated capability."""
@@ -415,10 +612,30 @@ class EventDispatcher:
     def _native_projection_state(self, stage: Usd.Stage):
         from .composed_projection import ComposedProjectionState
 
+        router = self._layer_router
+        if router is None:
+            if self._projection_state is None:
+                self._projection_state = ComposedProjectionState(stage)
+            else:
+                self._projection_state.bind(stage)
+            return self._projection_state
+
+        if self._projection_shadow is None:
+            self._projection_shadow = _LayeredProjectionShadow()
+        self._projection_shadow.bind(stage, router)
+        shadow_stage = self._projection_shadow.stage
         if self._projection_state is None:
-            self._projection_state = ComposedProjectionState(stage)
+            self._projection_state = ComposedProjectionState(
+                stage,
+                shadow_stage=shadow_stage,
+                advance_shadow=self._projection_shadow.advance,
+            )
         else:
-            self._projection_state.bind(stage)
+            self._projection_state.bind(
+                stage,
+                shadow_stage=shadow_stage,
+                advance_shadow=self._projection_shadow.advance,
+            )
         return self._projection_state
 
     def _apply_layered(
@@ -453,11 +670,21 @@ class EventDispatcher:
             if reset_layers or layer_stack_states
             else ((), ())
         )
+        projection_state = self._native_projection_state(stage) if projects_to_native else None
+        if projects_to_native and self._projection_shadow is not None:
+            self._projection_shadow.prepare_incremental(
+                records,
+                layer_stack_states,
+                force_full=(
+                    reset_layers
+                    or bool(projection_state and projection_state.needs_full_reconcile)
+                ),
+            )
         projection = (
             ComposedChangeProjection(
                 stage,
                 events,
-                state=self._native_projection_state(stage),
+                state=projection_state,
                 extra_scene_paths=stack_paths,
                 extra_arc_candidates=stack_arc_paths,
                 reapply_composed_paths=same_origin_paths,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import cast
@@ -136,24 +136,41 @@ def _is_projectable_prim(prim: Usd.Prim) -> bool:
 
 
 class ComposedProjectionState:
-    """Persistent native-visible state for one mirror stage and adapter.
+    """Last successfully applied native-visible state for one mirror stage.
 
     ``Usd.Notice.ObjectsChanged`` identifies composed consumers only after a
-    layer mutation has occurred. Keeping the last successfully-applied native
-    state makes those post-change paths diffable without accessing the stage's
-    private Pcp cache or scanning every prim for each transaction.
+    layer mutation has occurred. A separately composed shadow stage makes
+    those post-change paths diffable without accessing the private Pcp cache,
+    scanning every prim, or retaining a Python snapshot of the whole stage.
+
+    The snapshot fallback remains available for standalone callers that do
+    not supply ``shadow_stage``. Layered dispatch uses the shadow path.
     """
 
-    def __init__(self, stage: Usd.Stage | None = None):
+    def __init__(
+        self,
+        stage: Usd.Stage | None = None,
+        *,
+        shadow_stage: Usd.Stage | None = None,
+        advance_shadow: Callable[[], None] | None = None,
+    ):
         self._stage: Usd.Stage | None = None
+        self._shadow_stage: Usd.Stage | None = None
+        self._advance_shadow: Callable[[], None] | None = None
         self._baseline: _ProjectionBaseline | None = None
         self._needs_full_reconcile = False
         if stage is not None:
-            self.bind(stage)
+            self.bind(
+                stage,
+                shadow_stage=shadow_stage,
+                advance_shadow=advance_shadow,
+            )
 
     @property
     def baseline(self) -> _ProjectionBaseline:
         if self._baseline is None:
+            if self._shadow_stage is not None:
+                raise RuntimeError("snapshot baseline is unavailable in shadow mode")
             raise RuntimeError("composed projection state is not bound")
         return self._baseline
 
@@ -161,25 +178,58 @@ class ComposedProjectionState:
     def needs_full_reconcile(self) -> bool:
         return self._needs_full_reconcile
 
-    def bind(self, stage: Usd.Stage) -> None:
-        if stage is self._stage and self._baseline is not None:
+    @property
+    def stage(self) -> Usd.Stage | None:
+        return self._stage
+
+    @property
+    def shadow_stage(self) -> Usd.Stage | None:
+        return self._shadow_stage
+
+    def bind(
+        self,
+        stage: Usd.Stage,
+        *,
+        shadow_stage: Usd.Stage | None = None,
+        advance_shadow: Callable[[], None] | None = None,
+    ) -> None:
+        if stage is self._stage and shadow_stage is None and advance_shadow is None:
+            return
+        if shadow_stage is stage:
+            raise ValueError("projection shadow must be a distinct Usd.Stage")
+        if shadow_stage is not None and advance_shadow is None:
+            raise ValueError("shadow projection state requires an advance callback")
+        if (
+            stage is self._stage
+            and shadow_stage is self._shadow_stage
+            and (shadow_stage is not None or self._baseline is not None)
+        ):
+            self._advance_shadow = advance_shadow
             return
         self._stage = stage
-        self._baseline = ComposedChangeProjection._capture_scope(
-            stage,
-            ("/",),
-            recurse=True,
+        self._shadow_stage = shadow_stage
+        self._advance_shadow = advance_shadow
+        self._baseline = (
+            None
+            if shadow_stage is not None
+            else ComposedChangeProjection._capture_scope(
+                stage,
+                ("/",),
+                recurse=True,
+            )
         )
         self._needs_full_reconcile = False
 
     def close(self) -> None:
         self._stage = None
+        self._shadow_stage = None
+        self._advance_shadow = None
         self._baseline = None
         self._needs_full_reconcile = False
 
     def require_full_reconcile(self) -> None:
         """Keep the last adapter baseline but widen the next projection."""
-        if self._baseline is not None:
+        if self._stage is not None:
             self._needs_full_reconcile = True
 
     def commit(self, projection: ComposedChangeProjection) -> None:
@@ -189,6 +239,13 @@ class ComposedProjectionState:
         stage = projection._stage
         if stage is not self._stage:
             raise ValueError("projection stage no longer matches persistent state")
+
+        if self._shadow_stage is not None:
+            if self._advance_shadow is None:
+                raise RuntimeError("shadow projection state cannot advance")
+            self._advance_shadow()
+            self._needs_full_reconcile = False
+            return
 
         subtree_roots = set(projection._resync_prim_roots)
         exact_paths = set(projection._affected_prim_paths)
@@ -568,7 +625,8 @@ class ComposedChangeProjection:
         self._events = events
         self._validate_events(events)
         self._state = state or ComposedProjectionState(stage)
-        self._state.bind(stage)
+        if self._state.stage is not stage:
+            self._state.bind(stage)
         self._reset = reset
         self._resynced_paths: set[Sdf.Path] = set()
         self._changed_info_paths: set[Sdf.Path] = set()
@@ -589,7 +647,9 @@ class ComposedChangeProjection:
             initial_scene_paths,
             extra_arc_candidates,
         )
-        self._before = self._state.baseline
+        self._before = (
+            None if self._state.shadow_stage is not None else self._state.baseline
+        )
         if self._state.needs_full_reconcile:
             self._resynced_paths.add(Sdf.Path.absoluteRootPath)
             self._reapply_all_composed = True
@@ -782,6 +842,17 @@ class ComposedChangeProjection:
         return result
 
     @classmethod
+    def _capture_candidates(
+        cls,
+        stage: Usd.Stage,
+        candidates: _ProjectionCandidates,
+    ) -> _ProjectionBaseline:
+        capture = cls.__new__(cls)
+        capture._stage = stage
+        capture._candidates = candidates
+        return capture._capture_baseline()
+
+    @classmethod
     def _capture_scope(
         cls,
         stage: Usd.Stage,
@@ -798,7 +869,7 @@ class ComposedChangeProjection:
         else:
             for prim_path in prim_paths:
                 capture._add_prim_candidates(stage.GetPrimAtPath(prim_path))
-        return capture._capture_baseline()
+        return cls._capture_candidates(stage, capture._candidates)
 
     def _add_baseline_candidates(
         self,
@@ -817,6 +888,8 @@ class ComposedChangeProjection:
             )
 
         before = self._before
+        if before is None:
+            raise RuntimeError("snapshot baseline is unavailable in shadow mode")
         candidates = self._candidates
         for prim_path, state in before.prims.items():
             if not included(prim_path):
@@ -1007,7 +1080,9 @@ class ComposedChangeProjection:
         paths: Iterable[Sdf.Path],
         *,
         include_prim_state: bool = True,
+        stage: Usd.Stage | None = None,
     ) -> None:
+        source_stage = stage or self._stage
         xform_prims = set()
         seen_prims = set()
         for path in paths:
@@ -1022,18 +1097,24 @@ class ComposedChangeProjection:
                 self._candidates.variants.add(prim_path)
                 self._candidates.active.add(prim_path)
                 self._candidates.instanceable.add(prim_path)
-                prim = self._stage.GetPrimAtPath(prim_path)
+                prim = source_stage.GetPrimAtPath(prim_path)
                 if _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer):
                     self._candidates.point_instancers[(prim_path, None)].add("inactive_ids")
             if not path.IsPropertyPath():
                 continue
 
-            prop = self._stage.GetPropertyAtPath(path)
-            if self._add_property_candidate(prim_path, str(path.name), prop, prim):
+            prop = source_stage.GetPropertyAtPath(path)
+            if self._add_property_candidate(
+                prim_path,
+                str(path.name),
+                prop,
+                prim,
+                stage=source_stage,
+            ):
                 xform_prims.add(prim_path)
 
         for prim_path in xform_prims:
-            prim = self._stage.GetPrimAtPath(prim_path)
+            prim = source_stage.GetPrimAtPath(prim_path)
             xformable = UsdGeom.Xformable(prim) if _is_projectable_prim(prim) else None
             if not xformable:
                 continue
@@ -1046,8 +1127,11 @@ class ComposedChangeProjection:
         name: str,
         prop: Usd.Property,
         prim: Usd.Prim | None = None,
+        *,
+        stage: Usd.Stage | None = None,
     ) -> bool:
         """Classify one authored property, returning whether it is an xform op."""
+        source_stage = stage or self._stage
         candidates = self._candidates
         if name == "xformOpOrder" or name.startswith("xformOp:"):
             candidates.xforms.add((prim_path, None))
@@ -1065,7 +1149,7 @@ class ComposedChangeProjection:
         elif (purpose := _material_purpose_from_name(name)) is not None:
             candidates.materials.add((prim_path, purpose))
         elif (
-            _is_projectable_prim(prim := prim or self._stage.GetPrimAtPath(prim_path))
+            _is_projectable_prim(prim := prim or source_stage.GetPrimAtPath(prim_path))
             and prim.IsA(UsdGeom.PointInstancer)
             and (field := POINT_INSTANCER_USD_TO_WIRE.get(name))
         ):
@@ -1078,7 +1162,12 @@ class ComposedChangeProjection:
                 candidates.gprim[(prim_path, time)].add(name)
         return False
 
-    def _add_prim_candidates(self, prim: Usd.Prim) -> None:
+    def _add_prim_candidates(
+        self,
+        prim: Usd.Prim,
+        *,
+        stage: Usd.Stage | None = None,
+    ) -> None:
         if not _is_projectable_prim(prim):
             return
         prim_path = str(prim.GetPath())
@@ -1103,6 +1192,7 @@ class ComposedChangeProjection:
                 str(prop.GetName()),
                 prop,
                 prim,
+                stage=stage,
             )
         if has_xform:
             xformable = UsdGeom.Xformable(prim)
@@ -1110,15 +1200,23 @@ class ComposedChangeProjection:
                 (prim_path, time) for time in xformable.GetTimeSamples()
             )
 
-    def _add_subtree_candidates(self, roots: Iterable[str]) -> None:
+    def _add_subtree_candidates(
+        self,
+        roots: Iterable[str],
+        *,
+        stage: Usd.Stage | None = None,
+    ) -> None:
+        source_stage = stage or self._stage
         for root in roots:
             prim = (
-                self._stage.GetPseudoRoot() if str(root) == "/" else self._stage.GetPrimAtPath(root)
+                source_stage.GetPseudoRoot()
+                if str(root) == "/"
+                else source_stage.GetPrimAtPath(root)
             )
             if not prim or not prim.IsValid():
                 continue
             for descendant in Usd.PrimRange.AllPrims(prim):
-                self._add_prim_candidates(descendant)
+                self._add_prim_candidates(descendant, stage=source_stage)
 
     @staticmethod
     def _minimal_roots(paths: Iterable[str]) -> set[str]:
@@ -1163,7 +1261,14 @@ class ComposedChangeProjection:
             if not any(_path_is_at_or_below(path, root) for root in self._resync_prim_roots)
         }
 
-        self._add_baseline_candidates(self._resync_prim_roots, recurse=True)
+        before_stage = self._state.shadow_stage
+        if before_stage is None:
+            self._add_baseline_candidates(self._resync_prim_roots, recurse=True)
+        else:
+            self._add_subtree_candidates(
+                self._resync_prim_roots,
+                stage=before_stage,
+            )
         self._add_subtree_candidates(self._resync_prim_roots)
         prim_scene_paths = {path for path in exact_scene_paths if not path.IsPropertyPath()}
         property_scene_paths = exact_scene_paths - prim_scene_paths
@@ -1172,6 +1277,16 @@ class ComposedChangeProjection:
             property_scene_paths,
             include_prim_state=False,
         )
+        if before_stage is not None:
+            self._add_scene_path_candidates(
+                prim_scene_paths,
+                stage=before_stage,
+            )
+            self._add_scene_path_candidates(
+                property_scene_paths,
+                include_prim_state=False,
+                stage=before_stage,
+            )
 
     def _record_affected_prim_paths(self) -> None:
         candidates = self._candidates
@@ -1189,6 +1304,8 @@ class ComposedChangeProjection:
         self._affected_prim_paths = {path for path in paths if path and path != "/"}
 
     def _before_state(self, prim_path: str) -> _PrimProjectionBaseline:
+        if self._before is None:
+            raise RuntimeError("projection before-state has not been captured")
         return self._before.prims.get(prim_path, _EMPTY_PRIM_BASELINE)
 
     def build_events(self) -> list[dict]:
@@ -1200,6 +1317,11 @@ class ComposedChangeProjection:
         if self._subtree_roots:
             self._add_subtree_candidates(self._subtree_roots)
         self._record_affected_prim_paths()
+        if (before_stage := self._state.shadow_stage) is not None:
+            self._before = self._capture_candidates(
+                before_stage,
+                self._candidates,
+            )
 
         projected: list[dict] = []
         for step in _PROJECTION_STEPS:

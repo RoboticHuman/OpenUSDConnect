@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pxr import Sdf, Usd, UsdShade
+from pxr import Sdf, Usd, UsdGeom, UsdShade
 
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import encode_message
@@ -287,6 +287,88 @@ def test_persistent_projection_sparse_commit_replaces_only_affected_prim():
 
     assert state.baseline.prims["/World/Changed"] is not changed_before
     assert state.baseline.prims["/World/Untouched"] is untouched_before
+
+
+def test_shadow_projection_state_noop_bind_preserves_shadow_mode():
+    live = Usd.Stage.CreateInMemory()
+    shadow = Usd.Stage.CreateInMemory()
+    state = ComposedProjectionState(
+        live,
+        shadow_stage=shadow,
+        advance_shadow=lambda: None,
+    )
+
+    state.bind(live)
+
+    assert state.shadow_stage is shadow
+    with pytest.raises(RuntimeError, match="shadow mode"):
+        state.baseline.ensure("/World")
+
+
+def test_layered_shadow_advances_only_after_native_adapter_success():
+    class FailingOnceAdapter(MockAdapter):
+        fail_next = False
+
+        def apply_events(self, events):
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("adapter failed")
+            return super().apply_events(events)
+
+    stage = Usd.Stage.CreateInMemory()
+    receiver = _LayeredQueue(
+        [
+            encode_message(
+                _state(
+                    1,
+                    [(_STRONG_LAYER, "Strong", False)],
+                )
+            ),
+            *_xform_events(1, _STRONG_LAYER, 1.0),
+        ]
+    )
+    adapter = FailingOnceAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter, mirror_stage=stage)
+    assert dispatcher.drain_and_apply() > 0
+    assert dispatcher._projection_state.shadow_stage is not stage
+
+    adapter.fail_next = True
+    receiver.messages = [
+        _event(
+            4,
+            _STRONG_LAYER,
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Thing",
+                "fields": ["t"],
+                "t": [2.0, 0.0, 0.0],
+            },
+        )
+    ]
+    with pytest.raises(RuntimeError, match="adapter failed"):
+        dispatcher.drain_and_apply()
+
+    state = dispatcher._projection_state
+    assert state.needs_full_reconcile
+    shadow_prim = state.shadow_stage.GetPrimAtPath("/World/Thing")
+    shadow_matrix = UsdGeom.Xformable(shadow_prim).GetLocalTransformation()
+    assert tuple(shadow_matrix.ExtractTranslation()) == pytest.approx((1.0, 0.0, 0.0))
+
+    receiver.messages = [
+        encode_message(
+            _state(
+                2,
+                [(_STRONG_LAYER, "Strong", False)],
+            )
+        )
+    ]
+    assert dispatcher.drain_and_apply() > 0
+    assert adapter.get_trs("/World/Thing")["t"] == pytest.approx([2.0, 0.0, 0.0])
+    assert not state.needs_full_reconcile
+    shadow_matrix = UsdGeom.Xformable(
+        state.shadow_stage.GetPrimAtPath("/World/Thing")
+    ).GetLocalTransformation()
+    assert tuple(shadow_matrix.ExtractTranslation()) == pytest.approx((2.0, 0.0, 0.0))
 
 
 def test_unknown_event_kind_cannot_bypass_native_projection():

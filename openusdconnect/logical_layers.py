@@ -31,6 +31,43 @@ class LogicalLayerRouter(LayerKeyRouter):
     def layer_keys(self) -> tuple[str, ...]:
         return self._layer_keys
 
+    @property
+    def layer_identifiers(self) -> frozenset[str]:
+        """Identifiers of the anonymous layers owned by this router."""
+        return frozenset(self._managed_identifiers())
+
+    def synchronize_from(self, source: LogicalLayerRouter) -> None:
+        """Replace this router's topology and contents with ``source``.
+
+        Destination layers remain independent anonymous layers.  Public
+        ``Sdf.Layer.TransferContent`` advances a projection shadow without
+        retaining a Python snapshot for every composed prim.
+        """
+        if not isinstance(source, LogicalLayerRouter):
+            raise TypeError("source must be a LogicalLayerRouter")
+        if source is self:
+            return
+
+        for layer_key in source._layer_keys:
+            if layer_key not in self._layers:
+                layer = self._create_layer(layer_key, layer_key)
+                self._layers[layer_key] = layer
+                self._keys_by_identifier[layer.identifier] = layer_key
+            self._layers[layer_key].TransferContent(source._layers[layer_key])
+
+        self._layer_keys = source._layer_keys
+        self._muted = dict(source._muted)
+        removed_keys = set(self._layers) - set(self._layer_keys)
+        if self._stage is not None:
+            self._install_layers(self._stage)
+        for layer_key in removed_keys:
+            layer = self._layers.pop(layer_key)
+            self._keys_by_identifier.pop(layer.identifier, None)
+
+        self._generation = source._generation
+        self._revision = source._revision
+        self._ready = source._ready
+
     def layer_for(self, layer_key: str) -> Sdf.Layer:
         """Return the receiver-local layer for one routed event."""
         if not self._ready:
