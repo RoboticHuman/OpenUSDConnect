@@ -131,9 +131,7 @@ class _SharedStageBinding:
         self._session_fields = {
             field: (
                 pseudo_root.HasInfo(field),
-                copy.deepcopy(pseudo_root.GetInfo(field))
-                if pseudo_root.HasInfo(field)
-                else None,
+                copy.deepcopy(pseudo_root.GetInfo(field)) if pseudo_root.HasInfo(field) else None,
             )
             for field in STAGE_METADATA_KEYS
         }
@@ -181,6 +179,204 @@ class _SharedStageBinding:
         for old_key, new_key, event in moved:
             del self._events[old_key]
             self._events[new_key] = event
+
+
+class _LayeredPreviousStage:
+    """Last layered USD state successfully delivered to a native adapter.
+
+    The immutable base root is shared for low-cost composition. A live change
+    to a context-dependent resolver mapping therefore requires dispatcher
+    recreation, stage rebind, or destructive native-scene rebuild.
+    """
+
+    def __init__(self):
+        self._live_stage: Usd.Stage | None = None
+        self._live_router: LayerKeyRouter | None = None
+        self._previous_stage: Usd.Stage | None = None
+        self._previous_router: LayerKeyRouter | None = None
+        self._delivery_prepared = False
+        self._pending_delivery = None
+
+    @property
+    def previous_stage(self) -> Usd.Stage:
+        if self._previous_stage is None:
+            raise RuntimeError("layered previous stage is not bound")
+        return self._previous_stage
+
+    def bind(self, live_stage: Usd.Stage, live_router: LayerKeyRouter) -> None:
+        if live_stage is self._live_stage and live_router is self._live_router:
+            previous_stage = self.previous_stage
+            population_mask = live_stage.GetPopulationMask()
+            if previous_stage.GetPopulationMask() != population_mask:
+                previous_stage.SetPopulationMask(population_mask)
+            load_rules = live_stage.GetLoadRules()
+            if previous_stage.GetLoadRules() != load_rules:
+                previous_stage.SetLoadRules(load_rules)
+            return
+        from pxr import Sdf, Usd
+
+        from ._managed_sublayers import replace_managed_sublayers
+        from .logical_layers import LogicalLayerRouter
+
+        self.close()
+        if not isinstance(live_router, LogicalLayerRouter):
+            raise TypeError("layered native projection requires a LogicalLayerRouter")
+
+        previous_session = Sdf.Layer.CreateAnonymous("previous-adapter-state-session.usda")
+        previous_session.TransferContent(live_stage.GetSessionLayer())
+        replace_managed_sublayers(
+            previous_session,
+            [],
+            live_router.layer_identifiers,
+        )
+        previous_stage = Usd.Stage.OpenMasked(
+            live_stage.GetRootLayer(),
+            previous_session,
+            live_stage.GetPathResolverContext(),
+            live_stage.GetPopulationMask(),
+            Usd.Stage.LoadNone,
+        )
+        if previous_stage is None:
+            raise RuntimeError("could not open layered previous stage")
+        previous_router = LogicalLayerRouter(previous_stage)
+        previous_router.synchronize_from(live_router)
+        previous_stage.SetLoadRules(live_stage.GetLoadRules())
+
+        self._live_stage = live_stage
+        self._live_router = live_router
+        self._previous_stage = previous_stage
+        self._previous_router = previous_router
+
+    def prepare_delivery(
+        self,
+        records: Sequence[ReceivedEvent],
+        layer_stack_states: Sequence[dict],
+        *,
+        force_full: bool,
+    ) -> None:
+        """Stage the authored batch that a successful commit should mirror."""
+        self._delivery_prepared = True
+        self._pending_delivery = (
+            None
+            if force_full
+            else (tuple(records), tuple(layer_stack_states))
+        )
+
+    def advance_after_delivery(self) -> None:
+        """Advance after the pending native adapter delivery succeeds."""
+        try:
+            if self._delivery_prepared and self._pending_delivery is not None:
+                records, layer_stack_states = self._pending_delivery
+                self._apply_pending_delivery(records, layer_stack_states)
+            else:
+                self._copy_full_live_state()
+        finally:
+            self._delivery_prepared = False
+            self._pending_delivery = None
+
+    def _apply_pending_delivery(
+        self,
+        records: Sequence[ReceivedEvent],
+        layer_stack_states: Sequence[dict],
+    ) -> None:
+        from pxr import Usd
+
+        from .adapters import UsdStageAdapter
+        from .logical_layers import LogicalLayerRouter
+
+        live_stage = self._live_stage
+        live_router = self._live_router
+        previous_stage = self._previous_stage
+        previous_router = self._previous_router
+        if (
+            live_stage is None
+            or previous_stage is None
+            or not isinstance(live_router, LogicalLayerRouter)
+            or not isinstance(previous_router, LogicalLayerRouter)
+        ):
+            raise RuntimeError("layered previous stage is not bound")
+
+        for state in layer_stack_states:
+            previous_router.apply_state(state)
+
+        routed = []
+        update_load_rules = False
+        for record in records:
+            event = record.event
+            kind = event.get("k")
+            layer = (
+                None
+                if kind in NON_COLLABORATION_KINDS
+                else previous_router.layer_for(record.layer_key)
+            )
+            routed.append((layer, event))
+            update_load_rules |= kind in {
+                K_LOAD_PAYLOAD,
+                K_RENAME_PRIM,
+                K_UNLOAD_PAYLOAD,
+            }
+
+        stage_adapter = UsdStageAdapter(previous_stage)
+        layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
+        with previous_router.writable(layers.values()):
+            start = 0
+            while start < len(routed):
+                layer = routed[start][0]
+                end = start + 1
+                while end < len(routed) and routed[end][0] is layer:
+                    end += 1
+                run = [event for _layer, event in routed[start:end]]
+                edit_target = Usd.EditTarget(
+                    previous_stage.GetSessionLayer() if layer is None else layer
+                )
+                with Usd.EditContext(previous_stage, edit_target):
+                    stage_adapter.apply_events(run)
+                start = end
+
+        if update_load_rules:
+            previous_stage.SetLoadRules(live_stage.GetLoadRules())
+
+    def _copy_full_live_state(self) -> None:
+        from pxr import Sdf
+
+        from ._managed_sublayers import replace_managed_sublayers
+        from .logical_layers import LogicalLayerRouter
+
+        live_stage = self._live_stage
+        live_router = self._live_router
+        previous_stage = self._previous_stage
+        previous_router = self._previous_router
+        if (
+            live_stage is None
+            or previous_stage is None
+            or not isinstance(live_router, LogicalLayerRouter)
+            or not isinstance(previous_router, LogicalLayerRouter)
+        ):
+            raise RuntimeError("layered previous stage is not bound")
+
+        previous_session = previous_stage.GetSessionLayer()
+        managed_identifiers = (
+            live_router.layer_identifiers | previous_router.layer_identifiers
+        )
+        with Sdf.ChangeBlock():
+            previous_session.TransferContent(live_stage.GetSessionLayer())
+            replace_managed_sublayers(
+                previous_session,
+                [],
+                managed_identifiers,
+            )
+        previous_router.synchronize_from(live_router)
+        previous_stage.SetLoadRules(live_stage.GetLoadRules())
+
+    def close(self) -> None:
+        if self._previous_router is not None:
+            self._previous_router.close()
+        self._live_stage = None
+        self._live_router = None
+        self._previous_stage = None
+        self._previous_router = None
+        self._delivery_prepared = False
+        self._pending_delivery = None
 
 
 def _asset_paths(event: dict) -> tuple[str, ...]:
@@ -296,6 +492,8 @@ class EventDispatcher:
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LayerKeyRouter | None = None
         self._shared_stage = _SharedStageBinding()
+        self._projection_state = None
+        self._layered_previous_stage: _LayeredPreviousStage | None = None
 
     @property
     def last_seq(self) -> int:
@@ -329,6 +527,8 @@ class EventDispatcher:
         """
         if self.adapter is None:
             return 0
+        if self._projection_state is not None:
+            self._projection_state.ensure_native_projection_safe()
         bufs = self.receiver.drain_queue()
         if not bufs:
             mark_replay_applied = getattr(self.receiver, "mark_replay_applied", None)
@@ -403,6 +603,22 @@ class EventDispatcher:
         with suppress_ctx:
             self._layer_router.bind(stage)
             self._shared_stage.bind(stage)
+            if self._projection_state is not None:
+                self._native_projection_state(stage)
+
+    @property
+    def native_scene_rebuild_required(self) -> bool:
+        """Whether resolver refresh made incremental native delivery unsafe."""
+        return bool(
+            self._projection_state
+            and self._projection_state.native_scene_rebuild_required
+        )
+
+    def acknowledge_native_scene_rebuilt(self) -> None:
+        """Advance the baseline and resume after native state reconstruction."""
+        if self._projection_state is None:
+            return
+        self._projection_state.acknowledge_native_scene_rebuilt()
 
     def unbind_stage(self) -> None:
         """Detach managed layers without closing the dispatcher.
@@ -422,6 +638,12 @@ class EventDispatcher:
             self._shared_stage.close()
             if self._layer_router is not None:
                 self._layer_router.close()
+            if self._projection_state is not None:
+                self._projection_state.close()
+                self._projection_state = None
+            if self._layered_previous_stage is not None:
+                self._layered_previous_stage.close()
+                self._layered_previous_stage = None
 
     def _sync_layer_router(self) -> None:
         """Match the local router to the receiver's negotiated capability."""
@@ -447,6 +669,41 @@ class EventDispatcher:
         self._shared_stage.bind(stage)
         return stage
 
+    def _native_projection_state(self, stage: Usd.Stage):
+        from .composed_projection import ComposedProjectionState
+
+        router = self._layer_router
+        if router is None:
+            if self._projection_state is None:
+                self._projection_state = ComposedProjectionState(stage)
+            else:
+                self._projection_state.bind(stage)
+            return self._projection_state
+
+        if self._layered_previous_stage is None:
+            self._layered_previous_stage = _LayeredPreviousStage()
+        self._layered_previous_stage.bind(stage, router)
+        previous_stage = self._layered_previous_stage.previous_stage
+        if self._projection_state is None:
+            self._projection_state = ComposedProjectionState(
+                stage,
+                previous_stage=previous_stage,
+                advance_previous_stage=(
+                    self._layered_previous_stage.advance_after_delivery
+                ),
+                resolver_refresh_requires_native_rebuild=True,
+            )
+        else:
+            self._projection_state.bind(
+                stage,
+                previous_stage=previous_stage,
+                advance_previous_stage=(
+                    self._layered_previous_stage.advance_after_delivery
+                ),
+                resolver_refresh_requires_native_rebuild=True,
+            )
+        return self._projection_state
+
     def _apply_layered(
         self,
         records: list[ReceivedEvent],
@@ -465,9 +722,11 @@ class EventDispatcher:
             raise RuntimeError("layered replay was not negotiated")
         stage = self._bind_layer_router()
         events = [record.event for record in records]
-        adapter_stage = self.adapter.targets_stage()
-        projects_to_native = adapter_stage is not stage
-        stage_adapter = UsdStageAdapter(stage) if projects_to_native else self.adapter
+        adapter_writes_to_mirror_stage = self.adapter.targets_stage() is stage
+        projects_to_external_scene = not adapter_writes_to_mirror_stage
+        stage_adapter = (
+            UsdStageAdapter(stage) if projects_to_external_scene else self.adapter
+        )
         local_origin = getattr(self.receiver, "origin", None)
         same_origin_paths = {
             str(record.event["prim"])
@@ -479,16 +738,31 @@ class EventDispatcher:
             if reset_layers or layer_stack_states
             else ((), ())
         )
+        projection_state = (
+            self._native_projection_state(stage)
+            if projects_to_external_scene
+            else None
+        )
+        if projects_to_external_scene and self._layered_previous_stage is not None:
+            self._layered_previous_stage.prepare_delivery(
+                records,
+                layer_stack_states,
+                force_full=(
+                    reset_layers
+                    or bool(projection_state and projection_state.needs_full_reconcile)
+                ),
+            )
         projection = (
             ComposedChangeProjection(
                 stage,
                 events,
+                state=projection_state,
                 extra_scene_paths=stack_paths,
                 extra_arc_candidates=stack_arc_paths,
                 reapply_composed_paths=same_origin_paths,
                 reset=reset_layers,
             )
-            if projects_to_native
+            if projects_to_external_scene
             else None
         )
 
@@ -500,8 +774,9 @@ class EventDispatcher:
             self._observe_asset_dependencies(run, edit_target=edit_target)
 
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        projected: list[dict] = []
-        with suppress_ctx:
+        projection_ctx = projection if projection is not None else nullcontext()
+        native_adapter_events: list[dict] = []
+        with projection_ctx, suppress_ctx:
             if reset_layers:
                 self._shared_stage.reset()
                 router.clear()
@@ -547,11 +822,14 @@ class EventDispatcher:
             self._shared_stage.remember(shared_state_events)
 
             if projection is not None:
-                projected = projection.build_events()
-                if projected:
-                    self.adapter.apply_events(projected)
+                native_adapter_events = projection.build_events()
+                if native_adapter_events:
+                    self.adapter.apply_events(native_adapter_events)
+                projection.commit()
 
-            adapter_events = projected if projection is not None else events
+            adapter_events = (
+                native_adapter_events if projection is not None else events
+            )
             if self.on_imported is not None:
                 imported = [
                     event["prim"]
@@ -566,7 +844,7 @@ class EventDispatcher:
                 applied = [event["prim"] for event in adapter_events if event.get("prim")]
                 if applied:
                     self.on_applied(applied)
-        return len(projected) if projection is not None else len(events)
+        return len(native_adapter_events) if projection is not None else len(events)
 
     def _apply(self, events: list[dict]) -> int:
         """Run the apply pipeline on a pre-decoded batch.
@@ -1016,6 +1294,7 @@ class EventDispatcher:
             projection = ComposedChangeProjection(
                 stage,
                 adapter_events,
+                state=self._native_projection_state(stage),
                 reapply_all_composed=True,
             )
         # A dependency can have been received while any local layer or mapped
@@ -1024,6 +1303,8 @@ class EventDispatcher:
         # Snapshot every affected layer before mutating any of them so a stage
         # adapter failure rolls the complete multi-layer replay back.
         with ExitStack() as transaction:
+            if projection is not None:
+                transaction.enter_context(projection)
             snapshotted_layers: set[str] = set()
             for tracked_event, _local_events in replays:
                 layer = tracked_event.edit_target.GetLayer()
@@ -1052,13 +1333,14 @@ class EventDispatcher:
                     else:
                         apply_events(stage, local_events)
 
-        # DCC adapters consume the same events only after the mirror stage has
-        # committed. They do not expose USD edit targets themselves.
-        if not adapter_handles_stage:
-            assert projection is not None
-            adapter_events = projection.build_events()
-            if adapter_events:
-                self.adapter.apply_events(adapter_events)
+            # DCC adapters consume the same events only after the mirror stage
+            # has committed. They do not expose USD edit targets themselves.
+            if not adapter_handles_stage:
+                assert projection is not None
+                adapter_events = projection.build_events()
+                if adapter_events:
+                    self.adapter.apply_events(adapter_events)
+                projection.commit()
 
         for tracked_event, local_events in replays:
             if self.emitter is not None:

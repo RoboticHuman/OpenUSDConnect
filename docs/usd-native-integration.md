@@ -229,6 +229,22 @@ composed result into Blender. A receive-only USD application such as usdview
 can apply directly to its displayed stage because that stage is not also its
 authoring source.
 
+### Adapter destination contract
+
+`DCCAdapter.targets_stage()` selects the layered receive path. An adapter that
+writes directly into USD must return the exact `Usd.Stage` instance it mutates;
+`UsdStageAdapter` implements this contract. When that object is also the
+receiver's mirror stage, OpenUSD performs composition and the dispatcher skips
+composed projection.
+
+An adapter that writes into an external scene, such as Blender objects, returns
+`None`. The dispatcher then authors incoming records into its USD mirror and
+projects the mirror's composed result into the adapter. Returning a different
+`Usd.Stage` also selects projection because it is a separate destination, even
+if it was opened from equivalent layers. The comparison uses object identity,
+not layer or identifier equivalence. Custom stage-backed adapters must override
+`targets_stage()`; inheriting `None` opts into external-scene projection.
+
 Native Unreal currently uses the lower-level flat path around its
 `USDStageActor`. Flat replay is a single-layer compatibility path: servers with
 department policy, multiple collaboration layers, or a muted collaboration
@@ -596,6 +612,29 @@ process's `ArResolver` plugin and context.
 Use `receiver.refresh_asset_dependency()` after resolver state or an asset
 mapping changes. Use `receiver.pending_asset_dependencies` to inspect paths
 that still do not resolve.
+
+### Runtime resolver-context changes
+
+Managed native projection does not incrementally synchronize topology changes
+caused only by refreshing a context-dependent `ArResolver` context. Its
+previous-state stage shares the immutable base root layer with the live stage
+to keep startup, memory use, and normal transaction latency low. A resolver
+refresh can therefore recompose both stages before the dispatcher has observed
+the former topology.
+
+After changing a context-dependent resolver mapping, the dispatcher logs an
+error, sets `native_scene_rebuild_required`, and raises
+`NativeSceneRebuildRequired` before draining more receiver input. Recreate
+the receiver/dispatcher or rebind a replacement stage, and reconstruct the
+native adapter scene from the current composed stage. A destructive full native
+resync is equivalent; after it succeeds, call
+`acknowledge_native_scene_rebuilt()` to resume delivery. Restarting the
+integration is the simplest fallback when it does not expose either operation.
+An ordinary network reconnect that retains the same dispatcher does not clear
+the guard. Ordinary USD edits, filesystem asset appearance, and explicit
+reference or payload changes continue to use their normal incremental paths;
+this restriction applies only to composition changes caused solely by a live
+resolver-context refresh.
 
 ## Identity and authentication
 
