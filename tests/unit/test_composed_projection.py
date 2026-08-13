@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pxr
 import pytest
-from pxr import Sdf, Usd, UsdGeom, UsdShade
+from pxr import Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from openusdconnect.adapters import MockAdapter
 from openusdconnect.codec import encode_message
@@ -257,36 +264,332 @@ def test_persistent_projection_state_reconciles_after_adapter_failure():
         settled.commit()
 
 
-def test_persistent_projection_noop_commit_keeps_baseline_object():
+def test_persistent_projection_noop_commit_keeps_owned_shadow_stage():
     stage = Usd.Stage.CreateInMemory()
     stage.DefinePrim("/World/Thing", "Sphere")
     state = ComposedProjectionState(stage)
-    baseline = state.baseline
+    shadow = state.shadow_stage
+
+    assert shadow is not stage
+    assert shadow.GetRootLayer() is not stage.GetRootLayer()
+    assert shadow.GetSessionLayer() is not stage.GetSessionLayer()
 
     with ComposedChangeProjection(stage, [], state=state) as projection:
         assert projection.build_events() == []
         projection.commit()
 
-    assert state.baseline is baseline
+    assert state.shadow_stage is shadow
 
 
-def test_persistent_projection_sparse_commit_replaces_only_affected_prim():
+def test_persistent_projection_sparse_commit_advances_owned_shadow():
     stage = Usd.Stage.CreateInMemory()
     changed = stage.DefinePrim("/World/Changed", "Sphere")
     untouched = stage.DefinePrim("/World/Untouched", "Sphere")
     changed.GetAttribute("radius").Set(1.0)
     untouched.GetAttribute("radius").Set(3.0)
     state = ComposedProjectionState(stage)
-    changed_before = state.baseline.prims["/World/Changed"]
-    untouched_before = state.baseline.prims["/World/Untouched"]
+    shadow = state.shadow_stage
+    assert shadow.GetPrimAtPath("/World/Changed").GetAttribute("radius").Get() == 1.0
+    assert shadow.GetPrimAtPath("/World/Untouched").GetAttribute("radius").Get() == 3.0
 
     with ComposedChangeProjection(stage, [], state=state) as projection:
         changed.GetAttribute("radius").Set(2.0)
         assert any(item["k"] == "set_gprim_attrs" for item in projection.build_events())
         projection.commit()
 
-    assert state.baseline.prims["/World/Changed"] is not changed_before
-    assert state.baseline.prims["/World/Untouched"] is untouched_before
+    assert state.shadow_stage is shadow
+    assert shadow.GetPrimAtPath("/World/Changed").GetAttribute("radius").Get() == 2.0
+    assert shadow.GetPrimAtPath("/World/Untouched").GetAttribute("radius").Get() == 3.0
+
+
+def test_owned_shadow_clones_and_advances_local_sublayers():
+    root = Sdf.Layer.CreateAnonymous("owned-shadow-root.usda")
+    sublayer = Sdf.Layer.CreateAnonymous("owned-shadow-edit.usda")
+    root.subLayerPaths.append(sublayer.identifier)
+    stage = Usd.Stage.Open(root)
+    with Usd.EditContext(stage, Usd.EditTarget(sublayer)):
+        stage.DefinePrim("/World/Thing", "Sphere").GetAttribute("radius").Set(1.0)
+    state = ComposedProjectionState(stage)
+    shadow = state.shadow_stage
+
+    assert sublayer.identifier not in shadow.GetRootLayer().subLayerPaths
+    assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 1.0
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        with Usd.EditContext(stage, Usd.EditTarget(sublayer)):
+            stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Set(2.0)
+        assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 1.0
+        assert any(item["k"] == "set_gprim_attrs" for item in projection.build_events())
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 2.0
+
+
+def test_owned_shadow_rebuilds_after_local_sublayer_topology_change():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World", "Xform")
+    state = ComposedProjectionState(stage)
+    old_shadow = state.shadow_stage
+
+    added = Sdf.Layer.CreateAnonymous("owned-shadow-added.usda")
+    added_stage = Usd.Stage.Open(added)
+    added_stage.DefinePrim("/World/Added", "Sphere")
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        stage.GetRootLayer().subLayerPaths.append(added.identifier)
+        projected = projection.build_events()
+        assert any(
+            item["k"] == "ensure_prim" and item["prim"] == "/World/Added"
+            for item in projected
+        )
+        assert not old_shadow.GetPrimAtPath("/World/Added")
+        projection.commit()
+
+    assert state.shadow_stage is not old_shadow
+    assert state.shadow_stage.GetPrimAtPath("/World/Added")
+
+
+def test_owned_shadow_flattens_package_root_and_preserves_resolved_assets(tmp_path):
+    texture = tmp_path / "texture.txt"
+    texture.write_text("asset", encoding="utf-8")
+    source_path = tmp_path / "source.usda"
+    source = Sdf.Layer.CreateNew(str(source_path))
+    source_stage = Usd.Stage.Open(source)
+    sphere = source_stage.DefinePrim("/World/Thing", "Sphere")
+    sphere.GetAttribute("radius").Set(1.0)
+    sphere.CreateAttribute("userProperties:asset", Sdf.ValueTypeNames.Asset).Set(
+        Sdf.AssetPath("texture.txt")
+    )
+    source.Save()
+
+    package_path = tmp_path / "scene.usdz"
+    assert UsdUtils.CreateNewUsdzPackage(
+        Sdf.AssetPath(str(source_path)),
+        str(package_path),
+    )
+    stage = Usd.Stage.Open(str(package_path))
+    state = ComposedProjectionState(stage)
+    shadow = state.shadow_stage
+    live_asset = stage.GetAttributeAtPath("/World/Thing.userProperties:asset").Get()
+    shadow_asset = shadow.GetAttributeAtPath("/World/Thing.userProperties:asset").Get()
+
+    assert shadow.GetRootLayer() is not stage.GetRootLayer()
+    assert shadow_asset.resolvedPath == live_asset.resolvedPath
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        stage.SetEditTarget(stage.GetRootLayer())
+        stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Set(2.0)
+        assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 1.0
+        assert any(item["k"] == "set_gprim_attrs" for item in projection.build_events())
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    assert state.shadow_stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 2.0
+
+
+def test_owned_shadow_survives_context_dependent_resolver_refresh(tmp_path):
+    install_root = Path(pxr.__file__).resolve().parents[3]
+    plugin_info = (
+        install_root
+        / "share"
+        / "usd"
+        / "examples"
+        / "plugin"
+        / "usdResolverExample"
+        / "resources"
+        / "plugInfo.json"
+    )
+    if not plugin_info.is_file():
+        pytest.skip("OpenUSD resolver example plugin is not installed")
+
+    script = textwrap.dedent(
+        r"""
+        import json
+        import sys
+        from pathlib import Path
+
+        from pxr import Ar, Plug, Sdf, Usd
+
+        from openusdconnect.composed_projection import (
+            ComposedChangeProjection,
+            ComposedProjectionState,
+        )
+
+
+        def write_asset(path, radius):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            layer = Sdf.Layer.CreateNew(str(path))
+            stage = Usd.Stage.Open(layer)
+            stage.DefinePrim("/Model", "Xform")
+            stage.DefinePrim("/Model/Geom", "Sphere").GetAttribute("radius").Set(radius)
+            layer.Save()
+
+
+        plugin_info = Path(sys.argv[1])
+        work = Path(sys.argv[2])
+        assert Plug.Registry().RegisterPlugins(str(plugin_info))
+        write_asset(work / "assets" / "Model" / "v1" / "model.usda", 1.0)
+        write_asset(work / "assets" / "Model" / "v2" / "model.usda", 2.0)
+        mapping = work / "versions.json"
+        mapping.write_text(json.dumps({"Model": "v1"}), encoding="utf-8")
+
+        resolver = Ar.GetResolver()
+        context = resolver.CreateContextFromString("asset", str(mapping))
+        root = Sdf.Layer.CreateNew(str(work / "root.usda"))
+        stage = Usd.Stage.Open(root, context)
+        stage.DefinePrim("/World", "Xform").GetReferences().AddReference(
+            "asset:Model/{$VERSION}/model.usda",
+            "/Model",
+        )
+        root.Save()
+
+        state = ComposedProjectionState(stage)
+        shadow = state.shadow_stage
+        assert shadow.GetAttributeAtPath("/World/Geom.radius").Get() == 1.0
+
+        mapping.write_text(json.dumps({"Model": "v2"}), encoding="utf-8")
+        resolver.RefreshContext(context)
+        assert stage.GetAttributeAtPath("/World/Geom.radius").Get() == 2.0
+        assert shadow.GetAttributeAtPath("/World/Geom.radius").Get() == 1.0
+        assert state.needs_full_reconcile
+
+        with ComposedChangeProjection(stage, [], state=state) as projection:
+            projected = projection.build_events()
+            assert any(
+                event["k"] == "set_reference"
+                and event["refs"][0]["asset_path"] == "asset:Model/v2/model.usda"
+                for event in projected
+            )
+            assert any(
+                event["k"] == "set_gprim_attrs"
+                and event["prim"] == "/World/Geom"
+                and event["attrs"]["radius"] == 2.0
+                for event in projected
+            )
+            projection.commit()
+
+        assert shadow.GetAttributeAtPath("/World/Geom.radius").Get() == 2.0
+        assert not state.needs_full_reconcile
+        with ComposedChangeProjection(stage, [], state=state) as projection:
+            assert projection.build_events() == []
+            projection.commit()
+        state.close()
+        """
+    )
+    env = os.environ.copy()
+    env["USD_RESOLVER_EXAMPLE_ASSET_DIR"] = str(tmp_path / "assets")
+    subprocess.run(
+        [sys.executable, "-c", script, str(plugin_info), str(tmp_path)],
+        check=True,
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        timeout=30,
+    )
+
+
+def test_owned_file_shadow_preserves_payload_load_rules(tmp_path):
+    payload_path = tmp_path / "payload.usda"
+    payload = Sdf.Layer.CreateNew(str(payload_path))
+    payload_stage = Usd.Stage.Open(payload)
+    payload_stage.DefinePrim("/Payload", "Xform")
+    payload_stage.DefinePrim("/Payload/Child", "Sphere")
+    payload.Save()
+
+    root_path = tmp_path / "root.usda"
+    root = Sdf.Layer.CreateNew(str(root_path))
+    root_stage = Usd.Stage.Open(root)
+    root_stage.DefinePrim("/World", "Xform").GetPayloads().AddPayload(
+        "payload.usda",
+        "/Payload",
+    )
+    root.Save()
+
+    stage = Usd.Stage.Open(str(root_path), Usd.Stage.LoadNone)
+    stage.Load("/World")
+    state = ComposedProjectionState(stage)
+
+    assert stage.GetPrimAtPath("/World/Child")
+    assert state.shadow_stage.GetPrimAtPath("/World/Child")
+
+
+def test_owned_file_shadow_incrementally_tracks_composed_masking(tmp_path):
+    weak_path = tmp_path / "weak.usda"
+    weak = Sdf.Layer.CreateNew(str(weak_path))
+    weak_stage = Usd.Stage.Open(weak)
+    weak_stage.DefinePrim("/World/Thing", "Sphere").GetAttribute("radius").Set(1.0)
+    weak.Save()
+
+    root_path = tmp_path / "root.usda"
+    root = Sdf.Layer.CreateNew(str(root_path))
+    root.subLayerPaths.append("weak.usda")
+    root_stage = Usd.Stage.Open(root)
+    root_stage.OverridePrim("/World/Thing").GetAttribute("radius").Set(2.0)
+    root.Save()
+
+    stage = Usd.Stage.Open(str(root_path))
+    state = ComposedProjectionState(stage)
+    shadow = state.shadow_stage
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        with Usd.EditContext(stage, Usd.EditTarget(weak)):
+            stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Set(3.0)
+        assert projection.build_events() == []
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 2.0
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        with Usd.EditContext(stage, Usd.EditTarget(root)):
+            stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Clear()
+        projected = projection.build_events()
+        assert any(
+            item["k"] == "set_gprim_attrs"
+            and item["attrs"]["radius"] == pytest.approx(3.0)
+            for item in projected
+        )
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    assert shadow.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 3.0
+
+
+def test_owned_file_shadow_incrementally_tracks_composition_arcs(tmp_path):
+    root_path = tmp_path / "root.usda"
+    root = Sdf.Layer.CreateNew(str(root_path))
+    root_stage = Usd.Stage.Open(root)
+    root_stage.CreateClassPrim("/Class")
+    root_stage.DefinePrim("/Class/Child", "Sphere").GetAttribute("radius").Set(4.0)
+    root_stage.DefinePrim("/World", "Xform")
+    root.Save()
+
+    stage = Usd.Stage.Open(str(root_path))
+    state = ComposedProjectionState(stage)
+    shadow = state.shadow_stage
+    assert not shadow.GetPrimAtPath("/World/Child")
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        stage.GetPrimAtPath("/World").GetInherits().AddInherit("/Class")
+        projected = projection.build_events()
+        assert any(
+            item["k"] == "ensure_prim" and item["prim"] == "/World/Child"
+            for item in projected
+        )
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    shadow_child = shadow.GetPrimAtPath("/World/Child")
+    assert shadow_child
+    assert shadow_child.GetAttribute("radius").Get() == pytest.approx(4.0)
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        stage.GetPrimAtPath("/World").GetInherits().ClearInherits()
+        projected = projection.build_events()
+        assert any(
+            item["k"] == "delete_prim" and item["prim"] == "/World/Child"
+            for item in projected
+        )
+        projection.commit()
+
+    assert state.shadow_stage is shadow
+    assert not shadow.GetPrimAtPath("/World/Child")
 
 
 def test_shadow_projection_state_noop_bind_preserves_shadow_mode():
@@ -301,8 +604,6 @@ def test_shadow_projection_state_noop_bind_preserves_shadow_mode():
     state.bind(live)
 
     assert state.shadow_stage is shadow
-    with pytest.raises(RuntimeError, match="shadow mode"):
-        state.baseline.ensure("/World")
 
 
 def test_layered_shadow_advances_only_after_native_adapter_success():

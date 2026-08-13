@@ -7,8 +7,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import cast
+from weakref import ref
 
-from pxr import Sdf, Tf, Usd, UsdGeom, UsdShade
+from pxr import Ar, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from .protocol_constants import (
     EVENT_KEYS,
@@ -80,8 +81,8 @@ class _ProjectionCandidates:
 
 
 @dataclass(slots=True)
-class _PrimProjectionBaseline:
-    """Adapter-visible state retained for one composed prim."""
+class _PrimProjectionValues:
+    """Adapter-visible values read for one affected composed prim."""
 
     valid: bool = False
     type_state: tuple[str, tuple[str, ...]] | None = None
@@ -98,20 +99,20 @@ class _PrimProjectionBaseline:
 
 
 @dataclass(slots=True)
-class _ProjectionBaseline:
-    """Selected composed state captured immediately before a transaction."""
+class _ProjectionValues:
+    """Selected composed values read from one side of a transaction."""
 
-    prims: dict[str, _PrimProjectionBaseline] = dataclass_field(default_factory=dict)
+    prims: dict[str, _PrimProjectionValues] = dataclass_field(default_factory=dict)
 
-    def ensure(self, prim_path: str) -> _PrimProjectionBaseline:
+    def ensure(self, prim_path: str) -> _PrimProjectionValues:
         state = self.prims.get(prim_path)
         if state is None:
-            state = _PrimProjectionBaseline()
+            state = _PrimProjectionValues()
             self.prims[prim_path] = state
         return state
 
 
-_EMPTY_PRIM_BASELINE = _PrimProjectionBaseline()
+_EMPTY_PRIM_VALUES = _PrimProjectionValues()
 
 
 def _path_is_at_or_below(path: str, root: str) -> bool:
@@ -135,6 +136,208 @@ def _is_projectable_prim(prim: Usd.Prim) -> bool:
     return bool(prim.GetTypeName() or prim.GetAuthoredProperties() or not tuple(prim.GetChildren()))
 
 
+class _OwnedStageShadow:
+    """Independent shadow for callers without an externally managed stage.
+
+    All-anonymous root/session sublayer trees are cloned exactly with
+    ``TransferContent`` and identifier rewiring. File-backed local layers use
+    ``UsdUtils.FlattenLayerStack`` so relative asset paths retain their source
+    anchors while references, payloads, inherits, specializes, and variants
+    remain composition arcs.
+    """
+
+    def __init__(self, live_stage: Usd.Stage):
+        self._live_stage = live_stage
+        self._stage: Usd.Stage | None = None
+        self._sources: dict[str, Sdf.Layer] = {}
+        self._clones: dict[str, Sdf.Layer] = {}
+        self._flattened = False
+        self._rebuild()
+
+    @property
+    def stage(self) -> Usd.Stage:
+        if self._stage is None:
+            raise RuntimeError("owned projection shadow is closed")
+        return self._stage
+
+    @staticmethod
+    def _resolve_sublayer(layer: Sdf.Layer, path: str) -> Sdf.Layer | None:
+        return Sdf.Layer.FindRelativeToLayer(
+            layer,
+            path,
+        ) or Sdf.Layer.FindOrOpenRelativeToLayer(layer, path)
+
+    @classmethod
+    def _collect_local_layers(cls, stage: Usd.Stage) -> dict[str, Sdf.Layer]:
+        result: dict[str, Sdf.Layer] = {}
+
+        def collect(layer: Sdf.Layer) -> None:
+            if layer.identifier in result:
+                return
+            result[layer.identifier] = layer
+            for path in layer.subLayerPaths:
+                child = cls._resolve_sublayer(layer, path)
+                if child is not None:
+                    collect(child)
+
+        collect(stage.GetRootLayer())
+        collect(stage.GetSessionLayer())
+        return result
+
+    @staticmethod
+    def _clone_layer(source: Sdf.Layer) -> Sdf.Layer:
+        extension = source.GetFileFormat().primaryFileExtension or "usda"
+        clone = Sdf.Layer.CreateAnonymous(f"projection-shadow.{extension}")
+        clone.TransferContent(source)
+        return clone
+
+    @staticmethod
+    def _freeze_asset_path(source_layer: Sdf.Layer, asset_path: str) -> str:
+        """Keep resolver-dependent paths fixed at their current resolution."""
+        anchored = UsdUtils.FlattenLayerStackResolveAssetPath(
+            source_layer,
+            asset_path,
+        )
+        resolver = Ar.GetResolver()
+        if not (
+            resolver.IsContextDependentPath(asset_path)
+            or resolver.IsContextDependentPath(anchored)
+        ):
+            return anchored
+        resolved = resolver.Resolve(anchored)
+        return str(resolved) if resolved else anchored
+
+    def _rewire_sublayers(self) -> None:
+        for identifier, source in self._sources.items():
+            clone = self._clones[identifier]
+            for index, path in enumerate(tuple(source.subLayerPaths)):
+                child = self._resolve_sublayer(source, path)
+                if child is None:
+                    continue
+                child_clone = self._clones.get(child.identifier)
+                if child_clone is not None:
+                    clone.subLayerPaths[index] = child_clone.identifier
+
+    def _mapped_muted_layers(self) -> set[str]:
+        return {
+            self._clones[identifier].identifier
+            if identifier in self._clones
+            else identifier
+            for identifier in self._live_stage.GetMutedLayers()
+        }
+
+    def _sync_runtime_state(self) -> None:
+        shadow = self.stage
+        live = self._live_stage
+        population_mask = live.GetPopulationMask()
+        if shadow.GetPopulationMask() != population_mask:
+            shadow.SetPopulationMask(population_mask)
+
+        load_rules = live.GetLoadRules()
+        if shadow.GetLoadRules() != load_rules:
+            shadow.SetLoadRules(load_rules)
+        if self._flattened:
+            return
+
+        desired_muted = self._mapped_muted_layers()
+        current_muted = set(shadow.GetMutedLayers())
+        to_mute = sorted(desired_muted - current_muted)
+        to_unmute = sorted(current_muted - desired_muted)
+        if to_mute or to_unmute:
+            shadow.MuteAndUnmuteLayers(to_mute, to_unmute)
+
+    def prepare(self) -> None:
+        """Follow runtime mask/load changes without advancing authored state."""
+        self._sync_runtime_state()
+
+    def advance(self, projected_events: list[dict] | None) -> None:
+        """Advance native-visible state after adapter success.
+
+        File-backed shadows are already a consolidated local layer stack, so
+        the projected adapter batch is their cheapest exact advancement. A
+        caller that commits without building events falls back to rebuilding.
+        """
+        if self._flattened:
+            if projected_events is None:
+                self._rebuild()
+                return
+            from .adapters import UsdStageAdapter
+
+            shadow = self.stage
+            if not projected_events:
+                self._sync_runtime_state()
+                return
+            try:
+                with Usd.EditContext(shadow, shadow.GetRootLayer()):
+                    UsdStageAdapter(shadow).apply_events(projected_events)
+                self._sync_runtime_state()
+            except Exception:
+                self._rebuild()
+            return
+
+        current_sources = self._collect_local_layers(self._live_stage)
+        if set(current_sources) != set(self._sources):
+            self._rebuild(current_sources)
+            return
+
+        self._sources = current_sources
+        with Sdf.ChangeBlock():
+            for identifier, source in self._sources.items():
+                self._clones[identifier].TransferContent(source)
+            self._rewire_sublayers()
+        self._sync_runtime_state()
+
+    def _rebuild(self, sources: dict[str, Sdf.Layer] | None = None) -> None:
+        live = self._live_stage
+        self._stage = None
+        self._sources = sources or self._collect_local_layers(live)
+        self._flattened = any(not layer.anonymous for layer in self._sources.values())
+        if self._flattened:
+            root = UsdUtils.FlattenLayerStack(
+                live,
+                resolveAssetPathFn=self._freeze_asset_path,
+            )
+            session = Sdf.Layer.CreateAnonymous("projection-shadow-session.usda")
+            shadow = Usd.Stage.OpenMasked(
+                root,
+                session,
+                live.GetPathResolverContext(),
+                live.GetPopulationMask(),
+                Usd.Stage.LoadNone,
+            )
+            if shadow is None:
+                raise RuntimeError("could not open flattened local-stack projection shadow")
+            self._clones = {}
+            self._stage = shadow
+            self._sync_runtime_state()
+            return
+
+        self._clones = {
+            identifier: self._clone_layer(source)
+            for identifier, source in self._sources.items()
+        }
+        self._rewire_sublayers()
+        root = self._clones[live.GetRootLayer().identifier]
+        session = self._clones[live.GetSessionLayer().identifier]
+        shadow = Usd.Stage.OpenMasked(
+            root,
+            session,
+            live.GetPathResolverContext(),
+            live.GetPopulationMask(),
+            Usd.Stage.LoadNone,
+        )
+        if shadow is None:
+            raise RuntimeError("could not open owned projection shadow stage")
+        self._stage = shadow
+        self._sync_runtime_state()
+
+    def close(self) -> None:
+        self._stage = None
+        self._sources.clear()
+        self._clones.clear()
+        self._flattened = False
+
+
 class ComposedProjectionState:
     """Last successfully applied native-visible state for one mirror stage.
 
@@ -143,8 +346,10 @@ class ComposedProjectionState:
     those post-change paths diffable without accessing the private Pcp cache,
     scanning every prim, or retaining a Python snapshot of the whole stage.
 
-    The snapshot fallback remains available for standalone callers that do
-    not supply ``shadow_stage``. Layered dispatch uses the shadow path.
+    Layered dispatch supplies its incrementally-replayed shadow. Standalone
+    callers receive an owned shadow with independent clones of the editable
+    root/session sublayer trees. File-backed local stacks use OpenUSD's native
+    layer-stack flattening so relative asset paths remain correctly anchored.
     """
 
     def __init__(
@@ -157,7 +362,9 @@ class ComposedProjectionState:
         self._stage: Usd.Stage | None = None
         self._shadow_stage: Usd.Stage | None = None
         self._advance_shadow: Callable[[], None] | None = None
-        self._baseline: _ProjectionBaseline | None = None
+        self._owned_shadow: _OwnedStageShadow | None = None
+        self._resolver_notice_key = None
+        self._resolver_notice_callback = None
         self._needs_full_reconcile = False
         if stage is not None:
             self.bind(
@@ -165,14 +372,6 @@ class ComposedProjectionState:
                 shadow_stage=shadow_stage,
                 advance_shadow=advance_shadow,
             )
-
-    @property
-    def baseline(self) -> _ProjectionBaseline:
-        if self._baseline is None:
-            if self._shadow_stage is not None:
-                raise RuntimeError("snapshot baseline is unavailable in shadow mode")
-            raise RuntimeError("composed projection state is not bound")
-        return self._baseline
 
     @property
     def needs_full_reconcile(self) -> bool:
@@ -184,7 +383,35 @@ class ComposedProjectionState:
 
     @property
     def shadow_stage(self) -> Usd.Stage | None:
+        if self._owned_shadow is not None:
+            return self._owned_shadow.stage
         return self._shadow_stage
+
+    def _on_resolver_changed(self, notice, _sender) -> None:
+        stage = self._stage
+        if stage is not None and notice.AffectsContext(stage.GetPathResolverContext()):
+            self.require_full_reconcile()
+
+    def _ensure_resolver_listener(self) -> None:
+        if self._resolver_notice_key is None:
+            state_ref = ref(self)
+
+            def on_resolver_changed(notice, sender) -> None:
+                state = state_ref()
+                if state is not None:
+                    state._on_resolver_changed(notice, sender)
+
+            self._resolver_notice_callback = on_resolver_changed
+            self._resolver_notice_key = Tf.Notice.RegisterGlobally(
+                Ar.Notice.ResolverChanged,
+                self._resolver_notice_callback,
+            )
+
+    def prepare(self, stage: Usd.Stage) -> None:
+        if self._stage is not stage:
+            self.bind(stage)
+        elif self._owned_shadow is not None:
+            self._owned_shadow.prepare()
 
     def bind(
         self,
@@ -193,6 +420,7 @@ class ComposedProjectionState:
         shadow_stage: Usd.Stage | None = None,
         advance_shadow: Callable[[], None] | None = None,
     ) -> None:
+        self._ensure_resolver_listener()
         if stage is self._stage and shadow_stage is None and advance_shadow is None:
             return
         if shadow_stage is stage:
@@ -202,30 +430,32 @@ class ComposedProjectionState:
         if (
             stage is self._stage
             and shadow_stage is self._shadow_stage
-            and (shadow_stage is not None or self._baseline is not None)
+            and shadow_stage is not None
         ):
             self._advance_shadow = advance_shadow
             return
+        if self._owned_shadow is not None:
+            self._owned_shadow.close()
         self._stage = stage
         self._shadow_stage = shadow_stage
         self._advance_shadow = advance_shadow
-        self._baseline = (
-            None
-            if shadow_stage is not None
-            else ComposedChangeProjection._capture_scope(
-                stage,
-                ("/",),
-                recurse=True,
-            )
+        self._owned_shadow = (
+            _OwnedStageShadow(stage) if shadow_stage is None else None
         )
         self._needs_full_reconcile = False
 
     def close(self) -> None:
+        if self._owned_shadow is not None:
+            self._owned_shadow.close()
         self._stage = None
         self._shadow_stage = None
         self._advance_shadow = None
-        self._baseline = None
+        self._owned_shadow = None
         self._needs_full_reconcile = False
+        if self._resolver_notice_key is not None:
+            self._resolver_notice_key.Revoke()
+            self._resolver_notice_key = None
+            self._resolver_notice_callback = None
 
     def require_full_reconcile(self) -> None:
         """Keep the last adapter baseline but widen the next projection."""
@@ -240,55 +470,14 @@ class ComposedProjectionState:
         if stage is not self._stage:
             raise ValueError("projection stage no longer matches persistent state")
 
-        if self._shadow_stage is not None:
+        if self._owned_shadow is not None:
+            self._owned_shadow.advance(projection._projected_events)
+        elif self._shadow_stage is not None:
             if self._advance_shadow is None:
                 raise RuntimeError("shadow projection state cannot advance")
             self._advance_shadow()
-            self._needs_full_reconcile = False
-            return
-
-        subtree_roots = set(projection._resync_prim_roots)
-        exact_paths = set(projection._affected_prim_paths)
-        exact_paths = {
-            path
-            for path in exact_paths
-            if not any(_path_is_at_or_below(path, root) for root in subtree_roots)
-        }
-
-        if not subtree_roots and not exact_paths:
-            self._needs_full_reconcile = False
-            return
-
-        if "/" in subtree_roots:
-            self._baseline = ComposedChangeProjection._capture_scope(
-                stage,
-                ("/",),
-                recurse=True,
-            )
-            self._needs_full_reconcile = False
-            return
-
-        if subtree_roots:
-            removed_paths = {
-                path
-                for path in self.baseline.prims
-                if any(_path_is_at_or_below(path, root) for root in subtree_roots)
-            }
-            for path in removed_paths:
-                self.baseline.prims.pop(path, None)
-            self.baseline.prims.update(
-                ComposedChangeProjection._capture_scope(
-                    stage, subtree_roots, recurse=True
-                ).prims
-            )
-        if exact_paths:
-            for path in exact_paths:
-                self.baseline.prims.pop(path, None)
-            self.baseline.prims.update(
-                ComposedChangeProjection._capture_scope(
-                    stage, exact_paths, recurse=False
-                ).prims
-            )
+        else:
+            raise RuntimeError("composed projection state has no shadow")
         self._needs_full_reconcile = False
 
 
@@ -625,14 +814,14 @@ class ComposedChangeProjection:
         self._events = events
         self._validate_events(events)
         self._state = state or ComposedProjectionState(stage)
-        if self._state.stage is not stage:
-            self._state.bind(stage)
+        self._state.prepare(stage)
         self._reset = reset
         self._resynced_paths: set[Sdf.Path] = set()
         self._changed_info_paths: set[Sdf.Path] = set()
         self._asset_resync_paths: set[Sdf.Path] = set()
         self._resync_prim_roots: set[str] = set()
         self._affected_prim_paths: set[str] = set()
+        self._projected_events: list[dict] | None = None
         self._notice_key = None
         self._prepare_reapplication_scope(
             reapply_all_composed=reapply_all_composed,
@@ -647,9 +836,7 @@ class ComposedChangeProjection:
             initial_scene_paths,
             extra_arc_candidates,
         )
-        self._before = (
-            None if self._state.shadow_stage is not None else self._state.baseline
-        )
+        self._before: _ProjectionValues | None = None
         if self._state.needs_full_reconcile:
             self._resynced_paths.add(Sdf.Path.absoluteRootPath)
             self._reapply_all_composed = True
@@ -772,10 +959,10 @@ class ComposedChangeProjection:
         self._add_scene_path_candidates(scene_paths)
         self._add_subtree_candidates(self._subtree_roots)
 
-    def _capture_baseline(self) -> _ProjectionBaseline:
+    def _capture_candidate_values(self) -> _ProjectionValues:
         stage = self._stage
         candidates = self._candidates
-        result = _ProjectionBaseline()
+        result = _ProjectionValues()
         for prim_path in candidates.prims:
             result.ensure(prim_path).valid = _is_projectable_prim(
                 stage.GetPrimAtPath(prim_path)
@@ -846,74 +1033,11 @@ class ComposedChangeProjection:
         cls,
         stage: Usd.Stage,
         candidates: _ProjectionCandidates,
-    ) -> _ProjectionBaseline:
+    ) -> _ProjectionValues:
         capture = cls.__new__(cls)
         capture._stage = stage
         capture._candidates = candidates
-        return capture._capture_baseline()
-
-    @classmethod
-    def _capture_scope(
-        cls,
-        stage: Usd.Stage,
-        prim_paths: Iterable[str],
-        *,
-        recurse: bool,
-    ) -> _ProjectionBaseline:
-        """Capture complete adapter-visible state for selected prim scopes."""
-        capture = cls.__new__(cls)
-        capture._stage = stage
-        capture._candidates = _ProjectionCandidates()
-        if recurse:
-            capture._add_subtree_candidates(prim_paths)
-        else:
-            for prim_path in prim_paths:
-                capture._add_prim_candidates(stage.GetPrimAtPath(prim_path))
-        return cls._capture_candidates(stage, capture._candidates)
-
-    def _add_baseline_candidates(
-        self,
-        prim_paths: Iterable[str],
-        *,
-        recurse: bool,
-    ) -> None:
-        """Restore pre-change candidates that no longer exist on the stage."""
-        roots = tuple(prim_paths)
-        if not roots:
-            return
-
-        def included(path: str) -> bool:
-            return any(
-                _path_is_at_or_below(path, root) if recurse else path == root for root in roots
-            )
-
-        before = self._before
-        if before is None:
-            raise RuntimeError("snapshot baseline is unavailable in shadow mode")
-        candidates = self._candidates
-        for prim_path, state in before.prims.items():
-            if not included(prim_path):
-                continue
-            candidates.prims.add(prim_path)
-            candidates.types.add(prim_path)
-            candidates.xforms.update((prim_path, time) for time in state.xforms or ())
-            for time, values in (state.gprim or {}).items():
-                candidates.gprim[(prim_path, time)].update(values)
-            if state.variants:
-                candidates.variants.add(prim_path)
-            candidates.materials.update(
-                (prim_path, purpose) for purpose in state.materials or ()
-            )
-            for time in state.connectables or ():
-                candidates.connectables[(prim_path, time)].add("*")
-            candidates.active.add(prim_path)
-            candidates.visibility.update(
-                (prim_path, time) for time in state.visibility or ()
-            )
-            candidates.instanceable.add(prim_path)
-            for time, values in (state.point_instancers or {}).items():
-                candidates.point_instancers[(prim_path, time)].update(values)
-            candidates.arcs.update((prim_path, kind) for kind in state.arcs or ())
+        return capture._capture_candidate_values()
 
     def _should_reapply_composed(self, prim_path: str) -> bool:
         return self._reapply_all_composed or prim_path in self._reapply_composed_paths
@@ -1263,12 +1387,11 @@ class ComposedChangeProjection:
 
         before_stage = self._state.shadow_stage
         if before_stage is None:
-            self._add_baseline_candidates(self._resync_prim_roots, recurse=True)
-        else:
-            self._add_subtree_candidates(
-                self._resync_prim_roots,
-                stage=before_stage,
-            )
+            raise RuntimeError("composed projection state has no shadow stage")
+        self._add_subtree_candidates(
+            self._resync_prim_roots,
+            stage=before_stage,
+        )
         self._add_subtree_candidates(self._resync_prim_roots)
         prim_scene_paths = {path for path in exact_scene_paths if not path.IsPropertyPath()}
         property_scene_paths = exact_scene_paths - prim_scene_paths
@@ -1277,16 +1400,15 @@ class ComposedChangeProjection:
             property_scene_paths,
             include_prim_state=False,
         )
-        if before_stage is not None:
-            self._add_scene_path_candidates(
-                prim_scene_paths,
-                stage=before_stage,
-            )
-            self._add_scene_path_candidates(
-                property_scene_paths,
-                include_prim_state=False,
-                stage=before_stage,
-            )
+        self._add_scene_path_candidates(
+            prim_scene_paths,
+            stage=before_stage,
+        )
+        self._add_scene_path_candidates(
+            property_scene_paths,
+            include_prim_state=False,
+            stage=before_stage,
+        )
 
     def _record_affected_prim_paths(self) -> None:
         candidates = self._candidates
@@ -1303,10 +1425,10 @@ class ComposedChangeProjection:
         paths.update(key[0] for key in candidates.arcs)
         self._affected_prim_paths = {path for path in paths if path and path != "/"}
 
-    def _before_state(self, prim_path: str) -> _PrimProjectionBaseline:
+    def _before_state(self, prim_path: str) -> _PrimProjectionValues:
         if self._before is None:
             raise RuntimeError("projection before-state has not been captured")
-        return self._before.prims.get(prim_path, _EMPTY_PRIM_BASELINE)
+        return self._before.prims.get(prim_path, _EMPTY_PRIM_VALUES)
 
     def build_events(self) -> list[dict]:
         """Return adapter events representing the post-transaction composition."""
@@ -1326,6 +1448,7 @@ class ComposedChangeProjection:
         projected: list[dict] = []
         for step in _PROJECTION_STEPS:
             projected.extend(getattr(self, step.method_name)())
+        self._projected_events = projected
         return projected
 
     def commit(self) -> None:
