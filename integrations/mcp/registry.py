@@ -398,9 +398,10 @@ TOOL_TABLE: dict[str, ToolRow] = {
     ),
     K_SET_PAYLOAD: ToolRow(
         K_SET_PAYLOAD,
-        "Replace the current edit target's payload list op (unloaded by default). "
+        "Replace the current edit target's payload list op without changing the "
+        "stage's current payload load rules. "
         "Arc entries accept asset_path, prim_path, list_position, layer_offset, "
-        "and layer_scale. Follow with load_payload to materialize.",
+        "and layer_scale. Use load_payload or unload_payload to change runtime state.",
         _set_payload,
     ),
     K_LOAD_PAYLOAD: ToolRow(K_LOAD_PAYLOAD, "Load a prim's payload children.", _load_payload),

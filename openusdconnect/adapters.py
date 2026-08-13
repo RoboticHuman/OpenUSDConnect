@@ -19,9 +19,6 @@ from .event_apply import (
 from .event_apply import (
     apply_events as _apply_events_to_stage,
 )
-from .event_apply import (
-    ensure_canonical_ops as _ensure_canonical_ops,
-)
 from .protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -398,6 +395,13 @@ class DCCAdapter(ABC):
         list_op_authored: bool,
         list_op_explicit: bool,
     ) -> bool:
+        """Author payload arcs without changing runtime load state.
+
+        Payload list editing and working-set control are separate protocol
+        operations. Implementations must leave their current loaded/unloaded
+        state unchanged here; :meth:`load_payload` and :meth:`unload_payload`
+        apply explicit runtime-state changes.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -642,7 +646,10 @@ class ShaderMapperRegistry:
 class UsdStageAdapter(DCCAdapter):
     """Applies events to a Usd.Stage via event_apply functions.
 
-    Suitable for headless receivers and server-side USD consumers.
+    Suitable for headless receivers and server-side USD consumers. Direct
+    semantic methods construct protocol events and use the same registered
+    appliers as network delivery; batches retain event_apply's optimized
+    ordering path.
     """
 
     def __init__(self, stage):
@@ -653,7 +660,7 @@ class UsdStageAdapter(DCCAdapter):
     def targets_stage(self):
         return self.stage
 
-    def apply_event(self, event: dict):
+    def apply_event(self, event: dict) -> bool:
         _apply_event_to_stage(self.stage, event)
         return True
 
@@ -667,20 +674,17 @@ class UsdStageAdapter(DCCAdapter):
         type_name: str = "Xform",
         api_schemas: list[str] | None = None,
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {
                 "k": K_ENSURE_PRIM,
                 "prim": prim_path,
                 "typeName": type_name,
                 "api_schemas": list(api_schemas or []),
-            },
+            }
         )
-        return True
 
     def ensure_xform_ops(self, prim_path: str) -> bool:
-        _ensure_canonical_ops(self.stage, prim_path)
-        return True
+        return self.apply_event({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
 
     def set_xform_trs(
         self,
@@ -704,26 +708,20 @@ class UsdStageAdapter(DCCAdapter):
             payload["s"] = s
         if time is not None:
             payload["time"] = time
-        _apply_event_to_stage(self.stage, payload)
-        return True
+        return self.apply_event(payload)
 
     def delete_prim(self, prim_path: str) -> bool:
-        self.stage.RemovePrim(prim_path)
-        return True
+        return self.apply_event({"k": K_DELETE_PRIM, "prim": prim_path})
 
     def deactivate_prim(self, prim_path: str, active: bool = False) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": active},
         )
-        return True
 
     def rename_prim(self, prim_path: str, new_name: str) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {"k": K_RENAME_PRIM, "prim": prim_path, "new_name": new_name},
         )
-        return True
 
     def set_visibility(
         self,
@@ -734,8 +732,7 @@ class UsdStageAdapter(DCCAdapter):
         ev: dict = {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": visible}
         if time is not None:
             ev["time"] = time
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
     def set_gprim_attrs(
         self,
@@ -746,8 +743,7 @@ class UsdStageAdapter(DCCAdapter):
         ev: dict = {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": attrs}
         if time is not None:
             ev["time"] = time
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
     def set_sdf_spec_fields(
         self,
@@ -758,8 +754,7 @@ class UsdStageAdapter(DCCAdapter):
         fragment: str,
         removed: bool = False,
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {
                 "k": K_SET_SDF_SPEC_FIELDS,
                 "prim": prim_path,
@@ -768,9 +763,34 @@ class UsdStageAdapter(DCCAdapter):
                 "fields": fields,
                 "fragment": fragment,
                 "removed": removed,
-            },
+            }
         )
-        return True
+
+    def set_sublayers(
+        self,
+        sublayers: list[dict],
+        *,
+        generation: str,
+        revision: int,
+    ) -> bool:
+        return self.apply_event(
+            {
+                "k": K_SET_SUBLAYERS,
+                "prim": "/",
+                "sublayers": sublayers,
+                "generation": generation,
+                "revision": revision,
+            }
+        )
+
+    def replace_sdf_layer_content(self, fragment: str) -> bool:
+        return self.apply_event(
+            {
+                "k": K_REPLACE_SDF_LAYER_CONTENT,
+                "prim": "/",
+                "fragment": fragment,
+            }
+        )
 
     def set_reference(
         self,
@@ -780,17 +800,15 @@ class UsdStageAdapter(DCCAdapter):
         list_op_authored: bool = True,
         list_op_explicit: bool = False,
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {
                 "k": K_SET_REFERENCE,
                 "prim": prim_path,
                 "refs": refs,
                 "list_op_authored": list_op_authored,
                 "list_op_explicit": list_op_explicit,
-            },
+            }
         )
-        return True
 
     def set_payload(
         self,
@@ -800,35 +818,26 @@ class UsdStageAdapter(DCCAdapter):
         list_op_authored: bool = True,
         list_op_explicit: bool = False,
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {
                 "k": K_SET_PAYLOAD,
                 "prim": prim_path,
                 "payloads": payloads,
                 "list_op_authored": list_op_authored,
                 "list_op_explicit": list_op_explicit,
-            },
+            }
         )
-        prim = self.stage.GetPrimAtPath(prim_path)
-        if prim and prim.HasPayload():
-            self.stage.Unload(prim_path)
-        return True
 
     def load_payload(self, prim_path: str) -> bool:
-        _apply_event_to_stage(self.stage, {"k": K_LOAD_PAYLOAD, "prim": prim_path})
-        return True
+        return self.apply_event({"k": K_LOAD_PAYLOAD, "prim": prim_path})
 
     def unload_payload(self, prim_path: str) -> bool:
-        _apply_event_to_stage(self.stage, {"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
-        return True
+        return self.apply_event({"k": K_UNLOAD_PAYLOAD, "prim": prim_path})
 
     def set_variant_selections(self, prim_path: str, selections: dict[str, str]) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {"k": K_SET_VARIANT_SELECTIONS, "prim": prim_path, "selections": selections},
         )
-        return True
 
     def set_material_binding(
         self,
@@ -843,8 +852,7 @@ class UsdStageAdapter(DCCAdapter):
         }
         if material_purpose:
             ev["material_purpose"] = material_purpose
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
     def set_connectable_input(
         self,
@@ -863,8 +871,7 @@ class UsdStageAdapter(DCCAdapter):
         }
         if time is not None:
             ev["time"] = time
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
     def set_stage_metadata(
         self,
@@ -887,29 +894,24 @@ class UsdStageAdapter(DCCAdapter):
         ):
             if val is not None:
                 ev[key] = val
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
     def set_connectable_connection(
         self, prim_path: str, connections: dict, disconnections: list | None = None
     ) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {
                 "k": K_SET_CONNECTABLE_CONNECTION,
                 "prim": prim_path,
                 "connections": connections,
                 "disconnections": disconnections or [],
-            },
+            }
         )
-        return True
 
     def set_instanceable(self, prim_path: str, instanceable: bool) -> bool:
-        _apply_event_to_stage(
-            self.stage,
+        return self.apply_event(
             {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": instanceable},
         )
-        return True
 
     def set_point_instancer(
         self,
@@ -950,8 +952,7 @@ class UsdStageAdapter(DCCAdapter):
         }
         if time is not None:
             ev["time"] = time
-        _apply_event_to_stage(self.stage, ev)
-        return True
+        return self.apply_event(ev)
 
 
 class MockAdapter(DCCAdapter):

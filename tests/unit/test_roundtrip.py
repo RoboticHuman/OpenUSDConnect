@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.emitter import NoticeEmitter, decompose_trs_from_matrix, near_list
-from openusdconnect.event_apply import apply_events, ensure_canonical_ops
+from openusdconnect.event_apply import apply_event, apply_events, ensure_canonical_ops
 from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
@@ -316,7 +316,7 @@ class TestPayloadRoundtrip:
     """Payload-specific roundtrip tests."""
 
     def test_payload_via_adapter(self):
-        """UsdStageAdapter writes the payload arc and unloads the prim."""
+        """UsdStageAdapter writes the payload arc."""
         pay_stage = Usd.Stage.CreateInMemory("payload_src.usda")
         pay_stage.DefinePrim("/Model", "Xform")
         pay_layer = pay_stage.GetRootLayer()
@@ -361,8 +361,8 @@ class TestPayloadRoundtrip:
         assert prim_b.IsValid()
         assert prim_b.HasAuthoredPayloads()
 
-    def test_payload_unloaded_by_default(self):
-        """After UsdStageAdapter.set_payload(), prim payload is not loaded."""
+    def test_set_payload_preserves_default_load_rules(self):
+        """Payload authoring does not implicitly change the stage working set."""
         pay_stage = Usd.Stage.CreateInMemory("pay_unload.usda")
         pay_stage.DefinePrim("/Model", "Xform")
         pay_stage.DefinePrim("/Model/Child", "Cube")
@@ -376,13 +376,49 @@ class TestPayloadRoundtrip:
             "/World/Heavy",
             [{"asset_path": pay_layer.identifier, "prim_path": "/Model"}],
         )
-        # The payload arc is authored but the prim should be unloaded
         prim = stage.GetPrimAtPath("/World/Heavy")
         assert prim.IsValid()
         assert prim.HasAuthoredPayloads()
-        # Child from payload should NOT be visible (unloaded)
+        assert prim.IsLoaded()
         child = stage.GetPrimAtPath("/World/Heavy/Child")
-        assert not child or not child.IsValid()
+        assert child.IsValid()
+
+    @pytest.mark.parametrize("initially_loaded", [True, False])
+    def test_direct_and_event_payload_paths_preserve_the_same_load_rules(
+        self, initially_loaded
+    ):
+        payload_stage = Usd.Stage.CreateInMemory("payload_parity.usda")
+        payload_stage.DefinePrim("/Model", "Xform")
+        payload_stage.DefinePrim("/Model/Child", "Cube")
+        event = {
+            "k": K_SET_PAYLOAD,
+            "prim": "/World/Asset",
+            "payloads": [
+                {
+                    "asset_path": payload_stage.GetRootLayer().identifier,
+                    "prim_path": "/Model",
+                }
+            ],
+        }
+        direct_stage = Usd.Stage.CreateInMemory()
+        event_stage = Usd.Stage.CreateInMemory()
+        for target in (direct_stage, event_stage):
+            target.DefinePrim("/World/Asset", "Xform")
+            if not initially_loaded:
+                target.Unload("/World/Asset")
+
+        UsdStageAdapter(direct_stage).set_payload("/World/Asset", event["payloads"])
+        apply_event(event_stage, event)
+
+        direct_prim = direct_stage.GetPrimAtPath("/World/Asset")
+        event_prim = event_stage.GetPrimAtPath("/World/Asset")
+        assert direct_prim.IsLoaded() is initially_loaded
+        assert event_prim.IsLoaded() is initially_loaded
+        assert str(direct_stage.GetLoadRules()) == str(event_stage.GetLoadRules())
+        assert (
+            direct_stage.GetRootLayer().ExportToString()
+            == event_stage.GetRootLayer().ExportToString()
+        )
 
     def test_payload_can_be_loaded_after_receive(self):
         """User can manually load a payload after receive."""
@@ -399,7 +435,7 @@ class TestPayloadRoundtrip:
             "/World/Loadable",
             [{"asset_path": pay_layer.identifier, "prim_path": "/Model"}],
         )
-        # Initially unloaded
+        adapter.unload_payload("/World/Loadable")
         child = stage.GetPrimAtPath("/World/Loadable/Geo")
         assert not child or not child.IsValid()
 
@@ -476,7 +512,7 @@ class TestPayloadRoundtrip:
         adapter = UsdStageAdapter(stage)
         adapter.ensure_prim("/World/Asset")
         adapter.set_payload("/World/Asset", [{"asset_path": payload_path, "prim_path": "/Model"}])
-        # set_payload unloads by default
+        adapter.unload_payload("/World/Asset")
         assert not adapter.stage.GetPrimAtPath("/World/Asset").IsLoaded()
 
         adapter.load_payload("/World/Asset")
