@@ -46,6 +46,45 @@ def _event_kinds(events, prim_path):
     return [event["k"] for event in events if event.get("prim") == prim_path]
 
 
+def test_snapshot_skips_composed_traversal_for_truly_empty_edit_target(monkeypatch):
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Base", "Xform")
+    authoring = Sdf.Layer.CreateAnonymous("empty-authoring.usda")
+    stage.GetSessionLayer().subLayerPaths.append(authoring.identifier)
+    stage.SetEditTarget(Usd.EditTarget(authoring))
+    emitter = NoticeEmitter(stage)
+
+    def fail_if_traversed(_root):
+        raise AssertionError("empty edit target traversed the composed stage")
+
+    monkeypatch.setattr(Usd, "PrimRange", fail_if_traversed)
+    try:
+        assert emitter.snapshot_events() == []
+    finally:
+        emitter.cleanup()
+
+
+def test_snapshot_does_not_skip_metadata_only_edit_target():
+    stage = Usd.Stage.CreateInMemory()
+    authoring = Sdf.Layer.CreateAnonymous("metadata-authoring.usda")
+    authoring.comment = "authored metadata"
+    stage.GetSessionLayer().subLayerPaths.append(authoring.identifier)
+    stage.SetEditTarget(Usd.EditTarget(authoring))
+    emitter = NoticeEmitter(stage)
+
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    assert any(
+        event["k"] == K_SET_SDF_SPEC_FIELDS
+        and event["spec_path"] == "/"
+        and "comment" in event["fields"]
+        for event in events
+    )
+
+
 def test_snapshot_emits_reference_without_composed_descendant_baseline(tmp_path):
     source = _make_reference_stage(_make_sphere_asset(tmp_path))
     emitter = NoticeEmitter(source)

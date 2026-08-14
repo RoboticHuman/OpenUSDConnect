@@ -3070,7 +3070,10 @@ class NoticeEmitter:
 
     def _mark_snapshot_dirty(self) -> None:
         """Mark every authored prim and Sdf spec for one full snapshot."""
-        self._record_edit_target()
+        edit_target = self._record_edit_target()
+        layer = edit_target.GetLayer()
+        if layer.empty and not layer.pseudoRoot.ListInfoKeys():
+            return
         self._full_sdf_spec_scan = True
         for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
             path = str(prim.GetPath())
