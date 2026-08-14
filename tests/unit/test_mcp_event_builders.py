@@ -7,10 +7,7 @@ import math
 import pytest
 
 from integrations.mcp.registry import TOOL_TABLE, euler_to_quat_wxyz
-from openusdconnect.protocol_constants import (
-    K_SET_STAGE_METADATA,
-    POINT_INSTANCER_FIELDS,
-)
+from openusdconnect.protocol_constants import POINT_INSTANCER_FIELDS
 from openusdconnect.protocol_validation import validate_event
 
 # Representative args per kind, also the inputs the consistency loop validates.
@@ -61,7 +58,8 @@ SAMPLE_ARGS: dict[str, dict] = {
         "spec_kind": "attribute",
         "fields": ["default"],
         "fragment": (
-            '#usda 1.0\n\nover "World" { over "A" { custom double userProperties:weight = 1 } }\n'
+            '#usda 1.0\n\nover "World"\n{\n    over "A"\n    {\n'
+            "        custom double userProperties:weight = 1\n    }\n}\n"
         ),
     },
     "replace_sdf_layer_content": {"fragment": "#usda 1.0\n"},
@@ -80,9 +78,7 @@ def test_sample_args_cover_all_kinds():
 def test_build_emits_matching_kind_and_passes_shape(kind):
     ev = TOOL_TABLE[kind].build(**SAMPLE_ARGS[kind])
     assert ev["k"] == kind
-    if kind != K_SET_STAGE_METADATA:
-        # set_stage_metadata carries no "prim", which validate_event requires.
-        assert validate_event(ev), f"{kind}: {ev}"
+    assert validate_event(ev), f"{kind}: {ev}"
 
 
 def test_set_stage_metadata_has_no_prim():

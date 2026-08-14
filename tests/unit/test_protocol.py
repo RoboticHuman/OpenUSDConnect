@@ -48,6 +48,8 @@ from openusdconnect.protocol_validation import (
     is_quat_valid,
     is_vec3_valid,
     validate_event,
+    validate_event_or_raise,
+    validate_events,
 )
 
 
@@ -97,6 +99,10 @@ class TestConnectableAttrHelpers:
 
 
 class TestMessageConstruction:
+    def test_make_hello_rejects_unknown_role(self):
+        with pytest.raises(ValueError, match="emitter.*receiver"):
+            make_hello("observer")
+
     def test_make_hello_emitter(self):
         msg = make_hello("emitter", producer_session_id="producer-1")
         assert msg["type"] == MSG_HELLO
@@ -175,6 +181,65 @@ def test_every_event_kind_has_one_target_domain():
 
 
 class TestValidateEvent:
+    @pytest.mark.parametrize("prim", ["relative", "/", "/World{look=red}/Mesh"])
+    def test_semantic_events_require_absolute_non_variant_prim_paths(self, prim):
+        assert not validate_event({"k": K_DELETE_PRIM, "prim": prim})
+
+    def test_stage_metadata_does_not_require_a_prim(self):
+        assert validate_event({"k": K_SET_STAGE_METADATA, "metersPerUnit": 1.0})
+        assert not validate_event({"k": K_SET_STAGE_METADATA})
+        assert not validate_event({"k": K_SET_STAGE_METADATA, "upAxis": "X"})
+
+    def test_nonfinite_transform_values_are_rejected(self):
+        assert not validate_event(
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/X",
+                "fields": ["t"],
+                "t": [float("nan"), 0.0, 0.0],
+            }
+        )
+
+    def test_transform_fields_must_exactly_match_payload(self):
+        assert not validate_event(
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/X",
+                "fields": ["t"],
+                "t": [0.0, 0.0, 0.0],
+                "s": [1.0, 1.0, 1.0],
+            }
+        )
+
+    def test_point_instancer_fields_are_validated(self):
+        event = {
+            "k": "set_point_instancer",
+            "prim": "/World/Instances",
+            "fields": ["positions"],
+            "positions": [[0.0, 0.0, 0.0]],
+        }
+        assert validate_event(event)
+        event["fields"] = ["not_a_point_instancer_field"]
+        assert not validate_event(event)
+
+    def test_mode_validation_uses_event_kind_classification(self):
+        event = {"k": K_SET_VISIBILITY, "prim": "/World/X", "visible": True}
+        with pytest.raises(ValueError, match="shared_stage"):
+            validate_event_or_raise(event, layer_mode=LayerMode.SHARED_STAGE)
+
+    def test_transaction_validation_identifies_event_index(self):
+        with pytest.raises(ValueError, match="event 1:.*transform fields"):
+            validate_events(
+                [
+                    {"k": K_DELETE_PRIM, "prim": "/World/Valid"},
+                    {
+                        "k": K_SET_XFORM_TRS,
+                        "prim": "/World/Bad",
+                        "fields": ["bogus"],
+                    },
+                ]
+            )
+
     def test_ensure_prim_valid(self):
         assert validate_event({"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Xform"})
 

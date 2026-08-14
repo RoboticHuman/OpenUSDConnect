@@ -161,6 +161,17 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         role_raw = hello_fb.Role()
         role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
+        if role not in ("emitter", "receiver"):
+            send_msg(
+                self.request,
+                {
+                    "type": MSG_HELLO_REJECTED,
+                    "code": HelloRejectionCode.Unspecified,
+                    "reason": "role must be 'emitter' or 'receiver'",
+                },
+            )
+            LOG.warning("Rejected unknown role %r from %s", role, self.client_address)
+            return
         client_id_raw = hello_fb.ClientId()
         client_id = (
             client_id_raw.decode("utf-8") if isinstance(client_id_raw, bytes) else client_id_raw

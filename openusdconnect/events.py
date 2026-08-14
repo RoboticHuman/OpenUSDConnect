@@ -3,10 +3,10 @@
 TypedDicts describe the dict-shape of every event kind on the wire; the
 FlatBuffers schema (``schema/events.fbs``) is the canonical source for
 wire-format compatibility. The dispatch registry holds an :class:`EventSpec`
-per kind — populated by ``@register_encoder`` / ``@register_decoder`` /
-``@register_applier`` decorators at function definition sites in ``codec``
-and ``event_apply``. The accessors (``get``, ``by_tag``, ``all_specs``)
-lazily import those modules on first call, so the registry is always
+per kind — populated by decorators at function definition sites in ``codec``,
+``event_apply``, and ``protocol_validation``. The accessors (``get``,
+``by_tag``, ``all_specs``) lazily import those modules on first call, so the
+registry is always
 populated by the time it's observed.
 
 The ``k`` field discriminates the :data:`Event` union and matches a ``K_*``
@@ -423,6 +423,7 @@ class EventSpec:
     encode: Callable | None = None  # (builder, ev_dict) -> int offset
     decode: Callable | None = None  # (fb_obj, kind) -> ev_dict
     apply: Callable | None = None  # (stage, ev_dict) -> None
+    validate: Callable | None = None  # (ev_dict) -> None; raises on invalid data
 
 
 _REGISTRY: dict[str, EventSpec] = {}
@@ -442,7 +443,7 @@ def _ensure_handlers_loaded() -> None:
     if _HANDLERS_LOADED:
         return
     _HANDLERS_LOADED = True
-    from . import codec, event_apply  # noqa: F401
+    from . import codec, event_apply, protocol_validation  # noqa: F401
 
 
 def _spec_for(kind: str) -> EventSpec:
@@ -482,6 +483,16 @@ def register_applier(kind: str):
 
     def deco(fn: Callable) -> Callable:
         _spec_for(kind).apply = fn
+        return fn
+
+    return deco
+
+
+def register_validator(kind: str):
+    """Register ``fn(ev)`` as the raising validator for ``kind``."""
+
+    def deco(fn: Callable) -> Callable:
+        _spec_for(kind).validate = fn
         return fn
 
     return deco
@@ -540,6 +551,7 @@ __all__ = [
     "register_encoder",
     "register_decoder",
     "register_applier",
+    "register_validator",
     "get",
     "by_tag",
     "all_specs",

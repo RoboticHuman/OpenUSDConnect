@@ -237,14 +237,14 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
         persist_token=False,
         reconnect=False,
     )
-    original_apply = sync_server.apply_txn
+    original_apply = sync_server._apply_validated_txn
 
     def reject_marked_transaction(events, *args, **kwargs):
         if any(event.get("prim") == "/World/Rejected" for event in events):
             raise ValueError("injected invalid managed transaction")
         return original_apply(events, *args, **kwargs)
 
-    monkeypatch.setattr(sync_server, "apply_txn", reject_marked_transaction)
+    monkeypatch.setattr(sync_server, "_apply_validated_txn", reject_marked_transaction)
     try:
         client.start()
         assert client.connect(timeout=5)

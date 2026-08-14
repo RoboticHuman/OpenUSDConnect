@@ -473,8 +473,6 @@ def _encode_auth_rejected(b, msg):
 
 def _encode_hello_rejected(b, msg):
     code = int(msg.get("code", HelloRejectionCode.Unspecified))
-    if code == HelloRejectionCode.Unspecified:
-        raise ValueError("hello_rejected code must be specified")
     reason = b.CreateString(msg.get("reason", ""))
     _fb.HelloRejectedStart(b)
     _fb.HelloRejectedAddCode(b, code)

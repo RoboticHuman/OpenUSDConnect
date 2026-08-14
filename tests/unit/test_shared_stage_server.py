@@ -349,7 +349,7 @@ def test_modes_reject_ambiguous_layer_routing(tmp_path):
         child = shared.shared_layer_graph.layer_for(_child_key(shared))
         with pytest.raises(ValueError, match="require layer_key"):
             shared._commit_events([_value_event(child, 3.0)])
-        with pytest.raises(ValueError, match="unsupported shared-stage events"):
+        with pytest.raises(ValueError, match="unavailable in shared_stage mode"):
             shared._commit_events(
                 [event],
                 layer_key=shared.shared_layer_graph.root_layer_key,
