@@ -33,10 +33,8 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
-    K_SET_CONNECTABLE_CONNECTION,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
-    K_SET_SDF_SPEC_FIELDS,
     K_SET_STAGE_METADATA,
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
@@ -410,24 +408,10 @@ def _renamed_path(path: str, old_root: str, new_name: str) -> str:
 
 
 def _stage_sync_scope(events: list[dict]) -> list[str] | None:
-    """Every prim path a stage-sync batch may author on, for the scoped
-    atomic_apply backup. Returns None when the batch writes outside prim
-    scopes or addresses exact Sdf specs, forcing the full-layer snapshot.
-    """
-    paths: list[str] = []
-    for ev in events:
-        if ev.get("k") in (K_SET_STAGE_METADATA, K_SET_SDF_SPEC_FIELDS):
-            return None
-        prim = ev.get("prim")
-        if not prim:
-            return None
-        paths.append(prim)
-        if ev.get("k") == K_SET_CONNECTABLE_CONNECTION:
-            for conn in ev.get("connections", {}).values():
-                source = conn.get("source_prim")
-                if source:
-                    paths.append(source)
-    return paths
+    """Compatibility wrapper for the shared atomic-apply scope calculation."""
+    from .event_apply import atomic_apply_prim_paths
+
+    return atomic_apply_prim_paths(events)
 
 
 class EventDispatcher:

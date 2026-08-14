@@ -21,7 +21,7 @@ from ._client_utils import (
 )
 from .client_id import make_stable_client_id
 from .codec import ReceivedEvent, decode_messages
-from .event_apply import apply_events, atomic_apply
+from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
 from .protocol_constants import (
     K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_SDF_SPEC_FIELDS,
@@ -754,7 +754,7 @@ class SharedStageClient:
             self._pending_records.append(record)
             return False
         with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-            with atomic_apply(self._stage):
+            with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths([event])):
                 apply_events(self._stage, [event])
         self._tracker.accept_authoritative_event(layer, event)
         return True
@@ -786,9 +786,10 @@ class SharedStageClient:
             else:
                 groups.append((layer, [record]))
         for layer, records in groups:
+            events = [record.event for record in records]
             with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-                with atomic_apply(self._stage):
-                    apply_events(self._stage, [record.event for record in records])
+                with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths(events)):
+                    apply_events(self._stage, events)
             for record in records:
                 self._tracker.accept_authoritative_event(layer, record.event)
             applied += len(records)

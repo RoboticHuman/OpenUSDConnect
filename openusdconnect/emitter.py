@@ -941,6 +941,15 @@ class PrimChannel:
             cached = self.cache_default
         return current if current != cached else None
 
+    def cache_snapshot(self, current):
+        """Return the compact state retained after diffing ``current``.
+
+        Most channels carry bounded scalar state and retain it directly.
+        Bulk channels override this to keep fingerprints instead of scene
+        payloads; the stage remains the owner of their actual values.
+        """
+        return current
+
     def to_event(self, prim_path, diff):
         """Build the wire event(s) for the diff.
 
@@ -1318,8 +1327,11 @@ class PointInstancerChannel(PrimChannel):
 
     def diff(self, current, cached):
         cached = cached or {}
-        changed = {n: v for n, v in current.items() if not values_equal(v, cached.get(n))}
+        changed = {n: v for n, v in current.items() if _value_hash(v) != cached.get(n)}
         return changed if changed else None
+
+    def cache_snapshot(self, current):
+        return {name: _value_hash(value) for name, value in current.items()}
 
     def to_event(self, prim_path, diff):
         return {
@@ -1361,12 +1373,13 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
                 events_out.extend(ev)
             else:
                 events_out.append(ev)
+    snapshot = channel.cache_snapshot(current)
     if partial:
         merged = dict(cached or {})
-        merged.update(current)
+        merged.update(snapshot)
         pc[channel.cache_key] = merged
     else:
-        pc[channel.cache_key] = current
+        pc[channel.cache_key] = snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -1532,7 +1545,7 @@ def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
     # local edit back to the server's value doesn't re-emit. Bounded by
     # the size of ev["attrs"]; no full prim scan.
     last_attrs = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_GPRIM_ATTRS, {})
-    last_attrs.update(ev.get("attrs", {}))
+    last_attrs.update({name: _value_hash(value) for name, value in ev.get("attrs", {}).items()})
 
 
 def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
@@ -1597,10 +1610,11 @@ _PI_WIRE_TO_USD = {
 
 
 def _invalidate_set_point_instancer(emitter, prim_path, ev):
-    """Write the event's own values into the cache.
+    """Fingerprint the event's values into the cache.
 
-    The applied state equals the event payload, so caching it directly is
-    exact and avoids re-reading every per-instance array from the stage.
+    The applied state equals the event payload, so its fingerprint is the
+    correct new baseline. Retaining decoded arrays here can otherwise keep an
+    entire FlatBuffer frame alive for the emitter's lifetime.
     """
     import numpy as np
 
@@ -1618,7 +1632,7 @@ def _invalidate_set_point_instancer(emitter, prim_path, ev):
         return
     state = emitter._prim_cache.setdefault(prim_path, {}).setdefault(_C_POINT_INSTANCER, {})
     for f in fields:
-        state[f] = ev[f]
+        state[f] = _value_hash(ev[f])
 
 
 def _invalidate_set_stage_metadata(emitter, _prim_path, _ev):
@@ -2294,7 +2308,7 @@ class NoticeEmitter:
                     current = channel.read(stage, cp)
                 if current is None:
                     continue
-                pc[channel.cache_key] = current
+                pc[channel.cache_key] = channel.cache_snapshot(current)
             # Generic gprim attrs use a specialized path so info-only notices
             # can read only named dirty attrs, not every heavy mesh array.
             gprim_snapshot = {}
@@ -2321,7 +2335,7 @@ class NoticeEmitter:
                         value,
                     )
                     if val is not None:
-                        gprim_snapshot[name] = val
+                        gprim_snapshot[name] = _value_hash(val)
             if gprim_snapshot:
                 pc[_C_GPRIM_ATTRS] = gprim_snapshot
             # Seed the api_schemas snapshot so a later diff cycle doesn't
@@ -3519,9 +3533,9 @@ class NoticeEmitter:
                 source_layer,
                 value,
             )
-            if transport_value is None or values_equal(
-                transport_value,
-                previous_attributes.get(attribute_name),
+            if (
+                transport_value is None
+                or _value_hash(transport_value) == previous_attributes.get(attribute_name)
             ):
                 continue
 
@@ -3545,7 +3559,9 @@ class NoticeEmitter:
             event["primvar_meta"] = primvar_metadata
         if attribute_interpolation:
             event["attr_interp"] = attribute_interpolation
-        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attributes)
+        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(
+            {name: _value_hash(value) for name, value in changed_attributes.items()}
+        )
         return event
 
     def _build_dirty_prim_events(

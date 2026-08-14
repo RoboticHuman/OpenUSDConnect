@@ -546,6 +546,40 @@ class TestCleanup:
 
         assert retained_specs == []
 
+    def test_prim_cache_fingerprints_bulk_gprim_arrays(self):
+        stage, emitter = _make_stage_and_emitter()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
+        mesh.GetPointsAttr().Set(
+            Vt.Vec3fArray(
+                [Gf.Vec3f(0, 0, 0), Gf.Vec3f(1, 0, 0), Gf.Vec3f(0, 1, 0)]
+            )
+        )
+        mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3]))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2]))
+
+        emitter.build_events_for_dirty()
+
+        cached = emitter._prim_cache["/World/Mesh"]["gprim_attrs"]
+        assert set(cached) >= {"points", "faceVertexCounts", "faceVertexIndices"}
+        assert all(isinstance(fingerprint, int) for fingerprint in cached.values())
+
+    def test_remote_gprim_invalidation_does_not_retain_numpy_payload(self):
+        stage, emitter = _make_stage_and_emitter()
+        UsdGeom.Mesh.Define(stage, "/World/Mesh")
+        points = np.arange(3000, dtype=np.float32).reshape(-1, 3)
+
+        emitter.invalidate_for_event(
+            {
+                "k": K_SET_GPRIM_ATTRS,
+                "prim": "/World/Mesh",
+                "attrs": {"points": points},
+            }
+        )
+
+        cached = emitter._prim_cache["/World/Mesh"]["gprim_attrs"]
+        assert isinstance(cached["points"], int)
+        assert cached["points"] is not points
+
     def test_cleanup_idempotent(self):
         stage, emitter = _make_stage_and_emitter()
         emitter.cleanup()
