@@ -38,9 +38,11 @@ def test_unreal_stage_material_and_reverse_parity(request, tmp_path):
     assert run.result["layer_parity"] is True
     assert run.result["live_created_component"] == "StaticMeshComponent"
     assert run.result["reverse_edits_emitted"] is True
+    assert run.result["outage_reconnected"] is True
+    assert run.result["offline_edits_emitted"] is True
     reverse = run.result["server_reverse_state"]
-    assert reverse["roughness"] == pytest.approx(0.11)
-    assert reverse["translate"] == pytest.approx([6.0, 2.0, 1.0])
+    assert reverse["roughness"] == pytest.approx(0.07)
+    assert reverse["translate"] == pytest.approx([9.0, 3.0, 2.0])
 
     for phase in ("initial_materials", "final_materials"):
         materials = run.result[phase]
