@@ -377,6 +377,7 @@ def test_managed_client_rebinds_and_parks_the_emitter():
         assert client.emitter.build_events_for_dirty()
 
         client.rebind_stage(None)
+        assert client._dispatcher.adapter.targets_stage() is new_stage
         new_stage.DefinePrim("/AfterPark", "Scope")
         assert client.emitter.build_events_for_dirty() == []
     finally:

@@ -15,11 +15,23 @@ from openusdconnect.sdf_spec_delta import serialize_spec_fields
 
 
 class _NullReceiver:
+    layered_replay_active = False
+    origin = None
+
     def drain_queue(self):
         return []
 
+    def mark_replay_applied(self):
+        return False
+
+    def request_replay_from(self, _seq_start):
+        pass
+
 
 class _QueuedReceiver:
+    layered_replay_active = False
+    origin = None
+
     def __init__(self, messages):
         self.messages = list(messages)
         self.replay_requests = []
@@ -31,6 +43,9 @@ class _QueuedReceiver:
 
     def request_replay_from(self, seq_start):
         self.replay_requests.append(seq_start)
+
+    def mark_replay_applied(self):
+        return False
 
 
 def _event(seq, prim):

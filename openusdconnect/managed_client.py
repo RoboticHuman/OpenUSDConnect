@@ -587,7 +587,6 @@ class ManagedClient:
             raise RuntimeError("cannot rebind while a prepared publisher batch is pending")
         if stage is None:
             self._dispatcher.unbind_stage()
-            self._dispatcher.adapter = None
             self._emitter.cleanup()
             self._stage = None
             self._authoring_layer = None

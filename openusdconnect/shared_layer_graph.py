@@ -447,12 +447,7 @@ class SharedLayerGraph(LayerKeyRouter):
                     raise ValueError(f"sublayer references undeclared layer key {child_key!r}")
         return states, parent_revisions
 
-    def apply_state(self, message: dict) -> None:
-        """Apply and route a complete authoritative graph baseline."""
-        if not super().apply_state(message):
-            return
-
-    def _apply_state_inner(self, state: dict) -> bool:
+    def _apply_state_inner(self, state: dict) -> None:
         states, parent_revisions = self._validate_topology(state)
         root_key = state["root_layer_key"]
         old = (
@@ -496,7 +491,6 @@ class SharedLayerGraph(LayerKeyRouter):
                 self._identity_identifiers_by_key,
             ) = old
             raise
-        return True
 
     def _materialize_states(
         self,

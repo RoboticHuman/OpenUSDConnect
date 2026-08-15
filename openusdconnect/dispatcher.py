@@ -509,15 +509,11 @@ class EventDispatcher:
         Returns the number of events applied (0 when the queue was empty,
         only contained pings/resync, or the dispatcher is parked).
         """
-        if self.adapter is None:
-            return 0
         if self._projection_state is not None:
             self._projection_state.ensure_native_projection_safe()
         bufs = self.receiver.drain_queue()
         if not bufs:
-            mark_replay_applied = getattr(self.receiver, "mark_replay_applied", None)
-            if mark_replay_applied is not None:
-                mark_replay_applied()
+            self.receiver.mark_replay_applied()
             return 0
         self._sync_layer_router()
 
@@ -573,9 +569,7 @@ class EventDispatcher:
         if result.errors:
             self.receiver.request_replay_from(self._last_seq + 1)
         else:
-            mark_replay_applied = getattr(self.receiver, "mark_replay_applied", None)
-            if mark_replay_applied is not None:
-                mark_replay_applied()
+            self.receiver.mark_replay_applied()
 
         return applied
 
@@ -631,7 +625,7 @@ class EventDispatcher:
 
     def _sync_layer_router(self) -> None:
         """Match the local router to the receiver's negotiated capability."""
-        active = bool(getattr(self.receiver, "layered_replay_active", False))
+        active = self.receiver.layered_replay_active
         if active and self._layer_router is None:
             from .logical_layers import LogicalLayerRouter
 
@@ -711,7 +705,7 @@ class EventDispatcher:
         stage_adapter = (
             UsdStageAdapter(stage) if projects_to_external_scene else self.adapter
         )
-        local_origin = getattr(self.receiver, "origin", None)
+        local_origin = self.receiver.origin
         same_origin_paths = {
             str(record.event["prim"])
             for record in records
