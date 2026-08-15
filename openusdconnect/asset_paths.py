@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from contextlib import nullcontext
 
@@ -234,7 +235,74 @@ def stabilize_layer_asset_paths(
                     )
 
 
+def repair_missing_duplicate_asset_paths(layer: Sdf.Layer) -> int:
+    """Repair unresolved paths containing an accidental repeated directory.
+
+    Some third-party USD assets contain paths such as
+    ``textures/./textures/map.png``. Flattening anchors that malformed value
+    into an absolute ``.../textures/textures/map.png`` path. Change it only
+    when the original does not resolve and removing one adjacent duplicate
+    component identifies an existing file.
+    """
+
+    resolver = Ar.GetResolver()
+
+    def _resolves(identifier: str) -> bool:
+        if os.path.exists(identifier):
+            return True
+        try:
+            return bool(resolver.Resolve(identifier))
+        except Exception:
+            return False
+
+    repaired_count = 0
+
+    def _repair(identifier: str) -> str:
+        nonlocal repaired_count
+        if not identifier or "://" in identifier or "[" in identifier:
+            return identifier
+        normalized = os.path.normpath(identifier)
+        if not os.path.isabs(normalized) or _resolves(normalized):
+            return identifier
+        drive, tail = os.path.splitdrive(normalized)
+        components = [part for part in tail.split(os.sep) if part]
+        for index in range(len(components) - 1):
+            if components[index].casefold() != components[index + 1].casefold():
+                continue
+            candidate_components = components[: index + 1] + components[index + 2 :]
+            candidate = os.path.join(drive + os.sep, *candidate_components)
+            if not _resolves(candidate):
+                continue
+            repaired_count += 1
+            repaired = candidate.replace("\\", "/")
+            LOG.warning("Repaired unresolved duplicate asset path %s -> %s", identifier, repaired)
+            return repaired
+        return identifier
+
+    specs = []
+    layer.Traverse(
+        Sdf.Path.absoluteRootPath,
+        lambda path: specs.append(layer.GetObjectAtPath(path)),
+    )
+    for spec in specs:
+        if spec is None:
+            continue
+        for field in tuple(spec.ListInfoKeys()):
+            value = spec.GetInfo(field)
+            if value_contains_asset_path(value):
+                spec.SetInfo(
+                    field,
+                    _transform_asset_paths(
+                        value,
+                        _repair,
+                        use_evaluated_paths=False,
+                    ),
+                )
+    return repaired_count
+
+
 __all__ = [
+    "repair_missing_duplicate_asset_paths",
     "stabilize_layer_asset_paths",
     "transport_asset_identifier",
     "value_contains_asset_path",

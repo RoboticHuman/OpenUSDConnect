@@ -25,7 +25,9 @@ LIVE_METADATA_KEY = "openusdconnect"
 
 _REMOTE_SCHEMES = ("http://", "https://")
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "openusdconnect-live-cache")
+_TEXTURE_CACHE_DIR = os.path.join(tempfile.gettempdir(), "openusdconnect-texture-cache")
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_PACKAGE_TEXTURE_MARKER = b".usdz["
 
 
 def is_remote(path: str) -> bool:
@@ -74,6 +76,45 @@ def fetch_to_temp(url: str, timeout: float = 10.0) -> str:
         data = resp.read()
         etag = resp.headers.get("ETag", "")
     return _write_cached_snapshot(url, data, etag)
+
+
+def _has_package_texture_references(local_path: str) -> bool:
+    if local_path.lower().endswith(".usdz"):
+        return True
+    try:
+        overlap = b""
+        with open(local_path, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                candidate = overlap + chunk.lower()
+                if _PACKAGE_TEXTURE_MARKER in candidate:
+                    return True
+                overlap = candidate[-(len(_PACKAGE_TEXTURE_MARKER) - 1) :]
+    except OSError:
+        return False
+    return False
+
+
+def texture_import_options(local_path: str, metadata: dict | None = None) -> dict:
+    """Return Blender import options that keep package textures alive.
+
+    Blender extracts USDZ textures into a short-lived directory for its default
+    packed mode. Some builds retain lazy image datablocks after deleting that
+    directory. Copy package-backed textures into a stable per-scene cache so
+    Blender can load them on demand after the USD import operator returns.
+    """
+    if not _has_package_texture_references(local_path):
+        return {}
+
+    scene_id = str((metadata or {}).get("scene_id", "")).strip()
+    identity = f"scene:{scene_id}" if scene_id else os.path.normcase(os.path.abspath(local_path))
+    token = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:20]
+    texture_dir = os.path.join(_TEXTURE_CACHE_DIR, token)
+    os.makedirs(texture_dir, exist_ok=True)
+    return {
+        "import_textures_mode": "IMPORT_COPY",
+        "import_textures_dir": texture_dir,
+        "tex_name_collision_mode": "OVERWRITE",
+    }
 
 
 def read_live_metadata(local_path: str) -> dict | None:

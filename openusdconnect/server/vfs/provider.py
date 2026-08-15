@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from pxr import Sdf, Usd
 
+from ...asset_paths import repair_missing_duplicate_asset_paths
 from ...protocol_constants import PROTOCOL_VERSION
 from ..types import InvalidVfsWriteError
 
@@ -347,6 +348,8 @@ class VirtualStageFile(_CachedVirtualFile):
                 flat = srv.stage.Flatten()
         finally:
             srv.txn_barrier.release_shared()
+
+        repair_missing_duplicate_asset_paths(flat)
 
         cld = dict(flat.customLayerData)
         cld[METADATA_KEY] = self.build_metadata(seq, epoch)

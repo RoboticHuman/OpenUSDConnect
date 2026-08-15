@@ -15,6 +15,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import bpy
@@ -48,6 +49,9 @@ except Exception as e:
 LOG = logging.getLogger(__name__)
 
 DEFAULT_COALESCE_SECONDS = 0.15
+EMITTER_RECONNECT_INTERVAL_SECONDS = 1.0
+EMITTER_RECONNECT_MAX_INTERVAL_SECONDS = 8.0
+EMITTER_RECONNECT_TIMEOUT_SECONDS = 2.0
 
 
 def _compute_local_trs(obj):
@@ -1042,7 +1046,15 @@ class _State:
     """
 
     __slots__ = (
-        "author", "notice_emitter", "sender", "_last_send_time", "_last_seen_frame",
+        "author",
+        "notice_emitter",
+        "sender",
+        "_last_send_time",
+        "_last_seen_frame",
+        "_last_reconnect_attempt",
+        "_reconnect_interval",
+        "_reconnect_generation",
+        "_reconnect_thread",
     )
 
     def __init__(self):
@@ -1054,6 +1066,10 @@ class _State:
         # frame-driven eval (F-curve evaluation during playback or scrub)
         # apart from a real user edit.
         self._last_seen_frame: int | None = None
+        self._last_reconnect_attempt: float = 0.0
+        self._reconnect_interval: float = EMITTER_RECONNECT_INTERVAL_SECONDS
+        self._reconnect_generation: int = 0
+        self._reconnect_thread: threading.Thread | None = None
 
 
 _state = _State()
@@ -1078,6 +1094,70 @@ def _try_send_dirty_events():
             _state.notice_emitter.mark_prepared_events_sent(events)
         else:
             LOG.warning("emitter send failed; retaining %d events for reconnect", len(events))
+
+
+def _cancel_emitter_reconnect() -> None:
+    """Invalidate and finish any in-flight background reconnect attempt."""
+    _state._reconnect_generation += 1
+    _state._last_reconnect_attempt = 0.0
+    _state._reconnect_interval = EMITTER_RECONNECT_INTERVAL_SECONDS
+    reconnect_thread = _state._reconnect_thread
+    if (
+        reconnect_thread is not None
+        and reconnect_thread is not threading.current_thread()
+        and reconnect_thread.is_alive()
+    ):
+        # The worker's network attempt is bounded. Waiting here prevents an
+        # explicit Connect from adopting a socket that the stale worker is
+        # about to close, and prevents Disconnect from briefly reconnecting.
+        reconnect_thread.join()
+    _state._reconnect_thread = None
+
+
+def _emitter_reconnect_worker(sender: EventSender, generation: int) -> None:
+    """Reconnect without blocking Blender's main/UI thread."""
+    connected = False
+    try:
+        connected = sender.connect(timeout=EMITTER_RECONNECT_TIMEOUT_SECONDS)
+    except Exception:
+        LOG.exception("Emitter reconnect attempt failed")
+    current = _state.sender is sender and _state._reconnect_generation == generation
+    if connected and current:
+        _state._reconnect_interval = EMITTER_RECONNECT_INTERVAL_SECONDS
+        LOG.info("Emitter reconnected to %s:%d", sender.host, sender.port)
+    elif current:
+        _state._reconnect_interval = min(
+            _state._reconnect_interval * 2.0,
+            EMITTER_RECONNECT_MAX_INTERVAL_SECONDS,
+        )
+    elif connected:
+        # The user explicitly disconnected or selected another endpoint while
+        # the background handshake was running.
+        sender.disconnect()
+
+
+def _schedule_emitter_reconnect() -> bool:
+    """Start one throttled reconnect attempt for the active emitter."""
+    sender = _state.sender
+    if sender is None or sender.sock is not None or sender.recovery_required:
+        return False
+    reconnect_thread = _state._reconnect_thread
+    if reconnect_thread is not None and reconnect_thread.is_alive():
+        return False
+    now = time.monotonic()
+    if now - _state._last_reconnect_attempt < _state._reconnect_interval:
+        return False
+    _state._last_reconnect_attempt = now
+    generation = _state._reconnect_generation
+    reconnect_thread = threading.Thread(
+        target=_emitter_reconnect_worker,
+        args=(sender, generation),
+        name="openusdconnect-blender-emitter-reconnect",
+        daemon=True,
+    )
+    _state._reconnect_thread = reconnect_thread
+    reconnect_thread.start()
+    return True
 
 
 def set_emitter_feedback_guard(value: bool):
@@ -1231,6 +1311,7 @@ def _timer_tick():
     try:
         if _state.author is None or not _state.author.enabled:
             return 0.25
+        _schedule_emitter_reconnect()
         emitter = _state.notice_emitter
         if emitter and (emitter.dirty or emitter.prepared_event_count):
             _try_send_dirty_events()
@@ -1379,7 +1460,8 @@ class USD_CONNECT_OT_import_with_hook(bpy.types.Operator):
             from . import live_discovery
 
             local_path, meta = live_discovery.resolve_import_source(self.filepath)
-            bpy.ops.wm.usd_import(filepath=local_path)
+            import_options = live_discovery.texture_import_options(local_path, meta)
+            bpy.ops.wm.usd_import(filepath=local_path, **import_options)
             meta = live_discovery.read_live_metadata(local_path)
             context.scene.usd_connect_base_usd_path = local_path
             # Apply MaterialX materials that Blender's importer doesn't handle
@@ -1487,6 +1569,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
+        _cancel_emitter_reconnect()
         if _state.sender is not None and _state.sender.sock is not None:
             self.report({"INFO"}, "Already connected")
             return {"CANCELLED"}
@@ -1573,6 +1656,7 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
     bl_label = "Disconnect Emitter"
 
     def execute(self, context):
+        _cancel_emitter_reconnect()
         _remove_handler()
         retained = 0
         if _state.sender is not None:
@@ -1695,6 +1779,7 @@ def register():
 
 
 def unregister():
+    _cancel_emitter_reconnect()
     _remove_handler()
     _reset_stage_author()
     if _state.sender is not None:

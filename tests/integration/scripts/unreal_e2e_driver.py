@@ -34,6 +34,11 @@ def _write_result(payload):
         stream.write("\n")
 
 
+def _touch(path):
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write("ready\n")
+
+
 def _request_exit():
     unreal.EditorPythonScripting.set_keep_python_script_alive(False)
 
@@ -272,6 +277,18 @@ def _author_reverse_edits():
     roughness.Set(0.11)
 
 
+def _author_offline_edits():
+    stage = _find_stage()
+    if stage is None:
+        raise RuntimeError("USD stage disappeared during server outage")
+    translate = stage.GetPrimAtPath("/World/PreviewBall").GetAttribute("xformOp:translate")
+    roughness = stage.GetPrimAtPath("/World/Looks/Preview/Surface").GetAttribute("inputs:roughness")
+    if not translate or not roughness:
+        raise RuntimeError("offline-edit attributes are missing")
+    translate.Set(Gf.Vec3d(9.0, 3.0, 2.0))
+    roughness.Set(0.07)
+
+
 def _tick(_delta_time):
     try:
         if STATE.get("finished"):
@@ -341,6 +358,29 @@ def _tick(_delta_time):
             max_seq = _max_sequence()
             if max_seq < STATE["reverse_baseline_seq"] + 2:
                 return
+            STATE["outage_baseline_seq"] = max_seq
+            _touch(CONFIG["outage_ready_path"])
+            STATE["phase"] = "wait_for_outage_disconnect"
+            _log("reverse edits reached the server; requesting outage")
+            return
+
+        if phase == "wait_for_outage_disconnect":
+            status = _status()
+            if status["receiver_connected"]:
+                return
+            _author_offline_edits()
+            _touch(CONFIG["offline_edit_path"])
+            STATE["phase"] = "wait_for_outage_reconnect"
+            _log("server outage observed; authored queued offline edits")
+            return
+
+        if phase == "wait_for_outage_reconnect":
+            status = _status()
+            if not status["receiver_connected"] or not status["emitter_connected"]:
+                return
+            max_seq = _max_sequence()
+            if max_seq < STATE["outage_baseline_seq"] + 2:
+                return
             _finish(
                 {
                     "final_materials": STATE["final_materials"],
@@ -350,6 +390,9 @@ def _tick(_delta_time):
                     "max_sequence": max_seq,
                     "reverse_baseline_sequence": STATE["reverse_baseline_seq"],
                     "reverse_edits_emitted": True,
+                    "outage_baseline_sequence": STATE["outage_baseline_seq"],
+                    "offline_edits_emitted": True,
+                    "outage_reconnected": True,
                 }
             )
     except Exception as exc:

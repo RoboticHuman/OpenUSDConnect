@@ -9,7 +9,7 @@ import json
 import threading
 
 import pytest
-from pxr import Sdf, Usd, UsdLux
+from pxr import Sdf, Usd, UsdLux, UsdShade
 
 from openusdconnect.codec import message_to_dict
 from openusdconnect.framing import recv_framed_rfile
@@ -271,6 +271,7 @@ class TestSnapshotToken:
         assert dept_srv.delete_layer("alice")
         assert dept_srv.get_snapshot_token() == (epoch + 1, seq)
 
+
 # ---------------------------------------------------------------------------
 # Read side
 # ---------------------------------------------------------------------------
@@ -293,6 +294,37 @@ class TestRead:
         stage = _open_stage(vfile.read())
         prim = stage.GetPrimAtPath("/World/Cube")
         assert prim and prim.GetTypeName() == "Cube"
+
+    def test_flat_snapshot_repairs_existing_duplicate_asset_path(self, tmp_path):
+        texture_dir = tmp_path / "textures"
+        texture_dir.mkdir()
+        texture_path = texture_dir / "map.png"
+        texture_path.write_bytes(b"not-an-image")
+        base_path = tmp_path / "material.usda"
+        stage = Usd.Stage.CreateNew(str(base_path))
+        shader = UsdShade.Shader.Define(stage, "/Material/Texture")
+        shader.CreateIdAttr("UsdUVTexture")
+        shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+            Sdf.AssetPath("./textures/./textures/map.png")
+        )
+        stage.GetRootLayer().Save()
+
+        server = UsdSyncServer(
+            base_usd_path=str(base_path),
+            log_path=str(tmp_path / "asset-path.db"),
+        )
+        try:
+            virtual_file = VirtualStageFile(
+                server,
+                name="scene.usd",
+                advertise_host="127.0.0.1",
+                sync_port=7200,
+            )
+            snapshot = _open_stage(virtual_file.read())
+            value = snapshot.GetPrimAtPath("/Material/Texture").GetAttribute("inputs:file").Get()
+            assert value.path.replace("\\", "/") == str(texture_path).replace("\\", "/")
+        finally:
+            server.store.close()
 
     def test_stat_matches_read(self, vfile):
         st = vfile.stat()
@@ -758,9 +790,7 @@ class TestWriteTranslate:
         count = srv.get_event_count()
 
         with pytest.raises(UnsupportedVfsWriteError, match="sublayer topology"):
-            translate_vfile.write(
-                _with_current_live_metadata(srv, _stage_bytes_with_sublayer())
-            )
+            translate_vfile.write(_with_current_live_metadata(srv, _stage_bytes_with_sublayer()))
 
         assert srv.get_event_count() == count
         assert srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
@@ -798,9 +828,7 @@ class TestWriteTranslate:
         assert dept_srv.last_vfs_write_analysis["status"] == "unsupported_rejected"
         assert "department layers" in dept_srv.last_vfs_write_analysis["notes"][0]
 
-    def test_non_default_collaboration_layers_disable_translate(
-        self, srv, translate_vfile
-    ):
+    def test_non_default_collaboration_layers_disable_translate(self, srv, translate_vfile):
         with srv.stage_lock:
             srv.layer_stack.ensure_layer("review")
 
@@ -808,6 +836,7 @@ class TestWriteTranslate:
             translate_vfile.write(translate_vfile.read())
 
         assert "collaboration layers: review" in srv.last_vfs_write_analysis["notes"][0]
+
 
 class TestDavResourceLifecycle:
     def test_read_metadata_and_content_use_one_pinned_snapshot(self):

@@ -1781,12 +1781,25 @@ class BlenderAdapter(DCCAdapter):
         # on `is_surface_shader` so helper multi-node mappers (Normal Map,
         # etc.) don't suppress siblings under the same NodeGraph.
         surface_multi_node_mats = set()
+        native_preview_mats = set()
         for scene_path, sid, _inputs, _itypes in shader_events:
+            mat_path = scene_path.rsplit("/", 1)[0]
             mapper = self._shader_registry.get(sid)
             if mapper and mapper.is_multi_node and mapper.is_surface_shader:
-                mat_path = scene_path.rsplit("/", 1)[0]
                 surface_multi_node_mats.add(mat_path)
+            if sid == "UsdPreviewSurface":
+                native_preview_mats.add(mat_path)
+        native_preview_mats.difference_update(surface_multi_node_mats)
+
+        def _uses_native_preview(scene_path):
+            return any(
+                scene_path == mat_path or scene_path.startswith(f"{mat_path}/")
+                for mat_path in native_preview_mats
+            )
+
         for scene_path, sid, inputs, itypes in shader_events:
+            if _uses_native_preview(scene_path):
+                continue
             mapper = self._shader_registry.get(sid)
             if mapper and not mapper.is_multi_node:
                 mat_path = scene_path.rsplit("/", 1)[0]
@@ -1794,6 +1807,8 @@ class BlenderAdapter(DCCAdapter):
                     continue
             self.set_connectable_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:
+            if _uses_native_preview(scene_path):
+                continue
             self.set_connectable_connection(scene_path, conns)
 
         # Fix missing textures — Blender's USD importer creates Image Texture

@@ -487,14 +487,27 @@ def main() -> None:
             fidelity = _check_fidelity(source, case, payloads, decoders, ctx)
             print(f"case={name} fields={','.join(fields)} iterations={iterations}")
             for alt in ("A", "B", "C", "D"):
-                encode = _measure(lambda: encoders[alt](case), iterations)
+                encode = _measure(
+                    lambda alt=alt, case=case: encoders[alt](case),
+                    iterations,
+                )
                 cold = _measure(
-                    lambda: decoders[alt](case, payloads[alt], Sdf.Layer.CreateAnonymous("cold")),
+                    lambda alt=alt, case=case, payloads=payloads: decoders[alt](
+                        case,
+                        payloads[alt],
+                        Sdf.Layer.CreateAnonymous("cold"),
+                    ),
                     iterations,
                 )
                 warm_target = Sdf.Layer.CreateAnonymous("warm")
                 decoders["A"](case, payloads["A"], warm_target)
-                warm = _measure(lambda: decoders[alt](case, payloads[alt], warm_target), iterations)
+                warm = _measure(
+                    lambda alt=alt,
+                    case=case,
+                    payloads=payloads,
+                    warm_target=warm_target: decoders[alt](case, payloads[alt], warm_target),
+                    iterations,
+                )
                 text_ok, semantic_ok = fidelity[alt]
                 print(
                     f"  {alt}"

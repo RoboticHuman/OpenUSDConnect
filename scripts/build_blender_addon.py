@@ -33,6 +33,13 @@ def build():
     for f in blender_src.iterdir():
         if f.suffix == ".py":
             shutil.copy2(f, build_dir / f.name)
+    # OpenPBRSurfaceMapper uses the official MaterialX value translation.
+    # Bundle it beside shader_mapper.py so an installed addon has no source-
+    # checkout dependency on the top-level integrations package.
+    shutil.copy2(
+        REPO_ROOT / "integrations" / "openpbr_to_standard_surface.py",
+        build_dir / "openpbr_to_standard_surface.py",
+    )
 
     # Copy core library (vendored inside addon)
     core_src = REPO_ROOT / "openusdconnect"

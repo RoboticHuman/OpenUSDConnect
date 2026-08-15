@@ -688,12 +688,12 @@ def _verify_reverse_server_state(scenario: UnrealScenario) -> dict:
             .GetAttribute("inputs:roughness")
             .Get()
         )
-        expected_translate = Gf.Vec3d(6.0, 2.0, 1.0)
+        expected_translate = Gf.Vec3d(9.0, 3.0, 2.0)
         if translate != expected_translate:
-            raise UnrealTestError(f"Unreal reverse transform did not reach the server: {translate}")
-        if roughness is None or abs(float(roughness) - 0.11) > 1e-6:
+            raise UnrealTestError(f"Unreal offline transform did not reach the server: {translate}")
+        if roughness is None or abs(float(roughness) - 0.07) > 1e-6:
             raise UnrealTestError(
-                f"Unreal reverse shader input did not reach the server: {roughness}"
+                f"Unreal offline shader input did not reach the server: {roughness}"
             )
         return {"roughness": float(roughness), "translate": list(translate)}
     finally:
@@ -736,31 +736,41 @@ def run_unreal_e2e(
     server_log = work_dir / "server.log"
     unreal_log = work_dir / "unreal.log"
     unreal_console_log = work_dir / "unreal-console.log"
+    outage_ready_path = Path(config["outage_ready_path"])
+    offline_edit_path = Path(config["offline_edit_path"])
+    outage_ready_path.unlink(missing_ok=True)
+    offline_edit_path.unlink(missing_ok=True)
     unreal_log.unlink(missing_ok=True)
     unreal_console_log.unlink(missing_ok=True)
     for fallback_log in work_dir.glob("unreal_*.log"):
         fallback_log.unlink()
+    server_command = [
+        sys.executable,
+        "-m",
+        "openusdconnect.server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--base",
+        str(scenario.base_stage),
+        "--event-log",
+        str(scenario.database_path),
+    ]
+
     with server_log.open("w", encoding="utf-8") as server_output:
-        server = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "openusdconnect.server",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--base",
-                str(scenario.base_stage),
-                "--event-log",
-                str(scenario.database_path),
-            ],
-            cwd=REPO_ROOT,
-            stdout=server_output,
-            stderr=subprocess.STDOUT,
-        )
+        def start_server():
+            process = subprocess.Popen(
+                server_command,
+                cwd=REPO_ROOT,
+                stdout=server_output,
+                stderr=subprocess.STDOUT,
+            )
+            _wait_for_port(port, process)
+            return process
+
+        server = start_server()
         try:
-            _wait_for_port(port, server)
             command = _editor_command(
                 engine,
                 project,
@@ -771,20 +781,36 @@ def run_unreal_e2e(
             env["OUC_UNREAL_TEST_CONFIG"] = str(scenario.config_path)
             started = time.monotonic()
             with unreal_console_log.open("w", encoding="utf-8") as unreal_output:
-                try:
-                    completed = subprocess.run(
-                        command,
-                        cwd=work_dir,
-                        env=env,
-                        stdout=unreal_output,
-                        stderr=subprocess.STDOUT,
-                        timeout=None if interactive else timeout + 90.0,
-                    )
-                except subprocess.TimeoutExpired as exc:
+                editor = subprocess.Popen(
+                    command,
+                    cwd=work_dir,
+                    env=env,
+                    stdout=unreal_output,
+                    stderr=subprocess.STDOUT,
+                )
+                outage_started = False
+                outage_restarted = False
+                process_deadline = None if interactive else started + timeout + 90.0
+                while editor.poll() is None:
+                    if outage_ready_path.is_file() and not outage_started:
+                        _stop_process(server)
+                        outage_started = True
+                    if offline_edit_path.is_file() and outage_started and not outage_restarted:
+                        server = start_server()
+                        outage_restarted = True
+                    if process_deadline is not None and time.monotonic() >= process_deadline:
+                        _stop_process(editor)
+                        raise UnrealTestError(
+                            f"Unreal test exceeded {timeout + 90.0:.0f}s\n"
+                            f"{_run_log_tail(unreal_log, unreal_console_log)}"
+                        )
+                    time.sleep(0.05)
+                completed_returncode = editor.wait()
+                if not outage_started or not outage_restarted:
                     raise UnrealTestError(
-                        f"Unreal test exceeded {timeout + 90.0:.0f}s\n"
+                        "Unreal scenario exited without completing the server outage cycle\n"
                         f"{_run_log_tail(unreal_log, unreal_console_log)}"
-                    ) from exc
+                    )
             elapsed = time.monotonic() - started
         finally:
             _stop_process(server)
@@ -801,10 +827,10 @@ def run_unreal_e2e(
             f"Unreal scenario failed: {result.get('error', result)}\n"
             f"{_run_log_tail(unreal_log, unreal_console_log)}"
         )
-    if completed.returncode:
+    if completed_returncode:
         raise UnrealTestError(
             f"Unreal scenario passed but the editor exited with code "
-            f"{completed.returncode}:\n{_run_log_tail(unreal_log, unreal_console_log)}"
+            f"{completed_returncode}:\n{_run_log_tail(unreal_log, unreal_console_log)}"
         )
     result["server_reverse_state"] = _verify_reverse_server_state(scenario)
     return UnrealRunResult(

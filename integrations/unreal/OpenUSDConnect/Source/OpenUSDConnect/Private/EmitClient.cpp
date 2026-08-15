@@ -19,6 +19,35 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDEmit, Log, All);
 
 using namespace OUC;
 
+namespace
+{
+bool IsPeerClosed(FSocket* Socket)
+{
+	if (!Socket)
+	{
+		return true;
+	}
+
+	uint32 PendingBytes = 0;
+	if (Socket->HasPendingData(PendingBytes))
+	{
+		return false;
+	}
+
+	// An orderly TCP close becomes readable with no payload. HasPendingData()
+	// alone cannot distinguish that state from an idle connection on Windows.
+	if (!Socket->Wait(ESocketWaitConditions::WaitForRead, FTimespan::Zero()))
+	{
+		return false;
+	}
+
+	uint8 Probe = 0;
+	int32 BytesRead = 0;
+	return !Socket->Recv(&Probe, 1, BytesRead, ESocketReceiveFlags::Peek)
+		|| BytesRead == 0;
+}
+}
+
 // ---------------------------------------------------------------------------
 FProducerEndpointState::FProducerEndpointState(
 	const FString& InHost,
@@ -366,6 +395,12 @@ uint32 FEmitClient::Run()
 		float RateLimitDelay = 0.0f;
 		while (!bShouldStop.load(std::memory_order_relaxed) && !bShouldDisconnect)
 		{
+			if (IsPeerClosed(Socket))
+			{
+				bShouldDisconnect = true;
+				break;
+			}
+
 			// 1. Claim and send every endpoint-state transaction not yet written
 			// on this connection. Items remain owned by ProducerState until a
 			// committed/duplicate TransactionResult arrives.

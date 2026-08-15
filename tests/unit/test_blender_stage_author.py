@@ -394,8 +394,7 @@ class TestAutoTrack:
         trs = [
             event
             for event in events
-            if event["k"] == K_SET_XFORM_TRS
-            and event["prim"] == "/World/Asset/Geom/Mesh"
+            if event["k"] == K_SET_XFORM_TRS and event["prim"] == "/World/Asset/Geom/Mesh"
         ]
         assert len(trs) == 1
         assert trs[0]["t"] == [1.0, 0.0, 0.0]
@@ -490,8 +489,9 @@ def test_parametric_geometry_scale_is_not_authored_as_xform_scale():
 
     scale_op = next(
         op
-        for op in UsdGeom.Xformable(author.stage.GetPrimAtPath("/World/ChairLeg"))
-        .GetOrderedXformOps()
+        for op in UsdGeom.Xformable(
+            author.stage.GetPrimAtPath("/World/ChairLeg")
+        ).GetOrderedXformOps()
         if op.GetOpType() == UsdGeom.XformOp.TypeScale
     )
     # Blender Z-up (0.05, 0.05, 0.85) converts back to USD Y-up.
@@ -989,9 +989,87 @@ def test_blender_timer_retries_a_prepared_batch_after_reconnect(monkeypatch):
     monkeypatch.setattr(capture._state, "author", author)
     monkeypatch.setattr(capture._state, "notice_emitter", emitter)
     monkeypatch.setattr(capture, "_try_send_dirty_events", send_pending)
+    monkeypatch.setattr(capture, "_schedule_emitter_reconnect", MagicMock())
 
     assert capture._timer_tick() == 0.25
     send_pending.assert_called_once_with()
+
+
+def test_blender_timer_schedules_emitter_reconnect(monkeypatch):
+    from integrations.blender import capture
+
+    author = MagicMock()
+    author.enabled = True
+    reconnect = MagicMock()
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(capture._state, "notice_emitter", None)
+    monkeypatch.setattr(capture, "_schedule_emitter_reconnect", reconnect)
+
+    assert capture._timer_tick() == 0.25
+    reconnect.assert_called_once_with()
+
+
+def test_blender_reconnect_worker_preserves_current_sender(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = True
+    sender.host = "127.0.0.1"
+    sender.port = 7200
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
+    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    sender.connect.assert_called_once_with(
+        timeout=capture.EMITTER_RECONNECT_TIMEOUT_SECONDS,
+    )
+    sender.disconnect.assert_not_called()
+    assert capture._state._reconnect_interval == capture.EMITTER_RECONNECT_INTERVAL_SECONDS
+
+
+def test_blender_reconnect_worker_backs_off_after_failure(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = False
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
+    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    assert capture._state._reconnect_interval == 8.0
+
+
+def test_blender_reconnect_worker_closes_stale_connection(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = True
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 8)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    sender.disconnect.assert_called_once_with()
+
+
+def test_cancel_blender_reconnect_waits_for_worker(monkeypatch):
+    from integrations.blender import capture
+
+    reconnect_thread = MagicMock()
+    reconnect_thread.is_alive.return_value = True
+    monkeypatch.setattr(capture._state, "_reconnect_thread", reconnect_thread)
+    generation = capture._state._reconnect_generation
+    monkeypatch.setattr(capture._state, "_reconnect_generation", generation)
+
+    capture._cancel_emitter_reconnect()
+
+    reconnect_thread.join.assert_called_once_with()
+    assert capture._state._reconnect_thread is None
+    assert capture._state._reconnect_generation == generation + 1
 
 
 def test_remote_apply_refreshes_only_matching_transform_baselines(monkeypatch):
