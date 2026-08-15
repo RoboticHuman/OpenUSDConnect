@@ -38,7 +38,10 @@ from openusdconnect.protocol_constants import (
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
 )
-from openusdconnect.shader_connections import resolve_nodegraph_connection
+from openusdconnect.shader_connections import (
+    flatten_interface_input_connections,
+    resolve_nodegraph_connection,
+)
 
 from .shader_mapper import create_default_registry
 
@@ -886,11 +889,13 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             return True
         # When ``info_id`` is non-empty, the prim is a UsdShade.Shader and
-        # the value is its Sdr identifier — look up a registered shader
-        # mapper. When empty, the prim is a NodeGraph/Material/UsdLux Light;
-        # route through the light-input handler (no-op for NodeGraph/Material
-        # since the prim has no LIGHT Blender object).
+        # the value is its Sdr identifier, so look up a registered shader
+        # mapper. When empty, the prim is a Material, NodeGraph, or UsdLux
+        # Light. Material and NodeGraph interface values are forwarded to the
+        # shader inputs that consume them; lights use their dedicated mapping.
         if not info_id:
+            if self._apply_interface_inputs(prim_path, inputs):
+                return True
             return self._apply_light_input(prim_path, inputs, input_types)
         mapper = self._shader_registry.get(info_id)
         if not mapper:
@@ -905,6 +910,72 @@ class BlenderAdapter(DCCAdapter):
         if mapper.is_multi_node:
             return self._apply_multi_node_shader(prim_path, mapper, inputs)
         return self._apply_single_node_shader(prim_path, mapper, inputs)
+
+    def _apply_interface_inputs(self, prim_path: str, inputs: dict) -> bool:
+        """Apply edited Material/NodeGraph inputs to their shader consumers.
+
+        The dispatcher updates ``mirror_stage`` before calling the external
+        adapter, so OpenUSD can resolve the composed interface connections for
+        the exact state being delivered. Blender has no nodes for USD
+        interface inputs; updating the mapped consumer sockets is therefore
+        the native representation of the same edit.
+        """
+        if self.mirror_stage is None or not inputs:
+            return False
+
+        from pxr import UsdShade
+
+        from openusdconnect.usd_state import usd_value_to_python
+
+        prim = self.mirror_stage.GetPrimAtPath(prim_path)
+        if not prim or not (
+            prim.IsA(UsdShade.Material) or prim.IsA(UsdShade.NodeGraph)
+        ):
+            return False
+
+        connectable = (
+            UsdShade.Material(prim)
+            if prim.IsA(UsdShade.Material)
+            else UsdShade.NodeGraph(prim)
+        )
+        edited_names = set(inputs)
+        consumer_updates: dict[str, dict] = {}
+        for interface_input, consumers in (
+            connectable.ComputeInterfaceInputConsumersMap(True).items()
+        ):
+            if interface_input.GetBaseName() not in edited_names:
+                continue
+            value = usd_value_to_python(interface_input.Get())
+            if value is None:
+                continue
+            for consumer in consumers:
+                shader = UsdShade.Shader(consumer.GetPrim())
+                if not shader:
+                    continue
+                shader_id = shader.GetIdAttr().Get()
+                if not shader_id:
+                    continue
+                shader_path = str(shader.GetPath())
+                update = consumer_updates.setdefault(
+                    shader_path,
+                    {
+                        "shader_id": str(shader_id),
+                        "inputs": {},
+                        "input_types": {},
+                    },
+                )
+                input_name = consumer.GetBaseName()
+                update["inputs"][input_name] = value
+                update["input_types"][input_name] = str(consumer.GetTypeName())
+
+        for shader_path, update in consumer_updates.items():
+            self.set_connectable_input(
+                shader_path,
+                update["shader_id"],
+                update["inputs"],
+                update["input_types"],
+            )
+        return True
 
     def _apply_light_input(self, prim_path: str, inputs: dict, input_types: dict) -> bool:
         """Route UsdLux light inputs to the Blender light data block.
@@ -1739,6 +1810,12 @@ class BlenderAdapter(DCCAdapter):
                     file_path,
                 )
                 if sid:
+                    flatten_interface_input_connections(
+                        UsdShade.Shader(prim),
+                        inputs,
+                        itypes,
+                        conns,
+                    )
                     shader_events.append((scene_path, sid, inputs, itypes))
                     if conns:
                         remapped_conns = {}

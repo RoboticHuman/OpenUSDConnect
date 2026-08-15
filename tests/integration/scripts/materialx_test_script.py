@@ -10,6 +10,7 @@ Exit code 0 = all tests pass, 1 = failure.
 
 import os
 import sys
+import tempfile
 import traceback
 
 import bpy
@@ -236,6 +237,7 @@ _EXPECTED_INPUTS = {
     "specular_roughness",
     "transmission",
     "subsurface",
+    "subsurface_color",
     "subsurface_radius",
     "subsurface_scale",
     "subsurface_anisotropy",
@@ -745,6 +747,380 @@ def test_enrichment_from_reference(r):
     r.ok(name)
 
 
+def test_bubblegum_interface_enrichment(r):
+    """Material interface values from bubblegum.mtlx reach its Blender shader."""
+    name = "bubblegum_interface_enrichment"
+    _clear_materials()
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+
+    from integrations.blender.blender_adapter import BlenderAdapter
+
+    adapter = BlenderAdapter()
+    material_root = "/World/Looks/BubbleGumAsset"
+    material_path = f"{material_root}/bubblegum"
+    shader_path = f"{material_path}/mtlxstandard_surface1"
+    adapter.ensure_prim(material_root, "Scope")
+    adapter.set_reference(
+        material_root,
+        [
+            {
+                "asset_path": os.path.join(
+                    project_root,
+                    "assets",
+                    "full_assets",
+                    "StandardShaderBall",
+                    "example_materials",
+                    "bubblegum.mtlx",
+                ),
+                "prim_path": "/MaterialX/Materials",
+            }
+        ],
+    )
+    adapter.ensure_prim("/World/BubbleGumBall", "Sphere")
+    adapter.set_material_binding("/World/BubbleGumBall", material_path)
+
+    obj = adapter._find_object_by_prim("/World/BubbleGumBall")
+    mat = obj.data.materials[0] if obj and obj.data and obj.data.materials else None
+    if mat is None or mat.get("usd_material_path") != material_path:
+        r.fail(name, "Bubble Gum material binding is missing")
+        return
+
+    cached = adapter._registry.get_shader(shader_path)
+    input_map = cached.get("input_map")
+    if input_map is None:
+        r.fail(name, "Bubble Gum standard-surface network was not enriched")
+        return
+    if abs(input_map["subsurface"].default_value - 1.0) > 0.01:
+        r.fail(name, f"subsurface={input_map['subsurface'].default_value}, expected 1")
+        return
+    color = input_map["subsurface_color"].default_value
+    expected = (1.0, 0.22, 0.493)
+    if any(abs(color[index] - expected[index]) > 0.01 for index in range(3)):
+        r.fail(name, f"subsurface_color={tuple(color)}, expected={expected}")
+        return
+    if abs(input_map["subsurface_scale"].default_value - 0.0325) > 0.001:
+        r.fail(
+            name,
+            f"subsurface_scale={input_map['subsurface_scale'].default_value}, expected 0.0325",
+        )
+        return
+    r.ok(name)
+
+
+def test_bubblegum_live_interface_edit(r):
+    """A live Material interface edit updates the existing Blender network."""
+    name = "bubblegum_live_interface_edit"
+    _clear_materials()
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+
+    from pxr import Gf, Sdf, Usd, UsdShade
+
+    from integrations.blender.blender_adapter import BlenderAdapter
+
+    asset_path = os.path.join(
+        project_root,
+        "assets",
+        "full_assets",
+        "StandardShaderBall",
+        "example_materials",
+        "bubblegum.mtlx",
+    )
+    material_root = "/World/Looks/BubbleGumAsset"
+    material_path = f"{material_root}/bubblegum"
+    shader_path = f"{material_path}/mtlxstandard_surface1"
+
+    mirror = Usd.Stage.CreateInMemory()
+    root = mirror.DefinePrim(material_root, "Scope")
+    root.GetReferences().AddReference(
+        Sdf.Reference(asset_path, "/MaterialX/Materials")
+    )
+
+    adapter = BlenderAdapter(mirror_stage=mirror)
+    adapter.ensure_prim(material_root, "Scope")
+    adapter.set_reference(
+        material_root,
+        [{"asset_path": asset_path, "prim_path": "/MaterialX/Materials"}],
+    )
+
+    cached = adapter._registry.get_shader(shader_path)
+    input_map = cached.get("input_map")
+    if input_map is None:
+        r.fail(name, "Bubble Gum standard-surface network was not enriched")
+        return
+    node_count = len(input_map["subsurface_color"].node.id_data.nodes)
+
+    material = UsdShade.Material.Get(mirror, material_path)
+    live_color = Gf.Vec3f(0.08, 0.65, 1.0)
+    material.GetInput("subsurface_color").Set(live_color)
+    material.GetInput("specular_roughness").Set(0.42)
+    adapter.set_connectable_input(
+        material_path,
+        "",
+        {
+            "subsurface_color": [0.08, 0.65, 1.0],
+            "specular_roughness": 0.42,
+        },
+        {"subsurface_color": "color3f", "specular_roughness": "float"},
+    )
+
+    if adapter._registry.get_shader(shader_path).get("input_map") is not input_map:
+        r.fail(name, "live edit rebuilt the shader socket map")
+        return
+    color = input_map["subsurface_color"].default_value
+    if any(abs(color[index] - live_color[index]) > 0.01 for index in range(3)):
+        r.fail(name, f"subsurface_color={tuple(color)}, expected={tuple(live_color)}")
+        return
+    if abs(input_map["specular_roughness"].default_value - 0.42) > 0.01:
+        r.fail(
+            name,
+            "specular_roughness="
+            f"{input_map['specular_roughness'].default_value}, expected=0.42",
+        )
+        return
+    if len(input_map["subsurface_color"].node.id_data.nodes) != node_count:
+        r.fail(name, "live edit duplicated material nodes")
+        return
+    r.ok(name)
+
+
+def test_referenced_nested_material_live_edits(r):
+    """Live edits update a nested, internally referenced Blender material."""
+    name = "referenced_nested_material_live_edits"
+    _clear_materials()
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+
+    from integrations.blender.blender_adapter import BlenderAdapter
+
+    with tempfile.TemporaryDirectory(prefix="openusdconnect-live-material-") as temp_dir:
+        asset_path = os.path.join(temp_dir, "nested_material.usda")
+        asset = Usd.Stage.CreateNew(asset_path)
+        asset_root = asset.DefinePrim("/Asset", "Scope")
+        asset.SetDefaultPrim(asset_root)
+        asset.DefinePrim("/Asset/Library", "Scope")
+        asset.DefinePrim("/Asset/Looks", "Scope")
+
+        base = UsdShade.Material.Define(asset, "/Asset/Library/Base")
+        outer = UsdShade.NodeGraph.Define(asset, "/Asset/Library/Base/Outer")
+        inner = UsdShade.NodeGraph.Define(
+            asset,
+            "/Asset/Library/Base/Outer/Inner",
+        )
+        surface = UsdShade.Shader.Define(
+            asset,
+            "/Asset/Library/Base/Outer/Inner/Surface",
+        )
+        surface.CreateIdAttr("ND_standard_surface_surfaceshader")
+
+        material_inputs = {
+            "base": (Sdf.ValueTypeNames.Float, 1.0),
+            "base_color": (
+                Sdf.ValueTypeNames.Color3f,
+                Gf.Vec3f(0.2, 0.3, 0.4),
+            ),
+            "metalness": (Sdf.ValueTypeNames.Float, 0.1),
+            "specular_roughness": (Sdf.ValueTypeNames.Float, 0.25),
+            "emission_color": (
+                Sdf.ValueTypeNames.Color3f,
+                Gf.Vec3f(0.01, 0.02, 0.03),
+            ),
+        }
+        for input_name, (type_name, value) in material_inputs.items():
+            material_input = base.CreateInput(input_name, type_name)
+            material_input.Set(value)
+            outer_input = outer.CreateInput(input_name, type_name)
+            inner_input = inner.CreateInput(input_name, type_name)
+            shader_input = surface.CreateInput(input_name, type_name)
+            outer_input.ConnectToSource(material_input)
+            inner_input.ConnectToSource(outer_input)
+            shader_input.ConnectToSource(inner_input)
+
+        inner_coat = inner.CreateInput("coat", Sdf.ValueTypeNames.Float)
+        inner_coat.Set(0.15)
+        surface.CreateInput("coat", Sdf.ValueTypeNames.Float).ConnectToSource(
+            inner_coat
+        )
+        surface.CreateInput("subsurface", Sdf.ValueTypeNames.Float).Set(0.0)
+
+        for texture_name in ("TexA", "TexB"):
+            texture = UsdShade.Shader.Define(
+                asset,
+                f"/Asset/Library/Base/Outer/Inner/{texture_name}",
+            )
+            texture.CreateIdAttr("UsdUVTexture")
+            texture.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+        surface_output = surface.CreateOutput(
+            "surface",
+            Sdf.ValueTypeNames.Token,
+        )
+        inner_output = inner.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        outer_output = outer.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        inner_output.ConnectToSource(surface_output)
+        outer_output.ConnectToSource(inner_output)
+        base.CreateSurfaceOutput("mtlx").ConnectToSource(outer_output)
+
+        instance = UsdShade.Material.Define(asset, "/Asset/Looks/Instance")
+        instance.GetPrim().GetReferences().AddInternalReference(
+            "/Asset/Library/Base"
+        )
+        sphere = UsdGeom.Sphere.Define(asset, "/Asset/Geom")
+        UsdShade.MaterialBindingAPI.Apply(sphere.GetPrim()).Bind(instance)
+        asset.GetRootLayer().Save()
+
+        root_path = "/World/LookAsset"
+        material_path = f"{root_path}/Looks/Instance"
+        inner_path = f"{material_path}/Outer/Inner"
+        surface_path = f"{inner_path}/Surface"
+        tex_a_path = f"{inner_path}/TexA"
+        tex_b_path = f"{inner_path}/TexB"
+
+        mirror = Usd.Stage.CreateInMemory()
+        mirror_root = mirror.DefinePrim(root_path, "Scope")
+        mirror_root.GetReferences().AddReference(asset_path)
+        adapter = BlenderAdapter(mirror_stage=mirror)
+        adapter.ensure_prim(root_path, "Scope")
+        adapter.set_reference(
+            root_path,
+            [{"asset_path": asset_path, "prim_path": "/Asset"}],
+        )
+
+        input_map = adapter._registry.get_shader(surface_path).get("input_map")
+        if input_map is None:
+            r.fail(name, "referenced nested shader was not enriched")
+            return
+        node_count = len(input_map["base_color"].node.id_data.nodes)
+
+        material_updates = {
+            "base": 0.72,
+            "base_color": [0.8, 0.15, 0.35],
+            "metalness": 0.63,
+            "specular_roughness": 0.47,
+            "emission_color": [0.1, 0.3, 0.7],
+        }
+        material = UsdShade.Material.Get(mirror, material_path)
+        for input_name, value in material_updates.items():
+            authored_value = (
+                Gf.Vec3f(*value)
+                if input_name in {"base_color", "emission_color"}
+                else value
+            )
+            material.GetInput(input_name).Set(authored_value)
+        adapter.set_connectable_input(
+            material_path,
+            "",
+            material_updates,
+            {
+                "base": "float",
+                "base_color": "color3f",
+                "metalness": "float",
+                "specular_roughness": "float",
+                "emission_color": "color3f",
+            },
+        )
+
+        nested = UsdShade.NodeGraph.Get(mirror, inner_path)
+        nested.GetInput("coat").Set(0.81)
+        adapter.set_connectable_input(
+            inner_path,
+            "",
+            {"coat": 0.81},
+            {"coat": "float"},
+        )
+        mirror_surface = UsdShade.Shader.Get(mirror, surface_path)
+        mirror_surface.GetInput("subsurface").Set(0.36)
+        adapter.set_connectable_input(
+            surface_path,
+            "ND_standard_surface_surfaceshader",
+            {"subsurface": 0.36},
+            {"subsurface": "float"},
+        )
+
+        scalar_expectations = {
+            "base": 0.72,
+            "metalness": 0.63,
+            "specular_roughness": 0.47,
+            "coat": 0.81,
+            "subsurface": 0.36,
+        }
+        for input_name, expected in scalar_expectations.items():
+            actual = input_map[input_name].default_value
+            if abs(actual - expected) > 0.01:
+                r.fail(name, f"{input_name}={actual}, expected={expected}")
+                return
+        for input_name, expected in {
+            "base_color": (0.8, 0.15, 0.35),
+            "emission_color": (0.1, 0.3, 0.7),
+        }.items():
+            actual = input_map[input_name].default_value
+            if any(abs(actual[index] - expected[index]) > 0.01 for index in range(3)):
+                r.fail(name, f"{input_name}={tuple(actual)}, expected={expected}")
+                return
+        if adapter._registry.get_shader(surface_path).get("input_map") is not input_map:
+            r.fail(name, "live value edits rebuilt the shader socket map")
+            return
+        if len(input_map["base_color"].node.id_data.nodes) != node_count:
+            r.fail(name, "live value edits duplicated material nodes")
+            return
+
+        for texture_path in (tex_a_path, tex_b_path):
+            adapter.set_connectable_input(
+                texture_path,
+                "UsdUVTexture",
+                {},
+                {},
+            )
+        base_color_input = mirror_surface.GetInput("base_color")
+        for texture_path in (tex_a_path, tex_b_path):
+            texture_output = UsdShade.Shader.Get(
+                mirror,
+                texture_path,
+            ).GetOutput("rgb")
+            base_color_input.ConnectToSource(texture_output)
+            adapter.set_connectable_connection(
+                surface_path,
+                {
+                    "inputs:base_color": {
+                        "source_prim": texture_path,
+                        "source_attr": "outputs:rgb",
+                    }
+                },
+            )
+
+        target_socket = input_map["base_color"]
+        incoming = [
+            link
+            for link in target_socket.node.id_data.links
+            if link.to_socket == target_socket
+        ]
+        if len(incoming) != 1:
+            r.fail(name, f"base_color has {len(incoming)} incoming links, expected 1")
+            return
+        if incoming[0].from_node.get("usd_shader_path") != tex_b_path:
+            r.fail(name, "base_color was not rewired to TexB")
+            return
+
+        base_color_input.DisconnectSource()
+        adapter.set_connectable_connection(
+            surface_path,
+            {},
+            ["inputs:base_color"],
+        )
+        incoming = [
+            link
+            for link in target_socket.node.id_data.links
+            if link.to_socket == target_socket
+        ]
+        if incoming:
+            r.fail(name, "base_color disconnection left an incoming Blender link")
+            return
+        r.ok(name)
+
+
 # ------------------------------------------------------------------
 # Runner
 # ------------------------------------------------------------------
@@ -771,6 +1147,9 @@ def main():
         test_adapter_glass_enables_refraction,
         # Post-import MaterialX enrichment
         test_enrichment_from_reference,
+        test_bubblegum_interface_enrichment,
+        test_bubblegum_live_interface_edit,
+        test_referenced_nested_material_live_edits,
     ]
 
     for t in tests:

@@ -76,7 +76,7 @@ class LogicalLayerRouter(LayerKeyRouter):
             raise ValueError(f"event targets unknown logical layer {layer_key!r}")
         return self._layers[layer_key]
 
-    def _apply_state_inner(self, state: dict) -> bool:
+    def _apply_state_inner(self, state: dict) -> None:
         layer_keys: list[str] = []
         labels: dict[str, str] = {}
         muted: dict[str, bool] = {}
@@ -108,7 +108,6 @@ class LogicalLayerRouter(LayerKeyRouter):
         for layer_key in removed_keys:
             layer = self._layers.pop(layer_key)
             self._keys_by_identifier.pop(layer.identifier, None)
-        return True
 
     def edit_target_for(self, layer_key: str) -> Usd.EditTarget:
         return Usd.EditTarget(self.layer_for(layer_key))
@@ -189,8 +188,6 @@ class LogicalLayerRouter(LayerKeyRouter):
     def _install_layers(self, stage: Usd.Stage) -> None:
         if not self._layer_keys:
             return
-        if stage is None:
-            return
 
         active_layers = [self._layers[layer_key] for layer_key in self._layer_keys]
         active_ids = [layer.identifier for layer in active_layers]
@@ -222,8 +219,6 @@ class LogicalLayerRouter(LayerKeyRouter):
             stage.MuteAndUnmuteLayers(sorted(to_mute), sorted(to_unmute))
 
     def _detach_layers(self, stage: Usd.Stage) -> None:
-        if stage is None:
-            return
         managed = self._managed_identifiers()
         muted = {identifier for identifier in managed if stage.IsLayerMuted(identifier)}
         if muted:

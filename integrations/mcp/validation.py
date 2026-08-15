@@ -203,6 +203,19 @@ def validate_and_prepare(
             continue
 
         _require_prim_path(ev.get("prim"), idx=idx, kind=kind, field="prim")
+
+        if kind == K_SET_CONNECTABLE_INPUT and isinstance(ev.get("input_types"), dict):
+            for name, type_name in ev["input_types"].items():
+                _check_sdf_type(type_name, idx=idx, field=f"input_types[{name}]")
+        if kind == K_SET_GPRIM_ATTRS and isinstance(ev.get("primvar_meta"), dict):
+            for name, metadata in ev["primvar_meta"].items():
+                if isinstance(metadata, dict):
+                    _check_sdf_type(
+                        metadata.get("typeName"),
+                        idx=idx,
+                        field=f"primvar_meta[{name}].typeName",
+                    )
+
         _shape_check(ev, idx)
 
         if kind == K_ENSURE_PRIM:
@@ -215,8 +228,6 @@ def validate_and_prepare(
                         prepended.add(anc)
 
         if kind == K_SET_CONNECTABLE_INPUT:
-            for name, tn in ev.get("input_types", {}).items():
-                _check_sdf_type(tn, idx=idx, field=f"input_types[{name}]")
             info_id = ev.get("info_id", "")
             if info_id and node_exists is not None and not node_exists(info_id):
                 warnings.append(
@@ -225,17 +236,13 @@ def validate_and_prepare(
                 )
 
         if kind == K_SET_GPRIM_ATTRS:
-            for name, meta in ev.get("primvar_meta", {}).items():
+            for name in ev.get("primvar_meta", {}):
                 if not name.startswith(PRIMVAR_PREFIX):
                     raise ToolError(
                         f"set_gprim_attrs: primvar_meta key {name!r} must start with 'primvars:'",
                         event_index=idx,
                         field="primvar_meta",
                     )
-                _check_sdf_type(
-                    meta.get("typeName"), idx=idx, field=f"primvar_meta[{name}].typeName"
-                )
-
         if kind == K_SET_MATERIAL_BINDING:
             _require_prim_path(ev["material_path"], idx=idx, kind=kind, field="material_path")
 

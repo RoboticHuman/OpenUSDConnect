@@ -1118,6 +1118,58 @@ class _ScopedAtomicApply:
         return False
 
 
+def atomic_apply_prim_paths(events) -> list[str] | None:
+    """Return the layer prims that fully contain a batch's possible writes.
+
+    ``None`` means the batch can modify layer-wide state and therefore needs
+    a full-layer snapshot. Exact Sdf events are scoped from ``spec_path``, not
+    their composed routing path. For inactive variant specs, backing up the
+    prim that owns the first variant selection captures the variant subtree
+    that actually lives in the layer.
+    """
+    paths: list[str] = []
+    for event in events:
+        kind = event.get("k")
+        if kind in (K_SET_STAGE_METADATA, K_REPLACE_SDF_LAYER_CONTENT, K_SET_SUBLAYERS):
+            return None
+        if kind == K_SET_SDF_SPEC_FIELDS:
+            if event.get("spec_kind") == "layer":
+                return None
+            spec_path = Sdf.Path(event.get("spec_path", ""))
+            if spec_path.isEmpty:
+                return None
+            variant_owner = next(
+                (
+                    prefix.GetPrimPath()
+                    for prefix in spec_path.GetPrefixes()
+                    if prefix.IsPrimVariantSelectionPath()
+                ),
+                None,
+            )
+            prim_path = variant_owner or spec_path.GetPrimPath()
+            if prim_path.isEmpty or prim_path == Sdf.Path.absoluteRootPath:
+                return None
+            paths.append(str(prim_path))
+            continue
+
+        prim_path = event.get("prim")
+        if not prim_path or prim_path == "/":
+            return None
+        paths.append(prim_path)
+        if kind == K_RENAME_PRIM:
+            parent = prim_path.rsplit("/", 1)[0]
+            new_name = event.get("new_name", "")
+            if not new_name:
+                return None
+            paths.append(f"{parent}/{new_name}" if parent else f"/{new_name}")
+        elif kind == K_SET_CONNECTABLE_CONNECTION:
+            for connection in event.get("connections", {}).values():
+                source = connection.get("source_prim")
+                if source:
+                    paths.append(source)
+    return paths
+
+
 def atomic_apply(stage: Usd.Stage, prim_paths=None):
     """Return a context manager for atomic event application.
 

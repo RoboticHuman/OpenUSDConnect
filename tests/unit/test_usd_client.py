@@ -106,6 +106,25 @@ def test_receiver_always_requests_full_layered_replay():
         receiver.close()
 
 
+def test_receiver_parks_without_invalidating_dispatcher_adapter():
+    stage = Usd.Stage.CreateInMemory()
+    receiver = UsdReceiver(
+        stage,
+        app_name="parked-receiver",
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        adapter = receiver._dispatcher.adapter
+        receiver.rebind_stage(None)
+        receiver._started = True
+
+        assert receiver._dispatcher.adapter is adapter
+        assert receiver.update() == 0
+    finally:
+        receiver.close()
+
+
 def test_receiver_status_distinguishes_connecting_replay_and_ready():
     receiver = UsdReceiver(
         Usd.Stage.CreateInMemory(),

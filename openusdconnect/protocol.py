@@ -68,6 +68,8 @@ def make_hello(
         producer_session_id: Ordered producer-session identity. Required for
             emitter connections that submit ordinary transactions.
     """
+    if role not in ("emitter", "receiver"):
+        raise ValueError("role must be 'emitter' or 'receiver'")
     mode = LayerMode(layer_mode)
     if mode is LayerMode.SHARED_STAGE and department is not None:
         raise ValueError("department routing is unavailable in shared-stage mode")

@@ -12,7 +12,11 @@ import openusdconnect.server.connection as connection_module
 from openusdconnect.codec import message_to_dict
 from openusdconnect.framing import recv_framed
 from openusdconnect.protocol import make_hello
-from openusdconnect.protocol_constants import MSG_TRANSACTION_RESULT
+from openusdconnect.protocol_constants import (
+    MSG_HELLO_REJECTED,
+    MSG_TRANSACTION_RESULT,
+    PROTOCOL_VERSION,
+)
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
@@ -92,6 +96,28 @@ def test_lost_commit_ack_reconnects_as_duplicate_without_reapplying(
         assert state.stage.GetPrimAtPath("/World/Once").IsValid()
     finally:
         sender.disconnect()
+
+
+def test_server_rejects_unknown_hello_role(transaction_server):
+    state, port = transaction_server
+    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+    try:
+        send_msg(
+            sock,
+            {
+                "type": "hello",
+                "role": "observer",
+                "protocol_version": PROTOCOL_VERSION,
+                "client_id": "unknown-role",
+            },
+        )
+        reply = message_to_dict(recv_framed(sock))
+        assert reply["type"] == MSG_HELLO_REJECTED
+        assert "emitter" in reply["reason"]
+        assert "receiver" in reply["reason"]
+        assert not state.clients
+    finally:
+        sock.close()
 
 
 def test_lost_ack_from_group_commit_reconnects_without_reapplying(
@@ -340,14 +366,14 @@ def test_pipeline_rejection_preserves_result_order_and_quarantines_suffix(
     monkeypatch,
 ):
     state, port = transaction_server
-    apply_txn = state.apply_txn
+    apply_txn = state._apply_validated_txn
 
     def reject_second(events, *args, **kwargs):
         if any(event.get("prim") == "/World/Reject2" for event in events):
             raise ValueError("injected invalid transaction")
         return apply_txn(events, *args, **kwargs)
 
-    monkeypatch.setattr(state, "apply_txn", reject_second)
+    monkeypatch.setattr(state, "_apply_validated_txn", reject_second)
     sender = EventSender(
         "127.0.0.1",
         port,

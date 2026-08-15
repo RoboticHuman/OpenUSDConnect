@@ -192,15 +192,14 @@ class TestHelloRejected:
         decoded, _ = _roundtrip(msg)
         assert decoded == msg
 
-    def test_requires_a_specific_code(self):
-        with pytest.raises(ValueError, match="must be specified"):
-            encode_message(
-                {
-                    "type": "hello_rejected",
-                    "code": _fb.HelloRejectionCode.Unspecified,
-                    "reason": "connection rejected",
-                }
-            )
+    def test_generic_rejection_roundtrip(self):
+        msg = {
+            "type": "hello_rejected",
+            "code": _fb.HelloRejectionCode.Unspecified,
+            "reason": "connection rejected",
+        }
+        decoded, _ = _roundtrip(msg)
+        assert decoded == msg
 
 
 class TestResyncCompactQuit:

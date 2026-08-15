@@ -33,6 +33,19 @@ def _accept_and_hello_ok(srv, timeout=2):
 
 
 class TestEventSenderConnect:
+    def test_constructor_rejects_non_emitter_role(self):
+        with pytest.raises(ValueError, match="must be 'emitter'"):
+            EventSender("127.0.0.1", 1, client_id="bad-role", role="receiver")
+
+    def test_malformed_events_fail_before_encoding_or_outbox_ownership(self):
+        sender = EventSender("127.0.0.1", 1, client_id="validation-client")
+        with pytest.raises(ValueError, match="transform fields"):
+            sender.send_events(
+                [{"k": "set_xform_trs", "prim": "/World/X", "fields": ["bogus"]}]
+            )
+        assert sender.pending_transaction_count == 0
+        assert sender._next_txn_id == 1
+
     def test_handshake_and_send_events(self):
         srv, port = _make_server()
         sender = EventSender("127.0.0.1", port, client_id="test-client")

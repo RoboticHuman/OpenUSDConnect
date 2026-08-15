@@ -65,6 +65,7 @@ from ..protocol_constants import (
     LayerMode,
     event_apply_tier,
 )
+from ..protocol_validation import validate_events
 from ..sdf_spec_delta import merge_spec_events
 from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph, StaleLayerGraphError
 from ..usd_state import read_material_binding, read_variant_selections
@@ -2784,12 +2785,22 @@ class UsdSyncServer:
         ``self.edit_layer``). Shared session metadata and stage-state events
         are applied under the primary session edit target.
         """
-        from ..event_apply import apply_events
-        from ..sdf_spec_delta import validate_spec_delta
+        validate_events(events, layer_mode=self.layer_mode)
+        self._apply_validated_txn(
+            events,
+            layer=layer,
+            update_tracking=update_tracking,
+        )
 
-        for event in events:
-            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
-                validate_spec_delta(event)
+    def _apply_validated_txn(
+        self,
+        events: list[dict],
+        layer: Sdf.Layer | None = None,
+        *,
+        update_tracking: bool = True,
+    ) -> None:
+        """Apply events admitted by a public transaction boundary."""
+        from ..event_apply import apply_events
 
         target = layer or self.edit_layer
 
@@ -2888,6 +2899,7 @@ class UsdSyncServer:
                 "invalid_identity",
                 "client_id and session_id are required and txn_id must be positive",
             )
+        validate_events(events, layer_mode=self.layer_mode)
 
         if self._transaction_stopping:
             raise RuntimeError("transaction coordinator is shutting down")
@@ -3145,7 +3157,7 @@ class UsdSyncServer:
                                     atomic_apply_layer(self.stage.GetSessionLayer())
                                 )
                             for transaction in prepared:
-                                self.apply_txn(
+                                self._apply_validated_txn(
                                     transaction.request.events,
                                     layer=transaction.target_layer,
                                     update_tracking=False,
@@ -3335,6 +3347,9 @@ class UsdSyncServer:
         still participates in the maintenance barrier, global commit order,
         atomic USD rollback, and synchronous durable persistence.
         """
+        if not events:
+            return []
+        validate_events(events, layer_mode=self.layer_mode)
         self.txn_barrier.acquire_shared()
         try:
             with self._transaction_commit_lock:
@@ -3439,7 +3454,7 @@ class UsdSyncServer:
                             rollback.enter_context(
                                 atomic_apply_layer(self.stage.GetSessionLayer())
                             )
-                        self.apply_txn(
+                        self._apply_validated_txn(
                             events,
                             layer=target_layer,
                             update_tracking=False,
@@ -3518,11 +3533,6 @@ class UsdSyncServer:
     ) -> list[tuple[dict, bytes]]:
         """Apply one exact authored-layer transaction."""
         from ..event_apply import apply_events, atomic_apply
-        from ..protocol_validation import validate_event
-        from ..sdf_spec_delta import (
-            validate_layer_content_replacement,
-            validate_spec_delta,
-        )
 
         graph = self.shared_layer_graph
         if graph is None:
@@ -3554,14 +3564,8 @@ class UsdSyncServer:
                 if event.get("k") == K_SET_SUBLAYERS:
                     prepared = graph.canonicalize_sublayers(layer_key, event)
                     canonical = prepared.event
-                elif event.get("k") == K_REPLACE_SDF_LAYER_CONTENT:
-                    canonical = dict(event)
-                    validate_layer_content_replacement(canonical)
                 else:
                     canonical = dict(event)
-                    validate_spec_delta(canonical)
-                if not validate_event(canonical):
-                    raise ValueError(f"invalid shared-stage event {canonical.get('k')!r}")
                 canonical_events.append(canonical)
         except StaleLayerGraphError as exc:
             raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc

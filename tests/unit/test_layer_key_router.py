@@ -21,7 +21,6 @@ class _RecordingRouter(LayerKeyRouter):
         for item in state.get("layers", ()):
             layer = Sdf.Layer.CreateAnonymous(item["label"])
             self._bind_key(item["layer_key"], layer)
-        return True
 
     def _install_layers(self, stage):
         self.installs.append(stage)
@@ -85,7 +84,7 @@ def test_failed_state_application_does_not_advance_state():
             if self._should_fail:
                 self._should_fail = False
                 raise ValueError("boom")
-            return super()._apply_state_inner(state)
+            super()._apply_state_inner(state)
 
     router = _FailingOnceRouter()
     with pytest.raises(ValueError, match="boom"):

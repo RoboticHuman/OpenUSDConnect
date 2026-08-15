@@ -34,13 +34,14 @@ from openusdconnect.protocol_constants import (
 )
 
 
-def test_every_event_kind_has_encoder_decoder_applier():
+def test_every_event_kind_has_encoder_decoder_applier_and_validator():
     for kind in sorted(EVENT_KEYS):
         spec = events.get(kind)
         assert spec is not None, f"{kind}: no EventSpec registered"
         assert spec.encode is not None, f"{kind}: missing @register_encoder"
         assert spec.decode is not None, f"{kind}: missing @register_decoder"
         assert spec.apply is not None, f"{kind}: missing @register_applier"
+        assert spec.validate is not None, f"{kind}: missing @register_validator"
         assert spec.fb_tag is not None, f"{kind}: missing fb_tag"
         assert spec.fb_class is not None, f"{kind}: missing fb_class"
 
