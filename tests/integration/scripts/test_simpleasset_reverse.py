@@ -191,7 +191,7 @@ def _test_step():
             log("Step 4: Changing shader value via operator...")
 
             # Find a MaterialX shader node on a material that's assigned
-            # to a mesh — orphan materials aren't tracked by depsgraph.
+            # to a mesh orphan materials aren't tracked by depsgraph.
             assigned_mats = set()
             for obj in bpy.data.objects:
                 if obj.data and hasattr(obj.data, "materials"):

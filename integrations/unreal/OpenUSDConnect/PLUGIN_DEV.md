@@ -1,4 +1,4 @@
-# OpenUSD Connect — Plugin Developer Notes
+# OpenUSD Connect Plugin Developer Notes
 
 End-user installation/usage docs live in [`README.md`](README.md). This file documents the
 plugin's internals: architecture, threading, protocol, and the rough edges that future
@@ -18,13 +18,13 @@ work will need to address.
 │  Tick() ─► waits for World->bIsWorldInitialized                              │
 │         ─► fires deferred Connect()                                          │
 │         ─► finds AUsdStageActor → AttachToStageActor() subscribes to         │
-│            OnPrimChanged                                                     │
+│            FUsdListener::OnObjectsChanged                                    │
 │         ─► drains EventQueue with bSuppressEmit=true while applying          │
 │                                                                              │
-│  OnPrimChanged() ─► (game thread, via UE delegate)                           │
-│                  ─► skipped if bSuppressEmit is true                         │
-│                  ─► reads TRS / visibility from pxr stage                    │
-│                  ─► encodes Txn frame and pushes to FEmitClient              │
+│  OnObjectsChanged() ─► queues exact changed Sdf paths                         │
+│  Tick()             ─► drains those paths unless bSuppressEmit is true       │
+│                     ─► reads TRS / visibility / shader inputs                │
+│                     ─► encodes Txn frames and pushes to FEmitClient          │
 │                                                                              │
 └──────────────────┬─────────────────────────────────┬─────────────────────────┘
                    │                                 │
@@ -49,10 +49,11 @@ work will need to address.
                        Python OpenUSDConnect server
 ```
 
-Both threads share the same `ClientId` and `SessionOrigin` so the server can correlate
-the two sockets as one logical Unreal client. `SessionOrigin` is regenerated per
-subsystem instance — i.e. per world — so the editor world and a PIE world are distinct
-clients to the server.
+Both threads share a stable project/machine `ClientId` and one endpoint-scoped
+producer session ID. The session ID is sent as diagnostic `origin` on both
+sockets and as `producer_session_id` by the emitter. The receiver uses it to
+recognize this plugin instance's own broadcasts; the server still publishes
+every committed record to every receiver.
 
 ---
 
@@ -80,50 +81,51 @@ clients to the server.
 Frame: [4-byte big-endian uint32 length][N bytes FlatBuffers Envelope]
 ```
 
-### `Envelope { payload_type: uint8; payload: Payload union; schema_version: uint16 = 1 }`
+The authoritative message and event definitions are
+`openusdconnect/schema/messages.fbs` and `events.fbs`. Avoid copying numeric
+union discriminants into documentation; generated bindings expose the named
+enums and the values can change when the schema grows.
 
-| `payload_type` | Direction | Meaning |
+| Payload | Direction | Meaning |
 |----------------|-----------|---------|
-| `1 Hello`           | C→S | Handshake (role = `"receiver"` or `"emitter"`) |
-| `2 HelloOk`         | S→C | Auth accepted |
-| `3 AuthRejected`    | S→C | Token failed TOFU check |
-| `4 Txn`             | C→S | Batch of events (used by emitter) |
-| `5 BroadcastEvent`  | S→C | Single event with monotonic seq (used by receiver) |
-| `6 Resync`          | S→C | Reset client seq → server replays from 0 |
-| `8 Ping`            | S→C | Idle heartbeat |
-| `12 RateLimited`    | S→C | `retry_after: float` seconds |
+| `Hello` / `HelloOk` | both | role, protocol/schema compatibility, authentication, layer mode, and producer-session handshake |
+| `AuthRejected` / `HelloRejected` | S→C | authentication or capability rejection |
+| `Txn` | C→S | ordered producer transaction |
+| `TransactionResult` | S→C | cumulative durable acknowledgement or deterministic rejection |
+| `BroadcastEvent` | S→C | one sequenced authoritative event |
+| `ReplayComplete` | S→C | exact replay-to-live boundary |
+| `Resync` | S→C | discard the old replay position and rebuild |
+| `Ping` / `RateLimited` | S→C | connection health and backpressure |
 
 ### `EventWrapper { event_type: uint8; event: EventPayload union }`
 
-`event_type` values are listed at the top of `USDConnectProtocol.h`. The handful currently implemented in
-either direction is summarised in [`README.md`](README.md#supported-events).
+The event union is generated from `events.fbs`. The subset implemented in each
+direction is summarized in [`README.md`](README.md#supported-events).
 
-### FlatBuffers without generated FlatBuffers code
+### Generated FlatBuffers bindings
 
-The plugin does **not** invoke `flatc --cpp` and ship its full generated readers/writers
-(allocator override + Unity-build + `dynamic_cast` macro conflicts make that painful in UE).
-Instead, reading is done in `OUC::FB::*` via raw vtable arithmetic, and writing uses the
-`FlatBufferBuilder` directly with fields placed at hard-coded VT offsets defined in
-`OUC::VT::*`.
+The plugin includes the flatc-generated C++ bindings under
+`OpenUSDConnectPXR/Public/Schema/`. `USDConnectProtocol.h` adds only framing,
+verification, version checks, and Unreal-friendly helpers. `TxnBuilder.cpp`
+uses the generated `Create*` functions; receive code uses the generated table
+accessors.
 
-Vtable offset rule: the *N*th declared field of a table has VT offset `4 + 2*N`. Union
-fields take two slots — the type-discriminant byte (lower VT) and the offset to the
-referenced table (next VT). All offsets and discriminant constants in `USDConnectProtocol.h`
-are **auto-generated** from `openusdconnect/schema/{messages,events}.fbs` by
-`scripts/generate_unreal_protocol.py` (also invoked from `scripts/generate_flatbuffers.sh`).
-Regenerate and re-commit the header after any schema change — the C++ call sites use
-`TableName_FieldName` constants and will fail to compile if a field is renamed/removed,
-which is the point.
+Run `scripts/generate_flatbuffers.sh` after changing either schema and commit
+the regenerated Python and C++ bindings together. The generated C++ header pins
+the FlatBuffers runtime version with a `static_assert`; keep
+`setup_flatbuffers.py` on the same version so plugin builds fetch compatible
+headers.
 
 ### Threading & framing rules learned the hard way
 
 - The frame-length prefix is **big-endian** (`struct.pack(">I", ...)` on the server),
   but the FlatBuffers payload itself is little-endian as always.
-- The frame size limit is **16 MiB** (`OUC::kMaxFrameSize`) — match the server's value.
-- Emitter and receiver each open their own TCP socket. The server keys clients by
-  `(client_id, origin)`; with the same `ClientId` + `SessionOrigin` we appear as one
-  logical client (one emitter + one receiver). Different worlds → different
-  `SessionOrigin` → distinct clients.
+- The frame size limit is **16 MiB** (`OUC::kMaxFrameSize`) match the server's value.
+- Emitter and receiver each open their own TCP socket. `client_id` is the stable
+  authentication and producer identity. `origin` is diagnostic metadata, while
+  the emitter's `producer_session_id` provides exactly-once transaction identity.
+  The plugin reuses one endpoint-scoped producer session across ordinary
+  reconnects and creates a new one after changing endpoint or department.
 
 ---
 

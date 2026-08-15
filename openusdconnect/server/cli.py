@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None):
         default=None,
         metavar="LIST",
         help="Comma-separated department priority (strongest first). "
-        "Enables per-client layer ordering by department. "
+        "Clients in one department share its ordered collaboration layer. "
         "Example: --departments lighting,fx,animation,layout",
     )
     services.add_argument(
@@ -354,8 +354,9 @@ def main(argv: list[str] | None = None):
         "--durability",
         choices=["strict", "realtime"],
         default="strict",
-        help="strict: persist to DB before broadcast (no lost events). "
-        "realtime: broadcast first, persist async (lower latency).",
+        help="strict: persist every write before broadcast. realtime: allow "
+        "eligible server-internal writes to persist asynchronously; producer "
+        "transaction acknowledgements remain durable.",
     )
     limits.add_argument(
         "--max-connections",

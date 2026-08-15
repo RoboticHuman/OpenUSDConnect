@@ -1,4 +1,4 @@
-"""T2: Teapot — Variant switching with interleaved live editing.
+"""T2: Teapot Variant switching with interleaved live editing.
 
 Verifies:
 1. Default variant (Utah) → Ceramic material with primvar Base Color

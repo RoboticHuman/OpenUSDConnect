@@ -243,7 +243,7 @@ class TestTransactionIdentity:
 
 
 # ===================================================================
-# Event-level tests — all 17 kinds
+# Event-level tests all 17 kinds
 # ===================================================================
 
 
@@ -663,7 +663,7 @@ class TestSetConnectableConnection:
 
     def test_roundtrip_output_side(self):
         """Material/NodeGraph output port connections ride the same wire
-        shape — only the namespace prefix on local_attr differs."""
+        shape only the namespace prefix on local_attr differs."""
         ev = {
             "k": "set_connectable_connection",
             "prim": "/World/Mat",
@@ -753,7 +753,7 @@ class TestSchemaProtocolSync:
         registered_tags = {spec.fb_tag for spec in events.all_specs() if spec.fb_tag is not None}
 
         assert fb_tags == registered_tags, (
-            f"Schema/registry mismatch — "
+            f"Schema/registry mismatch "
             f"in schema but not registered: {fb_tags - registered_tags}, "
             f"registered but not in schema: {registered_tags - fb_tags}"
         )
@@ -766,7 +766,7 @@ class TestSchemaProtocolSync:
         codec_tags = set(_PAYLOAD_TO_MSG_TYPE.keys())
 
         assert fb_tags == codec_tags, (
-            f"Schema/codec mismatch — "
+            f"Schema/codec mismatch "
             f"in schema but not codec: {fb_tags - codec_tags}, "
             f"in codec but not schema: {codec_tags - fb_tags}"
         )

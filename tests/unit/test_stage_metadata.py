@@ -133,7 +133,7 @@ def test_emitter_ignores_unrelated_pseudo_root_edits():
     """
     stage = Usd.Stage.CreateInMemory()
     emitter = NoticeEmitter(stage)
-    # Comments do fire a pseudo-root info notice — but on the "comment" field,
+    # Comments do fire a pseudo-root info notice but on the "comment" field,
     # not any of our watched metadata fields.
     stage.GetRootLayer().comment = "hello"
     # No metadata-watched field was changed → no event should be produced.

@@ -126,13 +126,13 @@ uint32 FSyncClient::Run()
 			if (bHasAnnouncedFailure)
 			{
 				UE_LOG(LogUSDConnect, Verbose,
-					TEXT("Could not connect to %s:%d — retrying in %.1fs"),
+					TEXT("Could not connect to %s:%d retrying in %.1fs"),
 					*Host, Port, ReconnectDelaySecs);
 			}
 			else
 			{
 				UE_LOG(LogUSDConnect, Log,
-					TEXT("Could not connect to %s:%d — retrying in %.1fs"),
+					TEXT("Could not connect to %s:%d retrying in %.1fs"),
 					*Host, Port, ReconnectDelaySecs);
 				bHasAnnouncedFailure = true;
 			}
@@ -214,7 +214,7 @@ uint32 FSyncClient::Run()
 				AuthToken = IssuedToken;
 				if (Owner) { Owner->OnClientTokenIssued(IssuedToken); }
 			}
-			UE_LOG(LogUSDConnect, Log, TEXT("HELLO_OK received — entering receive loop"));
+			UE_LOG(LogUSDConnect, Log, TEXT("HELLO_OK received entering receive loop"));
 		}
 
 		bConnected.store(true, std::memory_order_relaxed);
@@ -237,7 +237,7 @@ uint32 FSyncClient::Run()
 		if (!bShouldStop.load(std::memory_order_relaxed))
 		{
 			UE_LOG(LogUSDConnect, Log,
-				TEXT("Receiver disconnected — reconnecting in %.1fs"),
+				TEXT("Receiver disconnected reconnecting in %.1fs"),
 				ReconnectDelaySecs);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 		}
@@ -335,7 +335,7 @@ bool FSyncClient::RecvFrame(TArray<uint8>& OutFrame)
 	if (PayloadLen == 0 || PayloadLen > kMaxFrameSize)
 	{
 		UE_LOG(LogUSDConnect, Warning,
-			TEXT("Bad frame length %u — disconnecting"), PayloadLen);
+			TEXT("Bad frame length %u disconnecting"), PayloadLen);
 		return false;
 	}
 
@@ -364,7 +364,7 @@ bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
 	if (!Env)
 	{
-		UE_LOG(LogUSDConnect, Error, TEXT("Invalid receiver frame — requesting replay"));
+		UE_LOG(LogUSDConnect, Error, TEXT("Invalid receiver frame requesting replay"));
 		return false;
 	}
 	const OpenUSDConnect::Payload PType =
@@ -375,7 +375,7 @@ bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 		const OpenUSDConnect::BroadcastEvent* BcEvent = Env->payload_as_BroadcastEvent();
 		if (!BcEvent)
 		{
-			UE_LOG(LogUSDConnect, Error, TEXT("Invalid BroadcastEvent — requesting replay"));
+			UE_LOG(LogUSDConnect, Error, TEXT("Invalid BroadcastEvent requesting replay"));
 			return false;
 		}
 		const int32 Seq = BcEvent->seq();
@@ -388,7 +388,7 @@ bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 		if (Seq != ExpectedSeq)
 		{
 			UE_LOG(LogUSDConnect, Error,
-				TEXT("Receiver sequence gap: expected=%d received=%d — requesting replay"),
+				TEXT("Receiver sequence gap: expected=%d received=%d requesting replay"),
 				ExpectedSeq, Seq);
 			return false;
 		}
@@ -405,19 +405,19 @@ bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
 	}
 	else if (PType == OpenUSDConnect::Payload::Ping)
 	{
-		// Heartbeat — receivers ignore (server is just checking the connection).
+		// Heartbeat receivers ignore (server is just checking the connection).
 	}
 	else if (PType == OpenUSDConnect::Payload::RateLimited)
 	{
 		const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
 		const float Retry = RL ? RL->retry_after() : 1.0f;
 		UE_LOG(LogUSDConnect, Warning,
-			TEXT("Rate limited — sleeping %.1fs"), Retry);
+			TEXT("Rate limited sleeping %.1fs"), Retry);
 		FPlatformProcess::Sleep(Retry);
 	}
 	else if (PType == OpenUSDConnect::Payload::Resync)
 	{
-		UE_LOG(LogUSDConnect, Log, TEXT("Resync received — resetting seq counter"));
+		UE_LOG(LogUSDConnect, Log, TEXT("Resync received resetting seq counter"));
 		LastReceivedSeq = 0;
 		++ReplayGeneration;
 		if (Owner)

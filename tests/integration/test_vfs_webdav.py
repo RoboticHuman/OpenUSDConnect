@@ -1,4 +1,4 @@
-"""Integration tests for the VFS WebDAV frontend — a dummy HTTP/WebDAV client.
+"""Integration tests for the VFS WebDAV frontend a dummy HTTP/WebDAV client.
 
 Starts the real WebDAV server (wsgidav + cheroot) on a free port and
 exercises it the way the Windows WebClient redirector would: OPTIONS,
@@ -41,7 +41,7 @@ def _local_directory_args() -> list[str]:
 
 
 class DavClient:
-    """Minimal WebDAV client on http.client — the 'dummy test client'."""
+    """Minimal WebDAV client on http.client the 'dummy test client'."""
 
     def __init__(self, host: str, port: int):
         self.host = host

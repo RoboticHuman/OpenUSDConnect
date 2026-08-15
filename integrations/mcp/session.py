@@ -2,10 +2,10 @@
 
 Emit side: an ``EventSender`` (origin ``...-emit``). Mirror side: a
 ``ReceiverThread`` + ``EventDispatcher`` + ``UsdStageAdapter`` over an in-memory
-``Usd.Stage`` (origin ``...-recv``). The two origins differ so the server
-echoes the MCP's own writes back to the receiver, keeping the mirror the
-server's authoritative composed result. Same ``client_id`` keeps all MCP edits
-in one per-client layer.
+``Usd.Stage`` (origin ``...-recv``). The server returns the complete commit
+stream to every receiver, so the mirror observes both MCP and foreign edits.
+The two roles share one stable ``client_id`` and use distinct origins for
+diagnostics.
 """
 
 from __future__ import annotations

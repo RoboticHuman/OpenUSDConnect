@@ -1,4 +1,4 @@
-"""USD Connect — Blender addon for real-time USD sync via OpenUSDConnect.
+"""USD Connect Blender addon for real-time USD sync via OpenUSDConnect.
 
 Install via: Preferences > Add-ons > Install from Disk > select the zip.
 The zip bundles the openusdconnect core library inside the addon directory.
@@ -25,7 +25,7 @@ import uuid
 _addon_dir = os.path.dirname(os.path.abspath(__file__))
 _bundled_prefix = os.path.join(_addon_dir, "openusdconnect")
 # On reload, also purge bundled openusdconnect modules so the freshly-extracted
-# addon files load — otherwise the package __init__'s `from .codec import ...`
+# addon files load otherwise the package __init__'s `from .codec import ...`
 # resolves against the stale cached submodule and misses newly-added symbols.
 _is_addon_reload = "capture" in dir()
 if os.path.isdir(_bundled_prefix):
@@ -39,14 +39,14 @@ if os.path.isdir(_bundled_prefix):
 
 from openusdconnect.client_id import make_stable_client_id
 
-# Stable client ID based on username + hostname. Persists across sessions
-# so the server can map reconnections to the same per-client layer.
+# Stable client ID based on username + hostname. Persists across sessions for
+# authentication, producer replay, and collaboration attribution.
 STABLE_CLIENT_ID = make_stable_client_id("blender")
 
 # Session-level origin identifier shared by emitter and receiver connections
 # from this Blender instance. Durable events return in the complete commit
 # stream; Blender's apply guard prevents those records from being re-emitted.
-# Random per session — unlike STABLE_CLIENT_ID, this changes on restart so
+# Random per session unlike STABLE_CLIENT_ID, this changes on restart so
 # the server can distinguish multiple sessions from the same machine.
 SESSION_ORIGIN = f"blender-{uuid.uuid4().hex[:12]}"
 

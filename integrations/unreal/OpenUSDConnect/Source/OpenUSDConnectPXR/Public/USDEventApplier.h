@@ -39,7 +39,7 @@ public:
 	/**
 	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.
 	 * Value writes on existing prims are; structural events (prim definition,
-	 * composition arcs, variants, schema application) are not — they need the
+	 * composition arcs, variants, schema application) are not they need the
 	 * stage to recompose as they apply. Callers batching multiple frames must
 	 * close any open block before applying a frame this returns false for.
 	 */

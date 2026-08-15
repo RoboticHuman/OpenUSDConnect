@@ -17,7 +17,7 @@ __all__ = [
 
 
 def run_vfs_server(*args, **kwargs):
-    """Lazy wrapper — importing the WebDAV frontend requires optional deps."""
+    """Lazy wrapper importing the WebDAV frontend requires optional deps."""
     from .webdav import run_vfs_server as _run
 
     return _run(*args, **kwargs)

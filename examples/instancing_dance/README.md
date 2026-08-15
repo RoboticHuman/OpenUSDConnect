@@ -71,8 +71,8 @@ and `Ctrl+C` the server.
 
 ## Files
 
-- `run.py` — one-command orchestrator: server + usdview + dance,
+- `run.py` one-command orchestrator: server + usdview + dance,
   with cleanup.
-- `dance.py` — sender only. Use this if a server is already running
+- `dance.py` sender only. Use this if a server is already running
   or you want to drive it from a different terminal.
-- `empty.usda` — the base scene the server loads. Just `/World`.
+- `empty.usda` the base scene the server loads. Just `/World`.

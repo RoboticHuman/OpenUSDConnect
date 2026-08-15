@@ -9,7 +9,7 @@ Verifies:
   * Fix 1: ``frame_change_post`` → ``PlaybackControl(set_time, ...)``
     propagates the leader's playhead to the server.
   * (Implicitly) Fix 2: F-curve-driven depsgraph evals during scrub do
-    not flood the wire with default-time TRS overwrites — the follower
+    not flood the wire with default-time TRS overwrites the follower
     relies on its own local F-curve evaluation for the sphere's pose;
     if Fix 2 were broken, the leader would clobber the follower's
     static-time TRS, but the static pose would lose to the F-curve on

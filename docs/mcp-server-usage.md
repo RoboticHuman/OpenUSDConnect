@@ -1,11 +1,9 @@
 # OpenUSDConnect MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server that exposes the OpenUSDConnect
-event protocol as tools, so Claude (Desktop / Code) can author USD scenes —
-procedural meshes, references/payloads, transforms, instancing, and especially
-`UsdShade.ConnectableAPI` shader networks (UsdPreviewSurface + MaterialX) — and
-stream them to the sync server, which fans them out to every connected DCC
-(Blender, Unreal, usdview).
+An [MCP](https://modelcontextprotocol.io) server that exposes OpenUSDConnect as
+tools. An MCP client can author meshes, composition arcs, transforms,
+instancing, and `UsdShade.ConnectableAPI` networks, then inspect the composed
+result through a local USD mirror.
 
 The MCP is a network **client** built on the core library (`EventSender` +
 `ReceiverThread` + `EventDispatcher` + `UsdStageAdapter`), the same shape as the
@@ -23,13 +21,14 @@ uv sync --group server --group mcp  # installs pxr and the official MCP SDK
 
 ## Run
 
-Start a sync server (one is required — the MCP is network-only):
+Start a sync server (one is required because the MCP is network-only):
 
 ```bash
 uv run python -m openusdconnect.server --port 7200
 ```
 
-Then register the MCP server with your client. **Claude Code:**
+Then register it with any MCP client that supports stdio servers. For example,
+with Claude Code:
 
 ```bash
 claude mcp add openusdconnect -- uv --directory D:\gamedev\OpenUSDConnect run python -m integrations.mcp
@@ -61,7 +60,7 @@ Flags (CLI) override environment variables override defaults.
 | `OPENUSDCONNECT_HOST` | `--host` | `127.0.0.1` | Sync server host |
 | `OPENUSDCONNECT_PORT` | `--port` | `7200` | Sync server port |
 | `OPENUSDCONNECT_CLIENT_ID` | `--client-id` | `<user>-<host>-mcp` | Client identity |
-| `OPENUSDCONNECT_DEPARTMENT` | `--department` | _(none)_ | Layer-ordering department |
+| `OPENUSDCONNECT_DEPARTMENT` | `--department` | _(none)_ | Department identity; ordering requires server `--departments` policy |
 | `OPENUSDCONNECT_MIRROR` | `--mirror` / `--no-mirror` | on | In-memory mirror for introspection |
 | `OPENUSDCONNECT_AUTO_CONNECT` | `--auto-connect` / `--no-auto-connect` | on | Auto-connect on first authoring tool |
 | `OPENUSDCONNECT_AUTO_ANCESTORS` | `--auto-create-ancestors` / `--no-auto-create-ancestors` | on | Auto-create missing parent prims (as `Xform`) |
@@ -70,23 +69,25 @@ Flags (CLI) override environment variables override defaults.
 ## Tools
 
 ### Session
-- `usd_connect(host?, port?, client_id?, department?)` — connect + start mirror.
-- `usd_status()` — connection state, mirror prim count, last sequence, metadata.
+- `usd_connect(host?, port?, client_id?, department?)` connect + start mirror.
+- `usd_status()` connection state, mirror prim count, last sequence, metadata.
 - `usd_disconnect()`.
 
-Authoring/introspection tools auto-connect, so `usd_connect` is only needed to
-target a non-default server.
+Authoring tools auto-connect when that option is enabled. Mirror-backed
+introspection requires an established connection, so call `usd_connect` before
+inspecting a fresh session or when targeting a non-default server.
 
 ### Authoring
-- `usd_send_events(events)` — validate + send a list of raw event dicts as **one
-  atomic transaction**. The primary tool for composite authoring (a whole mesh
-  or shader network at once).
-- One thin tool per event kind (`usd_ensure_prim`, `usd_set_xform_trs`,
+- `usd_send_events(events)` validates and sends managed authoring event dicts as
+  **one atomic transaction**. It is the primary tool for composite authoring,
+  such as a whole mesh or shader network.
+- One thin tool per publicly exposed managed event kind (`usd_ensure_prim`, `usd_set_xform_trs`,
   `usd_set_gprim_attrs`, `usd_set_reference`, `usd_set_payload`,
   `usd_set_material_binding`, `usd_set_connectable_input`,
   `usd_set_connectable_connection`, `usd_set_point_instancer`,
   `usd_set_instanceable`, `usd_set_variant_selections`,
-  `usd_set_stage_metadata`, ...). Each sends a single event.
+  `usd_set_stage_metadata`, ...). Each sends a single event. Shared-stage layer
+  transport kinds are internal and are not exposed as MCP tools.
 
 `usd_set_xform_trs` accepts a quaternion `r=[w,x,y,z]` or, for convenience,
 `rotate_euler=[rx,ry,rz]` degrees + `rotate_order` (converted to a quaternion).
@@ -117,16 +118,15 @@ target a non-default server.
 - `usd_get_stage_metadata()`
 
 ### Shader discovery (no connection needed)
-- `usd_list_shader_nodes(filter?, source_type?, max?)` — `source_type` is
-  `"mtlx"` (MaterialX, ~785 nodes), `"glslfx"` (UsdPreviewSurface family), or
-  `"USD"`.
-- `usd_describe_shader_node(info_id)` — exact input/output names + Sdf types +
+- `usd_list_shader_nodes(filter?, source_type?, max?)` `source_type` is
+  `"mtlx"` (MaterialX), `"glslfx"` (UsdPreviewSurface family), or `"USD"`.
+- `usd_describe_shader_node(info_id)` exact input/output names + Sdf types +
   defaults. Use this to author correct `info_id`, `input_types`, and connection
   endpoints.
 
 ### Playback
 - `usd_claim_playback(time?)`, `usd_playback_control(action, time?, rate?)`.
-- `usd_playback_status()` — read the shared playhead (playing/time/rate, leader
+- `usd_playback_status()` read the shared playhead (playing/time/rate, leader
   client id, whether this client leads) from the latest broadcast PlaybackState.
 
 ## Authoring recipes
@@ -146,7 +146,7 @@ target a non-default server.
 ]
 ```
 
-**UsdPreviewSurface material + bind** — discover input types first with
+**UsdPreviewSurface material + bind** discover input types first with
 `usd_describe_shader_node("UsdPreviewSurface")`, then send one transaction:
 
 ```json
@@ -175,12 +175,14 @@ Verify any network with
 
 ## How it works
 
-- **Emit + mirror.** The MCP emits via `EventSender` (origin `…-emit`) and keeps
-  a read-only `Usd.Stage` mirror via `ReceiverThread` (origin `…-recv`),
-  replaying from sequence 1. Differing origins make the server echo the MCP's own
-  writes back, so the mirror is the server's authoritative composed result of the
-  MCP's edits **and** every other DCC's. Same `client_id` keeps all MCP edits in
-  one per-client layer.
+- **Emit + mirror.** The MCP emits via `EventSender` and keeps a read-only
+  `Usd.Stage` mirror through `ReceiverThread`, replaying from sequence 1. The
+  server broadcasts committed records to every receiver, including the
+  producer's receiver, so the mirror contains the authoritative result of both
+  local and remote edits. The emitter and receiver use distinct diagnostic
+  origins but share one `client_id`, giving both roles the same stable client
+  identity. The server routes edits to its shared managed layer or to the
+  configured department layer.
 - **Atomicity.** `usd_send_events` and every per-kind tool send exactly one
   transaction; the server applies it create → structural → value.
 - **Read-after-write.** After sending, the session drains the mirror (bounded by
@@ -196,7 +198,7 @@ Verify any network with
 To expose a newly added core event kind through the MCP, add one row to
 `TOOL_TABLE` in `integrations/mcp/registry.py`. `test_mcp_registry_consistency`
 fails until the row exists. New shader nodes (MaterialX, custom) need no MCP
-changes — `usd_describe_shader_node` reads them from the Sdr registry.
+changes `usd_describe_shader_node` reads them from the Sdr registry.
 
 ## Testing
 

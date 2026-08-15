@@ -5,9 +5,9 @@ then uses NoticeEmitter to detect changes and generate the exact events
 the real Blender emitter would produce.
 
 Two phases:
-  Phase 1 — Initial setup: define /World/Chair, add reference, set transform.
+  Phase 1 Initial setup: define /World/Chair, add reference, set transform.
             NoticeEmitter picks up all composed prims as first-encounter.
-  Phase 2 — Movement: change /World/Chair translate.
+  Phase 2 Movement: change /World/Chair translate.
             NoticeEmitter picks up /World/Chair (known) + any children
             that get dirty from ObjectsChanged.
 
@@ -87,7 +87,7 @@ def main():
         print(f"  {prim.GetPath()} type={prim.GetTypeName()}")
 
     # -----------------------------------------------------------------
-    # Phase 1 — NoticeEmitter picks up the initial state.
+    # Phase 1 NoticeEmitter picks up the initial state.
     # The prim definition + reference add triggered ObjectsChanged,
     # so all composed prims are now dirty.
     # -----------------------------------------------------------------
@@ -106,7 +106,7 @@ def main():
         print(f"  {ev.get('k')} {ev.get('prim')}")
 
     # -----------------------------------------------------------------
-    # Phase 2 — Simulate user moving the Chair.
+    # Phase 2 Simulate user moving the Chair.
     # Change the translate on /World/Chair.  The ObjectsChanged notice
     # fires, and NoticeEmitter picks up whatever USD reports as dirty.
     # -----------------------------------------------------------------
@@ -125,7 +125,7 @@ def main():
         child_xf = UsdGeom.Xformable(prim)
         for op in child_xf.GetOrderedXformOps():
             if op.GetAttr().GetName() == "xformOp:translate":
-                # Re-write the same value — this still triggers a notice
+                # Re-write the same value this still triggers a notice
                 op.Set(op.Get())
                 break
 

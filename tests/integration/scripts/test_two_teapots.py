@@ -1,4 +1,4 @@
-"""E2E test: two teapots at different paths — check material identity.
+"""E2E test: two teapots at different paths check material identity.
 
 Spawns /World/Teapot (under scene root) and /Teapot (bare root).
 Both reference the same Teapot.usd asset. Checks that each gets its own

@@ -66,7 +66,7 @@ class TestResult:
     def fail(self, name, msg):
         self.failed += 1
         self.errors.append((name, msg))
-        print(f"  FAIL: {name} — {msg}")
+        print(f"  FAIL: {name} {msg}")
 
 
 def test_ensure_prim_xform(r):
@@ -227,7 +227,7 @@ def test_ensure_prim_supported_light_types_create_blender_lights(r):
 
 def test_ensure_prim_skipped_light_types_create_no_object(r):
     """Lights without any Blender equivalent (CylinderLight, GeometryLight,
-    PortalLight, PluginLight) must NOT create a stray Empty object — they
+    PortalLight, PluginLight) must NOT create a stray Empty object they
     should be skipped via _NON_SCENE_TYPES. DomeLight is handled separately
     by test_ensure_prim_domelight_sets_up_world_network."""
     name = "test_ensure_prim_skipped_light_types_create_no_object"
@@ -250,7 +250,7 @@ def test_ensure_prim_skipped_light_types_create_no_object(r):
 
 
 def test_ensure_prim_domelight_sets_up_world_network(r):
-    """DomeLight is not a scene object — it sets up the World shader network
+    """DomeLight is not a scene object it sets up the World shader network
     (TexCoord → Mapping → EnvTex → VectorMath → Background → WorldOutput)
     matching what Blender's own USD importer produces."""
     name = "test_ensure_prim_domelight_sets_up_world_network"
@@ -433,7 +433,7 @@ def test_multi_domelight_last_wins(r):
 
 def test_ensure_prim_light_with_api_schemas(r):
     """Light ensure_prim must accept the api_schemas kwarg without error
-    (lights flow with api_schemas=['ShapingAPI'] etc. — the kwarg is
+    (lights flow with api_schemas=['ShapingAPI'] etc. the kwarg is
     USD-stage-only on the Blender side, but it must not raise)."""
     name = "test_ensure_prim_light_with_api_schemas"
     _clear_scene()
@@ -550,7 +550,7 @@ def test_set_connectable_input_writes_light_attributes(r):
 
 
 def test_set_connectable_input_on_non_light_is_noop(r):
-    """Empty info_id on a non-light prim should not raise — the light input
+    """Empty info_id on a non-light prim should not raise the light input
     handler returns True silently when the prim isn't a Blender LIGHT."""
     name = "test_set_connectable_input_on_non_light_is_noop"
     _clear_scene()
@@ -903,7 +903,7 @@ def test_set_reference_imports_usd(r):
         r.fail(name, f"expected {EXPECTED_VERTEX_COUNT} vertices, got {total_verts}")
         return
 
-    # Verify idempotent — calling again doesn't duplicate
+    # Verify idempotent calling again doesn't duplicate
     count_before = len(bpy.data.objects)
     adapter.set_reference("/World/Asset", refs)
     count_after = len(bpy.data.objects)
@@ -971,7 +971,7 @@ def test_set_reference_reimport_after_delete(r):
           f"imported_ref={has_ref} container={container} "
           f"remaining_children={remaining}")
 
-    # Second import — same asset path, but stale cache should be detected
+    # Second import same asset path, but stale cache should be detected
     all_before = set(bpy.data.objects)
     result2 = adapter.set_reference("/World/Asset", refs)
     if not result2:
@@ -1622,11 +1622,11 @@ def test_capture_camera_move_emits_trs_only(r):
             self.is_updated_transform = transform
             self.is_updated_geometry = geometry
 
-    # First encounter — drain initial events.
+    # First encounter drain initial events.
     author.on_depsgraph_update([_Update(cam_obj, transform=True, geometry=True)])
     emitter.build_events_for_dirty()
 
-    # Move only — change location, leave camera data alone.
+    # Move only change location, leave camera data alone.
     cam_obj.location = (3.0, 4.0, 5.0)
     bpy.context.view_layer.update()
     author.on_depsgraph_update([_Update(cam_obj, transform=True, geometry=False)])

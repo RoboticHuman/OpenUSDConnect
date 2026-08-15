@@ -3,7 +3,7 @@
 Edits that only touch a Material's interface inputs don't dirty the shader
 prims Hydra watches; the connection module forwards the edited values onto
 the consuming shader inputs after apply so the network re-resolves.
-Forwarding is scoped to the inputs each event edited — untouched interface
+Forwarding is scoped to the inputs each event edited untouched interface
 values (e.g. the dozens composed from a referenced .mtlx document) are
 never authored onto consumers.
 """

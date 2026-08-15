@@ -8,7 +8,7 @@ Manual run (not part of the pytest suite):
     3. Inspect output: bishop_diag.json
 
 Useful when investigating why a MaterialX scene's textures/connections
-look wrong in Blender after import — the dump shows every node, every
+look wrong in Blender after import the dump shows every node, every
 link, and every texture image's resolved state.
 """
 

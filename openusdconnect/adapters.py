@@ -63,7 +63,7 @@ def _time_kwarg(ev: dict) -> dict:
     """``{"time": v}`` when ``ev`` has a non-None ``time``, ``{}`` otherwise.
 
     Lets adapters that don't model time samples omit the ``time=`` parameter
-    entirely — they receive the kwarg only when there's an actual sample
+    entirely they receive the kwarg only when there's an actual sample
     to write, never a spurious ``time=None``.
     """
     t = ev.get("time")
@@ -235,7 +235,7 @@ class DCCAdapter(ABC):
     ) -> bool:
         """Idempotent prim definition.
 
-        ``api_schemas`` carries applied API schema names — bare ``"Name"``
+        ``api_schemas`` carries applied API schema names bare ``"Name"``
         for single-apply, ``"Name:instance"`` for multi-apply. Additive
         only on the receive side; never removes schemas.
         """
@@ -472,7 +472,7 @@ class DCCAdapter(ABC):
     ) -> bool:
         """Apply stage-level metadata (units + timeline).
 
-        Only fields the caller passes as non-``None`` are applied — the
+        Only fields the caller passes as non-``None`` are applied the
         emitter ships partial updates to keep wire cost down. DCCs map
         these to their own scene units / fps / timeline settings.
         """
@@ -562,7 +562,7 @@ class MultiNodeShaderMapper(ShaderMapper):
     Used for complex shaders like MaterialX Standard Surface that need
     preprocessing nodes (Hue/Sat, Mix, Math) before the main BSDF.
     The ``create_network`` method replaces the per-input ``apply_value``
-    pattern — it receives all inputs at once and builds the full graph.
+    pattern it receives all inputs at once and builds the full graph.
     """
 
     @property
@@ -575,13 +575,13 @@ class MultiNodeShaderMapper(ShaderMapper):
         belongs on Material Output.Surface.  Helper mappers (normal-map,
         displacement pre-processing, etc.) override to False so they
         don't misroute their Vector/Color outputs into the Shader-typed
-        Surface input — and don't clear an already-authored surface BSDF
+        Surface input and don't clear an already-authored surface BSDF
         when the receiver adapter prepares the node tree.
         """
         return True
 
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
-        pass  # Not used — create_network handles everything
+        pass  # Not used create_network handles everything
 
     def read_all_inputs(self, node=None, *, input_map=None) -> dict:
         """Read all mapped input values from a multi-node network.
@@ -589,7 +589,7 @@ class MultiNodeShaderMapper(ShaderMapper):
         Unlike single-node mappers which read from one node, multi-node
         mappers read from the socket map returned by ``create_network``.
         Each socket is a generic object with ``.default_value`` and
-        ``.is_linked`` attributes — no DCC-specific imports needed.
+        ``.is_linked`` attributes no DCC-specific imports needed.
         """
         if not input_map:
             return {}

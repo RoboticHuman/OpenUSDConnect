@@ -1,4 +1,4 @@
-"""Shared test asset builder — creates a USD chair with real mesh geometry.
+"""Shared test asset builder creates a USD chair with real mesh geometry.
 
 Used by both headless Blender test scripts and scripts/create_test_asset.py.
 The chair has 6 meshes (Seat + 4 Legs + Back), 48 vertices total.
@@ -79,9 +79,9 @@ def create_chair_asset(filepath):
 
     Structure:
         /Model          (Xform, defaultPrim)
-        /Model/Seat     (Mesh — 2x0.4x2 box at y=0.6)
-        /Model/Leg_0..3 (Mesh — thin boxes at corners)
-        /Model/Back     (Mesh — thin slab at back edge)
+        /Model/Seat     (Mesh 2x0.4x2 box at y=0.6)
+        /Model/Leg_0..3 (Mesh thin boxes at corners)
+        /Model/Back     (Mesh thin slab at back edge)
 
     Returns the stage (caller can inspect or just let it go out of scope).
     """

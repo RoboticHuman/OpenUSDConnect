@@ -2,7 +2,7 @@
 
 A network authored through the real event pipeline exports to XML, the XML
 re-opens through usdMtlx, and the recomposed network carries the same values
-and connections — the property consumers of materialized documents rely on.
+and connections the property consumers of materialized documents rely on.
 """
 
 import os

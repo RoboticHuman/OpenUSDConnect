@@ -30,7 +30,7 @@ BASE_URL = "https://download.blender.org/release"
 FALLBACK_VERSION = "5.0.1"
 
 # LTS minor versions (from blender.org/download/lts/).
-# Blender declares specific releases as LTS — not a simple even/odd rule.
+# Blender declares specific releases as LTS not a simple even/odd rule.
 _KNOWN_LTS_MINORS = {"2.83", "2.93", "3.3", "3.6", "4.2", "4.5"}
 
 
@@ -183,7 +183,7 @@ def download_and_extract(version: str) -> pathlib.Path:
     else:
         print(f"Using cached download: {download_path}")
 
-    # Extract — find existing extracted dir or extract fresh
+    # Extract find existing extracted dir or extract fresh
     extract_dir = _find_extracted_dir(version)
     if extract_dir:
         print(f"Already extracted: {extract_dir}")

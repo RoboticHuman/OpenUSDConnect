@@ -2,7 +2,7 @@
 
 Uses a real server subprocess, real TCP connections, and verifies layer
 isolation, department ordering, mute/unmute, and merge.
-No DCC needed — headless, runs in CI.
+No DCC needed headless, runs in CI.
 """
 
 import time
@@ -81,7 +81,7 @@ class TestLayerIsolation:
         assert "department" not in record
 
     def test_separate_layers_isolation(self, tmp_path):
-        """Two departments editing different prims — both visible in composed stage."""
+        """Two departments editing different prims both visible in composed stage."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
         _emit_events(
@@ -98,7 +98,7 @@ class TestLayerIsolation:
         assert srv.client_layers["alice"] is not srv.client_layers["bob"]
 
     def test_same_prim_stronger_layer_wins(self, tmp_path):
-        """Two departments editing same prim — stronger department wins."""
+        """Two departments editing same prim stronger department wins."""
         srv = _make_server(tmp_path, department_priority=["animation", "layout"])
 
         _emit_events(srv, "alice", _make_trs_events("/World/Cube", (1, 0, 0)), department="layout")
@@ -180,7 +180,7 @@ class TestDepartmentOrdering:
         _emit_events(srv, "first", _make_trs_events("/World/Cube", (1, 0, 0)))
         _emit_events(srv, "second", _make_trs_events("/World/Cube", (2, 0, 0)))
 
-        # Last write wins — both on shared edit_layer
+        # Last write wins both on shared edit_layer
         t = _read_translate(srv.stage, "/World/Cube")
         assert t == (2, 0, 0)
 
@@ -287,7 +287,7 @@ class TestSharedDepartmentLayer:
             srv, "alice", _make_trs_events("/World/Cube", (3, 0, 0)), department="animation"
         )
 
-        # Alice wrote last — her value wins
+        # Alice wrote last her value wins
         assert _read_translate(srv.stage, "/World/Cube") == (3, 0, 0)
 
     def test_direct_apply_authors_shared_department_layer(self, tmp_path):
@@ -305,7 +305,7 @@ class TestSharedDepartmentLayer:
 
 class TestLayerLifecycle:
     def test_layer_survives_disconnect(self, tmp_path):
-        """Department layer persists after simulated disconnect — opinions stay."""
+        """Department layer persists after simulated disconnect opinions stay."""
         srv = _make_server(tmp_path, department_priority=["animation"])
 
         addr = ("127.0.0.1", 12345)
@@ -315,7 +315,7 @@ class TestLayerLifecycle:
         )
         assert _read_translate(srv.stage, "/World/Cube") == (1, 2, 3)
 
-        # Disconnect — client removed from tracking, but layer stays
+        # Disconnect client removed from tracking, but layer stays
         srv.unregister_client(addr)
         key = f"{addr[0]}:{addr[1]}"
         assert key not in srv.clients
@@ -444,7 +444,7 @@ class TestMergeParity:
         _emit_events(srv, "alice", _make_trs_events("/World/A", (10, 20, 30)), department="layout")
         _emit_events(srv, "bob", _make_trs_events("/World/B", (40, 50, 60)), department="animation")
 
-        # Both also edit same prim — animation is stronger
+        # Both also edit same prim animation is stronger
         _emit_events(
             srv, "alice", _make_trs_events("/World/Shared", (1, 0, 0)), department="layout"
         )
@@ -731,14 +731,14 @@ class TestConcurrentDepartmentWrites:
     """Verify that concurrent threads writing to different department layers
     produce correct composed results.
 
-    USD's SetEditTarget is a global stage mutation — writes must be
+    USD's SetEditTarget is a global stage mutation writes must be
     serialized through stage_lock.  These tests confirm the lock
     correctly protects concurrent access and that reads can interleave
     with the split lock phases.
     """
 
     def test_concurrent_writes_to_different_departments(self, tmp_path):
-        """3 threads × 20 writes each to separate prims — verify writes
+        """3 threads × 20 writes each to separate prims verify writes
         land in the correct layer (not cross-written due to SetEditTarget
         race) and that per-layer values are independently correct."""
         import threading
@@ -778,7 +778,7 @@ class TestConcurrentDepartmentWrites:
         assert _read_translate(srv.stage, "/World/Light") == (19, 20, 19)
         assert _read_translate(srv.stage, "/World/FX") == (19, 19, 20)
 
-        # Opinions landed in the correct layers — each layer must only
+        # Opinions landed in the correct layers each layer must only
         # contain specs for its own prim, not the other departments'.
         anim_layer = srv.client_layers["alice"]
         light_layer = srv.client_layers["bob"]
@@ -796,7 +796,7 @@ class TestConcurrentDepartmentWrites:
         assert fx_layer.GetPrimAtPath("/World/Anim") is None
         assert fx_layer.GetPrimAtPath("/World/Light") is None
 
-        # Verify the value inside each layer directly (not composed) —
+        # Verify the value inside each layer directly (not composed)
         # catches corruption where the composed value happens to be right
         # but the layer opinion is wrong.
         for layer, prim_path, expected in [
@@ -866,12 +866,12 @@ class TestConcurrentDepartmentWrites:
 
         assert not errors, f"Writer threads raised: {errors}"
 
-        # Animation is stronger — composed value must be animation's last write,
+        # Animation is stronger composed value must be animation's last write,
         # regardless of which thread finished last.
         result = _read_translate(srv.stage, "/World/Shared")
         assert result == (119, 19, 19), f"Expected animation to win, got {result}"
 
-        # Both layers have opinions — verify each layer's opinion is
+        # Both layers have opinions verify each layer's opinion is
         # independently correct (catches writes landing in the wrong layer).
         anim_layer = srv.client_layers["alice"]
         light_layer = srv.client_layers["bob"]
@@ -894,7 +894,7 @@ class TestConcurrentDepartmentWrites:
     def test_reads_interleave_with_writes(self, tmp_path):
         """Dashboard reads (prim count, flatten, layer info) complete while
         writers are active. Verifies the split lock phases allow reads to
-        interleave — reads should not be starved by continuous writes."""
+        interleave reads should not be starved by continuous writes."""
         import threading
 
         srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
@@ -984,8 +984,8 @@ class TestMultiDepartmentContention:
             "animation",
             [
                 ("/World/AnimRig", (100, 0, 0), False),
-                ("/World/Hero", (1, 0, 0), True),  # shared — animation wins
-                ("/World/Camera", (10, 0, 0), True),  # shared — animation wins
+                ("/World/Hero", (1, 0, 0), True),  # shared animation wins
+                ("/World/Camera", (10, 0, 0), True),  # shared animation wins
             ],
         ),
         (
@@ -993,8 +993,8 @@ class TestMultiDepartmentContention:
             "lighting",
             [
                 ("/World/KeyLight", (0, 100, 0), False),
-                ("/World/Hero", (0, 1, 0), True),  # shared — weaker
-                ("/World/EnvSphere", (0, 10, 0), True),  # shared — lighting wins vs fx/layout
+                ("/World/Hero", (0, 1, 0), True),  # shared weaker
+                ("/World/EnvSphere", (0, 10, 0), True),  # shared lighting wins vs fx/layout
             ],
         ),
         (
@@ -1002,8 +1002,8 @@ class TestMultiDepartmentContention:
             "fx",
             [
                 ("/World/Particles", (0, 0, 100), False),
-                ("/World/Hero", (0, 0, 1), True),  # shared — weakest with opinion
-                ("/World/EnvSphere", (0, 0, 10), True),  # shared — weaker than lighting
+                ("/World/Hero", (0, 0, 1), True),  # shared weakest with opinion
+                ("/World/EnvSphere", (0, 0, 10), True),  # shared weaker than lighting
             ],
         ),
         (
@@ -1011,7 +1011,7 @@ class TestMultiDepartmentContention:
             "layout",
             [
                 ("/World/Ground", (50, 50, 0), False),
-                ("/World/Camera", (50, 0, 50), True),  # shared — weaker than animation
+                ("/World/Camera", (50, 0, 50), True),  # shared weaker than animation
             ],
         ),
     ]

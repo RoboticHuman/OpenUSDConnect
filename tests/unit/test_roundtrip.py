@@ -1,4 +1,4 @@
-"""Roundtrip tests — emitter -> events -> MockAdapter, verify TRS values match.
+"""Roundtrip tests emitter -> events -> MockAdapter, verify TRS values match.
 
 Tests the full pipeline without network or DCC: author transforms on a stage,
 use NoticeEmitter to build events, apply events via MockAdapter.
@@ -118,7 +118,7 @@ class TestNoticeEmitterRoundtrip:
     def test_emitter_no_change_no_events(self):
         stage = _create_test_stage()
         emitter = NoticeEmitter(stage)
-        # Don't make any changes — drain initial dirty set
+        # Don't make any changes drain initial dirty set
         _ = emitter.build_events_for_dirty()
         # Now check again
         events = emitter.build_events_for_dirty()
@@ -234,7 +234,7 @@ class TestNoticeEmitterRoundtrip:
         stage.DefinePrim("/World/Sphere", "Sphere")
         emitter = NoticeEmitter(stage)
 
-        # First encounter — visibility is not authored on either prim
+        # First encounter visibility is not authored on either prim
         events = emitter.build_events_for_dirty()
         vis_events = [e for e in events if e.get("k") == K_SET_VISIBILITY]
         assert len(vis_events) == 0, f"Got spurious visibility events: {vis_events}"
@@ -455,7 +455,7 @@ class TestPayloadRoundtrip:
         if not os.path.isfile(pyramid_path):
             pytest.skip("Pyramid fixture not found")
 
-        # Open the Pyramid asset — it has prepend payload = @./payload.usda@
+        # Open the Pyramid asset it has prepend payload = @./payload.usda@
         src_stage = Usd.Stage.Open(pyramid_path)
         root_prim = src_stage.GetDefaultPrim()
         assert root_prim is not None
@@ -1035,7 +1035,7 @@ class TestStageToStageRoundtrip:
         """Real-asset roundtrip: load gold_openpbr.mtlx, emit shader-input
         and shader-connection events for every UsdShade connectable, encode
         through the codec, apply to a fresh stage, and verify the receiver's
-        Material output structure matches the source exactly — same
+        Material output structure matches the source exactly same
         namespace-qualified output name, same source path, same source
         attribute name."""
         from pxr import UsdShade
@@ -1330,7 +1330,7 @@ class TestVariantSelectionRoundtrip:
         stage_a.SetEditTarget(Usd.EditTarget(session_a))
         emitter = NoticeEmitter(stage_a)
 
-        # First flush — captures initial "small" selection
+        # First flush captures initial "small" selection
         emitter.mark_dirty("/World/Sphere")
         emitter.build_events_for_dirty()
 
@@ -1405,7 +1405,7 @@ class TestLIVERPS:
         # Without local opinion, reference value wins
         assert abs(prim.GetAttribute("radius").Get() - 50.0) < 1e-6
 
-        # Add local opinion — should override reference
+        # Add local opinion should override reference
         prim.GetAttribute("radius").Set(3.0)
         assert abs(prim.GetAttribute("radius").Get() - 3.0) < 1e-6
 
@@ -1454,11 +1454,11 @@ class TestLIVERPS:
         stage.SetEditTarget(Usd.EditTarget(session))
         emitter = NoticeEmitter(stage)
 
-        # First flush — local radius=1 wins over variant "big" radius=10
+        # First flush local radius=1 wins over variant "big" radius=10
         emitter.mark_dirty("/World/Sphere")
         emitter.build_events_for_dirty()
 
-        # Switch to "small" (radius=0.5) — but local=1 still wins
+        # Switch to "small" (radius=0.5) but local=1 still wins
         prim = stage.GetPrimAtPath("/World/Sphere")
         prim.GetVariantSets().GetVariantSet("size").SetVariantSelection("small")
         events = emitter.build_events_for_dirty()
@@ -1467,7 +1467,7 @@ class TestLIVERPS:
         vsel = [e for e in events if e["k"] == K_SET_VARIANT_SELECTIONS]
         assert len(vsel) == 1
 
-        # But no gprim attr event — composed radius is still 1.0
+        # But no gprim attr event composed radius is still 1.0
         gprim_evs = [e for e in events if e["k"] == K_SET_GPRIM_ATTRS]
         assert len(gprim_evs) == 0
 
@@ -1485,7 +1485,7 @@ class TestLIVERPS:
         # Without local, payload wins
         assert abs(prim.GetAttribute("radius").Get() - 77.0) < 1e-6
 
-        # Add local — should override
+        # Add local should override
         prim.GetAttribute("radius").Set(2.0)
         assert abs(prim.GetAttribute("radius").Get() - 2.0) < 1e-6
 

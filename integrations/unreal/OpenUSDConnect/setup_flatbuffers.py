@@ -7,7 +7,7 @@ Run once before the first build (header-only, no build step):
 The flatc-generated bindings committed under Source/OpenUSDConnectPXR/Public/
 Schema pin the exact runtime version they were produced with (the generated
 header carries a static_assert), so the plugin always compiles against this
-vendored copy — never whatever version an engine happens to ship.
+vendored copy never whatever version an engine happens to ship.
 DEFAULT_VERSION must match the flatc used by scripts/generate_flatbuffers.sh;
 override with ``--version`` only when regenerating the bindings with a
 different flatc.

@@ -1,4 +1,4 @@
-"""Asset integration tests — pytest wrappers that launch Blender.
+"""Asset integration tests pytest wrappers that launch Blender.
 
 Each test starts a server, runs a Blender script, and checks for SUCCESS
 in the output. Skipped by default; enable with --asset-tests flag.
@@ -105,7 +105,7 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
     try:
         # 1) Send time-sampled events BEFORE Blender connects.
         #    They land in the event log; Blender's receiver replays
-        #    them from seq=1 on connect — no startup race.
+        #    them from seq=1 on connect no startup race.
         from openusdconnect.protocol_constants import (
             K_ENSURE_PRIM,
             K_ENSURE_XFORM_OPS,
@@ -127,7 +127,7 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
                 {"k": K_ENSURE_PRIM, "prim": "/World/AnimSphere",
                  "typeName": "Sphere"},
                 {"k": K_ENSURE_XFORM_OPS, "prim": "/World/AnimSphere"},
-                # Time-sampled translate keyframes — these go to USD as
+                # Time-sampled translate keyframes these go to USD as
                 # xformOp:translate.Set(value, Usd.TimeCode(t))
                 {"k": K_SET_XFORM_TRS, "prim": "/World/AnimSphere",
                  "fields": ["t"], "t": [0.0, 0.0, 0.0], "time": 1.0},
@@ -141,7 +141,7 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
         finally:
             sender.disconnect()
 
-        # 2) Now start Blender — it replays the log on receiver connect.
+        # 2) Now start Blender it replays the log on receiver connect.
         r = run_blender(
             blender_exe, observer_script, port, timeout=120, background=False,
         )
@@ -424,7 +424,7 @@ def test_two_blender_playback(blender_exe, tmp_path):
 
         leader = _spawn(leader_script, "test-playback-leader")
         # Stagger to give the leader a head start on addon install /
-        # connect — same-port concurrent connects on Windows are flaky
+        # connect same-port concurrent connects on Windows are flaky
         # otherwise. The leader's _run() sleeps 4 s before it claims
         # playback, well after the follower has connected.
         import time as _time

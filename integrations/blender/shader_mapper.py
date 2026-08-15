@@ -23,7 +23,7 @@ except Exception:
 
 
 class BlenderShaderMapper(ShaderMapper):
-    """Base Blender mapper — applies values to Blender node sockets."""
+    """Base Blender mapper applies values to Blender node sockets."""
 
     def apply_value(self, node, usd_name: str, value, **kwargs) -> None:
         blender_name = self.get_native_input(usd_name)
@@ -127,7 +127,7 @@ class TextureShaderMapper(ShaderMapper):
                 img = bpy.data.images.load(resolved, check_existing=True)
         # Only assign when we resolved a real image.  If resolution failed
         # and the node already has an image (commonly loaded by Blender's
-        # USD importer using pxr's asset resolver), keep it — clobbering
+        # USD importer using pxr's asset resolver), keep it clobbering
         # with a placeholder loses the working texture.
         if img is not None:
             node.image = img
@@ -183,7 +183,7 @@ class NormalMapShaderMapper(ShaderMapper):
 
     Both MaterialX and Blender's Normal Map node interpret tangent-space
     normal map textures using the OpenGL convention (R=X, G=+Y, B=Z), so
-    no coordinate flip is needed at the output — the decoded world-space
+    no coordinate flip is needed at the output the decoded world-space
     normal feeds straight into BSDF.Normal.
     """
 
@@ -731,7 +731,7 @@ def create_default_registry() -> ShaderMapperRegistry:
             colorspace="sRGB",
         ))
     # Data-typed image variants (floats, vectors) carry per-pixel data,
-    # not color — load as Non-Color so Blender skips gamma correction.
+    # not color load as Non-Color so Blender skips gamma correction.
     # Critical for normal maps, roughness, metallic, displacement, etc.
     for data_tex in (
         "ND_image_float",

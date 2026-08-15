@@ -3,7 +3,7 @@
 TypedDicts describe the dict-shape of every event kind on the wire; the
 FlatBuffers schema (``schema/events.fbs``) is the canonical source for
 wire-format compatibility. The dispatch registry holds an :class:`EventSpec`
-per kind — populated by decorators at function definition sites in ``codec``,
+per kind populated by decorators at function definition sites in ``codec``,
 ``event_apply``, and ``protocol_validation``. The accessors (``get``,
 ``by_tag``, ``all_specs``) lazily import those modules on first call, so the
 registry is always
@@ -89,14 +89,14 @@ ConnectableInputValue = bool | int | float | str | list[float]
 
 
 # ---------------------------------------------------------------------------
-# Event TypedDicts — one per K_* kind in protocol_constants
+# Event TypedDicts one per K_* kind in protocol_constants
 # ---------------------------------------------------------------------------
 
 
 class EnsurePrim(TypedDict):
     """Idempotent ``DefinePrim``. ``typeName`` may be ``""`` for untyped scopes.
 
-    ``api_schemas`` carries applied API schema names — bare ``"Name"`` for
+    ``api_schemas`` carries applied API schema names bare ``"Name"`` for
     single-apply, ``"Name:instance"`` for multi-apply. Additive only on the
     receive side; never removes schemas.
     """
@@ -118,7 +118,7 @@ class SetXformTRS(TypedDict):
     """Partial transform update.
 
     ``fields`` lists which of ``"t"``, ``"r"``, ``"s"`` are present in this
-    payload. Rotation ``r`` is a quaternion ``[w, x, y, z]`` — not euler.
+    payload. Rotation ``r`` is a quaternion ``[w, x, y, z]`` not euler.
     ``time`` is an optional USD time sample; absent = ``Usd.TimeCode.Default()``.
     """
 
@@ -273,7 +273,7 @@ class SetConnectableConnection(TypedDict):
 
 
 class SetStageMetadata(TypedDict):
-    """Stage-level metadata snapshot — only present fields are applied.
+    """Stage-level metadata snapshot only present fields are applied.
 
     Carries units (``metersPerUnit``, ``upAxis``) and timeline metadata
     (``timeCodesPerSecond``, ``framesPerSecond``, ``startTimeCode``,
@@ -379,7 +379,7 @@ class SetSublayers(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Discriminated union — accept any event kind
+# Discriminated union accept any event kind
 # ---------------------------------------------------------------------------
 
 Event = (

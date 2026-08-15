@@ -1,4 +1,4 @@
-"""Tests for openusdconnect.protocol — validation helpers, message construction."""
+"""Tests for openusdconnect.protocol validation helpers, message construction."""
 
 import pytest
 
@@ -666,7 +666,7 @@ class TestValidateEvent:
         )
 
     def test_set_shader_input_missing_info_id_invalid(self):
-        """Missing info_id (None) is still rejected — only an explicit
+        """Missing info_id (None) is still rejected only an explicit
         empty string is the valid 'no info:id' signal."""
         assert not validate_event(
             {"k": "set_connectable_input", "prim": "/Mat/PBR", "inputs": {}, "input_types": {}}

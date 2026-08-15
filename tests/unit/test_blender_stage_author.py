@@ -538,7 +538,7 @@ class TestPartialDiff:
         sys.modules["bpy"].data.objects = _BlenderObjectList([obj])
         author, emitter = _make_author_and_emitter()
 
-        # First encounter — all fields
+        # First encounter all fields
         events1 = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
         trs1 = [e for e in events1 if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs1) == 1
@@ -558,7 +558,7 @@ class TestPartialDiff:
 
         _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
 
-        # Same transform — BlenderStageAuthor detects no matrix change, skips
+        # Same transform BlenderStageAuthor detects no matrix change, skips
         events = _get_events(author, emitter, [MockDepsgraphUpdate(obj)])
         trs = [e for e in events if e["k"] == K_SET_XFORM_TRS and e["prim"] == "/World/Cube"]
         assert len(trs) == 0

@@ -81,7 +81,7 @@ using namespace OUC;
 namespace Wire = OpenUSDConnect;
 
 // ---------------------------------------------------------------------------
-// pxr USD apply handlers — all guarded by USE_USD_SDK
+// pxr USD apply handlers all guarded by USE_USD_SDK
 // ---------------------------------------------------------------------------
 #if USE_USD_SDK
 
@@ -302,7 +302,7 @@ void ApplySetStageMetadata(pxr::UsdStageRefPtr& Stage, const Wire::SetStageMetad
 	{
 		Stage->SetMetadata(pxr::TfToken("metersPerUnit"), *Ev->metersPerUnit());
 	}
-	// upAxis: USDImporter reads this separately on stage open — skip for now
+	// upAxis: USDImporter reads this separately on stage open skip for now
 }
 
 // ---- SetReference ---------------------------------------------------------
@@ -546,7 +546,7 @@ bool TypeIs(const std::string& Type, std::initializer_list<const char*> Names)
 }
 
 // Copy a wire vector straight into a VtArray: one allocation, one memcpy, no
-// intermediate buffer — the wire rows are little-endian and layout-identical
+// intermediate buffer the wire rows are little-endian and layout-identical
 // to GfVec2f/GfVec3f/float/int32/int64 elements. WireScalar sizes the length
 // prefix (a [float] field carrying Vec3f rows counts floats, not rows).
 template <typename VtArrayType, typename WireScalar = float>
@@ -600,7 +600,7 @@ pxr::VtValue CoerceString(const std::string& S, const std::string& Type)
 // Build a float-flavored VtValue from an element buffer. Serves the small
 // fixed-size types plus integral payloads that need per-element conversion;
 // large float wire arrays take the VtArrayFromWire memcpy path instead.
-// Fixed-size types demand exact element counts — a mismatch is a malformed
+// Fixed-size types demand exact element counts a mismatch is a malformed
 // encoder and must surface, not truncate.
 bool FloatsToValue(const TArray<float>& A, const std::string& Type, pxr::VtValue& Out)
 {
@@ -693,7 +693,7 @@ TArray<float> FloatsFromIntWire(const ::flatbuffers::Vector<int32_t>* Vec)
 
 // Build a VtValue for a ConnectableInputValue payload according to its USD
 // type name. Mirrors the core applier's value coercion table. Fixed-size
-// types demand exact element counts — a mismatch is a malformed encoder and
+// types demand exact element counts a mismatch is a malformed encoder and
 // must surface, not truncate.
 bool DecodeConnectableValue(const Wire::ConnectableInputValue* Val, const FString& TypeNameStr, pxr::VtValue& Out)
 {
@@ -1601,7 +1601,7 @@ bool FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	if (!PxrStage)
 	{
 		UE_LOG(LogUSDEventApplier, Warning,
-			TEXT("No USD stage open on AUsdStageActor — skipping event"));
+			TEXT("No USD stage open on AUsdStageActor skipping event"));
 		return false;
 	}
 
@@ -1635,7 +1635,7 @@ bool FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	return true;
 #else
 	UE_LOG(LogUSDEventApplier, Warning,
-		TEXT("USD SDK not available — cannot apply USD events"));
+		TEXT("USD SDK not available cannot apply USD events"));
 	return false;
 #endif
 }

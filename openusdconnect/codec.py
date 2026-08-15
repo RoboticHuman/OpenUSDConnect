@@ -3,12 +3,12 @@
 FlatBuffers is the canonical wire and storage format.  Zero-copy access
 is used wherever possible:
 
-  * **Receiver queue** — stores raw bytes; decode on drain.
-  * **Broadcast relay** — pre-framed binary sent to all receivers.
-  * **Event store** — binary blobs written/read without re-serialization.
+  * **Receiver queue** stores raw bytes; decode on drain.
+  * **Broadcast relay** pre-framed binary sent to all receivers.
+  * **Event store** binary blobs written/read without re-serialization.
 
 The server's event-processing path (apply_txn) still operates on Python
-dicts — events are decoded once on ingestion and the dict is passed to
+dicts events are decoded once on ingestion and the dict is passed to
 event_apply.  This is the primary conversion boundary.
 
 Primary API (zero-copy path):
@@ -311,7 +311,7 @@ def resolve_payload(envelope: Envelope):
     """Resolve envelope union to (msg_type_str, typed_fb_object).
 
     Returns e.g. ("hello", Hello) or ("event", BroadcastEvent).
-    The typed object shares the same underlying buffer — zero-copy.
+    The typed object shares the same underlying buffer zero-copy.
     """
     tag = envelope.PayloadType()
     msg_type = _PAYLOAD_TO_MSG_TYPE.get(tag)
@@ -341,7 +341,7 @@ def resolve_event(event_wrapper: EventWrapper):
 
 
 def is_ping(buf: bytes | bytearray) -> bool:
-    """Check if a buffer is a Ping message — single byte read, no alloc."""
+    """Check if a buffer is a Ping message single byte read, no alloc."""
     return decode_envelope(buf).PayloadType() == PayloadType.Ping
 
 
@@ -415,7 +415,7 @@ def _encode_hello(b, msg):
 def _encode_stage_metadata_table(b, meta: dict | None, *, force: bool = False) -> int | None:
     """Build a SetStageMetadata table from a sparse dict.
 
-    Returns ``None`` when ``meta`` is empty and ``force`` is False — caller
+    Returns ``None`` when ``meta`` is empty and ``force`` is False caller
     omits the optional field rather than writing an empty table.
     """
     if not meta and not force:
@@ -879,7 +879,7 @@ def _encode_attr_value_inner(b, value) -> int:
         _fb.AttrValueAddValueType(b, AttrValueType.ScalarString)
         _fb.AttrValueAddScalarString(b, str_off)
         return _fb.AttrValueEnd(b)
-    # numpy arrays — bulk encode via CreateNumpyVector (zero-copy path)
+    # numpy arrays bulk encode via CreateNumpyVector (zero-copy path)
     if isinstance(value, np.ndarray):
         return _encode_attr_value_numpy(b, value)
     if isinstance(value, list):
@@ -893,7 +893,7 @@ def _encode_attr_value_inner(b, value) -> int:
 
 
 def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
-    """Encode a numpy array into an AttrValue — direct bulk copy."""
+    """Encode a numpy array into an AttrValue direct bulk copy."""
     if arr.size == 0:
         json_off = b.CreateString("[]")
         _fb.AttrValueStart(b)
@@ -907,7 +907,7 @@ def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
     elif arr.ndim == 2:
         stride = arr.shape[1]
     else:
-        # 3D+ arrays — flatten and use stride from last dim
+        # 3D+ arrays flatten and use stride from last dim
         stride = arr.shape[-1]
 
     # Flatten to 1D for FlatBuffers vector
@@ -938,7 +938,7 @@ def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
 
 
 def _encode_attr_value_list(b, value: list) -> int:
-    """Encode a list value — detect element type, use typed vectors."""
+    """Encode a list value detect element type, use typed vectors."""
     if not value:
         json_off = b.CreateString("[]")
         _fb.AttrValueStart(b)
@@ -1549,7 +1549,7 @@ def decode_messages(
     for raw in raw_messages:
         try:
             msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
-        except Exception as exc:  # noqa: BLE001 — surfaced via result.errors
+        except Exception as exc:  # noqa: BLE001 surfaced via result.errors
             result.errors.append(exc)
             break
 
@@ -2130,7 +2130,7 @@ def _dict_set_connectable_input(sci, kind):
             inputs[name] = civ.ScalarInt()
         elif vt == ConnectableInputValueType.ScalarFloat:
             inputs[name] = civ.ScalarFloat()
-        # else: value type None or unrecognized — drop the input entry so the
+        # else: value type None or unrecognized drop the input entry so the
         # applier doesn't author a spurious default. type_name is preserved so
         # the receiver can log the unsupported kind without silently corrupting.
     ev = {

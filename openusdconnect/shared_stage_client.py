@@ -1,4 +1,4 @@
-"""Bidirectional synchronization for equivalent file-backed USD stages."""
+"""Bidirectional synchronization for equivalent portable USD stages."""
 
 from __future__ import annotations
 
@@ -363,7 +363,7 @@ class SharedStageClient:
     ) -> SharedRecoveryAssessment:
         """Select server state by replaying onto a clean equivalent stage.
 
-        Shared stages use application-owned file layers. The event log cannot
+        Shared stages use application-owned layers. The event log cannot
         safely clear an arbitrary live layer in place, and a currently detached
         layer may be reattached later. The caller therefore supplies a clean
         stage opened from the same collaboration baseline. Rejected work is
@@ -813,7 +813,7 @@ class SharedStageClient:
         return mapped
 
     def _rebind_stage_for_recovery(self, stage: Usd.Stage) -> None:
-        """Bind an equivalent clean file-backed stage before synchronous replay.
+        """Bind an equivalent clean portable stage before synchronous replay.
 
         Rebinding intentionally refuses unsent tracker changes. A rejected
         sender outbox is allowed because its exact bytes and layer snapshots

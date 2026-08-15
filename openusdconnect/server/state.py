@@ -85,7 +85,7 @@ from .types import (
 
 LOG = logging.getLogger(__name__)
 
-# Bounded queue limits — provides natural backpressure when receivers or
+# Bounded queue limits provides natural backpressure when receivers or
 # persistence can't keep up, preventing unbounded memory growth.
 _BROADCAST_QUEUE_MAX = 10_000
 _PERSIST_QUEUE_MAX = 10_000
@@ -199,7 +199,7 @@ def _prim_xform_trs(prim) -> dict | None:
 
 def _abbrev_scalar(value) -> str:
     if value is None:
-        return "—"
+        return ""
     s = str(value)
     return s if len(s) <= 120 else s[:117] + "…"
 
@@ -255,7 +255,7 @@ def _point_instancer_summary(prim) -> dict:
 def _authored_attr_rows(prim) -> list[dict]:
     """Authored attributes as ``{name, type, value, numTimeSamples}`` rows.
 
-    Array-typed values are reported by type only — never materialized — so
+    Array-typed values are reported by type only never materialized so
     inspecting a heavy prim (e.g. a million-point mesh) copies no buffers
     while stage_lock is held.
     """
@@ -454,7 +454,7 @@ class UsdSyncServer:
         self._transaction_thread: threading.Thread | None = None
         self._transaction_stopping = False
 
-        # Pluggable event store — defaults to SQLite
+        # Pluggable event store defaults to SQLite
         self.store: EventStore = event_store or SqliteEventStore(log_path)
         # Lazy durable highwater cache. Commit serialization makes this an
         # exact mirror of producer_sessions after the first lookup; reconnect
@@ -482,12 +482,12 @@ class UsdSyncServer:
             _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
             self.token_store = TokenStore(_token_path)
 
-        # Cached prim count — invalidated on structural events to avoid
+        # Cached prim count invalidated on structural events to avoid
         # full Traverse on every dashboard poll.
         self._prim_count: int = 0
         self._prim_count_dirty: bool = True
 
-        # Playback synchronization — a single leader drives the shared
+        # Playback synchronization a single leader drives the shared
         # playhead. apply_playback_control rejects writes from non-leaders.
         self.playback_lock = threading.Lock()
         self.playback: dict = {
@@ -497,7 +497,7 @@ class UsdSyncServer:
             "leader_client_id": None,
         }
 
-        # Async broadcast — emitter threads push to the queue, a dedicated
+        # Async broadcast emitter threads push to the queue, a dedicated
         # thread handles the actual network sends so emitters are never
         # blocked by slow receivers.
         # Each queued item retains the receiver membership captured when the
@@ -511,9 +511,11 @@ class UsdSyncServer:
         )
         self._broadcast_thread.start()
 
-        # Durability mode:
-        #   "strict"   — persist to DB before broadcast (no lost events on crash)
-        #   "realtime" — broadcast first, persist async (lower latency)
+        # Durability mode for writes without producer progress. Idempotent
+        # producer transactions always persist their event and cumulative
+        # high-water mark atomically before acknowledgement and publication.
+        #   "strict" persists every write before broadcast
+        #   "realtime" allows eligible server-internal writes to persist async
         self.durability = durability
         # Per-client rate limiting (0 = disabled)
         self.txn_rate = txn_rate
@@ -561,7 +563,7 @@ class UsdSyncServer:
         )
         self._op_cache_layer: str | None = None
 
-        # Incremental prim tracking — avoids full log scans on dashboard polls.
+        # Incremental prim tracking avoids full log scans on dashboard polls.
         self._prim_paths: dict[str, str] = {}  # prim_path → typeName
         # Per-prim flags maintained incrementally from events so dashboard
         # tree refreshes never have to query pxr per prim.
@@ -828,7 +830,7 @@ class UsdSyncServer:
         layer (rather than using the session layer directly) so that
         multi-user mode can add per-client sublayers alongside it.
 
-        Accepts an optional *label* for the layer identifier — this is the
+        Accepts an optional *label* for the layer identifier this is the
         extension point for per-client layers.
         """
         layer = Sdf.Layer.CreateAnonymous(label)
@@ -968,7 +970,7 @@ class UsdSyncServer:
         LOG.info("Restored stage from event log: %d events", len(routed))
 
     def _replay_shared_log(self, rows: list[tuple[int, bytes]]) -> None:
-        """Restore exact file-backed layer opinions in persisted order."""
+        """Restore exact authored-layer opinions in persisted order."""
         from ..event_apply import apply_events
 
         graph = self.shared_layer_graph
@@ -1052,14 +1054,14 @@ class UsdSyncServer:
             return False, None
 
         if not self.token_store.has_token(client_id):
-            # First connect — issue token (TOFU)
+            # First connect issue token (TOFU)
             new_token = self.token_store.issue(client_id, department)
             return True, new_token
 
         if token and self.token_store.verify(client_id, token):
             return True, None
 
-        LOG.warning("Auth rejected for %s — invalid or missing token", client_id)
+        LOG.warning("Auth rejected for %s invalid or missing token", client_id)
         return False, None
 
     def revoke_token(self, client_id: str) -> bool:
@@ -1213,7 +1215,7 @@ class UsdSyncServer:
         return _department_for_layer_key(layer_key) if layer_key is not None else None
 
     def mute_layer(self, key: str) -> bool:
-        """Mute a layer by client_id or department — opinions hidden but preserved."""
+        """Mute a layer by client_id or department opinions hidden but preserved."""
         layer_key = self.resolve_layer_key(key)
         if not layer_key:
             return False
@@ -1261,7 +1263,7 @@ class UsdSyncServer:
         if not layer or layer is self.edit_layer:
             return False
 
-        # Collect leaf prim paths outside the lock — this is a read-only
+        # Collect leaf prim paths outside the lock this is a read-only
         # walk of the source layer, no stage mutation involved.
         leaves = []
 
@@ -1409,7 +1411,7 @@ class UsdSyncServer:
           Phase 1 (no lock): snapshot the log and build the compacted dict.
           Phase 2 (exclusive): merge any delta, rewrite store, resync.
         """
-        # Phase 1 — snapshot + compute (no txn_barrier, emitters keep running)
+        # Phase 1 snapshot + compute (no txn_barrier, emitters keep running)
         rows = self.store.get_all_asc()
         if not rows:
             return
@@ -1417,7 +1419,7 @@ class UsdSyncServer:
         latest = self._build_compacted(rows)
         original_count = len(rows)
 
-        # Phase 2 — merge delta + commit (exclusive, emitters blocked)
+        # Phase 2 merge delta + commit (exclusive, emitters blocked)
         self.txn_barrier.acquire_exclusive()
         try:
             # Every transaction that began before the exclusive barrier is now
@@ -1453,7 +1455,7 @@ class UsdSyncServer:
         ``set_material_binding`` keys additionally carry the binding
         purpose so allPurpose/preview/full bindings survive independently.
 
-        Each entry carries a replay stamp — the seq of the last record
+        Each entry carries a replay stamp the seq of the last record
         merged into it, except creates, which keep their first-seen seq.
         Rewriting in stamp order preserves the original log's causal
         order: a prim's create replays before every event that references
@@ -1504,7 +1506,7 @@ class UsdSyncServer:
         if k in (K_DELETE_PRIM, K_RENAME_PRIM):
             # Tombstone the whole subtree: descendants of a deleted or
             # renamed prim must not replay and recreate it as a typeless
-            # zombie. Events after the tombstone are kept — they represent
+            # zombie. Events after the tombstone are kept they represent
             # a recreation and replay after the delete via their stamps.
             child_prefix = prim + "/"
             to_remove = [
@@ -1533,7 +1535,7 @@ class UsdSyncServer:
             latest[key] = (ev, meta, seq)
             return
 
-        # load/unload are mutually exclusive — only the last one wins.
+        # load/unload are mutually exclusive only the last one wins.
         if k == K_LOAD_PAYLOAD:
             latest.pop((prim, K_UNLOAD_PAYLOAD, None, layer_scope), None)
             latest[key] = (ev, meta, seq)
@@ -1804,7 +1806,7 @@ class UsdSyncServer:
         """Clear all events, reset the edit layer, and resync receivers."""
         if self.layer_mode is LayerMode.SHARED_STAGE:
             raise RuntimeError(
-                "purge is unavailable in shared-stage mode because file-backed "
+                "purge is unavailable in shared-stage mode because application-owned "
                 "authored opinions are not server-owned"
             )
         self.txn_barrier.acquire_exclusive()
@@ -2240,7 +2242,7 @@ class UsdSyncServer:
     def append_log(self, rec: dict) -> bytes:
         """Append an event record and return its encoded representation.
 
-        Raises on persistence failure — callers should not broadcast
+        Raises on persistence failure callers should not broadcast
         events that were not successfully persisted.
         """
         ev = rec.get("event", {})
@@ -2562,7 +2564,7 @@ class UsdSyncServer:
                 self.wire_metrics.record(kind, len(buf))
         payload = frame_batch(framed_payloads)
         self._enqueue_broadcast(payload, exclude_origin, audience)
-        # Notify event listeners synchronously — these are in-process
+        # Notify event listeners synchronously these are in-process
         # callbacks (e.g. dashboard) that are fast and must see events
         # in order.
         self._notify_event_listeners(records)
@@ -2592,7 +2594,7 @@ class UsdSyncServer:
     ):
         """Enqueue a one-off non-event message (PlaybackState, etc.) for broadcast.
 
-        Bypasses the event listener path — playback messages are control-plane
+        Bypasses the event listener path playback messages are control-plane
         signals, not USD scene events, so they shouldn't appear in the
         dashboard event log.
         """
@@ -2625,7 +2627,7 @@ class UsdSyncServer:
             try:
                 item = self._broadcast_queue.get(timeout=_PING_INTERVAL)
             except queue.Empty:
-                # Idle — send pings to detect dead receivers
+                # Idle send pings to detect dead receivers
                 self._send_to_all(_ping_payload)
                 continue
 
@@ -2673,7 +2675,7 @@ class UsdSyncServer:
         """Send payload to matching receivers, removing dead ones.
 
         A failed send is the earliest reliable signal that a client is
-        gone — releases the playback-leader role here too so other
+        gone releases the playback-leader role here too so other
         clients don't wait a full keepalive cycle to reclaim it. The
         dead handler's recv loop exits separately once keepalive expires.
         """
@@ -3789,7 +3791,7 @@ class UsdSyncServer:
     def get_prim_tree(self) -> list[dict]:
         """Build the prim tree from the incremental _prim_paths dict.
 
-        No event log scan needed — uses the in-memory prim tracking.
+        No event log scan needed uses the in-memory prim tracking.
         Instancing flags come from set lookups, and ``has_children``
         falls out of a single-pass parent count, so the tree refresh
         stays linear and free of per-prim pxr calls.
@@ -3839,7 +3841,7 @@ class UsdSyncServer:
         """Composed snapshot of one prim for the dashboard inspector.
 
         Reads are bounded (array buffers are never materialized, no flatten)
-        so stage_lock is held only briefly — safe on the realtime path.
+        so stage_lock is held only briefly safe on the realtime path.
         """
         with self.stage_lock:
             prim = self.stage.GetPrimAtPath(path)
@@ -3888,10 +3890,10 @@ class UsdSyncServer:
         """Export the server's edit layer as a USDA string (thread-safe).
 
         If *file_path* is given, also writes the layer to disk.  The exported
-        layer contains only the opinions authored by the server — the base
+        layer contains only the opinions authored by the server the base
         layer and its sublayers are not included.
         """
-        # Snapshot layer ref under lock, serialize outside — avoids holding
+        # Snapshot layer ref under lock, serialize outside avoids holding
         # stage_lock during the (potentially slow) ExportToString call.
         with self.stage_lock:
             layer = self.edit_layer
@@ -3916,9 +3918,9 @@ class UsdSyncServer:
 
         All layers, composition arcs, and opinions are resolved into final
         values.  The result is a standalone file with no external dependencies
-        — useful for archiving, delivery, or rendering.
+        useful for archiving, delivery, or rendering.
         """
-        # Flatten under lock (fast — creates a composed snapshot), then
+        # Flatten under lock (fast creates a composed snapshot), then
         # export outside lock to avoid blocking mutations during disk I/O.
         with self.stage_lock:
             flat = self.stage.Flatten()

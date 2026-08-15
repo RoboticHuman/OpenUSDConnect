@@ -1,10 +1,10 @@
-// OpenUSDConnect event schema — FlatBuffers IDL
+// OpenUSDConnect event schema FlatBuffers IDL
 // Covers all event kinds for USD scene synchronization.
 
 namespace OpenUSDConnect;
 
 // ---------------------------------------------------------------------------
-// Attribute value — supports scalars and bulk typed arrays (zero-copy)
+// Attribute value supports scalars and bulk typed arrays (zero-copy)
 // ---------------------------------------------------------------------------
 
 // Which field of AttrValue is populated.
@@ -14,8 +14,8 @@ enum AttrValueType : byte {
     ScalarInt,
     ScalarBool,
     ScalarString,
-    FloatArray,     // contiguous float32 — points, normals, UVs (flattened)
-    IntArray,       // contiguous int32 — face indices, vertex counts
+    FloatArray,     // contiguous float32 points, normals, UVs (flattened)
+    IntArray,       // contiguous int32 face indices, vertex counts
     StringVal,      // alias for string scalars (kept for clarity)
     NestedList,     // JSON fallback for unusual/nested types
 }
@@ -90,7 +90,7 @@ table SublayerEntry {
 
 // A connection edge: an attribute on `prim` is connected to an
 // attribute on `source_prim`. Names are USD namespace-qualified
-// (`inputs:foo` or `outputs:foo`) — the same form that appears in
+// (`inputs:foo` or `outputs:foo`) the same form that appears in
 // .usda syntax. Direction is encoded in the prefix; no separate
 // discriminator field. Uniform for input-side and output-side
 // connections at any depth.
@@ -110,7 +110,7 @@ table StringPair {
 }
 
 // ---------------------------------------------------------------------------
-// Connectable input value — typed to match UsdShade input types
+// Connectable input value typed to match UsdShade input types
 // ---------------------------------------------------------------------------
 
 // Which field of ConnectableInputValue is populated.
@@ -139,7 +139,7 @@ table ConnectableInputValue {
 }
 
 // ---------------------------------------------------------------------------
-// Event kinds — one table per kind
+// Event kinds one table per kind
 // ---------------------------------------------------------------------------
 
 table EnsurePrim {
@@ -305,7 +305,7 @@ table SetSublayers {
 }
 
 // Stage-level metadata (timeCodesPerSecond, framesPerSecond, start/end timecode,
-// metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional —
+// metersPerUnit, upAxis). Each numeric scalar is a FB-nullable optional
 // absent = "field not authored", present = "apply this value". upAxis is a
 // nullable string (None == empty when no opinion).
 table SetStageMetadata {
@@ -318,7 +318,7 @@ table SetStageMetadata {
 }
 
 // ---------------------------------------------------------------------------
-// Event union — wraps all event kinds
+// Event union wraps all event kinds
 // ---------------------------------------------------------------------------
 
 union EventPayload {

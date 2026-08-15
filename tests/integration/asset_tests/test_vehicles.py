@@ -1,4 +1,4 @@
-"""T7: Vehicles 4WD — Multiple material bindings per asset.
+"""T7: Vehicles 4WD Multiple material bindings per asset.
 
 Verifies 6 different material bindings across mesh parts, each
 resolving to the correct UsdPreviewSurface material.

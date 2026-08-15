@@ -1,4 +1,4 @@
-"""T5: Camera scene — UsdGeomCamera replication into Blender.
+"""T5: Camera scene UsdGeomCamera replication into Blender.
 
 Verifies:
 1. Reference to teapotScene_camera.usd brings /Cameras/mainCamera/mono in as
@@ -113,12 +113,12 @@ def _run():
 
         elif _step == 4:
             # Two separate things in Blender:
-            #   1. scene.camera     — which camera renders (F12) and is
+            #   1. scene.camera     which camera renders (F12) and is
             #                         "the active scene camera"
-            #   2. view_perspective — what the 3D viewport is looking through
+            #   2. view_perspective what the 3D viewport is looking through
             # Setting #1 alone leaves the viewport on its previous perspective.
             # To actually look through the camera we also flip every VIEW_3D
-            # space to CAMERA — the equivalent of Numpad 0.
+            # space to CAMERA the equivalent of Numpad 0.
             cam_obj = _find_imported_camera()
             bpy.context.scene.camera = cam_obj
             if bpy.context.scene.camera is not cam_obj:

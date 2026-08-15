@@ -1,4 +1,4 @@
-"""BlenderAdapter — applies incoming USD sync events to Blender objects.
+"""BlenderAdapter applies incoming USD sync events to Blender objects.
 
 Implements the DCCAdapter interface for Blender. Finds objects by
 obj["usd_prim_path"] custom property and sets location/rotation/scale.
@@ -105,7 +105,7 @@ def apply_stage_metadata_to_scene(
         scene.frame_start = int(round(startTimeCode / tcps * fps))
     if endTimeCode is not None:
         scene.frame_end = int(round(endTimeCode / tcps * fps))
-    # upAxis is informational on the Blender side — axis_conversion module
+    # upAxis is informational on the Blender side axis_conversion module
     # owns the rotation logic; no scene property to write.
 
 
@@ -325,7 +325,7 @@ class BlenderAdapter(DCCAdapter):
             for face in bm.faces:
                 for loop in face.loops:
                     co = loop.vert.co
-                    # Spherical projection — works for all primitive shapes
+                    # Spherical projection works for all primitive shapes
                     u = 0.5 + math.atan2(co.x, co.y) / (2 * math.pi)
                     v = 0.5 + math.asin(max(-1, min(1, co.z))) / math.pi
                     loop[uv_layer].uv = (u, v)
@@ -422,12 +422,12 @@ class BlenderAdapter(DCCAdapter):
     # or plugin-specific. The 4 supported lights (SphereLight, DistantLight,
     # RectLight, DiskLight) flow through _create_blender_object via
     # _USDLUX_TO_BLENDER_LIGHT. DomeLight is handled separately as a World
-    # shader network rather than a light object — see _ensure_dome_light.
+    # shader network rather than a light object see _ensure_dome_light.
     _SKIPPED_LIGHT_TYPES = frozenset({
         "CylinderLight", "GeometryLight", "PortalLight", "PluginLight",
     })
 
-    # Prim types that don't need scene objects — handled by their dedicated
+    # Prim types that don't need scene objects handled by their dedicated
     # event handlers (set_connectable_input, set_material_binding) or out of
     # scope for the Blender adapter today.
     _NON_SCENE_TYPES = (
@@ -441,7 +441,7 @@ class BlenderAdapter(DCCAdapter):
         api_schemas: list[str] | None = None,
     ) -> bool:
         # api_schemas (ShapingAPI, ShadowAPI, etc.) are USD-stage-only state
-        # in the Blender adapter — there's no corresponding Blender object
+        # in the Blender adapter there's no corresponding Blender object
         # property. They're already applied to the mirror stage by the
         # EventDispatcher; nothing to do on the Blender object itself.
         del api_schemas
@@ -474,7 +474,7 @@ class BlenderAdapter(DCCAdapter):
         obj = self._find_object_by_prim(prim_path)
         if obj is not None and obj.parent is not None:
             # Normalize MPI to Identity so obj.location/rotation/scale are in
-            # parent-local space — matching what the emitter sends.
+            # parent-local space matching what the emitter sends.
             # Imported objects may have non-identity MPI from Blender's
             # USD importer (set to parent.world.inverse() at import time).
             #
@@ -511,7 +511,7 @@ class BlenderAdapter(DCCAdapter):
         s: list[float] | None = None,
         time: float | None = None,
     ) -> bool:
-        # DomeLight has no scene object — its Xform drives the World's
+        # DomeLight has no scene object its Xform drives the World's
         # Mapping node rotation instead. Translation/scale are conventionally
         # meaningless on a dome (it's at infinity) and silently ignored.
         if prim_path in self._dome_light_paths:
@@ -528,7 +528,7 @@ class BlenderAdapter(DCCAdapter):
         # Axis conversion for T and S applies to ALL objects (imported or not)
         # when the scene is Y-up and no ancestor handles the rotation.
         # The is_imported flag only affects rotation handling (compose_axis_rotation
-        # vs yup_to_zup_quat) — it should not skip T/S conversion.
+        # vs yup_to_zup_quat) it should not skip T/S conversion.
         convert = self._needs_axis_conv and not parent_handles
 
         if t is not None:
@@ -641,7 +641,7 @@ class BlenderAdapter(DCCAdapter):
 
         # Array attrs arrive as numpy on the receive path; this adapter is
         # written against plain Python sequences (from_pydata, `if st:`), so
-        # normalize at the boundary. Cheap bulk .tolist() — the costly
+        # normalize at the boundary. Cheap bulk .tolist() the costly
         # per-element decode was already avoided upstream.
         attrs = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in attrs.items()}
 
@@ -981,10 +981,10 @@ class BlenderAdapter(DCCAdapter):
         """Route UsdLux light inputs to the Blender light data block.
 
         Conversion table (matches what Blender's own USD importer does for
-        the common cases — Cycles-flavored, no per-renderer divergence):
+        the common cases Cycles-flavored, no per-renderer divergence):
 
         - ``intensity``        → ``light.data.energy``         (1:1; per-renderer
-          unit conversion is a follow-up — Cycles wants Watts, USD authors
+          unit conversion is a follow-up Cycles wants Watts, USD authors
           in nits/lumens/Watts depending on schema)
         - ``color``            → ``light.data.color``          (RGB, no alpha)
         - ``radius`` on POINT  → ``light.data.shadow_soft_size`` (light radius)
@@ -994,7 +994,7 @@ class BlenderAdapter(DCCAdapter):
         - ``angle``  on SUN    → ``light.data.angle``          (USD deg → Blender rad)
 
         UsdLux inputs without a clean Blender equivalent on the current
-        light type (e.g. ``shaping:cone:angle`` on a POINT — would require
+        light type (e.g. ``shaping:cone:angle`` on a POINT would require
         promoting the SphereLight to a SPOT, follow-up) are silently
         skipped.
 
@@ -1038,7 +1038,7 @@ class BlenderAdapter(DCCAdapter):
     # DomeLight (UsdLux) → Blender World shader
     # ------------------------------------------------------------------
     # USD DomeLight is a 360° image-based light. Blender models this as
-    # the World shader, not a scene object — so DomeLight maps to a node
+    # the World shader, not a scene object so DomeLight maps to a node
     # network on bpy.context.scene.world.node_tree:
     #
     #   Texture Coordinate → Mapping → Environment Texture
@@ -1056,7 +1056,7 @@ class BlenderAdapter(DCCAdapter):
     #   DomeLight.Xform      → Mapping.Rotation (quat → Euler)
     #
     # Blender has exactly one World per scene; multiple USD DomeLights map
-    # to "last-DomeLight-wins" — the most recent ensure_prim drives the
+    # to "last-DomeLight-wins" the most recent ensure_prim drives the
     # World, earlier domes' events are silently ignored.
 
     _DOME_NODE_NAMES = {
@@ -1251,7 +1251,7 @@ class BlenderAdapter(DCCAdapter):
     def _prepare_tree_for_network(self, tree):
         """Remove Blender's auto-created default Principled BSDF.
 
-        Leaves BSDFs tagged with `usd_shader_path` alone — those were
+        Leaves BSDFs tagged with `usd_shader_path` alone those were
         authored by another pipeline-driven mapper and removing them
         would orphan that mapper's network.
         """
@@ -1473,7 +1473,7 @@ class BlenderAdapter(DCCAdapter):
                 source_prim,
             )
 
-            # Resolve source socket — multi-node output map first.  Only
+            # Resolve source socket multi-node output map first.  Only
             # consult it when the source side is an output; multi-node
             # input maps are for the destination side, not the source.
             cached_outputs = self._registry.get_shader(source_prim).get("output_map")
@@ -1493,7 +1493,7 @@ class BlenderAdapter(DCCAdapter):
             else:
                 continue
 
-            # Resolve target socket — check multi-node input map first.
+            # Resolve target socket check multi-node input map first.
             if cached_inputs and local_base in cached_inputs:
                 tgt_socket = cached_inputs[local_base]
             elif target_node:
@@ -1607,7 +1607,7 @@ class BlenderAdapter(DCCAdapter):
         """Import a USD asset and merge the imported root into *container*.
 
         The container (created by ensure_prim) is consumed: the imported
-        root takes over its prim_path, position, and parent — becoming
+        root takes over its prim_path, position, and parent becoming
         the single object that represents the prim.
 
         Returns (new_objs, merged) where merged is the new prim
@@ -1616,7 +1616,7 @@ class BlenderAdapter(DCCAdapter):
         LOG.info("set_reference: importing %s for %s", resolved, prim_path)
         before = set(bpy.data.objects)
 
-        # Suppress USDHook tagging during this import — the adapter
+        # Suppress USDHook tagging during this import the adapter
         # handles tagging with correct composed scene paths below.
         from .capture import USD_CONNECT_Hook
 
@@ -1660,7 +1660,7 @@ class BlenderAdapter(DCCAdapter):
         # Remap file-internal paths to composed scene paths.
         # e.g. "/Teapot/teapot_MeshShape" → "/World/Teapot/teapot_MeshShape".
         # Imported roots are registered in the cache but their usd_prim_path
-        # is NOT overwritten — the merge below handles that.
+        # is NOT overwritten the merge below handles that.
         imported_root_set = set(imported_roots)
         for obj in new_objs:
             hook_path = obj.get("usd_prim_path", "")
@@ -1688,7 +1688,7 @@ class BlenderAdapter(DCCAdapter):
                 self._registry.register(composed_path, obj)
 
         # Merge: replace the container with the first imported root.
-        # The root becomes the prim representation — it holds both the
+        # The root becomes the prim representation it holds both the
         # container's position and the import-time Rx(90°) axis rotation.
         merged = None
         if imported_roots:
@@ -1722,7 +1722,7 @@ class BlenderAdapter(DCCAdapter):
                 extra_root.parent = root
                 extra_root.matrix_parent_inverse = _IDENTITY_4X4.copy()
 
-            # Remove the container — frees its name for the merged root.
+            # Remove the container frees its name for the merged root.
             container_name = container.name
             self._registry.unregister(prim_path)
             for col in container.users_collection:
@@ -1777,7 +1777,7 @@ class BlenderAdapter(DCCAdapter):
             LOG.debug("Could not open %s for MaterialX enrichment", resolved)
             return
 
-        # Walk the full stage — materials may live in sibling scopes.
+        # Walk the full stage materials may live in sibling scopes.
         root_prim = stage.GetPseudoRoot()
         if not root_prim or not root_prim.IsValid():
             return
@@ -1840,7 +1840,7 @@ class BlenderAdapter(DCCAdapter):
                                 }
                             else:
                                 # Input-side source (NodeGraph interface
-                                # forwarding) — preserve direction.
+                                # forwarding) preserve direction.
                                 remapped_conns[local_attr] = {
                                     "source_prim": _remap(conn["source_prim"]),
                                     "source_attr": conn["source_attr"],
@@ -1853,7 +1853,7 @@ class BlenderAdapter(DCCAdapter):
             self.set_material_binding(scene_path, target, purpose)
         # Blender's USD importer already handles UsdPreviewSurface shaders.
         # When a material's surface shader is multi-node MaterialX, the
-        # mapper builds the full network itself — applying our texture
+        # mapper builds the full network itself applying our texture
         # mappers on top would create redundant/conflicting nodes.  Gate
         # on `is_surface_shader` so helper multi-node mappers (Normal Map,
         # etc.) don't suppress siblings under the same NodeGraph.
@@ -1873,7 +1873,7 @@ class BlenderAdapter(DCCAdapter):
         for scene_path, conns in connection_events:
             self.set_connectable_connection(scene_path, conns)
 
-        # Fix missing textures — Blender's USD importer creates Image Texture
+        # Fix missing textures Blender's USD importer creates Image Texture
         # nodes but often fails to resolve relative texture paths. Walk the
         # stage for texture shaders and load the images using pxr's resolved paths.
         self._fix_missing_textures(stage, root_prim, prim_path, _remap)
@@ -2029,13 +2029,13 @@ class BlenderAdapter(DCCAdapter):
         # Covers two cases:
         #   1. Adapter previously imported the asset (_imported_refs has entry)
         #   2. User imported the base scene before the adapter existed
-        #      (e.g. single-instance emitter+receiver loopback) — children
+        #      (e.g. single-instance emitter+receiver loopback) children
         #      exist but _imported_refs is empty.
         if self._ref_children_exist(prim_path):
             prev_entry = self._registry.get_imported_ref(prim_path)
             prev_asset = prev_entry[0] if prev_entry else None
             if prev_asset is None or prev_asset == resolved_refs[0][0]:
-                # Same asset (or unknown) and children present — skip import.
+                # Same asset (or unknown) and children present skip import.
                 # Tag the container for future dedup.
                 container = self._find_object_by_prim(prim_path)
                 if container is not None and len(resolved_refs) == 1:
@@ -2051,10 +2051,10 @@ class BlenderAdapter(DCCAdapter):
                     prim_path,
                 )
                 return True
-            # Different asset — remove old children, re-import below
+            # Different asset remove old children, re-import below
             self._remove_imported_ref_children(prim_path)
         elif self._registry.get_imported_ref(prim_path) is not None:
-            # Had a previous import but children are gone — remove stale entry
+            # Had a previous import but children are gone remove stale entry
             self._remove_imported_ref_children(prim_path)
 
         # Find or create the container object for this prim_path.

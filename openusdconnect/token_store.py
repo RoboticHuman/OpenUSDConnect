@@ -2,7 +2,7 @@
 
 Manages authentication tokens for client identity verification.
 Tokens are issued on first connect and verified on reconnect.
-Storage is SQLite — same as the event store.
+Storage is SQLite same as the event store.
 """
 
 from __future__ import annotations
