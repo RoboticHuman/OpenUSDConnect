@@ -144,7 +144,7 @@ replay, reconnection, adapters, and the cases that require recovery.
 | Integration | Direction | Entry point |
 | --- | --- | --- |
 | Blender addon | Bidirectional | `uv run python scripts/build_blender_addon.py` |
-| usdview plugin | Receive | `uv run python -m integrations.usdview.launcher scene.usda --port 7200` |
+| usdview plugin | Receive | `uv run python scripts/start_usdview.py scene.usda` |
 | Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal plugin guide](integrations/unreal/OpenUSDConnect/README.md) |
 | MCP server | Author and inspect | `uv run python -m integrations.mcp` |
 | Dashboard | Administration | Start the server with `--dashboard-port 8080` |
@@ -153,9 +153,12 @@ The Blender addon zip is written to `dist/usd_connect_blender.zip`. Install it
 through **Edit > Preferences > Add-ons > Install from Disk**. See the
 [Blender guide](docs/blender-addon-usage.md) for normal and live-open workflows.
 
-For MaterialX and RenderMan in usdview, add `--renderman` to the launcher. The
-launcher configures the renderer environment and selects hdPrman when a
-compatible RenderMan/OpenUSD installation is available.
+`scripts/start_usdview.py` starts a temporary server, discovers the matching
+usdview executable, and wires the receiver plugin. Use
+`python -m integrations.usdview.launcher` to connect to an existing server.
+For MaterialX and RenderMan, add `--renderman`; the launcher configures the
+renderer environment and selects hdPrman when a compatible RenderMan/OpenUSD
+installation is available.
 
 ## Live-open snapshots
 
