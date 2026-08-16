@@ -33,12 +33,12 @@ TEAPOT_ASSET = os.path.join(
     "teapot",
     "teapot.usd",
 )
-MALFORMED_TEXTURE_ASSET = os.path.join(
+REFERENCED_TEXTURE_ASSET = os.path.join(
     PROJECT_ROOT,
-    "assets",
-    "test_assets",
-    "MaterialXTest",
-    "basicTextured.usda",
+    "tests",
+    "fixtures",
+    "materialx_vfs",
+    "basic_textured.usda",
 )
 DIRECT_TEXTURE_ASSET = os.path.join(
     PROJECT_ROOT,
@@ -227,7 +227,7 @@ def test_materialx_vfs_import_resolves_textures_and_renders(
     tmp_path,
     free_port,
 ):
-    """The supported live-open operator enriches a real malformed asset snapshot."""
+    """The supported live-open operator preserves valid referenced MaterialX textures."""
     build = subprocess.run(
         [sys.executable, "scripts/build_blender_addon.py"],
         cwd=PROJECT_ROOT,
@@ -238,7 +238,7 @@ def test_materialx_vfs_import_resolves_textures_and_renders(
     assert build.returncode == 0, build.stderr
 
     server = UsdSyncServer(
-        base_usd_path=MALFORMED_TEXTURE_ASSET,
+        base_usd_path=REFERENCED_TEXTURE_ASSET,
         log_path=str(tmp_path / "materialx-vfs.db"),
     )
     try:

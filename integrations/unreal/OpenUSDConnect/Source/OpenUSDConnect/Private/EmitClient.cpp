@@ -21,6 +21,8 @@ using namespace OUC;
 
 namespace
 {
+constexpr double FrameReadTimeoutSeconds = 10.0;
+
 bool IsPeerClosed(FSocket* Socket)
 {
 	if (!Socket)
@@ -430,10 +432,13 @@ uint32 FEmitClient::Run()
 				++ResultIndex)
 			{
 				uint32 PendingBytes = 0;
-				if (!Socket || !Socket->HasPendingData(PendingBytes) || PendingBytes < 4)
+				if (!Socket || !Socket->HasPendingData(PendingBytes) || PendingBytes == 0)
 				{
 					break;
 				}
+				// RecvFrame handles fragmented headers and bodies. Enter it as
+				// soon as any byte is readable so a peer close after a partial
+				// header is observed instead of leaving this connection stuck.
 				TArray<uint8> InFrame;
 				if (!RecvFrame(InFrame))
 				{
@@ -556,6 +561,13 @@ bool FEmitClient::RecvExact(uint8* Buf, int32 Needed)
 	while (Got < Needed)
 	{
 		if (bShouldStop.load(std::memory_order_relaxed) || !Socket) return false;
+		if (!Socket->Wait(
+			ESocketWaitConditions::WaitForRead,
+			FTimespan::FromSeconds(FrameReadTimeoutSeconds)))
+		{
+			UE_LOG(LogUSDEmit, Warning, TEXT("Timed out while receiving emitter frame"));
+			return false;
+		}
 		int32 Read = 0;
 		if (!Socket->Recv(Buf + Got, Needed - Got, Read) || Read <= 0) return false;
 		Got += Read;

@@ -157,6 +157,12 @@ class TestTextureImportOptions:
 
         assert live_discovery.texture_import_options(str(path)) == {}
 
+    def test_package_marker_in_invalid_bytes_is_not_treated_as_usd(self, tmp_path):
+        path = tmp_path / "invalid.usd"
+        path.write_bytes(b"not USD, despite asset.usdz[0/texture.png]")
+
+        assert live_discovery.texture_import_options(str(path)) == {}
+
     def test_usdz_uses_stable_copy_directory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             live_discovery,
@@ -174,7 +180,7 @@ class TestTextureImportOptions:
         assert first["tex_name_collision_mode"] == "OVERWRITE"
         assert os.path.isdir(first["import_textures_dir"])
 
-    def test_flat_snapshot_detects_package_relative_texture(self, tmp_path, monkeypatch):
+    def test_live_texture_directory_is_stable_per_snapshot_version(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             live_discovery,
             "_TEXTURE_CACHE_DIR",
@@ -182,13 +188,22 @@ class TestTextureImportOptions:
         )
         first = tmp_path / "snapshot-1.usd"
         second = tmp_path / "snapshot-2.usd"
-        content = b'#usda 1.0\nasset inputs:file = @asset.usdz[0/texture.png]@\n'
-        first.write_bytes(content)
-        second.write_bytes(content)
-        metadata = {"scene_id": "live-scene"}
+        first.write_text('#usda 1.0\ndef Xform "World" {}\n', encoding="utf-8")
+        second.write_bytes(first.read_bytes())
+        metadata = {
+            "live": True,
+            "scene_id": "live-scene",
+            "epoch": 3,
+            "snapshot_seq": 8,
+        }
 
         first_options = live_discovery.texture_import_options(str(first), metadata)
         second_options = live_discovery.texture_import_options(str(second), metadata)
+        next_options = live_discovery.texture_import_options(
+            str(second),
+            {**metadata, "snapshot_seq": 9},
+        )
 
         assert first_options["import_textures_mode"] == "IMPORT_COPY"
         assert first_options["import_textures_dir"] == second_options["import_textures_dir"]
+        assert first_options["import_textures_dir"] != next_options["import_textures_dir"]

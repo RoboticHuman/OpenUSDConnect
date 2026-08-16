@@ -1096,22 +1096,24 @@ def _try_send_dirty_events():
             LOG.warning("emitter send failed; retaining %d events for reconnect", len(events))
 
 
-def _cancel_emitter_reconnect() -> None:
-    """Invalidate and finish any in-flight background reconnect attempt."""
+def _cancel_emitter_reconnect() -> bool:
+    """Invalidate reconnect work without waiting on Blender's UI thread.
+
+    Returns ``False`` while a stale worker still owns the sender. The worker
+    disconnects any socket it establishes after observing the generation
+    change, so explicit operations must wait until it exits.
+    """
     _state._reconnect_generation += 1
     _state._last_reconnect_attempt = 0.0
     _state._reconnect_interval = EMITTER_RECONNECT_INTERVAL_SECONDS
     reconnect_thread = _state._reconnect_thread
-    if (
+    worker_alive = bool(
         reconnect_thread is not None
         and reconnect_thread is not threading.current_thread()
         and reconnect_thread.is_alive()
-    ):
-        # The worker's network attempt is bounded. Waiting here prevents an
-        # explicit Connect from adopting a socket that the stale worker is
-        # about to close, and prevents Disconnect from briefly reconnecting.
-        reconnect_thread.join()
-    _state._reconnect_thread = None
+    )
+    _state._reconnect_thread = reconnect_thread if worker_alive else None
+    return not worker_alive
 
 
 def _emitter_reconnect_worker(sender: EventSender, generation: int) -> None:
@@ -1125,6 +1127,11 @@ def _emitter_reconnect_worker(sender: EventSender, generation: int) -> None:
     if connected and current:
         _state._reconnect_interval = EMITTER_RECONNECT_INTERVAL_SECONDS
         LOG.info("Emitter reconnected to %s:%d", sender.host, sender.port)
+    elif current and (sender.auth_rejected or sender.hello_rejected):
+        reason = sender.rejection_reason or (
+            "authentication rejected" if sender.auth_rejected else "connection rejected"
+        )
+        LOG.error("Emitter automatic reconnect stopped: %s", reason)
     elif current:
         _state._reconnect_interval = min(
             _state._reconnect_interval * 2.0,
@@ -1139,7 +1146,13 @@ def _emitter_reconnect_worker(sender: EventSender, generation: int) -> None:
 def _schedule_emitter_reconnect() -> bool:
     """Start one throttled reconnect attempt for the active emitter."""
     sender = _state.sender
-    if sender is None or sender.sock is not None or sender.recovery_required:
+    if (
+        sender is None
+        or sender.sock is not None
+        or sender.recovery_required
+        or sender.auth_rejected
+        or sender.hello_rejected
+    ):
         return False
     reconnect_thread = _state._reconnect_thread
     if reconnect_thread is not None and reconnect_thread.is_alive():
@@ -1569,7 +1582,9 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-        _cancel_emitter_reconnect()
+        if not _cancel_emitter_reconnect():
+            self.report({"WARNING"}, "Emitter reconnect cancellation is still finishing")
+            return {"CANCELLED"}
         if _state.sender is not None and _state.sender.sock is not None:
             self.report({"INFO"}, "Already connected")
             return {"CANCELLED"}
@@ -1607,26 +1622,29 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
                 _state.notice_emitter = NoticeEmitter(_state.author.stage)
 
             if sender is None:
+                emit_host = str(scene.usd_connect_emit_host)
+                emit_port = int(scene.usd_connect_emit_port)
                 sender = EventSender(
-                    host=scene.usd_connect_emit_host,
-                    port=scene.usd_connect_emit_port,
+                    host=emit_host,
+                    port=emit_port,
                     client_id=STABLE_CLIENT_ID,
                     origin=SESSION_ORIGIN,
                     department=scene.usd_connect_department or None,
-                    token=token_client.load_token(
-                        scene.usd_connect_emit_host,
-                        scene.usd_connect_emit_port,
-                    ),
-                    on_token_issued=lambda token: token_client.save_token(
-                        scene.usd_connect_emit_host,
-                        scene.usd_connect_emit_port,
-                        token,
+                    token=token_client.load_token(emit_host, emit_port),
+                    on_token_issued=lambda token, host=emit_host, port=emit_port: (
+                        token_client.save_token(host, port, token)
                     ),
                 )
                 _state.sender = sender
             if not _state.sender.connect():
-                reason = _state.sender.transaction_error or (
-                    "auth rejected" if _state.sender.auth_rejected else "could not connect"
+                reason = (
+                    _state.sender.transaction_error
+                    or _state.sender.rejection_reason
+                    or (
+                        "authentication rejected"
+                        if _state.sender.auth_rejected
+                        else "could not connect"
+                    )
                 )
                 if _state.sender.auth_rejected:
                     token_client.delete_token(
@@ -1656,10 +1674,10 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
     bl_label = "Disconnect Emitter"
 
     def execute(self, context):
-        _cancel_emitter_reconnect()
+        reconnect_finished = _cancel_emitter_reconnect()
         _remove_handler()
         retained = 0
-        if _state.sender is not None:
+        if _state.sender is not None and reconnect_finished:
             try:
                 flushed = _state.sender.flush(timeout=2.0)
             except Exception as exc:
@@ -1674,7 +1692,9 @@ class USD_CONNECT_OT_disconnect_emitter(bpy.types.Operator):
             _state.notice_emitter = None
         _state.author = None
         context.scene.usd_connect_net_emitter_running = False
-        if (
+        if not reconnect_finished:
+            self.report({"INFO"}, "Emitter disconnect requested")
+        elif (
             retained
             and _state.sender is not None
             and _state.sender.recovery_required is True
@@ -1779,12 +1799,13 @@ def register():
 
 
 def unregister():
-    _cancel_emitter_reconnect()
+    reconnect_finished = _cancel_emitter_reconnect()
     _remove_handler()
     _reset_stage_author()
-    if _state.sender is not None:
-        _state.sender.disconnect()
-        _state.sender = None
+    sender = _state.sender
+    _state.sender = None
+    if sender is not None and reconnect_finished:
+        sender.disconnect()
     for c in reversed(_CAPTURE_CLASSES):
         bpy.utils.unregister_class(c)
     for attr, _, _ in _SCENE_PROPS:

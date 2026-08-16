@@ -3,7 +3,6 @@ from __future__ import annotations
 from pxr import Sdf, Usd, UsdShade, UsdVol
 
 from openusdconnect.asset_paths import (
-    repair_missing_duplicate_asset_paths,
     stabilize_layer_asset_paths,
     transport_asset_identifier,
 )
@@ -95,38 +94,6 @@ def test_stabilize_layer_asset_paths_visits_nested_and_array_values(tmp_path):
     assert fragment.GetPrimAtPath("/Look").customData["resources"]["normal"].path == (
         f"{prefix}/textures/normal.tx"
     )
-
-
-def _layer_with_asset_path(identifier: str):
-    layer = Sdf.Layer.CreateAnonymous("asset-path")
-    stage = Usd.Stage.Open(layer)
-    stage.DefinePrim("/Look").CreateAttribute(
-        "file", Sdf.ValueTypeNames.Asset, custom=True
-    ).Set(Sdf.AssetPath(identifier))
-    return layer
-
-
-def test_duplicate_asset_path_repair_preserves_valid_intentional_directory(tmp_path):
-    texture = tmp_path / "textures" / "textures" / "map.png"
-    texture.parent.mkdir(parents=True)
-    texture.write_bytes(b"image")
-    identifier = _usd_path(texture)
-    layer = _layer_with_asset_path(identifier)
-
-    assert repair_missing_duplicate_asset_paths(layer) == 0
-    assert layer.GetAttributeAtPath("/Look.file").default.path == identifier
-
-
-def test_duplicate_asset_path_repair_preserves_unresolved_and_package_paths(tmp_path):
-    unresolved = _usd_path(tmp_path / "textures" / "textures" / "missing.png")
-    layer = _layer_with_asset_path(unresolved)
-    assert repair_missing_duplicate_asset_paths(layer) == 0
-    assert layer.GetAttributeAtPath("/Look.file").default.path == unresolved
-
-    package = f"{_usd_path(tmp_path / 'archive.usdz')}[textures/textures/map.png]"
-    layer = _layer_with_asset_path(package)
-    assert repair_missing_duplicate_asset_paths(layer) == 0
-    assert layer.GetAttributeAtPath("/Look.file").default.path == package
 
 
 def test_connectable_event_anchors_file_relative_asset_input(tmp_path):

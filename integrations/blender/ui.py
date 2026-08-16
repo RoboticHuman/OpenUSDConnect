@@ -82,6 +82,9 @@ def _draw_emitter_section(layout, scene):
             box.label(text="Publishing paused: recovery required", icon="ERROR")
             box.label(text=sender.recovery_disposition.value.replace("_", " ").title())
             box.label(text=sender.transaction_error)
+        elif sender is not None and (sender.auth_rejected or sender.hello_rejected):
+            box.label(text="Emitter reconnect stopped", icon="ERROR")
+            box.label(text=sender.rejection_reason or "Connection rejected")
         elif sender is not None and sender.connected:
             box.label(text="Emitter connected", icon="CHECKMARK")
         else:

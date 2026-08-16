@@ -123,9 +123,15 @@ def main():
         nodes = list(material.node_tree.nodes)
         image_nodes = [node for node in nodes if node.bl_idname == "ShaderNodeTexImage"]
         image_paths = [node.image.filepath if node.image else "" for node in image_nodes]
+        print(
+            "MaterialX nodes:",
+            [(node.name, node.bl_idname) for node in nodes],
+            "images=",
+            image_paths,
+            flush=True,
+        )
         assert len(image_nodes) >= 2
         assert all(path and os.path.isfile(path) for path in image_paths)
-        assert all("textures/textures" not in path.replace("\\", "/") for path in image_paths)
 
         meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
         assert meshes

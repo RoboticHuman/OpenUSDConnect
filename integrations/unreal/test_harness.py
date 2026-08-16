@@ -766,7 +766,11 @@ def run_unreal_e2e(
                 stdout=server_output,
                 stderr=subprocess.STDOUT,
             )
-            _wait_for_port(port, process)
+            try:
+                _wait_for_port(port, process)
+            except Exception:
+                _stop_process(process)
+                raise
             return process
 
         server = start_server()
@@ -781,36 +785,45 @@ def run_unreal_e2e(
             env["OUC_UNREAL_TEST_CONFIG"] = str(scenario.config_path)
             started = time.monotonic()
             with unreal_console_log.open("w", encoding="utf-8") as unreal_output:
-                editor = subprocess.Popen(
-                    command,
-                    cwd=work_dir,
-                    env=env,
-                    stdout=unreal_output,
-                    stderr=subprocess.STDOUT,
-                )
-                outage_started = False
-                outage_restarted = False
-                process_deadline = None if interactive else started + timeout + 90.0
-                while editor.poll() is None:
-                    if outage_ready_path.is_file() and not outage_started:
-                        _stop_process(server)
-                        outage_started = True
-                    if offline_edit_path.is_file() and outage_started and not outage_restarted:
-                        server = start_server()
-                        outage_restarted = True
-                    if process_deadline is not None and time.monotonic() >= process_deadline:
-                        _stop_process(editor)
+                editor = None
+                try:
+                    editor = subprocess.Popen(
+                        command,
+                        cwd=work_dir,
+                        env=env,
+                        stdout=unreal_output,
+                        stderr=subprocess.STDOUT,
+                    )
+                    outage_started = False
+                    outage_restarted = False
+                    process_deadline = None if interactive else started + timeout + 90.0
+                    while editor.poll() is None:
+                        if outage_ready_path.is_file() and not outage_started:
+                            _stop_process(server)
+                            outage_started = True
+                        if (
+                            offline_edit_path.is_file()
+                            and outage_started
+                            and not outage_restarted
+                        ):
+                            server = start_server()
+                            outage_restarted = True
+                        if process_deadline is not None and time.monotonic() >= process_deadline:
+                            _stop_process(editor)
+                            raise UnrealTestError(
+                                f"Unreal test exceeded {timeout + 90.0:.0f}s\n"
+                                f"{_run_log_tail(unreal_log, unreal_console_log)}"
+                            )
+                        time.sleep(0.05)
+                    completed_returncode = editor.wait()
+                    if not outage_started or not outage_restarted:
                         raise UnrealTestError(
-                            f"Unreal test exceeded {timeout + 90.0:.0f}s\n"
+                            "Unreal scenario exited without completing the server outage cycle\n"
                             f"{_run_log_tail(unreal_log, unreal_console_log)}"
                         )
-                    time.sleep(0.05)
-                completed_returncode = editor.wait()
-                if not outage_started or not outage_restarted:
-                    raise UnrealTestError(
-                        "Unreal scenario exited without completing the server outage cycle\n"
-                        f"{_run_log_tail(unreal_log, unreal_console_log)}"
-                    )
+                finally:
+                    if editor is not None and editor.poll() is None:
+                        _stop_process(editor)
             elapsed = time.monotonic() - started
         finally:
             _stop_process(server)
