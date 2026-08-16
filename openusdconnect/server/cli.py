@@ -46,6 +46,11 @@ from ..defaults import (
 from ..defaults import (
     host_for_url as _host_for_url,
 )
+from ..plugin_environment import (
+    DEFAULT_SDR_SHADER_IDS,
+    PluginEnvironmentError,
+    prepare_usd_plugin_environment,
+)
 from ..protocol_constants import LayerMode
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
@@ -96,6 +101,9 @@ class ServerConfig:
     compact_interval: float = 0
     reclaim_interval: float = 0
     vfs: VfsConfig | None = None
+    plugin_dll_dirs: list[str] | None = None
+    preflight_shader_ids: tuple[str, ...] = DEFAULT_SDR_SHADER_IDS
+    preflight_plugins: bool = True
 
 
 def _normalize_vfs_share(share: str) -> str:
@@ -136,6 +144,28 @@ def run_server(config: ServerConfig | None = None):
         raise ValueError("the managed VFS composition is unavailable in shared-stage mode")
     if layer_mode is LayerMode.SHARED_STAGE and config.export_diff:
         raise ValueError("--export-diff is unavailable in shared-stage mode")
+    if config.preflight_plugins:
+        plugin_result = prepare_usd_plugin_environment(
+            dll_dirs=config.plugin_dll_dirs or (),
+            shader_ids=config.preflight_shader_ids,
+        )
+        if plugin_result.added_dll_dirs:
+            LOG.info(
+                "Added USD plugin DLL directories: %s",
+                os.pathsep.join(plugin_result.added_dll_dirs),
+            )
+        if plugin_result.missing_dll_dirs:
+            LOG.warning(
+                "USD plugin DLL directories do not exist: %s",
+                os.pathsep.join(plugin_result.missing_dll_dirs),
+            )
+        if plugin_result.unresolved_shader_ids:
+            LOG.warning(
+                "Sdr preflight could not resolve shader identifiers: %s",
+                ", ".join(plugin_result.unresolved_shader_ids),
+            )
+        LOG.info("Sdr preflight completed in %.1f ms", plugin_result.elapsed_ms)
+
     sync_server = UsdSyncServer(
         base_usd_path=config.base_usd_path,
         layer_mode=layer_mode,
@@ -273,7 +303,7 @@ def run_server(config: ServerConfig | None = None):
         _cleanup()
 
 
-def main(argv: list[str] | None = None):
+def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
     ap = argparse.ArgumentParser(
         prog="openusdconnect-server",
@@ -316,6 +346,18 @@ def main(argv: list[str] | None = None):
         default=None,
         metavar="PATH",
         help="Export the override layer as USDA on shutdown",
+    )
+    plugins = ap.add_argument_group("USD plugin environment")
+    plugins.add_argument(
+        "--plugin-dll-dir",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Prepend DIR for Windows USD plugin dependency loading before Sdr "
+            "initialization; repeat for multiple directories. Also read from "
+            "OPENUSDCONNECT_DLL_DIRS"
+        ),
     )
     services = ap.add_argument_group("services")
     services.add_argument(
@@ -487,32 +529,37 @@ def main(argv: list[str] | None = None):
         if args.vfs_port is not None
         else None
     )
-    run_server(
-        ServerConfig(
-            host=args.host,
-            port=args.port,
-            base_usd_path=args.base,
-            layer_mode=args.layer_mode,
-            resolver_context=_create_resolver_context(args.resolver_context),
-            log_path=args.event_log,
-            compact=args.compact,
-            export_diff=args.export_diff,
-            dashboard_port=args.dashboard_port,
-            op_cache_size=args.op_cache_size,
-            department_priority=args.departments,
-            require_token=args.require_token,
-            durability=args.durability,
-            max_connections=args.max_connections,
-            txn_rate=args.txn_rate,
-            txn_burst=args.txn_burst,
-            txn_batch_size=args.txn_batch_size,
-            txn_batch_delay_ms=args.txn_batch_delay_ms,
-            wire_metrics=args.wire_metrics,
-            compact_interval=args.compact_interval,
-            reclaim_interval=args.reclaim_interval,
-            vfs=vfs,
-        )
+    config = ServerConfig(
+        host=args.host,
+        port=args.port,
+        base_usd_path=args.base,
+        layer_mode=args.layer_mode,
+        resolver_context=_create_resolver_context(args.resolver_context),
+        log_path=args.event_log,
+        compact=args.compact,
+        export_diff=args.export_diff,
+        dashboard_port=args.dashboard_port,
+        op_cache_size=args.op_cache_size,
+        department_priority=args.departments,
+        require_token=args.require_token,
+        durability=args.durability,
+        max_connections=args.max_connections,
+        txn_rate=args.txn_rate,
+        txn_burst=args.txn_burst,
+        txn_batch_size=args.txn_batch_size,
+        txn_batch_delay_ms=args.txn_batch_delay_ms,
+        wire_metrics=args.wire_metrics,
+        compact_interval=args.compact_interval,
+        reclaim_interval=args.reclaim_interval,
+        vfs=vfs,
+        plugin_dll_dirs=args.plugin_dll_dir,
     )
+    try:
+        run_server(config)
+    except PluginEnvironmentError as exc:
+        LOG.error("%s", exc)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

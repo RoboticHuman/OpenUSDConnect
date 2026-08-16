@@ -25,6 +25,11 @@ from .event_apply import apply_event, apply_events, atomic_apply
 from .events import Event
 from .layer_key_router import LayerKeyRouter
 from .managed_client import ManagedClient, ManagedRecoveryResult
+from .plugin_environment import (
+    PluginEnvironmentError,
+    PluginEnvironmentResult,
+    prepare_usd_plugin_environment,
+)
 from .protocol import make_hello, make_quit, make_txn
 from .protocol_constants import LayerMode
 from .receiver import ReceiverThread
@@ -62,6 +67,8 @@ __all__ = [
     "ManagedRecoveryResult",
     "MockAdapter",
     "NoticeEmitter",
+    "PluginEnvironmentError",
+    "PluginEnvironmentResult",
     "ReceiverThread",
     "QuarantinedTransaction",
     "RecoveryArtifact",
@@ -92,6 +99,7 @@ __all__ = [
     "make_quit",
     "make_txn",
     "message_to_dict",
+    "prepare_usd_plugin_environment",
     "resolve_event",
     "resolve_payload",
     "run_server",
