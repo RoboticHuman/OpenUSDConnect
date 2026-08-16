@@ -364,7 +364,7 @@ class UsdSyncServer:
         durability: str = "strict",
         txn_rate: float = 0,
         txn_burst: int = 0,
-        txn_batch_size: int = 128,
+        txn_batch_size: int = 256,
         txn_batch_delay: float = 0.0005,
         wire_metrics: bool = False,
         compact_interval: float = 0,

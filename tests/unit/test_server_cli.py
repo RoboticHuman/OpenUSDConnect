@@ -76,7 +76,7 @@ def test_server_config_disables_vfs_by_default():
     assert config.host == "127.0.0.1"
     assert config.port == 7200
     assert config.vfs is None
-    assert config.txn_batch_size == 128
+    assert config.txn_batch_size == 256
     assert config.txn_batch_delay_ms == 0.5
     assert config.preflight_plugins is True
 

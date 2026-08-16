@@ -391,7 +391,7 @@ def _receiver_worker(port, spec, done_event, connect_delay, errors, stats):
 # ---------------------------------------------------------------------------
 
 def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_output,
-               connect_existing, text_profile=False, txn_batch_size=128,
+               connect_existing, text_profile=False, txn_batch_size=256,
                txn_batch_delay_ms=0.5, profile_rate=50):
     total_clients = n_emitters + n_receivers + n_bidi
     total_sockets = n_emitters + n_receivers + n_bidi * 2
@@ -762,8 +762,8 @@ def main():
                     help="Number of bidirectional clients (default: 20)")
     ap.add_argument("--iterations", type=positive_int, default=100,
                     help="Write iterations per writer (default: 100)")
-    ap.add_argument("--txn-batch-size", type=positive_int, default=128,
-                    help="Maximum transactions per durable commit (default: 128)")
+    ap.add_argument("--txn-batch-size", type=positive_int, default=256,
+                    help="Maximum transactions per durable commit (default: 256)")
     ap.add_argument("--txn-batch-delay-ms", type=float, default=0.5,
                     help="Maximum group collection delay in ms (default: 0.5)")
     ap.add_argument("--profile", action="store_true",
