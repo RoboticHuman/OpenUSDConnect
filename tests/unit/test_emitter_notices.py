@@ -12,6 +12,7 @@ from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_event, apply_events
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
@@ -21,7 +22,9 @@ from openusdconnect.protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
+    K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
 )
 from openusdconnect.sdf_arc_state import read_arc_state
@@ -579,6 +582,82 @@ class TestCleanup:
         cached = emitter._prim_cache["/World/Mesh"]["gprim_attrs"]
         assert isinstance(cached["points"], int)
         assert cached["points"] is not points
+
+    def test_remote_definition_does_not_become_local_authoring_ownership(self):
+        stage = Usd.Stage.CreateInMemory()
+        remote = Sdf.Layer.CreateAnonymous("remote")
+        authoring = Sdf.Layer.CreateAnonymous("authoring")
+        stage.GetSessionLayer().subLayerPaths = [remote.identifier, authoring.identifier]
+        stage.SetEditTarget(Usd.EditTarget(authoring))
+        emitter = NoticeEmitter(stage)
+        asset = Sdf.Layer.CreateAnonymous("asset.usda")
+        asset_prim = Sdf.CreatePrimInLayer(asset, "/Model")
+        asset_prim.specifier = Sdf.SpecifierDef
+        asset_prim.typeName = "Xform"
+        remote_events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Sphere"},
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Sphere",
+                "refs": [{"asset_path": asset.identifier, "prim_path": "/Model"}],
+            },
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"},
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/Sphere",
+                "fields": ["t"],
+                "t": [2.0, 1.5, 0.0],
+            },
+            {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": True},
+            {
+                "k": K_SET_SDF_SPEC_FIELDS,
+                "prim": "/World/Sphere",
+                "spec_path": "/World/Sphere.radius",
+                "spec_kind": "attribute",
+                "fields": ["custom", "default", "typeName", "variability"],
+                "fragment": (
+                    '#usda 1.0\n\nover "World"\n{\n    over "Sphere"\n'
+                    "    {\n        double radius = 1\n    }\n}\n"
+                ),
+                "removed": False,
+            },
+        ]
+        with emitter.suppressed():
+            with Usd.EditContext(stage, Usd.EditTarget(remote)):
+                apply_events(stage, remote_events)
+                emitter.invalidate_for_events(remote_events)
+
+        translate = next(
+            op
+            for op in UsdGeom.Xformable(stage.GetPrimAtPath("/World/Sphere")).GetOrderedXformOps()
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate
+        )
+        orient = next(
+            op
+            for op in UsdGeom.Xformable(stage.GetPrimAtPath("/World/Sphere")).GetOrderedXformOps()
+            if op.GetOpType() == UsdGeom.XformOp.TypeOrient
+        )
+        translate.Set(Gf.Vec3d(-2.0, 1.5, 0.0))
+        orient.Set(Gf.Quatf(0.9238795, 0.0, 0.3826834, 0.0))
+        UsdGeom.Imageable(stage.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
+            UsdGeom.Tokens.invisible
+        )
+        events = emitter.build_events_for_dirty()
+
+        assert K_DELETE_PRIM not in [event["k"] for event in events]
+        assert [event["k"] for event in events] == [K_SET_VISIBILITY, K_SET_XFORM_TRS]
+        assert stage.GetPrimAtPath("/World/Sphere").GetTypeName() == "Sphere"
+        assert UsdGeom.Sphere(stage.GetPrimAtPath("/World/Sphere")).GetRadiusAttr().Get() == 1
+
+        with emitter.suppressed():
+            with Usd.EditContext(stage, Usd.EditTarget(remote)):
+                apply_events(stage, events)
+                emitter.invalidate_for_events(events)
+        UsdGeom.Imageable(stage.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
+            UsdGeom.Tokens.inherited
+        )
+
+        assert [event["k"] for event in emitter.build_events_for_dirty()] == [K_SET_VISIBILITY]
 
     def test_cleanup_idempotent(self):
         stage, emitter = _make_stage_and_emitter()

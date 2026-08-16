@@ -1166,6 +1166,7 @@ class ConnectableChannel(PrimChannel):
 class VisibilityChannel(PrimChannel):
     cache_key = _C_VISIBILITY
     watched_attrs = ("visibility",)
+    uses_local_property_sources = True
 
     def read(self, stage, prim_path):
         prim = stage.GetPrimAtPath(prim_path)
@@ -1175,6 +1176,13 @@ class VisibilityChannel(PrimChannel):
         if not vis_attr or not vis_attr.IsValid() or not vis_attr.IsAuthored():
             return None
         return vis_attr.Get() or "inherited"
+
+    def read_local(self, _stage, _prim_path, property_sources):
+        source = property_sources.get("visibility", {}).get("default")
+        if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
+            return None
+        value = source.default
+        return None if isinstance(value, Sdf.ValueBlock) else str(value)
 
     def to_event(self, prim_path, diff):
         return {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": diff != "invisible"}
@@ -1397,8 +1405,15 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
 # starts from the applied state instead of echoing it back to the server.
 
 
+def _invalidation_targets_authoring_layer(emitter) -> bool:
+    target = emitter._suppressed_edit_target
+    return target is None or target.GetLayer() == emitter.stage.GetEditTarget().GetLayer()
+
+
 def _invalidate_ensure_prim(emitter, prim_path, _ev):
     emitter._know_prim(prim_path)
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     specs = emitter._local_prim_specs(prim_path)
     ownership_spec = emitter._local_definition_spec(specs) or (specs[0] if specs else None)
     state = _local_prim_state(ownership_spec)
@@ -1427,6 +1442,8 @@ def _invalidate_rename_prim(emitter, prim_path, ev):
 
 
 def _invalidate_set_reference(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     pc = emitter._prim_cache.setdefault(prim_path, {})
     pc[_C_REFERENCES] = _read_edit_target_arc_state(
         emitter.stage,
@@ -1451,6 +1468,8 @@ def _invalidate_set_reference(emitter, prim_path, _ev):
 
 
 def _invalidate_set_payload(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOADS] = _read_edit_target_arc_state(
         emitter.stage,
         prim_path,
@@ -1474,6 +1493,8 @@ def _invalidate_unload_payload(emitter, prim_path, _ev):
 
 
 def _invalidate_set_variant_selections(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     emitter._prim_cache.setdefault(prim_path, {})[_C_VARIANT_SELECTIONS] = (
         _read_edit_target_variant_selections(emitter.stage, prim_path)
     )
@@ -1494,6 +1515,8 @@ def _resync_connectable_cache(emitter, prim_path):
     Used by both connectable input and connection invalidators since they
     share one read and one cache entry now.
     """
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     _fields, property_sources = emitter._local_property_state(prim_path)
     kind, info_id, inputs, types, connections = _read_edit_target_usdshade_connectable(
         emitter.stage,
@@ -1553,6 +1576,8 @@ def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
 
 
 def _invalidate_set_xform_trs(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("time") is not None:
         time = float(ev["time"])
         for field, op_name in _TRS_FIELD_TO_OP_NAME.items():
@@ -1568,6 +1593,8 @@ def _invalidate_set_xform_trs(emitter, prim_path, ev):
 
 
 def _invalidate_set_visibility(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("time") is not None:
         # Cache stores the USD string form ("inherited"/"invisible") via the
         # build path, so hash the matching string from the event's bool.
@@ -1650,6 +1677,8 @@ def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
     path = Sdf.Path(spec_path)
     key = (spec_kind, spec_path)
     emitter._dirty_sdf_specs.pop(key, None)
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("removed", False):
         emitter._sdf_spec_fields.pop(key, None)
         if spec_kind in _SDF_PROPERTY_KINDS:
@@ -1788,6 +1817,7 @@ class NoticeEmitter:
         self._removed_local_definition_prims: set[str] = set()
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppress_depth: int = 0
+        self._suppressed_edit_target: Usd.EditTarget | None = None
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self._prim_cache: dict[str, dict] = {}
         # Unfiltered info-only attr names. Channels use this for read gating;
@@ -2264,6 +2294,7 @@ class NoticeEmitter:
         self._edit_target_conflict = False
         self._prepared_events = None
         self._suppress_depth = 0
+        self._suppressed_edit_target = None
 
     def rebind_stage(self, stage: Usd.Stage) -> None:
         """Reset tracking and attach this emitter to a replacement stage.
@@ -2363,6 +2394,8 @@ class NoticeEmitter:
         Reentrant: each call increments the suppress depth.
         Must be paired with a matching unsuppress() call.
         """
+        if self._suppress_depth == 0:
+            self._suppressed_edit_target = self.stage.GetEditTarget()
         self._suppress_depth += 1
 
     def unsuppress(self):
@@ -2373,6 +2406,8 @@ class NoticeEmitter:
         """
         assert self._suppress_depth > 0, "unsuppress() called without matching suppress()"
         self._suppress_depth -= 1
+        if self._suppress_depth == 0:
+            self._suppressed_edit_target = None
 
     def suppressed(self):
         """Return a context manager that suppresses notices for the block.
