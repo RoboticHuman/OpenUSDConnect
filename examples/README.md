@@ -1,8 +1,9 @@
 # Examples
 
 These examples exercise the same public clients and event protocol used by the
-integrations. Complete the [getting-started requirements](../docs/getting-started.md#what-you-need), then
-follow the linked example guide for its authoritative run instructions.
+integrations. Complete the
+[getting-started requirements](../docs/getting-started.md#requirements), then
+follow the linked example guide for its complete run instructions.
 
 ## One-command demos
 

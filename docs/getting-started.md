@@ -1,13 +1,16 @@
-# Getting Started
+# Getting Started With Blender
 
 ## Requirements
 
 - Windows, macOS, or Linux
+- [Git](https://git-scm.com/)
 - Python 3.13 or newer
 - [uv](https://docs.astral.sh/uv/)
 - Blender 4.4 or newer
 
-The USD Working Group asset submodule is not required for this workflow.
+Python and `uv` run the server and build the add-on. Blender uses its own Python
+and OpenUSD runtime. The commands in this guide work in PowerShell and
+POSIX-compatible shells.
 
 ## Install
 
@@ -36,31 +39,44 @@ Run this from the repository root:
 uv run openusdconnect-server --base test_scene.usda --port 7200 --dashboard-port 8080
 ```
 
-This starts the managed TCP sync server on `127.0.0.1:7200` and the dashboard
-at <http://127.0.0.1:8080>. Keep the terminal running.
+This starts the sync server on `127.0.0.1:7200` and the dashboard at
+<http://127.0.0.1:8080>. Keep the terminal running. The walkthrough is local and
+does not require an external service. Startup is complete when the terminal
+reports `Server listening on 127.0.0.1:7200` and
+`Dashboard running on http://localhost:8080`.
 
 ## Connect Blender
 
 In the first Blender instance:
 
 1. Press `N` in the 3D viewport and open the **USD Connect** tab.
-2. Choose **Import USD (with prim tagging)** and select `test_scene.usda`.
+2. In the **USD Connect** tab, choose **Import USD (with prim tagging)** and
+   select `test_scene.usda`. Do not use Blender's standard **File > Import**
+   command. This add-on command records the USD path represented by each
+   imported Blender object so later edits can be matched correctly.
 3. Under **Network Emitter**, confirm the host and port are
    `127.0.0.1:7200`, then choose **Connect Emitter**.
 4. Under **Network Receiver**, confirm the same host and port, then choose
    **Start Receiver**.
+5. Confirm that the panel shows **Emitter connected** and **Receiver running**.
 
-**Connect Emitter** also starts local capture. Open a second Blender instance
-and repeat the same steps. Move, rotate, or scale a prim in either instance;
-the other instance should update immediately.
+**Connect Emitter** also begins monitoring supported Blender edits. Open a
+second Blender instance and repeat the same steps. Move, rotate, or scale any
+imported object in either instance; the matching object in the other instance
+should update shortly.
 
-The original USD file is the common base. Server events are authored into
-managed collaboration layers rather than overwriting `test_scene.usda`.
+The emitter sends local edits to the server. The receiver applies server edits
+in Blender. The original USD file is the common starting point and is not
+overwritten; the server stores synchronized changes in its event history and
+collaboration layers.
 
-## Optional: Open A Served Live File
+## Alternative: Open A Server-Provided USD File
 
-Live-open adds a browsable USD file with embedded connection metadata. Use it
-when users should discover and join the session through a normal file picker.
+The server-provided file workflow is an optional alternative to opening the base
+file and entering the connection fields manually. It creates a local
+`scene.usd` containing the current scene state and sync server address. An
+integrated application opens that file, then sends and receives live changes
+through the same TCP sync server used above.
 
 Stop the standard server with `Ctrl+C`, then run:
 
@@ -85,15 +101,19 @@ It prints the exact file to open:
 | macOS | `<repo>/.ouc_live_mount/usd/scene.usd` |
 | Linux | `<repo>/.ouc_live_mount/usd/scene.usd` |
 
+`<repo>` means the cloned OpenUSDConnect directory. The `--open` option opens
+the generated file's folder in Explorer, Finder, or the platform file manager;
+it does not start Blender or import the file.
+
 In Blender, leave **Auto-start Emitter** and **Auto-start Receiver** enabled,
 choose **Import USD (with prim tagging)**, and select the reported `scene.usd`.
-The add-on reads the `openusdconnect` metadata, configures the endpoint, and
-continues from the embedded snapshot sequence. Repeat in a second Blender
-instance to test bidirectional editing.
+The add-on reads the `openusdconnect` metadata, configures the server address,
+and starts after the last event represented in the file. Repeat in a second
+Blender instance to test bidirectional editing.
 
 The manual connect, disconnect, start, and stop controls remain available.
-Disable either auto-start checkbox before import when only one direction should
-start automatically.
+Disable **Auto-start Emitter** for receive-only use, or disable **Auto-start
+Receiver** for send-only use.
 
 On Windows, the drive is a local `subst` alias and does not require the
 WebClient service or administrator access. If `O:` is occupied, use `--drive
@@ -103,9 +123,9 @@ P:` or `--no-drive` and open the printed mirror path.
 
 Open <http://127.0.0.1:8080>. After moving an object, confirm that:
 
-- Both Blender clients remain connected.
-- The event sequence advances.
-- A transform transaction appears in the event view.
+- Both Blender clients appear in the client list.
+- The sequence number at the top of the dashboard advances.
+- A transform transaction appears in the event list.
 - The server and both Blender instances agree on the final transform.
 
 For a live-open session, the served snapshot is also available at
@@ -115,6 +135,10 @@ local path or a native mount rather than the diagnostic HTTP URL.
 ## Stop The Session
 
 Stop a standard server with `Ctrl+C` in its terminal.
+
+The event log remains on disk after the server stops. Starting the server again
+with the same event log resumes that session. Use a different `--event-log`
+path when you need an independent test session.
 
 Stop every process recorded by the live-open launcher and release its Windows
 drive alias with:
@@ -188,13 +212,14 @@ uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port
 
 The local mirror is recommended because it supports DCC save patterns without
 administrator access. Native Windows UNC and macOS WebDAV mounts are available
-for environments that require them; see [Live-open and VFS](live-open.md).
+for environments that require them; see [server-provided USD files](live-open.md).
 
 ## Next Steps
 
+- [Documentation index](README.md)
 - [Blender add-on controls and layered workflows](blender-addon-usage.md)
 - [Unreal Engine integration](../integrations/unreal/OpenUSDConnect/README.md)
-- [Live-open, VFS paths, and write fallback](live-open.md)
+- [Server-provided file paths and write fallback](live-open.md)
 - [Run the material and instancing demos](../examples/README.md)
 - [Connect an MCP client](mcp-server-usage.md)
 - [Build a USD-native integration](usd-native-integration.md)

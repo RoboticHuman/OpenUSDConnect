@@ -30,7 +30,7 @@ its cumulative producer high-water mark are durable.
 | Command | Purpose | Dependency groups |
 | --- | --- | --- |
 | `uv run openusdconnect-server --help` | Run the TCP sync server and optional VFS/dashboard services. | `bundled-usd`; add `vfs` or `dashboard` as needed |
-| `uv run python scripts/start_live_open.py --help` | Start a complete local server, WebDAV VFS, write-capable mirror, and optional Windows drive. | `bundled-usd`, `vfs` |
+| `uv run python scripts/start_live_open.py --help` | Start the local server, WebDAV file endpoint, write-capable mirror, and optional Windows drive. | `bundled-usd`, `vfs`; add `dashboard` when using `--dashboard-port` |
 | `uv run python scripts/start_live_open.py stop --help` | Stop the processes recorded by the live-open launcher. | `bundled-usd`, `vfs` |
 | `uv run python scripts/local_vfs_bridge.py --help` | Mirror one virtual USD file locally and upload stable saves with ETag conflict protection. | base installation |
 | `uv run python scripts/local_vfs_bridge.py status --help` | Print bridge health and recovery state. | base installation |

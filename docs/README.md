@@ -1,18 +1,18 @@
 # Documentation
 
-Choose the path that matches what you are trying to do. Setup and command details
-stay in the linked guides so there is one authoritative place to maintain them.
+Choose the guide that matches the task. Setup and command details stay in the
+linked pages so each topic has one maintained reference.
 
 ## Start
 
 For a first run or a quick orientation:
 
-- [Project overview and getting started](../README.md#getting-started) introduces the
-  server, integrations, dependency groups, and core concepts.
-- [Blender getting started](getting-started.md) walks through the standard server,
-  manual connection, and optional seamless live-open workflow.
-- [Live-open and VFS](live-open.md) covers paths, mounts, write fallback, metadata,
-  authentication, and diagnostics in depth.
+- [Project overview](../README.md) introduces the server, integrations,
+  dependency groups, and core concepts.
+- [Blender getting started](getting-started.md) covers the base-file connection
+  and the optional server-provided USD file.
+- [Server-provided USD files](live-open.md) covers live-open paths, mounts, write
+  fallback, metadata, authentication, and diagnostics.
 - [Runnable examples](../examples/README.md) offers smaller demonstrations organized
   by launch style and feature.
 
@@ -28,6 +28,19 @@ For artists, technical directors, operators, and tool users:
 | Install and operate the Unreal Engine plugin | [Unreal Engine plugin](../integrations/unreal/OpenUSDConnect/README.md) |
 | Author and inspect scenes through an MCP client | [MCP server usage](mcp-server-usage.md) |
 | Work with synchronized materials and shaders | [Live material editing](live-material-editing.md) |
+
+## Understand
+
+For the design and behavior behind the user workflows:
+
+- [System overview](../README.md#how-it-works) describes the server, event log,
+  synchronization modes, and clients.
+- [Server-provided USD files](live-open.md) explains generated snapshots, local
+  mirrors, WebDAV access, and write fallback.
+- [Shared stage architecture](shared-stage-architecture.md) explains direct
+  synchronization of authored USD layer graphs.
+- [Client recovery](client-recovery.md) covers reconnect, replay, compaction,
+  and recovery states.
 
 ## Extend
 

@@ -1,16 +1,20 @@
-# Live-Open And Virtual Files
+# Server-Provided USD Files
 
-Live-open presents an active OpenUSDConnect scene as an ordinary USD file. A
-non-integrated application can open a current snapshot; an integrated DCC also
-reads embedded connection metadata and joins live synchronization from the
-correct sequence.
+The server-provided file service, also called live-open, publishes the current
+server scene as USD files through HTTP/WebDAV and a local filesystem mirror. An
+application without an OpenUSDConnect integration can open the current scene as
+a snapshot. With write fallback enabled, supported changes saved to that file
+can be sent to the server, but the application does not receive incremental
+updates. An integrated DCC also reads the embedded server address, then
+continues synchronization over the normal TCP connection after the last event
+included in the file.
 
 For the primary server and Blender setup, begin with
-[Getting Started](getting-started.md). Its optional live-open section introduces
-this serving path; this page covers resource formats, mounting, write fallback,
-metadata, and server configuration in depth.
+[Getting Started](getting-started.md). Its server-provided file section introduces
+this option; this page documents resource formats, mounting, write fallback,
+metadata, and server configuration.
 
-## Start The Complete Local Workflow
+## Start The Live-Open Services
 
 ```bash
 uv sync --group server --group vfs --group dashboard
@@ -35,7 +39,7 @@ The WebDAV collection defaults to <http://127.0.0.1:7280/usd/>.
 
 | Resource | Purpose |
 | --- | --- |
-| `scene.usd` | Flattened, dependency-free snapshot for broad compatibility and live-open continuation. |
+| `scene.usd` | Flattened snapshot with no sibling-file dependencies; used for DCC import and live-open continuation. |
 | `scene.live.usda` | Composition root that preserves the exported base and live override layers. |
 | `_layers/` | File-backed layers referenced by `scene.live.usda`. |
 | `openusdconnect.json` | Machine-readable manifest for launchers and diagnostics. |
@@ -47,9 +51,9 @@ that token.
 
 ### `scene.usd`: Flattened Snapshot
 
-Use `scene.usd` for normal DCC import, non-integrated viewers, file downloads,
+Use `scene.usd` for DCC import, non-integrated viewers, file downloads,
 and the Blender or Unreal live-open workflow. It contains the composed stage at
-one authoritative sequence and does not depend on sibling files.
+one server sequence and does not depend on sibling files.
 
 Flattening intentionally discards the identity of individual contributing
 layers. An integrated client therefore continues from `snapshot_seq + 1` in
@@ -70,8 +74,8 @@ sublayer references. It is not the default live-open target for DCC import.
 
 | Path | Recommended use |
 | --- | --- |
-| Local mirror | Normal DCC open and save; recommended on every platform. |
-| Windows drive alias | Friendly Explorer/file-picker access to the local mirror without administrator rights. |
+| Local mirror | DCC open and save through a filesystem directory; recommended on every platform. |
+| Windows drive alias | Explorer and file-picker access to the local mirror without administrator rights. |
 | Windows UNC/WebDAV | Read/open diagnostics through the native WebClient redirector. |
 | macOS WebDAV mount | Native read-oriented access to the complete virtual tree. |
 | HTTP URL | Download, scripting, health checks, and custom launchers. |
@@ -134,7 +138,7 @@ uv run openusdconnect-mount-vfs --port 7280 --drive P: --open
 uv run openusdconnect-mount-vfs unmount --drive P:
 ```
 
-For ordinary local DCC use, prefer the launcher's no-admin local drive alias.
+For local DCC use, prefer the launcher's no-admin local drive alias.
 
 ### macOS
 
