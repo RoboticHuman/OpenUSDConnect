@@ -903,7 +903,7 @@ def test_material_ancestor_path_uses_usd_ownership_not_shader_parent():
     assert BlenderAdapter._material_ancestor_path(shader.GetPrim()) == "/Looks/Material"
 
 
-def test_materialx_enrichment_follows_connected_surface_graph(tmp_path):
+def test_materialx_enrichment_follows_connected_surface_graph(tmp_path, caplog):
     from pxr import Sdf, Usd, UsdShade
 
     path = tmp_path / "dual-surface.usda"
@@ -937,12 +937,14 @@ def test_materialx_enrichment_follows_connected_surface_graph(tmp_path):
     adapter.set_connectable_connection = MagicMock(return_value=True)
     adapter._fix_missing_textures = MagicMock()
 
+    caplog.set_level("INFO", logger="integrations.blender.blender_adapter")
     adapter._enrich_materialx_from_import(str(path), "", "")
 
     applied = {
         call.args[0] for call in adapter.set_connectable_input.call_args_list
     }
     assert applied == {"/Material/MtlxSurface", "/Material/Texture"}
+    assert f"Post-import enrichment: applied 2 shaders from {path}" in caplog.messages
 
 
 class TestBlenderAssetArcProjection:

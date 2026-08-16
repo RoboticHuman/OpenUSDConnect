@@ -1954,10 +1954,10 @@ class BlenderAdapter(DCCAdapter):
         # stage for texture shaders and load the images using pxr's resolved paths.
         self._fix_missing_textures(stage, root_prim, prim_path, _remap)
 
-        if shader_events:
+        if selected_shaders:
             LOG.info(
                 "Post-import enrichment: applied %d shaders from %s",
-                len(shader_events),
+                len(selected_shaders),
                 resolved,
             )
 
