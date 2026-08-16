@@ -18,11 +18,12 @@ CONSTANTS InitialHead, MaxSeq, QueueBound, FailSeq
 
 SeqIds == 1..MaxSeq
 FrameKinds == {"event", "complete"}
-Frame == [kind : FrameKinds, seq : 0..MaxSeq]
+Frame == [kind : FrameKinds, seq : 0..MaxSeq, generation : BOOLEAN]
 
 VARIABLES
     durableHead,
     connected,
+    generation,
     networkStable,
     stageReady,
     replayHead,
@@ -32,12 +33,13 @@ VARIABLES
     received,
     applied,
     synchronized,
+    synchronizedGeneration,
     failedOnce
 
 vars == <<
-    durableHead, connected, networkStable, stageReady, replayHead,
+    durableHead, connected, generation, networkStable, stageReady, replayHead,
     nextToSend, markerSent, queue, received, applied, synchronized,
-    failedOnce
+    synchronizedGeneration, failedOnce
 >>
 
 EventLimit == IF markerSent THEN durableHead ELSE replayHead
@@ -54,6 +56,7 @@ Init ==
     /\ QueueBound >= 1
     /\ durableHead = InitialHead
     /\ connected = FALSE
+    /\ generation = FALSE
     /\ networkStable = FALSE
     /\ stageReady = FALSE
     /\ replayHead = 0
@@ -63,41 +66,47 @@ Init ==
     /\ received = 0
     /\ applied = 0
     /\ synchronized = FALSE
+    /\ synchronizedGeneration = FALSE
     /\ failedOnce = FALSE
 
 StabilizeNetwork ==
     /\ ~networkStable
     /\ networkStable' = TRUE
     /\ UNCHANGED <<
-        durableHead, connected, stageReady, replayHead, nextToSend,
-        markerSent, queue, received, applied, synchronized, failedOnce
+        durableHead, connected, generation, stageReady, replayHead, nextToSend,
+        markerSent, queue, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 MakeStageReady ==
     /\ ~stageReady
     /\ stageReady' = TRUE
     /\ UNCHANGED <<
-        durableHead, connected, networkStable, replayHead, nextToSend,
-        markerSent, queue, received, applied, synchronized, failedOnce
+        durableHead, connected, generation, networkStable, replayHead,
+        nextToSend, markerSent, queue, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 AppendLive ==
     /\ durableHead < MaxSeq
     /\ durableHead' = durableHead + 1
     /\ UNCHANGED <<
-        connected, networkStable, stageReady, replayHead, nextToSend,
-        markerSent, queue, received, applied, synchronized, failedOnce
+        connected, generation, networkStable, stageReady, replayHead,
+        nextToSend, markerSent, queue, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 Connect ==
     /\ ~connected
     /\ connected' = TRUE
+    /\ generation' = ~generation
     /\ replayHead' = durableHead
     /\ nextToSend' = applied + 1
     /\ markerSent' = FALSE
     /\ queue' = <<>>
     /\ received' = applied
     /\ synchronized' = FALSE
+    /\ synchronizedGeneration' = ~generation
     /\ UNCHANGED <<
         durableHead, networkStable, stageReady, applied, failedOnce
        >>
@@ -116,7 +125,8 @@ Disconnect ==
     /\ ~networkStable
     /\ ResetForReplay
     /\ UNCHANGED <<
-        durableHead, networkStable, stageReady, applied, failedOnce
+        durableHead, generation, networkStable, stageReady, applied,
+        synchronizedGeneration, failedOnce
        >>
 
 DetectGap ==
@@ -125,28 +135,48 @@ DetectGap ==
     /\ nextToSend <= durableHead
     /\ ResetForReplay
     /\ UNCHANGED <<
-        durableHead, networkStable, stageReady, applied, failedOnce
+        durableHead, generation, networkStable, stageReady, applied,
+        synchronizedGeneration, failedOnce
        >>
 
 SendEvent ==
     /\ EventAvailable
     /\ Len(queue) < QueueBound
-    /\ queue' = Append(queue, [kind |-> "event", seq |-> nextToSend])
+    /\ queue' = Append(queue, [
+        kind |-> "event", seq |-> nextToSend, generation |-> generation
+       ])
     /\ received' = nextToSend
     /\ nextToSend' = nextToSend + 1
     /\ UNCHANGED <<
-        durableHead, connected, networkStable, stageReady, replayHead,
-        markerSent, applied, synchronized, failedOnce
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, markerSent, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 SendComplete ==
     /\ CompleteAvailable
     /\ Len(queue) < QueueBound
-    /\ queue' = Append(queue, [kind |-> "complete", seq |-> replayHead])
+    /\ queue' = Append(queue, [
+        kind |-> "complete", seq |-> replayHead, generation |-> generation
+       ])
     /\ markerSent' = TRUE
     /\ UNCHANGED <<
-        durableHead, connected, networkStable, stageReady, replayHead,
-        nextToSend, received, applied, synchronized, failedOnce
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, nextToSend, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
+       >>
+
+InjectStaleComplete ==
+    /\ connected
+    /\ ~networkStable
+    /\ Len(queue) < QueueBound
+    /\ queue' = Append(queue, [
+        kind |-> "complete", seq |-> replayHead, generation |-> ~generation
+       ])
+    /\ UNCHANGED <<
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, nextToSend, markerSent, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 Overflow ==
@@ -155,71 +185,70 @@ Overflow ==
     /\ (EventAvailable \/ CompleteAvailable)
     /\ ResetForReplay
     /\ UNCHANGED <<
-        durableHead, networkStable, stageReady, applied, failedOnce
+        durableHead, generation, networkStable, stageReady, applied,
+        synchronizedGeneration, failedOnce
        >>
 
 ApplyEventSuccess ==
     /\ stageReady
     /\ Len(queue) > 0
     /\ Head(queue).kind = "event"
+    /\ Head(queue).generation = generation
     /\ Head(queue).seq = applied + 1
     /\ (Head(queue).seq # FailSeq \/ failedOnce)
     /\ applied' = Head(queue).seq
     /\ queue' = Tail(queue)
     /\ UNCHANGED <<
-        durableHead, connected, networkStable, stageReady, replayHead,
-        nextToSend, markerSent, received, synchronized, failedOnce
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, nextToSend, markerSent, received, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 ApplyEventFailure ==
     /\ stageReady
     /\ Len(queue) > 0
     /\ Head(queue).kind = "event"
+    /\ Head(queue).generation = generation
     /\ Head(queue).seq = applied + 1
     /\ Head(queue).seq = FailSeq
     /\ ~failedOnce
     /\ failedOnce' = TRUE
     /\ ResetForReplay
-    /\ UNCHANGED <<durableHead, networkStable, stageReady, applied>>
-
-ApplyGap ==
-    /\ stageReady
-    /\ Len(queue) > 0
-    /\ Head(queue).kind = "event"
-    /\ Head(queue).seq # applied + 1
-    /\ ResetForReplay
     /\ UNCHANGED <<
-        durableHead, networkStable, stageReady, applied, failedOnce
+        durableHead, generation, networkStable, stageReady, applied,
+        synchronizedGeneration
        >>
 
 ApplyCompleteSuccess ==
     /\ stageReady
     /\ Len(queue) > 0
     /\ Head(queue).kind = "complete"
+    /\ Head(queue).generation = generation
     /\ Head(queue).seq = applied
     /\ queue' = Tail(queue)
     /\ synchronized' = TRUE
+    /\ synchronizedGeneration' = generation
     /\ UNCHANGED <<
-        durableHead, connected, networkStable, stageReady, replayHead,
-        nextToSend, markerSent, received, applied, failedOnce
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, nextToSend, markerSent, received, applied, failedOnce
        >>
 
-ApplyCompleteFailure ==
+DiscardStaleFrame ==
     /\ stageReady
     /\ Len(queue) > 0
-    /\ Head(queue).kind = "complete"
-    /\ Head(queue).seq # applied
-    /\ ResetForReplay
+    /\ Head(queue).generation # generation
+    /\ queue' = Tail(queue)
     /\ UNCHANGED <<
-        durableHead, networkStable, stageReady, applied, failedOnce
+        durableHead, connected, generation, networkStable, stageReady,
+        replayHead, nextToSend, markerSent, received, applied, synchronized,
+        synchronizedGeneration, failedOnce
        >>
 
 ApplyHead ==
     \/ ApplyEventSuccess
     \/ ApplyEventFailure
-    \/ ApplyGap
     \/ ApplyCompleteSuccess
-    \/ ApplyCompleteFailure
+    \/ DiscardStaleFrame
 
 Next ==
     \/ StabilizeNetwork
@@ -230,6 +259,7 @@ Next ==
     \/ DetectGap
     \/ SendEvent
     \/ SendComplete
+    \/ InjectStaleComplete
     \/ Overflow
     \/ ApplyHead
 
@@ -247,6 +277,7 @@ Spec ==
 TypeOK ==
     /\ durableHead \in 0..MaxSeq
     /\ connected \in BOOLEAN
+    /\ generation \in BOOLEAN
     /\ networkStable \in BOOLEAN
     /\ stageReady \in BOOLEAN
     /\ replayHead \in 0..MaxSeq
@@ -256,6 +287,7 @@ TypeOK ==
     /\ received \in 0..MaxSeq
     /\ applied \in 0..MaxSeq
     /\ synchronized \in BOOLEAN
+    /\ synchronizedGeneration \in BOOLEAN
     /\ failedOnce \in BOOLEAN
 
 AppliedCursorIsSound ==
@@ -278,20 +310,27 @@ QueuedEventsAreOrdered ==
 
 ReplayMarkerOrdersLiveTraffic ==
     \A marker, event \in 1..Len(queue):
-        queue[marker].kind = "complete" /\ queue[event].kind = "event" =>
+        queue[marker].kind = "complete"
+        /\ queue[event].kind = "event"
+        /\ queue[marker].generation = queue[event].generation =>
             /\ (event < marker => queue[event].seq <= queue[marker].seq)
             /\ (marker < event => queue[event].seq > queue[marker].seq)
 
-AtMostOneReplayMarker ==
-    Cardinality({index \in 1..Len(queue): queue[index].kind = "complete"}) <= 1
+AtMostOneCurrentReplayMarker ==
+    Cardinality({index \in 1..Len(queue):
+        queue[index].kind = "complete"
+        /\ queue[index].generation = generation}) <= 1
 
 SynchronizedMeansReplayApplied ==
     synchronized =>
         /\ connected
         /\ markerSent
+        /\ synchronizedGeneration = generation
         /\ applied >= replayHead
         /\ \A index \in 1..Len(queue):
-            queue[index].kind = "event" => queue[index].seq > replayHead
+            queue[index].kind = "event"
+            /\ queue[index].generation = generation
+            => queue[index].seq > replayHead
 
 DisconnectedIsNotSynchronized == ~connected => ~synchronized
 

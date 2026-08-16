@@ -70,29 +70,41 @@ Init ==
     /\ publishQueue = <<>>
     /\ broadcast = <<>>
 
-GroupSuccess ==
+ExpectedGroupLog == <<
+    [seq |-> 1, producer |-> P1, id |-> 1],
+    [seq |-> 2, producer |-> P2, id |-> 1],
+    [seq |-> 3, producer |-> P1, id |-> 2],
+    [seq |-> 4, producer |-> P2, id |-> 2],
+    [seq |-> 5, producer |-> P1, id |-> 3]
+>>
+
+ExpectedGroupStage == {
+    Key(P1, 1), Key(P2, 1), Key(P1, 2), Key(P2, 2), Key(P1, 3)
+}
+
+GroupApply ==
     /\ phase = "group"
     /\ ~InvalidA2
+    /\ phase' = "group_applied"
+    /\ stage' = ExpectedGroupStage
+    /\ UNCHANGED <<
+        cursor, progress, receipts, nextSeq, log, results,
+        publishQueue, broadcast
+       >>
+
+GroupPersist ==
+    /\ phase = "group_applied"
     /\ phase' = "done"
     /\ cursor' = Len(Batch) + 1
     /\ progress' = [producer \in Producers |->
         IF producer = P1 THEN 3 ELSE 2]
     /\ receipts' = progress'
     /\ nextSeq' = 6
-    /\ log' = <<
-        [seq |-> 1, producer |-> P1, id |-> 1],
-        [seq |-> 2, producer |-> P2, id |-> 1],
-        [seq |-> 3, producer |-> P1, id |-> 2],
-        [seq |-> 4, producer |-> P2, id |-> 2],
-        [seq |-> 5, producer |-> P1, id |-> 3]
-       >>
-    /\ stage' = {
-        Key(P1, 1), Key(P2, 1), Key(P1, 2), Key(P2, 2), Key(P1, 3)
-       }
+    /\ log' = ExpectedGroupLog
     /\ results' = [index \in RequestIndex |->
         IF index = 5 THEN "duplicate" ELSE "committed"]
     /\ publishQueue' = <<1, 2, 3, 4, 5>>
-    /\ UNCHANGED broadcast
+    /\ UNCHANGED <<stage, broadcast>>
 
 GroupFailure ==
     /\ phase = "group"
@@ -103,7 +115,16 @@ GroupFailure ==
         publishQueue, broadcast
        >>
 
-GroupStep == GroupSuccess \/ GroupFailure
+GroupRollback ==
+    /\ phase = "group_applied"
+    /\ phase' = "fallback"
+    /\ cursor' = 1
+    /\ stage' = {}
+    /\ UNCHANGED <<
+        progress, receipts, nextSeq, log, results, publishQueue, broadcast
+       >>
+
+GroupStep == GroupApply \/ GroupPersist \/ GroupFailure \/ GroupRollback
 
 AdvanceFallback ==
     /\ cursor' = cursor + 1
@@ -196,7 +217,7 @@ Spec ==
     /\ WF_vars(PublishStep)
 
 TypeOK ==
-    /\ phase \in {"group", "fallback", "done"}
+    /\ phase \in {"group", "group_applied", "fallback", "done"}
     /\ cursor \in 1..(Len(Batch) + 1)
     /\ progress \in [Producers -> 0..MaxTxn]
     /\ receipts \in [Producers -> 0..MaxTxn]
@@ -214,13 +235,18 @@ LogSequenceIsContiguous ==
     /\ \A index \in 1..Len(log): log[index].seq = index
 
 StageMatchesDurableLog ==
-    stage = {
-        Key(log[index].producer, log[index].id) : index \in 1..Len(log)
-    }
+    IF phase = "group_applied"
+    THEN /\ stage = ExpectedGroupStage
+         /\ log = <<>>
+    ELSE stage = {
+             Key(log[index].producer, log[index].id) : index \in 1..Len(log)
+         }
 
 PerProducerCommitIsPrefix ==
     \A producer \in Producers, id \in 1..MaxTxn:
-        (id <= progress[producer]) = (Key(producer, id) \in stage)
+        (id <= progress[producer]) =
+            (\E index \in 1..Len(log):
+                Key(log[index].producer, log[index].id) = Key(producer, id))
 
 TransactionAppliedAtMostOnce ==
     \A first, second \in 1..Len(log):
@@ -254,6 +280,15 @@ FallbackStartsAfterCleanRollback ==
         /\ stage = {}
         /\ progress = [producer \in Producers |-> 0]
         /\ receipts = [producer \in Producers |-> 0]
+
+TentativeGroupIsNotPublished ==
+    phase = "group_applied" =>
+        /\ progress = [producer \in Producers |-> 0]
+        /\ receipts = [producer \in Producers |-> 0]
+        /\ nextSeq = 1
+        /\ results = [index \in RequestIndex |-> "pending"]
+        /\ publishQueue = <<>>
+        /\ broadcast = <<>>
 
 DoneHasExpectedOutcome ==
     phase = "done" =>

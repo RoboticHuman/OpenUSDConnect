@@ -199,15 +199,17 @@ ApplyMutation(c) ==
         handledRemoteNotices, localSubmissions, echoSubmissions
        >>
 
-ConsumeSuppressedNotice(c) ==
+HandleRemoteNotice(c) ==
     /\ phase[c] = "notice"
-    /\ suppression[c]
     /\ phase' = [phase EXCEPT ![c] = "finish"]
-    /\ handledRemoteNotices' = [handledRemoteNotices EXCEPT ![c] = @ + 1]
+    /\ handledRemoteNotices' = [handledRemoteNotices EXCEPT
+        ![c] = @ + IF suppression[c] THEN 1 ELSE 0]
+    /\ echoSubmissions' = [echoSubmissions EXCEPT
+        ![c] = @ + IF suppression[c] THEN 0 ELSE 1]
     /\ UNCHANGED <<
         authored, prepared, submitted, wire, serverLog, serverValue, connected,
         networkStable, queues, cursor, localValue, applySeq, applyEdit,
-        suppression, remoteNotices, localSubmissions, echoSubmissions
+        suppression, remoteNotices, localSubmissions
        >>
 
 FinishApply(c) ==
@@ -231,7 +233,7 @@ Next ==
     \/ (\E c \in Clients: Disconnect(c))
     \/ (\E c \in Clients: BeginApply(c))
     \/ (\E c \in Clients: ApplyMutation(c))
-    \/ (\E c \in Clients: ConsumeSuppressedNotice(c))
+    \/ (\E c \in Clients: HandleRemoteNotice(c))
     \/ (\E c \in Clients: FinishApply(c))
 
 Spec ==
@@ -244,7 +246,7 @@ Spec ==
     /\ (\A c \in Clients: WF_vars(Connect(c)))
     /\ (\A c \in Clients: WF_vars(BeginApply(c)))
     /\ (\A c \in Clients: WF_vars(ApplyMutation(c)))
-    /\ (\A c \in Clients: WF_vars(ConsumeSuppressedNotice(c)))
+    /\ (\A c \in Clients: WF_vars(HandleRemoteNotice(c)))
     /\ (\A c \in Clients: WF_vars(FinishApply(c)))
 
 TypeOK ==
@@ -312,8 +314,8 @@ CompleteStreamHasNoGaps ==
 RemoteApplyIsGuarded ==
     \A c \in Clients:
         /\ (phase[c] = "idle") = (~suppression[c])
-        /\ handledRemoteNotices[c] <= remoteNotices[c]
-        /\ remoteNotices[c] <= handledRemoteNotices[c] + 1
+        /\ handledRemoteNotices[c] + echoSubmissions[c] <= remoteNotices[c]
+        /\ remoteNotices[c] <= handledRemoteNotices[c] + echoSubmissions[c] + 1
 
 NoRemoteEchoSubmission ==
     /\ submitted \subseteq authored
