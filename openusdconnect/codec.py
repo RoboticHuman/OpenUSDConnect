@@ -1627,6 +1627,157 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
     return spec.decode(obj, kind)
 
 
+_FB_I32 = struct.Struct("<i")
+_FB_U16 = struct.Struct("<H")
+_FB_U32 = struct.Struct("<I")
+_FB_U64 = struct.Struct("<Q")
+
+
+def _require_buffer_span(buf, position: int, size: int) -> None:
+    if position < 0 or size < 0 or position + size > len(buf):
+        raise ValueError("malformed FlatBuffers transaction")
+
+
+def _table_field_offsets(buf, table_position: int, vtable_offsets: tuple[int, ...]):
+    _require_buffer_span(buf, table_position, _FB_I32.size)
+    vtable_position = table_position - _FB_I32.unpack_from(buf, table_position)[0]
+    _require_buffer_span(buf, vtable_position, 2 * _FB_U16.size)
+    vtable_size = _FB_U16.unpack_from(buf, vtable_position)[0]
+    object_size = _FB_U16.unpack_from(buf, vtable_position + _FB_U16.size)[0]
+    _require_buffer_span(buf, vtable_position, vtable_size)
+
+    result = []
+    for vtable_offset in vtable_offsets:
+        field_offset = (
+            _FB_U16.unpack_from(buf, vtable_position + vtable_offset)[0]
+            if vtable_offset + _FB_U16.size <= vtable_size
+            else 0
+        )
+        if field_offset >= object_size and field_offset != 0:
+            raise ValueError("malformed FlatBuffers transaction")
+        result.append(field_offset)
+    return tuple(result)
+
+
+def _indirect_position(buf, position: int) -> int:
+    _require_buffer_span(buf, position, _FB_U32.size)
+    target = position + _FB_U32.unpack_from(buf, position)[0]
+    _require_buffer_span(buf, target, _FB_U32.size)
+    return target
+
+
+def _decode_fb_string(buf, position: int) -> str:
+    string_position = _indirect_position(buf, position)
+    length = _FB_U32.unpack_from(buf, string_position)[0]
+    data_position = string_position + _FB_U32.size
+    _require_buffer_span(buf, data_position, length)
+    return bytes(buf[data_position:data_position + length]).decode("utf-8")
+
+
+def _decode_float_vector(buf, position: int, field_name: str) -> list[float]:
+    vector_position = _indirect_position(buf, position)
+    length = _FB_U32.unpack_from(buf, vector_position)[0]
+    data_position = vector_position + _FB_U32.size
+    byte_count = length * 4
+    _require_buffer_span(buf, data_position, byte_count)
+    vector_struct = _XFORM_VECTOR_STRUCTS[field_name]
+    if byte_count == vector_struct.size:
+        return list(vector_struct.unpack_from(buf, data_position))
+    return list(struct.unpack_from(f"<{length}f", buf, data_position))
+
+
+def _decode_xform_table(buf, table_position: int) -> dict:
+    prim_offset, mask_offset, t_offset, r_offset, s_offset, time_offset = (
+        _table_field_offsets(buf, table_position, (4, 6, 8, 10, 12, 14))
+    )
+    prim = _decode_fb_string(buf, table_position + prim_offset) if prim_offset else None
+    mask = buf[table_position + mask_offset] if mask_offset else 0
+    event = {"k": K_SET_XFORM_TRS, "prim": prim, "fields": []}
+    for bit, field_name, field_offset in (
+        (1, "t", t_offset),
+        (2, "r", r_offset),
+        (4, "s", s_offset),
+    ):
+        if mask & bit:
+            event["fields"].append(field_name)
+            event[field_name] = (
+                _decode_float_vector(buf, table_position + field_offset, field_name)
+                if field_offset
+                else []
+            )
+    if time_offset:
+        time_position = table_position + time_offset
+        _require_buffer_span(buf, time_position, _TIME_STRUCT.size)
+        event["time"] = _TIME_STRUCT.unpack_from(buf, time_position)[0]
+    return event
+
+
+def _decode_transaction_event(
+    buf,
+    wrapper_position: int,
+    *,
+    numpy_arrays: bool,
+) -> dict:
+    type_offset, event_offset = _table_field_offsets(buf, wrapper_position, (4, 6))
+    if type_offset and buf[wrapper_position + type_offset] == EventPayloadType.SetXformTrs:
+        if not event_offset:
+            raise ValueError("malformed FlatBuffers transform event")
+        event_position = _indirect_position(buf, wrapper_position + event_offset)
+        return _decode_xform_table(buf, event_position)
+
+    wrapper = EventWrapper()
+    wrapper.Init(buf, wrapper_position)
+    return event_to_dict(wrapper, numpy_arrays=numpy_arrays)
+
+
+def decode_transaction(
+    transaction: Txn,
+    *,
+    numpy_arrays: bool = False,
+) -> tuple[list[dict], int, str]:
+    """Decode a transaction, fast-pathing its common transform events.
+
+    Generated FlatBuffers accessors remain the fallback for every other event
+    kind. The returned tuple is ``(events, txn_id, layer_key)``.
+    """
+    buf = transaction._tab.Bytes
+    table_position = transaction._tab.Pos
+    events_offset, layer_offset, txn_id_offset = _table_field_offsets(
+        buf,
+        table_position,
+        (4, 6, 8),
+    )
+    txn_id = (
+        _FB_U64.unpack_from(buf, table_position + txn_id_offset)[0]
+        if txn_id_offset
+        else 0
+    )
+    layer_key = (
+        _decode_fb_string(buf, table_position + layer_offset)
+        if layer_offset
+        else ""
+    )
+    if not events_offset:
+        return [], txn_id, layer_key
+
+    vector_position = _indirect_position(buf, table_position + events_offset)
+    event_count = _FB_U32.unpack_from(buf, vector_position)[0]
+    elements_position = vector_position + _FB_U32.size
+    _require_buffer_span(buf, elements_position, event_count * _FB_U32.size)
+    events = []
+    for index in range(event_count):
+        element_position = elements_position + index * _FB_U32.size
+        wrapper_position = _indirect_position(buf, element_position)
+        events.append(
+            _decode_transaction_event(
+                buf,
+                wrapper_position,
+                numpy_arrays=numpy_arrays,
+            )
+        )
+    return events, txn_id, layer_key
+
+
 @dataclass(slots=True)
 class ReceivedEvent:
     """One event together with its broadcast routing envelope."""

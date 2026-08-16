@@ -16,8 +16,8 @@ from ..codec import (
     HelloRejectionCode,
     PayloadType,
     decode_envelope,
+    decode_transaction,
     encode_message,
-    event_to_dict,
     message_to_dict,
     resolve_payload,
 )
@@ -475,14 +475,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             # Decode txn events to dicts for apply_txn numpy arrays
             # for geometry attrs to avoid per-element Python iteration.
             _, txn_fb = resolve_payload(env)
-            events = [
-                event_to_dict(txn_fb.Events(i), numpy_arrays=True)
-                for i in range(txn_fb.EventsLength())
-            ]
+            events, txn_id, txn_layer_key = decode_transaction(
+                txn_fb,
+                numpy_arrays=True,
+            )
             if not events:
                 continue
-
-            txn_id = int(txn_fb.TxnId())
 
             if self._rate_bucket is not None:
                 wait = self._rate_bucket.try_consume()
@@ -502,9 +500,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             result = None
             request = None
             try:
-                txn_layer_key = txn_fb.LayerKey()
-                if isinstance(txn_layer_key, bytes):
-                    txn_layer_key = txn_layer_key.decode("utf-8")
                 request = sync_server.submit_idempotent_txn(
                     events,
                     session_id=self._producer_session_id,
@@ -513,7 +508,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     origin=self._origin,
                     client_addr=self._addr_key,
                     layer=self._client_layer,
-                    layer_key=txn_layer_key or "",
+                    layer_key=txn_layer_key,
                 )
             except TransactionRejectedError as exc:
                 result = make_transaction_result(

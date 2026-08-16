@@ -13,6 +13,7 @@ from openusdconnect.codec import (
     BroadcastEventEncoder,
     PayloadType,
     decode_envelope,
+    decode_transaction,
     encode_message,
     is_ping,
     message_to_dict,
@@ -808,6 +809,58 @@ class TestMultiEventTxn:
         assert len(d["events"]) == 4
         assert d["events"][0]["k"] == "ensure_prim"
         assert d["events"][2]["t"] == pytest.approx([1, 0, 0])
+
+    @pytest.mark.parametrize(
+        "events",
+        [
+            [
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Hero",
+                    "fields": ["t"],
+                    "t": [1.25, -2.5, 3.75],
+                }
+            ],
+            [
+                {"k": "ensure_xform_ops", "prim": "/World/Hero"},
+                {
+                    "k": "set_xform_trs",
+                    "prim": "/World/Hero",
+                    "fields": ["t", "r", "s"],
+                    "t": [1.0, 2.0, 3.0],
+                    "r": [0.5, 0.5, -0.5, 0.5],
+                    "s": [2.0, 3.0, 4.0],
+                    "time": 0.0,
+                },
+                {"k": "set_visibility", "prim": "/World/Hero", "visible": False},
+            ],
+        ],
+    )
+    def test_fast_transaction_decode_matches_general_decoder(self, events):
+        message = {
+            "type": "txn",
+            "txn_id": 42,
+            "layer_key": "animation",
+            "events": events,
+        }
+        wire = encode_message(message)
+        _, transaction = resolve_payload(decode_envelope(wire))
+
+        decoded_events, txn_id, layer_key = decode_transaction(
+            transaction,
+            numpy_arrays=True,
+        )
+
+        expected = message_to_dict(wire, numpy_arrays=True)
+        assert decoded_events == expected["events"]
+        assert txn_id == expected["txn_id"]
+        assert layer_key == expected["layer_key"]
+
+    def test_fast_transaction_decode_handles_empty_optional_fields(self):
+        wire = encode_message({"type": "txn", "events": []})
+        _, transaction = resolve_payload(decode_envelope(wire))
+
+        assert decode_transaction(transaction) == ([], 0, "")
 
 
 # ===================================================================
