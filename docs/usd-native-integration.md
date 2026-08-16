@@ -70,6 +70,12 @@ with UsdReceiver(stage, app_name="my-viewer") as receiver:
         show_loading(receiver.status.phase is not ClientPhase.READY)
 ```
 
+Interactive receive-only applications may bound one tick's work with
+`receiver.update(max_messages=500)`. Ordered replay remains pending until all
+messages preceding the server's synchronization watermark have been applied.
+Bidirectional clients intentionally drain their complete queued prefix before
+publishing local edits, so this budget applies only to `UsdReceiver`.
+
 `UsdReceiver` always requests managed layered replay from sequence 1. It owns
 anonymous collaboration layers at the strong end of the stage's session-layer
 stack. A server that cannot provide layered replay rejects the connection

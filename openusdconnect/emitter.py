@@ -950,6 +950,10 @@ class PrimChannel:
         """
         return current
 
+    def diff_and_snapshot(self, current, cached):
+        """Return the emitted diff and cache snapshot for one read."""
+        return self.diff(current, cached), self.cache_snapshot(current)
+
     def to_event(self, prim_path, diff):
         """Build the wire event(s) for the diff.
 
@@ -1341,6 +1345,16 @@ class PointInstancerChannel(PrimChannel):
     def cache_snapshot(self, current):
         return {name: _value_hash(value) for name, value in current.items()}
 
+    def diff_and_snapshot(self, current, cached):
+        cached = cached or {}
+        snapshot = self.cache_snapshot(current)
+        changed = {
+            name: value
+            for name, value in current.items()
+            if snapshot[name] != cached.get(name)
+        }
+        return (changed if changed else None), snapshot
+
     def to_event(self, prim_path, diff):
         return {
             "k": K_SET_POINT_INSTANCER,
@@ -1373,7 +1387,7 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
     slice, so it merges into the cached state instead of replacing it.
     """
     cached = pc.get(channel.cache_key)
-    d = channel.diff(current, cached)
+    d, snapshot = channel.diff_and_snapshot(current, cached)
     if d is not None:
         ev = channel.to_event(prim_path, d)
         if ev is not None:
@@ -1381,7 +1395,6 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
                 events_out.extend(ev)
             else:
                 events_out.append(ev)
-    snapshot = channel.cache_snapshot(current)
     if partial:
         merged = dict(cached or {})
         merged.update(snapshot)
@@ -3544,6 +3557,7 @@ class NoticeEmitter:
                     dirty_attribute_names.add(attribute_name)
 
         changed_attributes = {}
+        changed_attribute_hashes = {}
         primvar_metadata: dict = {}
         attribute_interpolation: dict = {}
         for attribute_name in dirty_attribute_names:
@@ -3571,13 +3585,14 @@ class NoticeEmitter:
                 source_layer,
                 value,
             )
-            if (
-                transport_value is None
-                or _value_hash(transport_value) == previous_attributes.get(attribute_name)
-            ):
+            if transport_value is None:
+                continue
+            value_hash = _value_hash(transport_value)
+            if value_hash == previous_attributes.get(attribute_name):
                 continue
 
             changed_attributes[attribute_name] = transport_value
+            changed_attribute_hashes[attribute_name] = value_hash
             metadata, interpolation = attribute_event_metadata(
                 prim,
                 attribute_name,
@@ -3597,9 +3612,7 @@ class NoticeEmitter:
             event["primvar_meta"] = primvar_metadata
         if attribute_interpolation:
             event["attr_interp"] = attribute_interpolation
-        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(
-            {name: _value_hash(value) for name, value in changed_attributes.items()}
-        )
+        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attribute_hashes)
         return event
 
     def _build_dirty_prim_events(

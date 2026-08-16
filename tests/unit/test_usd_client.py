@@ -125,6 +125,28 @@ def test_receiver_parks_without_invalidating_dispatcher_adapter():
         receiver.close()
 
 
+def test_receiver_update_forwards_message_budget(monkeypatch):
+    receiver = UsdReceiver(
+        Usd.Stage.CreateInMemory(),
+        app_name="budgeted-receiver",
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        receiver._started = True
+        calls = []
+        monkeypatch.setattr(
+            receiver._dispatcher,
+            "drain_and_apply",
+            lambda *, max_messages=None: calls.append(max_messages) or 3,
+        )
+
+        assert receiver.update(max_messages=128) == 3
+        assert calls == [128]
+    finally:
+        receiver.close()
+
+
 def test_receiver_status_distinguishes_connecting_replay_and_ready():
     receiver = UsdReceiver(
         Usd.Stage.CreateInMemory(),

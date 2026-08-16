@@ -18,6 +18,7 @@ from openusdconnect.codec import (
     is_ping,
     message_to_dict,
     payload_type,
+    payload_type_and_sequence,
     resolve_event,
     resolve_payload,
 )
@@ -69,6 +70,11 @@ class TestSchemaVersion:
             match=rf"unsupported schema version {version}",
         ):
             decode_envelope(bytes(builder.Output()))
+        with pytest.raises(
+            ValueError,
+            match=rf"unsupported schema version {version}",
+        ):
+            payload_type(bytes(builder.Output()))
 
 
 class TestPing:
@@ -173,9 +179,10 @@ class TestLayerGraphState:
             ],
         }
 
-        decoded, _ = _roundtrip(msg)
+        decoded, wire = _roundtrip(msg)
 
         assert decoded == msg
+        assert payload_type_and_sequence(wire) == (PayloadType.LayerGraphState, 17)
 
 
 class TestAuthRejected:
@@ -781,6 +788,63 @@ class TestBroadcastEvent:
         assert d["seq"] == 42
         assert d["event"]["k"] == "set_visibility"
         assert d["origin"] == "blender-1"
+
+    @pytest.mark.parametrize(
+        ("message", "expected_type", "expected_seq"),
+        [
+            (
+                {
+                    "type": "event",
+                    "seq": 42,
+                    "event": {"k": "set_visibility", "prim": "/World/X", "visible": True},
+                },
+                PayloadType.BroadcastEvent,
+                42,
+            ),
+            ({"type": "resync"}, PayloadType.Resync, 0),
+            ({"type": "ping"}, PayloadType.Ping, 0),
+        ],
+    )
+    def test_direct_payload_header_inspection(self, message, expected_type, expected_seq):
+        assert payload_type_and_sequence(encode_message(message)) == (
+            expected_type,
+            expected_seq,
+        )
+
+    def test_transform_fast_decode_preserves_envelope_and_optional_fields(self):
+        msg = {
+            "type": "event",
+            "seq": 73,
+            "event": {
+                "k": "set_xform_trs",
+                "prim": "/World/Hero",
+                "fields": ["t", "r", "s"],
+                "t": [1.25, -2.5, 3.75],
+                "r": [0.5, 0.5, -0.5, 0.5],
+                "s": [2.0, 3.0, 4.0],
+                "time": 0.0,
+            },
+            "origin": "usd-client",
+            "client_id": "artist",
+            "client": "127.0.0.1:1234",
+            "layer_key": "animation",
+        }
+
+        decoded, _ = _roundtrip(msg)
+
+        assert decoded["type"] == msg["type"]
+        assert decoded["seq"] == msg["seq"]
+        assert decoded["origin"] == msg["origin"]
+        assert decoded["client_id"] == msg["client_id"]
+        assert decoded["client"] == msg["client"]
+        assert decoded["layer_key"] == msg["layer_key"]
+        assert decoded["event"]["k"] == "set_xform_trs"
+        assert decoded["event"]["prim"] == "/World/Hero"
+        assert decoded["event"]["fields"] == ["t", "r", "s"]
+        assert decoded["event"]["t"] == pytest.approx(msg["event"]["t"])
+        assert decoded["event"]["r"] == pytest.approx(msg["event"]["r"])
+        assert decoded["event"]["s"] == pytest.approx(msg["event"]["s"])
+        assert decoded["event"]["time"] == 0.0
 
 
 # ===================================================================

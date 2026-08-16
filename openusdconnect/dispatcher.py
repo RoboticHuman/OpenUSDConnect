@@ -503,7 +503,7 @@ class EventDispatcher:
         """Receiver-local logical-layer router, or ``None`` for flat replay."""
         return self._layer_router
 
-    def drain_and_apply(self) -> int:
+    def drain_and_apply(self, *, max_messages: int | None = None) -> int:
         """Drain the receiver queue and run the apply pipeline.
 
         Returns the number of events applied (0 when the queue was empty,
@@ -511,7 +511,11 @@ class EventDispatcher:
         """
         if self._projection_state is not None:
             self._projection_state.ensure_native_projection_safe()
-        bufs = self.receiver.drain_queue()
+        bufs = (
+            self.receiver.drain_queue()
+            if max_messages is None
+            else self.receiver.drain_queue(max_messages=max_messages)
+        )
         if not bufs:
             self.receiver.mark_replay_applied()
             return 0
