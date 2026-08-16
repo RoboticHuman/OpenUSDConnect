@@ -1251,6 +1251,7 @@ def test_blender_unregister_detaches_sender_owned_by_reconnect_worker(monkeypatc
     monkeypatch.setattr(capture, "_reset_stage_author", MagicMock())
     monkeypatch.setattr(capture, "_CAPTURE_CLASSES", ())
     monkeypatch.setattr(capture, "_SCENE_PROPS", ())
+    monkeypatch.setattr(capture.bpy.app.handlers, "undo_pre", [], raising=False)
 
     capture.unregister()
 

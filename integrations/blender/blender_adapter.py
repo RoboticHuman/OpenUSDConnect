@@ -1814,6 +1814,21 @@ class BlenderAdapter(DCCAdapter):
                 return prim_path + file_path[len(prim_path_ref) :]
             return prim_path + "/" + file_path.lstrip("/")
 
+        def _resolve_output_source(source_path, source_name):
+            """Follow nested NodeGraph output forwarding to its terminal source."""
+            visited = set()
+            while (source_path, source_name) not in visited:
+                visited.add((source_path, source_name))
+                resolved_path, resolved_name = resolve_nodegraph_connection(
+                    stage,
+                    source_path,
+                    source_name,
+                )
+                if (resolved_path, resolved_name) == (source_path, source_name):
+                    break
+                source_path, source_name = resolved_path, resolved_name
+            return source_path, source_name
+
         # Collect material bindings, shader inputs, and connections
         # in event-kind order: bindings after shader inputs (matching protocol)
         shader_events = []
@@ -1842,8 +1857,7 @@ class BlenderAdapter(DCCAdapter):
                     conn = material_conns.get(output_name)
                     if not conn:
                         continue
-                    source_path, _source_name = resolve_nodegraph_connection(
-                        stage,
+                    source_path, _source_name = _resolve_output_source(
                         conn["source_prim"],
                         split_qualified_attr(conn["source_attr"])[1],
                     )
@@ -1876,8 +1890,7 @@ class BlenderAdapter(DCCAdapter):
                                 # Flatten NodeGraph passthroughs so Blender
                                 # wires directly between real shader nodes
                                 # (Blender has no NodeGroup-in-USD concept).
-                                flat_path, flat_base = resolve_nodegraph_connection(
-                                    stage,
+                                flat_path, flat_base = _resolve_output_source(
                                     conn["source_prim"],
                                     src_base,
                                 )
