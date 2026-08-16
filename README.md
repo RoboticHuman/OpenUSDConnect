@@ -155,6 +155,58 @@ services use `--event-log` and `--dashboard-port`.
 See [Command-Line Reference](docs/cli-reference.md) for the command inventory
 and dependency groups.
 
+#### Project USD plugin environment
+
+The standard `openusdconnect-server` command initializes the Sdr registry
+before event-log replay and before opening its network listener. It inherits
+the process's normal USD configuration, including `PXR_PLUGINPATH_NAME` and any
+renderer variables configured by the project.
+
+On Windows, if a USD plugin depends on DLLs outside the normal loader path,
+provide their directories with a repeatable option or the path-separator
+delimited `OPENUSDCONNECT_DLL_DIRS` environment variable:
+
+```powershell
+uv run openusdconnect-server --base scene.usda `
+  --plugin-dll-dir "$env:RMANTREE\bin" `
+  --plugin-dll-dir "$env:RMANTREE\lib"
+
+# Equivalent persistent project-shell configuration
+$env:OPENUSDCONNECT_DLL_DIRS = "C:\Renderer\bin;C:\Renderer\lib"
+uv run openusdconnect-server --base scene.usda
+```
+
+Linux and macOS projects should configure their platform loader environment
+before launching the process. OpenUSDConnect does not guess renderer installs
+or copy a DCC's private process environment; launch the server from the same
+project environment as the clients.
+
+Programmatic server users can configure the same behavior through
+`ServerConfig`. Hosts that construct their own USD objects can call the public
+helper before constructing the server or otherwise touching Sdr:
+
+```python
+from openusdconnect import (
+    ServerConfig,
+    prepare_usd_plugin_environment,
+    run_server,
+)
+
+# Normal server use: plugin preflight is enabled by default.
+run_server(
+    ServerConfig(
+        base_usd_path="scene.usda",
+        plugin_dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
+    )
+)
+
+# Custom host startup, before constructing USD-dependent services.
+prepare_usd_plugin_environment(
+    dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
+    shader_ids=["UsdPreviewSurface", "MyProjectSurface"],
+)
+```
+
 ### USD-native Python clients
 
 New `pxr.Usd` applications can use the layered high-level API and keep network
@@ -277,12 +329,9 @@ server-local lifecycle operations. They do not rewrite the authored log or
 replicate as durable layer operations, so they are not yet covered by layered
 replay or server restart.
 
-If a Hydra renderer such as RenderMan is installed into the shared USD build,
-launch through the renderer-safe wrapper so the Sdr registry can load its plugins:
-
-```bash
-uv run python -m integrations.run_server --port 7200 --base scene.usda
-```
+The source-tree `integrations.run_server` module remains a compatibility
+convenience that derives RenderMan DLL directories from `RMANTREE`; installed
+library users should use the standard command and configuration above.
 
 ### Live-open VFS
 The VFS endpoint exposes a small virtual directory with `scene.usd` as a

@@ -8,6 +8,7 @@ Usage:
 """
 
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -59,11 +60,38 @@ def test_bishop_materialx(blender_exe, tmp_path):
 
 def test_remote_reference_descendant_edit(blender_exe, tmp_path):
     """A local edit on remotely referenced geometry remains an Sdf override."""
+    port = 7219
     _run_asset_test(
         blender_exe,
         tmp_path,
         "test_remote_descendant_edit.py",
-        7219,
+        port,
+    )
+
+    # The external harness authors the reference; Blender should send only the
+    # one descendant explicitly edited by the test. A depsgraph reevaluation
+    # must not leak untouched importer objects into the collaboration layer.
+    db_path = tmp_path / f"events_{port}.db"
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT client_id, kind, prim FROM events ORDER BY seq",
+        ).fetchall()
+    blender_rows = [row for row in rows if row[0] != "asset_test"]
+    assert len(blender_rows) == 2, f"unexpected Blender transform leak: {blender_rows}"
+    blender_client = blender_rows[0][0]
+    assert blender_rows == [
+        (blender_client, "ensure_xform_ops", "/World/Bishop/Geom/Render"),
+        (blender_client, "set_xform_trs", "/World/Bishop/Geom/Render"),
+    ]
+
+
+def test_point_instancer_group_edit(blender_exe, tmp_path):
+    """Moving a selected pawn array authors the PointInstancer Xform."""
+    _run_asset_test(
+        blender_exe,
+        tmp_path,
+        "test_point_instancer_group_edit.py",
+        7221,
     )
 
 

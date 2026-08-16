@@ -85,6 +85,9 @@ def test_ensure_prim_xform(r):
     if obj.get("usd_type_name") != "Xform":
         r.fail(name, f"usd_type_name={obj.get('usd_type_name')}")
         return
+    if obj.get("_usd_imported") is not True:
+        r.fail(name, "receiver-created object is not tagged remote-owned")
+        return
     r.ok(name)
 
 
@@ -910,6 +913,64 @@ def test_set_reference_imports_usd(r):
     if count_after != count_before:
         r.fail(name, f"idempotent check failed: {count_before} -> {count_after} objects")
         return
+
+    r.ok(name)
+
+
+def test_set_reference_point_instancer_prototypes_do_not_double_transform(r):
+    """Referenced PointInstancer prototypes stay in importer world space."""
+    name = "test_set_reference_point_instancer_prototypes_do_not_double_transform"
+    _clear_scene()
+    adapter = BlenderAdapter()
+    adapter.ensure_prim("/World", "Xform")
+    adapter.ensure_prim("/World/Asset", "Xform")
+
+    chess_usd = os.path.join(
+        project_root,
+        "assets",
+        "full_assets",
+        "OpenChessSet",
+        "chess_set.usda",
+    )
+    refs = [{"asset_path": chess_usd, "prim_path": "/ChessSet"}]
+    if not adapter.set_reference("/World/Asset", refs):
+        r.fail(name, "set_reference returned False")
+        return
+
+    adapter.set_xform_trs(
+        "/World/Asset",
+        t=[0.0, 2.5, 0.0],
+        s=[3.2, 3.2, 3.2],
+    )
+    bpy.context.view_layer.update()
+
+    prototype = adapter._find_object_by_prim(
+        "/World/Asset/Black/Pawns/Pawn"
+    )
+    if prototype is None:
+        r.fail(name, "remapped pawn prototype was not registered")
+        return
+    if prototype.parent is not None:
+        r.fail(name, f"pawn prototype inherited parent {prototype.parent.name}")
+        return
+
+    instance_scales = []
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    for instance in depsgraph.object_instances:
+        if not instance.is_instance:
+            continue
+        original = getattr(instance.object, "original", instance.object)
+        path = original.get("usd_prim_path", "")
+        if path.endswith("/Black/Pawns/Pawn/Geom_Body/Render"):
+            instance_scales.append(tuple(instance.matrix_world.to_scale()))
+
+    if len(instance_scales) != 8:
+        r.fail(name, f"expected 8 pawn body instances, got {len(instance_scales)}")
+        return
+    for scale in instance_scales:
+        if any(abs(float(component) - 3.2) > 1e-4 for component in scale):
+            r.fail(name, f"pawn instance was double-scaled: {scale}")
+            return
 
     r.ok(name)
 
@@ -1759,6 +1820,7 @@ def main():
         test_ensure_xform_ops_identity_noop,
         test_ensure_xform_ops_no_parent,
         test_set_reference_imports_usd,
+        test_set_reference_point_instancer_prototypes_do_not_double_transform,
         test_set_reference_reimport_after_delete,
         test_set_payload_import_preserves_y_up_orientation,
         test_set_reference_missing_file,

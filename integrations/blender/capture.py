@@ -53,6 +53,12 @@ EMITTER_RECONNECT_INTERVAL_SECONDS = 1.0
 EMITTER_RECONNECT_MAX_INTERVAL_SECONDS = 8.0
 EMITTER_RECONNECT_TIMEOUT_SECONDS = 2.0
 
+# Structural import objects do not map to authorable USD transforms.
+# PointInstancer remains reversible as a transform of the whole instancer.
+_NON_REVERSE_XFORM_IMPORTED_TYPES = frozenset(
+    {"Material", "NodeGraph", "Scope", "Shader"}
+)
+
 
 def _compute_local_trs(obj):
     """Local-to-parent TRS decomposition. Returns (loc, rot_quat, scl)."""
@@ -329,21 +335,31 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             LOG.info("USDHook: No prim map available; nothing tagged.")
             return True
 
-        # Infer root prim from the stage's default prim and update auto_track_root.
-        # Skip during reference imports (_skip_root_inference) — the referenced file's
-        # default prim shouldn't override the main scene's auto_track_root.
-        if stage and not USD_CONNECT_Hook._skip_root_inference:
+        root_path = None
+        stage_needs_axis_conversion = False
+        if stage:
             try:
+                from openusdconnect.axis_conversion import needs_conversion
+
+                stage_needs_axis_conversion = needs_conversion(
+                    UsdGeom.GetStageUpAxis(stage)
+                )
                 default_prim = stage.GetDefaultPrim()
                 if default_prim and default_prim.IsValid():
                     root_path = str(default_prim.GetPath())
                 else:
-                    # Fall back to the first root-level prim
-                    root_prims = [p for p in stage.GetPseudoRoot().GetChildren()]
+                    root_prims = list(stage.GetPseudoRoot().GetChildren())
                     root_path = str(root_prims[0].GetPath()) if root_prims else None
-                if root_path:
-                    bpy.context.scene.usd_connect_auto_track_root = root_path
-                    LOG.info("USDHook: Auto-track root set to %s", root_path)
+            except Exception:
+                LOG.debug("USDHook: could not determine stage root/axis metadata")
+
+        # Infer root prim from the stage's default prim and update auto_track_root.
+        # Skip during reference imports (_skip_root_inference) the referenced file's
+        # default prim shouldn't override the main scene's auto_track_root.
+        if root_path and not USD_CONNECT_Hook._skip_root_inference:
+            try:
+                bpy.context.scene.usd_connect_auto_track_root = root_path
+                LOG.info("USDHook: Auto-track root set to %s", root_path)
             except Exception as e:
                 LOG.warning("USDHook: Could not infer root prim: %s", e)
 
@@ -358,6 +374,7 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
                 owners_by_data.setdefault(data.as_pointer(), []).append(obj)
 
         from .blender_adapter import (
+            _PROP_USD_AXIS_CONVERSION,
             _PROP_USD_IMPORTED,
             _PROP_USD_PRIM_ALIASES,
             _PROP_USD_XFORM_PRIM_PATH,
@@ -433,6 +450,10 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
             if stage_id:
                 obj["usd_stage_id"] = stage_id
             obj[_PROP_USD_IMPORTED] = True
+            if stage_needs_axis_conversion and obj.parent is None:
+                obj[_PROP_USD_AXIS_CONVERSION] = True
+            elif _PROP_USD_AXIS_CONVERSION in obj:
+                del obj[_PROP_USD_AXIS_CONVERSION]
 
         LOG.info("USDHook: Tagged %d objects with usd_prim_path", len(object_tags))
         return True
@@ -490,7 +511,8 @@ class BlenderStageAuthor:
 
     def initialize_baseline(self):
         """Snapshot current scene transforms for change detection."""
-        for obj in bpy.context.scene.objects:
+        # Include importer-only prototype collections.
+        for obj in bpy.data.objects:
             if "usd_prim_path" not in obj:
                 continue
             src = getattr(obj, "matrix_basis", obj.matrix_world)
@@ -927,7 +949,9 @@ class BlenderStageAuthor:
                 if prim and prim.IsValid():
                     prim.SetActive(False)
                 else:
-                    self.stage.OverridePrim(prim_path).SetActive(False)
+                    override = self.stage.OverridePrim(prim_path)
+                    if override and override.IsValid():
+                        override.SetActive(False)
                 LOG.info("Object deleted: deactivating prim %s", prim_path)
 
     def on_depsgraph_update(self, updates: list):
@@ -963,10 +987,30 @@ class BlenderStageAuthor:
             src = getattr(obj, "matrix_basis", obj.matrix_world)
             m = tuple(v for row in src for v in row)
             last = self._last_matrix.get(obj.name)
+            obj_orig = getattr(obj, "original", obj)
+            is_imported = self._is_imported_object(obj_orig)
+            authored_prim = self.stage.GetPrimAtPath(prim_path)
+
+            # Remote references may exist only in the receiver's mirror stage.
+            if is_imported and last is None and not authored_prim:
+                self._last_matrix[obj.name] = m
+                self._prim_refs[prim_path] = obj_orig
+                self._used_prim_paths.add(prim_path)
+                continue
+
+            # Importer scaffolding must not become USD xform opinions.
+            imported_type = obj_orig.get("usd_type_name", "")
+            if is_imported and imported_type in _NON_REVERSE_XFORM_IMPORTED_TYPES:
+                self._last_matrix[obj.name] = m
+                continue
             # Cameras carry typed-schema attrs (lens, aperture, ...) on their
             # data block; the matrix gate alone misses pure data edits.
             data_dirty = obj.type == "CAMERA" and getattr(update, "is_updated_geometry", False)
-            if last == m and self.stage.GetPrimAtPath(prim_path) and not data_dirty:
+            if (
+                last == m
+                and (is_imported or authored_prim)
+                and not data_dirty
+            ):
                 continue
             self._last_matrix[obj.name] = m
 
@@ -1080,8 +1124,29 @@ def get_emitter_sender() -> EventSender | None:
     return _state.sender
 
 
+def _clear_shader_rna_handles_before_undo(_scene) -> None:
+    """Drop cached NodeSockets before Blender invalidates their RNA on undo."""
+    author = _state.author
+    if author is not None:
+        author._shader_input_maps.clear()
+
+    try:
+        from . import receiver_addon
+
+        adapter = receiver_addon._ADAPTER
+        if adapter is None:
+            return
+        for _shader_path, shader_state in adapter._registry.iter_shaders():
+            shader_state.pop("input_map", None)
+            shader_state.pop("output_map", None)
+    except (AttributeError, ReferenceError, RuntimeError):
+        LOG.debug("Could not clear shader RNA handles before undo", exc_info=True)
+
+
 def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
+    if _state.author is not None and _state.author._applying_remote:
+        return
     if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
         return
     events = _state.notice_emitter.prepare_events_for_send()
@@ -1294,6 +1359,10 @@ def _depsgraph_handler(scene, depsgraph):
         has_object_updates = any(isinstance(update.id, bpy.types.Object) for update in updates)
         has_material_updates = any(isinstance(update.id, bpy.types.Material) for update in updates)
         if not has_object_updates and not has_material_updates:
+            return
+
+        # Do not reverse-author synchronous receiver mutations.
+        if _state.author is not None and _state.author._applying_remote:
             return
 
         if _state.author is not None and _state.author.enabled:
@@ -1796,11 +1865,15 @@ def register():
     _ensure_scene_props()
     for c in _CAPTURE_CLASSES:
         bpy.utils.register_class(c)
+    if _clear_shader_rna_handles_before_undo not in bpy.app.handlers.undo_pre:
+        bpy.app.handlers.undo_pre.append(_clear_shader_rna_handles_before_undo)
 
 
 def unregister():
     reconnect_finished = _cancel_emitter_reconnect()
     _remove_handler()
+    if _clear_shader_rna_handles_before_undo in bpy.app.handlers.undo_pre:
+        bpy.app.handlers.undo_pre.remove(_clear_shader_rna_handles_before_undo)
     _reset_stage_author()
     sender = _state.sender
     _state.sender = None

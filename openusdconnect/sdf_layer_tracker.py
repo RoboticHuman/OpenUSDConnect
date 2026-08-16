@@ -581,7 +581,7 @@ class SdfLayerChangeTracker:
         """Restore frozen local edits after older authoritative records apply."""
         if not self.graph.ready or not self._prepared:
             return
-        from .event_apply import apply_events, atomic_apply
+        from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
 
         with self.suppressed():
             for batch in self._prepared:
@@ -591,9 +591,13 @@ class SdfLayerChangeTracker:
                 }
                 if batch.layer_identifier not in reachable:
                     continue
+                events = self._events_for(batch)
                 with Usd.EditContext(self.stage, Usd.EditTarget(batch.layer)):
-                    with atomic_apply(self.stage):
-                        apply_events(self.stage, self._events_for(batch))
+                    with atomic_apply(
+                        self.stage,
+                        prim_paths=atomic_apply_prim_paths(events),
+                    ):
+                        apply_events(self.stage, events)
             self.sync_graph()
 
     def accept_authoritative_event(self, layer: Sdf.Layer, event: dict) -> None:

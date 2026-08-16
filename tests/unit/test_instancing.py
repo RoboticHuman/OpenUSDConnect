@@ -514,6 +514,38 @@ def test_emitter_invalidate_suppresses_instancing_echo():
     assert echo == []
 
 
+def test_emitter_cache_fingerprints_point_instancer_arrays():
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+    stage.DefinePrim("/Protos/A", "Xform")
+    _author_pi(stage)
+
+    emitter.build_events_for_dirty()
+
+    cached = emitter._prim_cache["/World/PI"]["point_instancer"]
+    assert set(cached) >= {"proto_indices", "positions", "orientations"}
+    assert all(isinstance(fingerprint, int) for fingerprint in cached.values())
+
+
+def test_remote_point_instancer_invalidation_does_not_retain_numpy_payload():
+    stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(stage)
+    positions = np.arange(3000, dtype=np.float32).reshape(-1, 3)
+
+    emitter.invalidate_for_event(
+        {
+            "k": K_SET_POINT_INSTANCER,
+            "prim": "/World/PI",
+            "fields": ["positions"],
+            "positions": positions,
+        }
+    )
+
+    cached = emitter._prim_cache["/World/PI"]["point_instancer"]
+    assert isinstance(cached["positions"], int)
+    assert cached["positions"] is not positions
+
+
 # ---------------------------------------------------------------------------
 # Adapters + round trip
 # ---------------------------------------------------------------------------

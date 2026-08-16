@@ -29,6 +29,7 @@ VARIABLES
     receiverSeq,
     checkpointSeq,
     activationSeq,
+    concurrentCommitPending,
     localState,
     newSession,
     newNext,
@@ -46,6 +47,7 @@ vars == <<
     receiverSeq,
     checkpointSeq,
     activationSeq,
+    concurrentCommitPending,
     localState,
     newSession,
     newNext,
@@ -67,6 +69,7 @@ Init ==
     /\ receiverSeq = 0
     /\ checkpointSeq = 0
     /\ activationSeq = 0
+    /\ concurrentCommitPending = TRUE
     /\ localState = "optimistic"
     /\ newSession = FALSE
     /\ newNext = 1
@@ -81,7 +84,8 @@ CommitOldPrefix ==
     /\ serverSeq' = serverSeq + 1
     /\ UNCHANGED <<
         phase, artifact, abandoned, abandonedOldHigh, receiverSeq,
-        checkpointSeq, activationSeq, localState, newSession, newNext,
+        checkpointSeq, activationSeq, concurrentCommitPending, localState,
+        newSession, newNext,
         newHigh, newApplyCount
        >>
 
@@ -92,7 +96,8 @@ Reject ==
     /\ artifact' = RejectedSuffix
     /\ UNCHANGED <<
         oldHigh, oldApplyCount, abandoned, abandonedOldHigh, serverSeq,
-        receiverSeq, checkpointSeq, activationSeq, localState, newSession,
+        receiverSeq, checkpointSeq, activationSeq, concurrentCommitPending,
+        localState, newSession,
         newNext, newHigh, newApplyCount
        >>
 
@@ -104,7 +109,8 @@ AbandonAndRequestReplay ==
     /\ checkpointSeq' = serverSeq
     /\ UNCHANGED <<
         oldHigh, oldApplyCount, artifact, serverSeq, receiverSeq,
-        activationSeq, localState, newSession, newNext, newHigh,
+        activationSeq, concurrentCommitPending, localState, newSession,
+        newNext, newHigh,
         newApplyCount
        >>
 
@@ -115,19 +121,44 @@ ApplyReplay ==
     /\ UNCHANGED <<
         phase, oldHigh, oldApplyCount, artifact, abandoned,
         abandonedOldHigh, serverSeq, checkpointSeq, activationSeq,
+        concurrentCommitPending, localState, newSession, newNext, newHigh,
+        newApplyCount
+       >>
+
+ConcurrentAuthoritativeCommit ==
+    /\ phase = "syncing"
+    /\ concurrentCommitPending
+    /\ serverSeq' = serverSeq + 1
+    /\ concurrentCommitPending' = FALSE
+    /\ UNCHANGED <<
+        phase, oldHigh, oldApplyCount, artifact, abandoned,
+        abandonedOldHigh, receiverSeq, checkpointSeq, activationSeq,
         localState, newSession, newNext, newHigh, newApplyCount
+       >>
+
+RefreshCheckpoint ==
+    /\ phase = "syncing"
+    /\ checkpointSeq < serverSeq
+    /\ checkpointSeq' = serverSeq
+    /\ UNCHANGED <<
+        phase, oldHigh, oldApplyCount, artifact, abandoned,
+        abandonedOldHigh, serverSeq, receiverSeq, activationSeq,
+        concurrentCommitPending, localState, newSession, newNext, newHigh,
+        newApplyCount
        >>
 
 UseServerAndStartNewSession ==
     /\ phase = "syncing"
     /\ receiverSeq = checkpointSeq
+    /\ checkpointSeq = serverSeq
     /\ phase' = "ready"
     /\ localState' = "authoritative"
     /\ newSession' = TRUE
     /\ activationSeq' = receiverSeq
     /\ UNCHANGED <<
         oldHigh, oldApplyCount, artifact, abandoned, abandonedOldHigh,
-        serverSeq, receiverSeq, checkpointSeq, newNext, newHigh,
+        serverSeq, receiverSeq, checkpointSeq, concurrentCommitPending,
+        newNext, newHigh,
         newApplyCount
        >>
 
@@ -139,7 +170,8 @@ SubmitNew ==
     /\ UNCHANGED <<
         phase, oldHigh, oldApplyCount, artifact, abandoned,
         abandonedOldHigh, serverSeq, receiverSeq, checkpointSeq,
-        activationSeq, localState, newSession, newHigh, newApplyCount
+        activationSeq, concurrentCommitPending, localState, newSession,
+        newHigh, newApplyCount
        >>
 
 CommitNew ==
@@ -151,7 +183,7 @@ CommitNew ==
     /\ UNCHANGED <<
         phase, oldHigh, oldApplyCount, artifact, abandoned,
         abandonedOldHigh, receiverSeq, checkpointSeq, activationSeq,
-        localState, newSession, newNext
+        concurrentCommitPending, localState, newSession, newNext
        >>
 
 Complete ==
@@ -161,7 +193,7 @@ Complete ==
     /\ UNCHANGED <<
         oldHigh, oldApplyCount, artifact, abandoned, abandonedOldHigh,
         serverSeq, receiverSeq, checkpointSeq, activationSeq, localState,
-        newSession, newNext, newHigh, newApplyCount
+        concurrentCommitPending, newSession, newNext, newHigh, newApplyCount
        >>
 
 Next ==
@@ -169,6 +201,8 @@ Next ==
     \/ Reject
     \/ AbandonAndRequestReplay
     \/ ApplyReplay
+    \/ ConcurrentAuthoritativeCommit
+    \/ RefreshCheckpoint
     \/ UseServerAndStartNewSession
     \/ SubmitNew
     \/ CommitNew
@@ -181,6 +215,7 @@ Spec ==
     /\ WF_vars(Reject)
     /\ WF_vars(AbandonAndRequestReplay)
     /\ WF_vars(ApplyReplay)
+    /\ WF_vars(RefreshCheckpoint)
     /\ WF_vars(UseServerAndStartNewSession)
     /\ WF_vars(SubmitNew)
     /\ WF_vars(CommitNew)
@@ -193,10 +228,11 @@ TypeOK ==
     /\ artifact \subseteq OldIds
     /\ abandoned \in BOOLEAN
     /\ abandonedOldHigh \in 0..MaxOld
-    /\ serverSeq \in 0..(MaxOld + MaxNew)
-    /\ receiverSeq \in 0..MaxOld
-    /\ checkpointSeq \in 0..MaxOld
-    /\ activationSeq \in 0..MaxOld
+    /\ serverSeq \in 0..(MaxOld + MaxNew + 1)
+    /\ receiverSeq \in 0..(MaxOld + 1)
+    /\ checkpointSeq \in 0..(MaxOld + 1)
+    /\ activationSeq \in 0..(MaxOld + 1)
+    /\ concurrentCommitPending \in BOOLEAN
     /\ localState \in {"optimistic", "authoritative"}
     /\ newSession \in BOOLEAN
     /\ newNext \in 1..(MaxNew + 1)
@@ -220,6 +256,7 @@ NewSessionStartsFromAuthoritativeCheckpoint ==
     newSession =>
         /\ localState = "authoritative"
         /\ activationSeq = checkpointSeq
+        /\ activationSeq <= serverSeq
 
 NoNewCommitBeforeNewSession ==
     newHigh > 0 => newSession

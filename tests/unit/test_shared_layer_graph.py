@@ -44,7 +44,8 @@ def test_baseline_maps_equivalent_graphs_without_transmitting_local_paths(tmp_pa
     authoritative = SharedLayerGraph(source, authoritative=True)
     message = authoritative.state_message(seq=1)
     receiver = SharedLayerGraph(target)
-    receiver.apply_state(message)
+    assert receiver.apply_state(message)
+    assert not receiver.apply_state(message)
 
     assert len(receiver.reachable_layer_keys()) == 2
     assert all(receiver.layer_for(key) is not None for key in receiver.reachable_layer_keys())

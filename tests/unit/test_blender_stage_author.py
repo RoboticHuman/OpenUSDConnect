@@ -197,7 +197,6 @@ class MockBlenderObject(sys.modules["bpy"].types.Object):
     def __setitem__(self, key, value):
         self._props[key] = value
 
-
 class MockDepsgraphUpdate:
     """Simulates a single depsgraph update entry."""
 
@@ -208,7 +207,11 @@ class MockDepsgraphUpdate:
 # ---------------------------------------------------------------------------
 # Import the module under test (after bpy mock is installed)
 # ---------------------------------------------------------------------------
-from integrations.blender.blender_adapter import _PROP_USD_IMPORTED, BlenderAdapter
+from integrations.blender.blender_adapter import (
+    _PROP_USD_IMPORTED,
+    BlenderAdapter,
+    _select_imported_root,
+)
 from integrations.blender.capture import BlenderStageAuthor
 from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.protocol_constants import (
@@ -267,6 +270,36 @@ def test_source_import_keeps_core_module_identity():
 
     importlib.reload(blender_package)
     assert sys.modules["openusdconnect.emitter"] is emitter_module
+
+
+def test_reference_import_selects_requested_root_over_point_instancer_prototypes():
+    """Native imports may expose prototype objects as additional roots."""
+    requested = MockBlenderObject("ChessSet", prim_path="/ChessSet", obj_type="EMPTY")
+    black_pawn = MockBlenderObject(
+        "BlackPawnPrototype",
+        prim_path="/ChessSet/Black/Pawns/Pawn",
+        obj_type="EMPTY",
+    )
+    white_pawn = MockBlenderObject(
+        "WhitePawnPrototype",
+        prim_path="/ChessSet/White/Pawns/Pawn",
+        obj_type="EMPTY",
+    )
+
+    roots = {white_pawn, black_pawn, requested}
+    assert _select_imported_root(roots, "/ChessSet") is requested
+
+
+def test_reference_import_fallback_selects_shallowest_usd_root():
+    """Default-prim imports without an explicit path remain deterministic."""
+    requested = MockBlenderObject("Model", prim_path="/Model", obj_type="EMPTY")
+    prototype = MockBlenderObject(
+        "Prototype",
+        prim_path="/Model/Instancer/Prototype",
+        obj_type="EMPTY",
+    )
+
+    assert _select_imported_root({prototype, requested}, "") is requested
 
 
 class TestAutoTrack:
@@ -380,6 +413,8 @@ class TestAutoTrack:
                 "/World/Asset/Geom/Mesh": mesh,
             }
         )
+        author.initialize_baseline()
+        mesh.matrix_world = _Matrix(loc=(2, 0, 0))
 
         events = _get_events(author, emitter, [MockDepsgraphUpdate(mesh)])
 
@@ -398,7 +433,83 @@ class TestAutoTrack:
             and event["prim"] == "/World/Asset/Geom/Mesh"
         ]
         assert len(trs) == 1
-        assert trs[0]["t"] == [1.0, 0.0, 0.0]
+        assert trs[0]["t"] == [2.0, 0.0, 0.0]
+
+    def test_unchanged_remote_import_does_not_escape_author_stage(self):
+        """Mirror-only imported prims must not be authored on reevaluation."""
+        mesh = MockBlenderObject(
+            "RemoteMesh",
+            loc=(1, 2, 3),
+            prim_path="/World/Asset/Geom/Render",
+            type_name="Mesh",
+        )
+        mesh[_PROP_USD_IMPORTED] = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([mesh])
+        author, emitter = _make_author_and_emitter()
+        author.initialize_baseline()
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(mesh)])
+
+        assert events == []
+        assert not author.stage.GetPrimAtPath("/World/Asset/Geom/Render")
+
+    def test_first_unbaselined_remote_update_is_accepted_not_emitted(self):
+        """Safety wins when import completion and a depsgraph callback race."""
+        mesh = MockBlenderObject(
+            "LateRemoteMesh",
+            loc=(4, 5, 6),
+            prim_path="/World/Asset/LateMesh",
+            type_name="Mesh",
+        )
+        mesh[_PROP_USD_IMPORTED] = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([mesh])
+        author, emitter = _make_author_and_emitter()
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(mesh)])
+
+        assert events == []
+        assert "LateRemoteMesh" in author._last_matrix
+
+    def test_imported_scope_transform_is_never_authored(self):
+        scope = MockBlenderObject(
+            "Materials",
+            prim_path="/World/Asset/Materials",
+            type_name="Scope",
+            obj_type="EMPTY",
+        )
+        scope[_PROP_USD_IMPORTED] = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([scope])
+        author, emitter = _make_author_and_emitter()
+        author.initialize_baseline()
+        scope.matrix_world = _Matrix(loc=(9, 8, 7))
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(scope)])
+
+        assert events == []
+        assert not author.stage.GetPrimAtPath("/World/Asset/Materials")
+
+    def test_point_instancer_authors_whole_group_transform(self):
+        """Moving the proxy object is a valid move of the whole instancer."""
+        pawns = MockBlenderObject(
+            "Black_Pawns",
+            prim_path="/World/ChessSet/Black/Pawns",
+            type_name="PointInstancer",
+            obj_type="POINTCLOUD",
+        )
+        pawns[_PROP_USD_IMPORTED] = True
+        sys.modules["bpy"].data.objects = _BlenderObjectList([pawns])
+        author, emitter = _make_author_and_emitter()
+        author.initialize_baseline()
+        pawns.matrix_world = _Matrix(loc=(0, 0, 0.25))
+
+        events = _get_events(author, emitter, [MockDepsgraphUpdate(pawns)])
+
+        assert any(
+            event["k"] == K_SET_XFORM_TRS
+            and event["prim"] == "/World/ChessSet/Black/Pawns"
+            for event in events
+        )
+        assert author.stage.GetPrimAtPath("/World/ChessSet/Black/Pawns")
 
     def test_seeded_remote_parent_is_authored_before_edited_child(self):
         """A receive-side cache entry does not imply a local USD spec exists."""

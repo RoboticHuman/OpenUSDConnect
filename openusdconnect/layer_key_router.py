@@ -90,8 +90,7 @@ class LayerKeyRouter(ABC):
             raise ValueError("layer state revision must be non-negative")
         if generation == self._generation and revision <= self._revision:
             return False
-        if not self._apply_state_inner(state):
-            return False
+        self._apply_state_inner(state)
         self._generation = generation
         self._revision = revision
         self._ready = True
@@ -111,11 +110,11 @@ class LayerKeyRouter(ABC):
         self._keys_by_identifier[layer.identifier] = layer_key
 
     @abstractmethod
-    def _apply_state_inner(self, state: dict) -> bool:
+    def _apply_state_inner(self, state: dict) -> None:
         """Reconcile mode-specific state after the generation/revision guard.
 
-        Returns True when the state actually changed (newer revision in the
-        same generation). Generation/revision commit only on success.
+        Generation/revision commit only when reconciliation returns without
+        raising.
         """
 
     def _install_layers(self, stage: Usd.Stage) -> None:  # noqa: B027

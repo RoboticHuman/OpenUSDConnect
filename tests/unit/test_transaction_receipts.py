@@ -198,6 +198,24 @@ def test_gap_is_rejected_with_expected_transaction(tmp_path):
         server.store.close()
 
 
+def test_invalid_transaction_is_rejected_before_queue_or_sequence_reservation(tmp_path):
+    server = UsdSyncServer(log_path=str(tmp_path / "invalid.db"), txn_batch_size=1)
+    try:
+        with pytest.raises(ValueError, match="transform fields"):
+            server.process_idempotent_txn(
+                [{"k": "set_xform_trs", "prim": "/World/X", "fields": ["bogus"]}],
+                client_id="client",
+                session_id="producer",
+                txn_id=1,
+            )
+        assert server.store.get_count() == 0
+        assert server.store.get_producer_progress("client", "producer") == 0
+        assert server._next_seq == 1
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
 def test_progress_and_authoritative_stage_survive_restart(tmp_path):
     db = str(tmp_path / "restart.db")
     first = UsdSyncServer(log_path=db, txn_batch_size=1)

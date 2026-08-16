@@ -35,6 +35,7 @@ def _state(
 class _LayeredQueue:
     layered_replay = True
     layered_replay_active = True
+    origin = None
 
     def __init__(self, messages):
         self.messages = list(messages)
@@ -47,6 +48,9 @@ class _LayeredQueue:
 
     def request_replay_from(self, seq_start):
         self.replay_requests.append(seq_start)
+
+    def mark_replay_applied(self):
+        return False
 
 
 def _property_event(seq: int, layer_key: str, value: int) -> bytes:

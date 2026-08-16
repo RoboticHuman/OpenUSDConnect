@@ -335,7 +335,7 @@ class VirtualStageFile(_CachedVirtualFile):
         self._sync_port = sync_port
         self._fmt = fmt
         self._department = department
-        self._scene_id = scene_id or getattr(sync_server, "scene_id", name.rsplit(".", 1)[0])
+        self._scene_id = scene_id or sync_server.scene_id
         self._vfs_url = vfs_url
 
     def _generate(self) -> tuple[bytes, tuple[int, int]]:
@@ -451,7 +451,7 @@ class VirtualStageFileSet:
         self.vfs_base_url = vfs_base_url.rstrip("/")
         self._advertise_host = advertise_host
         self._sync_port = sync_port
-        self._scene_id = scene_id or getattr(sync_server, "scene_id", flat_name)
+        self._scene_id = scene_id or sync_server.scene_id
         self._write_mode = write_mode
         self._validate_writes = validate_writes
         self.flattened = VirtualStageFile(

@@ -83,8 +83,6 @@ def test_remote_transform_and_materialx_changes_are_not_echoed(
             "/World/NoEchoParametricParent/Cube",
             "/World/NoEchoParametricParent/Cube",
             "/World/NoEchoParametricParent/Cube",
-            "/World/NoEchoParametricParent",
-            "/World/NoEchoParametricParent/Cube",
             "/World/NoEchoParametricParent/Cube",
             "/World/NoEchoParametricParent/Cube",
         ]
@@ -96,8 +94,6 @@ def test_remote_transform_and_materialx_changes_are_not_echoed(
             "set_xform_trs",
         ]
         assert [row[2] for row in rows[13:]] == [
-            "ensure_prim",
-            "ensure_prim",
             "ensure_xform_ops",
             "set_xform_trs",
         ]

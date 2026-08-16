@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 
-_DLL_DIRS_ENV = "OPENUSDCONNECT_DLL_DIRS"
+PLUGIN_DLL_DIRS_ENV = "OPENUSDCONNECT_DLL_DIRS"
 
 
 def prepend_dll_dirs(dirs: Iterable[str]) -> list[str]:
@@ -39,6 +39,6 @@ def prepend_dll_dirs(dirs: Iterable[str]) -> list[str]:
     return added
 
 
-def apply_env_dll_dirs(env_var: str = _DLL_DIRS_ENV) -> list[str]:
+def apply_env_dll_dirs(env_var: str = PLUGIN_DLL_DIRS_ENV) -> list[str]:
     """Prepend the ``os.pathsep``-separated directories named in ``env_var``."""
     return prepend_dll_dirs(os.environ.get(env_var, "").split(os.pathsep))

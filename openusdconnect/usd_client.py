@@ -215,6 +215,8 @@ class UsdReceiver:
             raise RuntimeError("UsdReceiver is closed")
         if not self._started:
             raise RuntimeError("UsdReceiver has not been started")
+        if self._stage is None:
+            return 0
         self._require_layered_replay()
         return self._dispatcher.drain_and_apply()
 
@@ -230,7 +232,6 @@ class UsdReceiver:
         if stage is None:
             self._stage = None
             self._dispatcher.unbind_stage()
-            self._dispatcher.adapter = None
             return
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)

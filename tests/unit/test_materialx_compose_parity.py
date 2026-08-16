@@ -637,6 +637,145 @@ class TestMaterialXComposeParity:
                 f"{label}: token[] mismatch"
             )
 
+    def test_live_overrides_inside_referenced_nested_material_round_trip(
+        self,
+        srv,
+        tmp_path,
+    ):
+        """Live overrides inside external and internal references keep parity.
+
+        The external asset contains an internally referenced Material, a
+        NodeGraph, and several shaders. The sender authors stronger values and
+        a stronger connection on the composed instance. Those incremental
+        opinions must reach the server and an already-running receiver.
+        """
+        asset_path = tmp_path / "referenced_look.usda"
+        asset = Usd.Stage.CreateNew(str(asset_path))
+        asset_root = asset.DefinePrim("/Asset", "Scope")
+        asset.SetDefaultPrim(asset_root)
+        asset.DefinePrim("/Asset/Library", "Scope")
+        asset.DefinePrim("/Asset/Looks", "Scope")
+
+        base = UsdShade.Material.Define(asset, "/Asset/Library/Base")
+        base.CreateInput("tint", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(0.2, 0.3, 0.4)
+        )
+        base.CreateInput("enabled", Sdf.ValueTypeNames.Bool).Set(True)
+        base.CreateInput("mode", Sdf.ValueTypeNames.Token).Set("base")
+        base.CreateInput("count", Sdf.ValueTypeNames.Int).Set(1)
+        base.CreateInput("label", Sdf.ValueTypeNames.String).Set("original")
+        base.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+            Sdf.AssetPath("./original.tx")
+        )
+
+        nodegraph = UsdShade.NodeGraph.Define(asset, "/Asset/Library/Base/NG")
+        nodegraph.CreateInput("gain", Sdf.ValueTypeNames.Float).Set(0.5)
+
+        color_a = UsdShade.Shader.Define(asset, "/Asset/Library/Base/ColorA")
+        color_a.CreateIdAttr("ND_constant_color3")
+        color_a_out = color_a.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+        color_b = UsdShade.Shader.Define(asset, "/Asset/Library/Base/ColorB")
+        color_b.CreateIdAttr("ND_constant_color3")
+        color_b.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+        surface = UsdShade.Shader.Define(asset, "/Asset/Library/Base/Surface")
+        surface.CreateIdAttr("ND_standard_surface_surfaceshader")
+        surface.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.25)
+        surface.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+            color_a_out
+        )
+        surface_out = surface.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        base.CreateSurfaceOutput("mtlx").ConnectToSource(surface_out)
+
+        instance = UsdShade.Material.Define(asset, "/Asset/Looks/Instance")
+        instance.GetPrim().GetReferences().AddInternalReference(
+            "/Asset/Library/Base"
+        )
+        asset.GetRootLayer().Save()
+
+        sender = Usd.Stage.CreateInMemory()
+        sender_root = sender.DefinePrim("/World/LookAsset", "Scope")
+        sender_root.GetReferences().AddReference(str(asset_path))
+        emitter = NoticeEmitter(sender)
+
+        initial = emitter.snapshot_events()
+        assert any(
+            event["k"] == "set_reference" and event["prim"] == "/World/LookAsset"
+            for event in initial
+        )
+        replayed = _server_process_and_replay(srv, initial)
+        receiver = Usd.Stage.CreateInMemory()
+        apply_events(receiver, replayed)
+
+        material_path = "/World/LookAsset/Looks/Instance"
+        nodegraph_path = f"{material_path}/NG"
+        surface_path = f"{material_path}/Surface"
+        color_b_path = f"{material_path}/ColorB"
+        material = UsdShade.Material.Get(sender, material_path)
+        material.GetInput("tint").Set(Gf.Vec3f(0.9, 0.1, 0.6))
+        material.GetInput("enabled").Set(False)
+        material.GetInput("mode").Set("live")
+        material.GetInput("count").Set(7)
+        material.GetInput("label").Set("override")
+        material.GetInput("file").Set(Sdf.AssetPath("./live.tx"))
+        UsdShade.NodeGraph.Get(sender, nodegraph_path).GetInput("gain").Set(0.8)
+        live_surface = UsdShade.Shader.Get(sender, surface_path)
+        live_surface.GetInput("roughness").Set(0.65)
+        live_surface.GetInput("base_color").ConnectToSource(
+            UsdShade.Shader.Get(sender, color_b_path).GetOutput("out")
+        )
+
+        changed = emitter.build_events_for_dirty()
+        input_events = {
+            event["prim"]: event
+            for event in changed
+            if event["k"] == K_SET_CONNECTABLE_INPUT
+        }
+        assert input_events[material_path]["inputs"] == {
+            "count": 7,
+            "enabled": False,
+            "file": "./live.tx",
+            "label": "override",
+            "mode": "live",
+            "tint": pytest.approx([0.9, 0.1, 0.6]),
+        }
+        assert input_events[nodegraph_path]["inputs"] == {"gain": pytest.approx(0.8)}
+        assert input_events[surface_path]["inputs"] == {
+            "roughness": pytest.approx(0.65)
+        }
+        assert any(
+            event["k"] in {K_SET_CONNECTABLE_CONNECTION, "set_sdf_spec_fields"}
+            and event["prim"] == surface_path
+            for event in changed
+        )
+
+        srv._commit_events(changed)
+        apply_events(receiver, changed)
+
+        for label, stage in (
+            ("sender", sender),
+            ("server", srv.stage),
+            ("receiver", receiver),
+        ):
+            live_material = UsdShade.Material.Get(stage, material_path)
+            assert live_material.GetInput("tint").Get() == Gf.Vec3f(0.9, 0.1, 0.6), label
+            assert live_material.GetInput("enabled").Get() is False, label
+            assert live_material.GetInput("mode").Get() == "live", label
+            assert live_material.GetInput("count").Get() == 7, label
+            assert live_material.GetInput("label").Get() == "override", label
+            assert live_material.GetInput("file").Get().path == "./live.tx", label
+            assert UsdShade.NodeGraph.Get(stage, nodegraph_path).GetInput(
+                "gain"
+            ).Get() == pytest.approx(0.8), label
+            stage_surface = UsdShade.Shader.Get(stage, surface_path)
+            assert stage_surface.GetInput("roughness").Get() == pytest.approx(0.65), label
+            sources, invalid = stage_surface.GetInput("base_color").GetConnectedSources()
+            assert not invalid, label
+            assert len(sources) == 1, label
+            assert str(sources[0].source.GetPath()) == color_b_path, label
+
+        emitter.cleanup()
+
 
     def test_variant_scoped_material_binding_follows_selection(self, srv):
         """Material bindings authored inside a variant scope must follow the

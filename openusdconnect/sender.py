@@ -28,6 +28,7 @@ from .protocol import (
     make_txn,
 )
 from .protocol_constants import LayerMode
+from .protocol_validation import validate_events
 from .recovery import (
     QuarantinedTransaction,
     RecoveryArtifact,
@@ -86,6 +87,8 @@ class EventSender:
         session_id: str | None = None,
         max_pending_transactions: int = _MAX_PENDING_TRANSACTIONS,
     ):
+        if role != "emitter":
+            raise ValueError("EventSender role must be 'emitter'")
         if max_pending_transactions < 1:
             raise ValueError("max_pending_transactions must be positive")
         self.host = host
@@ -367,6 +370,7 @@ class EventSender:
         """
         if not events:
             return False
+        validate_events(events, layer_mode=self.layer_mode)
         try:
             # Transaction identity and wire order are one operation. Without
             # this outer lock, concurrent callers can allocate IDs 1 then 2
@@ -411,6 +415,7 @@ class EventSender:
         """
         if not events:
             raise ValueError("repair events must not be empty")
+        validate_events(events, layer_mode=self.layer_mode)
         with self._condition:
             failure = self._failure
             if failure is None:

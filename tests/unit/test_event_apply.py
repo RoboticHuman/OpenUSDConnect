@@ -18,6 +18,7 @@ from openusdconnect.event_apply import (
     apply_event,
     apply_events,
     atomic_apply,
+    atomic_apply_prim_paths,
     ensure_canonical_ops,
     get_or_define_prim,
 )
@@ -1614,3 +1615,62 @@ class TestScopedAtomicApply:
         prim = stage.GetPrimAtPath("/World/Keep")
         assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
         assert not stage.GetPrimAtPath("/World/Mat")
+
+    def test_exact_sdf_property_scope_uses_owning_prim(self):
+        events = [
+            {
+                "k": "set_sdf_spec_fields",
+                "prim": "/World/Model",
+                "spec_path": "/World/Model.size",
+                "spec_kind": "attribute",
+            }
+        ]
+        assert atomic_apply_prim_paths(events) == ["/World/Model"]
+
+    def test_inactive_variant_scope_uses_variant_owner(self):
+        events = [
+            {
+                "k": "set_sdf_spec_fields",
+                "prim": "/World/Model/Geom",
+                "spec_path": "/World/Model{look=Red}Geom.size",
+                "spec_kind": "attribute",
+            }
+        ]
+        assert atomic_apply_prim_paths(events) == ["/World/Model"]
+
+    def test_inactive_variant_scope_rolls_back_variant_subtree(self):
+        stage = Usd.Stage.CreateInMemory()
+        layer = stage.GetEditTarget().GetLayer()
+        model = Sdf.CreatePrimInLayer(layer, "/World/Model")
+        variant_set = Sdf.VariantSetSpec(model, "look")
+        variant = Sdf.VariantSpec(variant_set, "Red")
+        geom = Sdf.PrimSpec(variant.primSpec, "Geom", Sdf.SpecifierDef)
+        geom.documentation = "before"
+        event = {
+            "k": "set_sdf_spec_fields",
+            "prim": "/World/Model/Geom",
+            "spec_path": str(geom.path),
+            "spec_kind": "prim",
+        }
+
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage, prim_paths=atomic_apply_prim_paths([event])):
+                geom.documentation = "after"
+                raise RuntimeError("boom")
+
+        assert layer.GetPrimAtPath(geom.path).documentation == "before"
+
+    def test_layer_sdf_event_requires_full_snapshot(self):
+        events = [
+            {
+                "k": "set_sdf_spec_fields",
+                "prim": "/",
+                "spec_path": "/",
+                "spec_kind": "layer",
+            }
+        ]
+        assert atomic_apply_prim_paths(events) is None
+
+    def test_rename_scope_includes_old_and_new_names(self):
+        events = [{"k": K_RENAME_PRIM, "prim": "/World/Old", "new_name": "New"}]
+        assert atomic_apply_prim_paths(events) == ["/World/Old", "/World/New"]

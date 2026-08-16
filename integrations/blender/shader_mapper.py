@@ -291,6 +291,7 @@ class MaterialXStandardSurfaceMapper(MultiNodeShaderMapper):
             "specular_roughness": bsdf.inputs["Roughness"],
             "transmission": bsdf.inputs["Transmission Weight"],
             "subsurface": bsdf.inputs["Subsurface Weight"],
+            "subsurface_color": mix_base.inputs[7],
             "subsurface_radius": bsdf.inputs["Subsurface Radius"],
             "subsurface_scale": bsdf.inputs["Subsurface Scale"],
             "subsurface_anisotropy": bsdf.inputs["Subsurface Anisotropy"],
@@ -309,6 +310,14 @@ class MaterialXStandardSurfaceMapper(MultiNodeShaderMapper):
             "normal": bsdf.inputs["Normal"],
             "tangent": bsdf.inputs["Tangent"],
         }
+
+        subsurface_weight = inputs.get("subsurface", 0.0)
+        if (
+            isinstance(subsurface_weight, (int, float))
+            and subsurface_weight > 0.0
+            and "subsurface_color" in inputs
+        ):
+            input_map.pop("base_color", None)
 
         output_map = {"out": bsdf.outputs[0]}
 

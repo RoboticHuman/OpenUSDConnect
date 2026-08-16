@@ -26,17 +26,36 @@ from openusdconnect.sdf_arc_state import (
 
 
 class _NullReceiver:
+    layered_replay_active = False
+    origin = None
+
     def drain_queue(self):
         return []
 
+    def mark_replay_applied(self):
+        return False
+
+    def request_replay_from(self, _seq_start):
+        pass
+
 
 class _QueueReceiver:
+    layered_replay_active = False
+    origin = None
+
     def __init__(self):
         self.messages = []
+        self.replay_requests = []
 
     def drain_queue(self):
         messages, self.messages = self.messages, []
         return messages
+
+    def mark_replay_applied(self):
+        return False
+
+    def request_replay_from(self, seq_start):
+        self.replay_requests.append(seq_start)
 
 
 def _create_variant_asset(path, version: str = "1") -> None:

@@ -27,6 +27,7 @@ from openusdconnect.adapters import DCCAdapter
 from openusdconnect.axis_conversion import (
     compose_axis_rotation,
     needs_conversion,
+    strip_axis_rotation,
     yup_to_zup_quat,
     yup_to_zup_scale,
     yup_to_zup_vec,
@@ -38,7 +39,10 @@ from openusdconnect.protocol_constants import (
     K_SET_VARIANT_SELECTIONS,
     K_UNLOAD_PAYLOAD,
 )
-from openusdconnect.shader_connections import resolve_nodegraph_connection
+from openusdconnect.shader_connections import (
+    flatten_interface_input_connections,
+    resolve_nodegraph_connection,
+)
 
 from .shader_mapper import create_default_registry
 
@@ -51,6 +55,9 @@ _PROP_USD_PRIM_ALIASES = "_usd_prim_path_aliases"
 # geometry/material edits still use ``usd_prim_path``, while reverse-captured
 # object transforms must be authored on the parent Xform.
 _PROP_USD_XFORM_PRIM_PATH = "_usd_xform_prim_path"
+# Importer provenance for the USD-to-Blender basis change; authored rotations
+# must not be mistaken for axis conversion.
+_PROP_USD_AXIS_CONVERSION = "_usd_axis_conversion"
 
 
 def _object_prim_paths(obj) -> tuple[str, ...]:
@@ -66,6 +73,29 @@ def _object_prim_paths(obj) -> tuple[str, ...]:
             if isinstance(path, str) and path
         )
     )
+
+
+def _select_imported_root(imported_roots, prim_path_ref: str):
+    """Choose the requested root when prototypes also import as top-level objects."""
+    if not imported_roots:
+        return None
+
+    target = str(prim_path_ref or "").rstrip("/")
+    if target:
+        exact = [
+            obj
+            for obj in imported_roots
+            if str(obj.get("usd_prim_path", "")).rstrip("/") == target
+        ]
+        if exact:
+            return min(exact, key=lambda obj: str(getattr(obj, "name", "")))
+
+    def _fallback_key(obj):
+        path = str(obj.get("usd_prim_path", ""))
+        depth = path.count("/") if path.startswith("/") else 1_000_000
+        return (depth, path, str(getattr(obj, "name", "")))
+
+    return min(imported_roots, key=_fallback_key)
 
 
 def apply_stage_metadata_to_scene(
@@ -107,27 +137,14 @@ def apply_stage_metadata_to_scene(
 
 
 def _has_axis_rotation(obj) -> bool:
-    """Return True if obj's world transform includes non-identity rotation,
-    catching axis-conversion rotation from any ancestor.
-
-    Composes the world matrix from local matrices (matrix_basis /
-    matrix_parent_inverse), which are current immediately, rather than reading
-    matrix_world. The depsgraph only re-evaluates matrix_world after
-    view_layer.update, which the receiver defers to end-of-tick, so mid-drain
-    matrix_world can still miss an ancestor rotation (e.g. an imported Y-up root)
-    that a child created in the same drain must inherit.
-    """
-    if not BPY_AVAILABLE or obj is None:
-        return False
-    m = mathutils.Matrix.Identity(4)
-    chain = []
-    o = obj
-    while o is not None:
-        chain.append(o)
-        o = o.parent
-    for o in reversed(chain):
-        m = m @ o.matrix_parent_inverse @ o.matrix_basis
-    return m.to_quaternion() != _IDENTITY_QUAT
+    """Return whether ancestry contains the importer-tagged basis conversion."""
+    current = obj
+    while current is not None:
+        original = getattr(current, "original", current)
+        if bool(original.get(_PROP_USD_AXIS_CONVERSION, False)):
+            return True
+        current = getattr(current, "parent", None)
+    return False
 
 
 def _apply_camera_attrs(camera_data, attrs: dict, meters_per_unit: float) -> None:
@@ -457,6 +474,8 @@ class BlenderAdapter(DCCAdapter):
             return True
 
         new = self._create_blender_object(prim_path, type_name)
+        # Receive-created objects represent authoritative USD state.
+        new[_PROP_USD_IMPORTED] = True
         self._link_object(new)
         self._registry.register(prim_path, new)
         self._parent_to_ancestor(new, prim_path)
@@ -886,11 +905,13 @@ class BlenderAdapter(DCCAdapter):
         if not BPY_AVAILABLE:
             return True
         # When ``info_id`` is non-empty, the prim is a UsdShade.Shader and
-        # the value is its Sdr identifier — look up a registered shader
-        # mapper. When empty, the prim is a NodeGraph/Material/UsdLux Light;
-        # route through the light-input handler (no-op for NodeGraph/Material
-        # since the prim has no LIGHT Blender object).
+        # the value is its Sdr identifier, so look up a registered shader
+        # mapper. When empty, the prim is a Material, NodeGraph, or UsdLux
+        # Light. Material and NodeGraph interface values are forwarded to the
+        # shader inputs that consume them; lights use their dedicated mapping.
         if not info_id:
+            if self._apply_interface_inputs(prim_path, inputs):
+                return True
             return self._apply_light_input(prim_path, inputs, input_types)
         mapper = self._shader_registry.get(info_id)
         if not mapper:
@@ -905,6 +926,72 @@ class BlenderAdapter(DCCAdapter):
         if mapper.is_multi_node:
             return self._apply_multi_node_shader(prim_path, mapper, inputs)
         return self._apply_single_node_shader(prim_path, mapper, inputs)
+
+    def _apply_interface_inputs(self, prim_path: str, inputs: dict) -> bool:
+        """Apply edited Material/NodeGraph inputs to their shader consumers.
+
+        The dispatcher updates ``mirror_stage`` before calling the external
+        adapter, so OpenUSD can resolve the composed interface connections for
+        the exact state being delivered. Blender has no nodes for USD
+        interface inputs; updating the mapped consumer sockets is therefore
+        the native representation of the same edit.
+        """
+        if self.mirror_stage is None or not inputs:
+            return False
+
+        from pxr import UsdShade
+
+        from openusdconnect.usd_state import usd_value_to_python
+
+        prim = self.mirror_stage.GetPrimAtPath(prim_path)
+        if not prim or not (
+            prim.IsA(UsdShade.Material) or prim.IsA(UsdShade.NodeGraph)
+        ):
+            return False
+
+        connectable = (
+            UsdShade.Material(prim)
+            if prim.IsA(UsdShade.Material)
+            else UsdShade.NodeGraph(prim)
+        )
+        edited_names = set(inputs)
+        consumer_updates: dict[str, dict] = {}
+        for interface_input, consumers in (
+            connectable.ComputeInterfaceInputConsumersMap(True).items()
+        ):
+            if interface_input.GetBaseName() not in edited_names:
+                continue
+            value = usd_value_to_python(interface_input.Get())
+            if value is None:
+                continue
+            for consumer in consumers:
+                shader = UsdShade.Shader(consumer.GetPrim())
+                if not shader:
+                    continue
+                shader_id = shader.GetIdAttr().Get()
+                if not shader_id:
+                    continue
+                shader_path = str(shader.GetPath())
+                update = consumer_updates.setdefault(
+                    shader_path,
+                    {
+                        "shader_id": str(shader_id),
+                        "inputs": {},
+                        "input_types": {},
+                    },
+                )
+                input_name = consumer.GetBaseName()
+                update["inputs"][input_name] = value
+                update["input_types"][input_name] = str(consumer.GetTypeName())
+
+        for shader_path, update in consumer_updates.items():
+            self.set_connectable_input(
+                shader_path,
+                update["shader_id"],
+                update["inputs"],
+                update["input_types"],
+            )
+        return True
 
     def _apply_light_input(self, prim_path: str, inputs: dict, input_types: dict) -> bool:
         """Route UsdLux light inputs to the Blender light data block.
@@ -1585,12 +1672,11 @@ class BlenderAdapter(DCCAdapter):
         imported_roots = [
             obj for obj in new_objs if obj.parent is None or obj.parent not in new_objs
         ]
+        root = _select_imported_root(imported_roots, prim_path_ref)
 
         # Remap file-internal paths to composed scene paths.
         # e.g. "/Teapot/teapot_MeshShape" → "/World/Teapot/teapot_MeshShape".
-        # Imported roots are registered in the cache but their usd_prim_path
-        # is NOT overwritten — the merge below handles that.
-        imported_root_set = set(imported_roots)
+        # Preserve the selected root until merge; remap other roots normally.
         for obj in new_objs:
             hook_path = obj.get("usd_prim_path", "")
             if hook_path and prim_path_ref and hook_path.startswith(prim_path_ref):
@@ -1598,7 +1684,7 @@ class BlenderAdapter(DCCAdapter):
             else:
                 obj_name = obj.name.replace(".", "_")
                 composed_path = f"{prim_path}/{obj_name}"
-            if obj in imported_root_set:
+            if obj is root:
                 # Register the child path so lookups (e.g. set_material_binding)
                 # can find the merged root by its original mesh path.
                 if composed_path != prim_path:
@@ -1620,8 +1706,8 @@ class BlenderAdapter(DCCAdapter):
         # The root becomes the prim representation — it holds both the
         # container's position and the import-time Rx(90°) axis rotation.
         merged = None
-        if imported_roots:
-            root = imported_roots[0]
+        if root is not None:
+            extra_roots = [obj for obj in imported_roots if obj is not root]
 
             # Transfer container's properties to the imported root
             root["usd_prim_path"] = prim_path
@@ -1639,17 +1725,24 @@ class BlenderAdapter(DCCAdapter):
             root.parent = container_parent
             root.matrix_parent_inverse = container.matrix_parent_inverse.copy()
 
-            # Avoid double Rx(90°): if the parent chain already has axis
-            # rotation, reset the root's own import-time rotation.
-            if _has_axis_rotation(container_parent):
-                root.rotation_quaternion = (1, 0, 0, 0)
-                root.rotation_euler = (0, 0, 0)
-                root.rotation_axis_angle = (0, 0, 1, 0)
+            # Strip only import-time axis rotation, preserving authored rotation.
+            if self._needs_axis_conv and _has_axis_rotation(container_parent):
+                imported_q = root.matrix_basis.to_quaternion()
+                stripped = strip_axis_rotation(
+                    imported_q.w,
+                    imported_q.x,
+                    imported_q.y,
+                    imported_q.z,
+                )
+                root.rotation_mode = "QUATERNION"
+                root.rotation_quaternion = mathutils.Quaternion(stripped)
+                if _PROP_USD_AXIS_CONVERSION in root:
+                    del root[_PROP_USD_AXIS_CONVERSION]
 
-            # Move any additional imported roots under the same parent
-            for extra_root in imported_roots[1:]:
-                extra_root.parent = root
-                extra_root.matrix_parent_inverse = _IDENTITY_4X4.copy()
+            # Geometry Nodes already composes PointInstancer prototypes;
+            # parenting extra roots would apply the reference transform twice.
+            for extra_root in extra_roots:
+                extra_root.parent = None
 
             # Remove the container — frees its name for the merged root.
             container_name = container.name
@@ -1764,6 +1857,12 @@ class BlenderAdapter(DCCAdapter):
                     file_path,
                 )
                 if sid:
+                    flatten_interface_input_connections(
+                        UsdShade.Shader(prim),
+                        inputs,
+                        itypes,
+                        conns,
+                    )
                     shader_events.append((scene_path, sid, inputs, itypes))
                     shader_material_paths[scene_path] = _remap(material_path)
                     shader_ids[scene_path] = sid

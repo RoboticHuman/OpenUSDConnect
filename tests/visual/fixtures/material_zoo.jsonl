@@ -143,7 +143,6 @@
 {"k": "ensure_prim", "prim": "/World/McpBall2", "typeName": "Sphere"}
 {"attrs": {"radius": 0.699999988079071}, "k": "set_gprim_attrs", "prim": "/World/McpBall2"}
 {"k": "ensure_xform_ops", "prim": "/World/McpBall2"}
-{"fields": [], "k": "set_xform_trs", "prim": "/World/McpBall2"}
 {"k": "set_material_binding", "material_path": "/World/Looks/EmeraldMcp", "prim": "/World/McpBall2"}
 {"fields": ["t"], "k": "set_xform_trs", "prim": "/World/McpBall2", "t": [6.0, 1.5, 0.0]}
 {"k": "ensure_prim", "prim": "/World/Bishop", "typeName": "Xform"}

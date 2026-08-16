@@ -686,7 +686,7 @@ class NativeSdfLayerChangeTracker:
     def restore_prepared(self) -> None:
         if not self.graph.ready or not self._prepared:
             return
-        from .event_apply import apply_events, atomic_apply
+        from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
 
         with self.suppressed():
             reachable = {
@@ -695,9 +695,13 @@ class NativeSdfLayerChangeTracker:
             for batch in self._prepared:
                 if batch.layer.identifier not in reachable:
                     continue
+                events = self._events_for(batch)
                 with Usd.EditContext(self.stage, Usd.EditTarget(batch.layer)):
-                    with atomic_apply(self.stage):
-                        apply_events(self.stage, self._events_for(batch))
+                    with atomic_apply(
+                        self.stage,
+                        prim_paths=atomic_apply_prim_paths(events),
+                    ):
+                        apply_events(self.stage, events)
             self.sync_graph()
 
     def accept_authoritative_event(self, _layer: Sdf.Layer, _event: dict) -> None:

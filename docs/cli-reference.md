@@ -13,6 +13,7 @@ OpenUSDConnect keeps endpoint names consistent across its user-facing tools:
 | Complete virtual-file URL | `--vfs-url` | `http://127.0.0.1:7280/usd/scene.usd` |
 | SQLite event log | `--event-log` | `usd_events.db` |
 | Dashboard listener | `--dashboard-port` | disabled |
+| Windows USD plugin dependency directory | `--plugin-dll-dir` (repeatable) | `OPENUSDCONNECT_DLL_DIRS` |
 
 Durations state their role in the option name, such as `--poll-interval`,
 `--settle-time`, and `--startup-timeout`. Invalid ports, counts, and durations
@@ -47,6 +48,18 @@ file-backed root and sublayers opened by every process. It requires `--base`
 and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
+
+## USD plugin startup
+
+The standard server initializes Sdr before it restores the event log or accepts
+connections. It inherits project USD configuration such as
+`PXR_PLUGINPATH_NAME`. On Windows, use repeatable `--plugin-dll-dir` options or
+the path-separator delimited `OPENUSDCONNECT_DLL_DIRS` environment variable for
+plugin dependency directories that are not already on `PATH`.
+
+This setup is intentionally renderer-agnostic. Renderer-specific variables and
+plugin discovery paths must be present in the environment used to launch the
+server, just as they are for the project's DCC clients.
 
 ## Development Commands
 

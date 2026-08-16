@@ -307,7 +307,7 @@ def _test_step():
 
         if _step == 8:
             scene = bpy.context.scene
-            if int(scene.usd_connect_recv_last_seq) < 17:
+            if int(scene.usd_connect_recv_last_seq) < 15:
                 return _wait_or_fail(
                     f"local parametric edit stalled at {scene.usd_connect_recv_last_seq}",
                 )
