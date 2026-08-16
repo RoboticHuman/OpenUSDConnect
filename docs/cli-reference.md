@@ -32,6 +32,7 @@ are rejected during argument parsing.
 | `uv run openusdconnect-mount-vfs --help` | Use the native Windows or macOS WebDAV filesystem client. | base installation |
 | `uv run openusdconnect-send --help` | Send JSON events or protocol control messages. | base installation |
 | `uv run python -m integrations.mcp --help` | Expose the live scene through the MCP stdio server. | `server`, `mcp` |
+| `uv run python scripts/start_usdview.py --help` | Start a server and open usdview already connected. | `server`, OpenUSD/usdview runtime |
 | `uv run python -m integrations.usdview.launcher --help` | Open a stage in usdview with automatic receiver wiring. | OpenUSD/usdview runtime |
 
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
@@ -69,6 +70,7 @@ server, just as they are for the project's DCC clients.
 | `openusdconnect-build-sdf-notice-bridge` | Build exact Sdf change tracking against the active OpenUSD install. |
 | `scripts/setup_blender_test.py` | Download/configure a portable Blender test runtime. |
 | `scripts/start_usdconnect_debug.py` | Start the server and one or two debug-enabled Blender sessions. |
+| `scripts/start_usdview.py` | Start a temporary server and connected usdview session. |
 | `scripts/run_unreal_tests.py` | Discover Unreal, package the plugin, and run the real editor integration scenario. |
 | `scripts/run_material_zoo.py` | Stream the MaterialX/OpenPBR material zoo into Blender and/or usdview. |
 | `scripts/check_windows_unc_webdav.py` | Diagnose a Windows WebClient UNC read and parse the result as USD. |

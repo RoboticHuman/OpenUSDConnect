@@ -404,9 +404,14 @@ auto-start receiver/emitter when the import-panel options are enabled.
 
 ### usdview
 ```bash
-uv run python -m integrations.usdview.launcher scene.usda --port 7200
+uv run python scripts/start_usdview.py scene.usda
 # add --renderman to use the hdPrman delegate
 ```
+
+This starts a temporary server, discovers the matching usdview executable,
+wires the receiver plugin, and shuts the server down when usdview closes. Use
+`python -m integrations.usdview.launcher` only when connecting to a server that
+is already running.
 
 ### Unreal Engine
 The Unreal integration is a UE5 plugin (with a Python launcher for live edits).
