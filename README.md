@@ -68,6 +68,43 @@ Use `uv run openusdconnect-server --help` for server options. Common additions
 are `--departments animation,lighting,fx`, `--require-token`, and
 `--dashboard-port 8080`.
 
+### Project USD plugin environment
+
+The standard `openusdconnect-server` command initializes the Sdr registry
+before replay or listener startup. It inherits project configuration such as
+`PXR_PLUGINPATH_NAME` and renderer variables.
+
+On Windows, provide plugin dependency directories through repeatable
+`--plugin-dll-dir` options or the path-separator-delimited
+`OPENUSDCONNECT_DLL_DIRS` variable:
+
+```powershell
+$env:OPENUSDCONNECT_DLL_DIRS = "C:\Renderer\bin;C:\Renderer\lib"
+uv run openusdconnect-server --base scene.usda
+```
+
+Linux and macOS projects configure their loader environment before launch.
+OpenUSDConnect does not copy a DCC's private environment, so launch the server
+from the same project environment as its clients.
+
+Programmatic servers use the same settings through `ServerConfig`:
+
+```python
+from openusdconnect import ServerConfig, run_server
+
+run_server(
+    ServerConfig(
+        base_usd_path="scene.usda",
+        plugin_dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
+    )
+)
+```
+
+Custom hosts can call `prepare_usd_plugin_environment()` before touching Sdr.
+See the [command-line reference](docs/cli-reference.md#usd-plugin-startup) for
+the complete startup contract. The source-tree `integrations.run_server`
+wrapper remains a RenderMan compatibility convenience.
+
 ### Connect a USD-native application
 
 `ManagedClient` is the usual bidirectional API for applications that own a

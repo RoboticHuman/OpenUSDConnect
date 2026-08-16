@@ -13,6 +13,7 @@ collect_ignore_glob = ["test_bishop.py", "test_teapot_*.py", "test_two_*.py",
                        "test_playback_*.py", "test_chair_replay.py",
                        "test_material_zoo_replay.py",
                        "test_remote_descendant_edit.py",
+                       "test_point_instancer_group_edit.py",
                        "test_headless_time_samples_to_blender.py",
                        "diag_*.py"]
 

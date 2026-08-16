@@ -78,6 +78,7 @@ def test_server_config_disables_vfs_by_default():
     assert config.vfs is None
     assert config.txn_batch_size == 128
     assert config.txn_batch_delay_ms == 0.5
+    assert config.preflight_plugins is True
 
 
 def test_shared_stage_mode_rejects_managed_outputs():
@@ -89,6 +90,25 @@ def test_shared_stage_mode_rejects_managed_outputs():
         server_cli.run_server(
             ServerConfig(layer_mode="shared_stage", export_diff="changes.usda")
         )
+
+
+def test_plugin_preflight_runs_before_server_construction(monkeypatch):
+    events = []
+
+    def preflight(**_kwargs):
+        events.append("preflight")
+        raise RuntimeError("plugin initialization failed")
+
+    def construct_server(**_kwargs):
+        events.append("construct")
+
+    monkeypatch.setattr(server_cli, "prepare_usd_plugin_environment", preflight)
+    monkeypatch.setattr(server_cli, "UsdSyncServer", construct_server)
+
+    with pytest.raises(RuntimeError, match="plugin initialization failed"):
+        server_cli.run_server(ServerConfig())
+
+    assert events == ["preflight"]
 
 
 def test_main_maps_vfs_arguments_to_nested_config(monkeypatch):
@@ -144,6 +164,27 @@ def test_main_accepts_canonical_service_flags(monkeypatch):
 
     assert captured[0].log_path == "canonical.db"
     assert captured[0].dashboard_port == 8080
+
+
+def test_main_maps_plugin_dll_directories(monkeypatch):
+    captured = []
+    monkeypatch.setattr(server_cli, "run_server", captured.append)
+
+    server_cli.main(
+        ["--plugin-dll-dir", r"C:\Renderer\bin", "--plugin-dll-dir", r"D:\Plugin\lib"]
+    )
+
+    assert captured[0].plugin_dll_dirs == [r"C:\Renderer\bin", r"D:\Plugin\lib"]
+
+
+def test_main_reports_plugin_environment_failure_without_traceback(monkeypatch, caplog):
+    def fail(_config):
+        raise server_cli.PluginEnvironmentError("configure project plugins")
+
+    monkeypatch.setattr(server_cli, "run_server", fail)
+
+    assert server_cli.main([]) == 2
+    assert "configure project plugins" in caplog.text
 
 
 def test_main_maps_group_commit_configuration(monkeypatch):
