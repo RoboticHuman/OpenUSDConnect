@@ -29,8 +29,10 @@ Fast checks:
 from __future__ import annotations
 
 import json
+import struct
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import flatbuffers
 import numpy as np
@@ -371,6 +373,139 @@ def encode_message(msg: dict) -> bytes:
 
     builder.Finish(envelope)
     return bytes(builder.Output())
+
+
+_SEQ_STRUCT = struct.Struct("<i")
+_TIME_STRUCT = struct.Struct("<d")
+_XFORM_VECTOR_STRUCTS = {
+    "t": struct.Struct("<3f"),
+    "r": struct.Struct("<4f"),
+    "s": struct.Struct("<3f"),
+}
+_XFORM_VECTOR_VTABLE_OFFSETS = {"t": 8, "r": 10, "s": 12}
+_XFORM_TIME_VTABLE_OFFSET = 14
+_BROADCAST_SEQ_VTABLE_OFFSET = 4
+
+
+@dataclass(frozen=True, slots=True)
+class _XformBroadcastTemplate:
+    wire: bytes
+    seq_position: int
+    vector_positions: tuple[tuple[str, int], ...]
+    time_position: int | None
+
+    def render(self, msg: dict) -> bytes:
+        output = bytearray(self.wire)
+        _SEQ_STRUCT.pack_into(output, self.seq_position, msg["seq"])
+        event = msg["event"]
+        for field_name, position in self.vector_positions:
+            _XFORM_VECTOR_STRUCTS[field_name].pack_into(
+                output,
+                position,
+                *event[field_name],
+            )
+        if self.time_position is not None:
+            _TIME_STRUCT.pack_into(output, self.time_position, event["time"])
+        return bytes(output)
+
+
+class BroadcastEventEncoder:
+    """Encode repeated transform broadcasts from bounded wire templates.
+
+    Transform edits keep the same FlatBuffers layout while only their sequence
+    and numeric TRS values change. Other event kinds use the general encoder.
+    """
+
+    def __init__(self, max_templates: int = 4096):
+        if max_templates < 1:
+            raise ValueError("max_templates must be positive")
+        self._template_for = lru_cache(maxsize=max_templates)(self._build_template)
+
+    def encode(self, msg: dict) -> bytes:
+        event = msg.get("event")
+        if msg.get("type") != MSG_EVENT or not event or event.get("k") != K_SET_XFORM_TRS:
+            return encode_message(msg)
+
+        fields = frozenset(event.get("fields", ()))
+        if not fields or not fields <= _XFORM_VECTOR_STRUCTS.keys():
+            return encode_message(msg)
+        field_mask = sum(_TRS_BITS[field] for field in fields)
+        template = self._template_for(
+            event["prim"],
+            field_mask,
+            event.get("time") is not None,
+            msg.get("origin") or None,
+            msg.get("client_id") or None,
+            msg.get("client") or None,
+            msg.get("layer_key") or None,
+        )
+        return template.render(msg)
+
+    def cache_info(self):
+        return self._template_for.cache_info()
+
+    @staticmethod
+    def _build_template(
+        prim: str,
+        field_mask: int,
+        has_time: bool,
+        origin: str | None,
+        client_id: str | None,
+        client: str | None,
+        layer_key: str | None,
+    ) -> _XformBroadcastTemplate:
+        fields = [field for field in ("t", "r", "s") if field_mask & _TRS_BITS[field]]
+        event = {
+            "k": K_SET_XFORM_TRS,
+            "prim": prim,
+            "fields": fields,
+            **{field: [1.0] * (_XFORM_VECTOR_STRUCTS[field].size // 4) for field in fields},
+        }
+        if has_time:
+            event["time"] = 1.0
+        msg = {"type": MSG_EVENT, "seq": 1, "event": event}
+        for key, value in (
+            ("origin", origin),
+            ("client_id", client_id),
+            ("client", client),
+            ("layer_key", layer_key),
+        ):
+            if value is not None:
+                msg[key] = value
+
+        wire = encode_message(msg)
+        envelope = decode_envelope(wire)
+        _, broadcast = resolve_payload(envelope)
+        _, trs = resolve_event(broadcast.Event())
+
+        seq_position = BroadcastEventEncoder._scalar_position(
+            broadcast,
+            _BROADCAST_SEQ_VTABLE_OFFSET,
+        )
+        vector_positions = []
+        for field_name in fields:
+            offset = trs._tab.Offset(_XFORM_VECTOR_VTABLE_OFFSETS[field_name])
+            if not offset:
+                raise RuntimeError(f"transform template omitted {field_name!r}")
+            vector_positions.append((field_name, trs._tab.Vector(offset)))
+        time_position = (
+            BroadcastEventEncoder._scalar_position(trs, _XFORM_TIME_VTABLE_OFFSET)
+            if has_time
+            else None
+        )
+        return _XformBroadcastTemplate(
+            wire,
+            seq_position,
+            tuple(vector_positions),
+            time_position,
+        )
+
+    @staticmethod
+    def _scalar_position(table, vtable_offset: int) -> int:
+        offset = table._tab.Offset(vtable_offset)
+        if not offset:
+            raise RuntimeError(f"FlatBuffers template omitted vtable field {vtable_offset}")
+        return table._tab.Pos + offset
 
 
 # --- Per-message-type encoders ---
@@ -1889,13 +2024,13 @@ def _dict_set_xform_trs(trs, kind):
     ev = {"k": kind, "prim": _str(trs.Prim())}
     if bitmask & 1:
         fields.append("t")
-        ev["t"] = [trs.T(i) for i in range(trs.TLength())]
+        ev["t"] = trs.TAsNumpy().tolist()
     if bitmask & 2:
         fields.append("r")
-        ev["r"] = [trs.R(i) for i in range(trs.RLength())]
+        ev["r"] = trs.RAsNumpy().tolist()
     if bitmask & 4:
         fields.append("s")
-        ev["s"] = [trs.S(i) for i in range(trs.SLength())]
+        ev["s"] = trs.SAsNumpy().tolist()
     ev["fields"] = fields
     t = trs.Time()
     if t is not None:

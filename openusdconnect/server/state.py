@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from pxr import Ar, Sdf, Usd, UsdGeom
 
-from ..codec import encode_message, message_to_dict
+from ..codec import BroadcastEventEncoder, encode_message, message_to_dict
 from ..emitter import (
     NoticeEmitter,
     read_payloads,
@@ -562,6 +562,7 @@ class UsdSyncServer:
             maxsize=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
         )
         self._op_cache_layer: str | None = None
+        self._broadcast_encoder = BroadcastEventEncoder()
 
         # Incremental prim tracking avoids full log scans on dashboard polls.
         self._prim_paths: dict[str, str] = {}  # prim_path → typeName
@@ -3508,7 +3509,7 @@ class UsdSyncServer:
                 record["origin"] = origin
             if event.get("k") not in NON_COLLABORATION_KINDS:
                 record["layer_key"] = layer_key
-            record_bin = encode_message(record)
+            record_bin = self._broadcast_encoder.encode(record)
             if self.wire_metrics is not None:
                 self.wire_metrics.record(event.get("k", ""), len(record_bin))
             records.append((record, record_bin))
@@ -3638,7 +3639,7 @@ class UsdSyncServer:
             }
             if origin:
                 record["origin"] = origin
-            record_bin = encode_message(record)
+            record_bin = self._broadcast_encoder.encode(record)
             if self.wire_metrics is not None:
                 self.wire_metrics.record(event.get("k", ""), len(record_bin))
             records.append((record, record_bin))

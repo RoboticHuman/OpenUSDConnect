@@ -10,6 +10,7 @@ import pytest
 
 from openusdconnect.codec import (
     AttrValueType,
+    BroadcastEventEncoder,
     PayloadType,
     decode_envelope,
     encode_message,
@@ -326,6 +327,88 @@ class TestSetXformTrs:
         np_t = trs.TAsNumpy()
         assert np_t.dtype == np.float32
         assert list(np_t) == pytest.approx([1, 2, 3])
+
+
+class TestBroadcastEventEncoder:
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Cube",
+                "fields": ["t"],
+                "t": [1.25, -2.5, 3.75],
+            },
+            {
+                "k": "set_xform_trs",
+                "prim": "/World/Cube",
+                "fields": ["t", "r", "s"],
+                "t": [4.0, 5.0, 6.0],
+                "r": [0.5, 0.5, -0.5, 0.5],
+                "s": [2.0, 3.0, 4.0],
+                "time": 0.0,
+            },
+        ],
+    )
+    def test_transform_template_is_wire_identical(self, event):
+        encoder = BroadcastEventEncoder()
+        message = {
+            "type": "event",
+            "seq": 42,
+            "event": event,
+            "origin": "blender",
+            "client_id": "artist",
+            "client": "127.0.0.1:1234",
+            "layer_key": "animation",
+        }
+
+        assert encoder.encode(message) == encode_message(message)
+
+    def test_cached_output_does_not_mutate_previous_result(self):
+        encoder = BroadcastEventEncoder()
+        message = {
+            "type": "event",
+            "seq": 1,
+            "event": {
+                "k": "set_xform_trs",
+                "prim": "/World/Cube",
+                "fields": ["t"],
+                "t": [1.0, 2.0, 3.0],
+            },
+        }
+        first = encoder.encode(message)
+        message["seq"] = 2
+        message["event"]["t"] = [7.0, 8.0, 9.0]
+
+        second = encoder.encode(message)
+
+        assert message_to_dict(first)["seq"] == 1
+        assert message_to_dict(first)["event"]["t"] == pytest.approx([1.0, 2.0, 3.0])
+        assert message_to_dict(second)["seq"] == 2
+        assert message_to_dict(second)["event"]["t"] == pytest.approx([7.0, 8.0, 9.0])
+
+    def test_template_cache_is_bounded_and_other_events_fall_back(self):
+        encoder = BroadcastEventEncoder(max_templates=2)
+        for index in range(3):
+            message = {
+                "type": "event",
+                "seq": index + 1,
+                "event": {
+                    "k": "set_xform_trs",
+                    "prim": f"/World/P{index}",
+                    "fields": ["t"],
+                    "t": [float(index), 0.0, 0.0],
+                },
+            }
+            assert message_to_dict(encoder.encode(message)) == message
+        assert encoder.cache_info().currsize == 2
+
+        ensure = {
+            "type": "event",
+            "seq": 4,
+            "event": {"k": "ensure_prim", "prim": "/World/P3", "typeName": "Xform"},
+        }
+        assert encoder.encode(ensure) == encode_message(ensure)
 
 
 class TestDeletePrim:
