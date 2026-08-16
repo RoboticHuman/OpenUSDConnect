@@ -19,6 +19,12 @@ Durations state their role in the option name, such as `--poll-interval`,
 `--settle-time`, and `--startup-timeout`. Invalid ports, counts, and durations
 are rejected during argument parsing.
 
+`--durability strict` is the default and persists server-authored records
+before live publication. `realtime` may defer persistence for server-internal
+writes that do not carry producer progress. Client `Txn` acknowledgements keep
+their exactly-once contract in either mode: an acknowledged transaction and
+its cumulative producer high-water mark are durable.
+
 ## Primary Commands
 
 | Command | Purpose | Dependency groups |
@@ -45,7 +51,7 @@ receiver-owned collaboration layers, department policy, and VFS live-open
 workflows.
 
 `--layer-mode shared_stage` instead routes exact authored changes to equivalent
-file-backed root and sublayers opened by every process. It requires `--base`
+portable root and sublayers opened by every process. It requires `--base`
 and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
@@ -73,6 +79,7 @@ server, just as they are for the project's DCC clients.
 | `scripts/start_usdview.py` | Start a temporary server and connected usdview session. |
 | `scripts/run_unreal_tests.py` | Discover Unreal, package the plugin, and run the real editor integration scenario. |
 | `scripts/run_material_zoo.py` | Stream the MaterialX/OpenPBR material zoo into Blender and/or usdview. |
+| `scripts/stress_test_departments.py` | Stress managed transactions and optionally capture a py-spy profile. |
 | `scripts/check_windows_unc_webdav.py` | Diagnose a Windows WebClient UNC read and parse the result as USD. |
 | `scripts/bench_vfs_snapshot.py` | Measure VFS snapshot generation and cache behavior. |
 | `scripts/dump_events.py` | Decode an event-log database for diagnostics. |

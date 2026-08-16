@@ -41,7 +41,7 @@ def stage():
 
 class TestNoticeHandlerTracksAllAttrs:
     """The notice handler records every changed attr name in _dirty_attrs,
-    even ones the gprim scan filters out — channels need them for gating."""
+    even ones the gprim scan filters out channels need them for gating."""
 
     def test_xform_change_appears_in_dirty_attrs(self, stage):
         mesh = stage.DefinePrim("/Mesh", "Mesh")
@@ -146,7 +146,7 @@ class TestMixedChangesPreserveEmissions:
         assert vis[0]["visible"] is False
 
     def test_light_intensity_emits_alongside_primvar_change(self, stage):
-        # MeshLightAPI on a Mesh — exactly the kind of prim where the
+        # MeshLightAPI on a Mesh exactly the kind of prim where the
         # original bug bit: it carries both light inputs and primvars.
         mesh = stage.DefinePrim("/MeshLight", "Mesh")
         UsdLux.MeshLightAPI.Apply(mesh)
@@ -213,13 +213,13 @@ class TestMaterialBindingRebind:
         mat_b = stage.DefinePrim("/MatB", "Material")
         from pxr import UsdShade
 
-        # First bind — fires resync + info-only (Apply is structural).
+        # First bind fires resync + info-only (Apply is structural).
         UsdShade.MaterialBindingAPI.Apply(mesh).Bind(UsdShade.Material(mat_a))
 
         em = NoticeEmitter(stage)
         em.build_events_for_dirty()  # consume initial
 
-        # Rebind to a different material — fires info-only only.
+        # Rebind to a different material fires info-only only.
         UsdShade.MaterialBindingAPI(mesh).Bind(UsdShade.Material(mat_b))
 
         events = em.build_events_for_dirty()
@@ -236,7 +236,7 @@ class TestMaterialBindingRebind:
 
 class TestGateMutualExclusion:
     """A channel can opt into resync-only gating OR named-attr gating,
-    not both — the validation should reject the combination."""
+    not both the validation should reject the combination."""
 
     def test_both_resync_and_watched_attrs_rejected(self, stage):
         class BothChannel(PrimChannel):
@@ -259,7 +259,7 @@ class TestGateMutualExclusion:
 
 class TestDefaultIsAlwaysRead:
     """A channel that declares neither gate must always read on dirty
-    prims — the safe default for integrators who don't know what USD
+    prims the safe default for integrators who don't know what USD
     notice path their state changes arrive on."""
 
     def test_no_declarations_means_always_read(self):

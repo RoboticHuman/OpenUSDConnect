@@ -556,7 +556,7 @@ class TestUsdStageAdapterDirectMethods:
         adapter.set_payload("/A", [{"asset_path": "/tmp/p.usd"}])
         adapter.load_payload("/A")
         adapter.unload_payload("/A")
-        # Just verify no crash — actual load/unload depends on file existing
+        # Just verify no crash actual load/unload depends on file existing
 
     def test_set_variant_selections(self):
         import os

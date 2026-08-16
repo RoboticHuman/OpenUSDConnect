@@ -28,7 +28,7 @@ DASHBOARD_STYLE = """
         overflow: auto;
     }
 
-    /* JSON editor theme — desaturated to match dashboard */
+    /* JSON editor theme desaturated to match dashboard */
     body.body--dark .jse-theme-dark {
         --jse-theme-color: #7eb8da;
         --jse-background-color: #1a1f27;
@@ -59,7 +59,7 @@ DASHBOARD_STYLE = """
         --jse-value-color-null: #5e6872;
     }
 
-    /* Theme-aware colors — desaturated for low eye strain */
+    /* Theme-aware colors desaturated for low eye strain */
     .dash-accent { color: var(--dash-accent); }
     .dash-muted { color: var(--dash-muted) !important; }
     .dash-kind { color: var(--dash-kind); }
@@ -101,7 +101,7 @@ def setup_pages(srv: UsdSyncServer):
         ui.add_css(DASHBOARD_STYLE)
         dark = ui.dark_mode(True)
 
-        # Shared refresh registry — sections register callbacks,
+        # Shared refresh registry sections register callbacks,
         # single timer drives them all. Heavier panels that normally
         # refresh manually register in the full registry instead; the
         # timer runs those only when the refresh-all toggle is on.
@@ -363,7 +363,7 @@ def _render_prim_detail(detail: dict):
         )
         ui.label(str(len(attrs))).classes("text-xs dash-muted")
         ui.icon("info", size="xs").classes("dash-muted").tooltip(
-            "Attributes with an authored opinion — schema defaults not shown"
+            "Attributes with an authored opinion schema defaults not shown"
         )
     if not attrs:
         ui.label("No authored attributes").classes("dash-muted text-xs")
@@ -718,7 +718,7 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None,
     roster_open: dict[str, bool] = {}
 
     def _refresh_layer_cards():
-        """Refresh only the layer card list (safe for timer — no expansion reset)."""
+        """Refresh only the layer card list (safe for timer no expansion reset)."""
         layers = srv.get_layer_stack_info()
         connected_clients = {
             c["client_id"] for c in srv.get_client_list() if c.get("client_id")
@@ -738,7 +738,7 @@ def _build_layer_stack(srv: UsdSyncServer, register_refresh=None,
                     )
 
     def _refresh_all():
-        """Full refresh — layer cards + composed view. For user actions only."""
+        """Full refresh layer cards + composed view. For user actions only."""
         _refresh_layer_cards()
         _refresh_composed()
 
@@ -940,8 +940,8 @@ def _build_clients_table(srv: UsdSyncServer, register_refresh=None):
             {
                 "key": c["key"],
                 "role": c["role"],
-                "client_id": c["client_id"] or "—",
-                "origin": c.get("origin") or "—",
+                "client_id": c["client_id"] or "",
+                "origin": c.get("origin") or "",
                 "event_count": f"{c['event_count']:,}",
                 "last_activity": f"{c['last_activity_ago']:.0f}s ago",
             }
@@ -1007,7 +1007,7 @@ def _build_wire_metrics(srv: UsdSyncServer, register_refresh=None):
 
 
 def _build_token_panel(srv: UsdSyncServer):
-    """Token management panel — list issued tokens with revoke buttons."""
+    """Token management panel list issued tokens with revoke buttons."""
     ui.label("TOKENS").classes("text-xs font-semibold dash-muted uppercase mb-1")
 
     token_container = ui.column().classes("w-full mb-4")
@@ -1080,7 +1080,7 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
         btn_prev = ui.button(
             icon="chevron_left", on_click=lambda: _go(-1),
         ).props("flat dense round size=sm")
-        page_label = ui.label("—").classes("text-xs dash-muted")
+        page_label = ui.label("").classes("text-xs dash-muted")
         btn_next = ui.button(
             icon="chevron_right", on_click=lambda: _go(1),
         ).props("flat dense round size=sm")
@@ -1183,7 +1183,7 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
 
     _rebuild()
 
-    # Live event listener — called from the TCP server thread, so we
+    # Live event listener called from the TCP server thread, so we
     # must NOT touch NiceGUI UI elements directly.  Instead, set a flag
     # and let a timer on the NiceGUI thread pick it up.
     _has_new_events = {"value": False}

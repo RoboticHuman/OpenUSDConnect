@@ -18,7 +18,7 @@ import struct
 
 _HEADER = struct.Struct(">I")  # 4-byte big-endian unsigned int
 _HEADER_SIZE = _HEADER.size
-MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MiB — same limit as the old _MAX_LINE_SIZE
+MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MiB same limit as the old _MAX_LINE_SIZE
 
 
 class MessageTooLarge(Exception):
@@ -108,7 +108,7 @@ def recv_framed_rfile(rfile, *, max_size: int = MAX_MESSAGE_SIZE) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Batch framing — frame multiple payloads into a single bytes blob
+# Batch framing frame multiple payloads into a single bytes blob
 # ---------------------------------------------------------------------------
 
 def frame_batch(payloads: list[bytes]) -> bytes:

@@ -111,7 +111,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
         # Socket hardening: disable Nagle (small JSON messages benefit from
         # immediate sends), enable aggressive keepalive (silent-disconnect
-        # detection capped at ~60 s — see _set_keepalive), and set a
+        # detection capped at ~60 s see _set_keepalive), and set a
         # handshake timeout so misbehaving clients don't block handler threads.
         # The timeout is cleared before _read_loop since receivers legitimately
         # sit idle (only consuming broadcasts); keepalive surfaces dead peers
@@ -323,7 +323,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         )
 
         try:
-            # Create per-client layer only when department ordering is enabled.
+            # Select a department layer only when department ordering is enabled.
             # Without departments, all clients share edit_layer (last-write-wins).
             self._client_layer = None
             if (
@@ -472,7 +472,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             if pt != PayloadType.Txn:
                 continue
 
-            # Decode txn events to dicts for apply_txn — numpy arrays
+            # Decode txn events to dicts for apply_txn numpy arrays
             # for geometry attrs to avoid per-element Python iteration.
             _, txn_fb = resolve_payload(env)
             events = [

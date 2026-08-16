@@ -13,7 +13,7 @@ LOG = logging.getLogger(__name__)
 def _set_send_timeout(sock: socket.socket, timeout_s: float):
     """Set a send-only timeout on a socket (platform-aware).
 
-    Uses SO_SNDTIMEO so only sends are affected — recv stays blocking.
+    Uses SO_SNDTIMEO so only sends are affected recv stays blocking.
     settimeout() cannot be used here because it sets both send and recv
     timeouts, causing spurious TimeoutError in the read loop.
     """
@@ -54,7 +54,7 @@ def _set_keepalive(
     """Enable aggressive TCP keepalive on a socket. Defaults give silent-
     disconnect detection in ~60 s instead of the OS default of ~2 hours.
 
-    Per-option setsockopt failures are logged but don't raise — SO_KEEPALIVE
+    Per-option setsockopt failures are logged but don't raise SO_KEEPALIVE
     is the minimum guarantee, the per-platform tuning is best-effort.
     """
     try:

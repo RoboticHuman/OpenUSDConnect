@@ -1,4 +1,4 @@
-"""Stage parity tests — verify emitter, server, and receiver stages converge.
+"""Stage parity tests verify emitter, server, and receiver stages converge.
 
 Exercises the real server event processing (apply_txn, sequence assignment,
 event log) without TCP. Events flow: emitter → server.apply_txn → replay

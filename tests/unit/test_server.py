@@ -1,4 +1,4 @@
-"""Tests for UsdSyncServer — in-process, no TCP.
+"""Tests for UsdSyncServer in-process, no TCP.
 
 Instantiates UsdSyncServer directly and exercises its core logic:
 sequence assignment, event log, compaction, replay, apply_txn, edit layer, etc.
@@ -417,7 +417,7 @@ class TestCompaction:
         assert vis[0]["visible"] is True
 
     def test_load_unload_latest_wins(self, srv):
-        """load/unload are mutually exclusive — only last one kept."""
+        """load/unload are mutually exclusive only last one kept."""
         self._insert_events(
             srv,
             [
@@ -574,7 +574,7 @@ class TestCompaction:
         events = [message_to_dict(r[0])["event"] for r in rows]
         attr_evs = [e for e in events if e["k"] == "set_gprim_attrs"]
         assert len(attr_evs) == 1
-        # Both attrs survive — merged, not replaced
+        # Both attrs survive merged, not replaced
         assert attr_evs[0]["attrs"]["primvars:st"] == [[0, 0], [1, 0]]
         assert attr_evs[0]["attrs"]["radius"] == 2.0
         # Interpolation metadata survives
@@ -646,7 +646,7 @@ class TestCompaction:
         events = [message_to_dict(r[0])["event"] for r in rows]
         shader_evs = [e for e in events if e["k"] == "set_connectable_input"]
         assert len(shader_evs) == 1
-        # Both inputs survive — merged, not replaced
+        # Both inputs survive merged, not replaced
         assert shader_evs[0]["inputs"]["diffuseColor"] == [1, 0, 0]
         assert shader_evs[0]["inputs"]["roughness"] == 0.5
         assert shader_evs[0]["input_types"]["diffuseColor"] == "color3f"
@@ -1518,7 +1518,7 @@ class TestEditLayerWithBaseFile:
         assert abs(base_attr.default[0] - 3.0) < 1e-6
 
     def test_nested_base_layers_untouched(self, tmp_path):
-        """Server with a base that has sublayers — all original layers stay clean."""
+        """Server with a base that has sublayers all original layers stay clean."""
         # Create sublayer: layout.usda
         layout_path = str(tmp_path / "layout.usda")
         layout_stage = Usd.Stage.CreateNew(layout_path)
@@ -1694,7 +1694,7 @@ class TestNestedLayerEditing:
 
     @pytest.fixture
     def nested_srv(self, tmp_path):
-        # layout.usda — base positions
+        # layout.usda base positions
         layout_path = str(tmp_path / "layout.usda")
         layout_stage = Usd.Stage.CreateNew(layout_path)
         layout_stage.DefinePrim("/World", "Xform")
@@ -1705,7 +1705,7 @@ class TestNestedLayerEditing:
         layout_stage.GetRootLayer().Save()
         del layout_stage
 
-        # char_anim.usda — character keyframe
+        # char_anim.usda character keyframe
         char_path = str(tmp_path / "char_anim.usda")
         char_stage = Usd.Stage.CreateNew(char_path)
         char_stage.OverridePrim("/World")
@@ -1714,13 +1714,13 @@ class TestNestedLayerEditing:
         char_stage.GetRootLayer().Save()
         del char_stage
 
-        # animation.usda — sublayers char_anim.usda
+        # animation.usda sublayers char_anim.usda
         anim_path = str(tmp_path / "animation.usda")
         anim_layer = Sdf.Layer.CreateNew(anim_path)
         anim_layer.subLayerPaths = ["./char_anim.usda"]
         anim_layer.Save()
 
-        # shot.usda — sublayers animation + layout
+        # shot.usda sublayers animation + layout
         shot_path = str(tmp_path / "shot.usda")
         shot_layer = Sdf.Layer.CreateNew(shot_path)
         shot_layer.subLayerPaths = ["./animation.usda", "./layout.usda"]
@@ -1749,7 +1749,7 @@ class TestNestedLayerEditing:
         assert abs(t_table[0] - (-2.0)) < 1e-6
 
     def test_two_users_different_layers(self, nested_srv):
-        """Alice and Bob edit different session sublayers — both opinions visible."""
+        """Alice and Bob edit different session sublayers both opinions visible."""
         srv, _ = nested_srv
 
         alice_layer = Sdf.Layer.CreateAnonymous("alice")
@@ -1838,7 +1838,7 @@ class TestNestedLayerEditing:
             layer=alice_layer,
         )
 
-        # Alice wins — her layer is stronger regardless of write order
+        # Alice wins her layer is stronger regardless of write order
         t = self._get_composed_translate(srv.stage, "/World/Chair")
         assert abs(t[2] - 42.0) < 1e-6
 
@@ -1850,7 +1850,7 @@ class TestNestedLayerEditing:
         """Session layer edits override the entire root layer stack."""
         srv, _ = nested_srv
 
-        # Chair is at (3,0,5) from char_anim.usda — override via default edit layer
+        # Chair is at (3,0,5) from char_anim.usda override via default edit layer
         srv.apply_txn(
             [
                 {"k": "ensure_xform_ops", "prim": "/World/Chair"},
@@ -1897,13 +1897,13 @@ class TestNestedLayerEditing:
         assert char_layer.GetPrimAtPath("/World/NewPrim") is None
 
     def test_nested_user_layers_parent_wins(self, nested_srv):
-        """Bob's layer is nested inside Alice's — Alice's opinions are stronger.
+        """Bob's layer is nested inside Alice's Alice's opinions are stronger.
 
         Session structure:
             sessionLayer
               └── alice
                     └── subLayers:
-                          └── bob   (weaker — child sublayer of alice)
+                          └── bob   (weaker child sublayer of alice)
         """
         srv, tmp_path = nested_srv
 
@@ -1947,7 +1947,7 @@ class TestNestedLayerEditing:
             layer=alice_layer,
         )
 
-        # Alice wins — parent layer is stronger than child sublayer
+        # Alice wins parent layer is stronger than child sublayer
         t = self._get_composed_translate(srv.stage, "/World/Chair")
         assert abs(t[2] - 7.0) < 1e-6
 
@@ -1972,7 +1972,7 @@ class TestNestedLayerEditing:
         assert abs(t[2] - 7.0) < 1e-6
 
     def test_nested_user_layers_no_overlap(self, nested_srv):
-        """Bob nested under Alice, editing different prims — both visible.
+        """Bob nested under Alice, editing different prims both visible.
 
         Session structure:
             sessionLayer
@@ -2015,7 +2015,7 @@ class TestNestedLayerEditing:
             layer=bob_layer,
         )
 
-        # Both visible — no conflict
+        # Both visible no conflict
         t_table = self._get_composed_translate(srv.stage, "/World/Table")
         t_chair = self._get_composed_translate(srv.stage, "/World/Chair")
         assert abs(t_table[1] - 50.0) < 1e-6
@@ -2110,7 +2110,7 @@ class TestTokenBucket:
     def test_does_not_exceed_burst(self):
         """Tokens cap at burst even after long idle."""
         tb = TokenBucket(rate=1000.0, burst=3)
-        # Simulate 10s passing — would refill 10000, but capped at burst=3
+        # Simulate 10s passing would refill 10000, but capped at burst=3
         tb._last -= 10.0
         for _ in range(3):
             assert tb.try_consume() == 0.0

@@ -2,7 +2,7 @@
 
 Receive-only: no emitter, no feedback-loop guard. Stage mutation triggers
 ``Usd.Notice.ObjectsChanged`` which refreshes the viewport on its own.
-Built on ``UsdReceiver`` — token persistence, identity, and the underlying
+Built on ``UsdReceiver`` token persistence, identity, and the underlying
 ``ReceiverThread`` + ``EventDispatcher`` composition are handled by the client.
 """
 

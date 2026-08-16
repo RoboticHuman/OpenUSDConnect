@@ -118,8 +118,9 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
     ) -> dict:
         """Connect to the OpenUSDConnect sync server and start the read-only
         mirror stage. Uses env defaults (OPENUSDCONNECT_HOST/PORT) when args are
-        omitted. Authoring/introspection tools auto-connect, so calling this is
-        optional unless you want to target a specific server."""
+        omitted. Authoring tools can auto-connect; mirror-backed introspection
+        requires this call first unless an authoring call already established
+        the session."""
         return session.connect(host, port, client_id, department)
 
     @mcp.tool()

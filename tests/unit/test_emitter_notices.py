@@ -1,7 +1,7 @@
 """Headless tests for NoticeEmitter extensions.
 
 Tests creation, deletion, deactivation, rename detection,
-suppress flag, and ChangeBlock batching — all DCC-agnostic.
+suppress flag, and ChangeBlock batching all DCC-agnostic.
 """
 
 import numpy as np
@@ -320,7 +320,7 @@ class TestReentrantSuppress:
 
         emitter.suppress()  # depth 1
         emitter.suppress()  # depth 2
-        emitter.unsuppress()  # depth 1 — still suppressed
+        emitter.unsuppress()  # depth 1 still suppressed
 
         stage.DefinePrim("/World/ShouldBeHidden", "Xform")
         events = emitter.build_events_for_dirty()
@@ -849,7 +849,7 @@ class TestFirstEncounterStructuralEvents:
         xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
         xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
 
-        # First encounter — should have ensure_prim
+        # First encounter should have ensure_prim
         events1 = emitter.build_events_for_dirty()
         ensure1 = [e for e in events1 if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/Obj"]
         assert len(ensure1) == 1
@@ -1687,7 +1687,7 @@ class TestGprimAttrEmission:
         attrs = attr_evs[0]["attrs"]
         assert "normals" in attrs
         assert np.array_equal(attrs["normals"], [[0.0, 0.0, 1.0]] * 3)
-        # Interpolation in attr_interp (not primvar_meta — normals isn't a primvar)
+        # Interpolation in attr_interp (not primvar_meta normals isn't a primvar)
         interp = attr_evs[0].get("attr_interp", {})
         assert interp.get("normals") == "faceVarying"
 
@@ -1745,7 +1745,7 @@ class TestMaterialEmission:
 
     def test_asset_path_input_emitted(self):
         """Asset-typed shader inputs (e.g. UsdUVTexture file) are emitted
-        with the authored path and type 'asset' — not silently dropped."""
+        with the authored path and type 'asset' not silently dropped."""
         from pxr import Sdf, UsdShade
 
         stage, emitter = _make_stage_and_emitter()
@@ -1796,7 +1796,7 @@ class TestMaterialEmission:
     def test_material_output_connection_emitted(self):
         """A Material's outputs:surface.connect = <shader.outputs:surface>
         edge emits a K_SET_CONNECTABLE_CONNECTION event with the qualified
-        local_attr "outputs:surface" — same wire shape as input-side
+        local_attr "outputs:surface" same wire shape as input-side
         connections, just a different prefix."""
         from pxr import Sdf, UsdShade
 
@@ -1820,7 +1820,7 @@ class TestMaterialEmission:
 
     def test_nodegraph_output_port_emitted(self):
         """A NodeGraph's outputs:result.connect = <internal_shader.outputs:rgb>
-        emits the output-port edge — the core gap #7 capability that lets
+        emits the output-port edge the core gap #7 capability that lets
         MaterialX scenes with NodeGraph wrappers replicate faithfully."""
         from pxr import Sdf, UsdShade
 
@@ -1845,7 +1845,7 @@ class TestMaterialEmission:
 
     def test_interface_forwarding_emitted_as_input_source(self):
         """An input-to-input edge (NodeGraph interface forwarding) emits
-        with source_attr starting with 'inputs:' — proves the prefix on
+        with source_attr starting with 'inputs:' proves the prefix on
         source_attr correctly reflects the source's USD attribute type."""
         from pxr import Sdf, UsdShade
 

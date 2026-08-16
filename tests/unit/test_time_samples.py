@@ -103,7 +103,7 @@ def test_time_absent_round_trips_without_time_key():
 def test_wire_cost_no_time_is_baseline():
     """time=None encoding must be byte-identical to a baseline encoding.
 
-    Both must skip the FB optional slot entirely — proves the cost claim.
+    Both must skip the FB optional slot entirely proves the cost claim.
     """
     no_time = {
         "k": K_SET_XFORM_TRS,
@@ -253,7 +253,7 @@ def test_emitter_emits_one_event_per_authored_sample():
     # Second cycle: nothing changed, zero events.
     assert emitter.build_events_for_dirty() == []
 
-    # Modify just one sample — exactly one event.
+    # Modify just one sample exactly one event.
     t_op.Set(Gf.Vec3d(30, 0, 0), Usd.TimeCode(48.0))
     out = emitter.build_events_for_dirty()
     sampled = [e for e in out if e.get("time") == 48.0]
@@ -359,7 +359,7 @@ def test_emitter_emits_single_sample_attrs():
     """An attr with exactly ONE time sample and no default opinion must
     still replicate. Usd value resolution returns the held sample at every
     numeric time, but ``Get(Default())`` is None and
-    ``ValueMightBeTimeVarying()`` is certain-False below two samples — a
+    ``ValueMightBeTimeVarying()`` is certain-False below two samples a
     gate based on either drops the attr entirely. Covers all four
     time-aware kinds.
     """
@@ -700,14 +700,14 @@ def test_emitter_layer_scoped_time_samples():
     """Per-client-layer mode: emit only samples authored on the stage's
     edit target, never samples from a stronger sibling layer (another
     client). The composed view falls afoul of USD's "strongest layer with
-    samples wins the time domain" rule — both shadowing the weaker
+    samples wins the time domain" rule both shadowing the weaker
     client's own samples AND leaking the stronger client's into the
     weaker emitter.
     """
     stage = Usd.Stage.CreateInMemory()
     cube = UsdGeom.Cube.Define(stage, "/Cube")
 
-    # Stack two anonymous layers as session sublayers — layer_a is stronger.
+    # Stack two anonymous layers as session sublayers layer_a is stronger.
     layer_b = Sdf.Layer.CreateAnonymous("clientB")
     layer_a = Sdf.Layer.CreateAnonymous("clientA")
     stage.GetSessionLayer().subLayerPaths.insert(0, layer_b.identifier)

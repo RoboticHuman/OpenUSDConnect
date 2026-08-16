@@ -1,4 +1,4 @@
-"""Tests for the VFS provider (VirtualStageFile) — in-process, no HTTP.
+"""Tests for the VFS provider (VirtualStageFile) in-process, no HTTP.
 
 Exercises snapshot generation, embedded connection metadata, cache/etag
 invalidation, write policy, and the browsable multi-file VFS directory.
@@ -323,7 +323,7 @@ class TestMetadata:
         _send(srv, [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}])
         stage = _open_stage(vfile.read())
         meta = stage.GetRootLayer().customLayerData["openusdconnect"]
-        # seq 1 was /World — and /World is present
+        # seq 1 was /World and /World is present
         assert meta["snapshot_seq"] == 1
         assert stage.GetPrimAtPath("/World")
 

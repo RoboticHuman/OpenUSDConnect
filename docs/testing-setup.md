@@ -1,38 +1,171 @@
-# Testing Setup
+# Testing
 
-OpenUSDConnect has five tiers of tests:
+OpenUSDConnect separates fast core coverage from tests that require Blender,
+Unreal Engine, RenderMan, operating-system mounts, or large external assets.
 
-- **Unit tests** (`tests/unit/`) — protocol, event application, roundtrip, emitter notices, stage parity including shader inputs (no Blender needed)
-- **Integration tests** (`tests/integration/`) — headless adapter tests and full two-Blender integration tests
-- **Asset E2E tests** (`tests/integration/asset_tests/`) — full pipeline with real USD assets, material enrichment, texture connections, variant switching (requires Blender GUI, skipped by default)
-- **Unreal E2E tests** (`tests/integration/test_unreal_integration.py`) — packages the plugin, provisions or targets a project, and checks two-way stage and material synchronization in Unreal Editor (opt-in)
-- **Visual regression tests** (`tests/visual/`) — render reference scenes with RenderMan and FLIP-compare against committed goldens; catches rendered-output regressions across materials, shaders, cameras, lights, and geometry (requires RenderMan + `uv sync --group visual`, skipped by default)
+## Test tiers
 
-## Running Tests
+| Tier | Location | Default behavior |
+| --- | --- | --- |
+| Core and headless integration | `tests/unit/`, most of `tests/integration/` | runs normally |
+| Timing-dependent | tests marked `slow` | requires `--slow-tests` |
+| Blender integration | selected `tests/integration/` | skips when Blender is not configured |
+| Blender asset E2E | `tests/integration/asset_tests/` | requires `--asset-tests` and Blender |
+| Unreal E2E | `tests/integration/test_unreal_integration.py` | requires `--unreal-tests` |
+| Visual regression | `tests/visual/` | requires `--visual-tests`, RenderMan, and FLIP |
+
+Install the normal development environment:
 
 ```bash
-uv sync --group server --group vfs
-
-# All tests
-uv run pytest tests/ -v
-
-# Unit tests only (fast, no Blender needed; timing-dependent "slow" tests
-# are skipped by default)
-uv run pytest tests/unit/ -v
-
-# Include the timing-dependent tests (e.g. periodic compaction, which
-# waits out real tick intervals)
-uv run pytest tests/unit/ --slow-tests -v
-
-# Integration tests only (requires Blender)
-uv run pytest tests/integration/ -v
+uv sync --group server --group vfs --group dev
 ```
 
-Unit tests cover protocol validation, USD stage event application, and emitter/adapter roundtrips using the `pxr` (OpenUSD) Python bindings.
+Run the common suites:
 
-## Live-Open And VFS Tests
+```bash
+uv run pytest tests/unit/ -v
+uv run pytest tests/ -v
+uv run pytest tests/unit/ --slow-tests -v
+```
 
-The WebDAV live-open path and local mirror have a focused headless suite:
+`tests/` includes headless integration tests. Tests that need a missing external
+runtime skip with a reason rather than making the core suite unusable.
+
+## Blender
+
+Blender tests require Blender 4.4 or newer. The executable is resolved in this
+order:
+
+1. `--blender /path/to/blender`
+2. `BLENDER_EXE`
+3. the first non-comment line of `blender.test.cfg`
+4. skip if none is configured
+
+The easiest setup is the portable runtime:
+
+```bash
+uv run python scripts/setup_blender_test.py --version 5.0.1
+```
+
+The script downloads Blender under `.blender/` and writes
+`blender.test.cfg`. Omit `--version` for the script's current default. Remove
+the portable installation with:
+
+```bash
+uv run python scripts/setup_blender_test.py --cleanup
+```
+
+Examples with an existing installation:
+
+```bash
+BLENDER_EXE=/path/to/blender uv run pytest tests/integration/ -v
+uv run pytest tests/integration/ --blender /path/to/blender -v
+```
+
+The harness uses repo-local Blender user resources, so tests and addon builds do
+not modify a normal user installation.
+
+## Asset E2E tests
+
+Initialize the USD Working Group asset submodule first:
+
+```bash
+git submodule update --init --recursive
+```
+
+Then run:
+
+```bash
+uv run pytest tests/integration/asset_tests/ --asset-tests -v
+```
+
+These tests launch Blender and exercise the real server, addon, native USD
+import, references and payloads, variants, texture loading, MaterialX
+NodeGraphs, material identity, bindings, cameras, and backlog replay. Scope a
+failure to one test while iterating:
+
+```bash
+uv run pytest \
+  tests/integration/asset_tests/test_assets.py::test_bishop_materialx \
+  --asset-tests -v
+```
+
+Harness usage and extension guidance live beside the tests in
+[`tests/integration/asset_tests/README.md`](../tests/integration/asset_tests/README.md).
+
+### Inspect the Material Zoo interactively
+
+```bash
+uv run python scripts/run_material_zoo.py --show --renderman
+```
+
+The runner starts a temporary server, opens the unchanged `test_scene.usda` in
+Blender and usdview, and streams the committed Material Zoo fixture plus a
+shared camera and IBL. Use `--viewers blender` or `--viewers usdview` for one
+client, `--no-presentation` to omit camera/IBL events, and `--exit-after 0` to
+keep the session open until Ctrl+C.
+
+## Visual regression
+
+Visual tests render reference scenes with RenderMan and compare them with
+committed goldens using FLIP:
+
+```bash
+uv sync --group visual
+uv run pytest tests/visual --visual-tests -v
+```
+
+Regenerate an intended baseline change, inspect the image, then run the compare
+pass again:
+
+```bash
+uv run pytest tests/visual --visual-tests --update-baselines -v
+uv run pytest tests/visual --visual-tests -v
+```
+
+The tier skips when `RMANTREE` or `flip-evaluator` is unavailable. A comparison
+failure reports the FLIP error-map path. Goldens depend on the renderer, sample
+budget, and USD/RenderMan versions and are stored with Git LFS.
+
+The renderer registry is in `integrations/visualtest/renderers.py`. The default
+RenderMan path translates OpenPBR to standard_surface because hdPrman does not
+provide an OpenPBR adapter.
+
+## Unreal Engine
+
+Unreal tests package the plugin and launch a real editor. Discover available
+engines with:
+
+```bash
+uv run python scripts/run_unreal_tests.py --list-engines
+```
+
+Run the generated-project scenario:
+
+```bash
+uv run python scripts/run_unreal_tests.py \
+  --engine-root /path/to/UnrealEngine \
+  --work-dir /tmp/openusdconnect-unreal
+```
+
+Equivalent pytest entry point:
+
+```bash
+uv run pytest tests/integration/test_unreal_integration.py \
+  --unreal-tests \
+  --unreal-engine /path/to/UnrealEngine \
+  -v
+```
+
+The harness can also target an existing project or prebuilt plugin package.
+Use `uv run python scripts/run_unreal_tests.py --help` before enabling
+`--install-plugin` or `--replace-plugin`, because those options intentionally
+modify the selected project.
+
+## Live-open and VFS tests
+
+The focused portable suite covers metadata, ETags, snapshot caching, WebDAV
+verbs, write modes, local-bridge conflict handling, and replay continuation:
 
 ```bash
 uv run pytest \
@@ -42,495 +175,65 @@ uv run pytest \
   tests/unit/test_start_live_open.py \
   tests/integration/test_vfs_webdav.py \
   tests/integration/test_start_live_open.py \
+  tests/integration/test_live_discovery.py \
   -q
-uv run pytest tests/integration/test_live_discovery.py -q
 ```
 
-These cover snapshot metadata, ETag/cache invalidation, read-only/drop/translate
-write modes, WebDAV verbs, virtual directory browsing, composition roots,
-startup cleanup, HTTP snapshot caching, mount helper path generation, a real
-`Sdf.Layer.Save()` through the local mirror, and the replay contract for
-receivers started at `snapshot_seq + 1`.
-
-Real Windows WebClient/UNC behavior is opt-in because it depends on local
-Windows service and policy configuration:
+Real OS mounts are opt-in:
 
 ```powershell
 $env:OUC_RUN_UNC_SMOKE = "1"
 uv run pytest tests/integration/test_windows_unc_webdav.py -q
 ```
 
-For a friendlier workstation diagnostic:
-
-```powershell
-uv run python scripts/check_windows_unc_webdav.py --port 7280
-```
-
-To make the virtual share browseable in normal Windows file pickers:
-
-```powershell
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
-uv run python scripts/mount_vfs_share.py unmount --drive O:
-```
-
-The native macOS filesystem smoke is also opt-in because it creates a real
-WebDAV mount:
-
 ```bash
 OUC_RUN_MACOS_WEBDAV_SMOKE=1 \
   uv run pytest tests/integration/test_macos_webdav_mount.py -q
 ```
 
-For large-scene sizing:
+## Interactive Blender debugging
 
-```powershell
-uv run python scripts/bench_vfs_snapshot.py --base D:\path\to\scene.usda
-uv run python scripts/bench_vfs_snapshot.py --synthetic-prims 10000
-```
-
-## Coverage Report
+The debug launcher starts a server and one or two repo-isolated Blender
+instances with optional debugpy attachment:
 
 ```bash
-# Terminal summary
-uv run pytest tests/unit/ --cov
-
-# HTML report (opens htmlcov/index.html)
-uv run pytest tests/unit/ --cov --cov-report=html
+uv run python scripts/start_usdconnect_debug.py --wait-for-debugger
+uv run python scripts/start_usdconnect_debug.py --wait-for-debugger --two-blenders
 ```
 
-Coverage is configured in `pyproject.toml` under `[tool.coverage.run]` to measure the `openusdconnect` package. The `htmlcov/` directory is gitignored.
-
-## Blender Test Configuration
-
-Blender integration tests run headless (`blender --background`) and require Blender 4.4+. The test framework checks for a Blender executable in this order:
-
-| Priority | Method | Example |
-|----------|--------|---------|
-| 1 | `--blender` CLI flag | `uv run pytest --blender /path/to/blender` |
-| 2 | `BLENDER_EXE` env var | `BLENDER_EXE=/path/to/blender uv run pytest` |
-| 3 | `blender.test.cfg` file | Single line with the exe path (gitignored) |
-| 4 | None set | Blender tests are skipped |
-
-### Option A: Download portable Blender (recommended)
-
-The bundled setup script downloads the official portable Blender build, extracts it to `.blender/` in the repo root, and writes `blender.test.cfg` automatically:
-
-```bash
-# Download latest stable
-uv run python scripts/setup_blender_test.py
-
-# Or specify a version
-uv run python scripts/setup_blender_test.py --version 5.0.1
-```
-
-After this, all Blender tests work immediately:
-
-```bash
-uv run pytest tests/ -v
-```
-
-To clean up the downloaded Blender (~400 MB extracted):
-
-```bash
-uv run python scripts/setup_blender_test.py --cleanup
-```
-
-### Option B: Point to a local Blender build
-
-If you build Blender from source or have it installed, write the path to `blender.test.cfg`:
-
-```bash
-echo "/path/to/build/bin/blender" > blender.test.cfg
-```
-
-Or pass it per-run without a config file:
-
-```bash
-# Via environment variable
-BLENDER_EXE=/path/to/blender uv run pytest tests/ -v
-
-# Via CLI flag
-uv run pytest tests/ -v --blender /path/to/blender
-```
-
-### Option C: Skip Blender tests
-
-If none of the above are configured, Blender tests are automatically skipped. No action needed.
-
-## Unreal Test Configuration
-
-Unreal tests are opt-in because they package the plugin and launch a real editor. Both
-Launcher installations and source builds are supported. List the installations the
-harness can use with:
-
-```bash
-uv run python scripts/run_unreal_tests.py --list-engines
-```
-
-The harness checks, in order:
-
-1. `--engine-root`, which may point to an engine root, `Engine/`, or an editor executable.
-2. `OUC_UNREAL_ENGINE_ROOT` or `UNREAL_ENGINE_ROOT`.
-3. A path stored in the gitignored `unreal.test.cfg` file.
-4. The selected project's `EngineAssociation`, Epic Games Launcher manifests and
-   registered source builds.
-5. Standard platform install locations.
-
-The generated-project scenario needs no manual setup:
-
-```bash
-uv run python scripts/run_unreal_tests.py \
-  --engine-root "/Users/Shared/Epic Games/UE_5.8" \
-  --work-dir /tmp/openusdconnect-unreal
-```
-
-Omit `--engine-root` to use discovery. The equivalent pytest entry point is:
-
-```bash
-uv run pytest tests/integration/test_unreal_integration.py \
-  --unreal-tests \
-  --unreal-engine "/path/to/UnrealEngine" \
-  -v
-```
-
-The scenario opens a Y-up USD stage, connects both Unreal sockets to a real
-OpenUSDConnect server, and checks:
-
-- exact root-layer parity after two live transactions;
-- PreviewSurface scalar and color updates on Unreal material instances;
-- a texture update on a mesh with authored face-varying UVs;
-- MaterialX material regeneration;
-- Unreal-to-server transform and shader-input edits;
-- clean socket shutdown.
-
-`BuildPlugin` output is fingerprinted by engine installation, build identity, target
-platform, and plugin source. Packages are reused from the platform cache
-(`~/Library/Caches/OpenUSDConnect/Unreal` on macOS), while `--rebuild-plugin` forces a
-rebuild.
-
-To test an existing project, pass its descriptor. The harness does not modify that
-project unless installation is requested explicitly. `--install-plugin` copies the
-package and enables the four plugins used by the test scenario:
-
-```bash
-uv run python scripts/run_unreal_tests.py \
-  --project "/path/to/Project.uproject" \
-  --install-plugin
-
-# Replace an existing project plugin deliberately
-uv run python scripts/run_unreal_tests.py \
-  --project "/path/to/Project.uproject" \
-  --install-plugin \
-  --replace-plugin
-```
-
-`--plugin-package` accepts an existing `BuildPlugin` output. `--interactive` uses the
-GUI editor and leaves the verified scene and server active until Unreal is closed.
-With `--work-dir`, the generated project, expected USD layers, structured result,
-server log, and Unreal log remain available for diagnosis.
-
-## Server Commands
-
-### Starting the server
-
-```bash
-# Basic — in-memory stage, default event log
-uv run python -m openusdconnect.server --port 7200
-
-# With a base USD scene
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda
-
-# Custom event log path
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log my_events.db
-
-# Compact the event log on startup (deduplicates, keeps latest state per prim)
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log my_events.db --compact
-
-# With the admin dashboard (requires: uv sync --group dashboard)
-uv run python -m openusdconnect.server --port 7200 --dashboard-port 8080
-
-# Export the override diff layer on shutdown
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --export-diff diff.usda
-```
-
-### Inspecting the event log
-
-```bash
-# Dump all events in the SQLite log (defaults to usd_events.db)
-uv run python scripts/dump_events.py
-
-# Dump a specific log file
-uv run python scripts/dump_events.py my_events.db
-```
-
-### Sending events manually (one-shot client)
-
-Use the built-in send tool to fire events at a running server. It handles FlatBuffers encoding, the hello/hello_ok handshake, and graceful disconnect automatically. Events are passed as JSON strings.
-
-```bash
-# Full help
-uv run python -m openusdconnect.send --help
-```
-
-**Create a prim:**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"ensure_prim","prim":"/World/MySphere","typeName":"Sphere"}' \
-  '{"k":"ensure_xform_ops","prim":"/World/MySphere"}'
-```
-
-**Move a prim:**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"set_xform_trs","prim":"/World/MySphere","fields":["t"],"t":[3.0,1.0,0.0]}'
-```
-
-**Set gprim attributes (e.g., radius):**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"set_gprim_attrs","prim":"/World/MySphere","attrs":{"radius":2.5}}'
-```
-
-**Set a reference on a prim:**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"ensure_prim","prim":"/World/Chair","typeName":"Xform"}' \
-  '{"k":"set_reference","prim":"/World/Chair","refs":[{"asset_path":"./chair.usd","prim_path":"/Model"}]}'
-```
-
-**Clear references from a prim:**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"set_reference","prim":"/World/Chair","refs":[]}'
-```
-
-**Set a payload on a prim:**
-
-```bash
-uv run python -m openusdconnect.send \
-  '{"k":"ensure_prim","prim":"/World/Asset","typeName":"Xform"}' \
-  '{"k":"set_payload","prim":"/World/Asset","payloads":[{"asset_path":"./heavy_geo.usd","prim_path":"/Model"}]}'
-```
-
-**Load / unload a payload:**
-
-```bash
-uv run python -m openusdconnect.send '{"k":"load_payload","prim":"/World/Asset"}'
-uv run python -m openusdconnect.send '{"k":"unload_payload","prim":"/World/Asset"}'
-```
-
-**Request log compaction:**
-
-```bash
-uv run python -m openusdconnect.send --msg '{"type":"compact"}'
-```
-
-**Read events from a file (one JSON per line):**
-
-```bash
-cat events.jsonl | uv run python -m openusdconnect.send --stdin
-```
-
-**Custom host/port:**
-
-```bash
-uv run python -m openusdconnect.send --host 10.0.0.1 --port 7201 \
-  '{"k":"ensure_prim","prim":"/World/Foo","typeName":"Xform"}'
-```
-
-**Delete the event log and start fresh:**
-
-```bash
-rm usd_events.db
-```
-
-## Asset Integration Tests (E2E)
-
-Heavy end-to-end tests that launch Blender (GUI mode) per test, send events through a real server, and verify material enrichment, texture connections, variant switching, and material identity on real USD assets.
-
-**Skipped by default.** Enable with `--asset-tests`:
-
-```bash
-# Run all asset tests (~90 seconds)
-uv run pytest tests/integration/asset_tests/ --asset-tests -v
-
-# Run a single asset test
-uv run pytest tests/integration/asset_tests/test_assets.py::test_bishop_materialx --asset-tests -v
-```
-
-The addon is automatically rebuilt before running. Each test starts its own server and cleans up after.
-
-### Asset test inventory
-
-| Test | Asset | What it verifies |
-|------|-------|-----------------|
-| `test_bishop_materialx` | OpenChessSet Bishop | MaterialX multi-node network, texture loading via NodeGraph resolution, diffuse connection chain (Mix←HueSat←Texture), dual materials (Black/White), material binding, shader map seeding |
-| `test_teapot_variants` | Teapot | Payload loading, default variant material (Ceramic with primvar Base Color), variant switch Utah↔Fancy with material rebinding, interleaved live editing with value retention across variant round-trips |
-| `test_two_teapots_identity` | Teapot ×2 | Path-based material identity — two references get separate Ceramic materials with different `usd_material_path` tags, node tree integrity, parent-context object naming |
-| `test_vehicles_multi_binding` | Vehicles 4WD | 6 material bindings across mesh parts from external material file references |
-| `test_camera_scene` | intent-vfx teapotScene_camera | UsdGeomCamera replicates as a `bpy.types.Camera` object with correct `lens`/`clip_start`/`clip_end`/`type` after the metersPerUnit-aware unit conversion, then is promoted to the active scene camera |
-| `test_material_zoo_backlog_replay` | Material Zoo event fixture | Both a USD-native stage receiver and Blender independently load `test_scene.usda`, replay the server backlog, and verify transforms, material bindings, texture graphs, OpenPBR translation, and referenced geometry |
-
-### Inspecting the Material Zoo replay
-
-To watch the committed Material Zoo fixture arrive through the real server in
-both usdview and Blender:
-
-```bash
-uv run python scripts/run_material_zoo.py --show --renderman
-```
-
-Both applications independently open the unchanged `test_scene.usda` base and
-receive the same Material Zoo events through their OpenUSDConnect integrations.
-The comparison camera and StinsonBeach IBL dome are also sent as events; the
-runner does not reconstruct a USD file for either application to import.
-
-Use `--viewers usdview` or `--viewers blender` to launch only one application,
-and `--no-presentation` to omit the camera and IBL events. The runner keeps its
-viewers open until you press Ctrl+C. The corresponding automated E2E test is:
-
-```bash
-uv run pytest tests/integration/asset_tests/test_assets.py::test_material_zoo_backlog_replay --asset-tests -v
-```
-
-### Adding new asset tests
-
-See `tests/integration/asset_tests/README.md` for the `TestHarness` API and step-by-step guide.
-
-## Visual Regression Tests
-
-A headless harness that renders reference scenes and FLIP-compares against committed golden images, catching any change to rendered output (materials, cameras, lights, geometry). **Skipped by default.**
-
-```bash
-# Run the visual tier (requires RenderMan installed + the visual deps)
-uv sync --group visual
-uv run pytest tests/visual --visual-tests -v
-
-# Regenerate the golden images (review the change before committing)
-uv run pytest tests/visual --visual-tests --update-baselines -v
-```
-
-The tier skips cleanly when RenderMan (`RMANTREE`) or `flip-evaluator` is absent. A render regresses when its mean [FLIP](https://github.com/NVIDIA/flip) error exceeds the per-scene threshold; the error map lands in the pytest temp dir. Goldens are pinned to the renderer, sample budget (`HD_PRMAN_MAX_SAMPLES`), and USD/RenderMan version, so changing any of those needs a deliberate `--update-baselines` regen. Goldens use Git LFS (`git lfs install` once per clone).
-
-**Regenerating goldens.** `--update-baselines` re-renders and overwrites the goldens, so that run *skips* (nothing left to compare); rerun without the flag to confirm they are stable. To review an intended change first, run the compare pass: a failing test writes a FLIP error map (path in its assert message) showing what moved. Scope to one scene with its test path (e.g. `tests/visual/test_material_zoo.py`); a new scene reports `missing` until its golden is captured the same way. Inspect the regenerated PNG before committing (the git diff is an opaque LFS pointer).
-
-**Renderers are pluggable** (`renderers.py`): a renderer name maps to a Hydra delegate plus optional env setup and material conditioning. `renderman` (default) sets the `RMAN_*` paths and translates OpenPBR to standard_surface (hdPrman has no OpenPBR adapter); `embree`/`storm` need neither. Add Cycles or Mitsuba as one `RENDERERS` entry.
-
-**Scenes** are static `.usda` (`tests/visual/scenes/`) or a curated event log replayed through the real `codec` + `apply_events` pipeline. `test_material_zoo.py` replays `material_zoo.jsonl` (UsdPreviewSurface, MaterialX standard_surface, OpenPBR, tiled / triplanar / UV-image texturing, a referenced chess piece) onto `test_scene.usda` under a framed camera + StinsonBeach IBL. Heavy assets come from the `usd-wg/assets` submodule (run `git submodule update --init --recursive`) plus a vendored UV sphere in `tests/visual/assets/`; the log stores them as portable `{REPO}` path tokens expanded at replay time, so the committed fixture carries no machine paths. The fixture is JSONL (semantic events re-encoded through the current codec at replay), so it survives wire/storage changes without a binary db.
-
-| File | Purpose |
-|------|---------|
-| `integrations/visualtest/renderers.py` | Pluggable Hydra renderer registry; add Cycles/Mitsuba here |
-| `visualtest/render.py`, `compare.py`, `harness.py` | Render, FLIP compare (mean + p99), baseline primitive |
-| `visualtest/replay.py`, `scene.py` | Event-log replay, camera framing + IBL |
-| `tests/visual/{scenes,fixtures,references,assets}/` | Static `.usda`, JSONL logs, LFS goldens, vendored geometry |
-
-> Requires USD >= 0.26.5 (earlier builds hit a RenderMan `ri:projection` camera-adapter bug). HdEmbree and Storm are registered alongside RenderMan in `renderers.py`.
-
-## What the Blender Tests Cover
-
-**`tests/integration/test_blender_adapter.py`** — Runs headless tests inside Blender's Python:
-- Prim creation for each geometry type (Sphere, Cube, Cylinder, Cone, Mesh, Xform)
-- Transform application (translate, rotate, scale)
-- Visibility toggling
-- Gprim attribute mapping (radius, size, height)
-- Delete, rename, idempotency
-- `test_ensure_xform_ops_preserves_world` — MPI reset preserves world-space position
-- `test_ensure_xform_ops_identity_noop` — identity MPI skipped (no unnecessary reset)
-
-**`tests/integration/test_blender_integration.py`** — End-to-end tests with real server + Blender processes:
-- `test_emitter_server_receiver_integration`: Manual events sent via socket -> server -> receiver Blender verifies objects arrived correctly
-- `test_autotrack_emitter_to_receiver`: Real auto-tracking via depsgraph -> server -> receiver Blender verifies objects, types, positions, and visibility
-- `test_autotrack_deferred_props`: Auto-tracked objects get `usd_prim_path`/`usd_type_name` via deferred `bpy.app.timers` (not inside depsgraph callback where writes are discarded)
-- `test_roleflip_no_axis_flip`: 3-phase role-flip test — import Y-up scene into Z-up Blender, receive events + flip to emitter, verify no axis flip on received + auto-tracked objects
-
-All integration tests start a real sync server, run Blender processes as emitter and receiver, and assert on the results.
-
-Both the debug launcher and integration tests set `BLENDER_USER_RESOURCES` to `.blender/user_data/` so the addon installs to a repo-local directory instead of your system AppData. This means the portable Blender is fully isolated — it won't interfere with any system-installed Blender.
-
-## Interactive Debugging with VS Code
-
-For hands-on debugging with breakpoints, the repo includes a launcher script that starts the sync server and one or two Blender instances with debugpy enabled, plus VS Code configs for attaching.
-
-### First-time setup
-
-1. Make sure `blender.test.cfg` exists (see Blender Test Configuration above).
-
-2. Generate the VS Code configs and launch Blender once so it writes the addon install path:
-
-```bash
-uv run python scripts/start_usdconnect_debug.py
-```
-
-3. Once Blender opens and you see `addon installed at: ...` in the terminal, close Blender, then regenerate VS Code configs with the correct debugpy path mappings:
+Generate VS Code launch/tasks configuration after the first addon install:
 
 ```bash
 uv run python scripts/setup_vscode.py
 ```
 
-This reads `.blender_addon_path` (written by the bootstrap) and generates `.vscode/launch.json` and `.vscode/tasks.json` with path mappings that bridge your workspace source files to where Blender actually loads the addon from.
-
-### Launching a debug session
-
-```bash
-# One Blender instance, waits for VS Code debugger attach
-uv run python scripts/start_usdconnect_debug.py --wait-for-debugger
-
-# Two Blender instances (A on :5678, B on :5679)
-uv run python scripts/start_usdconnect_debug.py --wait-for-debugger --two-blenders
-```
-
-The launcher starts the sync server and Blender, prints a summary table with PIDs and debug ports, then waits. When you close all Blender windows, the server is stopped automatically and the terminal is released.
-
-In VS Code, use the attach configs from the Run and Debug panel:
-
-| Config | Description |
-|--------|-------------|
-| `Attach: Blender A (debugpy :5678)` | Attach to instance A |
-| `Attach: Blender B (debugpy :5679)` | Attach to instance B |
-| `Attach All USD Connect` | Compound — attaches to both |
-
-Breakpoints work in both `integrations/blender/` and `openusdconnect/` source files.
-
-### Hot-reloading the addon
-
-After making code changes, you can rebuild the addon and push it to all running Blender instances without restarting them. From a separate terminal:
+Rebuild and hot-reload the addon into running debug instances:
 
 ```bash
 uv run python scripts/start_usdconnect_debug.py --reload
 ```
 
-This builds a fresh addon zip and drops a `.reload_addon` trigger file. Each running Blender instance has a background timer that watches for this file every 2 seconds, then disables, reinstalls, and re-enables the addon automatically.
+Use `--start-emitter`, `--start-receiver`, `--no-server`, `--base`, and
+`--event-log` as needed. The complete current flag list is available through
+`--help`.
 
-### Launcher flags
+## Coverage and lint
 
-| Flag | Description |
-|------|-------------|
-| `--wait-for-debugger` | Blender blocks at startup until VS Code attaches |
-| `--two-blenders` | Launch a second Blender instance (B on port 5679) |
-| `--reload` | Build addon + signal running instances to reload, then exit |
-| `--start-emitter` | Auto-start the network emitter on launch |
-| `--start-receiver` | Auto-start the network receiver on launch |
-| `--debug-port N` | debugpy port for instance A (default 5678) |
-| `--debug-port-b N` | debugpy port for instance B (default 5679) |
-| `--port N` | Sync server port (default 7200) |
-| `--blender-exe path` | Override Blender executable (default: from `blender.test.cfg`) |
+```bash
+uv run pytest tests/unit/ --cov
+uv run pytest tests/unit/ --cov --cov-report=html
+uv run ruff check
+uv run ruff format --check
+```
 
-## Files
+Coverage is configured in `pyproject.toml` for the `openusdconnect` package.
 
-| File | Purpose |
-|------|---------|
-| `blender.test.cfg` | Blender exe path (gitignored, created by setup script or manually) |
-| `.blender/` | Downloaded portable Blender (gitignored) |
-| `.blender/user_data/` | Isolated Blender user config and addon install directory (gitignored) |
-| `.blender_addon_path` | Installed addon directory (gitignored, written by bootstrap) |
-| `tests/conftest.py` | Pytest conftest with `blender_exe` fixture |
-| `scripts/setup_blender_test.py` | Portable Blender download/setup script |
-| `scripts/start_usdconnect_debug.py` | Debug session launcher (server + Blender + debugpy) |
-| `scripts/blender_bootstrap_instance.py` | Blender startup script (addon install, debugpy, reload watcher) |
-| `scripts/setup_vscode.py` | Generates `.vscode/launch.json` and `tasks.json` with correct path mappings |
+## Useful diagnostics
+
+```bash
+uv run openusdconnect-server --base test_scene.usda --event-log events.db
+uv run openusdconnect-send --help
+uv run python scripts/dump_events.py events.db
+```
+
+For performance testing and py-spy commands, see [Profiling](profiling.md).

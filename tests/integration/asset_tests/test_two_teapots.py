@@ -1,4 +1,4 @@
-"""T3: Two Teapots — Material identity separation.
+"""T3: Two Teapots Material identity separation.
 
 Verifies two references to the same asset get separate materials,
 each with intact node trees and Base Color connections.

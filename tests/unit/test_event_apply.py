@@ -1,4 +1,4 @@
-"""Tests for openusdconnect.event_apply — apply events to in-memory Usd.Stage.
+"""Tests for openusdconnect.event_apply apply events to in-memory Usd.Stage.
 
 Requires pxr (OpenUSD Python bindings). Tests are skipped if pxr is not available.
 """
@@ -349,7 +349,7 @@ class TestSetGprimAttrs:
     def test_nonexistent_attr_ignored(self, stage):
         """Setting a non-existent attribute is a no-op."""
         stage.DefinePrim("/World/Sphere", "Sphere")
-        # "bogus" is not a real attribute — should not raise
+        # "bogus" is not a real attribute should not raise
         apply_event(
             stage,
             {"k": K_SET_GPRIM_ATTRS, "prim": "/World/Sphere", "attrs": {"bogus": 1.0}},
@@ -769,7 +769,7 @@ class TestSetVariantSelections:
 
     def test_nonexistent_variant_set_ignored(self, stage):
         stage.DefinePrim("/World/Plain", "Xform")
-        # Should not raise — just skip the non-existent set
+        # Should not raise just skip the non-existent set
         apply_event(
             stage,
             {
@@ -917,7 +917,7 @@ class TestSetConnectableInput:
 
     def test_material_output_explicit_connection(self, stage):
         """An explicit set_shader_connection event with port_kind=output
-        authors Material.outputs:surface.connect — the only mechanism by
+        authors Material.outputs:surface.connect the only mechanism by
         which a Material terminal gets wired (no auto-wire fallback)."""
         from pxr import UsdShade
 
@@ -954,7 +954,7 @@ class TestSetConnectableInput:
 
     def test_material_no_phantom_outputs(self, stage):
         """set_shader_input on a surface shader must not synthesize any
-        Material output connections — the wire-driven design requires the
+        Material output connections the wire-driven design requires the
         emitter to author them via set_shader_connection.  Verifies the
         receiver stage matches the source-of-truth shape rather than
         guessing at terminals from info_id."""
@@ -1130,7 +1130,7 @@ class TestSetConnectableConnection:
 
     def test_lazy_source_output_uses_sdr_type(self, stage):
         """When the source output doesn't exist yet, its type is resolved
-        from the source shader's NodeDef (via Sdr) — UsdUVTexture.outputs:rgb
+        from the source shader's NodeDef (via Sdr) UsdUVTexture.outputs:rgb
         is float3, not Token."""
         from pxr import Sdf, UsdShade
 
@@ -1179,7 +1179,7 @@ class TestSetConnectableConnection:
 
     def test_lazy_target_input_uses_sdr_type(self, stage):
         """When the target input doesn't exist yet, its type comes from the
-        consumer shader's NodeDef — UsdPreviewSurface.inputs:normal is
+        consumer shader's NodeDef UsdPreviewSurface.inputs:normal is
         normal3f, not whatever Token the source is."""
         from pxr import Sdf, UsdShade
 
@@ -1225,7 +1225,7 @@ class TestSetConnectableConnection:
 
     def test_unknown_shader_falls_back_to_token(self, stage):
         """A shader whose info:id isn't in Sdr keeps the old Token behavior
-        for outputs — graceful fallback, no exception."""
+        for outputs graceful fallback, no exception."""
         from pxr import Sdf, UsdShade
 
         stage.DefinePrim("/Mat", "Material")

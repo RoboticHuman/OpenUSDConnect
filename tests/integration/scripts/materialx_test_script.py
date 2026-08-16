@@ -46,7 +46,7 @@ class TestResult:
     def fail(self, name, msg):
         self.failed += 1
         self.errors.append((name, msg))
-        print(f"  FAIL: {name} — {msg}")
+        print(f"  FAIL: {name} {msg}")
 
 
 def _fresh_material(name):
@@ -342,7 +342,7 @@ def test_our_mapper_value_application(r):
 
 
 # ------------------------------------------------------------------
-# Test: idempotent — second call reuses existing nodes
+# Test: idempotent second call reuses existing nodes
 # ------------------------------------------------------------------
 
 
@@ -732,7 +732,7 @@ def test_enrichment_from_reference(r):
     mtlx_path = "/World/Teapot/mtl/default_material/default_shader_mtlx"
     cached = adapter._registry.get_shader(mtlx_path).get("input_map")
     if cached is None:
-        r.fail(name, "no cached input_map — enrichment didn't run")
+        r.fail(name, "no cached input_map enrichment didn't run")
         return
 
     # Verify a MaterialX-specific value was applied (base=1.0 from the teapot)

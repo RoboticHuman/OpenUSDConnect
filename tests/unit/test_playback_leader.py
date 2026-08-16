@@ -131,7 +131,7 @@ def test_playback_control_omits_time_when_unset():
     """make_playback_control("play") must round-trip without `time`/`rate` keys.
 
     Earlier the FB scalars defaulted to 0/1.0, so decoded dicts always
-    carried `time: 0.0, rate: 1.0` — masking whether the sender authored
+    carried `time: 0.0, rate: 1.0` masking whether the sender authored
     a value. Nullable scalars + conditional encode/decode fix that.
     """
     raw = codec.encode_message(make_playback_control("play"))

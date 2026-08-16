@@ -10,7 +10,7 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 SCHEMA_DIR="$ROOT/openusdconnect/schema"
 OUT_DIR="$ROOT/openusdconnect/generated"
 
-# Python — single file, all types in one module
+# Python single file, all types in one module
 rm -f "$OUT_DIR/messages_generated.py"
 rm -rf "$OUT_DIR/OpenUSDConnect"
 
@@ -21,7 +21,7 @@ flatc --python --gen-all --gen-onefile \
 
 echo "Python bindings generated: $OUT_DIR/messages_generated.py"
 
-# Unreal C++ bindings — one self-contained header, committed alongside the
+# Unreal C++ bindings one self-contained header, committed alongside the
 # plugin. The generated code pins the flatc runtime version (static_assert);
 # keep setup_flatbuffers.py's DEFAULT_VERSION in lockstep with the flatc
 # used here.

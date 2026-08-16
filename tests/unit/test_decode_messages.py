@@ -1,4 +1,4 @@
-"""Tests for codec.decode_messages — wire stream batch decode."""
+"""Tests for codec.decode_messages wire stream batch decode."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Background receiver thread — connects to server, queues incoming events.
+"""Background receiver thread connects to server, queues incoming events.
 
 ReceiverThread is DCC-agnostic. It connects to the server as a receiver,
 reads length-prefixed FlatBuffers messages in a background thread, and
@@ -8,7 +8,7 @@ timer/callback registration is the plugin's responsibility.
 Features:
 - Automatic reconnection with exponential backoff on connection loss
 - Socket timeout to detect hung connections
-- Bounded queue — on overflow, disconnects, waits for drain, then reconnects for replay
+- Bounded queue on overflow, disconnects, waits for drain, then reconnects for replay
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ LOG = logging.getLogger(__name__)
 # Reconnection defaults
 _RECONNECT_BASE_DELAY = 1.0  # seconds
 _RECONNECT_MAX_DELAY = 30.0  # seconds
-_SOCKET_TIMEOUT = 30.0  # seconds — detect hung connections
+_SOCKET_TIMEOUT = 30.0  # seconds detect hung connections
 _MAX_QUEUE_DEPTH = 50_000  # max queued messages before overflow (disconnect + replay)
 _MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
 
@@ -211,7 +211,7 @@ class ReceiverThread(threading.Thread):
             self._handshake_event.clear()
 
             if self._queue_overflow:
-                # Intentional disconnect — wait for main thread to drain
+                # Intentional disconnect wait for main thread to drain
                 # before reconnecting, otherwise we'll overflow again.
                 self._queue_overflow = False
                 delay = self._reconnect_base_delay
@@ -329,7 +329,7 @@ class ReceiverThread(threading.Thread):
                     reason = ar.Reason()
                     if isinstance(reason, bytes):
                         reason = reason.decode("utf-8")
-                    LOG.error("ReceiverThread: auth rejected — %s", reason)
+                    LOG.error("ReceiverThread: auth rejected %s", reason)
                     self.auth_rejected = True
                     self._handshake_event.set()
                     return

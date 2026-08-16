@@ -1,4 +1,4 @@
-"""Blender receiver — applies incoming network events to Blender objects.
+"""Blender receiver applies incoming network events to Blender objects.
 
 Uses ReceiverThread from openusdconnect.receiver and drains the queue
 on the main thread via bpy.app.timers.
@@ -83,7 +83,7 @@ def _ensure_scene_props():
         S.usd_connect_recv_last_seq = IntProperty(name="Last Sequence", default=0)
     if not hasattr(S, "usd_connect_department"):
         S.usd_connect_department = StringProperty(name="Department", default="")
-    # Playback synchronization state — populated from server messages.
+    # Playback synchronization state populated from server messages.
     if not hasattr(S, "usd_connect_playback_is_leader"):
         S.usd_connect_playback_is_leader = BoolProperty(
             name="Local Is Playback Leader", default=False,
@@ -101,7 +101,7 @@ def _ensure_scene_props():
             name="Playback Playing", default=False,
         )
     # USD's timeCodesPerSecond from the server stage; needed for the
-    # timecode↔frame conversion. Defaults to 24 — the USD spec default.
+    # timecode↔frame conversion. Defaults to 24 the USD spec default.
     if not hasattr(S, "usd_connect_tcps"):
         S.usd_connect_tcps = FloatProperty(
             name="Stage timeCodesPerSecond", default=24.0,
@@ -113,7 +113,7 @@ def _ensure_adapter():
     global _ADAPTER
     if _ADAPTER is not None:
         return _ADAPTER
-    up_axis = "Y"  # default — most USD scenes are Y-up
+    up_axis = "Y"  # default most USD scenes are Y-up
     source_stage = _MIRROR_STAGE
     if source_stage is None:
         capture_module = _get_capture_module()
@@ -311,7 +311,7 @@ def _refresh_shader_reverse_sync_state(author, adapter, prim_path: str):
 # Latest-wins PlaybackState handoff: written by the receiver thread,
 # read-and-cleared by Blender's main-thread timer. The lock keeps the
 # read-then-clear pair atomic so an update arriving in between can't be
-# silently wiped — under the GIL this is rare in practice, under
+# silently wiped under the GIL this is rare in practice, under
 # free-threaded Python it's frequent (see scripts/bench_playback_state_sync.py).
 # Python's free-threading HOWTO explicitly recommends threading.Lock
 # over relying on built-in containers' internal locks.
@@ -409,7 +409,7 @@ def _apply_pending_playback_state() -> None:
     # shouldn't be yanked back to time=0 just because the leader left.
     if not leader:
         return
-    # The leader's own client mustn't echo its own state back into frame_set —
+    # The leader's own client mustn't echo its own state back into frame_set
     # the user's local scrub already moved the playhead.
     if scene.usd_connect_playback_is_leader:
         return
@@ -417,7 +417,7 @@ def _apply_pending_playback_state() -> None:
     tcps = max(1.0, float(getattr(scene, "usd_connect_tcps", 24.0)))
     target_frame = int(round(float(state.get("time", 0.0)) / tcps * fps))
     # Skip the (expensive) depsgraph eval when we'd land on the same frame
-    # — the leader resending the same timecode shouldn't burn cycles.
+    # the leader resending the same timecode shouldn't burn cycles.
     if target_frame == scene.frame_current:
         return
     try:
@@ -478,7 +478,7 @@ def _on_applied_events(events: list[dict]) -> None:
 def _on_resync() -> None:
     """Reset the adapter so all caches (including _imported_refs) are clean."""
     global _ADAPTER
-    LOG.info("Server requested resync — resetting adapter")
+    LOG.info("Server requested resync resetting adapter")
     _pending_import_seed_paths.clear()
     _pending_object_baseline_paths.clear()
     _pending_shader_baseline_paths.clear()
@@ -751,13 +751,13 @@ def _get_active_sender():
 def _frame_change_to_playback_control(scene):
     """Leader broadcasts its current frame as a PlaybackControl.
 
-    Bound to ``bpy.app.handlers.frame_change_post`` — fires once per
+    Bound to ``bpy.app.handlers.frame_change_post`` fires once per
     timeline frame change, covering both autonomous playback (Spacebar)
     and manual scrubs. Only the local playback leader emits; followers
     skip. ``_APPLYING_REMOTE`` short-circuits the case where a frame
     change is itself the consequence of a received ``PlaybackState``
     (the receiver path calls ``scene.frame_set``, which fires this
-    handler — without the guard we'd echo our own snapshot back to
+    handler without the guard we'd echo our own snapshot back to
     the server).
     """
     if _APPLYING_REMOTE:
@@ -785,7 +785,7 @@ class USD_CONNECT_OT_claim_playback(bpy.types.Operator):
             return {"CANCELLED"}
         # Include our current frame as the initial timecode so the server
         # sets the shared playhead to our position atomically with the
-        # grant — avoids followers snapping to the server's stale value
+        # grant avoids followers snapping to the server's stale value
         # (typically 0) on a fresh claim.
         scene = context.scene
         fps = max(1.0, float(scene.render.fps or 24.0))

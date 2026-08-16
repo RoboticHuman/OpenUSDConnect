@@ -15,7 +15,7 @@ class UUSDConnectSubsystem;
  * Protocol:
  *  1. Connect TCP to host:port
  *  2. Send Envelope{Hello, role="receiver"} with shared ClientId + SessionOrigin
- *  3. Read Envelope{HelloOk} — auth handshake
+ *  3. Read Envelope{HelloOk} auth handshake
  *  4. Loop: read 4-byte big-endian length + FlatBuffers payload
  *       - BroadcastEvent → validate contiguous receipt and enqueue raw bytes
  *       - Ping → ignore

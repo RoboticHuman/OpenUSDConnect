@@ -1,78 +1,79 @@
-# Live-Open Quickstart
+# Live-open and VFS
 
-This guide covers the current live-open workflow: start one OpenUSDConnect
-server, expose the live scene as a normal-looking USD file, import that file
-in Blender, and let the addon configure live sync from metadata.
+Live-open lets an application import a normal-looking USD file containing the
+current managed-server scene, then continue receiving live events from the
+snapshot sequence embedded in that file.
 
-## What You Get
+The VFS exposes:
 
-- A live sync server on the TCP protocol, usually `127.0.0.1:7200`.
-- A WebDAV virtual USD directory, usually `http://127.0.0.1:7280/usd/`.
-- A flattened USD fallback file: `scene.usd`.
-- A composition-aware USD root: `scene.live.usda`.
-- Exported live layers under `_layers/`.
-- A native filesystem mount on Windows or macOS.
-- A write-capable local mirror. It is a normal directory on macOS and Linux,
-  and may also use a drive alias such as `O:\scene.usd` on Windows.
-- A flattened snapshot for non-integrated tools.
-- Blender and Unreal metadata discovery with configurable auto-start for
-  receiver/emitter.
+- `scene.usd`: a flattened continuation snapshot for broad compatibility
+- `scene.live.usda`: a composition root preserving the exported live layer
+  stack
+- `_layers/`: generated live layers used by the composition root
+- `openusdconnect.json`: machine-readable endpoint and snapshot metadata
 
-The WebDAV directory is read-only by default. Direct writes return `403`.
-For compatibility with tools that require a successful save, use
-`--vfs-write-mode drop`; writes are accepted and discarded. For fallback
-editing from non-integrated tools, use `--vfs-write-mode translate`; a saved
-USD snapshot is parsed, translated into live events, and broadcast through the
-normal sync server. Translate mode validates uploaded content as a readable USD
-file by default. Invalid USD, stale live snapshots, and obviously incomplete
-destructive saves are rejected instead of silently replacing newer live state.
-Drop mode does not validate because it never mutates server state.
+The filenames are configurable. The snapshot is an initial-open mechanism;
+interactive synchronization still uses the TCP protocol.
 
-## Prerequisites
+## Recommended workstation workflow
 
-- Python environment with OpenUSD `pxr` bindings available.
-- Server dependencies:
+Install the server and VFS dependencies:
 
-```powershell
+```bash
 uv sync --group server --group vfs
 ```
 
-- Blender addon installed if you want automatic live sync:
-
-```powershell
-uv run python scripts/build_blender_addon.py
-```
-
-Then install `dist/usd_connect_blender.zip` from Blender:
-`Edit > Preferences > Add-ons > Install from Disk`.
-
-Windows native mounts require the WebClient service. macOS native mounts use
-the system `mount_webdav` client and need no additional package.
-
-## Start A Live-Open Server
-
-For a complete local workstation session, use the workstation launcher:
+Start a complete local session:
 
 ```bash
-uv run python scripts/start_live_open.py \
-  --base /path/to/scene.usda \
-  --open
+uv run python scripts/start_live_open.py --base /path/to/scene.usda --open
 ```
 
-This starts the sync server, the VFS endpoint, and a local mirror. On Windows,
-the mirror uses `O:` by default; pass `--drive` to choose another letter. On
-macOS and Linux, the file defaults to `.ouc_live_mount/usd/scene.usd`.
-Stop the recorded session with:
+The launcher starts:
+
+1. the sync server, normally on `127.0.0.1:7200`
+2. the WebDAV VFS, normally on `127.0.0.1:7280`
+3. a write-capable local mirror of `scene.usd`
+4. on Windows, an optional `O:` alias for that mirror
+
+It prints the file path to open. On macOS and Linux the default is below
+`.ouc_live_mount`; on Windows the default is `O:\scene.usd`.
+
+Stop only the processes recorded by that launcher with:
 
 ```bash
 uv run python scripts/start_live_open.py stop
 ```
 
-The launcher keeps translate write validation enabled by default. For
-compatibility testing only, pass `--vfs-bypass-write-validation`; invalid USD
-writes are then accepted and dropped because they cannot be translated.
+The workstation launcher uses validated `translate` writes by default. The
+standalone server's VFS remains read-only by default.
 
-To run the pieces manually:
+## Open in Blender
+
+1. Build and install the addon if needed:
+
+   ```bash
+   uv run python scripts/build_blender_addon.py
+   ```
+
+2. Open the **USD Connect** sidebar.
+3. Choose **Import USD (with prim tagging)**.
+4. Select the local `scene.usd` reported by the launcher.
+5. Enable **Auto-start Emitter** and **Auto-start Receiver** in the import
+   options if this Blender instance should join immediately.
+
+The addon imports the snapshot, reads `customLayerData["openusdconnect"]`,
+configures host and port, and starts receiving at `snapshot_seq + 1`.
+
+Snapshot continuation uses flat replay. It is valid only when the server has
+one unmuted collaboration layer and no department policy. If layer ordering or
+muting is required, import the original base file and use Blender's normal
+layered replay workflow instead.
+
+If auto-start fails, the imported scene stays open and the addon reports the
+connection error.
+
+## Run the server manually
 
 ```bash
 uv run openusdconnect-server \
@@ -83,130 +84,80 @@ uv run openusdconnect-server \
   --vfs-port 7280
 ```
 
-The sync protocol listens on `--port`. The virtual file listens on
-`--vfs-port`.
+The sync protocol listens on `--port`; WebDAV listens on `--vfs-port`.
 
-Useful VFS flags:
+Important VFS options:
 
-| Flag | Default | Purpose |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `--vfs-port PORT` | disabled | Starts the WebDAV virtual file endpoint. |
-| `--vfs-host HOST` | same as `--host` | Bind host/interface for WebDAV. |
-| `--vfs-share NAME` | `usd` | WebDAV collection/share name. |
-| `--vfs-name FILE` | `scene.usd` | Flattened fallback file name. |
-| `--vfs-live-name FILE` | `scene.live.usda` | Composition-aware root file name. |
-| `--vfs-layer-dir NAME` | `_layers` | Directory containing exported live layers. |
-| `--vfs-manifest-name FILE` | `openusdconnect.json` | Machine-readable VFS manifest. |
-| `--vfs-write-mode MODE` | `forbid` | `forbid` returns 403; `drop` accepts and discards PUT bodies; `translate` turns full-file USD saves into live events. |
-| `--vfs-bypass-write-validation` | translate validation enabled | Accept invalid USD writes in `translate` mode instead of rejecting them. Invalid bypassed writes are dropped because they cannot be translated. |
-| `--no-vfs-prewarm` | prewarm enabled | Disables background snapshot pre-generation. |
-| `--advertise-host HOST` | bind host, or `127.0.0.1` for all interfaces | Host embedded in live metadata. |
+| `--vfs-host` | sync bind host | WebDAV bind interface |
+| `--vfs-share` | `usd` | WebDAV collection name |
+| `--vfs-name` | `scene.usd` | flattened snapshot name |
+| `--vfs-live-name` | derived `.live.usda` name | composition-root name |
+| `--vfs-layer-dir` | `_layers` | generated layer directory |
+| `--vfs-write-mode` | `forbid` | `forbid`, `drop`, or `translate` |
+| `--advertise-host` | bind host, or loopback for `0.0.0.0` | host embedded in metadata |
+| `--no-vfs-prewarm` | prewarm enabled | disable background snapshot generation |
 
-If you bind to all interfaces, set `--advertise-host` to the hostname or IP
-that Blender clients should use:
-
-```powershell
-uv run openusdconnect-server `
-  --host 0.0.0.0 `
-  --port 7200 `
-  --base D:\show\shot010\scene.usda `
-  --vfs-port 7280 `
-  --advertise-host 10.10.20.15
-```
-
-## Supported Open Paths
-
-### HTTP/WebDAV URL
-
-```text
-http://127.0.0.1:7280/usd/scene.usd
-```
-
-This is the flattened fallback file. Browsers, `curl`, and
-`Invoke-WebRequest` can download it for diagnostics or custom launcher flows.
-Do not assume every stock USD runtime can open raw HTTP directly. Use a native
-mount or local mirror when an application expects a normal file path.
-
-The directory also contains:
-
-```text
-http://127.0.0.1:7280/usd/scene.live.usda
-http://127.0.0.1:7280/usd/_layers/
-http://127.0.0.1:7280/usd/openusdconnect.json
-```
-
-`scene.live.usda` preserves the live overlay stack and uses the original base
-layer path when the server has one. Use it from a native mount when the target
-USD runtime can resolve the companion layer files.
-
-### macOS Native Mount
-
-The native helper mounts the complete generated VFS tree read-only by default:
+When binding to all interfaces, set an address that remote clients can reach:
 
 ```bash
-uv run python scripts/mount_vfs_share.py --port 7280 --open
+uv run openusdconnect-server \
+  --host 0.0.0.0 \
+  --advertise-host 10.10.20.15 \
+  --base scene.usda \
+  --vfs-port 7280
 ```
 
-The default live file is:
+## Ways to access the virtual file
 
-```text
-~/.openusdconnect/mounts/usd/scene.usd
-```
+The local mirror is recommended for DCC saves because it supports temporary
+files and rename-based safe-save patterns.
 
-Choose a different directory with `--mount-point`. Unmount it with the same
-option:
+| Access | Example | Use |
+| --- | --- | --- |
+| Local mirror | `.ouc_live_mount/usd/scene.usd` or `O:\scene.usd` | recommended read/write DCC path |
+| HTTP/WebDAV | `http://127.0.0.1:7280/usd/scene.usd` | diagnostics and custom launchers |
+| Windows WebDAV UNC | `\\127.0.0.1@7280\usd\scene.usd` | native file picker, usually read-oriented |
+| macOS native mount | `~/.openusdconnect/mounts/usd/scene.usd` | native read-oriented mount |
 
-```bash
-uv run python scripts/mount_vfs_share.py unmount --mount-point /path/to/mount
-```
+Do not assume a stock USD runtime can open an HTTP URL directly. Use a local
+mirror or OS mount when the application expects a filesystem path.
 
-`--read-write` is available for filesystem diagnostics, but it is not the
-recommended DCC save path. The VFS has a fixed resource tree, while OpenUSD
-normally saves by creating a temporary sibling and renaming it over the target.
-Use the local bridge for saves. Native filesystem caching can also delay a
-reread; integrated clients use live sync after the initial open.
+### Native mount helper
 
-### Windows UNC Path
+The native arguments are platform-specific.
 
-```text
-\\127.0.0.1@7280\usd\scene.usd
-```
-
-Use this when you want a normal file-picker experience on Windows. The OS
-WebDAV redirector maps the UNC path to the WebDAV endpoint.
-
-For a friendlier browseable drive letter, mount the share:
+On Windows, choose a drive letter. The WebClient service must be running:
 
 ```powershell
 uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open
-```
-
-If the helper reports `WebClient: STOPPED` and `Access is denied`, start the
-Windows **WebClient** service from an elevated PowerShell or from
-`services.msc`, then run the mount command again:
-
-```powershell
-Start-Service WebClient
-```
-
-Unmount a Windows native mapping when done:
-
-```powershell
 uv run python scripts/mount_vfs_share.py unmount --drive O:
 ```
 
-### Write-Capable Local Bridge
-
-The local bridge keeps `scene.usd` refreshed in a normal local directory and
-uploads completed saves back through HTTP `PUT`:
+On macOS, use the macOS-only mount arguments. The mount is read-only by
+default:
 
 ```bash
-uv run python scripts/local_vfs_bridge.py \
-  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
-  --mirror-dir .ouc_live_mount/usd
+uv run python scripts/mount_vfs_share.py \
+  --port 7280 \
+  --mount-point /path/to/mount \
+  --volume-name OpenUSDConnect \
+  --open
+
+uv run python scripts/mount_vfs_share.py unmount \
+  --mount-point /path/to/mount
 ```
 
-Useful bridge options:
+Omit `--mount-point` to use
+`~/.openusdconnect/mounts/<share>`. `--read-write` is available on macOS for
+filesystem diagnostics, but native WebDAV mounts do not reliably support the
+temporary-file and rename sequence used by USD safe saves. Use the local
+bridge for DCC saves.
+
+### Local bridge by itself
+
+To mirror an already-running VFS:
 
 ```bash
 uv run python scripts/local_vfs_bridge.py \
@@ -214,180 +165,75 @@ uv run python scripts/local_vfs_bridge.py \
   --mirror-dir .ouc_live_mount/usd \
   --background \
   --open
-
-uv run python scripts/local_vfs_bridge.py status \
-  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json
-
-uv run python scripts/local_vfs_bridge.py stop \
-  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json \
-  --stop-process
 ```
 
-On Windows, add `--drive O:` to expose the mirror through `subst`; this remains
-the default when no drive option is given. Pass `--no-drive` to use only the
-directory. The bridge keeps status and logs outside the mirror.
+The bridge waits for saves to stabilize and uploads them with the last observed
+ETag. A concurrent or stale save enters a visible recovery state instead of
+overwriting newer server state. Use its `status` and `stop` subcommands with
+the status-file path printed at startup.
 
-Open the reported `Live USD file`, for example:
+## Write modes
 
-```text
-.ouc_live_mount/usd/scene.usd
-```
+The WebDAV tree has a fixed set of server-generated resources. Creating,
+renaming, or deleting arbitrary files is not supported.
 
-Notes:
+- `forbid` returns HTTP 403 for writes. This is the standalone server default.
+- `drop` accepts and discards writes. Use it only for applications that demand
+  a successful save even though live edits arrive through the plugin.
+- `translate` parses a completed USD save and converts supported differences to
+  normal live transactions.
 
-- The file appears as a normal `.usd` file.
-- The server serves USDA text bytes under the `.usd` name.
-- The virtual share contains the flattened snapshot, a live composition root,
-  a manifest, and exported layer files.
-- Native VFS paths reject creation, deletion, and rename operations. The local
-  bridge accommodates safe-save patterns locally and uploads only the completed
-  managed file.
-- The bridge waits for a save to stabilize, uploads with the last observed
-  `ETag`, and enters a visible recovery/conflict state instead of overwriting
-  concurrent local or remote edits.
-- Direct `PUT` writes are forbidden by default, dropped only when
-  `--vfs-write-mode drop` is explicitly enabled, or translated when
-  `--vfs-write-mode translate` is explicitly enabled.
-- Translate mode records a write summary on the server and requires the
-  embedded `scene_id`, `epoch`, and `snapshot_seq` to match the current server
-  snapshot exactly.
-- Translate mode also rejects authored USD properties outside the supported
-  event subset, and it is disabled while any non-default collaboration layer
-  is active.
+Translate mode checks the embedded `scene_id`, `epoch`, and `snapshot_seq` to
+reject stale saves. It validates the USD file, rejects obviously incomplete
+destructive saves, and rejects authored operations that cannot be mapped safely
+into managed collaboration layers, including arbitrary sublayer topology.
+Custom properties, relationships, prim/layer metadata, and local variant
+definitions are supported through exact Sdf field events.
 
-## Blender Live-Open
+`--vfs-bypass-write-validation` is a compatibility escape hatch. Invalid bytes
+cannot be translated and are dropped; do not use it as a data-preserving mode.
 
-The Blender addon supports one live-open entry point: import a normal file
-path with prim tagging, then let the embedded metadata configure live sync.
+## Metadata contract
 
-1. Start the server with `--vfs-port`.
-2. In Blender, open the USD Connect sidebar.
-3. Click `Import USD (with prim tagging)`.
-4. Select the local mirror, native mount, or Windows UNC path. For example:
-
-```text
-.ouc_live_mount/usd/scene.usd
-```
-
-The addon imports the snapshot normally, reads the embedded metadata, sets
-the receiver/emitter host and port, and seeds the receiver from
-`snapshot_seq`. When the Import panel's **Auto-start Emitter** and
-**Auto-start Receiver** checkboxes are enabled, it also starts live emit and
-receive from `snapshot_seq + 1`.
-
-This snapshot continuation uses flat replay. The snapshot contains the
-composed scene at `snapshot_seq`, but not the logical identity of every
-historical collaboration-layer opinion. Layered replay remains available when
-Blender is configured from the original base USD rather than a live snapshot.
-
-Flat continuation requires one unmuted collaboration layer and no department
-policy. The sync server rejects it when layer ordering or muting must be
-preserved. In that case, open the original base USD and use layered replay.
-
-If live auto-start fails, the imported snapshot stays open and Blender
-reports the connection error. When either checkbox is disabled, the manual
-start/stop buttons remain available and use the metadata-populated host,
-port, and sequence values.
-
-## Metadata Contract
-
-The virtual file embeds live metadata in the root layer:
-
-```python
-customLayerData["openusdconnect"]
-```
-
-Current fields:
+Both snapshot forms embed `customLayerData["openusdconnect"]` on the root
+layer. Important fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `live` | `true` when this is an OpenUSDConnect live snapshot. |
-| `host` | Sync TCP host for receiver/emitter connections. |
-| `port` | Sync TCP port for receiver/emitter connections. |
-| `protocol_version` | OpenUSDConnect protocol version. |
-| `scene_id` | Stable server scene identifier for this base scene. |
-| `snapshot_seq` | Highest sequence number covered by the snapshot token. |
-| `epoch` | Snapshot epoch, bumped when visible non-transaction stage state changes or sequence ids are recycled. |
-| `vfs_url` | HTTP/WebDAV URL for this virtual file. |
-| `department` | Reserved department hint; currently empty by default. |
-| `requires_token` | Whether the TCP sync server requires TOFU tokens. |
-| `generated_at` | UTC timestamp for snapshot generation. |
+| `live` | identifies an OpenUSDConnect continuation file |
+| `host`, `port` | TCP sync endpoint |
+| `protocol_version` | protocol compatibility value |
+| `scene_id` | server scene identity |
+| `snapshot_seq` | highest event included in the snapshot |
+| `epoch` | invalidates stale snapshots when visible non-transaction state changes or sequence IDs are recycled |
+| `vfs_url` | backing WebDAV URL |
+| `requires_token` | whether TCP clients must authenticate |
+| `generated_at` | snapshot generation timestamp |
 
-Plugin-enabled clients should import the snapshot first, then connect a
-receiver with `sync_from = snapshot_seq + 1`.
+An integrated client imports the snapshot first and then requests events from
+`snapshot_seq + 1`.
 
-## Token Behavior
+## Authentication and exposure
 
-`--require-token` applies to the TCP live sync protocol, not to the WebDAV
-snapshot endpoint. The virtual file never embeds an auth token.
+`--require-token` protects the TCP sync protocol. Tokens are never embedded in
+the USD file and the WebDAV endpoint is intentionally unauthenticated.
 
-The WebDAV snapshot endpoint is intentionally unauthenticated. Keep
-`--vfs-host` bound to `127.0.0.1` for local workflows, or put remote VFS access
-behind a trusted network boundary or proxy.
+Keep `--vfs-host` on loopback for local workflows. Remote VFS access should be
+placed behind a trusted network boundary or authenticated proxy. Metadata-aware
+Blender and Unreal integrations use their TOFU token stores when joining TCP
+sync.
 
-Blender and the Unreal Python bridge use the existing TOFU token store:
-
-- On first connect, the server issues a token.
-- The client saves the token for that host and port.
-- Later receiver/emitter connections present the saved token.
-- If authentication is rejected, the client reports the failure.
-
-The native Unreal plugin stores issued tokens in the user's Unreal config
-when **Persist Auth Tokens** is enabled. If a token-required live-open file is
-opened and no token is saved yet, Unreal starts the receiver first, keeps the
-issued token in memory, optionally saves it, then starts the emitter on the
-next tick with the same token.
-`GetStatus()` reports endpoint, metadata source, snapshot sequence,
-receiver/emitter state, and auth state.
-
-When a virtual file says `requires_token = true`, plugin-enabled clients
-must already support the server's token flow. Non-integrated tools can still
-open the snapshot, but they cannot join live sync.
-
-## Quick Verification
-
-Fetch the snapshot:
+## Verify the setup
 
 ```bash
 curl -o ouc_scene.usd http://127.0.0.1:7280/usd/scene.usd
+uv run python -c "from pxr import Usd; s=Usd.Stage.Open('ouc_scene.usd'); print(bool(s), s.GetRootLayer().customLayerData.get('openusdconnect'))"
 ```
 
-Open it with OpenUSD:
-
-```bash
-uv run python -c "from pxr import Usd; stage = Usd.Stage.Open('ouc_scene.usd'); print(bool(stage), stage.GetRootLayer().customLayerData.get('openusdconnect'))"
-```
-
-Validate Windows UNC/WebClient on a workstation:
+Windows WebClient diagnostic:
 
 ```powershell
 uv run python scripts/check_windows_unc_webdav.py --port 7280
 ```
 
-Preview or create the native mount on Windows or macOS:
-
-```bash
-uv run python scripts/mount_vfs_share.py --port 7280 --print-only
-uv run python scripts/mount_vfs_share.py --port 7280 --open
-```
-
-Measure snapshot cost on a real or synthetic scene:
-
-```powershell
-uv run python scripts/bench_vfs_snapshot.py --base D:\path\to\scene.usda
-uv run python scripts/bench_vfs_snapshot.py --synthetic-prims 10000
-```
-
-Run the focused tests:
-
-```bash
-uv run pytest \
-  tests/unit/test_vfs.py \
-  tests/unit/test_vfs_mount.py \
-  tests/unit/test_local_vfs_bridge.py \
-  tests/unit/test_start_live_open.py \
-  tests/integration/test_vfs_webdav.py \
-  tests/integration/test_start_live_open.py \
-  -q
-uv run pytest tests/integration/test_live_discovery.py tests/integration/test_live_open_blender.py -q
-```
+Focused automated tests are listed under [Live-open and VFS tests](testing-setup.md#live-open-and-vfs-tests).

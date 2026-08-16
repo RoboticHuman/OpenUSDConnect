@@ -456,7 +456,7 @@ class USD_CONNECT_Hook(bpy.types.USDHook):
 
 
 # ---------------------------------------------------------------------------
-# BlenderStageAuthor — authors Blender depsgraph changes to a local USD stage
+# BlenderStageAuthor authors Blender depsgraph changes to a local USD stage
 # ---------------------------------------------------------------------------
 class BlenderStageAuthor:
     """Owns a local USD stage and authors Blender depsgraph changes to it.
@@ -529,7 +529,7 @@ class BlenderStageAuthor:
 
         NOTE: *obj* may be the evaluated (CoW) copy from depsgraph.updates.
         Custom property reads MUST go through ``obj.original`` because
-        the evaluated copy can have stale values — e.g. when
+        the evaluated copy can have stale values e.g. when
         _import_ref_asset overwrites USDHook's tags after the last
         depsgraph evaluation.  Writes also go to ``obj.original`` so
         they persist after the next evaluation cycle.
@@ -564,7 +564,7 @@ class BlenderStageAuthor:
             self._used_prim_paths.add(prim_path)
             type_name = _infer_usd_type(obj)
             # Write to the original data-block so properties persist.
-            # depsgraph.updates gives us evaluated copies — writes on those
+            # depsgraph.updates gives us evaluated copies writes on those
             # are discarded after the next evaluation cycle.
             original = getattr(obj, "original", obj)
             original["usd_prim_path"] = prim_path
@@ -836,7 +836,7 @@ class BlenderStageAuthor:
         """Write only changed shader input values to the emitter's USD stage.
 
         Compares against ``_last_shader_values`` (the baseline from the
-        previous read) to detect actual user edits — same pattern as
+        previous read) to detect actual user edits same pattern as
         ``_last_matrix`` for transforms.  On first encounter, seeds the
         baseline and skips authoring (all values are "initial state").
         """
@@ -933,7 +933,7 @@ class BlenderStageAuthor:
         for prim_path in stale_prims:
             found = path_to_obj.get(prim_path)
             if found is not None:
-                # Re-acquire reference — object survived undo
+                # Re-acquire reference object survived undo
                 self._prim_refs[prim_path] = found
                 LOG.info("Re-acquired reference for %s after undo", prim_path)
             else:
@@ -1010,13 +1010,13 @@ class BlenderStageAuthor:
                 continue
             self._last_matrix[obj.name] = m
 
-            # Skip prims under unloaded payloads — they can't be defined
+            # Skip prims under unloaded payloads they can't be defined
             # on the stage.  This window exists between an unload_payload and
             # the next load_payload when they arrive in separate transactions.
             if self._is_under_unloaded_payload(prim_path):
                 continue
 
-            # Ensure ancestors exist (structural — OUTSIDE ChangeBlock)
+            # Ensure ancestors exist (structural OUTSIDE ChangeBlock)
             self._ensure_ancestors_on_stage(obj)
 
             # Ensure prim exists on stage
@@ -1067,7 +1067,7 @@ class BlenderStageAuthor:
             self._used_prim_paths.add(new_path)
 
     def export_delta_as_string(self) -> str:
-        """For Emit Diff feature — export session layer as USDA string."""
+        """For Emit Diff feature export session layer as USDA string."""
         return self.delta_layer.ExportToString()
 
     def clear_delta(self):

@@ -1,42 +1,53 @@
 # Shared stage mode architecture
 
 Shared stage mode synchronizes the authored root-layer graph between processes
-that each open an equivalent file-backed USD stage. Where managed mode applies
+that each open an equivalent portable, non-anonymous USD stage. Where managed mode applies
 semantic event kinds over server-owned collaboration layers, shared stage mode
-treats each client's own file layers, root layer and sublayers alike, as the
+treats each client's application-owned layers, root layer and sublayers alike, as the
 synchronized data. `SharedStageClient` is the entry point, with the same
 `start()` / `connect()` / `update()` / `close()` lifecycle as
 `ManagedClient`.
 
 ## What shared stage does
 
-Every process opens its own equivalent stage and resolver context from the same
-assets on a shared filesystem or VFS. The server runs an authoritative mirror of
-the same graph. Edits made on any client's layers are detected, diffed against
-per-layer snapshots, sent as exact Sdf-spec deltas, canonicalized and sequenced
+Every process opens its own equivalent stage and resolver context. Layers may
+come from a filesystem or custom `ArResolver`; the authored root and recursive
+sublayer contents must be equivalent and editable by participating authors.
+The server runs an authoritative mirror of the same graph. Edits made on any client's
+layers are detected, sent as exact Sdf-spec deltas, canonicalized and sequenced
 by the server, broadcast, and applied to the matching local layers on every
-other client.
+participant, including the authoring participant's authoritative echo.
+
+Shared-stage mode does not publish or compare a complete initial baseline.
+Opaque keys prove layer routing, not content identity. If two resolver contexts
+return different untouched values, edited fields can synchronize while the
+remaining stage still differs. Production deployments must establish baseline
+identity through immutable versions, resolver policy, or an external content
+check before enabling edits.
 
 Both kinds of state replicate:
 
 - Topology: the ordered sublayer list of every layer, including sublayer paths,
   offsets, and scales. Composition arc edits (add, remove, reorder, retarget a
   sublayer) are first-class events.
-- Authored SDF opinions: every authored field on every spec in the graph, from
-  prim specifiers and attributes to relationships, variant sets, variants, and
-  layer metadata.
+- Authored SDF opinions on the supported layer, prim, attribute, relationship,
+  variant-set, and variant spec types, including their metadata.
 
 Local identifiers and resolved filesystem paths never cross the wire. Opaque
 `layer:{uuid}` keys route each event to the correct local `Sdf.Layer`, so each
 process may resolve the same authored path to a different concrete file.
 
-Change detection uses `Sdf.Notice.LayersDidChange` plus `Usd.Notice.ObjectsChanged`
-to seed candidate deltas, which are accepted only when replaying them onto a
-snapshot exactly reproduces the authored layer (byte-equal export). When notice
-data is incomplete, for example inactive variants or muted layers, the tracker
-falls back to a full snapshot diff. The native Sdf delegate bridge
-(`NativeSdfLayerChangeTracker`) is the preferred production tracker; the Python
-`SdfLayerChangeTracker` is the fallback.
+The portable tracker uses `Sdf.Notice.LayersDidChange` plus
+`Usd.Notice.ObjectsChanged` to seed candidate deltas, which are accepted only
+when replaying them onto its previous snapshot reproduces the current authored
+layer. When notice data is incomplete, for example inactive variants or muted
+layers, it falls back to a full snapshot diff. This tracker keeps complete
+in-memory layer snapshots.
+
+The optional native `SdfLayerStateDelegate` bridge captures old field values at
+the mutation boundary and avoids those baseline snapshots during ordinary
+tracking. It must be built against the exact OpenUSD ABI loaded by the host;
+the portable Python tracker remains the default fallback.
 
 ## How it differs from managed mode
 
@@ -61,19 +72,20 @@ or departments.
 
 ## When to use each
 
-Choose shared stage mode when all processes open the same assets from a shared
-filesystem or VFS and exact SDF fidelity matters: the layers on disk are the
-source of truth, and edits must replicate field-for-field, including sublayer
-topology, per-layer variant opinions, and layer metadata. It is the right fit
-for editors working directly on production layers where the file content itself
-is the deliverable.
+Choose shared stage mode when all processes open equivalent versioned assets
+through a filesystem, VFS, or resolver and field-level Sdf fidelity matters.
+Edits replicate across the application-owned layers, including sublayer
+topology, per-layer variant opinions, and layer metadata. Saving those layers
+to their backing stores remains an application decision.
 
 Choose managed mode when the server owns the collaboration data model: semantic
 event kinds must reach non-USD consumers (DCC adapters, the dashboard, the MCP
 server), collaboration content should live above the base stage rather than in
 it, or features like departments and playback leadership are
-required. Managed mode trades exact SDF fidelity for semantic, consumer-friendly
-events.
+required. Managed mode favors semantic, consumer-friendly events and a
+server-owned layer topology over reproducing each application's original layer
+graph. Its generic Sdf event still preserves supported authored fields that do
+not have a specialized semantic event.
 
 ## Data flow
 

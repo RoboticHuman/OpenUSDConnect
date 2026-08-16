@@ -1,4 +1,4 @@
-"""T1: Bishop — MaterialX with NodeGraph texture connections.
+"""T1: Bishop MaterialX with NodeGraph texture connections.
 
 Verifies multi-node shader network, texture loading, and connections
 through Mix/HueSat chain from diffuse texture to Base Color.

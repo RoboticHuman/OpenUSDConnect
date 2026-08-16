@@ -145,7 +145,7 @@ class TestSetCameraAttrs:
         assert cam.GetProjectionAttr().Get() == projection
 
     def test_all_core_attrs_together(self, stage):
-        """One event carrying every core attr — the typical first-emit payload."""
+        """One event carrying every core attr the typical first-emit payload."""
         cam = self._make_camera(stage)
         apply_event(
             stage,
@@ -178,7 +178,7 @@ class TestSetCameraAttrs:
 
 
 class TestCameraXform:
-    """Cameras are UsdGeom.Xformable — the existing TRS path must work on them."""
+    """Cameras are UsdGeom.Xformable the existing TRS path must work on them."""
 
     def test_ensure_xform_ops_on_camera(self, stage):
         apply_events(
@@ -357,7 +357,7 @@ class TestMockAdapterCamera:
 
 
 class TestRealCameraAsset:
-    """E2E using the StandardShaderBall's camera layer — a real authored
+    """E2E using the StandardShaderBall's camera layer a real authored
     UsdGeomCamera with focalLength, horizontalAperture, verticalAperture,
     clippingRange, and projection.
     """

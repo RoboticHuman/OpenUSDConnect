@@ -8,8 +8,8 @@ import platform
 def make_stable_client_id(dcc_name: str) -> str:
     """Generate a stable client ID from username, hostname, and DCC name.
 
-    Format ``{user}-{hostname}-{dcc}`` — persists across sessions so the
-    server maps reconnections to the same per-client layer. The
+    Format: ``{user}-{hostname}-{dcc}``. It persists across sessions for
+    authentication, producer replay, and collaboration attribution. The
     ``OPENUSDCONNECT_CLIENT_ID`` environment variable overrides the computed
     value when two DCC sessions on one machine need distinct client IDs. The
     older ``USD_CONNECT_CLIENT_ID`` spelling remains supported.

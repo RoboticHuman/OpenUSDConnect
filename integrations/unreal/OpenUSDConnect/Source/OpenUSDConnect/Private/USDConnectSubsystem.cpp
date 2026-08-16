@@ -599,7 +599,7 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 
 	// Guard: don't touch anything until the world is fully initialized and not
 	// being torn down. UTickableWorldSubsystem can tick during the tail end of
-	// world load — running heavy work here can deadlock startup.
+	// world load running heavy work here can deadlock startup.
 	UWorld* World = GetWorld();
 	if (!World || !World->bIsWorldInitialized || World->bIsTearingDown)
 	{
@@ -684,7 +684,7 @@ void UUSDConnectSubsystem::AttachToStageActor(AUsdStageActor* Actor)
 				const FString& Path = Pair.Key;
 				if (Path.IsEmpty() || Path == TEXT("/")) continue;
 
-				// Strip property suffix ".attrName" — we want the prim path.
+				// Strip property suffix ".attrName" we want the prim path.
 				// Changed "inputs:*" properties keep their name so the drain
 				// can emit just the edited shader inputs.
 				int32 DotIdx = INDEX_NONE;
@@ -709,7 +709,7 @@ void UUSDConnectSubsystem::AttachToStageActor(AUsdStageActor* Actor)
 	});
 
 	UE_LOG(LogUSDConnectSubsystem, Log,
-		TEXT("Attached to AUsdStageActor (%s) — subscribed to FUsdListener::OnObjectsChanged"),
+		TEXT("Attached to AUsdStageActor (%s) subscribed to FUsdListener::OnObjectsChanged"),
 		*Actor->GetName());
 }
 
@@ -762,13 +762,13 @@ void UUSDConnectSubsystem::DrainAndApply()
 	}
 
 	// Apply in bounded chunks. Each ApplyFrame triggers AUsdStageActor to
-	// resync Unreal scene components for the affected prim — when the HELLO
+	// resync Unreal scene components for the affected prim when the HELLO
 	// replay delivers thousands of events, applying them all on a single
 	// tick freezes the editor for seconds. Cap by both count and wall-time
 	// so a single tick stays interactive; the rest stays queued for the
 	// next tick.
 	constexpr int32  MaxApplyPerTick        = 512;
-	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms — preserves ~60 fps
+	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms preserves ~60 fps
 
 	int32 ChunkSize = 0;
 	{
@@ -797,7 +797,7 @@ void UUSDConnectSubsystem::DrainAndApply()
 	bSuppressEmit.store(true);
 	{
 		// Contiguous value events share one SdfChangeBlock so their notices
-		// fire as a single batch — the stage actor's per-notice component
+		// fire as a single batch the stage actor's per-notice component
 		// resync dominates replay throughput. Structural events cannot apply
 		// inside a block (UsdStage::DefinePrim and composition-arc edits need
 		// the stage to recompose immediately), so the run's block closes
@@ -852,7 +852,7 @@ void UUSDConnectSubsystem::DrainAndApply()
 				ReplayEpoch = Complete->epoch();
 				bReplaySynchronized.store(true);
 				UE_LOG(LogUSDConnectSubsystem, Log,
-					TEXT("Receiver replay applied through seq=%d epoch=%llu — publishing enabled"),
+					TEXT("Receiver replay applied through seq=%d epoch=%llu publishing enabled"),
 					ReplayHeadSeq,
 					static_cast<unsigned long long>(ReplayEpoch));
 				++Applied;
@@ -1077,7 +1077,7 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 			TArray<uint8> Frame = BuildVisibilityTxnFrame(
 				TxnId, Batch);
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) — enqueueing"),
+				TEXT("EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) enqueueing"),
 				*PrimPath, Frame.Num(), Vis.bVisible ? 1 : 0);
 			if (Frame.Num() > 0) EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
 		}
@@ -1098,7 +1098,7 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 	TArray<uint8> Frame = BuildConnectableInputTxnFrame(
 		TxnId, Batch);
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes — enqueueing"),
+		TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes enqueueing"),
 		*PrimPath, Batch[0].Inputs.Num(), Frame.Num());
 	if (Frame.Num() > 0) EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
 }
@@ -1198,7 +1198,7 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 
 	// The session-layer authoring below fires stage notices; suppress our own
 	// listener so they don't loop back into the emit path. The stage actor's
-	// listener still sees them — that's what triggers the re-import.
+	// listener still sees them that's what triggers the re-import.
 	bSuppressEmit.store(true);
 	for (const FString& Material : Materials)
 	{

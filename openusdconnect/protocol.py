@@ -58,8 +58,8 @@ def make_hello(
             part of the complete commit stream; integrations use the value for
             attribution and local reconciliation.
         department: Optional department name (e.g. "animation", "lighting").
-            Used by the server for layer ordering when per-client layers
-            are enabled.
+            When the server enables department policy, clients in the same
+            department share its ordered collaboration layer.
         token: Authentication token from a previous session (TOFU).
         layered_replay: Whether a receiver can reconstruct the logical
             authored-layer stack instead of consuming only the composed view.
