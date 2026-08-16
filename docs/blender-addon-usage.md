@@ -102,7 +102,8 @@ requires one unmuted collaboration layer and no department policy. A server
 that requires layered replay rejects the receiver without closing the imported
 scene. Use the original base workflow in that case.
 
-The [Live-Open Quickstart](live-open-quickstart.md) covers local mirrors,
+The [getting started guide](getting-started.md) covers the first local session. The
+[Live-open and VFS guide](live-open.md) covers local mirrors,
 Windows/macOS mounts, write modes, and token behavior.
 
 ## What synchronizes

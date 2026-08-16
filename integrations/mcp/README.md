@@ -1,38 +1,13 @@
 # OpenUSDConnect MCP server
 
-Exposes the OpenUSDConnect event protocol as MCP tools so Claude can author USD
-scenes (meshes, references/payloads, transforms, instancing, and
-UsdPreviewSurface / MaterialX shader networks) and stream them to the sync
-server. Network client only; scene authoring uses the core event protocol, and
-the local USD mirror negotiates the optional logical-layer replay capability.
+This package exposes the OpenUSDConnect event protocol as a local stdio MCP
+server. It provides live USD authoring, mirror-backed introspection, shader
+discovery, and playback tools while using the core sync protocol as a network
+client.
 
-## Quick start
-
-```bash
-uv sync --group bundled-usd --group mcp
-uv run python -m openusdconnect.server --port 7200     # in one terminal
-```
-
-Register with Claude Code:
-
-```bash
-claude mcp add openusdconnect -- uv --directory <repo> run python -m integrations.mcp
-```
-
-or Claude Desktop (`claude_desktop_config.json`):
-
-```json
-{ "mcpServers": { "openusdconnect": {
-  "command": "uv",
-  "args": ["--directory", "<repo>", "run", "python", "-m", "integrations.mcp"],
-  "env": { "OPENUSDCONNECT_PORT": "7200" }
-}}}
-```
-
-Configure via `OPENUSDCONNECT_HOST` / `_PORT` / `_CLIENT_ID` / `_DEPARTMENT`.
-
-See [`docs/mcp-server-usage.md`](../../docs/mcp-server-usage.md) for the full
-tool reference, authoring recipes, and architecture.
+For installation, client-neutral configuration, first-run verification, the
+tool reference, and authoring recipes, see the canonical
+[`MCP server usage guide`](../../docs/mcp-server-usage.md).
 
 ## Layout
 
