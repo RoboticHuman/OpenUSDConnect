@@ -543,6 +543,7 @@ def _apply_received_events_timer():
         scene = bpy.context.scene
         if scene is not None:
             scene.usd_connect_recv_running = False
+        _set_remote_apply_guard(False)
         return None
 
     # Hold the feedback guard for the entire batch INCLUDING view_layer.update()
@@ -710,6 +711,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             if _RECEIVER is not None:
                 _stop_receiver_thread(_RECEIVER)
                 _RECEIVER = None
+            _set_remote_apply_guard(False)
             _unregister_receiver_timer()
             scene.usd_connect_recv_running = False
             self.report({"ERROR"}, f"Failed to start receiver: {exc}")
@@ -729,6 +731,7 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
             _stop_receiver_thread(receiver)
             _store_last_sequence(context.scene, _LAST_SEQ)
         _unregister_receiver_timer()
+        _set_remote_apply_guard(False)
         context.scene.usd_connect_recv_running = False
         self.report({"INFO"}, f"Receiver stopped at seq={_LAST_SEQ}")
         return {"FINISHED"}

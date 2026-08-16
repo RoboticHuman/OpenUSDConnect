@@ -410,3 +410,24 @@ def test_no_double_rx90():
     identity = (1.0, 0.0, 0.0, 0.0)
     total = _quat_mul(q_rx90, identity)
     _assert_vec_close(total, q_rx90)
+
+
+def test_axis_conversion_ancestry_uses_import_provenance_not_rotation():
+    """An authored rotated parent is not Blender's display-basis node."""
+    from integrations.blender.blender_adapter import (
+        _PROP_USD_AXIS_CONVERSION,
+        _has_axis_rotation,
+    )
+
+    class Obj(dict):
+        def __init__(self, parent=None):
+            super().__init__()
+            self.parent = parent
+            self.original = self
+
+    authored_rotated_parent = Obj()
+    child = Obj(authored_rotated_parent)
+    assert not _has_axis_rotation(child)
+
+    authored_rotated_parent[_PROP_USD_AXIS_CONVERSION] = True
+    assert _has_axis_rotation(child)
