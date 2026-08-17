@@ -240,9 +240,10 @@ def main():
             pass
         try:
             if bpy.context.scene.usd_connect_recv_running:
-                bpy.ops.usd_connect.stop_receiver()
-        except Exception:
-            pass
+                result = bpy.ops.usd_connect.stop_receiver()
+                results["receiver_stop"] = "PASS" if "FINISHED" in result else f"FAIL: {result}"
+        except Exception as exc:
+            results["receiver_stop"] = f"FAIL: {exc}"
         try:
             if bpy.context.scene.usd_connect_net_emitter_running or capture._state.sender:
                 bpy.ops.usd_connect.disconnect_emitter()

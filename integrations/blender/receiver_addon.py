@@ -223,6 +223,8 @@ def _discard_replay_state() -> None:
 def _set_remote_apply_guard(value: bool):
     """Set the feedback-loop guard on both receiver and emitter modules."""
     global _APPLYING_REMOTE
+    if value == _APPLYING_REMOTE:
+        return
     _APPLYING_REMOTE = value
     capture_module = _get_capture_module()
     if capture_module is not None:

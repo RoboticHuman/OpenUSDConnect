@@ -1522,6 +1522,24 @@ def test_receiver_sequence_persistence_tolerates_released_scene():
     receiver_addon._store_last_sequence(ReleasedScene(), 42)
 
 
+def test_remote_apply_guard_ignores_duplicate_transitions(monkeypatch):
+    from integrations.blender import receiver_addon
+
+    transitions = []
+    capture = types.SimpleNamespace(set_emitter_feedback_guard=transitions.append)
+    monkeypatch.setattr(receiver_addon, "_APPLYING_REMOTE", False)
+    monkeypatch.setattr(receiver_addon, "_get_capture_module", lambda: capture)
+
+    receiver_addon._set_remote_apply_guard(False)
+    receiver_addon._set_remote_apply_guard(True)
+    receiver_addon._set_remote_apply_guard(True)
+    receiver_addon._set_remote_apply_guard(False)
+    receiver_addon._set_remote_apply_guard(False)
+
+    assert transitions == [True, False]
+    assert receiver_addon._APPLYING_REMOTE is False
+
+
 def test_receiver_stage_metadata_updates_adapter_axis_conversion(monkeypatch):
     from integrations.blender import blender_adapter
 
