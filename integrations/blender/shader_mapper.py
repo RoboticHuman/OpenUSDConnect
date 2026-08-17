@@ -386,7 +386,13 @@ class OpenPBRSurfaceMapper(MaterialXStandardSurfaceMapper):
     }
 
     def create_network(self, tree, inputs, **kwargs):
-        from integrations.openpbr_to_standard_surface import open_pbr_to_standard_surface
+        try:
+            from .openpbr_to_standard_surface import open_pbr_to_standard_surface
+        except ImportError:
+            # Source-tree execution keeps the shared helper one package above
+            # the Blender integration; the installable addon vendors it beside
+            # this module.
+            from integrations.openpbr_to_standard_surface import open_pbr_to_standard_surface
 
         std_values = open_pbr_to_standard_surface(inputs)
         nodes, std_map, output_map = super().create_network(tree, std_values, **kwargs)

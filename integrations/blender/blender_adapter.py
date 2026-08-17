@@ -1764,16 +1764,20 @@ class BlenderAdapter(DCCAdapter):
         return new_objs, merged
 
     @staticmethod
-    def _is_under_material(prim) -> bool:
-        """Return True if prim is a descendant of a UsdShade.Material."""
+    def _material_ancestor_path(prim) -> str:
+        """Return the owning UsdShade.Material path for a descendant prim."""
         from pxr import UsdShade
 
         ancestor = prim.GetParent()
         while ancestor and ancestor.IsValid():
             if ancestor.IsA(UsdShade.Material):
-                return True
+                return str(ancestor.GetPath())
             ancestor = ancestor.GetParent()
-        return False
+        return ""
+
+    @classmethod
+    def _is_under_material(cls, prim) -> bool:
+        return bool(cls._material_ancestor_path(prim))
 
     def _enrich_materialx_from_import(self, resolved, prim_path, prim_path_ref):
         """Read MaterialX materials from an imported USD file and apply them.
@@ -1810,9 +1814,28 @@ class BlenderAdapter(DCCAdapter):
                 return prim_path + file_path[len(prim_path_ref) :]
             return prim_path + "/" + file_path.lstrip("/")
 
+        def _resolve_output_source(source_path, source_name):
+            """Follow nested NodeGraph output forwarding to its terminal source."""
+            visited = set()
+            while (source_path, source_name) not in visited:
+                visited.add((source_path, source_name))
+                resolved_path, resolved_name = resolve_nodegraph_connection(
+                    stage,
+                    source_path,
+                    source_name,
+                )
+                if (resolved_path, resolved_name) == (source_path, source_name):
+                    break
+                source_path, source_name = resolved_path, resolved_name
+            return source_path, source_name
+
         # Collect material bindings, shader inputs, and connections
         # in event-kind order: bindings after shader inputs (matching protocol)
         shader_events = []
+        shader_material_paths = {}
+        shader_ids = {}
+        shader_sources = {}
+        material_surface_sources = {}
         connection_events = []
         binding_events = []
 
@@ -1826,7 +1849,23 @@ class BlenderAdapter(DCCAdapter):
                         (scene_path, _remap(target), purpose)
                     )
 
-            if prim.IsA(UsdShade.Shader) and self._is_under_material(prim):
+            if prim.IsA(UsdShade.Material):
+                _kind, _sid, _inputs, _itypes, material_conns = (
+                    read_usdshade_connectable(stage, file_path)
+                )
+                for output_name in ("outputs:mtlx:surface", "outputs:surface"):
+                    conn = material_conns.get(output_name)
+                    if not conn:
+                        continue
+                    source_path, _source_name = _resolve_output_source(
+                        conn["source_prim"],
+                        split_qualified_attr(conn["source_attr"])[1],
+                    )
+                    material_surface_sources[scene_path] = _remap(source_path)
+                    break
+
+            material_path = self._material_ancestor_path(prim)
+            if prim.IsA(UsdShade.Shader) and material_path:
                 _kind, sid, inputs, itypes, conns = read_usdshade_connectable(
                     stage,
                     file_path,
@@ -1839,6 +1878,8 @@ class BlenderAdapter(DCCAdapter):
                         conns,
                     )
                     shader_events.append((scene_path, sid, inputs, itypes))
+                    shader_material_paths[scene_path] = _remap(material_path)
+                    shader_ids[scene_path] = sid
                     if conns:
                         remapped_conns = {}
                         for local_attr, conn in conns.items():
@@ -1849,8 +1890,7 @@ class BlenderAdapter(DCCAdapter):
                                 # Flatten NodeGraph passthroughs so Blender
                                 # wires directly between real shader nodes
                                 # (Blender has no NodeGroup-in-USD concept).
-                                flat_path, flat_base = resolve_nodegraph_connection(
-                                    stage,
+                                flat_path, flat_base = _resolve_output_source(
                                     conn["source_prim"],
                                     src_base,
                                 )
@@ -1868,31 +1908,45 @@ class BlenderAdapter(DCCAdapter):
                                     "source_attr": conn["source_attr"],
                                 }
                         connection_events.append((scene_path, remapped_conns))
+                        shader_sources[scene_path] = {
+                            conn["source_prim"] for conn in remapped_conns.values()
+                        }
 
         # Bindings first so materials are tagged with usd_material_path
         # before set_connectable_input looks them up.
         for scene_path, target, purpose in binding_events:
             self.set_material_binding(scene_path, target, purpose)
-        # Blender's USD importer already handles UsdPreviewSurface shaders.
-        # When a material's surface shader is multi-node MaterialX, the
-        # mapper builds the full network itself applying our texture
-        # mappers on top would create redundant/conflicting nodes.  Gate
-        # on `is_surface_shader` so helper multi-node mappers (Normal Map,
-        # etc.) don't suppress siblings under the same NodeGraph.
-        surface_multi_node_mats = set()
-        for scene_path, sid, _inputs, _itypes in shader_events:
-            mapper = self._shader_registry.get(sid)
-            if mapper and mapper.is_multi_node and mapper.is_surface_shader:
-                mat_path = scene_path.rsplit("/", 1)[0]
-                surface_multi_node_mats.add(mat_path)
-        for scene_path, sid, inputs, itypes in shader_events:
-            mapper = self._shader_registry.get(sid)
-            if mapper and not mapper.is_multi_node:
-                mat_path = scene_path.rsplit("/", 1)[0]
-                if mat_path in surface_multi_node_mats:
+        # Follow the material's authored surface output instead of inferring
+        # render intent from shader names or hierarchy. Blender already handles
+        # Preview-only materials; enrich only a connected multi-node MaterialX
+        # surface and the shader nodes reachable from its inputs.
+        selected_shaders = set()
+        for mat_path, terminal_path in material_surface_sources.items():
+            terminal_mapper = self._shader_registry.get(shader_ids.get(terminal_path, ""))
+            if not (
+                terminal_mapper
+                and terminal_mapper.is_multi_node
+                and terminal_mapper.is_surface_shader
+            ):
+                continue
+            pending = [terminal_path]
+            while pending:
+                shader_path = pending.pop()
+                if (
+                    shader_path in selected_shaders
+                    or shader_material_paths.get(shader_path) != mat_path
+                ):
                     continue
+                selected_shaders.add(shader_path)
+                pending.extend(shader_sources.get(shader_path, ()))
+
+        for scene_path, sid, inputs, itypes in shader_events:
+            if scene_path not in selected_shaders:
+                continue
             self.set_connectable_input(scene_path, sid, inputs, itypes)
         for scene_path, conns in connection_events:
+            if scene_path not in selected_shaders:
+                continue
             self.set_connectable_connection(scene_path, conns)
 
         # Fix missing textures Blender's USD importer creates Image Texture
@@ -1900,10 +1954,10 @@ class BlenderAdapter(DCCAdapter):
         # stage for texture shaders and load the images using pxr's resolved paths.
         self._fix_missing_textures(stage, root_prim, prim_path, _remap)
 
-        if shader_events:
+        if selected_shaders:
             LOG.info(
                 "Post-import enrichment: applied %d shaders from %s",
-                len(shader_events),
+                len(selected_shaders),
                 resolved,
             )
 

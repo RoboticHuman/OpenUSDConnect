@@ -148,3 +148,62 @@ class TestStaticFile:
 
     def test_missing_file_returns_none(self, tmp_path):
         assert live_discovery.read_live_metadata(str(tmp_path / "nope.usda")) is None
+
+
+class TestTextureImportOptions:
+    def test_plain_usd_uses_blender_defaults(self, tmp_path):
+        path = tmp_path / "plain.usda"
+        path.write_text('#usda 1.0\ndef Xform "World" {}\n', encoding="utf-8")
+
+        assert live_discovery.texture_import_options(str(path)) == {}
+
+    def test_package_marker_in_invalid_bytes_is_not_treated_as_usd(self, tmp_path):
+        path = tmp_path / "invalid.usd"
+        path.write_bytes(b"not USD, despite asset.usdz[0/texture.png]")
+
+        assert live_discovery.texture_import_options(str(path)) == {}
+
+    def test_usdz_uses_stable_copy_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            live_discovery,
+            "_TEXTURE_CACHE_DIR",
+            str(tmp_path / "texture-cache"),
+        )
+        path = tmp_path / "asset.usdz"
+        path.write_bytes(b"package bytes are not opened by this helper")
+
+        first = live_discovery.texture_import_options(str(path))
+        second = live_discovery.texture_import_options(str(path))
+
+        assert first == second
+        assert first["import_textures_mode"] == "IMPORT_COPY"
+        assert first["tex_name_collision_mode"] == "OVERWRITE"
+        assert os.path.isdir(first["import_textures_dir"])
+
+    def test_live_texture_directory_is_stable_per_snapshot_version(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            live_discovery,
+            "_TEXTURE_CACHE_DIR",
+            str(tmp_path / "texture-cache"),
+        )
+        first = tmp_path / "snapshot-1.usd"
+        second = tmp_path / "snapshot-2.usd"
+        first.write_text('#usda 1.0\ndef Xform "World" {}\n', encoding="utf-8")
+        second.write_bytes(first.read_bytes())
+        metadata = {
+            "live": True,
+            "scene_id": "live-scene",
+            "epoch": 3,
+            "snapshot_seq": 8,
+        }
+
+        first_options = live_discovery.texture_import_options(str(first), metadata)
+        second_options = live_discovery.texture_import_options(str(second), metadata)
+        next_options = live_discovery.texture_import_options(
+            str(second),
+            {**metadata, "snapshot_seq": 9},
+        )
+
+        assert first_options["import_textures_mode"] == "IMPORT_COPY"
+        assert first_options["import_textures_dir"] == second_options["import_textures_dir"]
+        assert first_options["import_textures_dir"] != next_options["import_textures_dir"]

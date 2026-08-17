@@ -19,6 +19,37 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDEmit, Log, All);
 
 using namespace OUC;
 
+namespace
+{
+constexpr double FrameReadTimeoutSeconds = 10.0;
+
+bool IsPeerClosed(FSocket* Socket)
+{
+	if (!Socket)
+	{
+		return true;
+	}
+
+	uint32 PendingBytes = 0;
+	if (Socket->HasPendingData(PendingBytes))
+	{
+		return false;
+	}
+
+	// An orderly TCP close becomes readable with no payload. HasPendingData()
+	// alone cannot distinguish that state from an idle connection on Windows.
+	if (!Socket->Wait(ESocketWaitConditions::WaitForRead, FTimespan::Zero()))
+	{
+		return false;
+	}
+
+	uint8 Probe = 0;
+	int32 BytesRead = 0;
+	return !Socket->Recv(&Probe, 1, BytesRead, ESocketReceiveFlags::Peek)
+		|| BytesRead == 0;
+}
+}
+
 // ---------------------------------------------------------------------------
 FProducerEndpointState::FProducerEndpointState(
 	const FString& InHost,
@@ -366,6 +397,12 @@ uint32 FEmitClient::Run()
 		float RateLimitDelay = 0.0f;
 		while (!bShouldStop.load(std::memory_order_relaxed) && !bShouldDisconnect)
 		{
+			if (IsPeerClosed(Socket))
+			{
+				bShouldDisconnect = true;
+				break;
+			}
+
 			// 1. Claim and send every endpoint-state transaction not yet written
 			// on this connection. Items remain owned by ProducerState until a
 			// committed/duplicate TransactionResult arrives.
@@ -395,10 +432,13 @@ uint32 FEmitClient::Run()
 				++ResultIndex)
 			{
 				uint32 PendingBytes = 0;
-				if (!Socket || !Socket->HasPendingData(PendingBytes) || PendingBytes < 4)
+				if (!Socket || !Socket->HasPendingData(PendingBytes) || PendingBytes == 0)
 				{
 					break;
 				}
+				// RecvFrame handles fragmented headers and bodies. Enter it as
+				// soon as any byte is readable so a peer close after a partial
+				// header is observed instead of leaving this connection stuck.
 				TArray<uint8> InFrame;
 				if (!RecvFrame(InFrame))
 				{
@@ -521,6 +561,13 @@ bool FEmitClient::RecvExact(uint8* Buf, int32 Needed)
 	while (Got < Needed)
 	{
 		if (bShouldStop.load(std::memory_order_relaxed) || !Socket) return false;
+		if (!Socket->Wait(
+			ESocketWaitConditions::WaitForRead,
+			FTimespan::FromSeconds(FrameReadTimeoutSeconds)))
+		{
+			UE_LOG(LogUSDEmit, Warning, TEXT("Timed out while receiving emitter frame"));
+			return false;
+		}
 		int32 Read = 0;
 		if (!Socket->Recv(Buf + Got, Needed - Got, Read) || Read <= 0) return false;
 		Got += Read;

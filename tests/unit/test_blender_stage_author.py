@@ -891,6 +891,62 @@ class TestMapperReverseReads:
         assert mapper.read_all_inputs(node) == {"varname": "displayColor"}
 
 
+def test_material_ancestor_path_uses_usd_ownership_not_shader_parent():
+    from pxr import Usd, UsdShade
+
+    stage = Usd.Stage.CreateInMemory()
+    UsdShade.Material.Define(stage, "/Looks/Material")
+    stage.DefinePrim("/Looks/Material/Nodes", "Scope")
+    shader = UsdShade.Shader.Define(stage, "/Looks/Material/Nodes/Surface")
+    shader.CreateIdAttr("UsdPreviewSurface")
+
+    assert BlenderAdapter._material_ancestor_path(shader.GetPrim()) == "/Looks/Material"
+
+
+def test_materialx_enrichment_follows_connected_surface_graph(tmp_path, caplog):
+    from pxr import Sdf, Usd, UsdShade
+
+    path = tmp_path / "dual-surface.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    material = UsdShade.Material.Define(stage, "/Material")
+
+    preview = UsdShade.Shader.Define(stage, "/Material/Preview")
+    preview.CreateIdAttr("UsdPreviewSurface")
+    preview_out = preview.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+    material.CreateSurfaceOutput().ConnectToSource(preview_out)
+
+    surface = UsdShade.Shader.Define(stage, "/Material/MtlxSurface")
+    surface.CreateIdAttr("ND_standard_surface_surfaceshader")
+    surface_out = surface.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    material.CreateSurfaceOutput("mtlx").ConnectToSource(surface_out)
+
+    texture = UsdShade.Shader.Define(stage, "/Material/Texture")
+    texture.CreateIdAttr("ND_tiledimage_color3")
+    texture_out = texture.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+    surface.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+        texture_out
+    )
+
+    disconnected = UsdShade.Shader.Define(stage, "/Material/Disconnected")
+    disconnected.CreateIdAttr("ND_standard_surface_surfaceshader")
+    disconnected.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    stage.GetRootLayer().Save()
+
+    adapter = BlenderAdapter()
+    adapter.set_connectable_input = MagicMock(return_value=True)
+    adapter.set_connectable_connection = MagicMock(return_value=True)
+    adapter._fix_missing_textures = MagicMock()
+
+    caplog.set_level("INFO", logger="integrations.blender.blender_adapter")
+    adapter._enrich_materialx_from_import(str(path), "", "")
+
+    applied = {
+        call.args[0] for call in adapter.set_connectable_input.call_args_list
+    }
+    assert applied == {"/Material/MtlxSurface", "/Material/Texture"}
+    assert f"Post-import enrichment: applied 2 shaders from {path}" in caplog.messages
+
+
 class TestBlenderAssetArcProjection:
     @staticmethod
     def _make_asset(tmp_path, name):
@@ -1100,9 +1156,125 @@ def test_blender_timer_retries_a_prepared_batch_after_reconnect(monkeypatch):
     monkeypatch.setattr(capture._state, "author", author)
     monkeypatch.setattr(capture._state, "notice_emitter", emitter)
     monkeypatch.setattr(capture, "_try_send_dirty_events", send_pending)
+    monkeypatch.setattr(capture, "_schedule_emitter_reconnect", MagicMock())
 
     assert capture._timer_tick() == 0.25
     send_pending.assert_called_once_with()
+
+
+def test_blender_timer_schedules_emitter_reconnect(monkeypatch):
+    from integrations.blender import capture
+
+    author = MagicMock()
+    author.enabled = True
+    reconnect = MagicMock()
+    monkeypatch.setattr(capture._state, "author", author)
+    monkeypatch.setattr(capture._state, "notice_emitter", None)
+    monkeypatch.setattr(capture, "_schedule_emitter_reconnect", reconnect)
+
+    assert capture._timer_tick() == 0.25
+    reconnect.assert_called_once_with()
+
+
+def test_blender_reconnect_worker_preserves_current_sender(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = True
+    sender.host = "127.0.0.1"
+    sender.port = 7200
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
+    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    sender.connect.assert_called_once_with(
+        timeout=capture.EMITTER_RECONNECT_TIMEOUT_SECONDS,
+    )
+    sender.disconnect.assert_not_called()
+    assert capture._state._reconnect_interval == capture.EMITTER_RECONNECT_INTERVAL_SECONDS
+
+
+def test_blender_reconnect_worker_backs_off_after_failure(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = False
+    sender.auth_rejected = False
+    sender.hello_rejected = False
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
+    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    assert capture._state._reconnect_interval == 8.0
+
+
+def test_blender_reconnect_worker_closes_stale_connection(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = True
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 8)
+
+    capture._emitter_reconnect_worker(sender, 7)
+
+    sender.disconnect.assert_called_once_with()
+
+
+def test_cancel_blender_reconnect_never_waits_for_worker(monkeypatch):
+    from integrations.blender import capture
+
+    reconnect_thread = MagicMock()
+    reconnect_thread.is_alive.return_value = True
+    monkeypatch.setattr(capture._state, "_reconnect_thread", reconnect_thread)
+    generation = capture._state._reconnect_generation
+    monkeypatch.setattr(capture._state, "_reconnect_generation", generation)
+
+    assert capture._cancel_emitter_reconnect() is False
+
+    reconnect_thread.join.assert_not_called()
+    assert capture._state._reconnect_thread is reconnect_thread
+    assert capture._state._reconnect_generation == generation + 1
+
+
+def test_blender_unregister_detaches_sender_owned_by_reconnect_worker(monkeypatch):
+    from integrations.blender import capture
+
+    reconnect_thread = MagicMock()
+    reconnect_thread.is_alive.return_value = True
+    sender = MagicMock()
+    monkeypatch.setattr(capture._state, "_reconnect_thread", reconnect_thread)
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture, "_remove_handler", MagicMock())
+    monkeypatch.setattr(capture, "_reset_stage_author", MagicMock())
+    monkeypatch.setattr(capture, "_CAPTURE_CLASSES", ())
+    monkeypatch.setattr(capture, "_SCENE_PROPS", ())
+    monkeypatch.setattr(capture.bpy.app.handlers, "undo_pre", [], raising=False)
+
+    capture.unregister()
+
+    sender.disconnect.assert_not_called()
+    assert capture._state.sender is None
+
+
+def test_blender_reconnect_worker_stops_after_handshake_rejection(monkeypatch):
+    from integrations.blender import capture
+
+    sender = MagicMock()
+    sender.connect.return_value = False
+    sender.auth_rejected = True
+    sender.hello_rejected = False
+    sender.rejection_reason = "token revoked"
+    monkeypatch.setattr(capture._state, "sender", sender)
+    monkeypatch.setattr(capture._state, "_reconnect_generation", 4)
+
+    capture._emitter_reconnect_worker(sender, 4)
+
+    assert capture._schedule_emitter_reconnect() is False
 
 
 def test_remote_apply_refreshes_only_matching_transform_baselines(monkeypatch):

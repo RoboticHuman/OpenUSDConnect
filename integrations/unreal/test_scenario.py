@@ -540,6 +540,8 @@ def create_scenario(work_dir: Path, *, port: int, python_executable: Path) -> Un
                 "python_executable": str(python_executable),
                 "repo_root": str(REPO_ROOT),
                 "result_path": str(result_path),
+                "outage_ready_path": str(work_dir / "outage-ready"),
+                "offline_edit_path": str(work_dir / "offline-edit-authored"),
                 "timeout": 120.0,
                 "update_events": updates,
             },

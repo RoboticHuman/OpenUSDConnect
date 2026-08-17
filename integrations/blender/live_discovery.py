@@ -25,6 +25,7 @@ LIVE_METADATA_KEY = "openusdconnect"
 
 _REMOTE_SCHEMES = ("http://", "https://")
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "openusdconnect-live-cache")
+_TEXTURE_CACHE_DIR = os.path.join(tempfile.gettempdir(), "openusdconnect-texture-cache")
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -74,6 +75,35 @@ def fetch_to_temp(url: str, timeout: float = 10.0) -> str:
         data = resp.read()
         etag = resp.headers.get("ETag", "")
     return _write_cached_snapshot(url, data, etag)
+
+
+def texture_import_options(local_path: str, metadata: dict | None = None) -> dict:
+    """Return Blender import options that keep transient textures alive.
+
+    Blender extracts USDZ textures into a short-lived directory for its default
+    packed mode, and live snapshots may be replaced in their download cache.
+    Copy textures for either case into a stable per-scene directory so Blender
+    can load them on demand after the import operator returns.
+    """
+    is_live_snapshot = bool(metadata and metadata.get("live"))
+    if not is_live_snapshot and not local_path.lower().endswith(".usdz"):
+        return {}
+
+    scene_id = str((metadata or {}).get("scene_id", "")).strip()
+    if scene_id:
+        epoch = str((metadata or {}).get("epoch", "")).strip()
+        snapshot_seq = str((metadata or {}).get("snapshot_seq", "")).strip()
+        identity = f"scene:{scene_id}:epoch:{epoch}:seq:{snapshot_seq}"
+    else:
+        identity = os.path.normcase(os.path.abspath(local_path))
+    token = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:20]
+    texture_dir = os.path.join(_TEXTURE_CACHE_DIR, token)
+    os.makedirs(texture_dir, exist_ok=True)
+    return {
+        "import_textures_mode": "IMPORT_COPY",
+        "import_textures_dir": texture_dir,
+        "tex_name_collision_mode": "OVERWRITE",
+    }
 
 
 def read_live_metadata(local_path: str) -> dict | None:
