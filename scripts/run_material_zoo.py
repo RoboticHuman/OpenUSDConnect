@@ -24,6 +24,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from integrations.server_process import start as start_server_process
+from integrations.server_process import stop as stop_process
+from integrations.server_process import wait_until_listening
 from openusdconnect.cli_common import nonnegative_seconds, port_or_zero
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,23 +113,9 @@ def _select_port(requested: int) -> int:
         return int(probe.getsockname()[1])
 
 
-def _wait_for_server(port: int, timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.settimeout(0.1)
-            if probe.connect_ex(("127.0.0.1", port)) == 0:
-                return
-        time.sleep(0.05)
-    raise RuntimeError(f"server did not start on port {port}")
-
-
 def _start_server(port: int, event_log: Path) -> subprocess.Popen:
-    process = subprocess.Popen(
+    process = start_server_process(
         [
-            sys.executable,
-            "-m",
-            "openusdconnect.server",
             "--port",
             str(port),
             "--base",
@@ -134,11 +123,9 @@ def _start_server(port: int, event_log: Path) -> subprocess.Popen:
             "--event-log",
             str(event_log),
         ],
-        cwd=PROJECT_ROOT,
+        project_root=PROJECT_ROOT,
     )
-    _wait_for_server(port)
-    if process.poll() is not None:
-        raise RuntimeError(f"server exited with code {process.returncode}")
+    wait_until_listening(process, "127.0.0.1", port)
     return process
 
 
@@ -252,17 +239,6 @@ def _publish(port: int, fixture_events: list[dict], presentation_events: list[di
         sender.disconnect()
 
 
-def _stop_process(process: subprocess.Popen | None) -> None:
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5.0)
-
-
 def main() -> int:
     args = _parse_args()
     from integrations.visualtest.replay import load_events
@@ -343,8 +319,8 @@ def main() -> int:
             print("Stopping Material Zoo viewers...", flush=True)
         finally:
             for process in reversed(viewer_processes):
-                _stop_process(process)
-            _stop_process(server)
+                stop_process(process)
+            stop_process(server)
     return 0
 
 

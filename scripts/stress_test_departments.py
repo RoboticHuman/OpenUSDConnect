@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -38,7 +38,10 @@ if _PROJECT_ROOT not in sys.path:
 
 from pxr import Usd, UsdGeom
 
-from openusdconnect.cli_common import nonnegative_int, positive_int
+from integrations.server_process import start as start_server_process
+from integrations.server_process import stop as stop_process
+from integrations.server_process import wait_until_listening
+from openusdconnect.cli_common import nonnegative_int, port_number, positive_int
 from openusdconnect.codec import message_to_dict
 from openusdconnect.event_apply import apply_events
 from openusdconnect.framing import recv_framed
@@ -165,9 +168,6 @@ def _wait_for_server(port, timeout=15):
     return False
 
 
-_PID_LINE_RE = re.compile(r"\(PID (\d+)\)")
-
-
 def _stop_py_spy_gracefully(proc, timeout=15):
     """Send Ctrl+Break / SIGINT so py-spy flushes its output before exiting.
 
@@ -193,51 +193,6 @@ def _stop_py_spy_gracefully(proc, timeout=15):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
-
-
-def _spawn_server_with_pid_capture(server_cmd, timeout=10):
-    """Spawn the server and parse the real interpreter PID from its log.
-
-    On uv venvs (Windows in particular), ``sys.executable`` is a launcher
-    stub that spawns the real Python interpreter as a child so
-    ``Popen.pid`` is the launcher, not the interpreter py-spy needs to
-    attach to.  The server logs ``Server listening on … (PID N)`` where N
-    is its own ``os.getpid()``, which is the real interpreter.  We
-    capture stdout, parse N, and continue draining stdout in a background
-    thread so the server keeps running unblocked.
-    """
-    proc = subprocess.Popen(
-        server_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    real_pid = None
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                break
-            continue
-        sys.stdout.write(line)
-        m = _PID_LINE_RE.search(line)
-        if m:
-            real_pid = int(m.group(1))
-            break
-
-    if real_pid is None:
-        proc.terminate()
-        return proc, None
-
-    # Continue draining stdout so the server's pipe buffer doesn't fill up.
-    def _drain():
-        for line in iter(proc.stdout.readline, ""):
-            sys.stdout.write(line)
-
-    threading.Thread(target=_drain, daemon=True).start()
-    return proc, real_pid
 
 
 def _make_trs_events(prim_path, t, first_encounter=False):
@@ -271,6 +226,12 @@ def _read_translate(stage, prim_path):
             v = op.Get()
             return (v[0], v[1], v[2])
     return None
+
+
+def _shared_prims_to_verify(iterations, n_writers):
+    if n_writers == 0:
+        return []
+    return SHARED_PRIMS[:min(iterations, len(SHARED_PRIMS))]
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +353,11 @@ def _receiver_worker(port, spec, done_event, connect_delay, errors, stats):
 
 def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_output,
                connect_existing, text_profile=False, txn_batch_size=256,
-               txn_batch_delay_ms=0.5, profile_rate=50):
+               txn_batch_delay_ms=0.5, profile_rate=50,
+               server_port=SERVER_PORT, db_path=DB_PATH, plugin_dll_dirs=()):
+    db_path = Path(db_path)
+    if not db_path.is_absolute():
+        db_path = Path(_PROJECT_ROOT) / db_path
     total_clients = n_emitters + n_receivers + n_bidi
     total_sockets = n_emitters + n_receivers + n_bidi * 2
 
@@ -403,50 +368,37 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
     text_profile_path = None
 
     if connect_existing:
-        print(f"Connecting to existing server on port {SERVER_PORT}...")
-        if not _wait_for_server(SERVER_PORT, timeout=5):
+        print(f"Connecting to existing server on port {server_port}...")
+        if not _wait_for_server(server_port, timeout=5):
             print("ERROR: No server running. Start one first:")
-            print(f"  uv run python -m openusdconnect.server --port {SERVER_PORT} "
-                  f"--event-log {DB_PATH} --departments {DEPARTMENTS}")
+            print(f"  uv run openusdconnect-server --port {server_port} "
+                  f"--event-log {db_path} --departments {DEPARTMENTS}")
             return False
     else:
-        for f in _db_files():
+        for f in _db_files(db_path):
             if os.path.exists(f):
                 os.remove(f)
 
         server_cmd = [
-            sys.executable, "-m", "openusdconnect.server",
-            "--port", str(SERVER_PORT),
-            "--event-log", DB_PATH,
+            "--port", str(server_port),
+            "--event-log", str(db_path),
             "--departments", DEPARTMENTS,
             "--txn-batch-size", str(txn_batch_size),
             "--txn-batch-delay-ms", str(txn_batch_delay_ms),
         ]
-        # Spawn the server.  py-spy's ``record -- <cmd>`` mode cannot
-        # introspect a uv venv python (errors with "Failed to find python
-        # version from target process") because ``sys.executable`` on uv
-        # is a launcher stub that spawns the real interpreter as a child.
-        # ``record --pid`` attach mode works fine but only against the
-        # real interpreter PID, not the launcher.  ``Popen.pid`` is the
-        # launcher; we parse the interpreter PID from the server's own
-        # log line.
-        if profile or text_profile:
-            server_proc, real_server_pid = _spawn_server_with_pid_capture(server_cmd)
-            if real_server_pid is None:
-                print("ERROR: could not parse server PID from log; "
-                      "profiling disabled.")
-                profile = False
-                text_profile = False
-        else:
-            server_proc = subprocess.Popen(server_cmd)
-            real_server_pid = None
+        for directory in plugin_dll_dirs:
+            server_cmd.extend(("--plugin-dll-dir", directory))
+        server_proc = start_server_process(server_cmd, project_root=_PROJECT_ROOT)
+        real_server_pid = server_proc.pid
 
-        if not _wait_for_server(SERVER_PORT):
-            print("ERROR: Server failed to start.")
-            server_proc.terminate()
+        try:
+            wait_until_listening(server_proc, "127.0.0.1", server_port, 15)
+        except RuntimeError as error:
+            print(f"ERROR: {error}")
+            stop_process(server_proc)
             return False
 
-        print(f"  Server PID: {real_server_pid or server_proc.pid}")
+        print(f"  Server PID: {real_server_pid}")
 
         # --text-profile records raw collapsed stacks and post-processes them
         # into a text hotspot report (LLM-friendly).  --profile records the
@@ -517,7 +469,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         rx_threads = []
         for spec in receivers:
             t = threading.Thread(target=_receiver_worker,
-                                 args=(SERVER_PORT, spec, done_event,
+                                 args=(server_port, spec, done_event,
                                        idx * delay_step, errors, recv_stats))
             t.start()
             rx_threads.append(t)
@@ -531,7 +483,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
             receiver_spec = {"client_id": f"{spec['client_id']}-rx"}
             receiver_thread = threading.Thread(
                 target=_receiver_worker,
-                args=(SERVER_PORT, receiver_spec, done_event,
+                args=(server_port, receiver_spec, done_event,
                       idx * delay_step, errors, recv_stats),
             )
             receiver_thread.start()
@@ -540,7 +492,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
 
             emitter_thread = threading.Thread(
                 target=_emitter_worker,
-                args=(SERVER_PORT, spec, iterations, barrier,
+                args=(server_port, spec, iterations, barrier,
                       idx * delay_step, errors, emit_stats,
                       submission_finished_at, ack_latencies),
             )
@@ -551,7 +503,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         emit_threads = []
         for spec in emitters:
             t = threading.Thread(target=_emitter_worker,
-                                 args=(SERVER_PORT, spec, iterations, barrier,
+                                 args=(server_port, spec, iterations, barrier,
                                        idx * delay_step, errors, emit_stats,
                                        submission_finished_at,
                                        ack_latencies))
@@ -635,7 +587,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         # We drain until the stream goes quiet (no new data for 3 seconds).
         print("\nVerifying final state via full replay...")
 
-        verify_sock = _connect_receiver(SERVER_PORT, "verifier-final")
+        verify_sock = _connect_receiver(server_port, "verifier-final")
         verify_events = []
         verify_sock.settimeout(1)
         quiet_seconds = 0
@@ -661,10 +613,10 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         n = iterations - 1
         all_pass = True
 
-        # Shared prims must exist. This lightweight verifier applies the
-        # authored stream to one flat stage, so it does not assert the
-        # department stack's final composed value.
-        for prim_path in SHARED_PRIMS:
+        # Shared prims touched by this workload must exist. This lightweight
+        # verifier applies the authored stream to one flat stage, so it does
+        # not assert the department stack's final composed value.
+        for prim_path in _shared_prims_to_verify(iterations, n_writers):
             actual = _read_translate(verify_stage, prim_path)
             if actual is None:
                 print(f"  FAIL {prim_path}: not found")
@@ -707,8 +659,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
             # early stop ran.  Gracefully signal so py-spy still flushes
             # its samples.
             _stop_py_spy_gracefully(py_spy_proc)
-            server_proc.terminate()
-            server_proc.wait(timeout=10)
+            stop_process(server_proc, timeout=10)
             print("  Server stopped.")
             if profile and profile_path:
                 print(f"  SVG profile saved to {profile_path}")
@@ -732,7 +683,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
                     print(f"  Raw stacks saved to {raw_profile_path}")
                 else:
                     print("  WARN: failed to summarize raw profile")
-            for f in _db_files():
+            for f in _db_files(db_path):
                 try:
                     os.remove(f)
                 except OSError:
@@ -741,9 +692,12 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
             print("  Server left running (--connect mode).")
 
 
-def _db_files():
+def _db_files(db_path=DB_PATH):
     """All DB files (main, tokens, WAL, SHM) that need cleanup."""
-    bases = [DB_PATH, DB_PATH.replace(".db", "_tokens.db")]
+    db_path = str(db_path)
+    base_path = Path(db_path)
+    token_path = base_path.with_name(f"{base_path.stem}_tokens{base_path.suffix}")
+    bases = [db_path, str(token_path)]
     files = []
     for b in bases:
         files.append(b)
@@ -778,16 +732,28 @@ def main():
                          "(default: stress_profile.svg or stress_profile.txt)")
     ap.add_argument("--profile-rate", type=positive_int, default=50,
                     help="py-spy sampling rate in Hz (default: 50)")
+    ap.add_argument("--port", type=port_number, default=SERVER_PORT,
+                    help=f"Server port (default: {SERVER_PORT})")
+    ap.add_argument("--event-log", type=Path, default=Path(DB_PATH),
+                    help=f"Temporary stress event log (default: {DB_PATH})")
+    ap.add_argument("--plugin-dll-dir", action="append", default=[], metavar="DIR",
+                    help="Forward a USD plugin dependency directory; repeat as needed")
     ap.add_argument("--connect", action="store_true",
                     help="Connect to an already-running server instead of spawning one")
     args = ap.parse_args()
+
+    if (args.profile or args.text_profile) and not args.connect and not shutil.which("py-spy"):
+        ap.error("py-spy is unavailable; run through `uv run --group profile ...`")
 
     ok = run_stress(args.emitters, args.receivers, args.bidi,
                     args.iterations, args.profile, args.profile_output,
                     args.connect, text_profile=args.text_profile,
                     txn_batch_size=args.txn_batch_size,
                     txn_batch_delay_ms=args.txn_batch_delay_ms,
-                    profile_rate=args.profile_rate)
+                    profile_rate=args.profile_rate,
+                    server_port=args.port,
+                    db_path=args.event_log,
+                    plugin_dll_dirs=args.plugin_dll_dir)
     sys.exit(0 if ok else 1)
 
 

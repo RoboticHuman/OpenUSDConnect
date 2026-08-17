@@ -105,6 +105,12 @@ See the [command-line reference](docs/cli-reference.md#usd-plugin-startup) for
 the complete startup contract. The source-tree `integrations.run_server`
 wrapper remains a RenderMan compatibility convenience.
 
+The bundled launchers use that wrapper automatically, so the dashboard demo,
+department stress test, Material Zoo, live-open, Blender debug, and usdview
+flows inherit the current project environment and discover RenderMan from
+`RMANTREE` when installed. Generic plugin dependencies can still be supplied
+with `OPENUSDCONNECT_DLL_DIRS` or each launcher's `--plugin-dll-dir` option.
+
 ### Connect a USD-native application
 
 `ManagedClient` is the usual bidirectional API for applications that own a
@@ -147,7 +153,7 @@ replay, reconnection, adapters, and the cases that require recovery.
 | usdview plugin | Receive | `uv run python scripts/start_usdview.py scene.usda` |
 | Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal plugin guide](integrations/unreal/OpenUSDConnect/README.md) |
 | MCP server | Author and inspect | `uv run python -m integrations.mcp` |
-| Dashboard | Administration | Start the server with `--dashboard-port 8080` |
+| Dashboard | Administration | `uv run --group server --group dashboard python scripts/demo_layer_dashboard.py` |
 
 The Blender addon zip is written to `dist/usd_connect_blender.zip`. Install it
 through **Edit > Preferences > Add-ons > Install from Disk**. See the

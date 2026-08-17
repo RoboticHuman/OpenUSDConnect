@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+from integrations.server_process import command as server_command
+from integrations.server_process import server_environment
 from openusdconnect.cli_common import (
     add_sync_endpoint_args,
     add_vfs_resource_args,
@@ -46,6 +48,8 @@ from openusdconnect.defaults import (
     advertise_host_for_bind,
     vfs_url,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -298,7 +302,12 @@ def _acquire_start_lock(state_file: Path, session_id: str) -> Path:
     raise RuntimeError(f"could not claim launcher state {state_file}")
 
 
-def _start_process(cmd: list[str], log_path: Path) -> subprocess.Popen:
+def _start_process(
+    cmd: list[str],
+    log_path: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab")
     creationflags = 0
@@ -312,7 +321,8 @@ def _start_process(cmd: list[str], log_path: Path) -> subprocess.Popen:
             stderr=subprocess.STDOUT,
             creationflags=creationflags,
             start_new_session=not _is_windows(),
-            cwd=str(Path.cwd()),
+            cwd=str(PROJECT_ROOT),
+            env=env,
         )
     finally:
         log.close()
@@ -471,10 +481,7 @@ def _run_start_claimed(config: LiveOpenConfig) -> int:
         config.vfs_name,
     )
 
-    server_cmd = [
-        sys.executable,
-        "-m",
-        "openusdconnect.server",
+    server_args = [
         "--host",
         config.host,
         "--port",
@@ -497,11 +504,16 @@ def _run_start_claimed(config: LiveOpenConfig) -> int:
         config.vfs_write_mode,
     ]
     if config.vfs_bypass_write_validation:
-        server_cmd.append("--vfs-bypass-write-validation")
+        server_args.append("--vfs-bypass-write-validation")
     if config.dashboard_port:
-        server_cmd.extend(["--dashboard-port", str(config.dashboard_port)])
+        server_args.extend(["--dashboard-port", str(config.dashboard_port)])
 
-    server = _start_process(server_cmd, server_log)
+    server_cmd = server_command(server_args)
+    server = _start_process(
+        server_cmd,
+        server_log,
+        env=server_environment(PROJECT_ROOT),
+    )
     try:
         _wait_for_http(
             live_vfs_url,

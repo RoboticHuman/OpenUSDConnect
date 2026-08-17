@@ -156,7 +156,7 @@ def test_start_uses_platform_local_exposure(
     launcher = _load_launcher()
     commands = []
 
-    def fake_start_process(command, _log_path):
+    def fake_start_process(command, _log_path, **_kwargs):
         commands.append(command)
         return _Process(1000 + len(commands))
 

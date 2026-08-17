@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from integrations import server_process
 from scripts import start_usdview
 
 
@@ -42,16 +43,18 @@ def test_server_command_forwards_project_environment_options(tmp_path):
 
 
 def test_windows_server_uses_base_interpreter_and_current_environment(monkeypatch):
-    monkeypatch.setattr(start_usdview.os, "name", "nt")
-    monkeypatch.setattr(start_usdview.sys, "_base_executable", "/base/python.exe")
+    monkeypatch.setattr(server_process, "_is_windows", lambda: True)
+    monkeypatch.setattr(server_process.sys, "_base_executable", "/base/python.exe")
     monkeypatch.setattr(
-        start_usdview.sysconfig,
+        server_process.sysconfig,
         "get_paths",
         lambda: {"purelib": "/project/site-packages", "platlib": "/project/site-packages"},
     )
 
-    assert start_usdview._server_python() == "/base/python.exe"
-    paths = start_usdview._server_environment()["PYTHONPATH"].split(start_usdview.os.pathsep)
+    assert server_process.python_executable() == "/base/python.exe"
+    paths = server_process.server_environment(start_usdview.PROJECT_ROOT)["PYTHONPATH"].split(
+        server_process.os.pathsep
+    )
     assert paths[:2] == [str(start_usdview.PROJECT_ROOT), "/project/site-packages"]
 
 
@@ -77,10 +80,10 @@ def test_main_stops_server_when_usdview_exits(monkeypatch, tmp_path):
     viewer = FakeProcess(pid=200, return_codes=[None, 0])
 
     monkeypatch.setattr(start_usdview, "_select_port", lambda _host, _port: 7312)
-    monkeypatch.setattr(start_usdview, "_wait_for_server", lambda *_args: None)
+    monkeypatch.setattr(start_usdview, "wait_until_listening", lambda *_args: None)
     monkeypatch.setattr(start_usdview.subprocess, "Popen", lambda *_args, **_kwargs: server)
     monkeypatch.setattr(start_usdview.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(start_usdview, "_stop_process", lambda process: stopped.append(process))
+    monkeypatch.setattr(start_usdview, "stop_process", lambda process: stopped.append(process))
     monkeypatch.setattr("integrations.usdview.launcher.find_usdview", lambda: Path("usdview"))
     monkeypatch.setattr(
         "integrations.usdview.launcher.launch_usdview", lambda *_args, **_kwargs: viewer

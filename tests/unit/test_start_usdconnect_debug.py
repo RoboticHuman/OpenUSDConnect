@@ -20,18 +20,15 @@ def test_start_server_forwards_host_and_canonical_event_log(monkeypatch):
     launcher = _load_launcher()
     calls = []
     monkeypatch.setattr(
-        launcher.subprocess,
-        "Popen",
+        launcher,
+        "start_server_process",
         lambda command, **kwargs: calls.append((command, kwargs)),
     )
 
-    launcher._start_server("python", "10.0.0.5", 7210, "scene.usda", "events.db")
+    launcher._start_server("10.0.0.5", 7210, "scene.usda", "events.db")
 
     command, kwargs = calls[0]
     assert command == [
-        "python",
-        "-m",
-        "openusdconnect.server",
         "--host",
         "10.0.0.5",
         "--port",
@@ -41,7 +38,7 @@ def test_start_server_forwards_host_and_canonical_event_log(monkeypatch):
         "--event-log",
         "events.db",
     ]
-    assert kwargs["cwd"] == str(launcher.REPO_ROOT)
+    assert kwargs["project_root"] == launcher.REPO_ROOT
 
 
 def test_start_blender_forwards_base_before_network_flags(monkeypatch):

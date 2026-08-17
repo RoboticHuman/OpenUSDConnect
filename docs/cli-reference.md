@@ -40,6 +40,7 @@ its cumulative producer high-water mark are durable.
 | `uv run python -m integrations.mcp --help` | Expose the live scene through the MCP stdio server. | `server`, `mcp` |
 | `uv run python scripts/start_usdview.py --help` | Start a server and open usdview already connected. | `server`, OpenUSD/usdview runtime |
 | `uv run python -m integrations.usdview.launcher --help` | Open a stage in usdview with automatic receiver wiring. | OpenUSD/usdview runtime |
+| `uv run --group server --group dashboard python scripts/demo_layer_dashboard.py` | Start and populate a temporary departmental dashboard demo. | `server`, `dashboard` |
 
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
 `openusdconnect-mount-vfs`.
@@ -68,6 +69,14 @@ This setup is intentionally renderer-agnostic. Renderer-specific variables and
 plugin discovery paths must be present in the environment used to launch the
 server, just as they are for the project's DCC clients.
 
+Source-tree tools that start their own server share one subprocess launcher.
+It preserves the active project environment, uses the real interpreter PID for
+profilers and process management, and invokes `integrations.run_server` so an
+installed RenderMan runtime is discovered from `RMANTREE`. This applies to the
+dashboard demo, stress test, Material Zoo, live-open, Blender debug, and
+combined usdview launcher. Repeatable `--plugin-dll-dir` options remain
+available on tools that need additional project-specific plugin directories.
+
 ## Development Commands
 
 | Command | Purpose |
@@ -79,6 +88,7 @@ server, just as they are for the project's DCC clients.
 | `scripts/start_usdview.py` | Start a temporary server and connected usdview session. |
 | `scripts/run_unreal_tests.py` | Discover Unreal, package the plugin, and run the real editor integration scenario. |
 | `scripts/run_material_zoo.py` | Stream the MaterialX/OpenPBR material zoo into Blender and/or usdview. |
+| `scripts/demo_layer_dashboard.py` | Start a populated temporary dashboard; use `--exit-after` for smoke tests. |
 | `scripts/stress_test_departments.py` | Stress managed transactions and optionally capture a py-spy profile. |
 | `scripts/check_windows_unc_webdav.py` | Diagnose a Windows WebClient UNC read and parse the result as USD. |
 | `scripts/bench_vfs_snapshot.py` | Measure VFS snapshot generation and cache behavior. |

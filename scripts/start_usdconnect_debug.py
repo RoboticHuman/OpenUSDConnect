@@ -19,6 +19,7 @@ import pathlib
 import subprocess
 import time
 
+from integrations.server_process import start as start_server_process
 from openusdconnect.cli_common import (
     add_sync_endpoint_args,
     port_or_zero,
@@ -44,18 +45,6 @@ def _find_blender(explicit: str) -> str:
     raise SystemExit(
         "Blender executable not provided and blender.test.cfg is empty/missing."
     )
-
-
-def _find_uv_python() -> str:
-    """Find the Python interpreter managed by uv."""
-    result = subprocess.run(
-        ["uv", "python", "find"],
-        capture_output=True, text=True,
-    )
-    python = result.stdout.strip()
-    if not python or not pathlib.Path(python).exists():
-        raise SystemExit("Could not find Python via uv. Run 'uv sync' first.")
-    return python
 
 
 def _build_addon():
@@ -88,18 +77,17 @@ def _reload_addon():
           " Running Blender instances will pick it up within ~2s.")
 
 
-def _start_server(python: str, host: str, port: int,
-                   base_usd: str, log_path: str) -> subprocess.Popen:
+def _start_server(host: str, port: int,
+                  base_usd: str, log_path: str) -> subprocess.Popen:
     """Start the sync server as a subprocess."""
     args = [
-        python, "-m", "openusdconnect.server",
         "--host", host,
         "--port", str(port),
         "--base", base_usd,
         "--event-log", log_path,
     ]
     print(f"[launcher] Starting server on {host}:{port} ...")
-    return subprocess.Popen(args, cwd=str(REPO_ROOT))
+    return start_server_process(args, project_root=REPO_ROOT)
 
 
 def _start_blender(blender_exe: str, role: str, host: str, port: int,
@@ -176,9 +164,8 @@ def main(argv: list[str] | None = None):
     # Start server (unless --no-server)
     server_proc = None
     if not args.no_server:
-        python = _find_uv_python()
         server_proc = _start_server(
-            python, args.host, args.port, base_usd, log_path,
+            args.host, args.port, base_usd, log_path,
         )
         time.sleep(1)
 

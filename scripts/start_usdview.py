@@ -7,40 +7,20 @@ or pressing Ctrl+C also stops the server started by this launcher.
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import subprocess
 import sys
-import sysconfig
 import tempfile
 import time
 from pathlib import Path
 
+from integrations.server_process import command as server_command
+from integrations.server_process import server_environment, wait_until_listening
+from integrations.server_process import stop as stop_process
 from openusdconnect.cli_common import nonnegative_int, port_or_zero, positive_seconds
 from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_STARTUP_TIMEOUT
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _server_python() -> str:
-    """Use the real Windows interpreter, not uv's short-lived venv launcher."""
-
-    if os.name == "nt":
-        return str(getattr(sys, "_base_executable", sys.executable))
-    return sys.executable
-
-
-def _server_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    if os.name != "nt":
-        return env
-    paths = [str(PROJECT_ROOT)]
-    for key in ("purelib", "platlib"):
-        path = sysconfig.get_paths().get(key)
-        if path and path not in paths:
-            paths.append(path)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [*paths, env.get("PYTHONPATH", "")]))
-    return env
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
@@ -123,10 +103,7 @@ def _select_port(host: str, requested: int) -> int:
 
 
 def _server_command(args: argparse.Namespace, port: int, event_log: Path) -> list[str]:
-    command = [
-        _server_python(),
-        "-m",
-        "integrations.run_server",
+    args_list = [
         "--host",
         args.host,
         "--port",
@@ -139,44 +116,14 @@ def _server_command(args: argparse.Namespace, port: int, event_log: Path) -> lis
         args.layer_mode,
     ]
     for context in args.resolver_context:
-        command.extend(("--resolver-context", context))
+        args_list.extend(("--resolver-context", context))
     for directory in args.plugin_dll_dir:
-        command.extend(("--plugin-dll-dir", directory))
+        args_list.extend(("--plugin-dll-dir", directory))
     if args.export_diff:
-        command.extend(("--export-diff", args.export_diff))
+        args_list.extend(("--export-diff", args.export_diff))
     if args.compact:
-        command.append("--compact")
-    return command
-
-
-def _wait_for_server(
-    host: str,
-    port: int,
-    process: subprocess.Popen,
-    timeout: float,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        return_code = process.poll()
-        if return_code is not None:
-            raise RuntimeError(f"server exited during startup with code {return_code}")
-        try:
-            with socket.create_connection((host, port), timeout=0.1):
-                return
-        except OSError:
-            time.sleep(0.05)
-    raise RuntimeError(f"server did not start on {host}:{port} within {timeout:g}s")
-
-
-def _stop_process(process: subprocess.Popen | None) -> None:
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5.0)
+        args_list.append("--compact")
+    return server_command(args_list)
 
 
 def _run_session(
@@ -199,11 +146,11 @@ def _run_session(
     server = subprocess.Popen(
         _server_command(args, port, event_log),
         cwd=PROJECT_ROOT,
-        env=_server_environment(),
+        env=server_environment(PROJECT_ROOT),
     )
     viewer = None
     try:
-        _wait_for_server(args.host, port, server, args.startup_timeout)
+        wait_until_listening(server, args.host, port, args.startup_timeout)
 
         from integrations.usdview.launcher import find_usdview, launch_usdview
 
@@ -234,8 +181,8 @@ def _run_session(
                 raise RuntimeError(f"server exited with code {server_code}")
             time.sleep(0.2)
     finally:
-        _stop_process(viewer)
-        _stop_process(server)
+        stop_process(viewer)
+        stop_process(server)
 
 
 def main(argv: list[str] | None = None) -> int:
