@@ -16,7 +16,7 @@ logical layers.
 ## Install
 
 ```bash
-uv sync --group server --group mcp  # installs pxr and the official MCP SDK
+uv sync --group bundled-usd --group mcp  # installs pxr and the official MCP SDK
 ```
 
 ## Run

@@ -1,7 +1,7 @@
 """Start a dashboard server and populate a small departmental layer stack.
 
 Usage:
-    uv run --group server --group dashboard python scripts/demo_layer_dashboard.py
+    uv run --group bundled-usd --group dashboard python scripts/demo_layer_dashboard.py
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def _require_dashboard_dependency() -> None:
     if importlib.util.find_spec("nicegui") is None:
         raise RuntimeError(
             "dashboard dependency is missing; run with "
-            "`uv run --group server --group dashboard python "
+            "`uv run --group bundled-usd --group dashboard python "
             "scripts/demo_layer_dashboard.py`"
         )
 

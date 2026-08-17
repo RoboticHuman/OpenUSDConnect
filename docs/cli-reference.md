@@ -29,18 +29,18 @@ its cumulative producer high-water mark are durable.
 
 | Command | Purpose | Dependency groups |
 | --- | --- | --- |
-| `uv run openusdconnect-server --help` | Run the TCP sync server and optional VFS/dashboard services. | `server`; add `vfs` or `dashboard` as needed |
-| `uv run python scripts/start_live_open.py --help` | Start a complete local server, WebDAV VFS, write-capable mirror, and optional Windows drive. | `server`, `vfs` |
-| `uv run python scripts/start_live_open.py stop --help` | Stop the processes recorded by the live-open launcher. | `server`, `vfs` |
+| `uv run openusdconnect-server --help` | Run the TCP sync server and optional VFS/dashboard services. | `bundled-usd`; add `vfs` or `dashboard` as needed |
+| `uv run python scripts/start_live_open.py --help` | Start a complete local server, WebDAV VFS, write-capable mirror, and optional Windows drive. | `bundled-usd`, `vfs` |
+| `uv run python scripts/start_live_open.py stop --help` | Stop the processes recorded by the live-open launcher. | `bundled-usd`, `vfs` |
 | `uv run python scripts/local_vfs_bridge.py --help` | Mirror one virtual USD file locally and upload stable saves with ETag conflict protection. | base installation |
 | `uv run python scripts/local_vfs_bridge.py status --help` | Print bridge health and recovery state. | base installation |
 | `uv run python scripts/local_vfs_bridge.py stop --help` | Stop a bridge and release its optional Windows drive. | base installation |
 | `uv run openusdconnect-mount-vfs --help` | Use the native Windows or macOS WebDAV filesystem client. | base installation |
 | `uv run openusdconnect-send --help` | Send JSON events or protocol control messages. | base installation |
-| `uv run python -m integrations.mcp --help` | Expose the live scene through the MCP stdio server. | `server`, `mcp` |
-| `uv run python scripts/start_usdview.py --help` | Start a server and open usdview already connected. | `server`, OpenUSD/usdview runtime |
+| `uv run python -m integrations.mcp --help` | Expose the live scene through the MCP stdio server. | `bundled-usd`, `mcp` |
+| `uv run python scripts/start_usdview.py --help` | Start a server and open usdview already connected. | `bundled-usd`, OpenUSD/usdview runtime |
 | `uv run python -m integrations.usdview.launcher --help` | Open a stage in usdview with automatic receiver wiring. | OpenUSD/usdview runtime |
-| `uv run --group server --group dashboard python scripts/demo_layer_dashboard.py` | Start and populate a temporary departmental dashboard demo. | `server`, `dashboard` |
+| `uv run --group bundled-usd --group dashboard python scripts/demo_layer_dashboard.py` | Start and populate a temporary departmental dashboard demo. | `bundled-usd`, `dashboard` |
 
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
 `openusdconnect-mount-vfs`.
@@ -57,25 +57,56 @@ and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
 
-## USD plugin startup
+## OpenUSD runtime and custom plugins
 
-The standard server initializes Sdr before it restores the event log or accepts
-connections. It inherits project USD configuration such as
-`PXR_PLUGINPATH_NAME`. On Windows, use repeatable `--plugin-dll-dir` options or
-the path-separator delimited `OPENUSDCONNECT_DLL_DIRS` environment variable for
-plugin dependency directories that are not already on `PATH`.
+### Bundled runtime
 
-This setup is intentionally renderer-agnostic. Renderer-specific variables and
-plugin discovery paths must be present in the environment used to launch the
-server, just as they are for the project's DCC clients.
+The `bundled-usd` group installs `usd-core`: a renderer-neutral and
+custom-plugin-free runtime. Use it for core sync, standard USD schemas, and
+UsdPreviewSurface:
 
-Source-tree tools that start their own server share one subprocess launcher.
-It preserves the active project environment, uses the real interpreter PID for
-profilers and process management, and invokes `integrations.run_server` so an
-installed RenderMan runtime is discovered from `RMANTREE`. This applies to the
-dashboard demo, stress test, Material Zoo, live-open, Blender debug, and
-combined usdview launcher. Repeatable `--plugin-dll-dir` options remain
-available on tools that need additional project-specific plugin directories.
+```bash
+uv run --group bundled-usd openusdconnect-server --base scene.usda
+```
+
+### Project runtime
+
+Use a project-provided OpenUSD runtime when you need custom renderers,
+resolvers, file formats, or shader definitions. It must be compatible with the
+server's Python and OpenUSD build.
+
+Load the project or vendor environment first, then use an isolated environment
+without enabling the `bundled-usd` group:
+
+```bash
+uv run --isolated openusdconnect-server --base scene.usda
+```
+
+The environment must expose the intended `pxr` bindings. For custom plugins,
+configure:
+
+- plugin discovery through `PXR_PLUGINPATH_NAME`
+- native dependencies through `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,
+  or `DYLD_LIBRARY_PATH` on macOS
+
+Verify the selected bindings before launch:
+
+```bash
+uv run --isolated python -c "import pxr; from pxr import Usd; print(pxr.__file__); print(Usd.GetVersion())"
+```
+
+The server initializes Sdr before replay and accepts the active environment.
+Use the same plugin discovery and renderer variables as clients that interpret
+the scene. All source-tree launchers inherit that environment. RenderMan is
+discovered automatically when `RMANTREE` is set.
+
+On Windows, `openusdconnect-server` also accepts repeatable
+`--plugin-dll-dir` options. `OPENUSDCONNECT_DLL_DIRS` provides the same setting
+through the environment. Source-tree tools support this option where shown by
+their `--help` output.
+
+Programmatic hosts can set `ServerConfig.plugin_dll_dirs` or call
+`prepare_usd_plugin_environment()` before accessing Sdr.
 
 ## Development Commands
 

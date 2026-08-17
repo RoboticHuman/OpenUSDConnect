@@ -24,6 +24,6 @@ def test_build_server_without_mcp_group_is_actionable(monkeypatch):
 
     with pytest.raises(
         ImportError,
-        match="uv sync --group server --group mcp",
+        match="uv sync --group bundled-usd --group mcp",
     ):
         build_server()

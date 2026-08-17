@@ -177,6 +177,9 @@ def _find_bridge() -> Path | None:
         p = Path(env)
         return p if p.is_file() else None
 
+    if os.environ.get("OPENUSDCONNECT_BUNDLED_USD") == "1":
+        return None
+
     name = _dll_name()
 
     # 2. Next to this source module (development / editable install)

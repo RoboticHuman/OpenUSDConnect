@@ -25,6 +25,22 @@ def bridge_path() -> Path:
     return Path(value)
 
 
+def test_bundled_runtime_skips_implicitly_discovered_bridge(monkeypatch):
+    monkeypatch.delenv("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE", raising=False)
+    monkeypatch.setenv("OPENUSDCONNECT_BUNDLED_USD", "1")
+
+    assert sdf_delegate_bridge._find_bridge() is None
+
+
+def test_bundled_runtime_allows_explicit_bridge(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge.dll"
+    bridge.touch()
+    monkeypatch.setenv("OPENUSDCONNECT_SDF_DELEGATE_BRIDGE", str(bridge))
+    monkeypatch.setenv("OPENUSDCONNECT_BUNDLED_USD", "1")
+
+    assert sdf_delegate_bridge._find_bridge() == bridge
+
+
 def test_native_tracker_binds_the_stage_context_while_registering_layers(
     tmp_path,
     monkeypatch,

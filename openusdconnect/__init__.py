@@ -3,6 +3,11 @@
 Core library for replicating USD stage edits over a networked event protocol.
 """
 
+from ._runtime import select_runtime as _select_runtime
+
+_select_runtime()
+del _select_runtime
+
 from ._client_utils import ClientPhase, ClientStatus, SyncUpdate
 from .adapters import (
     DCCAdapter,

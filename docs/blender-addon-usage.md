@@ -88,7 +88,7 @@ from the complete authoritative layer stack.
 For a simple single-layer workstation session:
 
 ```bash
-uv sync --group server --group vfs
+uv sync --group bundled-usd --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
 

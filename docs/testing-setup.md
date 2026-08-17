@@ -17,7 +17,7 @@ Unreal Engine, RenderMan, operating-system mounts, or large external assets.
 Install the normal development environment:
 
 ```bash
-uv sync --group server --group vfs --group dev
+uv sync --group bundled-usd --group vfs --group dev
 ```
 
 Run the common suites:

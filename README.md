@@ -60,7 +60,7 @@ the asset and visual tests.
 ```bash
 git clone --recursive https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
-uv sync --group server
+uv sync --group bundled-usd
 uv run openusdconnect-server --base scene.usda --port 7200
 ```
 
@@ -68,48 +68,29 @@ Use `uv run openusdconnect-server --help` for server options. Common additions
 are `--departments animation,lighting,fx`, `--require-token`, and
 `--dashboard-port 8080`.
 
-### Project USD plugin environment
+### Choose an OpenUSD runtime
 
-The standard `openusdconnect-server` command initializes the Sdr registry
-before replay or listener startup. It inherits project configuration such as
-`PXR_PLUGINPATH_NAME` and renderer variables.
+The `bundled-usd` dependency group installs `usd-core`: a renderer-neutral and
+custom-plugin-free runtime. It supports core synchronization and standard USD
+schemas, including UsdPreviewSurface.
 
-On Windows, provide plugin dependency directories through repeatable
-`--plugin-dll-dir` options or the path-separator-delimited
-`OPENUSDCONNECT_DLL_DIRS` variable:
+Use your project's OpenUSD runtime when the scene depends on custom renderers,
+resolvers, file formats, or shader definitions. Load that runtime's environment,
+then omit the bundled `usd-core` dependency:
 
-```powershell
-$env:OPENUSDCONNECT_DLL_DIRS = "C:\Renderer\bin;C:\Renderer\lib"
-uv run openusdconnect-server --base scene.usda
+```bash
+# Load the project or vendor OpenUSD environment first.
+uv run --isolated openusdconnect-server --base scene.usda
 ```
 
-Linux and macOS projects configure their loader environment before launch.
-OpenUSDConnect does not copy a DCC's private environment, so launch the server
-from the same project environment as its clients.
+The server and source-tree launchers inherit the active environment. Plugin
+discovery uses `PXR_PLUGINPATH_NAME`; native dependencies use `PATH` on Windows,
+`LD_LIBRARY_PATH` on Linux, or `DYLD_LIBRARY_PATH` on macOS. Windows users can
+also set `OPENUSDCONNECT_DLL_DIRS` or pass `--plugin-dll-dir` to commands that
+provide it. RenderMan is discovered automatically when `RMANTREE` is set.
 
-Programmatic servers use the same settings through `ServerConfig`:
-
-```python
-from openusdconnect import ServerConfig, run_server
-
-run_server(
-    ServerConfig(
-        base_usd_path="scene.usda",
-        plugin_dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
-    )
-)
-```
-
-Custom hosts can call `prepare_usd_plugin_environment()` before touching Sdr.
-See the [command-line reference](docs/cli-reference.md#usd-plugin-startup) for
-the complete startup contract. The source-tree `integrations.run_server`
-wrapper remains a RenderMan compatibility convenience.
-
-The bundled launchers use that wrapper automatically, so the dashboard demo,
-department stress test, Material Zoo, live-open, Blender debug, and usdview
-flows inherit the current project environment and discover RenderMan from
-`RMANTREE` when installed. Generic plugin dependencies can still be supplied
-with `OPENUSDCONNECT_DLL_DIRS` or each launcher's `--plugin-dll-dir` option.
+See [OpenUSD runtime and custom plugins](docs/cli-reference.md#openusd-runtime-and-custom-plugins)
+for setup and verification.
 
 ### Connect a USD-native application
 
@@ -153,7 +134,7 @@ replay, reconnection, adapters, and the cases that require recovery.
 | usdview plugin | Receive | `uv run python scripts/start_usdview.py scene.usda` |
 | Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal plugin guide](integrations/unreal/OpenUSDConnect/README.md) |
 | MCP server | Author and inspect | `uv run python -m integrations.mcp` |
-| Dashboard | Administration | `uv run --group server --group dashboard python scripts/demo_layer_dashboard.py` |
+| Dashboard | Administration | `uv run --group bundled-usd --group dashboard python scripts/demo_layer_dashboard.py` |
 
 The Blender addon zip is written to `dist/usd_connect_blender.zip`. Install it
 through **Edit > Preferences > Add-ons > Install from Disk**. See the
@@ -173,7 +154,7 @@ workstation launcher starts the server, VFS endpoint, and a write-capable local
 mirror:
 
 ```bash
-uv sync --group server --group vfs
+uv sync --group bundled-usd --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
 
@@ -245,7 +226,7 @@ and [shared-stage architecture](docs/shared-stage-architecture.md).
 ## Development
 
 ```bash
-uv sync --group server --group vfs --group dev
+uv sync --group bundled-usd --group vfs --group dev
 uv run pytest tests/unit/ -v
 uv run pytest tests/ -v
 uv run ruff check
@@ -257,7 +238,8 @@ the exact commands and setup.
 
 ## Docker
 
-The included image uses `usd-core` for headless OpenUSD support:
+The included image uses the renderer-neutral and custom-plugin-free `usd-core`
+runtime:
 
 ```bash
 docker build -t openusdconnect-server .

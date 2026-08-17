@@ -55,27 +55,28 @@ The stress harness starts a temporary server and defaults to 40 send-only,
 
 ```bash
 # Performance baseline, no profiler
-uv run --group server python scripts/stress_test_departments.py \
+uv run --group bundled-usd python scripts/stress_test_departments.py \
   --emitters 40 --receivers 40 --bidi 20 --iterations 100
 
 # Text hotspot report at a controlled sampling rate
-uv run --group server --group profile python scripts/stress_test_departments.py \
+uv run --group bundled-usd --group profile python scripts/stress_test_departments.py \
   --emitters 40 --receivers 40 --bidi 20 --iterations 100 \
   --text-profile --profile-rate 50 \
   --profile-output stress-profile.txt
 
 # SVG flame graph
-uv run --group server --group profile python scripts/stress_test_departments.py \
+uv run --group bundled-usd --group profile python scripts/stress_test_departments.py \
   --profile --profile-rate 50 \
   --profile-output stress-profile.svg
 ```
 
 The script profiles only the transaction workload, stops py-spy before replay
 verification, and then checks final shared and private prim state.
-Its server inherits the project plugin environment and automatically discovers
-RenderMan from `RMANTREE`; use `--plugin-dll-dir` for any additional runtime
-dependency directories. The reported server PID is the real interpreter PID,
-so no manual process lookup or plugin-path editing is needed.
+Its server inherits the selected OpenUSD runtime and plugin environment.
+RenderMan is discovered automatically when `RMANTREE` is set. The reported
+server PID is the real interpreter PID, so no manual process lookup is needed.
+For a project runtime, load its environment and replace `--group bundled-usd`
+with `--isolated` in the commands above.
 
 Interpret its metrics separately:
 

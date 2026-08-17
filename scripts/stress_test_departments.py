@@ -36,6 +36,10 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from openusdconnect._runtime import select_runtime
+
+select_runtime()
+
 from pxr import Usd, UsdGeom
 
 from integrations.server_process import start as start_server_process

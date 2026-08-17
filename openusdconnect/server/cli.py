@@ -14,7 +14,8 @@ import signal
 import threading
 from dataclasses import dataclass
 
-from pxr import Ar
+import pxr
+from pxr import Ar, Usd
 
 from ..cli_common import (
     add_sync_endpoint_args,
@@ -56,6 +57,12 @@ from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
 
 LOG = logging.getLogger(__name__)
+
+
+def _log_usd_runtime() -> None:
+    version = ".".join(str(part) for part in Usd.GetVersion())
+    bindings = getattr(pxr, "__file__", None) or "unknown"
+    LOG.info("OpenUSD runtime: %s; bindings: %s", version, bindings)
 
 
 @dataclass(slots=True)
@@ -139,6 +146,7 @@ def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | N
 def run_server(config: ServerConfig | None = None):
     """Start the server (blocking)."""
     config = config or ServerConfig()
+    _log_usd_runtime()
     layer_mode = LayerMode(config.layer_mode)
     if layer_mode is LayerMode.SHARED_STAGE and config.vfs is not None:
         raise ValueError("the managed VFS composition is unavailable in shared-stage mode")

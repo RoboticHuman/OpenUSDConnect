@@ -17,12 +17,12 @@ ARG DASHBOARD=0
 
 WORKDIR /app
 
-# Install core package and server dependencies
+# Install the package, bundled OpenUSD runtime, and VFS dependencies.
 COPY pyproject.toml README.md LICENSE ./
 COPY openusdconnect/ openusdconnect/
 
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir usd-core==26.3 wsgidav==4.3.3 cheroot==10.0.1
+    && pip install --no-cache-dir usd-core==26.8 wsgidav==4.3.3 cheroot==10.0.1
 
 # Conditionally install dashboard dependencies and copy integration code
 COPY integrations/dashboard/ integrations/dashboard/

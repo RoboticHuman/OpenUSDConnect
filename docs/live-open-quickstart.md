@@ -20,7 +20,7 @@ interactive synchronization still uses the TCP protocol.
 Install the server and VFS dependencies:
 
 ```bash
-uv sync --group server --group vfs
+uv sync --group bundled-usd --group vfs
 ```
 
 Start a complete local session:

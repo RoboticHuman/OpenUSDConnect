@@ -9,7 +9,7 @@ the local USD mirror negotiates the optional logical-layer replay capability.
 ## Quick start
 
 ```bash
-uv sync --group server --group mcp
+uv sync --group bundled-usd --group mcp
 uv run python -m openusdconnect.server --port 7200     # in one terminal
 ```
 

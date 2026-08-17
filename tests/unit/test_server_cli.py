@@ -81,6 +81,23 @@ def test_server_config_disables_vfs_by_default():
     assert config.preflight_plugins is True
 
 
+def test_log_usd_runtime_reports_version_and_bindings(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server_cli.Usd, "GetVersion", lambda: (0, 26, 8))
+    monkeypatch.setattr(server_cli.pxr, "__file__", "/project/usd/pxr/__init__.py")
+    monkeypatch.setattr(server_cli.LOG, "info", lambda *args: calls.append(args))
+
+    server_cli._log_usd_runtime()
+
+    assert calls == [
+        (
+            "OpenUSD runtime: %s; bindings: %s",
+            "0.26.8",
+            "/project/usd/pxr/__init__.py",
+        )
+    ]
+
+
 def test_shared_stage_mode_rejects_managed_outputs():
     with pytest.raises(ValueError, match="VFS"):
         server_cli.run_server(

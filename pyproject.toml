@@ -43,8 +43,8 @@ dev = [
 dashboard = [
     "nicegui==3.9.0",
 ]
-server = [
-    "usd-core==26.3",
+bundled-usd = [
+    "usd-core==26.8",
 ]
 vfs = [
     "cheroot==10.0.1",
@@ -117,6 +117,7 @@ select = [
 # E402 = "module level import not at top of file"
 # I001 = "import block is unsorted"
 # These are ignored where imports must come after sys.path setup or conditional guards.
+"openusdconnect/__init__.py" = ["E402"]
 "integrations/blender/__init__.py" = ["E402", "I001"]
 "tests/integration/scripts/*.py" = ["E402", "E501", "F841", "B007"]
 "tests/unit/test_roundtrip.py" = ["E402"]
