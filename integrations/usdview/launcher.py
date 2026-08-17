@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -79,8 +80,10 @@ def _resolve_command(exe: Path) -> list[str]:
 
     On Windows ``usdview.cmd`` invokes whichever ``python`` is first on
     PATH, which can resolve to the launcher's venv (no PySide6) instead
-    of OpenUSD's. Bypass by reading the sibling script's shebang and
-    running its declared interpreter directly.
+    of OpenUSD's. Read the sibling script's shebang and run its declared
+    interpreter through a bootstrap that appends OpenUSDConnect's dependencies
+    *after* the install's own paths. This prevents another ``pxr`` package in
+    the launcher environment from shadowing usdview's ``pxr.Usdviewq``.
     """
     if exe.suffix.lower() in (".cmd", ".bat"):
         script = exe.with_suffix("")
@@ -95,9 +98,16 @@ def _resolve_command(exe: Path) -> list[str]:
         return [str(exe)]
 
     if first_line.startswith("#!"):
-        interpreter = Path(first_line[2:].strip())
-        if interpreter.exists():
-            return [str(interpreter), str(script)]
+        shebang = first_line[2:].strip()
+        direct_interpreter = Path(shebang.strip('"'))
+        interpreter = (
+            [str(direct_interpreter)]
+            if direct_interpreter.exists()
+            else shlex.split(shebang)
+        )
+        if interpreter and Path(interpreter[0]).exists():
+            bootstrap = Path(__file__).with_name("_bootstrap.py")
+            return [*interpreter, str(bootstrap), str(script)]
 
     return [str(exe)]
 
@@ -175,11 +185,20 @@ def launch_usdview(
         if p and p not in extra_paths:
             extra_paths.append(p)
 
+    exe = Path(usdview_exe) if usdview_exe else find_usdview()
+    command_prefix = _resolve_command(exe)
+
     env = os.environ.copy()
     env["PXR_PLUGINPATH_NAME"] = os.pathsep.join(
         filter(None, [str(plugin_dir), env.get("PXR_PLUGINPATH_NAME", "")])
     )
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [*extra_paths, env.get("PYTHONPATH", "")]))
+    bootstrap = Path(__file__).with_name("_bootstrap.py")
+    if str(bootstrap) in command_prefix:
+        env["OPENUSDCONNECT_PYTHONPATH_APPEND"] = os.pathsep.join(extra_paths)
+    else:
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [*extra_paths, env.get("PYTHONPATH", "")])
+        )
     env["OPENUSDCONNECT_HOST"] = host
     env["OPENUSDCONNECT_PORT"] = str(port)
     if token:
@@ -190,8 +209,6 @@ def launch_usdview(
         env["OPENUSDCONNECT_EXPECTED_SEQ"] = str(expected_seq)
     if scene_lights:
         env["OPENUSDCONNECT_SCENE_LIGHTS"] = "1"
-
-    exe = Path(usdview_exe) if usdview_exe else find_usdview()
 
     # Make RenderMan's plugin DLLs loadable so the Sdr registry initializes,
     # required even for Storm once RenderMan is installed into the shared USD
@@ -222,7 +239,7 @@ def launch_usdview(
         if not _has_renderer_arg(forwarded):
             forwarded = ["--renderer", RENDERMAN_RENDERER_ID, *forwarded]
 
-    cmd = [*_resolve_command(exe), str(stage_path), *forwarded]
+    cmd = [*command_prefix, str(stage_path), *forwarded]
     return subprocess.Popen(cmd, env=env)
 
 

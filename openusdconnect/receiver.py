@@ -1,4 +1,4 @@
-"""Background receiver thread — connects to server, queues incoming events.
+"""Background receiver thread connects to server, queues incoming events.
 
 ReceiverThread is DCC-agnostic. It connects to the server as a receiver,
 reads length-prefixed FlatBuffers messages in a background thread, and
@@ -8,7 +8,7 @@ timer/callback registration is the plugin's responsibility.
 Features:
 - Automatic reconnection with exponential backoff on connection loss
 - Socket timeout to detect hung connections
-- Bounded queue — on overflow, disconnects, waits for drain, then reconnects for replay
+- Bounded queue on overflow, disconnects, waits for drain, then reconnects for replay
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from .codec import (
     PayloadType,
     _decode_stage_metadata_table,
     decode_envelope,
-    is_ping,
     message_to_dict,
+    payload_type_and_sequence,
     resolve_payload,
 )
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
@@ -40,7 +40,7 @@ LOG = logging.getLogger(__name__)
 # Reconnection defaults
 _RECONNECT_BASE_DELAY = 1.0  # seconds
 _RECONNECT_MAX_DELAY = 30.0  # seconds
-_SOCKET_TIMEOUT = 30.0  # seconds — detect hung connections
+_SOCKET_TIMEOUT = 30.0  # seconds detect hung connections
 _MAX_QUEUE_DEPTH = 50_000  # max queued messages before overflow (disconnect + replay)
 _MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
 
@@ -211,7 +211,7 @@ class ReceiverThread(threading.Thread):
             self._handshake_event.clear()
 
             if self._queue_overflow:
-                # Intentional disconnect — wait for main thread to drain
+                # Intentional disconnect wait for main thread to drain
                 # before reconnecting, otherwise we'll overflow again.
                 self._queue_overflow = False
                 delay = self._reconnect_base_delay
@@ -329,7 +329,7 @@ class ReceiverThread(threading.Thread):
                     reason = ar.Reason()
                     if isinstance(reason, bytes):
                         reason = reason.decode("utf-8")
-                    LOG.error("ReceiverThread: auth rejected — %s", reason)
+                    LOG.error("ReceiverThread: auth rejected %s", reason)
                     self.auth_rejected = True
                     self._handshake_event.set()
                     return
@@ -407,23 +407,23 @@ class ReceiverThread(threading.Thread):
                     LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                 continue
 
-            # Post-handshake: skip pings
-            if is_ping(buf):
+            # Post-handshake data messages only need their tag and sequence in
+            # this thread; full decoding stays on the stage-owning consumer.
+            pt, seq = payload_type_and_sequence(buf)
+            if pt == PayloadType.Ping:
                 continue
 
             # Playback messages are control-plane signals: fire callbacks and
             # do not enqueue (the queue is reserved for stage-event bytes).
-            env = decode_envelope(buf)
-            pt = env.PayloadType()
             if pt == PayloadType.ReplayComplete:
-                _, complete = resolve_payload(env)
+                complete = message_to_dict(buf)
                 with self._incoming_lock:
                     if connection_generation != self._replay_generation:
                         return
                     self._received_replay_complete = (
                         connection_generation,
-                        int(complete.HeadSeq()),
-                        int(complete.Epoch()),
+                        int(complete["head_seq"]),
+                        int(complete["epoch"]),
                         self._incoming_serial,
                     )
                 continue
@@ -446,17 +446,6 @@ class ReceiverThread(threading.Thread):
                     except Exception:
                         LOG.exception("ReceiverThread: playback callback failed")
                 continue
-
-            # Extract seq for tracking (read from BroadcastEvent without
-            # full dict conversion)
-            if pt == PayloadType.Resync:
-                seq = 0
-            elif pt == PayloadType.BroadcastEvent:
-                _, be = resolve_payload(env)
-                seq = be.Seq()
-            elif pt == PayloadType.LayerGraphState:
-                _, graph = resolve_payload(env)
-                seq = graph.Seq()
 
             with self._incoming_lock:
                 if connection_generation != self._replay_generation:
@@ -497,6 +486,7 @@ class ReceiverThread(threading.Thread):
             self._replay_from = seq_start
             self.last_seq = seq_start - 1
             self._incoming.clear()
+            self._last_drained_serial = self._incoming_serial
             self._queue_overflow = False
             self._synchronized_event.clear()
             self._received_replay_complete = None
@@ -524,13 +514,21 @@ class ReceiverThread(threading.Thread):
         except OSError:
             LOG.debug("ReceiverThread: socket close failed", exc_info=True)
 
-    def drain_queue(self) -> deque:
-        """Drain all queued raw FlatBuffers messages. Thread-safe, call from main thread."""
+    def drain_queue(self, max_messages: int | None = None) -> deque:
+        """Drain queued wire messages, optionally limiting work for this tick."""
+        if max_messages is not None and (
+            isinstance(max_messages, bool) or not isinstance(max_messages, int) or max_messages < 1
+        ):
+            raise ValueError("max_messages must be a positive integer or None")
         with self._incoming_lock:
-            old = self._incoming
-            self._incoming = deque()
-            self._last_drained_serial = self._incoming_serial
-        return old
+            if max_messages is None or max_messages >= len(self._incoming):
+                drained = self._incoming
+                self._incoming = deque()
+                self._last_drained_serial = self._incoming_serial
+                return drained
+            drained = deque(self._incoming.popleft() for _ in range(max_messages))
+            self._last_drained_serial += len(drained)
+            return drained
 
     def stop(self):
         """Request clean shutdown."""

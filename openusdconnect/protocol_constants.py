@@ -108,7 +108,7 @@ POINT_INSTANCER_FIELDS = (
     "inactive_ids",
 )
 
-# Fields carried by a SetStageMetadata event. Authoritative list — used by
+# Fields carried by a SetStageMetadata event. Authoritative list used by
 # the codec, adapter dispatch, and emitter diff path.
 STAGE_METADATA_KEYS = (
     "timeCodesPerSecond",

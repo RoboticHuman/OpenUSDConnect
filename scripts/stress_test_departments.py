@@ -171,7 +171,7 @@ _PID_LINE_RE = re.compile(r"\(PID (\d+)\)")
 def _stop_py_spy_gracefully(proc, timeout=15):
     """Send Ctrl+Break / SIGINT so py-spy flushes its output before exiting.
 
-    py-spy needs a controlled shutdown signal — terminate() / TerminateProcess
+    py-spy needs a controlled shutdown signal terminate() / TerminateProcess
     on Windows kills it without giving it a chance to write the recorded
     sample data to disk.
     """
@@ -199,7 +199,7 @@ def _spawn_server_with_pid_capture(server_cmd, timeout=10):
     """Spawn the server and parse the real interpreter PID from its log.
 
     On uv venvs (Windows in particular), ``sys.executable`` is a launcher
-    stub that spawns the real Python interpreter as a child — so
+    stub that spawns the real Python interpreter as a child so
     ``Popen.pid`` is the launcher, not the interpreter py-spy needs to
     attach to.  The server logs ``Server listening on … (PID N)`` where N
     is its own ``os.getpid()``, which is the real interpreter.  We
@@ -391,8 +391,8 @@ def _receiver_worker(port, spec, done_event, connect_delay, errors, stats):
 # ---------------------------------------------------------------------------
 
 def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_output,
-               connect_existing, text_profile=False, txn_batch_size=128,
-               txn_batch_delay_ms=0.5):
+               connect_existing, text_profile=False, txn_batch_size=256,
+               txn_batch_delay_ms=0.5, profile_rate=50):
     total_clients = n_emitters + n_receivers + n_bidi
     total_sockets = n_emitters + n_receivers + n_bidi * 2
 
@@ -426,7 +426,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         # introspect a uv venv python (errors with "Failed to find python
         # version from target process") because ``sys.executable`` on uv
         # is a launcher stub that spawns the real interpreter as a child.
-        # ``record --pid`` attach mode works fine — but only against the
+        # ``record --pid`` attach mode works fine but only against the
         # real interpreter PID, not the launcher.  ``Popen.pid`` is the
         # launcher; we parse the interpreter PID from the server's own
         # log line.
@@ -451,7 +451,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         # --text-profile records raw collapsed stacks and post-processes them
         # into a text hotspot report (LLM-friendly).  --profile records the
         # classic SVG flame graph (for human review).  They're mutually
-        # exclusive — text wins if both are set.
+        # exclusive text wins if both are set.
         # Spawn py-spy in a new process group on Windows so we can send
         # CTRL_BREAK_EVENT to it without also signaling ourselves; the same
         # flag is harmless on POSIX (we use signal.SIGINT there).
@@ -461,27 +461,29 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         if text_profile:
             text_profile_path = profile_output or "stress_profile.txt"
             raw_profile_path = str(Path(text_profile_path).with_suffix(".raw"))
-            print(f"  Text profiling enabled (output: {text_profile_path})")
+            print(f"  Text profiling enabled at {profile_rate} Hz "
+                  f"(output: {text_profile_path})")
             py_spy_proc = subprocess.Popen(
                 [
                     "py-spy", "record",
                     "--format", "raw",
                     "--pid", str(real_server_pid),
                     "--output", raw_profile_path,
-                    "--rate", "200",
+                    "--rate", str(profile_rate),
                 ],
                 **py_spy_kwargs,
             )
             time.sleep(0.5)
         elif profile:
             profile_path = profile_output or "stress_profile.svg"
-            print(f"  SVG profiling enabled (output: {profile_path})")
+            print(f"  SVG profiling enabled at {profile_rate} Hz "
+                  f"(output: {profile_path})")
             py_spy_proc = subprocess.Popen(
                 [
                     "py-spy", "record",
                     "--pid", str(real_server_pid),
                     "--output", profile_path,
-                    "--rate", "200",
+                    "--rate", str(profile_rate),
                 ],
                 **py_spy_kwargs,
             )
@@ -571,7 +573,7 @@ def run_stress(n_emitters, n_receivers, n_bidi, iterations, profile, profile_out
         for t in rx_threads:
             t.join(timeout=10)
 
-        # Stop py-spy now — the actual workload is done, and the
+        # Stop py-spy now the actual workload is done, and the
         # verification block below is heavy log-replay work that we don't
         # want polluting the profile.  Graceful Ctrl+Break/SIGINT lets
         # py-spy flush its samples; null out the handle so the finally
@@ -760,8 +762,8 @@ def main():
                     help="Number of bidirectional clients (default: 20)")
     ap.add_argument("--iterations", type=positive_int, default=100,
                     help="Write iterations per writer (default: 100)")
-    ap.add_argument("--txn-batch-size", type=positive_int, default=128,
-                    help="Maximum transactions per durable commit (default: 128)")
+    ap.add_argument("--txn-batch-size", type=positive_int, default=256,
+                    help="Maximum transactions per durable commit (default: 256)")
     ap.add_argument("--txn-batch-delay-ms", type=float, default=0.5,
                     help="Maximum group collection delay in ms (default: 0.5)")
     ap.add_argument("--profile", action="store_true",
@@ -774,6 +776,8 @@ def main():
     ap.add_argument("--profile-output", default=None,
                     help="Profile output path "
                          "(default: stress_profile.svg or stress_profile.txt)")
+    ap.add_argument("--profile-rate", type=positive_int, default=50,
+                    help="py-spy sampling rate in Hz (default: 50)")
     ap.add_argument("--connect", action="store_true",
                     help="Connect to an already-running server instead of spawning one")
     args = ap.parse_args()
@@ -782,7 +786,8 @@ def main():
                     args.iterations, args.profile, args.profile_output,
                     args.connect, text_profile=args.text_profile,
                     txn_batch_size=args.txn_batch_size,
-                    txn_batch_delay_ms=args.txn_batch_delay_ms)
+                    txn_batch_delay_ms=args.txn_batch_delay_ms,
+                    profile_rate=args.profile_rate)
     sys.exit(0 if ok else 1)
 
 

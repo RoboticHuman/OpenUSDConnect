@@ -134,7 +134,7 @@ class TestCompaction:
         assert a_events[0]["k"] == K_DELETE_PRIM
 
     def test_deactivate_preserves_trs(self, tmp_path):
-        """deactivate_prim does NOT tombstone — TRS is kept for payload reload."""
+        """deactivate_prim does NOT tombstone TRS is kept for payload reload."""
         srv = _make_server(tmp_path)
         _inject_events(
             srv,
@@ -149,7 +149,7 @@ class TestCompaction:
         srv.compact_log()
         events = _read_log(srv)
 
-        # TRS survives — needed for replay_children_after_load
+        # TRS survives needed for replay_children_after_load
         a_events = [e for e in events if e["prim"] == "/World/A"]
         kinds = {e["k"] for e in a_events}
         assert K_ENSURE_PRIM in kinds
@@ -676,7 +676,7 @@ class TestCompactionReplayOrder:
     def test_per_event_replay_equivalence(self, tmp_path):
         """Golden property: applying the compacted log one event at a time
         composes the same stage as applying the original log one event at a
-        time — the contract strict sequential receivers rely on."""
+        time the contract strict sequential receivers rely on."""
         import pytest
 
         pytest.importorskip("pxr")

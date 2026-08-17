@@ -95,7 +95,7 @@ class ServerConfig:
     max_connections: int | None = None
     txn_rate: float = 0
     txn_burst: int = 0
-    txn_batch_size: int = 128
+    txn_batch_size: int = 256
     txn_batch_delay_ms: float = 0.5
     wire_metrics: bool = False
     compact_interval: float = 0
@@ -383,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="LIST",
         help="Comma-separated department priority (strongest first). "
-        "Enables per-client layer ordering by department. "
+        "Clients in one department share its ordered collaboration layer. "
         "Example: --departments lighting,fx,animation,layout",
     )
     services.add_argument(
@@ -396,8 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         "--durability",
         choices=["strict", "realtime"],
         default="strict",
-        help="strict: persist to DB before broadcast (no lost events). "
-        "realtime: broadcast first, persist async (lower latency).",
+        help="strict: persist every write before broadcast. realtime: allow "
+        "eligible server-internal writes to persist asynchronously; producer "
+        "transaction acknowledgements remain durable.",
     )
     limits.add_argument(
         "--max-connections",
@@ -423,10 +424,10 @@ def main(argv: list[str] | None = None) -> int:
     limits.add_argument(
         "--txn-batch-size",
         type=positive_int,
-        default=128,
+        default=256,
         metavar="N",
         help="Maximum durable managed transactions per SQLite group commit "
-        "(1 disables batching, default: 128)",
+        "(1 disables batching, default: 256)",
     )
     limits.add_argument(
         "--txn-batch-delay-ms",

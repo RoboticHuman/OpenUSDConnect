@@ -280,7 +280,7 @@ class SharedLayerGraph(LayerKeyRouter):
         if all(layer.identifier != edit_layer.identifier for layer in layers):
             raise ValueError(
                 f"shared-stage edit target {edit_layer.identifier!r} is outside "
-                "the root/sublayer graph; select a mapped file layer before "
+                "the root/sublayer graph; select a mapped authored layer before "
                 "constructing SharedStageClient"
             )
 

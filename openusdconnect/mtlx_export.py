@@ -79,7 +79,7 @@ def material_to_mtlx(
     """Serialize the material's shader network as a MaterialX document string.
 
     ``material_name`` names the ``surfacematerial`` inside the document
-    (default: the material prim's name) — reference the result at
+    (default: the material prim's name) reference the result at
     ``/MaterialX/Materials/<material_name>``.
     """
     mat_prim = stage.GetPrimAtPath(material_path)

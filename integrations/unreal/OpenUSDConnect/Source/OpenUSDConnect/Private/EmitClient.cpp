@@ -386,7 +386,7 @@ uint32 FEmitClient::Run()
 				AuthToken = IssuedToken;
 				if (Owner) { Owner->OnClientTokenIssued(IssuedToken); }
 			}
-			UE_LOG(LogUSDEmit, Log, TEXT("Emitter HELLO_OK — ready to send"));
+			UE_LOG(LogUSDEmit, Log, TEXT("Emitter HELLO_OK ready to send"));
 		}
 
 		ConnectionGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -480,7 +480,7 @@ uint32 FEmitClient::Run()
 					const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
 					const float Retry = RL ? RL->retry_after() : 1.0f;
 					UE_LOG(LogUSDEmit, Warning,
-						TEXT("Emitter rate limited — sleeping %.1fs"), Retry);
+						TEXT("Emitter rate limited sleeping %.1fs"), Retry);
 					RateLimitDelay = Retry;
 					bShouldDisconnect = true;
 				}
@@ -499,7 +499,7 @@ uint32 FEmitClient::Run()
 		if (!bShouldStop.load(std::memory_order_relaxed))
 		{
 			UE_LOG(LogUSDEmit, Log,
-				TEXT("Emitter disconnected — reconnecting in %.1fs"),
+				TEXT("Emitter disconnected reconnecting in %.1fs"),
 				ReconnectDelaySecs);
 			FPlatformProcess::Sleep(
 				RateLimitDelay > 0.0f ? RateLimitDelay : ReconnectDelaySecs);

@@ -3,12 +3,12 @@
 FlatBuffers is the canonical wire and storage format.  Zero-copy access
 is used wherever possible:
 
-  * **Receiver queue** — stores raw bytes; decode on drain.
-  * **Broadcast relay** — pre-framed binary sent to all receivers.
-  * **Event store** — binary blobs written/read without re-serialization.
+  * **Receiver queue** stores raw bytes; decode on drain.
+  * **Broadcast relay** pre-framed binary sent to all receivers.
+  * **Event store** binary blobs written/read without re-serialization.
 
 The server's event-processing path (apply_txn) still operates on Python
-dicts — events are decoded once on ingestion and the dict is passed to
+dicts events are decoded once on ingestion and the dict is passed to
 event_apply.  This is the primary conversion boundary.
 
 Primary API (zero-copy path):
@@ -29,8 +29,10 @@ Fast checks:
 from __future__ import annotations
 
 import json
+import struct
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import flatbuffers
 import numpy as np
@@ -289,6 +291,10 @@ _BUILDER_SIZE_HINT: dict[str, int] = {
     MSG_TXN: 4096,
 }
 _DEFAULT_BUILDER_SIZE = 512
+_FB_I32 = struct.Struct("<i")
+_FB_U16 = struct.Struct("<H")
+_FB_U32 = struct.Struct("<I")
+_FB_U64 = struct.Struct("<Q")
 
 
 # ===================================================================
@@ -311,7 +317,7 @@ def resolve_payload(envelope: Envelope):
     """Resolve envelope union to (msg_type_str, typed_fb_object).
 
     Returns e.g. ("hello", Hello) or ("event", BroadcastEvent).
-    The typed object shares the same underlying buffer — zero-copy.
+    The typed object shares the same underlying buffer zero-copy.
     """
     tag = envelope.PayloadType()
     msg_type = _PAYLOAD_TO_MSG_TYPE.get(tag)
@@ -341,13 +347,58 @@ def resolve_event(event_wrapper: EventWrapper):
 
 
 def is_ping(buf: bytes | bytearray) -> bool:
-    """Check if a buffer is a Ping message — single byte read, no alloc."""
-    return decode_envelope(buf).PayloadType() == PayloadType.Ping
+    """Check if a buffer is a Ping message single byte read, no alloc."""
+    return payload_type(buf) == PayloadType.Ping
 
 
 def payload_type(buf: bytes | bytearray) -> int:
     """Read the raw Payload union tag from a buffer."""
-    return decode_envelope(buf).PayloadType()
+    tag, _ = _payload_header(buf)
+    return tag
+
+
+def payload_type_and_sequence(buf: bytes | bytearray) -> tuple[int, int]:
+    """Read the payload tag and sequence without generated table wrappers."""
+    tag, payload_position = _payload_header(buf)
+    if tag not in (PayloadType.BroadcastEvent, PayloadType.LayerGraphState):
+        return tag, 0
+    if payload_position is None:
+        raise ValueError("FlatBuffers envelope has no payload")
+    seq_offset = _table_field_offsets(buf, payload_position, (4,))[0]
+    seq = (
+        _FB_I32.unpack_from(buf, payload_position + seq_offset)[0]
+        if seq_offset
+        else 0
+    )
+    return tag, seq
+
+
+def _payload_header(buf: bytes | bytearray) -> tuple[int, int | None]:
+    _require_buffer_span(buf, 0, _FB_U32.size)
+    envelope_position = _FB_U32.unpack_from(buf, 0)[0]
+    type_offset, payload_offset, version_offset = _table_field_offsets(
+        buf,
+        envelope_position,
+        (4, 6, 8),
+    )
+    version = (
+        _FB_U16.unpack_from(buf, envelope_position + version_offset)[0]
+        if version_offset
+        else 0
+    )
+    if version != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported schema version {version}; expected {SCHEMA_VERSION}",
+        )
+    tag = buf[envelope_position + type_offset] if type_offset else 0
+    if tag not in _PAYLOAD_TO_MSG_TYPE:
+        raise ValueError(f"unknown payload type {tag}")
+    payload_position = (
+        _indirect_position(buf, envelope_position + payload_offset)
+        if payload_offset
+        else None
+    )
+    return tag, payload_position
 
 
 # ===================================================================
@@ -371,6 +422,139 @@ def encode_message(msg: dict) -> bytes:
 
     builder.Finish(envelope)
     return bytes(builder.Output())
+
+
+_SEQ_STRUCT = struct.Struct("<i")
+_TIME_STRUCT = struct.Struct("<d")
+_XFORM_VECTOR_STRUCTS = {
+    "t": struct.Struct("<3f"),
+    "r": struct.Struct("<4f"),
+    "s": struct.Struct("<3f"),
+}
+_XFORM_VECTOR_VTABLE_OFFSETS = {"t": 8, "r": 10, "s": 12}
+_XFORM_TIME_VTABLE_OFFSET = 14
+_BROADCAST_SEQ_VTABLE_OFFSET = 4
+
+
+@dataclass(frozen=True, slots=True)
+class _XformBroadcastTemplate:
+    wire: bytes
+    seq_position: int
+    vector_positions: tuple[tuple[str, int], ...]
+    time_position: int | None
+
+    def render(self, msg: dict) -> bytes:
+        output = bytearray(self.wire)
+        _SEQ_STRUCT.pack_into(output, self.seq_position, msg["seq"])
+        event = msg["event"]
+        for field_name, position in self.vector_positions:
+            _XFORM_VECTOR_STRUCTS[field_name].pack_into(
+                output,
+                position,
+                *event[field_name],
+            )
+        if self.time_position is not None:
+            _TIME_STRUCT.pack_into(output, self.time_position, event["time"])
+        return bytes(output)
+
+
+class BroadcastEventEncoder:
+    """Encode repeated transform broadcasts from bounded wire templates.
+
+    Transform edits keep the same FlatBuffers layout while only their sequence
+    and numeric TRS values change. Other event kinds use the general encoder.
+    """
+
+    def __init__(self, max_templates: int = 4096):
+        if max_templates < 1:
+            raise ValueError("max_templates must be positive")
+        self._template_for = lru_cache(maxsize=max_templates)(self._build_template)
+
+    def encode(self, msg: dict) -> bytes:
+        event = msg.get("event")
+        if msg.get("type") != MSG_EVENT or not event or event.get("k") != K_SET_XFORM_TRS:
+            return encode_message(msg)
+
+        fields = frozenset(event.get("fields", ()))
+        if not fields or not fields <= _XFORM_VECTOR_STRUCTS.keys():
+            return encode_message(msg)
+        field_mask = sum(_TRS_BITS[field] for field in fields)
+        template = self._template_for(
+            event["prim"],
+            field_mask,
+            event.get("time") is not None,
+            msg.get("origin") or None,
+            msg.get("client_id") or None,
+            msg.get("client") or None,
+            msg.get("layer_key") or None,
+        )
+        return template.render(msg)
+
+    def cache_info(self):
+        return self._template_for.cache_info()
+
+    @staticmethod
+    def _build_template(
+        prim: str,
+        field_mask: int,
+        has_time: bool,
+        origin: str | None,
+        client_id: str | None,
+        client: str | None,
+        layer_key: str | None,
+    ) -> _XformBroadcastTemplate:
+        fields = [field for field in ("t", "r", "s") if field_mask & _TRS_BITS[field]]
+        event = {
+            "k": K_SET_XFORM_TRS,
+            "prim": prim,
+            "fields": fields,
+            **{field: [1.0] * (_XFORM_VECTOR_STRUCTS[field].size // 4) for field in fields},
+        }
+        if has_time:
+            event["time"] = 1.0
+        msg = {"type": MSG_EVENT, "seq": 1, "event": event}
+        for key, value in (
+            ("origin", origin),
+            ("client_id", client_id),
+            ("client", client),
+            ("layer_key", layer_key),
+        ):
+            if value is not None:
+                msg[key] = value
+
+        wire = encode_message(msg)
+        envelope = decode_envelope(wire)
+        _, broadcast = resolve_payload(envelope)
+        _, trs = resolve_event(broadcast.Event())
+
+        seq_position = BroadcastEventEncoder._scalar_position(
+            broadcast,
+            _BROADCAST_SEQ_VTABLE_OFFSET,
+        )
+        vector_positions = []
+        for field_name in fields:
+            offset = trs._tab.Offset(_XFORM_VECTOR_VTABLE_OFFSETS[field_name])
+            if not offset:
+                raise RuntimeError(f"transform template omitted {field_name!r}")
+            vector_positions.append((field_name, trs._tab.Vector(offset)))
+        time_position = (
+            BroadcastEventEncoder._scalar_position(trs, _XFORM_TIME_VTABLE_OFFSET)
+            if has_time
+            else None
+        )
+        return _XformBroadcastTemplate(
+            wire,
+            seq_position,
+            tuple(vector_positions),
+            time_position,
+        )
+
+    @staticmethod
+    def _scalar_position(table, vtable_offset: int) -> int:
+        offset = table._tab.Offset(vtable_offset)
+        if not offset:
+            raise RuntimeError(f"FlatBuffers template omitted vtable field {vtable_offset}")
+        return table._tab.Pos + offset
 
 
 # --- Per-message-type encoders ---
@@ -415,7 +599,7 @@ def _encode_hello(b, msg):
 def _encode_stage_metadata_table(b, meta: dict | None, *, force: bool = False) -> int | None:
     """Build a SetStageMetadata table from a sparse dict.
 
-    Returns ``None`` when ``meta`` is empty and ``force`` is False — caller
+    Returns ``None`` when ``meta`` is empty and ``force`` is False caller
     omits the optional field rather than writing an empty table.
     """
     if not meta and not force:
@@ -879,7 +1063,7 @@ def _encode_attr_value_inner(b, value) -> int:
         _fb.AttrValueAddValueType(b, AttrValueType.ScalarString)
         _fb.AttrValueAddScalarString(b, str_off)
         return _fb.AttrValueEnd(b)
-    # numpy arrays — bulk encode via CreateNumpyVector (zero-copy path)
+    # numpy arrays bulk encode via CreateNumpyVector (zero-copy path)
     if isinstance(value, np.ndarray):
         return _encode_attr_value_numpy(b, value)
     if isinstance(value, list):
@@ -893,7 +1077,7 @@ def _encode_attr_value_inner(b, value) -> int:
 
 
 def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
-    """Encode a numpy array into an AttrValue — direct bulk copy."""
+    """Encode a numpy array into an AttrValue direct bulk copy."""
     if arr.size == 0:
         json_off = b.CreateString("[]")
         _fb.AttrValueStart(b)
@@ -907,7 +1091,7 @@ def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
     elif arr.ndim == 2:
         stride = arr.shape[1]
     else:
-        # 3D+ arrays — flatten and use stride from last dim
+        # 3D+ arrays flatten and use stride from last dim
         stride = arr.shape[-1]
 
     # Flatten to 1D for FlatBuffers vector
@@ -938,7 +1122,7 @@ def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
 
 
 def _encode_attr_value_list(b, value: list) -> int:
-    """Encode a list value — detect element type, use typed vectors."""
+    """Encode a list value detect element type, use typed vectors."""
     if not value:
         json_off = b.CreateString("[]")
         _fb.AttrValueStart(b)
@@ -1471,7 +1655,9 @@ def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> di
     """
     envelope = decode_envelope(buf)
     msg_type, obj = resolve_payload(envelope)
-    if msg_type in (MSG_TXN, MSG_EVENT):
+    if msg_type == MSG_EVENT:
+        return decode_broadcast_event(obj, numpy_arrays=numpy_arrays)
+    if msg_type == MSG_TXN:
         return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type, numpy_arrays=numpy_arrays)
     return _DICT_DECODE_DISPATCH[msg_type](obj, msg_type)
 
@@ -1490,6 +1676,190 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
     if spec is None or spec.decode is None:
         raise KeyError(f"no registered decoder for event kind {kind!r}")
     return spec.decode(obj, kind)
+
+
+def _require_buffer_span(buf, position: int, size: int) -> None:
+    if position < 0 or size < 0 or position + size > len(buf):
+        raise ValueError("malformed FlatBuffers message")
+
+
+def _table_field_offsets(buf, table_position: int, vtable_offsets: tuple[int, ...]):
+    _require_buffer_span(buf, table_position, _FB_I32.size)
+    vtable_position = table_position - _FB_I32.unpack_from(buf, table_position)[0]
+    _require_buffer_span(buf, vtable_position, 2 * _FB_U16.size)
+    vtable_size = _FB_U16.unpack_from(buf, vtable_position)[0]
+    object_size = _FB_U16.unpack_from(buf, vtable_position + _FB_U16.size)[0]
+    _require_buffer_span(buf, vtable_position, vtable_size)
+
+    result = []
+    for vtable_offset in vtable_offsets:
+        field_offset = (
+            _FB_U16.unpack_from(buf, vtable_position + vtable_offset)[0]
+            if vtable_offset + _FB_U16.size <= vtable_size
+            else 0
+        )
+        if field_offset >= object_size and field_offset != 0:
+            raise ValueError("malformed FlatBuffers message")
+        result.append(field_offset)
+    return tuple(result)
+
+
+def _indirect_position(buf, position: int) -> int:
+    _require_buffer_span(buf, position, _FB_U32.size)
+    target = position + _FB_U32.unpack_from(buf, position)[0]
+    _require_buffer_span(buf, target, _FB_U32.size)
+    return target
+
+
+def _decode_fb_string(buf, position: int) -> str:
+    string_position = _indirect_position(buf, position)
+    length = _FB_U32.unpack_from(buf, string_position)[0]
+    data_position = string_position + _FB_U32.size
+    _require_buffer_span(buf, data_position, length)
+    return bytes(buf[data_position:data_position + length]).decode("utf-8")
+
+
+def _decode_float_vector(buf, position: int, field_name: str) -> list[float]:
+    vector_position = _indirect_position(buf, position)
+    length = _FB_U32.unpack_from(buf, vector_position)[0]
+    data_position = vector_position + _FB_U32.size
+    byte_count = length * 4
+    _require_buffer_span(buf, data_position, byte_count)
+    vector_struct = _XFORM_VECTOR_STRUCTS[field_name]
+    if byte_count == vector_struct.size:
+        return list(vector_struct.unpack_from(buf, data_position))
+    return list(struct.unpack_from(f"<{length}f", buf, data_position))
+
+
+def _decode_xform_table(buf, table_position: int) -> dict:
+    prim_offset, mask_offset, t_offset, r_offset, s_offset, time_offset = (
+        _table_field_offsets(buf, table_position, (4, 6, 8, 10, 12, 14))
+    )
+    prim = _decode_fb_string(buf, table_position + prim_offset) if prim_offset else None
+    mask = buf[table_position + mask_offset] if mask_offset else 0
+    event = {"k": K_SET_XFORM_TRS, "prim": prim, "fields": []}
+    for bit, field_name, field_offset in (
+        (1, "t", t_offset),
+        (2, "r", r_offset),
+        (4, "s", s_offset),
+    ):
+        if mask & bit:
+            event["fields"].append(field_name)
+            event[field_name] = (
+                _decode_float_vector(buf, table_position + field_offset, field_name)
+                if field_offset
+                else []
+            )
+    if time_offset:
+        time_position = table_position + time_offset
+        _require_buffer_span(buf, time_position, _TIME_STRUCT.size)
+        event["time"] = _TIME_STRUCT.unpack_from(buf, time_position)[0]
+    return event
+
+
+def _decode_event_wrapper(
+    buf,
+    wrapper_position: int,
+    *,
+    numpy_arrays: bool,
+) -> dict:
+    type_offset, event_offset = _table_field_offsets(buf, wrapper_position, (4, 6))
+    if type_offset and buf[wrapper_position + type_offset] == EventPayloadType.SetXformTrs:
+        if not event_offset:
+            raise ValueError("malformed FlatBuffers transform event")
+        event_position = _indirect_position(buf, wrapper_position + event_offset)
+        return _decode_xform_table(buf, event_position)
+
+    wrapper = EventWrapper()
+    wrapper.Init(buf, wrapper_position)
+    return event_to_dict(wrapper, numpy_arrays=numpy_arrays)
+
+
+def decode_transaction(
+    transaction: Txn,
+    *,
+    numpy_arrays: bool = False,
+) -> tuple[list[dict], int, str]:
+    """Decode a transaction, fast-pathing its common transform events.
+
+    Generated FlatBuffers accessors remain the fallback for every other event
+    kind. The returned tuple is ``(events, txn_id, layer_key)``.
+    """
+    buf = transaction._tab.Bytes
+    table_position = transaction._tab.Pos
+    events_offset, layer_offset, txn_id_offset = _table_field_offsets(
+        buf,
+        table_position,
+        (4, 6, 8),
+    )
+    txn_id = (
+        _FB_U64.unpack_from(buf, table_position + txn_id_offset)[0]
+        if txn_id_offset
+        else 0
+    )
+    layer_key = (
+        _decode_fb_string(buf, table_position + layer_offset)
+        if layer_offset
+        else ""
+    )
+    if not events_offset:
+        return [], txn_id, layer_key
+
+    vector_position = _indirect_position(buf, table_position + events_offset)
+    event_count = _FB_U32.unpack_from(buf, vector_position)[0]
+    elements_position = vector_position + _FB_U32.size
+    _require_buffer_span(buf, elements_position, event_count * _FB_U32.size)
+    events = []
+    for index in range(event_count):
+        element_position = elements_position + index * _FB_U32.size
+        wrapper_position = _indirect_position(buf, element_position)
+        events.append(
+            _decode_event_wrapper(
+                buf,
+                wrapper_position,
+                numpy_arrays=numpy_arrays,
+            )
+        )
+    return events, txn_id, layer_key
+
+
+def decode_broadcast_event(
+    broadcast: BroadcastEvent,
+    *,
+    numpy_arrays: bool = False,
+) -> dict:
+    """Decode a broadcast, fast-pathing its common transform event."""
+    buf = broadcast._tab.Bytes
+    table_position = broadcast._tab.Pos
+    seq_offset, event_offset, origin_offset, client_id_offset, client_offset, layer_offset = (
+        _table_field_offsets(buf, table_position, (4, 6, 8, 10, 12, 14))
+    )
+    message = {
+        "type": MSG_EVENT,
+        "seq": (
+            _FB_I32.unpack_from(buf, table_position + seq_offset)[0]
+            if seq_offset
+            else 0
+        ),
+        "event": {},
+    }
+    if event_offset:
+        message["event"] = _decode_event_wrapper(
+            buf,
+            _indirect_position(buf, table_position + event_offset),
+            numpy_arrays=numpy_arrays,
+        )
+    for key, field_offset in (
+        ("origin", origin_offset),
+        ("client_id", client_id_offset),
+        ("client", client_offset),
+        ("layer_key", layer_offset),
+    ):
+        if field_offset:
+            value = _decode_fb_string(buf, table_position + field_offset)
+            if value:
+                message[key] = value
+    return message
 
 
 @dataclass(slots=True)
@@ -1549,7 +1919,7 @@ def decode_messages(
     for raw in raw_messages:
         try:
             msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
-        except Exception as exc:  # noqa: BLE001 — surfaced via result.errors
+        except Exception as exc:  # noqa: BLE001 surfaced via result.errors
             result.errors.append(exc)
             break
 
@@ -1889,13 +2259,13 @@ def _dict_set_xform_trs(trs, kind):
     ev = {"k": kind, "prim": _str(trs.Prim())}
     if bitmask & 1:
         fields.append("t")
-        ev["t"] = [trs.T(i) for i in range(trs.TLength())]
+        ev["t"] = trs.TAsNumpy().tolist()
     if bitmask & 2:
         fields.append("r")
-        ev["r"] = [trs.R(i) for i in range(trs.RLength())]
+        ev["r"] = trs.RAsNumpy().tolist()
     if bitmask & 4:
         fields.append("s")
-        ev["s"] = [trs.S(i) for i in range(trs.SLength())]
+        ev["s"] = trs.SAsNumpy().tolist()
     ev["fields"] = fields
     t = trs.Time()
     if t is not None:
@@ -2130,7 +2500,7 @@ def _dict_set_connectable_input(sci, kind):
             inputs[name] = civ.ScalarInt()
         elif vt == ConnectableInputValueType.ScalarFloat:
             inputs[name] = civ.ScalarFloat()
-        # else: value type None or unrecognized — drop the input entry so the
+        # else: value type None or unrecognized drop the input entry so the
         # applier doesn't author a spurious default. type_name is preserved so
         # the receiver can log the unsupported kind without silently corrupting.
     ev = {

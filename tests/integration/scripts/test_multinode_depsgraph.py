@@ -177,7 +177,7 @@ def _test_step():
             return 1.0
 
         elif _step == 4:
-            # Step 4: First test — does depsgraph fire at all for programmatic
+            # Step 4: First test does depsgraph fire at all for programmatic
             # socket changes from a timer? Test with a default material.
             log("Step 4: Testing if depsgraph fires for ANY material change from timer...")
 
@@ -266,7 +266,7 @@ def _test_step():
             return 3.0
 
         elif _step == 44:
-            # Original step 4 — now skipped, we already changed roughness in step 40
+            # Original step 4 now skipped, we already changed roughness in step 40
             log("Step 4 (original): Changing roughness on multi-node material...")
             mat = None
             for m in bpy.data.materials:

@@ -1,7 +1,7 @@
 """Headless tests for NoticeEmitter extensions.
 
 Tests creation, deletion, deactivation, rename detection,
-suppress flag, and ChangeBlock batching — all DCC-agnostic.
+suppress flag, and ChangeBlock batching all DCC-agnostic.
 """
 
 import numpy as np
@@ -12,6 +12,7 @@ from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.event_apply import apply_event, apply_events
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
+    K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
     K_RENAME_PRIM,
@@ -21,7 +22,9 @@ from openusdconnect.protocol_constants import (
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
+    K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
 )
 from openusdconnect.sdf_arc_state import read_arc_state
@@ -317,7 +320,7 @@ class TestReentrantSuppress:
 
         emitter.suppress()  # depth 1
         emitter.suppress()  # depth 2
-        emitter.unsuppress()  # depth 1 — still suppressed
+        emitter.unsuppress()  # depth 1 still suppressed
 
         stage.DefinePrim("/World/ShouldBeHidden", "Xform")
         events = emitter.build_events_for_dirty()
@@ -580,6 +583,82 @@ class TestCleanup:
         assert isinstance(cached["points"], int)
         assert cached["points"] is not points
 
+    def test_remote_definition_does_not_become_local_authoring_ownership(self):
+        stage = Usd.Stage.CreateInMemory()
+        remote = Sdf.Layer.CreateAnonymous("remote")
+        authoring = Sdf.Layer.CreateAnonymous("authoring")
+        stage.GetSessionLayer().subLayerPaths = [remote.identifier, authoring.identifier]
+        stage.SetEditTarget(Usd.EditTarget(authoring))
+        emitter = NoticeEmitter(stage)
+        asset = Sdf.Layer.CreateAnonymous("asset.usda")
+        asset_prim = Sdf.CreatePrimInLayer(asset, "/Model")
+        asset_prim.specifier = Sdf.SpecifierDef
+        asset_prim.typeName = "Xform"
+        remote_events = [
+            {"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Sphere"},
+            {
+                "k": K_SET_REFERENCE,
+                "prim": "/World/Sphere",
+                "refs": [{"asset_path": asset.identifier, "prim_path": "/Model"}],
+            },
+            {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Sphere"},
+            {
+                "k": K_SET_XFORM_TRS,
+                "prim": "/World/Sphere",
+                "fields": ["t"],
+                "t": [2.0, 1.5, 0.0],
+            },
+            {"k": K_SET_VISIBILITY, "prim": "/World/Sphere", "visible": True},
+            {
+                "k": K_SET_SDF_SPEC_FIELDS,
+                "prim": "/World/Sphere",
+                "spec_path": "/World/Sphere.radius",
+                "spec_kind": "attribute",
+                "fields": ["custom", "default", "typeName", "variability"],
+                "fragment": (
+                    '#usda 1.0\n\nover "World"\n{\n    over "Sphere"\n'
+                    "    {\n        double radius = 1\n    }\n}\n"
+                ),
+                "removed": False,
+            },
+        ]
+        with emitter.suppressed():
+            with Usd.EditContext(stage, Usd.EditTarget(remote)):
+                apply_events(stage, remote_events)
+                emitter.invalidate_for_events(remote_events)
+
+        translate = next(
+            op
+            for op in UsdGeom.Xformable(stage.GetPrimAtPath("/World/Sphere")).GetOrderedXformOps()
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate
+        )
+        orient = next(
+            op
+            for op in UsdGeom.Xformable(stage.GetPrimAtPath("/World/Sphere")).GetOrderedXformOps()
+            if op.GetOpType() == UsdGeom.XformOp.TypeOrient
+        )
+        translate.Set(Gf.Vec3d(-2.0, 1.5, 0.0))
+        orient.Set(Gf.Quatf(0.9238795, 0.0, 0.3826834, 0.0))
+        UsdGeom.Imageable(stage.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
+            UsdGeom.Tokens.invisible
+        )
+        events = emitter.build_events_for_dirty()
+
+        assert K_DELETE_PRIM not in [event["k"] for event in events]
+        assert [event["k"] for event in events] == [K_SET_VISIBILITY, K_SET_XFORM_TRS]
+        assert stage.GetPrimAtPath("/World/Sphere").GetTypeName() == "Sphere"
+        assert UsdGeom.Sphere(stage.GetPrimAtPath("/World/Sphere")).GetRadiusAttr().Get() == 1
+
+        with emitter.suppressed():
+            with Usd.EditContext(stage, Usd.EditTarget(remote)):
+                apply_events(stage, events)
+                emitter.invalidate_for_events(events)
+        UsdGeom.Imageable(stage.GetPrimAtPath("/World/Sphere")).GetVisibilityAttr().Set(
+            UsdGeom.Tokens.inherited
+        )
+
+        assert [event["k"] for event in emitter.build_events_for_dirty()] == [K_SET_VISIBILITY]
+
     def test_cleanup_idempotent(self):
         stage, emitter = _make_stage_and_emitter()
         emitter.cleanup()
@@ -770,7 +849,7 @@ class TestFirstEncounterStructuralEvents:
         xf.AddOrientOp().Set(Gf.Quatf(1, 0, 0, 0))
         xf.AddScaleOp().Set(Gf.Vec3d(1, 1, 1))
 
-        # First encounter — should have ensure_prim
+        # First encounter should have ensure_prim
         events1 = emitter.build_events_for_dirty()
         ensure1 = [e for e in events1 if e["k"] == K_ENSURE_PRIM and e["prim"] == "/World/Obj"]
         assert len(ensure1) == 1
@@ -1608,7 +1687,7 @@ class TestGprimAttrEmission:
         attrs = attr_evs[0]["attrs"]
         assert "normals" in attrs
         assert np.array_equal(attrs["normals"], [[0.0, 0.0, 1.0]] * 3)
-        # Interpolation in attr_interp (not primvar_meta — normals isn't a primvar)
+        # Interpolation in attr_interp (not primvar_meta normals isn't a primvar)
         interp = attr_evs[0].get("attr_interp", {})
         assert interp.get("normals") == "faceVarying"
 
@@ -1666,7 +1745,7 @@ class TestMaterialEmission:
 
     def test_asset_path_input_emitted(self):
         """Asset-typed shader inputs (e.g. UsdUVTexture file) are emitted
-        with the authored path and type 'asset' — not silently dropped."""
+        with the authored path and type 'asset' not silently dropped."""
         from pxr import Sdf, UsdShade
 
         stage, emitter = _make_stage_and_emitter()
@@ -1717,7 +1796,7 @@ class TestMaterialEmission:
     def test_material_output_connection_emitted(self):
         """A Material's outputs:surface.connect = <shader.outputs:surface>
         edge emits a K_SET_CONNECTABLE_CONNECTION event with the qualified
-        local_attr "outputs:surface" — same wire shape as input-side
+        local_attr "outputs:surface" same wire shape as input-side
         connections, just a different prefix."""
         from pxr import Sdf, UsdShade
 
@@ -1741,7 +1820,7 @@ class TestMaterialEmission:
 
     def test_nodegraph_output_port_emitted(self):
         """A NodeGraph's outputs:result.connect = <internal_shader.outputs:rgb>
-        emits the output-port edge — the core gap #7 capability that lets
+        emits the output-port edge the core gap #7 capability that lets
         MaterialX scenes with NodeGraph wrappers replicate faithfully."""
         from pxr import Sdf, UsdShade
 
@@ -1766,7 +1845,7 @@ class TestMaterialEmission:
 
     def test_interface_forwarding_emitted_as_input_source(self):
         """An input-to-input edge (NodeGraph interface forwarding) emits
-        with source_attr starting with 'inputs:' — proves the prefix on
+        with source_attr starting with 'inputs:' proves the prefix on
         source_attr correctly reflects the source's USD attribute type."""
         from pxr import Sdf, UsdShade
 

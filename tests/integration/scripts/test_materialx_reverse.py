@@ -297,7 +297,7 @@ def _test_step():
                 _step = 99
                 return 1.0
 
-            # Ensure the material is used by a scene object — depsgraph
+            # Ensure the material is used by a scene object depsgraph
             # only tracks materials assigned to visible geometry.
             # The enrichment binding fails because the USD material path
             # is outside the variant scope.  Assign manually for testing.
@@ -330,7 +330,7 @@ def _test_step():
                 bpy.app.handlers.depsgraph_update_post.remove(_probe)
             bpy.app.handlers.depsgraph_update_post.append(_probe)
 
-            # Change the socket inside an operator — operators trigger the
+            # Change the socket inside an operator operators trigger the
             # full depsgraph evaluation pipeline after execute() returns,
             # unlike timer callbacks which don't.
             class _ForceUpdate(bpy.types.Operator):
@@ -411,7 +411,7 @@ except OSError:
     if start_server():
         bpy.app.timers.register(_test_step, first_interval=2.0)
     else:
-        log("Aborting — server failed to start. Start it externally first:")
+        log("Aborting server failed to start. Start it externally first:")
         log(
             "  uv run python -m openusdconnect.server "
             f"--port {SERVER_PORT} --event-log test_mtlx_reverse.db"

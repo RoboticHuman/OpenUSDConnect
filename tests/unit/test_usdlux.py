@@ -1,6 +1,6 @@
 """Tests for UsdLux light replication.
 
-Lights are UsdShade.ConnectableAPI containers — their parameters are
+Lights are UsdShade.ConnectableAPI containers their parameters are
 ``inputs:*`` attributes routed through the renamed ``set_connectable_input``
 event. The typed schema (SphereLight, RectLight, …) is carried by
 ``ensure_prim``; ShapingAPI / ShadowAPI are applied via the new ``api_schemas``
@@ -170,7 +170,7 @@ class TestConnectableInputOnLights:
         )
         p = stage.GetPrimAtPath("/Dome")
         asset = UsdLux.DomeLight(p).GetTextureFileAttr().Get()
-        # Empty asset path — round-trips through Sdf.AssetPath() default.
+        # Empty asset path round-trips through Sdf.AssetPath() default.
         assert isinstance(asset, Sdf.AssetPath)
         assert asset.path == ""
 
@@ -286,7 +286,7 @@ class TestEmitterLightDiff:
 
 class TestStructuralOrderingLight:
     def test_inputs_after_ensure_prim_with_api_schema(self, stage):
-        """Shuffled events still apply in dependency order — light type and
+        """Shuffled events still apply in dependency order light type and
         ShapingAPI must be present before inputs:shaping:cone:angle is written."""
         events = [
             # Out-of-order on purpose.
@@ -338,7 +338,7 @@ class TestRealAssetReplication:
 
     @pytest.fixture(scope="class")
     def _shared_stage(self):
-        # Opens the heavy StandardShaderBall asset once per class —
+        # Opens the heavy StandardShaderBall asset once per class
         # USD composition for this scene is ~1.7s; sharing across the
         # class drops the suite's total open time from N*1.7s to 1.7s.
         return Usd.Stage.Open(str(STANDARD_SHADER_BALL))
@@ -386,7 +386,7 @@ class TestRealAssetReplication:
 
     def test_xform_translation_replicates(self, src):
         """Mutating the parent Xform's matrix should replicate the new world
-        translation to the destination — exact value doesn't matter, what
+        translation to the destination exact value doesn't matter, what
         matters is src world translation == dst world translation."""
         em = NoticeEmitter(src)
 
@@ -396,7 +396,7 @@ class TestRealAssetReplication:
         new_mat = Gf.Matrix4d(old_mat)
         # Shift the matrix's translation by (+5, +2, 0). The composed world
         # transform also has a tweak op, but that applies equally on both
-        # sides — replication just needs src.world == dst.world.
+        # sides replication just needs src.world == dst.world.
         new_mat[3] = Gf.Vec4d(
             old_mat[3][0] + 5.0, old_mat[3][1] + 2.0, old_mat[3][2], 1.0,
         )
@@ -428,7 +428,7 @@ class TestRealAssetReplication:
     def test_user_applied_shaping_api_replicates(self, src):
         """Apply ShapingAPI to a real asset RectLight (turning it into a spot)
         and verify both the schema and its cone-angle input land on the
-        destination — exercises the api_schemas wire field end-to-end on a
+        destination exercises the api_schemas wire field end-to-end on a
         real asset, distinct from typed-schema built-ins."""
         em = NoticeEmitter(src)
 
@@ -464,7 +464,7 @@ class TestRealAssetReplication:
 
     def test_combined_intensity_and_move_replicate(self, src):
         """One emit cycle carrying both a light input change and a parent
-        Xform move — exercises the full receive-side ordering."""
+        Xform move exercises the full receive-side ordering."""
         em = NoticeEmitter(src)
 
         # Move parent Xform.
@@ -504,7 +504,7 @@ class TestRealAssetReplication:
 
 
 class TestRealAssetShapingAPIReplication:
-    """E2E against assets/test_assets/References/utils/Environment.usda — a real
+    """E2E against assets/test_assets/References/utils/Environment.usda a real
     asset whose 3 SphereLights already have ShapingAPI applied (`prepend
     apiSchemas = ["ShapingAPI"]` in the source). Verifies the full
     api_schemas wire path against authored asset content rather than
@@ -542,12 +542,12 @@ class TestRealAssetShapingAPIReplication:
 
     def test_shaping_replicates_to_destination(self, src):
         """Authored ShapingAPI on the source must arrive on the destination
-        via the api_schemas wire field — not via the typed-schema built-ins
+        via the api_schemas wire field not via the typed-schema built-ins
         path (SphereLight doesn't bring ShapingAPI as a built-in)."""
         em = NoticeEmitter(src)
 
         # Drive a notice on one of the existing spots so the emitter sees
-        # it on the next build cycle. Bump intensity by 0.1 — small but
+        # it on the next build cycle. Bump intensity by 0.1 small but
         # past the diff epsilon.
         spot_prim = src.GetPrimAtPath(self.SPOT_PATH)
         light = UsdLux.SphereLight(spot_prim)
@@ -579,7 +579,7 @@ class TestRealAssetShapingAPIReplication:
         assert dst_light.GetRadiusAttr().Get() == pytest.approx(5.0)
 
     def test_shaping_cone_angle_change_replicates(self, src):
-        """Authoring a tighter cone angle on the source spot — verify the
+        """Authoring a tighter cone angle on the source spot verify the
         shaping value change rides on set_connectable_input and the receiver
         retains the ShapingAPI."""
         em = NoticeEmitter(src)

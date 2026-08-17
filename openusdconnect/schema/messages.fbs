@@ -1,4 +1,4 @@
-// OpenUSDConnect wire protocol — FlatBuffers schema
+// OpenUSDConnect wire protocol FlatBuffers schema
 // Message envelope with union payload for all message types.
 
 include "events.fbs";
@@ -109,12 +109,12 @@ table RateLimited {
 }
 
 // ---------------------------------------------------------------------------
-// Playback synchronization — single-leader, server-arbitrated
+// Playback synchronization single-leader, server-arbitrated
 // ---------------------------------------------------------------------------
 
 // Client → server: request the playback-leader role. Server grants if no
 // leader is currently set, otherwise rejects. The optional ``time`` is
-// the claimer's current timecode — applied as the shared playhead
+// the claimer's current timecode applied as the shared playhead
 // atomically with the grant so followers don't snap to a stale value.
 table ClaimPlayback {
     client_id:string;

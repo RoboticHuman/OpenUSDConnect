@@ -1,210 +1,197 @@
-# Live Material Editing
+# Live material editing
 
-Real-time bidirectional material and shader sync between DCC applications through the OpenUSDConnect protocol.
+OpenUSDConnect synchronizes material bindings and `UsdShade.ConnectableAPI`
+networks without making the wire protocol depend on a particular renderer or
+DCC node system.
 
-Three event kinds carry all material state:
+## Protocol model
 
-- `set_material_binding` binds or unbinds a `UsdShade.Material` to a prim. An optional `material_purpose` (`"preview"` or `"full"`) selects the per-purpose binding slot; empty means allPurpose.
-- `set_connectable_input` sets typed input values on any `UsdShade.ConnectableAPI` container: Shader, NodeGraph, Material, or UsdLux light. `info_id` carries the shader's `info:id` (its Sdr identifier) and is empty for non-Shader containers.
-- `set_connectable_connection` authors or clears connection edges (`connections` plus optional `disconnections`), covering both input-to-output edges and the input-to-input edges NodeGraph interface forwarding produces.
+Three event kinds carry material state:
 
-The protocol layer is shader-agnostic: any `info:id` and any input set replicate. What a given DCC can *display* is decided by its shader mapper registry (see the Blender section below).
+- `set_material_binding` authors or clears a material binding. An optional
+  `material_purpose` selects all-purpose, preview, or full bindings.
+- `set_connectable_input` authors typed values on a Shader, NodeGraph,
+  Material, or UsdLux connectable. `info_id` is the Shader's Sdr identifier and
+  is empty for non-Shader containers.
+- `set_connectable_connection` authors or clears input and output connection
+  edges, including interface forwarding through Material and NodeGraph inputs.
 
-## Architecture
+Any valid shader identifier and typed input can pass through the core. A DCC
+adapter decides which networks it can display natively; unsupported authored
+state remains available in its USD mirror.
 
-Material edits flow through the emitter's USD stage, the bridge between DCC node graphs and the network protocol:
+## Data flow
 
-```
+For Blender, a local node edit follows this path:
+
+```text
 Blender node edit
-  -> depsgraph reports a Material update
-  -> BlenderStageAuthor reads the mapped node sockets via the shader
-     mapper and diffs against its per-shader baseline
-  -> changed values are written as UsdShade inputs on the emitter's stage
-  -> NoticeEmitter picks up the stage change and diffs against its
-     per-prim cache
-  -> set_connectable_input event -> server -> broadcast to other clients
-  -> BlenderAdapter routes the values through the shader mapper registry
-     onto Blender node sockets
+  -> BlenderStageAuthor writes the changed USD input
+  -> NoticeEmitter builds typed events from the edit-target opinion
+  -> server validates, commits, and broadcasts the transaction
+  -> receiving mirror composes the authoritative layer stack
+  -> BlenderAdapter updates existing native nodes and sockets
 ```
 
-The same `ShaderMapperRegistry` serves both directions: the mapper that applies incoming values to native nodes also reads them back for outgoing events, so values stay in USD input space throughout the roundtrip.
+The server sends committed records to every receiver, including a layered
+receiver associated with the author. Receive application suppresses local
+capture and advances its baselines, so authoritative records are not emitted a
+second time. Same-origin composed correction is still applied when a stronger
+layer masks the author's opinion.
 
-### Two diff layers on emit
-
-`BlenderStageAuthor` keeps a per-shader baseline of `{usd_input_name: value}`. On each material depsgraph tick it:
-
-1. reads every mapped socket from the node (for multi-node networks, from the socket map cached when the network was built)
-2. compares against the baseline and keeps only actual changes
-3. authors the changed values to the emitter's USD stage
-4. the `NoticeEmitter` then diffs that stage change against its own per-prim cache before building events
-
-First encounter seeds the baseline without authoring, so importing a material does not broadcast its defaults. The receive pipeline also seeds baselines right after applying shader events, reading the freshly applied node state, so the first local edit to a synced shader diffs against the synced values instead of being swallowed as a seed.
-
-On the stage side, the emitter reads the whole connectable interface once per cycle (`read_usdshade_connectable`) and fans the diff out into `set_connectable_input` and `set_connectable_connection` events. An input that carries a connection is excluded from value events, since its value comes from the source node.
-
-### Echo suppression
-
-The server does not echo events back to the origin that sent them, and the receive pipeline suppresses the emitter while applying incoming events, so an edit never bounces back to its author.
+`BlenderStageAuthor` also keeps a native-node baseline so an import does not
+broadcast shader defaults as user edits. The stage-side emitter performs a
+second authored-opinion diff before creating protocol events.
 
 ## Blender shader support
 
-The Blender integration's default registry maps these USD shader ids to Blender nodes.
+The default Blender registry includes:
 
-### UsdPreviewSurface (single node)
+- `UsdPreviewSurface` and `ND_UsdPreviewSurface_surfaceshader`, mapped to
+  Principled BSDF
+- MaterialX `standard_surface`, translated to a Principled-based network
+- OpenPBR surface, translated through the MaterialX standard-surface mapping
+- Common MaterialX math, mix, conversion, conditional, extract, texcoord,
+  image, tiled-image, and normal-map nodes
+- `UsdUVTexture` and `UsdPrimvarReader_*`
 
-Maps to Blender's Principled BSDF: one node, direct socket mapping. The MaterialX wrapper id `ND_UsdPreviewSurface_surfaceshader` uses the same mapping.
+UsdPreviewSurface covers diffuse/base color, metallic, roughness, emission,
+coat, opacity, IOR, and specular tint. Blender has no separate strength for
+USD's final emissive color, so a non-zero incoming color enables emission
+strength.
 
-| USD input | Blender socket |
-|-----------|----------------|
-| `diffuseColor` | Base Color |
-| `metallic` | Metallic |
-| `roughness` | Roughness |
-| `emissiveColor` | Emission Color |
-| `clearcoat` | Coat Weight |
-| `clearcoatRoughness` | Coat Roughness |
-| `opacity` | Alpha |
-| `ior` | IOR |
-| `specularColor` | Specular Tint |
+MaterialX standard-surface inputs that do not have a direct Principled socket
+are represented with supporting nodes. Transmission uses Blender's available
+base-color and IOR controls. OpenPBR inputs are translated to the corresponding
+standard-surface behavior, including computed coat and fuzz channels when
+needed.
 
-USD's `emissiveColor` is the final emission value with no separate strength, while Blender defaults Emission Strength to 0. When a non-zero emissive color arrives, Emission Strength is set to 1.0.
+The mapping is deliberately practical rather than a claim of renderer-identical
+shading. The USD mirror remains the authoritative graph.
 
-Bidirectional: edits to any of these sockets in Blender are emitted as `set_connectable_input`; incoming events apply to the Principled BSDF.
+## Referenced and nested interfaces
 
-### MaterialX standard_surface (multi-node)
+Referenced MaterialX frequently exposes values on a Material or NodeGraph
+interface rather than directly on the final Shader. Initial import enrichment
+uses public OpenUSD value-producer queries to flatten those interface values
+and shader-output connections onto Blender's existing imported graph.
 
-`ND_standard_surface_surfaceshader` builds a 5-node network: a Principled BSDF plus two HueSat -> Mix chains that combine `base`/`base_color` into Base Color and `specular`/`specular_color` into Specular Tint. Every other standard_surface input (roughness, metalness, transmission, subsurface, sheen, coat, thin film, emission, anisotropy, normal, tangent) maps directly onto a Principled socket.
+For live edits, the adapter asks the mirror's composed connectable for its
+recursive interface consumers and updates the corresponding existing shader
+sockets. This supports:
 
-When `transmission` is above zero the network is rewired for glass: `specular_IOR` drives the IOR socket and `transmission_color` drives Base Color, bypassing the diffuse base chain (Blender's Principled BSDF tints transmitted light with Base Color and has a single IOR for reflection and refraction).
+- Material interface values driving a Shader
+- NodeGraph inputs forwarding to nested NodeGraphs or Shaders
+- externally referenced materials containing internal references
+- connection rewiring and disconnection through those interfaces
 
-Bidirectional: `create_network` returns an `input_map` of USD input name to Blender socket. The same map applies incoming values and reads them back for reverse sync.
+The adapter does not build a persistent manual composition cache and does not
+recreate the material graph for an interface value change. It relies on the
+current composed USD stage and updates the nodes already owned by Blender's
+importer.
 
-### OpenPBR surface (multi-node)
+## Textures and primvars
 
-`ND_open_pbr_surface_surfaceshader` translates to standard_surface per the official MaterialX translation graph, then builds the standard_surface network. Most inputs are passthrough renames (`base_weight` to `base`, `fuzz_weight` to `sheen`, and so on). The computed channels become real Blender node subgraphs only when active, so a connected texture stays correct per-pixel: coat darkening of the base color, the coat/specular roughness mix, and the fuzz roughness power curve.
+`UsdUVTexture` and MaterialX image nodes map to Blender Image Texture nodes.
+Color variants load as sRGB; scalar and vector data load as Non-Color. Relative
+asset paths resolve against the owning USD document or configured asset root,
+and already-loaded images with the same absolute path are reused.
 
-### MaterialX utility nodes
+Swapping an image on a framework-created texture node publishes the new asset
+path. Changing a tracked UV map or primvar reader publishes its `varname`.
+Inputs driven by a connection are not simultaneously emitted as scalar values.
 
-Math (`ND_multiply_*`, `ND_divide_vector2`, `ND_subtract_vector2`, `ND_distance_vector3`), mix and multiply (`ND_mix_color3`, `ND_mix_vector3`, `ND_multiply_color3`), conversions (`ND_convert_*`), `ND_ifequal_*`, `ND_extract_color4`, `ND_texcoord_vector2`, `ND_surfacematerial`, and `ND_normalmap_*` each map to one or two configured Blender nodes with fixed port maps. `set_connectable_connection` routes edges through those maps, so multi-node MaterialX graphs (texture chains, channel math) rebuild as native Blender node networks.
+Packed texture channel networks are preserved by native import ownership. The
+adapter does not replace an imported channel-separation graph with a simplified
+reconstruction.
 
-### Textures and primvar readers
+## Material binding behavior
 
-`UsdUVTexture` and the MaterialX image nodes (`ND_image_*`, `ND_tiledimage_*`) map to Image Texture nodes. Color-typed variants load as sRGB; float and vector variants load as Non-Color, so normal maps and roughness data skip gamma correction. Relative file paths resolve against the scene's asset root (or the imported base USD's directory), and image datablocks already loaded from the same absolute path are reused rather than duplicated.
+Blender materials are identified by their composed USD paths, not only by leaf
+names. Two references to the same asset therefore receive distinct native
+materials when their composed paths differ.
 
-Texture sync is bidirectional on tracked nodes: swapping the image on a framework-created Image Texture node emits the new file path as an asset-typed `file` input, which other receivers load through the same resolution path. Changing the UV map or attribute name on a tracked reader node emits `varname` the same way.
+Per-purpose resolution follows USD binding intent: preview overrides
+all-purpose for preview consumers, and full is the fallback where applicable.
+A binding on an Xform is inherited by descendant meshes unless a descendant
+authors a stronger binding. Native import preserves `GeomSubset` assignments
+and polygon material indices.
 
-`UsdPrimvarReader_float2` maps to a UV Map node; the other `UsdPrimvarReader_*` variants map to Attribute nodes that read the named primvar (vertex colors, custom data) at render time.
+## Send a material transaction
 
-### Material binding in Blender
-
-Incoming `set_material_binding` events assign path-stable Blender materials: two references to the same asset get separate materials, each tagged with its composed USD path. Per-purpose bindings resolve like `ComputeBoundMaterial(purpose="preview")`: preview overrides allPurpose, and full is the last-resort fallback. A binding on an Xform propagates to descendant meshes that have no binding of their own, mirroring USD binding inheritance.
-
-## Example workflows
-
-### 1. Load an asset and edit its material live
-
-Set up the server and two Blender instances per the walkthrough in [Blender Addon Usage](blender-addon-usage.md), then reference an asset from the command line:
-
-```bash
-# Terminal: start the server on the repo's test scene
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log events.db
-
-# Terminal: create a Teapot with a payload, one atomic transaction
-uv run python -m openusdconnect.send \
-  '{"k":"ensure_prim","prim":"/World/Teapot","typeName":"Xform"}' \
-  '{"k":"ensure_xform_ops","prim":"/World/Teapot"}' \
-  '{"k":"set_xform_trs","prim":"/World/Teapot","fields":["t"],"t":[0,3,0]}' \
-  '{"k":"set_payload","prim":"/World/Teapot","payloads":[{"asset_path":"./assets/full_assets/Teapot/Teapot.usd","prim_path":"/Teapot"}]}' \
-  '{"k":"load_payload","prim":"/World/Teapot"}'
-```
-
-Connected Blender receivers import the Teapot with its Ceramic material. In the emitter Blender, change Roughness on the Ceramic Principled BSDF. The wire carries one event:
-
-```json
-{"k": "set_connectable_input",
- "prim": "/World/Teapot/Materials/Ceramic/UsdPreview/usdpreviewsurface",
- "info_id": "UsdPreviewSurface",
- "inputs": {"roughness": 0.8},
- "input_types": {"roughness": "float"}}
-```
-
-and every other receiver updates the Ceramic material.
-
-### 2. CLI shader override
+Use one transaction for the material, terminal connection, and binding:
 
 ```bash
-uv run python -m openusdconnect.send \
-  '{"k":"set_connectable_input","prim":"/World/Teapot/Materials/Ceramic/UsdPreview/usdpreviewsurface","info_id":"UsdPreviewSurface","inputs":{"roughness":0.1,"ior":2.0},"input_types":{"roughness":"float","ior":"float"}}'
+uv run openusdconnect-send \
+  '{"k":"ensure_prim","prim":"/World/Looks/Brass","typeName":"Material"}' \
+  '{"k":"ensure_prim","prim":"/World/Looks/Brass/Surface","typeName":"Shader"}' \
+  '{"k":"set_connectable_input","prim":"/World/Looks/Brass/Surface","info_id":"UsdPreviewSurface","inputs":{"diffuseColor":[0.71,0.65,0.26],"roughness":0.3,"metallic":1.0},"input_types":{"diffuseColor":"color3f","roughness":"float","metallic":"float"}}' \
+  '{"k":"set_connectable_connection","prim":"/World/Looks/Brass","connections":{"outputs:surface":{"source_prim":"/World/Looks/Brass/Surface","source_attr":"outputs:surface"}}}' \
+  '{"k":"set_material_binding","prim":"/World/Model","material_path":"/World/Looks/Brass"}'
 ```
 
-All connected receivers update the Ceramic material's roughness and IOR.
+The CLI validates the complete event batch and sends it atomically. The MCP
+server exposes the same operation through `usd_send_events` and provides Sdr
+shader discovery; see [MCP server](mcp-server-usage.md).
 
-The MCP server exposes these same events as validated LLM authoring tools, including full shader-network recipes; see [MCP Server Usage](mcp-server-usage.md).
+## Add material support to another DCC
 
-## Adding material sync to a new DCC
-
-`ShaderMapper`, `MultiNodeShaderMapper`, and `ShaderMapperRegistry` live in `openusdconnect.adapters` and are DCC-agnostic (the `node` parameter is untyped; each mapper knows its own node object type).
-
-### 1. Implement the DCCAdapter methods
+A DCC adapter implements the material methods from `DCCAdapter`:
 
 ```python
-class MyDCCAdapter(DCCAdapter):
-    def set_material_binding(self, prim_path, material_path, material_purpose=""):
-        # Assign the material to geometry in your DCC
+class MyAdapter(DCCAdapter):
+    def set_material_binding(
+        self,
+        prim_path,
+        material_path,
+        material_purpose="",
+    ):
         ...
 
-    def set_connectable_input(self, prim_path, info_id, inputs, input_types, time=None):
-        # info_id is empty for NodeGraph / Material / light containers
-        mapper = self._shader_registry.get(info_id)
+    def set_connectable_input(
+        self,
+        prim_path,
+        info_id,
+        inputs,
+        input_types,
+        time=None,
+    ):
         ...
 
-    def set_connectable_connection(self, prim_path, connections, disconnections=None):
-        # Wire shader nodes together in your DCC
-        ...
-```
-
-### 2. Register ShaderMapper subclasses
-
-```python
-class MyPBRMapper(ShaderMapper):
-    def apply_value(self, node, usd_name, value, **kwargs):
-        native_name = self.get_native_input(usd_name)
-        # Set the value on your DCC's shader node
-
-    def read_all_inputs(self, node):
-        # Read every mapped value back for reverse sync
-        return {usd_name: read_native(node, usd_name)
-                for usd_name in self._input_map}
-
-registry = ShaderMapperRegistry()
-registry.register(MyPBRMapper("UsdPreviewSurface", "my_pbr_node", {
-    "diffuseColor": "base_color",
-    "roughness": "roughness",
-}))
-```
-
-### 3. Multi-node shaders
-
-```python
-class MyMtlxMapper(MultiNodeShaderMapper):
-    def create_network(self, tree, inputs, **kwargs):
-        # Build your DCC's node network.
-        # Return (nodes, input_map, output_map).
+    def set_connectable_connection(
+        self,
+        prim_path,
+        connections,
+        disconnections=None,
+    ):
         ...
 ```
 
-The `input_map` (USD input name -> native socket) is the key to bidirectional editing: forward application writes values through it, and `read_all_inputs(input_map=...)` reads them back through it. The `output_map` lets `set_connectable_connection` resolve this shader's output sockets when another node connects to it.
+`ShaderMapper`, `MultiNodeShaderMapper`, and `ShaderMapperRegistry` in
+`openusdconnect.adapters` are optional DCC-independent helpers. A
+`ShaderMapper` translates one USD shader ID to a native node type and input
+map. A `MultiNodeShaderMapper` returns `(nodes, input_map, output_map)` from
+`create_network()` so the adapter can apply values, read them back, and resolve
+connection endpoints consistently.
 
-### 4. The core handles the rest
+The core handles event validation, serialization, sequencing, replay,
+authored-opinion detection, and receive dispatch. The integration remains
+responsible for native node creation, socket mapping, asset loading, and
+host-thread scheduling.
 
-- event encoding, transport, and sequencing (FlatBuffers over TCP through the sync server)
-- change detection on the emitter's stage (`NoticeEmitter` diffs the connectable interface per prim)
-- receive-side dispatch (`EventDispatcher` decodes, commits to the mirror stage, and calls your adapter)
-- echo suppression, event storage, replay, and compaction
+## Care points
 
-## Behavior notes and limitations
-
-- Reverse authoring preserves USD types: the type authored on the synced prim wins, then the shader's Sdr node definition, then a value-shape heuristic for inputs the stage has never seen. A texture swap round-trips as `asset`, a subsurface radius as `float3`, exactly as the source authored them.
-- Reverse sync reads unlinked value sockets only. An input driven by a connection is skipped when reading back, so a value edit never fights a texture link.
-- Multi-node reverse sync requires the socket map produced by `create_network`, which exists once the network has been built by the receive/import path. A multi-node material authored from scratch inside Blender has no map and does not emit.
-- On the emit side, Blender nodes are matched to USD shader prims through the `usd_shader_path` / `usd_shader_id` tags set during import and receive. An untagged Principled BSDF inside a tagged material falls back to matching a UsdPreviewSurface shader found under the material prim on the stage; other untagged nodes are not tracked.
-- Connections targeting Material or NodeGraph *output* ports are skipped by the Blender adapter: the Material surface terminal is wired automatically when a surface-shader network is built, and NodeGraph ports are flattened at import.
+- Preserve the authored `input_types`. When reverse-authoring a previously
+  unknown input, prefer the existing USD input type, then the Sdr definition,
+  and only then a value-shape fallback.
+- Do not emit a socket value while that input is connection-driven.
+- Reverse sync for a multi-node native network requires the `input_map` created
+  during import or receive. An unrelated graph authored from scratch in the DCC
+  has no USD identity or map unless the integration creates one.
+- Match shaders and materials by stable USD paths or explicit tags, not leaf
+  node names.
+- Material or NodeGraph output events may be represented by composed interface
+  forwarding rather than a one-to-one native node. Query the USD mirror for
+  producers and consumers instead of duplicating composition rules.
+- Time-sampled connectable values remain time samples in USD. A DCC adapter
+  needs an explicit animation policy to turn them into native keys.

@@ -1,6 +1,6 @@
 """Tests for generic API-schema replication on the K_ENSURE_PRIM event.
 
-Decoupled from UsdLux on purpose — uses MotionAPI (UsdGeom) and CollectionAPI
+Decoupled from UsdLux on purpose uses MotionAPI (UsdGeom) and CollectionAPI
 to prove the mechanism is generic. UsdLux-specific tests live in
 ``test_usdlux.py``.
 """
@@ -37,7 +37,7 @@ from openusdconnect.server.state import UsdSyncServer
 
 
 def _roundtrip(ev: dict) -> dict:
-    """Codec encode + decode an event dict — exercises FlatBuffers."""
+    """Codec encode + decode an event dict exercises FlatBuffers."""
     b = flatbuffers.Builder(256)
     off = _encode_event_wrapper(b, ev)
     b.Finish(off)
@@ -63,7 +63,7 @@ class TestApplyApiSchemas:
         assert prim.HasAPI(UsdGeom.MotionAPI)
 
     def test_apply_multiple_single_apply_schemas(self):
-        """Additive — two events apply both APIs."""
+        """Additive two events apply both APIs."""
         from pxr import UsdLux
 
         stage = Usd.Stage.CreateInMemory()
@@ -247,7 +247,7 @@ class TestEmitterFilter:
         assert "ShapingAPI" in ensure[0]["api_schemas"]
 
     def test_default_whitelist_excludes_motion(self):
-        """MotionAPI isn't a default — replicating it requires opt-in."""
+        """MotionAPI isn't a default replicating it requires opt-in."""
         stage = Usd.Stage.CreateInMemory()
         em = NoticeEmitter(stage)
         p = stage.DefinePrim("/Sphere", "Sphere")
@@ -305,7 +305,7 @@ class TestRegisterReplicatedApiSchema:
             _REPLICATED_API_SCHEMAS.update(original)
 
     def test_existing_emitter_unaffected_by_late_register(self):
-        """Snapshot semantics — emitters constructed before the register call
+        """Snapshot semantics emitters constructed before the register call
         keep the old set."""
         original = set(_REPLICATED_API_SCHEMAS)
         try:
@@ -361,7 +361,7 @@ class TestRegisterReplicatedApiSchema:
 
 class TestEmitterReEmitOnSchemaChange:
     def test_re_emit_after_late_api_schema_application(self):
-        """Apply ShapingAPI to an existing prim — the next emit cycle produces
+        """Apply ShapingAPI to an existing prim the next emit cycle produces
         a fresh ensure_prim with updated api_schemas."""
         from pxr import UsdLux
 
@@ -384,7 +384,7 @@ class TestEmitterReEmitOnSchemaChange:
 
 class TestDefaults:
     def test_default_set_excludes_motion_and_collection(self):
-        """MotionAPI and CollectionAPI are NOT defaults — explicit opt-in only."""
+        """MotionAPI and CollectionAPI are NOT defaults explicit opt-in only."""
         assert "MotionAPI" not in DEFAULT_REPLICATED_API_SCHEMAS
         assert "CollectionAPI" not in DEFAULT_REPLICATED_API_SCHEMAS
         # MaterialBindingAPI has its own dedicated event.
@@ -402,7 +402,7 @@ class TestDefaults:
 
 class TestStructuralOrdering:
     def test_api_schemas_applied_before_inputs(self):
-        """Shuffled events still apply in dependency order — ShapingAPI must
+        """Shuffled events still apply in dependency order ShapingAPI must
         be present before inputs:shaping:cone:angle is written."""
         from pxr import UsdLux
 

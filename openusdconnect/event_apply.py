@@ -1,4 +1,4 @@
-"""Apply events to a Usd.Stage — the core of the framework.
+"""Apply events to a Usd.Stage the core of the framework.
 
 Defines how protocol events map to USD mutations. Used by:
 - Server (authoritative stage)
@@ -49,7 +49,7 @@ from .sdf_arc_state import apply_arc_state
 
 LOG = logging.getLogger(__name__)
 
-# Module-level singleton — `Usd.TimeCode.Default()` is immutable, so the
+# Module-level singleton `Usd.TimeCode.Default()` is immutable, so the
 # usual mutable-default-arg footgun doesn't apply, but ruff's B008 still
 # flags the call. One shared instance keeps signatures clean.
 _TIME_DEFAULT = Usd.TimeCode.Default()
@@ -107,7 +107,7 @@ def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
     """Return the named xform op via direct attribute lookup.
 
     Canonical ops always live at ``xformOp:translate``,
-    ``xformOp:orient``, ``xformOp:scale`` — no scan needed.
+    ``xformOp:orient``, ``xformOp:scale`` no scan needed.
     """
     attr = xf.GetPrim().GetAttribute(f"xformOp:{op_base}")
     if attr and attr.IsValid():
@@ -160,14 +160,14 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
 
     If *op_cache* has a hit and the edit target already has the ops,
     returns cached op handles directly (avoids 3x find_op per txn).
-    Op handles are composed-stage references — valid for any edit target.
+    Op handles are composed-stage references valid for any edit target.
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
         prim = stage.DefinePrim(prim_path, "Xform")
     xf = UsdGeom.Xformable(prim)
 
-    # Pre-built Sdf.Path objects — avoids ~70 µs of string→path parsing.
+    # Pre-built Sdf.Path objects avoids ~70 µs of string→path parsing.
     path_t, path_o, path_s, path_order = _get_xform_paths(prim_path)
 
     # Check whether the edit target layer already has the ops.
@@ -183,7 +183,7 @@ def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
         if cached and cached[0] is not None:
             return prim, xf, cached[0], cached[1], cached[2]
     else:
-        # Ops missing from edit target — author attribute specs and
+        # Ops missing from edit target author attribute specs and
         # xformOpOrder directly via Sdf so each layer is self-contained.
         # The ChangeBlock batches the spec authoring into one
         # change-processing round; authored individually, every spec
@@ -259,7 +259,7 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME
         return
     type_name = str(attr.GetTypeName())
 
-    # numpy array fast path — bulk conversion via FromNumpy
+    # numpy array fast path bulk conversion via FromNumpy
     if isinstance(value, np.ndarray):
         if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
             arr = value.reshape(-1, 3).astype(np.float32, copy=False)
@@ -273,7 +273,7 @@ def _set_gprim_attr(prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME
             attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)), time)
         # Gf vector constructors reject numpy scalar dtypes through their
         # Boost.Python bindings even though `value.flat` would otherwise be
-        # a lazy iterator — destructure and cast to Python float, same
+        # a lazy iterator destructure and cast to Python float, same
         # shape as _apply_set_xform_trs.
         elif (
             type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
@@ -389,7 +389,7 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
             _ensure_primvar_attr(prim, attr_name, meta, pvapi)
         _set_gprim_attr(prim, attr_name, attr_value, tc)
 
-    # Set interpolation on primvars — needed for schema-defined primvars
+    # Set interpolation on primvars needed for schema-defined primvars
     # (e.g. displayColor) where the default interpolation differs from
     # the authored value.
     if pvapi:
@@ -598,7 +598,7 @@ def _set_connectable_input_value(
 ) -> None:
     """Set a single input on a UsdShade connectable, creating it if needed.
 
-    Works on Shader, NodeGraph, Material, and UsdLux lights — all share
+    Works on Shader, NodeGraph, Material, and UsdLux lights all share
     GetInput / CreateInput through ConnectableAPI. ``time`` selects the USD
     time sample; default writes the static opinion.
     """
@@ -772,7 +772,7 @@ def _apply_set_connectable_connection(stage: Usd.Stage, ev: dict) -> None:
     Each entry in `connections` is keyed by a namespace-qualified attribute
     name on `ev["prim"]` (e.g. "inputs:diffuseColor", "outputs:surface") and
     valued by `{source_prim, source_attr}` where `source_attr` is similarly
-    qualified.  Mirrors USD's `.connect` authoring shape — the connection
+    qualified.  Mirrors USD's `.connect` authoring shape the connection
     record lives on the local attribute and points upstream.
     """
     prim = stage.GetPrimAtPath(ev["prim"])
@@ -820,7 +820,7 @@ def _apply_api_schemas(prim: Usd.Prim, names: list[str]) -> None:
 
     Format mirrors prim.GetAppliedSchemas(): bare names for single-apply,
     "Name:instance" for multi-apply. Unknown names log a warning and are
-    skipped — never authors a phantom apiSchemas entry. Additive only.
+    skipped never authors a phantom apiSchemas entry. Additive only.
     """
     if not names:
         return
@@ -828,7 +828,7 @@ def _apply_api_schemas(prim: Usd.Prim, names: list[str]) -> None:
         schema_name, _, instance = name.partition(":")
         tf_type = Usd.SchemaRegistry.GetTypeFromSchemaTypeName(schema_name)
         if not tf_type:
-            LOG.warning("Unknown API schema %r — skipping", schema_name)
+            LOG.warning("Unknown API schema %r skipping", schema_name)
             continue
         if instance:
             prim.ApplyAPI(tf_type, instance)
@@ -1026,7 +1026,7 @@ class _AtomicApply:
 
     Snapshots the edit target layer on enter. If the block raises,
     restores the snapshot so the stage returns to its pre-apply state.
-    Exceptions propagate — __exit__ returns False.
+    Exceptions propagate __exit__ returns False.
     """
 
     __slots__ = ("_layer", "_backup")
@@ -1179,11 +1179,11 @@ def atomic_apply(stage: Usd.Stage, prim_paths=None):
             apply_events(stage, events)
 
     On success, changes persist. On failure, the edit target layer
-    is restored to its state before the block — partial applies
+    is restored to its state before the block partial applies
     are rolled back.
 
     With *prim_paths* (an iterable of every prim path the events can
-    author on), only those prim specs are backed up — O(touched prims)
+    author on), only those prim specs are backed up O(touched prims)
     instead of an O(layer) ``TransferContent`` snapshot. Pass ``None``
     when the batch can write outside prim scopes (stage metadata) or
     the touched set is unknown.

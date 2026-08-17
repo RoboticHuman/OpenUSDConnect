@@ -19,7 +19,7 @@ Op-coverage target (the protocol kinds we expect to see produced):
   - set_material_binding (mesh -> material direct binding)
 
 The connection comparator follows UsdShade.GetConnectedSources() for every
-Material / NodeGraph / Shader on both sides — `_compare_stages` in
+Material / NodeGraph / Shader on both sides `_compare_stages` in
 test_stage_parity.py does not walk connections, so a green test there
 does not prove connection parity. This test does.
 """
@@ -954,7 +954,7 @@ class TestAssetReproduce:
 
     The asset has:
       - /MaterialX (Scope)
-      - /MaterialX/Materials (untyped def — round-trips as Xform, see
+      - /MaterialX/Materials (untyped def round-trips as Xform, see
         _KNOWN_TYPENAME_DOWNGRADES)
       - /MaterialX/Materials/USD_Plastic (Material) with terminal output
         connection to its nested Shader's `outputs:surface`
@@ -984,7 +984,7 @@ class TestAssetReproduce:
 
     def test_material_interface_forwarding_preserved(self, srv):
         """The Shader's `inputs:diffuseColor.connect` points up to
-        `</MaterialX/Materials/USD_Plastic.inputs:diffuseColor>` — an
+        `</MaterialX/Materials/USD_Plastic.inputs:diffuseColor>` an
         Input-typed connection (not Output). This is the dual of the
         NodeGraph-output forwarding case and the sourceType must round-trip.
         """
@@ -1021,7 +1021,7 @@ class TestAssetReproduce:
             assert src.sourceName == "diffuseColor", (
                 f"diffuseColor sourceName on {label}: {src.sourceName}"
             )
-            # Input-typed source (not Output) — Material interface forwarding
+            # Input-typed source (not Output) Material interface forwarding
             assert src.sourceType == UsdShade.AttributeType.Input, (
                 f"diffuseColor sourceType on {label}: {src.sourceType} (expected Input)"
             )

@@ -1,4 +1,4 @@
-# OpenUSDConnect — usdview integration
+# OpenUSDConnect usdview integration
 
 Receive-side integration for Pixar's reference USD viewer. Adds an
 **OpenUSDConnect** menu to usdview with Connect / Disconnect / Status
@@ -6,7 +6,7 @@ commands. While connected, every event the server broadcasts (transforms,
 visibility, material bindings, composition arcs, time samples, stage
 metadata) is applied directly to the stage usdview is rendering.
 
-This is the smallest possible DCC integration in the project — usdview
+This is the smallest possible DCC integration in the project usdview
 already owns a live `Usd.Stage`, so the core `UsdStageAdapter` plugs in
 unchanged. No DCC-native object mapping, no emitter (receive-only).
 
@@ -27,24 +27,30 @@ or route transactions to layers outside the managed collaboration block.
 ## Quick start
 
 ```bash
-# Terminal 1 — start the server on a base scene
-uv run python -m openusdconnect.server --port 7200 --base test_scene.usda --event-log events.db
+uv run python scripts/start_usdview.py test_scene.usda
+```
 
-# Terminal 2 — launch usdview pre-wired to that server
+The launcher selects an unused port, starts a server with a temporary event
+log, discovers usdview from the active OpenUSD environment, and opens it with
+the receiver plugin already configured. Closing usdview or pressing Ctrl+C
+also stops the server. Pass `--event-log events.db` to preserve the session.
+
+To connect usdview to a server that is already running instead:
+
+```bash
 uv run python -m integrations.usdview.launcher test_scene.usda --host 127.0.0.1 --port 7200
 ```
 
-usdview opens, the **OpenUSDConnect** menu appears in the menubar, and
-the plugin auto-connects ~100ms after the window is up (driven by the
-`OPENUSDCONNECT_HOST` env var the launcher sets).
+In either case, usdview opens with the **OpenUSDConnect** menu and the plugin
+auto-connects after the window is ready.
 
-## RenderMan (hdPrman) renderer — optional
+## RenderMan (hdPrman) renderer optional
 
 Pixar's **hdPrman** Hydra delegate is off by default. Pass `--renderman`
 to make it available and start usdview in it:
 
 ```bash
-uv run python -m integrations.usdview.launcher test_scene.usda --renderman
+uv run python scripts/start_usdview.py test_scene.usda --renderman
 ```
 
 The flag sets the `RMAN_*` search paths from `$RMANTREE` plus the OpenUSD
@@ -54,18 +60,18 @@ selects the `HdPrmanLoaderRendererPlugin` delegate ("RenderMan RIS"). It
 requires a RenderManProServer install with `RMANTREE` set and an OpenUSD
 build made with the RenderMan imaging plugin (`PXR_BUILD_PRMAN_PLUGIN=ON`).
 
-Without `--renderman` nothing changes — usdview runs Storm-only as before.
+Without `--renderman` nothing changes usdview runs Storm-only as before.
 You can still switch renderers from usdview's **Renderer** menu once
 `--renderman` is on, and you can override which delegate it starts in by
 forwarding your own `--renderer` (e.g. `--renderman --renderer Storm` opens
 in Storm with RenderMan available in the menu). See
 https://openusd.org/release/plugins_renderman.html
 
-## How `find_usdview()` works
+## How usdview discovery works
 
-The launcher's `find_usdview()` tries three strategies in order:
+Both launchers use `find_usdview()`, which tries three strategies in order:
 
-1. `shutil.which("usdview.cmd"/"usdview.exe"/"usdview")` — works when
+1. `shutil.which("usdview.cmd"/"usdview.exe"/"usdview")` works when
    the OpenUSD `bin/` directory is on `PATH`.
 2. Walk up from `pxr.__file__` to the install root and probe
    `bin/usdview*`. `pxr` imports without PySide6 (only `pxr.Usdviewq`
@@ -96,7 +102,7 @@ usdview some_scene.usda
 ```
 
 Without `OPENUSDCONNECT_HOST` set, the menu is present but won't
-auto-connect — pick **Connect to OpenUSDConnect…** from the menu and
+auto-connect pick **Connect to OpenUSDConnect…** from the menu and
 enter the host/port.
 
 ## Refreshing a late asset dependency
@@ -132,7 +138,7 @@ tracked arcs whose resolution changes in the same refresh are updated too.
 |---|---|
 | `OPENUSDCONNECT_HOST` | Auto-connect target host (skips the dialog) |
 | `OPENUSDCONNECT_PORT` | Auto-connect target port (default 7200) |
-| `OPENUSDCONNECT_TOKEN` | TOFU token to present on connect. Must be set explicitly — the integration does not yet read the cached `~/.openusdconnect/tokens.json`. |
+| `OPENUSDCONNECT_TOKEN` | Explicit TOFU token. When omitted, `UsdReceiver` loads and persists the normal cached token for the host and port. |
 | `USDVIEW_PATH` | Explicit path to `usdview` executable for the launcher |
 | `PXR_PLUGINPATH_NAME` | Directory containing this `plugInfo.json` |
 | `PYTHONPATH` | Must include the OpenUSDConnect repo root so `integrations.usdview` and `openusdconnect` resolve |

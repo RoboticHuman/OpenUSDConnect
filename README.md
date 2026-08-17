@@ -1,446 +1,265 @@
 # OpenUSDConnect
 
-Real-time OpenUSD scene synchronization across DCC applications. A pure-Python
-core and an authoritative sync server keep OpenUSD stages consistent across
-Blender, usdview, Unreal Engine, and headless clients over a local network.
-Transforms, geometry, materials, composition arcs, instancing, cameras, lights,
-animation, and playback all replicate live through a compact event protocol.
+OpenUSDConnect synchronizes live OpenUSD scene edits across DCC applications,
+USD-native tools, and headless services. Its Python core is DCC-independent;
+Blender, usdview, Unreal Engine, and MCP integrations are reference clients
+built on the same event protocol.
 
-## Overview
-
-OpenUSDConnect is a **general-purpose USD livelink framework**, not a
-single-DCC plugin. The core library (`openusdconnect/`) is pure Python on top of
-the OpenUSD bindings (`pxr`), has no DCC dependencies, and is fully testable
-headless. The bundled integrations (Blender, usdview, Unreal, an MCP authoring
-server) are **reference clients**. They combine the core protocol with the
-host-specific stage ownership, event-loop, conversion, and lifecycle policy
-needed by each application. The protocol itself is DCC-agnostic.
-
-Scene changes are expressed as a fixed vocabulary of **events** (`ensure_prim`,
-`set_xform_trs`, `set_material_binding`, and so on) that map directly to USD spec
-operations. Clients emit events when their stage changes; the server sequences
-them into an authoritative, append-only log and fans them out to every connected
-client, which applies them to its own stage. The wire format is length-prefixed
-FlatBuffers over TCP.
+Changes are sent as typed USD operations, sequenced by an authoritative server,
+stored in SQLite, and replayed to connected or late-joining clients. The wire
+format is length-prefixed FlatBuffers over TCP.
 
 ```mermaid
 flowchart LR
-    subgraph A["emitting client (any DCC)"]
-        E["native edit"] --> LS["local USD stage"]
-        LS -- "emitter diff" --> EV["typed events"]
-    end
-    EV -- "TCP · FlatBuffers" --> SQ
-    subgraph S["sync server"]
-        SQ["sequencer"] --> LOG[("SQLite event log")]
-    end
-    LOG -- "broadcast + late-join replay" --> MS
-    subgraph B["receiving side"]
-        MS["mirror USD stage"] -- "DCCAdapter" --> N["native scene"]
-    end
+    A["USD or DCC edit"] --> E["typed events"]
+    E --> S["sync server"]
+    S --> L[("event log")]
+    S --> R["receivers"]
+    R --> U["USD stage or native scene"]
 ```
 
-The boxes are roles, not machines: a bidirectional client runs both halves
-at once. Flat receivers suppress ordinary origin echoes. Layered receivers
-also replay their own authored records into an independent mirror so its
-reconstructed layer stack remains complete; the emitter's authoring stage is
-not used as that mirror.
+## Choose a collaboration mode
 
-> [!IMPORTANT]
-> Changing a context-dependent `ArResolver` mapping while managed native
-> projection is running pauses incremental delivery. Recreate the
-> receiver/dispatcher, rebind a replacement stage, restart the integration, or
-> destructively rebuild the native scene and call
-> `acknowledge_native_scene_rebuilt()`. The dispatcher
-> exposes `native_scene_rebuild_required` and raises `NativeSceneRebuildRequired`
-> before draining more input, so this condition cannot silently desynchronize
-> the native scene. Ordinary authored USD changes remain incremental.
+OpenUSDConnect has two explicit layer models:
 
-## Features
+| Mode | Use it when | Client API |
+| --- | --- | --- |
+| `managed` (default) | The server owns collaboration layers and semantic events must reach USD and non-USD consumers. Supports departments, playback, dashboard, MCP, and live-open snapshots. | `ManagedClient`, `UsdPublisher`, `UsdReceiver` |
+| `shared_stage` | Every process opens an equivalent portable root and sublayer graph and authored Sdf fields must be routed to the corresponding application-owned layers. | `SharedStageClient` |
 
-### Sync server
-- Authoritative sequencer with atomic, ordered transactions
-- SQLite event log with late-join replay (sync from any sequence) and log compaction
-- WebDAV/UNC live-open endpoint that serves a normal-looking USD snapshot
-- Per-department shared layers with configurable strength ordering
-- TOFU (trust-on-first-use) token authentication and per-client rate limiting
-- Single-leader playback synchronization (a shared playhead)
-- Optional web admin dashboard with a live prim tree and event inspector
+Managed mode is the normal choice for livelink integrations. Shared-stage mode
+is for applications editing the same production layer graph field-for-field.
+The modes have different handshakes and cannot be mixed on one server.
 
-### USD coverage
-- **Transforms**: translate / orient / scale with quaternion rotation; partial TRS updates
-- **Geometry**: meshes, curves, points; typed attributes, primvars and interpolation; visibility
-- **Custom property data**: exact Sdf field deltas for locally authored custom attributes, relationships, and metadata not represented by specialized events
-- **Materials and shaders**: UsdPreviewSurface and MaterialX (`ND_*`) networks, nested NodeGraphs, per-purpose bindings
-- **Composition**: exact reference and payload list-op opinions, including
-  offsets, scales, reference custom data, payload load/unload, and variant
-  selections
-- **Shared file layers**: opt-in synchronization of an existing root layer and
-  its recursive sublayer graph, including topology, offsets, metadata,
-  variants, custom properties, connections, targets, and time samples
-- **Instancing**: native scenegraph instancing and `UsdGeomPointInstancer`
-- **Cameras and lights**: `UsdGeomCamera`; `UsdLux` lights with applied API schemas (Shaping, Shadow, and others)
-- **Stage metadata**: units (`metersPerUnit`, `upAxis`) and timeline (fps, time codes, range)
-- **Animation**: time-sampled values on transforms, visibility, attributes, shader inputs, and point instancers
-- **Prim lifecycle**: create, rename, delete, deactivate
+## Capabilities
 
-### Integrations
-These ship as **reference implementations**: working clients you can run today,
-and worked examples for writing your own. A new host integration maps its scene
-to the common event flow and defines how it owns authoring and receive-side USD
-stages.
+- Atomic, ordered transactions with durable acknowledgements and replay
+- Transforms, geometry, primvars, cameras, lights, visibility, and animation
+- References, payloads, variants, instanceability, and point instancers
+- UsdPreviewSurface and MaterialX values, bindings, NodeGraphs, and connections
+- Exact Sdf field deltas for custom properties, relationships, metadata, and
+  authored state not represented by a specialized event
+- Managed collaboration-layer ordering and muting, including department policy
+- Shared-stage root and recursive sublayer topology synchronization
+- TOFU authentication, rate limiting, playback leadership, log compaction,
+  optional dashboard, and WebDAV live-open snapshots
 
-| Integration | Direction | Notes |
-|---|---|---|
-| **Blender** | bidirectional | Emitter/receiver addon: live transform and material sync (UsdPreviewSurface, MaterialX), Y-up/Z-up conversion, depsgraph auto-tracking, live-open metadata auto-connect |
-| **usdview** | receive | Live viewer plugin and launcher; RenderMan-safe (Sdr plugin bootstrap) with OpenPBR to standard_surface translation for hdPrman |
-| **Unreal Engine** | bidirectional | Transform/visibility emit; receive-side composition arcs, variants, bindings, shader networks, and live-open metadata via `USDStageActor` |
-| **MCP server** | author + introspect | Exposes the event protocol as Model Context Protocol tools so an LLM (e.g. Claude) can author USD and inspect scenes |
-| **Dashboard** | admin | Web admin UI: status, client table, prim tree, event log |
+The protocol preserves USD state more broadly than every native DCC can display.
+Managed layered integrations reconstruct the authoritative USD state in a
+mirror or application stage, then a host adapter applies the subset its native
+scene can represent.
 
-## Getting started
+## Quick start
 
-### Clone
-The repository vendors the [USD Working Group asset library](https://github.com/usd-wg/assets)
-as a git submodule (`assets/`), used by the visual-regression and asset E2E test
-suites. Clone recursively so it comes along:
+### Install and run the server
+
+Python 3.13+ and [uv](https://docs.astral.sh/uv/) are required for the headless
+server. Clone recursively if you also want the USD Working Group assets used by
+the asset and visual tests.
 
 ```bash
 git clone --recursive https://github.com/RoboticHuman/OpenUSDConnect.git
-```
-
-Already cloned without `--recursive`? Pull the submodule in:
-
-```bash
-git submodule update --init --recursive
-```
-
-### Prerequisites
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/)
-- OpenUSD Python bindings (`pxr`): pulled in by the `server` dependency group for
-  headless use, provided by the DCC for integrations, or by `usd-core` in Docker
-
-Optional features are opt-in dependency groups: `server` (headless `pxr`),
-`vfs` (WebDAV live-open), `dashboard`, `mcp`, `dev` (tests and lint),
-`profile`.
-
-### Run the sync server
-```bash
-# Install headless dependencies (pulls pxr via usd-core)
+cd OpenUSDConnect
 uv sync --group server
-
-# Start the server
-uv run openusdconnect-server --port 7200 --base scene.usda
-
-# Serve a browsable live-open snapshot at http://127.0.0.1:7280/usd/scene.usd
-uv sync --group server --group vfs
-uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
-
-# With the admin dashboard (uv sync --group dashboard)
-uv run openusdconnect-server --port 7200 --base scene.usda --dashboard-port 8080
-
-# With per-department layers and authentication
-uv run openusdconnect-server --port 7200 --base scene.usda \
-  --departments animation,lighting,fx --require-token
-
-# Configure a custom URI resolver context (repeat for multiple resolvers)
-uv run openusdconnect-server --port 7200 --base scene.usda \
-  --resolver-context asset:/show/config/versions.json
+uv run openusdconnect-server --base scene.usda --port 7200
 ```
 
-CLI naming follows the endpoint being configured: dedicated tools use
-`--host`/`--port`, while combined launchers qualify the WebDAV endpoint as
-`--vfs-host`/`--vfs-port`/`--vfs-share`/`--vfs-name`. Persistence and optional
-services use `--event-log` and `--dashboard-port`.
-See [Command-Line Reference](docs/cli-reference.md) for the command inventory
-and dependency groups.
+Use `uv run openusdconnect-server --help` for server options. Common additions
+are `--departments animation,lighting,fx`, `--require-token`, and
+`--dashboard-port 8080`.
 
-#### Project USD plugin environment
+### Project USD plugin environment
 
 The standard `openusdconnect-server` command initializes the Sdr registry
-before event-log replay and before opening its network listener. It inherits
-the process's normal USD configuration, including `PXR_PLUGINPATH_NAME` and any
-renderer variables configured by the project.
+before replay or listener startup. It inherits project configuration such as
+`PXR_PLUGINPATH_NAME` and renderer variables.
 
-On Windows, if a USD plugin depends on DLLs outside the normal loader path,
-provide their directories with a repeatable option or the path-separator
-delimited `OPENUSDCONNECT_DLL_DIRS` environment variable:
+On Windows, provide plugin dependency directories through repeatable
+`--plugin-dll-dir` options or the path-separator-delimited
+`OPENUSDCONNECT_DLL_DIRS` variable:
 
 ```powershell
-uv run openusdconnect-server --base scene.usda `
-  --plugin-dll-dir "$env:RMANTREE\bin" `
-  --plugin-dll-dir "$env:RMANTREE\lib"
-
-# Equivalent persistent project-shell configuration
 $env:OPENUSDCONNECT_DLL_DIRS = "C:\Renderer\bin;C:\Renderer\lib"
 uv run openusdconnect-server --base scene.usda
 ```
 
-Linux and macOS projects should configure their platform loader environment
-before launching the process. OpenUSDConnect does not guess renderer installs
-or copy a DCC's private process environment; launch the server from the same
-project environment as the clients.
+Linux and macOS projects configure their loader environment before launch.
+OpenUSDConnect does not copy a DCC's private environment, so launch the server
+from the same project environment as its clients.
 
-Programmatic server users can configure the same behavior through
-`ServerConfig`. Hosts that construct their own USD objects can call the public
-helper before constructing the server or otherwise touching Sdr:
+Programmatic servers use the same settings through `ServerConfig`:
 
 ```python
-from openusdconnect import (
-    ServerConfig,
-    prepare_usd_plugin_environment,
-    run_server,
-)
+from openusdconnect import ServerConfig, run_server
 
-# Normal server use: plugin preflight is enabled by default.
 run_server(
     ServerConfig(
         base_usd_path="scene.usda",
         plugin_dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
     )
 )
-
-# Custom host startup, before constructing USD-dependent services.
-prepare_usd_plugin_environment(
-    dll_dirs=[r"C:\Renderer\bin", r"C:\Renderer\lib"],
-    shader_ids=["UsdPreviewSurface", "MyProjectSurface"],
-)
 ```
 
-### USD-native Python clients
+Custom hosts can call `prepare_usd_plugin_environment()` before touching Sdr.
+See the [command-line reference](docs/cli-reference.md#usd-plugin-startup) for
+the complete startup contract. The source-tree `integrations.run_server`
+wrapper remains a RenderMan compatibility convenience.
 
-New `pxr.Usd` applications can use the layered high-level API and keep network
-work out of the stage-owning thread:
+### Connect a USD-native application
+
+`ManagedClient` is the usual bidirectional API for applications that own a
+`pxr.Usd.Stage`:
 
 ```python
 from pxr import Usd
 
-from openusdconnect import UsdReceiver
+from openusdconnect import ClientPhase, ManagedClient
 
 stage = Usd.Stage.Open("scene.usda")
-with UsdReceiver(stage, app_name="my-viewer") as receiver:
-    if not receiver.connect(timeout=5):
+
+with ManagedClient(stage, app_name="my-editor") as client:
+    if not client.connect(timeout=5):
         raise ConnectionError("OpenUSDConnect server is unavailable")
+
     while application_is_running():
-        receiver.update()
+        client.update()
+        if client.status.phase is ClientPhase.READY:
+            # ManagedClient selects client.authoring_layer as the edit target.
+            edit_scene(stage)
 ```
 
-`UsdReceiver` requires layered replay and never silently falls back to flat
-replay. `UsdPublisher` observes ordinary USD edits in the current edit
-target and retains an unsent batch across reconnects. Bidirectional hosts use
-separate author and receive-mirror stages. See the
-[USD-native integration contract](docs/usd-native-integration.md) and the
-[`usd_native_client` example](examples/usd_native_client/README.md).
+Call `update()` on the stage-owning thread. `connect()` completes the network
+handshakes, but replay becomes visible only as `update()` applies it. Interactive
+updates do not wait for durability. At a save, publish, or orderly-shutdown
+boundary, call `update()` to submit the latest edits and then `flush(timeout)`
+to wait for their acknowledgement.
 
-Department assignment is server policy built on a logical collaboration-layer
-contract. Each authored opinion carries an opaque, portable `layer_key`, while
-the advertised layer stack defines strength through strongest-to-weakest order
-and mute state. The current policy maps a department such as `animation` to
-`department:animation` and maps department-less clients to the `default`
-logical layer.
+Use `UsdReceiver` for receive-only tools, `UsdPublisher` for send-only tools,
+and `SharedStageClient` for exact authored-layer synchronization. The
+[USD-native API guide](docs/usd-native-integration.md) explains ownership,
+replay, reconnection, adapters, and the cases that require recovery.
 
-USD-native receivers and Blender sessions opened from an ordinary base USD
-negotiate layered replay. Portable layer keys map to receiver-owned anonymous
-`Sdf.Layer` objects; server layer identifiers never cross the wire. The managed
-layers form an ordered block at the strong end of the receiver's session
-sublayers, while unrelated sublayers retain their order and offsets. Reorder
-and mute changes alter composition without moving authored opinions.
+## Integrations
 
-Blender reconstructs the stack in a separate USD mirror and projects only the
-resulting composed scene changes into Blender. An edit echoed to its author is
-also projected when needed, so a representable weak local edit is retained in
-its layer while the viewport returns to the stronger composed value. Prim
-lifecycle, transforms, geometry values, references and payloads, variants,
-material bindings, shader inputs and connections, visibility, and
-instanceability use this path.
+| Integration | Direction | Entry point |
+| --- | --- | --- |
+| Blender addon | Bidirectional | `uv run python scripts/build_blender_addon.py` |
+| usdview plugin | Receive | `uv run python scripts/start_usdview.py scene.usda` |
+| Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal plugin guide](integrations/unreal/OpenUSDConnect/README.md) |
+| MCP server | Author and inspect | `uv run python -m integrations.mcp` |
+| Dashboard | Administration | Start the server with `--dashboard-port 8080` |
 
-Flattened live-open snapshots resume flat replay from `snapshot_seq + 1` because
-they do not contain enough identity to reconstruct the historical logical layer
-stack. Flat replay is available only while the server has one unmuted
-collaboration layer and no department policy. A server that needs layer order or
-muting rejects a flat receiver with `hello_rejected` and the
-`LayeredReplayRequired` code. Native Unreal currently uses this single-layer
-compatibility mode.
+The Blender addon zip is written to `dist/usd_connect_blender.zip`. Install it
+through **Edit > Preferences > Add-ons > Install from Disk**. See the
+[Blender guide](docs/blender-addon-usage.md) for normal and live-open workflows.
 
-On restart, configured department order comes from `--departments`; unlisted
-departments are reconstructed in persisted replay order before the weakest
-`default` layer. Runtime reorder and mute controls are not yet persisted. Stage
-metadata is authored once in the shared session layer, and payload load/unload
-records remain stage runtime state rather than layer opinions.
+`scripts/start_usdview.py` starts a temporary server, discovers the matching
+usdview executable, and wires the receiver plugin. Use
+`python -m integrations.usdview.launcher` to connect to an existing server.
+For MaterialX and RenderMan, add `--renderman`; the launcher configures the
+renderer environment and selects hdPrman when a compatible RenderMan/OpenUSD
+installation is available.
 
-Layered replay covers OpenUSDConnect's managed collaboration layers. It does
-not transmit arbitrary client-authored sublayer graphs, sublayer offsets, or
-edit-target changes outside that block.
+## Live-open snapshots
 
-Applications that need to edit the same existing USD layer graph use the
-separate shared-stage contract:
+Managed servers can expose a normal-looking USD file over WebDAV. The
+workstation launcher starts the server, VFS endpoint, and a write-capable local
+mirror:
+
+```bash
+uv sync --group server --group vfs
+uv run python scripts/start_live_open.py --base scene.usda --open
+```
+
+Import the reported local `scene.usd` in a metadata-aware integration. The
+snapshot contains the composed state and a replay sequence, so the integration
+continues from the next event rather than replaying history over the snapshot.
+Flat snapshot continuation requires one unmuted collaboration layer and no
+department policy. Use the original base scene with layered replay when layer
+ordering or muting matters.
+
+See the [Live-Open Quickstart](docs/live-open-quickstart.md) for mounts, write
+modes, metadata, and security boundaries.
+
+## Shared-stage requirements
+
+Start a dedicated server with:
 
 ```bash
 uv run openusdconnect-server --base shot.usda --layer-mode shared_stage
 ```
 
-```python
-from pxr import Usd
+Every participant must resolve the root document and recursive sublayers to
+equivalent authored contents. OpenUSDConnect routes layers with opaque keys and
+does not transmit local filesystem paths or a complete baseline. It currently
+does not prove that untouched baseline data is identical, so the integration
+must establish that invariant through versioned assets, deployment policy, or
+its resolver.
 
-from openusdconnect import SharedStageClient
-
-stage = Usd.Stage.Open("shot.usda")
-with SharedStageClient(stage, app_name="my-editor") as client:
-    if not client.connect(timeout=5):
-        raise ConnectionError("OpenUSDConnect server is unavailable")
-    while application_is_running():
-        client.update()
-```
-
-Every process opens an equivalent root document under its own `ArResolver`
-context. The server sends opaque layer keys and exact authored Sdf deltas, not
-local filesystem paths or a flattened baseline. This mode supports same-stage
-bidirectional editing because authoritative records return to the same file
-layers. It does not use departments, managed collaboration layers, or the VFS
-snapshot workflow. See [Shared file-layer editing](docs/usd-native-integration.md#shared-file-layer-editing)
-and the [`shared_stage_client` example](examples/shared_stage_client/README.md).
-The pure-Python tracker is the portable default. Native hosts can build and
-opt into the exact-build Sdf notice bridge described in the integration guide
-to avoid full-layer baseline snapshots.
-
-Native DCC projection is limited by the adapter event contract. Clearing a
-property reveals and projects a weaker or schema fallback when one exists.
-Arbitrary Sdf-only fields, API-schema removal, and property removal with no
-representable fallback remain preserved in the USD mirror but may not alter the
-native scene.
-
-Document-anchored asset identifiers (`./` and `../`) copied from file-backed
-layers are re-anchored through their owning `Sdf.Layer`; the resolver's
-`resolvedPath` is never used as the wire value. Bare search-path identifiers,
-custom URIs, and database identifiers remain under the receiving process's
-`ArResolver` and stage context. Every endpoint must load the required resolver
-plugin and compatible local configuration. Relative values authored in
-anonymous source layers have no document anchor and remain relative, so those
-integrations must provide a resolvable identifier or local resolver policy.
-
-Incremental emission is driven by `Usd.Notice.ObjectsChanged`. Normal USD
-authoring APIs and Sdf edits that affect stage composition produce this notice.
-Direct Sdf edits that do not affect composition, such as edits inside an
-inactive variant, require a full emitter snapshot. Use USD authoring APIs and
-variant edit contexts for incremental live edits.
-
-The dashboard's department-layer merge and delete actions are still
-server-local lifecycle operations. They do not rewrite the authored log or
-replicate as durable layer operations, so they are not yet covered by layered
-replay or server restart.
-
-The source-tree `integrations.run_server` module remains a compatibility
-convenience that derives RenderMan DLL directories from `RMANTREE`; installed
-library users should use the standard command and configuration above.
-
-### Live-open VFS
-The VFS endpoint exposes a small virtual directory with `scene.usd` as a
-flattened snapshot and `scene.live.usda` as the composition root. Both contain
-`customLayerData["openusdconnect"]` so plugin-enabled DCCs can import/open the
-file normally, read the live endpoint metadata, and start from the snapshot
-sequence instead of replaying old events.
+The portable Python tracker keeps complete layer snapshots. Native USD hosts
+can build the optional exact-build Sdf notice bridge to capture old values
+without those snapshots:
 
 ```bash
-# Start the server and a write-capable local mirror on any supported platform
-uv run python scripts/start_live_open.py --base scene.usda --open
-
-# Mount the generated VFS tree using the native filesystem client
-# macOS mounts read-only by default; Windows uses WebClient and a drive letter
-uv run python scripts/mount_vfs_share.py --port 7280 --open
-uv run python scripts/mount_vfs_share.py --port 7280 --drive O: --open  # Windows
+uv run openusdconnect-build-sdf-notice-bridge
 ```
 
-For write fallback, start the server with `--vfs-write-mode translate`. Full-file
-USD saves are validated by default, rejected when stale or invalid, and converted
-to live events when safe. Custom attributes, relationships, prim and layer
-metadata, and local variant definitions are preserved. Authored sublayer
-topology is rejected because it cannot be mapped safely into the managed
-collaboration layer stack.
+See the [USD-native API guide](docs/usd-native-integration.md#shared-authored-layer-editing)
+and [shared-stage architecture](docs/shared-stage-architecture.md).
 
-The virtual directory has a fixed, server-generated file set. Existing managed
-files may accept `PUT` according to the selected write mode; creating, moving,
-or deleting arbitrary VFS files is not supported. The local mirror is the
-recommended save path because it accommodates temporary-file and rename-based
-DCC saves before uploading the completed `scene.usd`.
+## Important integration boundaries
 
-### Docker
-
-The server image uses [`usd-core`](https://pypi.org/project/usd-core/) from PyPI
-for headless OpenUSD support.
-
-```bash
-# Build the server image
-docker build -t openusdconnect-server .
-
-# Run the server
-docker run -p 7200:7200 -p 7280:7280 -v ./scenes:/scenes \
-  openusdconnect-server --port 7200 --base /scenes/scene.usda --vfs-port 7280
-
-# Build and run with dashboard support
-docker build --build-arg DASHBOARD=1 -t openusdconnect-server:dashboard .
-docker run -p 7200:7200 -p 7280:7280 -p 8080:8080 -v ./scenes:/scenes \
-  openusdconnect-server:dashboard \
-  --port 7200 --base /scenes/scene.usda --vfs-port 7280 --dashboard-port 8080
-```
-
-Or using Docker Compose:
-
-```bash
-docker compose --profile default up      # server only
-docker compose --profile dashboard up    # server + dashboard
-```
-
-### Blender addon
-```bash
-uv run python scripts/build_blender_addon.py
-```
-Install the output zip (`dist/usd_connect_blender.zip`) in Blender via
-**Edit > Preferences > Add-ons > Install from Disk**.
-
-For seamless live-open, import the local mirror reported by
-`scripts/start_live_open.py`, or use a native macOS/Windows VFS mount, with
-**Import USD (with Prim Tagging)**. The addon reads embedded metadata and can
-auto-start receiver/emitter when the import-panel options are enabled.
-
-### usdview
-```bash
-uv run python -m integrations.usdview.launcher scene.usda --port 7200
-# add --renderman to use the hdPrman delegate
-```
-
-### Unreal Engine
-The Unreal integration is a UE5 plugin (with a Python launcher for live edits).
-Requirements, installation, and the two-way sync walkthrough are in the
-[Unreal plugin README](integrations/unreal/OpenUSDConnect/README.md).
-The plugin can also open the VFS snapshot in USD Stage and use its embedded
-metadata for host, port, receiver replay position, and persisted TOFU token reuse.
-
-### MCP server (LLM authoring)
-```bash
-uv sync --group server --group mcp
-uv run python -m integrations.mcp     # stdio MCP server
-```
-Register it with an MCP client (e.g. Claude Code or Desktop) and point it at a
-running sync server. See [MCP Server Usage](docs/mcp-server-usage.md).
+- Managed clients must open the original base stage. A generated live-open
+  snapshot is a continuation baseline and is rejected by layered clients.
+- A `ManagedClient` owns one transient `authoring_layer`; keep it as the edit
+  target while the client is active. Use separate `UsdPublisher` and
+  `UsdReceiver` stages for applications that intentionally author other layers.
+- Asset identifiers stay as USD identifiers. Each process must load compatible
+  `ArResolver` plugins and contexts.
+- A resolver-context remap that changes composition without an authored USD
+  edit cannot be projected incrementally into a non-USD native scene. Rebuild
+  or replace that native destination before resuming.
+- `SharedStageClient` synchronizes in-memory authored layer contents. It never
+  calls `Sdf.Layer.Save()`; file or database persistence remains application
+  policy.
 
 ## Documentation
-- [USD-native Integration Contract](docs/usd-native-integration.md): layered
-  receiver and publisher lifecycle for `pxr.Usd` applications
-- [Blender Addon Usage](docs/blender-addon-usage.md): installation, UI overview, live-sync walkthrough
-- [Live-Open Quickstart](docs/live-open-quickstart.md): WebDAV/UNC live-open and metadata sync
-- [Live Material Editing](docs/live-material-editing.md): material and shader synchronization
-- [Unreal Engine Plugin](integrations/unreal/OpenUSDConnect/README.md): UE5 plugin requirements, install, two-way sync
-- [MCP Server Usage](docs/mcp-server-usage.md): tools, configuration, Claude client setup
-- [Testing Setup](docs/testing-setup.md): test tiers, Blender configuration, adding tests
-- [Profiling](docs/profiling.md): performance profiling with py-spy
 
-## Testing
+- [USD-native API guide](docs/usd-native-integration.md)
+- [Client recovery](docs/client-recovery.md)
+- [Blender addon](docs/blender-addon-usage.md)
+- [Live material editing](docs/live-material-editing.md)
+- [Live-open and VFS](docs/live-open-quickstart.md)
+- [Shared-stage architecture](docs/shared-stage-architecture.md)
+- [MCP server](docs/mcp-server-usage.md)
+- [Command-line reference](docs/cli-reference.md)
+- [Testing](docs/testing-setup.md)
+- [Profiling](docs/profiling.md)
+
+## Development
+
 ```bash
-uv run pytest tests/unit/ -v                                   # unit (fast, no DCC)
-uv run pytest tests/ -v                                        # plus headless integration
-uv run pytest tests/integration/asset_tests/ --asset-tests -v  # asset E2E (requires Blender)
-uv run pytest tests/visual --visual-tests -v                   # visual regression (RenderMan + submodule)
+uv sync --group server --group vfs --group dev
+uv run pytest tests/unit/ -v
+uv run pytest tests/ -v
+uv run ruff check
+```
+
+Blender asset tests and RenderMan visual tests are opt-in because they require
+external runtimes and assets. The [testing guide](docs/testing-setup.md) lists
+the exact commands and setup.
+
+## Docker
+
+The included image uses `usd-core` for headless OpenUSD support:
+
+```bash
+docker build -t openusdconnect-server .
+docker run -p 7200:7200 -v ./scenes:/scenes \
+  openusdconnect-server --base /scenes/scene.usda
 ```
 
 ## Acknowledgments
-- [USD Working Group Assets](https://github.com/usd-wg/assets): standardized test assets for the integration test suite
+
+- [USD Working Group Assets](https://github.com/usd-wg/assets), used by the
+  integration and visual test suites

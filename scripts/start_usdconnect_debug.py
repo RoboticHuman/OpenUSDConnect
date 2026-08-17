@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None):
     base_usd = args.base or str(REPO_ROOT / "test_scene.usda")
     log_path = args.event_log or str(REPO_ROOT / DEFAULT_EVENT_LOG)
 
-    # Reload mode — build and signal, then exit
+    # Reload mode build and signal, then exit
     if args.reload:
         _reload_addon()
         return

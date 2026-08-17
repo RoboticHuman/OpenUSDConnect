@@ -4,7 +4,7 @@ NoticeEmitter watches a Usd.Stage via Usd.Notice.ObjectsChanged,
 tracks dirty prims, snapshots TRS transforms, and builds partial-diff
 events ready to send over the network.
 
-DCC-agnostic — works on any Usd.Stage regardless of what's authoring to it.
+DCC-agnostic works on any Usd.Stage regardless of what's authoring to it.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ def _canonical_trs_field(op) -> str | None:
 
 LOG = logging.getLogger(__name__)
 
-# Per-prim cache keys — use these instead of raw strings to catch typos.
+# Per-prim cache keys use these instead of raw strings to catch typos.
 _C_TRS = "trs"
 _C_VISIBILITY = "visibility"
 _C_REFERENCES = "references"
@@ -268,7 +268,7 @@ def _is_transform_attr(attr_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Replicated API schemas — emit-side filter
+# Replicated API schemas emit-side filter
 # ---------------------------------------------------------------------------
 #
 # Decides which applied API schemas show up in the api_schemas field of
@@ -319,7 +319,7 @@ def register_replicated_api_schema(name: str) -> None:
     """Add an API schema to the global replicate-list for new NoticeEmitters.
 
     DCC integrations call at import time to add their own schemas. Existing
-    NoticeEmitters that snapshotted the global already are unaffected — only
+    NoticeEmitters that snapshotted the global already are unaffected only
     NoticeEmitters constructed AFTER the call pick up the addition.
 
     Validated against Usd.SchemaRegistry.IsAppliedAPISchema(name).
@@ -515,7 +515,7 @@ def _diff_time_samples(
 
     When ``edit_target`` is given, the times and values come from its layer
     directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
-    at the target-mapped spec path — only samples this target authored,
+    at the target-mapped spec path only samples this target authored,
     ignoring opinions on other layers.
     Required for per-client-layer setups where the composed view shadows
     weaker clients' samples and would otherwise leak the stronger
@@ -557,7 +557,7 @@ def _has_edit_target_samples(edit_target, attr) -> bool:
     Exact check, deliberately not ``Usd.Attribute.ValueMightBeTimeVarying``:
     that is certain-False for a single-sample attr (one sample cannot
     "vary"), yet such an attr has no default opinion and resolves to the
-    held sample at every numeric time — it must still emit. The layer
+    held sample at every numeric time it must still emit. The layer
     query is also ~6x cheaper and edit-target-scoped, matching what
     ``_diff_time_samples`` reads.
     """
@@ -592,11 +592,11 @@ def _read_composition_arcs(stage, prim_path, arc_attr):
     """Read composition arcs authored on this stage's own layers.
 
     Returns a list of (asset_path, prim_path_str) tuples, or empty list.
-    Only considers the root and session layers — ignores arcs that come
+    Only considers the root and session layers ignores arcs that come
     from composed-in layers (e.g. internal refs inside referenced assets).
 
     Args:
-        arc_attr: Spec attribute name — "referenceList" or "payloadList".
+        arc_attr: Spec attribute name "referenceList" or "payloadList".
     """
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
@@ -950,6 +950,10 @@ class PrimChannel:
         """
         return current
 
+    def diff_and_snapshot(self, current, cached):
+        """Return the emitted diff and cache snapshot for one read."""
+        return self.diff(current, cached), self.cache_snapshot(current)
+
     def to_event(self, prim_path, diff):
         """Build the wire event(s) for the diff.
 
@@ -1166,6 +1170,7 @@ class ConnectableChannel(PrimChannel):
 class VisibilityChannel(PrimChannel):
     cache_key = _C_VISIBILITY
     watched_attrs = ("visibility",)
+    uses_local_property_sources = True
 
     def read(self, stage, prim_path):
         prim = stage.GetPrimAtPath(prim_path)
@@ -1175,6 +1180,13 @@ class VisibilityChannel(PrimChannel):
         if not vis_attr or not vis_attr.IsValid() or not vis_attr.IsAuthored():
             return None
         return vis_attr.Get() or "inherited"
+
+    def read_local(self, _stage, _prim_path, property_sources):
+        source = property_sources.get("visibility", {}).get("default")
+        if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
+            return None
+        value = source.default
+        return None if isinstance(value, Sdf.ValueBlock) else str(value)
 
     def to_event(self, prim_path, diff):
         return {"k": K_SET_VISIBILITY, "prim": prim_path, "visible": diff != "invisible"}
@@ -1333,6 +1345,16 @@ class PointInstancerChannel(PrimChannel):
     def cache_snapshot(self, current):
         return {name: _value_hash(value) for name, value in current.items()}
 
+    def diff_and_snapshot(self, current, cached):
+        cached = cached or {}
+        snapshot = self.cache_snapshot(current)
+        changed = {
+            name: value
+            for name, value in current.items()
+            if snapshot[name] != cached.get(name)
+        }
+        return (changed if changed else None), snapshot
+
     def to_event(self, prim_path, diff):
         return {
             "k": K_SET_POINT_INSTANCER,
@@ -1365,7 +1387,7 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
     slice, so it merges into the cached state instead of replacing it.
     """
     cached = pc.get(channel.cache_key)
-    d = channel.diff(current, cached)
+    d, snapshot = channel.diff_and_snapshot(current, cached)
     if d is not None:
         ev = channel.to_event(prim_path, d)
         if ev is not None:
@@ -1373,7 +1395,6 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
                 events_out.extend(ev)
             else:
                 events_out.append(ev)
-    snapshot = channel.cache_snapshot(current)
     if partial:
         merged = dict(cached or {})
         merged.update(snapshot)
@@ -1383,7 +1404,7 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
 
 
 # ---------------------------------------------------------------------------
-# Cache invalidation — for receivers applying remote events
+# Cache invalidation for receivers applying remote events
 # ---------------------------------------------------------------------------
 #
 # After a remote event is applied to the stage, the per-prim diff cache
@@ -1397,8 +1418,15 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
 # starts from the applied state instead of echoing it back to the server.
 
 
+def _invalidation_targets_authoring_layer(emitter) -> bool:
+    target = emitter._suppressed_edit_target
+    return target is None or target.GetLayer() == emitter.stage.GetEditTarget().GetLayer()
+
+
 def _invalidate_ensure_prim(emitter, prim_path, _ev):
     emitter._know_prim(prim_path)
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     specs = emitter._local_prim_specs(prim_path)
     ownership_spec = emitter._local_definition_spec(specs) or (specs[0] if specs else None)
     state = _local_prim_state(ownership_spec)
@@ -1427,6 +1455,8 @@ def _invalidate_rename_prim(emitter, prim_path, ev):
 
 
 def _invalidate_set_reference(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     pc = emitter._prim_cache.setdefault(prim_path, {})
     pc[_C_REFERENCES] = _read_edit_target_arc_state(
         emitter.stage,
@@ -1437,7 +1467,7 @@ def _invalidate_set_reference(emitter, prim_path, _ev):
         emitter.stage,
         prim_path,
     )
-    # Composed children may carry their own variant selections — capture
+    # Composed children may carry their own variant selections capture
     # them so subsequent diffs don't fire on imported state.
     prim = emitter.stage.GetPrimAtPath(prim_path)
     if prim and prim.IsValid():
@@ -1451,6 +1481,8 @@ def _invalidate_set_reference(emitter, prim_path, _ev):
 
 
 def _invalidate_set_payload(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOADS] = _read_edit_target_arc_state(
         emitter.stage,
         prim_path,
@@ -1465,7 +1497,7 @@ def _invalidate_load_payload(emitter, prim_path, _ev):
 
 
 def _invalidate_unload_payload(emitter, prim_path, _ev):
-    # Children have left the composed stage — drop their caches so they're
+    # Children have left the composed stage drop their caches so they're
     # rediscovered on the next load_payload.
     emitter._purge_subtree(prim_path, include_root=False)
     prim = emitter.stage.GetPrimAtPath(prim_path)
@@ -1474,10 +1506,12 @@ def _invalidate_unload_payload(emitter, prim_path, _ev):
 
 
 def _invalidate_set_variant_selections(emitter, prim_path, _ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     emitter._prim_cache.setdefault(prim_path, {})[_C_VARIANT_SELECTIONS] = (
         _read_edit_target_variant_selections(emitter.stage, prim_path)
     )
-    # Variant change rewrites the child set — purge caches under this prim
+    # Variant change rewrites the child set purge caches under this prim
     # so they're rebuilt from the new composition.
     emitter._purge_subtree(prim_path, include_root=False)
 
@@ -1494,6 +1528,8 @@ def _resync_connectable_cache(emitter, prim_path):
     Used by both connectable input and connection invalidators since they
     share one read and one cache entry now.
     """
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     _fields, property_sources = emitter._local_property_state(prim_path)
     kind, info_id, inputs, types, connections = _read_edit_target_usdshade_connectable(
         emitter.stage,
@@ -1512,7 +1548,7 @@ def _resync_connectable_cache(emitter, prim_path):
 def _set_time_sample_cache(emitter, prim_path: str, cache_key: str, time: float, value):
     """Write a single ``(time, value)`` entry into ``_C_TIME_SAMPLES``.
 
-    Cheap regardless of how many other samples the attribute has — we
+    Cheap regardless of how many other samples the attribute has we
     fingerprint just the value the event carries instead of re-reading
     every authored sample from the composed stage.
     """
@@ -1553,6 +1589,8 @@ def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
 
 
 def _invalidate_set_xform_trs(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("time") is not None:
         time = float(ev["time"])
         for field, op_name in _TRS_FIELD_TO_OP_NAME.items():
@@ -1568,6 +1606,8 @@ def _invalidate_set_xform_trs(emitter, prim_path, ev):
 
 
 def _invalidate_set_visibility(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("time") is not None:
         # Cache stores the USD string form ("inherited"/"invisible") via the
         # build path, so hash the matching string from the event's bool.
@@ -1650,6 +1690,8 @@ def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
     path = Sdf.Path(spec_path)
     key = (spec_kind, spec_path)
     emitter._dirty_sdf_specs.pop(key, None)
+    if not _invalidation_targets_authoring_layer(emitter):
+        return
     if ev.get("removed", False):
         emitter._sdf_spec_fields.pop(key, None)
         if spec_kind in _SDF_PROPERTY_KINDS:
@@ -1760,7 +1802,7 @@ class NoticeEmitter:
                 field. Each name must be a bare schema name (no
                 ``":instance"``). If None, snapshots the module-level
                 ``_REPLICATED_API_SCHEMAS`` at construction (default behavior
-                — DCC integrations register their schemas at import time,
+                DCC integrations register their schemas at import time,
                 then any later-constructed emitter picks them up).
             extra_channels: Optional additional ``PrimChannel`` instances to
                 run alongside the built-in set. The framework-owned channels
@@ -1788,6 +1830,7 @@ class NoticeEmitter:
         self._removed_local_definition_prims: set[str] = set()
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppress_depth: int = 0
+        self._suppressed_edit_target: Usd.EditTarget | None = None
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self._prim_cache: dict[str, dict] = {}
         # Unfiltered info-only attr names. Channels use this for read gating;
@@ -1852,7 +1895,7 @@ class NoticeEmitter:
             if ch.reads_on_resync_only and (ch.watched_attrs or ch.watched_prefixes):
                 raise ValueError(
                     f"{type(ch).__name__} declares both reads_on_resync_only "
-                    f"and watched_attrs/watched_prefixes; pick one — resync-only "
+                    f"and watched_attrs/watched_prefixes; pick one resync-only "
                     f"for composition arcs, watched names for attributes/rels."
                 )
         self._channels: tuple[PrimChannel, ...] = _BUILTIN_PRIM_CHANNELS + extras
@@ -2264,6 +2307,7 @@ class NoticeEmitter:
         self._edit_target_conflict = False
         self._prepared_events = None
         self._suppress_depth = 0
+        self._suppressed_edit_target = None
 
     def rebind_stage(self, stage: Usd.Stage) -> None:
         """Reset tracking and attach this emitter to a replacement stage.
@@ -2288,7 +2332,7 @@ class NoticeEmitter:
         next emit cycle diffs against authored state instead of treating
         everything as a first-encounter delta.
 
-        Does NOT add to ``_known_prims`` — the emitter should still send
+        Does NOT add to ``_known_prims`` the emitter should still send
         structural events (ensure_prim, ensure_xform_ops) on first
         encounter so the server can create xform ops on payload prims.
         """
@@ -2363,6 +2407,8 @@ class NoticeEmitter:
         Reentrant: each call increments the suppress depth.
         Must be paired with a matching unsuppress() call.
         """
+        if self._suppress_depth == 0:
+            self._suppressed_edit_target = self.stage.GetEditTarget()
         self._suppress_depth += 1
 
     def unsuppress(self):
@@ -2373,6 +2419,8 @@ class NoticeEmitter:
         """
         assert self._suppress_depth > 0, "unsuppress() called without matching suppress()"
         self._suppress_depth -= 1
+        if self._suppress_depth == 0:
+            self._suppressed_edit_target = None
 
     def suppressed(self):
         """Return a context manager that suppresses notices for the block.
@@ -3059,7 +3107,7 @@ class NoticeEmitter:
         fn = _INVALIDATE_DISPATCH.get(k)
         if fn is None:
             return
-        # Stage-level events (no ``prim``) still dispatch — handlers ignore
+        # Stage-level events (no ``prim``) still dispatch handlers ignore
         # the empty path arg.
         fn(self, ev.get("prim", ""), ev)
 
@@ -3087,7 +3135,7 @@ class NoticeEmitter:
         build-events pipeline. Equivalent to walking ``Usd.PrimRange`` and
         calling ``mark_dirty`` on each path, then ``build_events_for_dirty``.
 
-        Useful for initial-sync scenarios — a DCC plugin coming online with
+        Useful for initial-sync scenarios a DCC plugin coming online with
         a populated stage, a replay harness reproducing a captured scene,
         or tests that need a full event stream for an authored stage.
         """
@@ -3509,6 +3557,7 @@ class NoticeEmitter:
                     dirty_attribute_names.add(attribute_name)
 
         changed_attributes = {}
+        changed_attribute_hashes = {}
         primvar_metadata: dict = {}
         attribute_interpolation: dict = {}
         for attribute_name in dirty_attribute_names:
@@ -3536,13 +3585,14 @@ class NoticeEmitter:
                 source_layer,
                 value,
             )
-            if (
-                transport_value is None
-                or _value_hash(transport_value) == previous_attributes.get(attribute_name)
-            ):
+            if transport_value is None:
+                continue
+            value_hash = _value_hash(transport_value)
+            if value_hash == previous_attributes.get(attribute_name):
                 continue
 
             changed_attributes[attribute_name] = transport_value
+            changed_attribute_hashes[attribute_name] = value_hash
             metadata, interpolation = attribute_event_metadata(
                 prim,
                 attribute_name,
@@ -3562,9 +3612,7 @@ class NoticeEmitter:
             event["primvar_meta"] = primvar_metadata
         if attribute_interpolation:
             event["attr_interp"] = attribute_interpolation
-        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(
-            {name: _value_hash(value) for name, value in changed_attributes.items()}
-        )
+        prim_cache.setdefault(_C_GPRIM_ATTRS, {}).update(changed_attribute_hashes)
         return event
 
     def _build_dirty_prim_events(
@@ -3752,7 +3800,7 @@ class NoticeEmitter:
         # the stage's current edit target. The composed view would let a
         # stronger client's samples leak into a weaker client's emit cycle
         # (USD's "strongest layer with samples wins the time domain" rule
-        # also shadows the weaker layer's own samples — both fail modes
+        # also shadows the weaker layer's own samples both fail modes
         # disappear once we read from the layer directly).
         edit_target = self.stage.GetEditTarget()
 

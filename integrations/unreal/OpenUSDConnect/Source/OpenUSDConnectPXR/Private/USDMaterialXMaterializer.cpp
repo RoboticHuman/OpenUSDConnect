@@ -157,7 +157,7 @@ namespace
 		return Out;
 	}
 
-	// True when every spec backing the prim comes from a .mtlx layer — i.e.
+	// True when every spec backing the prim comes from a .mtlx layer i.e.
 	// the prim only exists because a document reference composed it. Such
 	// shaders ARE the document; re-exporting them would duplicate every node
 	// on regeneration.
@@ -198,7 +198,7 @@ namespace
 	}
 
 	// Preview-surface materials translate to material INSTANCES whose
-	// parameters update in place — no document, no shader compile. The
+	// parameters update in place no document, no shader compile. The
 	// engine's own update chain misses value edits under the mtlx render
 	// context, so re-pull the instance parameters with its own converter.
 	static bool RefreshPreviewSurfaceInstances(AUsdStageActor* StageActor, const pxr::UsdPrim& Prim)
@@ -324,7 +324,7 @@ namespace
 			{
 				const FString BaseName = UTF8_TO_TCHAR(Input.GetBaseName().GetText());
 				// Namespaced inputs are prim-side bookkeeping, never MaterialX
-				// inputs — one in the document makes the engine reject the
+				// inputs one in the document makes the engine reject the
 				// whole file.
 				if (BaseName.Contains(TEXT(":")))
 				{
@@ -477,7 +477,7 @@ namespace
 	}
 
 	// A composed .mtlx spec on the material outside our document directory
-	// means the material is backed by a foreign document — leave it alone.
+	// means the material is backed by a foreign document leave it alone.
 	static bool HasForeignDocument(const pxr::UsdPrim& Prim)
 	{
 		const FString OursPrefix = DocDir() + TEXT("/");

@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 LOG = logging.getLogger(__name__)
 
+_WAL_AUTOCHECKPOINT_BYTES = 32 * 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class ProducerProgress:
@@ -160,6 +162,10 @@ class SqliteEventStore(EventStore):
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        page_size = int(self._conn.execute("PRAGMA page_size").fetchone()[0])
+        checkpoint_pages = max(1000, _WAL_AUTOCHECKPOINT_BYTES // page_size)
+        # Bound WAL growth while keeping checkpoints out of most commit batches.
+        self._conn.execute(f"PRAGMA wal_autocheckpoint={checkpoint_pages}")
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY,
@@ -169,9 +175,6 @@ class SqliteEventStore(EventStore):
                 prim TEXT
             )
         """)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_client_id ON events(client_id)"
-        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)"
         )

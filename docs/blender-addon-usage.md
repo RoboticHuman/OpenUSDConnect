@@ -1,264 +1,190 @@
-# Blender Addon Usage
+# Blender addon
 
-The USD Connect addon enables real-time transform sync between Blender instances (or any DCC with an OpenUSDConnect adapter) via a networked event protocol.
+The Blender addon imports USD with stable prim-path tags, publishes Blender
+edits through a local USD authoring stage, and applies authoritative composed
+changes from a separate USD mirror back into Blender.
 
-## Installation
+## Install
 
-1. Build the addon zip:
-   ```bash
-   uv run python scripts/build_blender_addon.py
-   ```
-   This produces `dist/usd_connect_blender.zip`.
+```bash
+uv run python scripts/build_blender_addon.py
+```
 
-2. In Blender: **Edit > Preferences > Add-ons > Install from Disk** and select the zip.
+Install `dist/usd_connect_blender.zip` through **Edit > Preferences > Add-ons >
+Install from Disk**, then enable **USD Connect**. The zip includes the
+`openusdconnect` Python package; Blender supplies its own `pxr` bindings.
 
-3. Enable the "USD Connect" addon (category: Import-Export).
+For a development install and hot reload, see
+[Testing](testing-setup.md#interactive-blender-debugging).
 
-The zip bundles the `openusdconnect` core library, so no separate Python package installation is needed.
+## UI
 
-For development, see [Testing Setup](testing-setup.md) for the debug launcher (`start_usdconnect_debug.py`) which supports hot-reloading the addon into running Blender instances without restarting.
-
-## UI Overview
-
-The addon adds a **USD Connect** tab in the 3D Viewport sidebar (press `N` to toggle). It has five sections:
+Open the **USD Connect** tab in the 3D Viewport sidebar (`N`).
 
 ### Import
-- **Auto-start Emitter / Auto-start Receiver** - When the imported file contains OpenUSDConnect metadata, these toggles decide whether import also starts local emit and live receive.
-- **Import USD (with prim tagging)** — Opens a file browser to import a `.usda`/`.usd`/`.usdc` file. All imported objects are tagged with their USD prim paths (`usd_prim_path` and `usd_type_name` custom properties).
-- **Skip Leaf /Geom Prim Paths** — When enabled (default), skips tagging the leaf `/Geom` child prims to reduce noise.
+
+**Import USD (with prim tagging)** uses Blender's USD importer and records the
+source paths as `usd_prim_path` and `usd_type_name` custom properties. Those
+tags are the stable identity used by emit and receive.
+
+When the imported file contains OpenUSDConnect live metadata, the import panel
+can auto-start the emitter and receiver. **Skip Leaf /Geom Prim Paths** avoids
+tagging common importer-generated leaf geometry objects when their parent is
+the useful scene identity.
 
 ### Local Capture
-Captures transform edits into a USD session layer delta (local only, no network). Useful for offline diffing.
 
-- **Base USD File** — Path to the reference USD file.
-- **Start/Stop Capture** — Toggles the depsgraph listener.
-- **Emit Diff** — Exports the session layer delta as `.usda` text.
-- **Clear Diff** — Discards all buffered changes.
-- **Coalesce (sec)** — Batching window for change events (default: 0.15s).
+Local Capture observes Blender changes and writes them into a USD session-layer
+delta without networking. Use **Emit Diff** to export the authored delta and
+**Clear Diff** to discard it. **Coalesce (sec)** controls the local batching
+window.
 
 ### Network Emitter
-Sends live transform events to a sync server.
 
-- **Server Host / Port** — Address of the OpenUSDConnect server (default: `127.0.0.1:7200`).
-- **Department**: Optional collaboration layer selected through server department policy.
-- **Send Rate (Hz)** — How often to poll for changes (default: 60 Hz).
-- **Auto-track New Objects** — When enabled, any manipulated object without a `usd_prim_path` tag is automatically assigned one.
-- **Root Prim** — Parent path for auto-tracked objects (default: `/World`).
-- **Connect/Disconnect Emitter** — Toggles the network connection.
+The emitter connects to the sync server and publishes changes detected from
+Blender. Configure host, port, optional department, and send rate. Department
+ordering applies only when the server was started with `--departments`.
+**Auto-track New Objects** assigns untagged objects a path below **Root Prim**
+when they are first edited.
 
 ### Network Receiver
-Listens to the sync server and applies incoming events to Blender objects.
 
-- **Host / Port** — Server address (default: `127.0.0.1:7200`).
-- **Department**: Shared with the emitter so both connections use the same collaboration identity and authorization scope.
-- **Start/Stop Receiver** — Toggles the background listener thread.
-- **Last seq** — Shows the highest event sequence number processed.
-- **Rebuild Replay**: Discards retained receiver state and rebuilds it from the configured USD base.
+The receiver reads the authoritative stream in a background thread and applies
+it from Blender's timer loop. **Rebuild Replay** discards retained receive state
+and reconstructs it from the configured base or live snapshot sequence.
 
 ### Playback Sync
-Shared-playhead control (see the Playback synchronization section below).
 
-- **Claim Playback**: request the leader role from the server; shown while another client (or nobody) holds it.
-- **Play / Pause / Push Frame**: leader-only transport controls. Push Frame broadcasts the current frame as the shared time.
-- **Release Playback**: give up the leader role.
-- **Leader / Time / Playing**: read-only status from the latest broadcast playback state.
+One connected client may claim playback leadership. The leader can play,
+pause, or push the current frame; followers update their Blender timelines from
+the server's playback state.
 
-## Two-Blender Live Sync Walkthrough
+## Normal layered workflow
 
-This is the manual workflow: one Blender instance emits changes, another receives them in real time.
-For the newer live-open workflow, see [Live-Open Quickstart](live-open-quickstart.md).
+Use this workflow when collaboration-layer order, muting, or departments must
+be preserved.
 
-## Live-Open Via Virtual USD File
+1. Start a managed server on the original base scene:
 
-The addon can import an OpenUSDConnect virtual USD file and configure live
-sync when the file contains `customLayerData["openusdconnect"]`. This is the
-preferred workflow when the server is started with `--vfs-port`.
+   ```bash
+   uv run openusdconnect-server \
+     --base scene.usda \
+     --event-log events.db \
+     --port 7200
+   ```
 
-### Server
+2. In each Blender instance, import the same original base through **Import USD
+   (with prim tagging)**.
+3. Start the receiver. It reconstructs server collaboration layers in a
+   separate USD mirror and projects their composed result into Blender.
+4. Start the emitter on instances that should author changes.
 
-```bash
-uv run openusdconnect-server --port 7200 --base scene.usda --vfs-port 7280
-```
+The authoring stage and receive mirror are intentionally separate. An authored
+opinion stays in its logical layer, while Blender displays the value composed
+from the complete authoritative layer stack.
 
-This exposes:
+## Live-open workflow
 
-| Path | Use |
-|------|-----|
-| `http://127.0.0.1:7280/usd/scene.usd` | Backing WebDAV URL for diagnostics, launchers, and the local bridge. |
-| `\\127.0.0.1@7280\usd\scene.usd` | Windows file-picker path through WebDAV/UNC. |
-| `O:\scene.usd` | Drive-letter file-picker path after mounting the WebDAV share. |
-| `.ouc_live_mount/usd/scene.usd` | Write-capable local mirror on macOS and Linux. |
-| `~/.openusdconnect/mounts/usd/scene.usd` | Read-only native macOS mount. |
-
-To start a write-capable local mirror for that server:
+For a simple single-layer workstation session:
 
 ```bash
-uv run python scripts/local_vfs_bridge.py \
-  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
-  --mirror-dir .ouc_live_mount/usd \
-  --background \
-  --open
+uv sync --group server --group vfs
+uv run python scripts/start_live_open.py --base scene.usda --open
 ```
 
-### Blender
+Import the reported local `scene.usd` path with prim tagging. Embedded metadata
+sets the server endpoint and `snapshot_seq`; the addon continues at
+`snapshot_seq + 1` when auto-start is enabled.
 
-Click **Import USD (with prim tagging)** and choose the reported local mirror
-path. A native macOS mount, Windows UNC path, or Windows drive mapping also
-works for read/live-open workflows.
+Live-open continuation is flat replay because the snapshot contains composed
+state rather than historical collaboration-layer identities. It therefore
+requires one unmuted collaboration layer and no department policy. A server
+that requires layered replay rejects the receiver without closing the imported
+scene. Use the original base workflow in that case.
 
-The addon imports the snapshot first. If live metadata is present, it sets the
-receiver and emitter host/port and seeds the receiver from `snapshot_seq`.
-With **Auto-start Emitter** and **Auto-start Receiver** enabled, import also
-starts the emitter and starts the receiver from `snapshot_seq + 1`. With
-either toggle disabled, use the existing manual start/stop buttons after
-import.
+The [Live-Open Quickstart](live-open-quickstart.md) covers local mirrors,
+Windows/macOS mounts, write modes, and token behavior.
 
-Live-open snapshots use flat replay because the imported snapshot already
-contains the composed state at `snapshot_seq`; it does not carry the historical
-mapping needed to rebuild every collaboration layer. A normal configured base
-USD instead uses layered replay. Blender keeps those layers in a receiver-owned
-USD mirror and applies their final composed result to Blender. Reorder, mute,
-and weak local edits therefore follow OpenUSD layer strength without rewriting
-the authored opinions.
+## What synchronizes
 
-Snapshot continuation is supported only on a server with one unmuted
-collaboration layer and no department policy. If the server requires layered
-replay, Blender leaves the imported snapshot open, stops the receiver, and logs
-the server's rejection reason. Configure Blender from the original base USD to
-join that layered session.
+The Blender integration currently handles these groups:
 
-The virtual share is read-only by default. Server operators can opt into
-compatibility drop mode with `--vfs-write-mode drop`, or fallback edit
-translation with `--vfs-write-mode translate`. Drop mode accepts and discards
-saves without validation. Translate mode validates saved content as USD by
-default, parses a full USD save, and broadcasts it as live events; plugin/TCP
-sync remains the preferred interactive authoring path.
+- Prim creation, deletion, deactivation, rename, visibility, and type changes
+- Local transforms using USD translate/orient/scale, including quaternion
+  rotation and stage-axis/unit conversion
+- Mesh and parametric geometry attributes, normals, primvars, purpose, cameras,
+  and selected light types
+- References, payload load state, variants, and native scenegraph instancing
+- Material bindings, UsdPreviewSurface, MaterialX shader values, NodeGraphs,
+  textures, and connection changes
+- Point-instancer authored state in the USD mirror; Blender records that the
+  prim is a point instancer but does not map its prototypes or instances into a
+  native Blender representation
+- Stage units, timeline metadata, and shared playback state
 
-If metadata is not present, the import behaves like the existing manual
-workflow. If auto-start fails, the imported snapshot remains open and the
-addon reports the connection error.
+Unsupported or not directly representable USD opinions remain correct in the
+receive mirror even when Blender has no native equivalent. Examples include
+some UsdLux types and inputs, arbitrary Sdf-only fields, and API-schema removal.
 
-When the server is running with `--require-token`, the USD file only says
-that a token is required. It does not contain the token. Blender uses the
-existing TOFU token store for the live emitter and receiver connections.
+See [Live material editing](live-material-editing.md) for the shader mappings
+and nested referenced-material behavior.
 
-### 1. Start the sync server
+## Composition and native import
 
-In a terminal:
+Blender's USD importer owns the initial realization of referenced assets,
+loaded payloads, and variant replacements. OpenUSDConnect sends the root
+composition operation and preserves explicit descendant edits, but does not
+replay a second synthesized copy of the imported subtree over Blender's result.
+This avoids placeholder geometry, duplicate material graphs, and lost
+`GeomSubset` material assignments.
 
-```bash
-uv run python -m openusdconnect.server --port 7200 --base scene.usda --event-log events.db
-```
+Subsequent explicit edits to imported descendants still synchronize normally.
+Referenced Material and NodeGraph interface values are resolved through the
+mirror stage and forwarded to existing Blender shader sockets without
+rebuilding the imported graph.
 
-The server is an authoritative event sequencer. It maintains a replay log so receivers that connect late (or reconnect) get all prior events. Use `--compact` on startup to compact the event log, or send a `compact` message from any connected client to trigger compaction at runtime.
+## Materials and lights
 
-### 2. Set up the Emitter (Blender instance A)
+`set_connectable_input` covers Shader, Material, NodeGraph, and UsdLux inputs.
+`set_connectable_connection` carries connection and disconnection edges.
+Blender maps supported shader identifiers through its shader-mapper registry;
+unknown networks remain in USD.
 
-1. Open the **USD Connect** sidebar panel.
-2. Click **Import USD** and select your base scene file. This tags all objects with their USD prim paths.
-3. In the **Network Emitter** section:
-   - Set **Server Host** and **Port** to match the server.
-   - Optionally enable **Auto-track New Objects** if you want to sync objects created during the session.
-4. Click **Connect Emitter**. The status should show "Emitter connected".
+Directly mapped lights include Distant, Sphere, Rect, and Disk lights.
+DomeLight maps to the Blender World, so the most recently applied dome wins.
+Other light types or inputs with no clean Blender equivalent remain mirror-only.
 
-Now any transform, visibility, or object creation changes are sent to the server as events.
+## Cameras and units
 
-### 3. Set up the Receiver (Blender instance B)
+Camera focal length, aperture, offsets, clipping, focus distance, f-stop, and
+projection are converted using the stage's `metersPerUnit`. Transform and
+distance conversion also account for USD Y-up versus Blender Z-up.
 
-1. Open the **USD Connect** sidebar panel.
-2. Click **Import USD** and select the **same** base scene file. Objects must have matching prim path tags.
-3. In the **Network Receiver** section:
-   - Set **Host** and **Port** to match the server.
-4. Click **Start Receiver**. The status should show "Receiver running".
+The receiver authors incoming time samples to the USD mirror. Native Blender
+F-curve creation for arbitrary received animation is not complete; static
+camera and transform opinions map directly.
 
-Incoming events are applied automatically. Move an object in instance A and it updates in instance B.
+## Auto-tracking
 
-### 4. Test it
+With **Auto-track New Objects** enabled, the addon assigns an untagged edited
+object a path below the configured root. Primitive type inference is
+best-effort: recognizable Blender primitives map to their USD schema types,
+other meshes use `Mesh`, and other objects use `Xform`.
 
-In the emitter Blender:
-- Select an object and move/rotate/scale it — the receiver updates in real time.
-- Toggle object visibility (eye icon in outliner) — the receiver shows/hides accordingly.
-- With auto-tracking enabled, add a new primitive (e.g., Add > Mesh > Cube) and move it — the receiver creates and positions it.
+Auto-tracking creates collaboration identity for the object. It is not a
+general USD exporter and does not infer every Blender modifier, constraint, or
+material graph.
 
-## Synced Event Types
+## Replay and feedback behavior
 
-| Event | What triggers it | What happens on the receiver |
-|-------|-----------------|------------------------------|
-| `ensure_prim` | First encounter of an object | Creates the prim (Xform, Sphere, Cube, SphereLight, etc.) and applies any API schemas in `api_schemas` (e.g. `ShapingAPI` for spot lights) |
-| `ensure_xform_ops` | First encounter of an object | Establishes translate/orient/scale ops |
-| `set_xform_trs` | Object moved/rotated/scaled | Applies the transform delta |
-| `set_visibility` | Visibility toggled | Shows/hides the object |
-| `set_gprim_attrs` | Attribute change | Updates parametric attrs (sphere radius, etc.), mesh topology, primvars (UVs, vertex colors), normals, purpose, and `UsdGeomCamera` typed attrs (focal length, aperture, clipping, projection, DoF) |
-| `set_reference` | USD reference set on a prim | Imports the referenced asset |
-| `set_payload` | USD payload arc set on a prim | Stores payload info (unloaded by default) |
-| `load_payload` | Payload load requested | Imports the payload asset |
-| `unload_payload` | Payload unload requested | Removes imported payload children |
-| `set_variant_selections` | Variant selection changed | Updates the active variant |
-| `set_material_binding` | Material bound/unbound (per purpose) | Updates the `material:binding[:purpose]` relationship; `material_purpose` of `""` / `"preview"` / `"full"` selects the slot |
-| `set_connectable_input` | Shader, NodeGraph, Material, or UsdLux light input value changed | Writes the typed input via `UsdShade.ConnectableAPI` |
-| `set_connectable_connection` | Shader/NodeGraph/Material/light input or output connection authored or cleared | Updates the connection edge |
-| `set_instanceable` | Native scenegraph instancing toggled on a prim that has a reference/payload arc | Sets the `instanceable` flag; composition rebuilds the instance locally. The Blender adapter toggles collection-instance Empties best-effort |
-| `set_point_instancer` | UsdGeomPointInstancer prototypes or per-instance arrays changed (including animated samples) | Authors the prototypes relationship and typed arrays at the event's time code. The Blender adapter records paths only |
-| `deactivate_prim` | Object deleted | Deactivates the prim |
-| `delete_prim` | Prim removed from stage | Removes the prim |
-| `rename_prim` | Object renamed | Renames the prim path |
+The receiver retains its mirror when stopped and resumes from the next sequence
+when the base, endpoint, and replay mode are unchanged. **Rebuild Replay** is
+required after intentionally changing those inputs.
 
-Rotation is transmitted as quaternion `[w, x, y, z]` (USD convention). Only changed fields are sent (partial diffs).
+The server broadcasts an author's committed records to every receiver,
+including the author's receive role in layered sessions. During application,
+the addon suppresses its emitter and updates emitter baselines so authoritative
+records do not bounce back as new edits.
 
-`set_gprim_attrs` events include `primvar_meta` (USD type name and interpolation) for
-primvar attributes and `attr_interp` for non-primvar attributes with interpolation metadata
-(e.g., normals).
-
-### UsdLux lights
-
-Light prims (`DistantLight`, `SphereLight`, `RectLight`, `DiskLight`, `DomeLight`) replicate through the same machinery as shaders and materials — they're `UsdShade.ConnectableAPI` containers and their parameters (`intensity`, `color`, `radius`, `shaping:cone:angle`, `texture:file`, etc.) ride on `set_connectable_input` events with empty `info_id`. Applied API schemas (`ShapingAPI` for spot/cone lights, `ShadowAPI` for shadow controls, `MeshLightAPI`/`VolumeLightAPI` for mesh-as-light) flow via the optional `api_schemas` field on `ensure_prim` (additive only; removing an API schema does not replicate).
-
-On receive, the Blender adapter creates native light objects for the directly mappable UsdLux types: `SphereLight` becomes a point light, `DistantLight` a sun, `RectLight` and `DiskLight` area lights. `DomeLight` maps to the World environment instead of a light object (Blender has one World per scene, so with multiple domes the most recent wins). Light inputs apply to the light data block: `intensity` to energy, `color`, `radius` (point soft size / disk size), `width`/`height` (area size), and `angle` (sun, converted degrees to radians). UsdLux types with no Blender equivalent (`CylinderLight`, `GeometryLight`, `PortalLight`, `PluginLight`) land on the mirror USD stage only, as do inputs with no clean mapping on the current light type (for example, shaping cone angles on a point light).
-
-### UsdGeomCamera
-
-Camera prims (`UsdGeomCamera`) replicate through `ensure_prim` (typeName=`"Camera"`) plus `set_gprim_attrs` carrying the typed camera attrs. The Blender adapter routes those attrs onto a `bpy.types.Camera` data block. Conversion follows Blender's own USD importer:
-
-| USD attr | Blender field | Note |
-|---|---|---|
-| `focalLength` | `camera.lens` | scaled by `100 * stage_meters_per_unit` (USD's tenths-of-unit → mm) |
-| `horizontalAperture` / `verticalAperture` | `camera.sensor_width` / `sensor_height` | same scaling, drives `sensor_fit` |
-| `horizontalApertureOffset` / `verticalApertureOffset` | `camera.shift_x` / `shift_y` | normalised by sensor size |
-| `clippingRange` | `camera.clip_start` / `clip_end` | scaled by `scene_scale` |
-| `focusDistance` | `camera.dof.focus_distance` | scaled by `scene_scale` |
-| `fStop` | `camera.dof.aperture_fstop` + `use_dof` | `use_dof` = (fStop > 0) |
-| `projection` | `camera.type` | `"perspective"` → `PERSP`, `"orthographic"` → `ORTHO` |
-
-Camera attributes participate in the time-sample flow: when a value is authored at a USD time sample, it replicates with the `time` field set on `set_gprim_attrs`. Blender-side F-curve authoring (cameras + transforms) is a follow-up — current capture writes the static opinion. Time samples authored on the mirror stage from any source (manual scripting, scrubbing in another DCC) are picked up automatically by the emitter.
-
-## Playback synchronization
-
-A single client at a time drives the shared playhead. The flow is:
-
-1. **Claim** — that client clicks **Claim Playback** in the panel. The server grants the leader role if no one currently holds it; otherwise the request is rejected with the current leader's id.
-2. **Drive** — the leader uses **Play / Pause / Push Frame** to advance the playhead. Each command updates the server's playback state and broadcasts `PlaybackState` to every other client.
-3. **Follow** — non-leader clients receive `PlaybackState` and the addon calls `scene.frame_set(...)` on the next idle tick, mapping `time` (USD timecode) to a Blender frame via the scene FPS. The same feedback guard that suppresses incoming-event re-emission also wraps the `frame_set` call so the depsgraph evaluation doesn't bounce back to the server.
-4. **Release** — on leader disconnect, the server clears the role and broadcasts a vacant-leader `PlaybackState`. Another client can then claim.
-
-Stage metadata (`timeCodesPerSecond`, `framesPerSecond`, `startTimeCode`, `endTimeCode`, `metersPerUnit`, `upAxis`) is delivered in `hello_ok` for new clients and broadcast as a `set_stage_metadata` event when it changes mid-session. The Blender receiver maps `framesPerSecond` to `scene.render.fps`, `metersPerUnit` to `scene.unit_settings.scale_length`, and the start/end timecodes to `scene.frame_start` / `scene.frame_end`.
-
-## Auto-track Mode
-
-When **Auto-track New Objects** is enabled in the Network Emitter:
-
-- Any object you manipulate (even without an existing `usd_prim_path`) is automatically assigned a path under the configured **Root Prim** (e.g., `/World/Cube`).
-- The USD type is inferred from the Blender mesh data: Sphere, Cube, Cylinder, Cone map to their USD equivalents. Other meshes become `Mesh`, non-mesh objects become `Xform`.
-- The inferred type is stored as a `usd_type_name` custom property on the Blender object.
-
-## Sequence Persistence
-
-The receiver retains its USD mirror while stopped and resumes from the next
-sequence when the base, server endpoint, and replay mode are unchanged. Click
-**Rebuild Replay** to discard that state. A normal base then replays from
-sequence 1; a live-open file rebuilds from its embedded `snapshot_seq`.
-
-If the server compacts its event log, it broadcasts a `resync` message. Receivers must handle this by resetting their sequence counter — the server then replays the compacted log. The Blender addon handles this. Other DCC integrations must implement `resync` support (see `protocol.py` for the message spec).
-
-## Feedback Loop Guard
-
-The addon prevents feedback loops: when the receiver applies incoming events, the capture/emitter module is temporarily suppressed so those changes aren't re-emitted back to the server.
+Compaction sends a resync boundary. The addon clears the affected replay state
+and rebuilds from the compacted authoritative log automatically.

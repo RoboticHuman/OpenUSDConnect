@@ -3,6 +3,9 @@
 import logging
 import socket
 import time
+from collections import deque
+
+import pytest
 
 from openusdconnect.codec import HelloRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
@@ -56,7 +59,7 @@ def _flood_events(conn, seqs):
     """Send events, tolerating the receiver closing the socket mid-flood.
 
     Overflowing the bounded queue makes the receiver disconnect by design, so
-    pushing past that point legitimately races with an RST from the peer — the
+    pushing past that point legitimately races with an RST from the peer the
     sender just stops. The test's real assertion is the receiver's reaction.
     """
     for i in seqs:
@@ -100,6 +103,41 @@ def _teardown(rt, conn, srv):
 
 
 class TestReceiverThread:
+    def test_bounded_drain_preserves_suffix_and_replay_watermark(self):
+        rt = ReceiverThread(reconnect=False)
+        rt.connected = True
+        rt._incoming = deque([b"one", b"two", b"three"])
+        rt._incoming_serial = 3
+        rt._received_replay_complete = (rt._replay_generation, 3, 7, 3)
+
+        assert list(rt.drain_queue(max_messages=2)) == [b"one", b"two"]
+        assert list(rt._incoming) == [b"three"]
+        assert rt._last_drained_serial == 2
+        assert not rt.mark_replay_applied()
+
+        assert list(rt.drain_queue(max_messages=2)) == [b"three"]
+        assert rt._last_drained_serial == 3
+        assert rt.mark_replay_applied()
+        assert rt.synchronized
+        assert rt.replay_head_seq == 3
+        assert rt.replay_epoch == 7
+
+    @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+    def test_bounded_drain_rejects_invalid_limit(self, limit):
+        with pytest.raises(ValueError, match="max_messages"):
+            ReceiverThread(reconnect=False).drain_queue(max_messages=limit)
+
+    def test_replay_request_advances_past_discarded_queue_serials(self):
+        rt = ReceiverThread(reconnect=False)
+        rt._incoming = deque([b"stale-one", b"stale-two"])
+        rt._incoming_serial = 5
+        rt._last_drained_serial = 3
+
+        rt.request_replay_from(4)
+
+        assert not rt._incoming
+        assert rt._last_drained_serial == 5
+
     def test_terminal_transport_failure_wakes_connection_waiter(self, monkeypatch):
         def _fail_connect(*_args, **_kwargs):
             raise OSError("injected connection failure")
@@ -448,7 +486,7 @@ class TestReconnection:
         )
         rt.start()
 
-        # First connection — send some events
+        # First connection send some events
         conn1 = _accept_and_hello(srv)
         _send_event(conn1, 10)
         _poll_until(lambda: rt.last_seq == 10)
@@ -457,7 +495,7 @@ class TestReconnection:
         conn1.close()
         _poll_until(lambda: not rt.connected)
 
-        # Reconnect — should request sync_from=11
+        # Reconnect should request sync_from=11
         conn2 = _accept(srv, timeout=2)
         hello = _recv_hello(conn2)
         assert hello["sync_from"] == 11
@@ -642,10 +680,10 @@ class TestSocketTimeout:
             # Wait longer than socket timeout
             time.sleep(0.1)
 
-            # Connection should still be alive — timeout just means no data
+            # Connection should still be alive timeout just means no data
             assert rt.connected
 
-            # Send data after timeout — should still be received
+            # Send data after timeout should still be received
             _send_event(conn, 1)
             collected = []
             _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 1)
@@ -673,7 +711,7 @@ class TestBoundedQueue:
         # First connection
         conn1 = _accept_and_hello(srv)
 
-        # Send 5 events into a queue with max depth 3 — overflow disconnects
+        # Send 5 events into a queue with max depth 3 overflow disconnects
         # the receiver mid-flood, so tolerate the RST from its closed socket.
         _flood_events(conn1, range(1, 6))
 
@@ -784,7 +822,7 @@ class TestConsecutiveTimeouts:
             rt.start()
             conn = _accept_and_hello(srv)
             _poll_until(lambda: rt.connected)
-            # Don't send anything — let timeouts accumulate
+            # Don't send anything let timeouts accumulate
             rt.join(timeout=2)
             assert not rt.is_alive()
         finally:

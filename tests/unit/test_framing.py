@@ -32,7 +32,7 @@ class _RecordingSock:
 
 class TestSendFramedSocket:
     def test_small_payload_is_one_sendall(self):
-        """Header + small payload must leave in a single sendall — splitting
+        """Header + small payload must leave in a single sendall splitting
         them recreates the Nagle/delayed-ACK write-write-read stall."""
         sock = _RecordingSock()
         send_framed(sock, b"abc")
@@ -55,7 +55,7 @@ class TestSendFramedSocket:
 
     def test_large_roundtrip_over_socket(self):
         a, b = socket.socketpair()
-        payload = bytes(range(256)) * 1024  # 256 KiB — above _COALESCE_LIMIT
+        payload = bytes(range(256)) * 1024  # 256 KiB above _COALESCE_LIMIT
         received = []
         try:
             reader = threading.Thread(target=lambda: received.append(recv_framed(b)))

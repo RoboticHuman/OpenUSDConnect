@@ -63,7 +63,7 @@ def aggregate(stacks: list[tuple[list[str], int]]):
 
     - inclusive: each frame in the stack contributes its sample count
       (deduplicated against recursion within a single stack).
-    - self: only the top of each stack contributes — pure CPU work in
+    - self: only the top of each stack contributes pure CPU work in
       that function as opposed to its callees.
     - by_file: per-file inclusive counts (each file deduplicated per stack).
     """

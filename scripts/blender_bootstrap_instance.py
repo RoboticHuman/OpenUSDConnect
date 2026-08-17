@@ -204,7 +204,7 @@ def _start_reload_watcher(addon_zip: str, role: str) -> None:
             zip_path = content if content and os.path.isfile(content) else addon_zip
 
             # Remove trigger before reloading so other instances also see it
-            # (each instance removes independently — first one wins on the
+            # (each instance removes independently first one wins on the
             # filesystem, others just get a FileNotFoundError which is fine).
             try:
                 os.remove(trigger_path)

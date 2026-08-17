@@ -130,7 +130,7 @@ def main():
 
     # ==================================================================
     # Phase 3: Emitter resends set_reference (simulates what happens
-    # when user moves Chair — emitter detects reference on stage and
+    # when user moves Chair emitter detects reference on stage and
     # sends it again as a first-encounter event)
     # ==================================================================
     print("\n[ManualThenMove] Sending emitter events (move simulation)...")

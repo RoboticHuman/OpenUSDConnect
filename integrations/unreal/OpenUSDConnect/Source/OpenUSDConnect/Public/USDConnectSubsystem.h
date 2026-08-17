@@ -89,7 +89,7 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
  *  1. Place an AUsdStageActor in the level; set its RootLayer to the USD file
  *     the server is managing.
  *  2. Configure host/port in Edit > Project Settings > Plugins > OpenUSD Connect.
- *  3. Press Play — the subsystem auto-connects both receiver and emitter.
+ *  3. Press Play the subsystem auto-connects both receiver and emitter.
  */
 UCLASS()
 class OPENUSDCONNECT_API UUSDConnectSubsystem : public UTickableWorldSubsystem
@@ -107,7 +107,7 @@ public:
 	virtual bool IsTickable() const override { return true; }
 
 	// Live sync must run in the editor (without PIE), not just during Play.
-	// UTickableWorldSubsystem defaults this to false — we override to true.
+	// UTickableWorldSubsystem defaults this to false we override to true.
 	virtual bool IsTickableInEditor() const override { return true; }
 
 	// Keep ticking when the game is paused so sync stays responsive.
@@ -133,7 +133,7 @@ public:
 	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
 	FUSDConnectStatus GetStatus() const;
 
-	/** Called from FSyncClient background thread — pushes one replay-generation frame. */
+	/** Called from FSyncClient background thread pushes one replay-generation frame. */
 	void EnqueueEvent(uint64 ReplayGeneration, TArray<uint8>&& RawBytes);
 
 	/** Called from client background threads when the server issues a TOFU token. */
@@ -283,7 +283,7 @@ private:
 	/**
 	 * Prims whose material networks changed this tick (received events and
 	 * local edits), resolved to owning materials and materialized to local
-	 * .mtlx documents at the end of Tick. Game thread only — both producers
+	 * .mtlx documents at the end of Tick. Game thread only both producers
 	 * (DrainAndApply, DrainAndEmit) and the consumer run there.
 	 */
 	TSet<FString> PendingMaterializePrims;

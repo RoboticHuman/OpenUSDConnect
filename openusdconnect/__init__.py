@@ -1,4 +1,4 @@
-"""OpenUSDConnect — DCC-agnostic real-time USD sync framework.
+"""OpenUSDConnect DCC-agnostic real-time USD sync framework.
 
 Core library for replicating USD stage edits over a networked event protocol.
 """

@@ -27,8 +27,10 @@ To exercise native change tracking, build the bridge with
 Both processes open the same example files here. In a production deployment,
 each process may use a different filesystem root or a custom `ArResolver`, as
 long as the root document and recursive sublayer graph resolve to equivalent
-assets. The demo does not save the changed layer; persistence remains an
-application decision.
+authored contents. OpenUSDConnect does not compare the complete untouched
+baseline, so production integrations must establish that equivalence through
+versioned assets or resolver policy. The demo does not save the changed layer;
+persistence remains an application decision.
 
 The author only changes the stage while `client.status.phase` is `READY`.
 During connection or replay it continues pumping `update()` without authoring;

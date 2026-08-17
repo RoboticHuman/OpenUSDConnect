@@ -1,6 +1,6 @@
 """Generate .vscode/launch.json and .vscode/tasks.json for OpenUSDConnect.
 
-Idempotent — safe to re-run. Overwrites existing files.
+Idempotent safe to re-run. Overwrites existing files.
 
 If .blender_addon_path exists (written by the bootstrap script on first
 launch), pathMappings will map the Blender addon install directory back to
@@ -49,7 +49,7 @@ def _build_path_mappings(repo_root: str, addon_path: str | None) -> list[dict]:
                 "remoteRoot": os.path.join(addon_path, "openusdconnect"),
             },
         ]
-    # Fallback when addon path is unknown — won't hit breakpoints but
+    # Fallback when addon path is unknown won't hit breakpoints but
     # at least the attach config exists.
     return [
         {

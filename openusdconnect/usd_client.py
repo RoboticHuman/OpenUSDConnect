@@ -209,8 +209,13 @@ class UsdReceiver:
             self.close()
             raise RuntimeError("server did not negotiate required layered replay")
 
-    def update(self) -> int:
-        """Apply one queued receive batch on the calling thread."""
+    def update(self, *, max_messages: int | None = None) -> int:
+        """Apply queued messages on the calling thread.
+
+        ``max_messages`` bounds one call's receive work for interactive
+        applications. Replay becomes ready only after every message preceding
+        the server's synchronization watermark has been applied.
+        """
         if self._closed:
             raise RuntimeError("UsdReceiver is closed")
         if not self._started:
@@ -218,7 +223,7 @@ class UsdReceiver:
         if self._stage is None:
             return 0
         self._require_layered_replay()
-        return self._dispatcher.drain_and_apply()
+        return self._dispatcher.drain_and_apply(max_messages=max_messages)
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
         """Move receive-side application and managed layers to a new stage.

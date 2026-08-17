@@ -503,7 +503,7 @@ class EventDispatcher:
         """Receiver-local logical-layer router, or ``None`` for flat replay."""
         return self._layer_router
 
-    def drain_and_apply(self) -> int:
+    def drain_and_apply(self, *, max_messages: int | None = None) -> int:
         """Drain the receiver queue and run the apply pipeline.
 
         Returns the number of events applied (0 when the queue was empty,
@@ -511,14 +511,18 @@ class EventDispatcher:
         """
         if self._projection_state is not None:
             self._projection_state.ensure_native_projection_safe()
-        bufs = self.receiver.drain_queue()
+        bufs = (
+            self.receiver.drain_queue()
+            if max_messages is None
+            else self.receiver.drain_queue(max_messages=max_messages)
+        )
         if not bufs:
             self.receiver.mark_replay_applied()
             return 0
         self._sync_layer_router()
 
         # Decode geometry to numpy (zero-copy bulk) rather than per-element
-        # Python lists — the list path is ~100x slower to decode+apply for
+        # Python lists the list path is ~100x slower to decode+apply for
         # heavy meshes. Adapters that need plain sequences normalize at their
         # own boundary.
         result = decode_messages(
@@ -833,7 +837,7 @@ class EventDispatcher:
         Stage-first ordering: skip-detect → mirror commit → adapter
         dispatch → invalidate → on_imported.  The stage commit happens
         BEFORE the adapter dispatch so that if ``atomic_apply`` raises,
-        the adapter is never touched — the consumer scene stays
+        the adapter is never touched the consumer scene stays
         untouched on a failed batch.  This is the "stage-first"
         guarantee.
         """
@@ -843,19 +847,19 @@ class EventDispatcher:
         with suppress_ctx:
             # Skip decisions are computed against PRE-commit state so the
             # comparison is meaningful.  Both the mirror commit and the
-            # adapter dispatch consume the skip sets — see ARC_KINDS for
+            # adapter dispatch consume the skip sets see ARC_KINDS for
             # why we bother.
             stage_skip = self._compute_stage_skip(events)
             adapter_skip = self._compute_adapter_skip(events, stage_skip)
 
             # Stage-backed adapters that share their Usd.Stage with the
-            # mirror don't need the separate commit — apply_events on
+            # mirror don't need the separate commit apply_events on
             # the adapter already covers the same stage.
             adapter_handles_mirror = (
                 self.mirror_stage is not None and self.adapter.targets_stage() is self.mirror_stage
             )
 
-            # 1. Mirror commit — atomic batch into the dispatcher's
+            # 1. Mirror commit atomic batch into the dispatcher's
             #    separate USD stage.
             if self.mirror_stage is not None and not adapter_handles_mirror:
                 stage_events = [
@@ -868,14 +872,14 @@ class EventDispatcher:
                     with atomic_apply(self.mirror_stage, prim_paths=scope):
                         apply_events(self.mirror_stage, stage_events)
 
-            # 2. Adapter dispatch — every non-skipped event. Reached
+            # 2. Adapter dispatch every non-skipped event. Reached
             #    after the mirror commit so adapters can rely on the
             #    mirror reflecting the events about to apply.
             non_skipped = [ev for i, ev in enumerate(events) if i not in adapter_skip]
             if non_skipped:
                 self.adapter.apply_events(non_skipped)
 
-            # 3. Emitter cache invalidation — re-syncs the per-prim diff
+            # 3. Emitter cache invalidation re-syncs the per-prim diff
             #    cache with the just-mutated stage.  Without this the
             #    next emit cycle would compare current stage state to a
             #    stale cache and re-emit a change the server already
@@ -1354,7 +1358,7 @@ class EventDispatcher:
         """Find arc events whose composed state already matches the stage.
 
         Reads pre-commit state to avoid unnecessary re-imports.  Unchanged
-        arcs are excluded from the mirror commit too — ``ClearReferences()``
+        arcs are excluded from the mirror commit too ``ClearReferences()``
         followed by re-adding identical references triggers recomposition
         even when the final state is identical.
         """

@@ -2,7 +2,7 @@
 
 Verifies the full flow: server → receiver → stage commit (atomic) → adapter.
 Uses a real server (subprocess), real ReceiverThread, and MockAdapter.
-No Blender required — headless, runs in CI.
+No Blender required headless, runs in CI.
 """
 
 import socket
@@ -103,7 +103,7 @@ def _receive_events(min_events=1, timeout=30.0):
 
 
 def _parse_events_from_bufs(bufs):
-    """Replicate the receiver's parse phase — decode FB buffers."""
+    """Replicate the receiver's parse phase decode FB buffers."""
     events = []
     for raw_buf in bufs:
         msg = message_to_dict(raw_buf)
@@ -162,7 +162,7 @@ class TestStageFirstIntegration:
         with atomic_apply(stage):
             apply_events(stage, parsed)
 
-        # Stage committed — dispatch to adapter
+        # Stage committed dispatch to adapter
         for ev in parsed:
             adapter.apply_event(ev)
 

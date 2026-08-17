@@ -219,7 +219,7 @@ class TestHarness:
         """Assert shader input maps were seeded for a path."""
         from usd_connect.capture import _state
         if not _state.author:
-            self._fail("Author is None — emitter not running")
+            self._fail("Author is None emitter not running")
             return
         maps = [k for k in _state.author._shader_input_maps if path_contains in k]
         if maps:

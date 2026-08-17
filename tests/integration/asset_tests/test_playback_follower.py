@@ -2,13 +2,13 @@
 
 Creates a local sphere with the SAME translate keyframes the leader will
 use (frames 1 / 12 / 24 → positions 0/10/20 on X). Then polls
-``scene.frame_current`` until it advances to 24 — proving that the
+``scene.frame_current`` until it advances to 24 proving that the
 leader's `PlaybackControl(set_time, ...)` broadcasts reached us and the
 receiver applied them via `scene.frame_set`.
 
 Also asserts the sphere ends at the F-curve-evaluated pose for frame 24,
 proving the follower's local F-curves drive the visible state (we don't
-need the leader's transform events for this — only the playhead sync).
+need the leader's transform events for this only the playhead sync).
 """
 
 import os

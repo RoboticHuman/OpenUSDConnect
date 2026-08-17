@@ -2,7 +2,7 @@
 
 Simulates the real single-instance workflow where the user:
   1. Imports a base scene with /World/Chair referencing test_asset.usda
-  2. Starts the receiver — it gets events from the server (or replayed)
+  2. Starts the receiver it gets events from the server (or replayed)
   3. Receiver processes set_reference on /World/Chair
   4. But those objects ALREADY EXIST from step 1!
   5. Does bpy.ops.wm.usd_import re-import and create duplicates?
@@ -51,7 +51,7 @@ def main():
         sys.exit(1)
 
     # ==================================================================
-    # Step 1: Import the base scene — same as user's normal workflow.
+    # Step 1: Import the base scene same as user's normal workflow.
     # This creates objects tagged with usd_prim_path by USDHook.
     # ==================================================================
     print(f"[Loopback] Importing base scene: {scene_file}")

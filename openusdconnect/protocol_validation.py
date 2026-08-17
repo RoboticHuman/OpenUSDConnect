@@ -8,6 +8,7 @@ avoid walking bulk geometry arrays a second time.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from numbers import Integral, Real
 
 import numpy as np
@@ -71,10 +72,20 @@ def _require_optional_time(event: dict) -> None:
         _require_finite(event["time"], "time")
 
 
-def _sdf_path(value, field: str) -> Sdf.Path:
-    if not isinstance(value, str) or not value or not Sdf.Path.IsValidPathString(value):
-        _fail(f"{field} must be a valid Sdf path")
+@lru_cache(maxsize=8192)
+def _validated_sdf_path(value: str) -> Sdf.Path | None:
+    if not Sdf.Path.IsValidPathString(value):
+        return None
     return Sdf.Path(value)
+
+
+def _sdf_path(value, field: str) -> Sdf.Path:
+    if not isinstance(value, str) or not value:
+        _fail(f"{field} must be a valid Sdf path")
+    path = _validated_sdf_path(value)
+    if path is None:
+        _fail(f"{field} must be a valid Sdf path")
+    return path
 
 
 def _require_prim_path(value, field: str = "prim", *, allow_root: bool = False) -> None:

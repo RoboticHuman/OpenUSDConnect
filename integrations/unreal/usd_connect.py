@@ -1,7 +1,7 @@
 """OpenUSDConnect integration for Unreal Engine.
 
 Bridges the OpenUSDConnect network protocol to USDStageActor's live USD stage.
-Leverages Epic's full USD support — USDStageActor handles all actor spawning,
+Leverages Epic's full USD support USDStageActor handles all actor spawning,
 transform conversion, and scene management. We only touch the USD stage.
 
 Usage (from UE Python console):
@@ -13,7 +13,7 @@ Usage (from UE Python console):
 
 Or add the project root to UE's Additional Python Paths (Project Settings →
 Plugins → Python → Additional Paths) and skip the sys.path line.
-Once imported, the module self-bootstraps — no init_unreal.py needed.
+Once imported, the module self-bootstraps no init_unreal.py needed.
 """
 
 from __future__ import annotations
@@ -127,12 +127,12 @@ def _ensure_stage():
             return _stage
         LOG.info("Stage root layer changed (%s → %s), re-attaching...", _root_layer_id, current_id)
 
-    # Stage missing or stale — try to find it again
+    # Stage missing or stale try to find it again
     stage = _find_stage(_root_layer_name)
     if stage is None:
         if _stage is not None:
             LOG.warning(
-                "Stage '%s' no longer in cache — waiting for reopen",
+                "Stage '%s' no longer in cache waiting for reopen",
                 _root_layer_name,
             )
             _stage = None
@@ -276,10 +276,10 @@ def start(
     global _live_metadata, _coalesce_seconds, _last_send_time, _running
 
     if _running:
-        LOG.warning("Already running — call stop() first")
+        LOG.warning("Already running call stop() first")
         return
 
-    import unreal  # noqa: F811 — only available inside UE
+    import unreal  # noqa: F811 only available inside UE
 
     _root_layer_name = root_layer_name
     _host = host
@@ -388,7 +388,7 @@ def start(
     # -- Build dispatcher ------------------------------------------------
     # The receive→apply pipeline is driven by EventDispatcher.  The
     # adapter writes to the stage directly (UsdStageAdapter), so no
-    # separate mirror_stage is needed — the adapter and the emitter
+    # separate mirror_stage is needed the adapter and the emitter
     # share the same stage.
     if _receiver is not None:
         from openusdconnect.adapters import UsdStageAdapter
@@ -426,7 +426,7 @@ def stop():
         _receiver.stop()
         _receiver = None
 
-    # Drop dispatcher (no separate state to flush — last_seq dies with it)
+    # Drop dispatcher (no separate state to flush last_seq dies with it)
     _dispatcher = None
 
     # Clean up emitter

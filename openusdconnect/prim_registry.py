@@ -1,4 +1,4 @@
-"""PrimRegistry — DCC-agnostic prim path to native object mapping.
+"""PrimRegistry DCC-agnostic prim path to native object mapping.
 
 Tracks the correspondence between USD prim paths and DCC-native objects
 (e.g. scene objects, DAG nodes).  Handles:
@@ -21,7 +21,7 @@ _EMPTY_SHADER: dict = {}
 
 
 def _default_alive(_obj) -> bool:
-    """Default liveness check — assumes the object is valid.
+    """Default liveness check assumes the object is valid.
 
     DCC adapters should provide their own ``alive_fn`` for proper
     freed-reference detection. The exception type raised on stale

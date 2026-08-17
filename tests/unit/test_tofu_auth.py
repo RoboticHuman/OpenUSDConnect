@@ -125,7 +125,7 @@ class TestServerAuthenticate:
         _, token = srv.authenticate("alice", None)
         srv.revoke_token("alice")
         accepted, _ = srv.authenticate("alice", token)
-        # After revoke, client_id has no token — TOFU re-issues
+        # After revoke, client_id has no token TOFU re-issues
         assert accepted  # Re-issued on first connect after revoke
 
     def test_no_client_id_rejected_when_token_required(self, tmp_path):

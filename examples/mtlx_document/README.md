@@ -8,7 +8,7 @@ the document path directly, which covers lobes their USD-prim parsers may not
 same values authored as inline prims draw opaque).
 
 The USD Material prim must be named exactly like the material inside the
-document (`GlassMtlx` here) — Unreal maps the generated material back to the
+document (`GlassMtlx` here) Unreal maps the generated material back to the
 prim by name.
 
 ```bash

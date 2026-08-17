@@ -2,7 +2,7 @@
 
 Counterpart to ``test_assets.py::test_headless_time_samples_to_blender``.
 The pytest wrapper sends a sequence of time-sampled ``set_xform_trs``
-events to the server BEFORE this Blender starts — the events live in
+events to the server BEFORE this Blender starts the events live in
 the event log. When this script connects via the addon's receiver, the
 server replays them; the addon applies them; this script then dumps
 the observed state.
@@ -22,7 +22,7 @@ What this is intentionally NOT verifying:
     Blender (DCC-backed) receiver, ``BlenderAdapter`` writes to Blender
     objects, not USD. The mirror stage is fed by capture's depsgraph
     roundtrip, which authors only default-time opinions. Time samples
-    don't land on the Blender receiver's mirror by design — animation
+    don't land on the Blender receiver's mirror by design animation
     data for Blender comes from local USD import (Blender Action
     F-curves), not from the wire. For stage-backed receivers
     (Unreal via UsdStageAdapter, headless scripts), time samples DO
@@ -74,14 +74,14 @@ def _observe_and_report():
     if loc == _EXPECTED_LOCATION:
         harness._pass(
             f"obj.location == {_EXPECTED_LOCATION} (latest time-sample's value, "
-            f"static-pose semantics — confirms BlenderAdapter ignores `time`)",
+            f"static-pose semantics confirms BlenderAdapter ignores `time`)",
         )
     else:
         harness._fail(
             f"obj.location == {loc}, expected {_EXPECTED_LOCATION}",
         )
 
-    # Q1 gap: no F-curves should exist on this object — incoming
+    # Q1 gap: no F-curves should exist on this object incoming
     # time-sampled events don't get translated into Blender keyframes.
     has_fcurves = bool(
         obj.animation_data and obj.animation_data.action
@@ -89,7 +89,7 @@ def _observe_and_report():
     )
     if has_fcurves:
         harness._fail(
-            "Unexpectedly found F-curves on the receiver's sphere — "
+            "Unexpectedly found F-curves on the receiver's sphere "
             "Q1 (Blender keyframe insertion on receive) is not implemented yet, "
             "so F-curves shouldn't be there. If this fails, either Q1 was "
             "implemented or Blender is auto-keying.",

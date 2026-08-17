@@ -1,4 +1,4 @@
-"""E2E test: Bishop asset — multi-node MaterialX with diffuse texture.
+"""E2E test: Bishop asset multi-node MaterialX with diffuse texture.
 
 Checks that the Bishop's ND_standard_surface shader gets enriched
 with proper node network including texture connections.

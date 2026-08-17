@@ -1,4 +1,4 @@
-"""Tests for openusdconnect.axis_conversion — Y-up ↔ Z-up basis change."""
+"""Tests for openusdconnect.axis_conversion Y-up ↔ Z-up basis change."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def test_vec_known_values():
     # Y-up (0, 10, 0) = 10 units up → Z-up (0, 0, 10)
     _assert_vec_close(yup_to_zup_vec(0, 10, 0), (0, 0, 10))
 
-    # Y-up (2, 0, 0) = 2 units right → Z-up (2, 0, 0) — X unchanged
+    # Y-up (2, 0, 0) = 2 units right → Z-up (2, 0, 0) X unchanged
     _assert_vec_close(yup_to_zup_vec(2, 0, 0), (2, 0, 0))
 
     # Y-up (0, 0, 2) = 2 units depth → Z-up (0, -2, 0)
@@ -115,7 +115,7 @@ def test_quat_ry_becomes_rz():
 
 
 def test_quat_rx_stays_rx():
-    """Rx(θ) should remain Rx(θ) — the X axis is the same in both systems."""
+    """Rx(θ) should remain Rx(θ) the X axis is the same in both systems."""
     angle = math.radians(30)
     c = math.cos(angle / 2)
     s = math.sin(angle / 2)
@@ -151,7 +151,7 @@ def test_quat_rz_becomes_ry_negated():
 # ---------------------------------------------------------------------------
 
 def test_scale_swap():
-    """Y-up scale (1, 2, 3) → Z-up (1, 3, 2) — swap Y and Z."""
+    """Y-up scale (1, 2, 3) → Z-up (1, 3, 2) swap Y and Z."""
     assert yup_to_zup_scale(1, 2, 3) == (1, 3, 2)
     assert zup_to_yup_scale(1, 3, 2) == (1, 2, 3)
 
@@ -215,8 +215,8 @@ def test_hierarchy_world_position():
     """Parent(converted) @ child(converted) gives correct Z-up world pos.
 
     Y-up scene:
-      /World: translate (0, 10, 0)   — 10 units up
-      /Teapot: local translate (3, 5, 0) — 3 right, 5 up from parent
+      /World: translate (0, 10, 0)   10 units up
+      /Teapot: local translate (3, 5, 0) 3 right, 5 up from parent
 
     Expected Z-up world position of Teapot: (3, 0, 15)
     """
@@ -285,7 +285,7 @@ def test_hierarchy_with_rotation():
 
 def test_strip_then_compose_roundtrip():
     """strip → compose gives back the original quaternion."""
-    # Rx(90°) @ Rz(45°) — a typical imported object rotation
+    # Rx(90°) @ Rz(45°) a typical imported object rotation
     angle = math.radians(45)
     c = math.cos(angle / 2)
     s = math.sin(angle / 2)
@@ -310,9 +310,9 @@ def test_strip_identity_gives_rx_neg90():
     """Stripping from identity gives Rx(-90°).
 
     This is what happens when the emitter processes an imported root
-    that still has Rx(90°) — strip recovers identity for USD.
+    that still has Rx(90°) strip recovers identity for USD.
     But if the root's Rx(90°) was already removed (parent handles axis),
-    stripping from identity gives Rx(-90°) — the emitter must not do this.
+    stripping from identity gives Rx(-90°) the emitter must not do this.
     """
     rx_neg90 = strip_axis_rotation(1, 0, 0, 0)
     # Rx(-90°) quaternion = (cos(-45°), sin(-45°), 0, 0) = (√2/2, -√2/2, 0, 0)
@@ -321,14 +321,14 @@ def test_strip_identity_gives_rx_neg90():
 
 
 def test_strip_rx90_gives_identity():
-    """Stripping Rx(90°) recovers identity — the correct USD rotation."""
+    """Stripping Rx(90°) recovers identity the correct USD rotation."""
     rx90 = (math.sqrt(2) / 2, math.sqrt(2) / 2, 0, 0)
     result = strip_axis_rotation(*rx90)
     _assert_vec_close(result, (1, 0, 0, 0))
 
 
 def test_compose_identity_gives_rx90():
-    """Composing onto identity gives Rx(90°) — adds axis conversion."""
+    """Composing onto identity gives Rx(90°) adds axis conversion."""
     result = compose_axis_rotation(1, 0, 0, 0)
     expected = (math.sqrt(2) / 2, math.sqrt(2) / 2, 0, 0)
     _assert_vec_close(result, expected)
@@ -371,7 +371,7 @@ def test_parent_with_rx90_child_passthrough():
     Since parent chain has Rx(90°), the value (0, 2, 0) is already Y-up
     (local Y = world Z = up).  The emitter should NOT convert it.
 
-    If incorrectly converted Z→Y: (0, 2, 0) → (0, 0, -2) — WRONG.
+    If incorrectly converted Z→Y: (0, 2, 0) → (0, 0, -2) WRONG.
     """
     # The local value is (0, 2, 0) in parent's rotated frame
     local_val = (0.0, 2.0, 0.0)
@@ -396,7 +396,7 @@ def test_no_double_rx90():
     makes geometry lie on its side.  After merge, the teapot's Rx(90°)
     must be stripped when the parent already handles axis conversion.
     """
-    # Rx(90°) @ Rx(90°) = Rx(180°) — the bug
+    # Rx(90°) @ Rx(90°) = Rx(180°) the bug
     a = math.sqrt(2) / 2
     q_rx90 = (a, a, 0, 0)
     from openusdconnect.axis_conversion import _quat_mul
@@ -406,7 +406,7 @@ def test_no_double_rx90():
     _assert_vec_close(q_rx180, (0, 1, 0, 0))
 
     # After fix: parent has Rx(90°), child has identity
-    # Total rotation applied to geometry = Rx(90°) — correct
+    # Total rotation applied to geometry = Rx(90°) correct
     identity = (1.0, 0.0, 0.0, 0.0)
     total = _quat_mul(q_rx90, identity)
     _assert_vec_close(total, q_rx90)

@@ -1,8 +1,24 @@
 """Tests for usdview launcher environment and presentation options."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from integrations.usdview import launcher
+
+
+def test_resolve_command_bootstraps_shebang_interpreter(tmp_path):
+    interpreter = tmp_path / "python.exe"
+    interpreter.touch()
+    script = tmp_path / "usdview"
+    script.write_text(f"#!{interpreter}\n", encoding="utf-8")
+
+    command = launcher._resolve_command(script)
+
+    assert command == [
+        str(interpreter),
+        str(Path(launcher.__file__).with_name("_bootstrap.py")),
+        str(script),
+    ]
 
 
 def test_launch_usdview_forwards_presentation_environment(monkeypatch):
