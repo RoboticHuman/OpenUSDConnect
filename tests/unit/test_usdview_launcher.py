@@ -3,7 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from integrations.usdview import launcher
+from integrations.usdview import _bootstrap, launcher
 
 
 def test_resolve_command_bootstraps_shebang_interpreter(tmp_path):
@@ -52,6 +52,71 @@ def test_launch_usdview_forwards_presentation_environment(monkeypatch):
     assert env["OPENUSDCONNECT_CAMERA_PATH"] == "/World/_TestCam"
     assert env["OPENUSDCONNECT_EXPECTED_SEQ"] == "262"
     assert env["OPENUSDCONNECT_SCENE_LIGHTS"] == "1"
+
+
+def test_launch_usdview_bootstrap_prefers_selected_install_python(tmp_path, monkeypatch):
+    install = tmp_path / "OpenUSDInstall"
+    bin_dir = install / "bin"
+    python_dir = install / "lib" / "python"
+    interpreter = install / ".venv" / "Scripts" / "python.exe"
+    bin_dir.mkdir(parents=True)
+    python_dir.mkdir(parents=True)
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    script = bin_dir / "usdview"
+    script.write_text(f"#!{interpreter}\n", encoding="utf-8")
+    launcher_cmd = bin_dir / "usdview.cmd"
+    launcher_cmd.touch()
+
+    captured = {}
+
+    def fake_popen(command, *, env):
+        captured["command"] = command
+        captured["env"] = env
+        return object()
+
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "conflicting-python"))
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("integrations.renderman.dll_dirs", lambda: [])
+
+    launcher.launch_usdview("test_scene.usda", usdview_exe=launcher_cmd)
+
+    env = captured["env"]
+    assert env["PYTHONPATH"].split(launcher.os.pathsep)[:2] == [
+        str(python_dir),
+        str(tmp_path / "conflicting-python"),
+    ]
+    assert env["PATH"].split(launcher.os.pathsep)[:2] == [
+        str(bin_dir),
+        str(install / "lib"),
+    ]
+    assert captured["command"][:3] == [
+        str(interpreter),
+        str(Path(launcher.__file__).with_name("_bootstrap.py")),
+        str(script),
+    ]
+
+
+def test_bootstrap_registers_selected_install_dll_dirs(tmp_path, monkeypatch):
+    install = tmp_path / "OpenUSDInstall"
+    script = install / "bin" / "usdview"
+    script.parent.mkdir(parents=True)
+    (install / "lib").mkdir()
+    script.touch()
+    added = []
+
+    monkeypatch.setattr(_bootstrap.os, "name", "nt")
+    monkeypatch.setattr(
+        _bootstrap.os,
+        "add_dll_directory",
+        lambda path: added.append(path) or object(),
+        raising=False,
+    )
+
+    handles = _bootstrap._add_usd_dll_dirs(install)
+
+    assert added == [str(install / "bin"), str(install / "lib")]
+    assert len(handles) == 2
 
 
 def test_main_accepts_presentation_arguments(monkeypatch):

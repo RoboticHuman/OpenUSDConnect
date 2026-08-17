@@ -10,11 +10,29 @@ from pathlib import Path
 APPEND_PATHS_ENV = "OPENUSDCONNECT_PYTHONPATH_APPEND"
 
 
+def _add_usd_dll_dirs(install_root: Path) -> list[object]:
+    """Keep the selected OpenUSD install's DLL directories active on Windows."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return []
+    return [
+        os.add_dll_directory(str(path))
+        for path in (install_root / "bin", install_root / "lib")
+        if path.is_dir()
+    ]
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit("usdview bootstrap requires the usdview script path")
 
     usdview_script = Path(sys.argv[1]).resolve()
+    install_root = (
+        usdview_script.parent.parent
+        if usdview_script.parent.name.lower() == "bin"
+        else None
+    )
+    # The handles must live until usdview exits.
+    _dll_handles = _add_usd_dll_dirs(install_root) if install_root else []
     for raw_path in os.environ.pop(APPEND_PATHS_ENV, "").split(os.pathsep):
         if not raw_path:
             continue

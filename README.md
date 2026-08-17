@@ -75,13 +75,25 @@ custom-plugin-free runtime. It supports core synchronization and standard USD
 schemas, including UsdPreviewSurface.
 
 Use your project's OpenUSD runtime when the scene depends on custom renderers,
-resolvers, file formats, or shader definitions. Load that runtime's environment,
-then omit the bundled `usd-core` dependency:
+resolvers, file formats, or shader definitions. From the repository root,
+activate it for the current PowerShell terminal, then run commands normally:
 
-```bash
-# Load the project or vendor OpenUSD environment first.
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
 uv run --isolated openusdconnect-server --base scene.usda
 ```
+
+The first positional argument is the OpenUSD install directory containing
+`bin` and `lib`. Pass `-RenderManRoot`, `-PluginPath`, or `-DllDir` when needed.
+For automation or other shells, use the cross-platform command wrapper:
+
+```bash
+uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
+  openusdconnect-server --base scene.usda
+```
+
+Repeat `--plugin-path` or `--dll-dir` for project plugins and native
+dependencies. Add `--renderman-root /path/to/RenderManProServer` for hdPrman.
 
 The server and source-tree launchers inherit the active environment. Plugin
 discovery uses `PXR_PLUGINPATH_NAME`; native dependencies use `PATH` on Windows,

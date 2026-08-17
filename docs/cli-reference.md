@@ -75,12 +75,28 @@ Use a project-provided OpenUSD runtime when you need custom renderers,
 resolvers, file formats, or shader definitions. It must be compatible with the
 server's Python and OpenUSD build.
 
-Load the project or vendor environment first, then use an isolated environment
-without enabling the `bundled-usd` group:
+From the repository root, activate the selected install for the current
+PowerShell terminal, then run without enabling the `bundled-usd` group:
 
-```bash
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
 uv run --isolated openusdconnect-server --base scene.usda
 ```
+
+The first positional argument is the OpenUSD install directory containing
+`bin` and `lib`. Use `-RenderManRoot` for hdPrman and pass arrays to
+`-PluginPath` or `-DllDir` for project additions.
+
+For automation or other shells, configure one command through the
+cross-platform wrapper:
+
+```bash
+uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
+  openusdconnect-server --base scene.usda
+```
+
+Use repeatable `--plugin-path` and `--dll-dir` options for project additions, or
+`--renderman-root /path/to/RenderManProServer` to configure hdPrman.
 
 The environment must expose the intended `pxr` bindings. For custom plugins,
 configure:

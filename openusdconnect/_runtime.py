@@ -7,26 +7,37 @@ import sys
 from importlib import metadata
 
 BUNDLED_USD_ENV = "OPENUSDCONNECT_BUNDLED_USD"
+USD_ROOT_ENV = "OPENUSDCONNECT_USD_ROOT"
 
 
-def _bundled_usd_installed() -> bool:
+def _normalized_path(path: str | os.PathLike) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _bundled_pxr_path() -> str | None:
     try:
-        metadata.version("usd-core")
+        distribution = metadata.distribution("usd-core")
     except metadata.PackageNotFoundError:
-        return False
-    return True
+        return None
+    return _normalized_path(distribution.locate_file("pxr"))
 
 
-def _prefer_bundled_usd() -> None:
+def _loaded_pxr_path() -> str | None:
+    module = sys.modules.get("pxr")
+    if module is None:
+        return None
+    module_file = getattr(module, "__file__", "")
+    return _normalized_path(os.path.dirname(module_file)) if module_file else ""
+
+
+def _prefer_bundled_usd(bundled_pxr: str) -> None:
     configured = os.environ.pop("PYTHONPATH", "")
     if not configured:
         return
-    distribution = metadata.distribution("usd-core")
-    bundled_pxr = os.path.normcase(os.path.abspath(distribution.locate_file("pxr")))
     conflicting = set()
     retained = []
     for path in configured.split(os.pathsep):
-        resolved = os.path.normcase(os.path.abspath(path or os.curdir))
+        resolved = _normalized_path(path or os.curdir)
         candidate_pxr = os.path.join(resolved, "pxr")
         if os.path.isdir(candidate_pxr) and candidate_pxr != bundled_pxr:
             conflicting.add(resolved)
@@ -37,13 +48,22 @@ def _prefer_bundled_usd() -> None:
     sys.path[:] = [
         path
         for path in sys.path
-        if os.path.normcase(os.path.abspath(path or os.curdir)) not in conflicting
+        if _normalized_path(path or os.curdir) not in conflicting
     ]
 
 
 def select_runtime() -> None:
-    if _bundled_usd_installed():
-        _prefer_bundled_usd()
+    if os.environ.get(USD_ROOT_ENV):
+        os.environ.pop(BUNDLED_USD_ENV, None)
+        return
+    bundled_pxr = _bundled_pxr_path()
+    if bundled_pxr is None:
+        os.environ.pop(BUNDLED_USD_ENV, None)
+        return
+    loaded_pxr = _loaded_pxr_path()
+    if loaded_pxr is None:
+        _prefer_bundled_usd(bundled_pxr)
+    if loaded_pxr in (None, bundled_pxr):
         os.environ[BUNDLED_USD_ENV] = "1"
     else:
         os.environ.pop(BUNDLED_USD_ENV, None)

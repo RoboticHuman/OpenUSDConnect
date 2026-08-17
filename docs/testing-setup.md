@@ -28,6 +28,22 @@ uv run pytest tests/ -v
 uv run pytest tests/unit/ --slow-tests -v
 ```
 
+On PowerShell, activate the OpenUSD installation once before running tests:
+
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+uv run pytest tests/ -v
+```
+
+For automation or other shells, configure the test command through the wrapper:
+
+```bash
+uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
+  pytest tests/ -v
+```
+
+Add `--renderman-root /path/to/RenderManProServer` when running the visual tier.
+
 `tests/` includes headless integration tests. Tests that need a missing external
 runtime skip with a reason rather than making the core suite unusable.
 

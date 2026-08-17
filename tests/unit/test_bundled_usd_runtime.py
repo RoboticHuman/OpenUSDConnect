@@ -20,7 +20,7 @@ def test_bundled_runtime_ignores_only_conflicting_pxr(monkeypatch, tmp_path):
         def locate_file(path):
             return site_packages / path
 
-    monkeypatch.setattr(runtime, "_bundled_usd_installed", lambda: True)
+    monkeypatch.setattr(runtime, "_loaded_pxr_path", lambda: None)
     monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution())
     monkeypatch.setattr(
         runtime.sys,
@@ -41,8 +41,42 @@ def test_bundled_runtime_ignores_only_conflicting_pxr(monkeypatch, tmp_path):
     assert runtime.os.environ[runtime.BUNDLED_USD_ENV] == "1"
 
 
+def test_loaded_project_pxr_is_not_reclassified_as_bundled(monkeypatch, tmp_path):
+    external = tmp_path / "external-usd" / "pxr"
+    bundled = tmp_path / "site-packages" / "pxr"
+    external.mkdir(parents=True)
+    bundled.mkdir(parents=True)
+    original_path = [str(external.parent), str(bundled.parent)]
+
+    class Distribution:
+        @staticmethod
+        def locate_file(path):
+            return bundled.parent / path
+
+    monkeypatch.setattr(runtime, "_loaded_pxr_path", lambda: str(external))
+    monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution())
+    monkeypatch.setattr(runtime.sys, "path", original_path.copy())
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(original_path))
+    monkeypatch.setenv(runtime.BUNDLED_USD_ENV, "1")
+
+    runtime.select_runtime()
+
+    assert runtime.sys.path == original_path
+    assert runtime.os.environ["PYTHONPATH"] == os.pathsep.join(original_path)
+    assert runtime.BUNDLED_USD_ENV not in runtime.os.environ
+
+
 def test_project_runtime_preserves_active_environment(monkeypatch):
-    monkeypatch.setattr(runtime, "_bundled_usd_installed", lambda: False)
+    monkeypatch.setattr(runtime, "_bundled_pxr_path", lambda: None)
+    monkeypatch.setenv(runtime.BUNDLED_USD_ENV, "1")
+
+    runtime.select_runtime()
+
+    assert runtime.BUNDLED_USD_ENV not in runtime.os.environ
+
+
+def test_explicit_project_runtime_overrides_installed_bundle(monkeypatch):
+    monkeypatch.setenv(runtime.USD_ROOT_ENV, "/project/openusd")
     monkeypatch.setenv(runtime.BUNDLED_USD_ENV, "1")
 
     runtime.select_runtime()

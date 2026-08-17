@@ -8,11 +8,13 @@ from pathlib import Path
 CAMERA_PATH = "/World/_TestCam"
 
 
-def stinson_beach_hdr() -> str:
+def stinson_beach_hdr(install_root: str | Path | None = None) -> str:
     """usdview's default dome-light texture, resolved in the active USD install."""
-    from integrations.renderman import usd_install_root
+    if install_root is None:
+        from integrations.renderman import usd_install_root as active_usd_install_root
 
-    return str(Path(usd_install_root()) / "lib" / "usd" / "hdx" / "resources"
+        install_root = active_usd_install_root()
+    return str(Path(install_root) / "lib" / "usd" / "hdx" / "resources"
                / "textures" / "StinsonBeach.hdr")
 
 

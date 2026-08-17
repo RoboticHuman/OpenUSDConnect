@@ -30,6 +30,18 @@ from pathlib import Path
 from openusdconnect.cli_common import add_sync_endpoint_args, nonnegative_int
 from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 
+from .install import usd_install_root
+
+
+def _prepend_env_paths(
+    env: dict[str, str], name: str, *paths: str | os.PathLike | None
+) -> None:
+    values = [str(path) for path in paths if path]
+    current = env.get(name)
+    if current:
+        values.append(current)
+    env[name] = os.pathsep.join(values)
+
 
 def find_usdview() -> Path:
     """Locate the ``usdview`` executable shipped with the system OpenUSD install.
@@ -189,16 +201,17 @@ def launch_usdview(
     command_prefix = _resolve_command(exe)
 
     env = os.environ.copy()
-    env["PXR_PLUGINPATH_NAME"] = os.pathsep.join(
-        filter(None, [str(plugin_dir), env.get("PXR_PLUGINPATH_NAME", "")])
-    )
+    _prepend_env_paths(env, "PXR_PLUGINPATH_NAME", plugin_dir)
     bootstrap = Path(__file__).with_name("_bootstrap.py")
+    install_root = usd_install_root(exe)
+    install_python = install_root / "lib" / "python" if install_root else None
+    if install_root:
+        _prepend_env_paths(env, "PATH", install_root / "bin", install_root / "lib")
     if str(bootstrap) in command_prefix:
+        _prepend_env_paths(env, "PYTHONPATH", install_python)
         env["OPENUSDCONNECT_PYTHONPATH_APPEND"] = os.pathsep.join(extra_paths)
     else:
-        env["PYTHONPATH"] = os.pathsep.join(
-            filter(None, [*extra_paths, env.get("PYTHONPATH", "")])
-        )
+        _prepend_env_paths(env, "PYTHONPATH", install_python, *extra_paths)
     env["OPENUSDCONNECT_HOST"] = host
     env["OPENUSDCONNECT_PORT"] = str(port)
     if token:
@@ -219,12 +232,12 @@ def launch_usdview(
 
     rman_dirs = _rman_dll_dirs()
     if rman_dirs:
-        env["PATH"] = os.pathsep.join(filter(None, [*rman_dirs, env.get("PATH", "")]))
+        _prepend_env_paths(env, "PATH", *rman_dirs)
 
     forwarded = list(extra_args)
     if renderman:
-        # hdPrman ships inside the OpenUSD install tree (parent of bin/usdview).
-        install_root = exe.resolve().parents[1]
+        if install_root is None:
+            raise RuntimeError("Could not determine the OpenUSD install containing usdview")
         rman_env = renderman_env(install_root)  # render-time RMAN_* search paths
         if not rman_env:
             raise RuntimeError(

@@ -150,7 +150,22 @@ def _find_blender(explicit: str | None) -> Path:
     raise RuntimeError("Blender not found; pass --blender or set BLENDER_EXE")
 
 
-def _build_presentation_events(fixture_events: list[dict], *, renderman: bool) -> list[dict]:
+def _stinson_beach_for_usdview(executable: Path) -> str | None:
+    from integrations.usdview.install import usd_install_root
+    from integrations.visualtest.scene import stinson_beach_hdr
+
+    install_root = usd_install_root(executable)
+    if install_root is None:
+        return None
+    texture = Path(stinson_beach_hdr(install_root))
+    if not texture.is_file():
+        raise RuntimeError(f"selected usdview install is missing {texture.name}: {texture}")
+    return str(texture)
+
+
+def _build_presentation_events(
+    fixture_events: list[dict], *, renderman: bool, dome_texture: str | None = None
+) -> list[dict]:
     from integrations.renderman import apply_dll_dirs, ensure_renderman
 
     if renderman:
@@ -165,7 +180,7 @@ def _build_presentation_events(fixture_events: list[dict], *, renderman: bool) -
     stage = reconstruct(str(BASE_PATH), fixture_events)
     emitter = NoticeEmitter(stage)
     frame_front_camera(stage)
-    apply_ibl_dome(stage)
+    apply_ibl_dome(stage, texture=dome_texture)
     events = emitter.build_events_for_dirty()
     unexpected = sorted(
         {
@@ -239,9 +254,24 @@ def _publish(port: int, fixture_events: list[dict], presentation_events: list[di
         sender.disconnect()
 
 
+def _raise_if_viewer_failed(processes: list[subprocess.Popen]) -> None:
+    for process in processes:
+        return_code = process.poll()
+        if return_code not in (None, 0):
+            raise RuntimeError(
+                f"viewer process {process.pid} exited early with code {return_code}"
+            )
+
+
 def main() -> int:
     args = _parse_args()
     from integrations.visualtest.replay import load_events
+
+    usdview_executable = None
+    if "usdview" in args.viewers:
+        from integrations.usdview.launcher import find_usdview
+
+        usdview_executable = Path(args.usdview).resolve() if args.usdview else find_usdview()
 
     base_hash = _sha256(BASE_PATH)
     fixture_events = load_events(
@@ -251,7 +281,15 @@ def main() -> int:
     presentation_events = (
         []
         if args.no_presentation
-        else _build_presentation_events(fixture_events, renderman=args.renderman)
+        else _build_presentation_events(
+            fixture_events,
+            renderman=args.renderman,
+            dome_texture=(
+                _stinson_beach_for_usdview(usdview_executable)
+                if usdview_executable is not None
+                else None
+            ),
+        )
     )
     expected_seq = len(fixture_events) + len(presentation_events)
     camera_path = CAMERA_PATH if presentation_events else ""
@@ -277,7 +315,7 @@ def main() -> int:
                         BASE_PATH,
                         host="127.0.0.1",
                         port=port,
-                        usdview_exe=args.usdview,
+                        usdview_exe=usdview_executable,
                         renderman=args.renderman,
                         camera_path=camera_path or None,
                         expected_seq=expected_seq,
@@ -297,6 +335,7 @@ def main() -> int:
 
             if args.publish_delay > 0:
                 time.sleep(args.publish_delay)
+            _raise_if_viewer_failed(viewer_processes)
             _publish(port, fixture_events, presentation_events)
             if _sha256(BASE_PATH) != base_hash:
                 raise RuntimeError("test_scene.usda changed while publishing live events")
@@ -312,6 +351,7 @@ def main() -> int:
                 time.monotonic() + args.exit_after if args.exit_after > 0 else None
             )
             while any(process.poll() is None for process in viewer_processes):
+                _raise_if_viewer_failed(viewer_processes)
                 if exit_deadline is not None and time.monotonic() >= exit_deadline:
                     break
                 time.sleep(0.25)
