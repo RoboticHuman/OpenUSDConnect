@@ -13,6 +13,7 @@ from pxr import Usd, UsdGeom
 
 from integrations.mcp import discovery, introspection
 from integrations.mcp.config import McpConfig
+from integrations.mcp.errors import ToolError
 from integrations.mcp.session import ConnectionSession
 from integrations.mcp.validation import validate_and_prepare
 from openusdconnect.adapters import UsdStageAdapter
@@ -122,6 +123,57 @@ def test_ancestors_auto_created_over_the_wire(server):
             assert session.mirror_stage.GetPrimAtPath(path).IsValid()
     finally:
         session.disconnect()
+
+
+def test_connect_returns_with_existing_replay_applied(server):
+    author = _connect(server)
+    try:
+        result, _prepared = _author(
+            author,
+            [{"k": "ensure_prim", "prim": "/World/Existing", "typeName": "Xform"}],
+        )
+        assert result["mirror_synced"]
+    finally:
+        author.disconnect()
+
+    reader = _connect(server)
+    try:
+        assert reader.status()["mirror_synchronized"] is True
+        assert reader.mirror_stage.GetPrimAtPath("/World/Existing").IsValid()
+    finally:
+        reader.disconnect()
+
+
+def test_send_rejects_while_initial_replay_is_incomplete(server):
+    author = ConnectionSession(
+        McpConfig(port=server, client_id="replay-author", read_after_write_timeout_s=10.0)
+    )
+    try:
+        author.connect()
+        events = [{"k": "ensure_prim", "prim": "/World", "typeName": "Xform"}]
+        events.extend(
+            {"k": "ensure_prim", "prim": f"/World/P{index}", "typeName": "Xform"}
+            for index in range(2_000)
+        )
+        assert author.send(events)["mirror_synced"]
+    finally:
+        author.disconnect()
+
+    reader = ConnectionSession(
+        McpConfig(port=server, client_id="replay-reader", read_after_write_timeout_s=0.01)
+    )
+    try:
+        status = reader.connect()
+        assert status["mirror_synchronized"] is False
+
+        with pytest.raises(ToolError) as error:
+            reader.send(
+                [{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}]
+            )
+
+        assert error.value.code == "mirror_not_ready"
+    finally:
+        reader.disconnect()
 
 
 def test_changes_since_tracks_own_and_foreign_edits(server):

@@ -1885,6 +1885,7 @@ class UsdSyncServer:
         origin: str = "vfs-write",
         reject_stale: bool = True,
         reject_ambiguous: bool = True,
+        unchanged_snapshot: bool = False,
     ) -> int:
         """Replace the live edit state from a complete uploaded USD snapshot.
 
@@ -2047,6 +2048,15 @@ class UsdSyncServer:
                     "uploaded VFS snapshot looks destructively incomplete; "
                     f"removed {len(removed_paths)} of {len(before_paths)} prims"
                 )
+
+            if unchanged_snapshot:
+                analysis = _analysis(
+                    "unchanged",
+                    ["uploaded bytes match the current virtual snapshot"],
+                )
+                self.last_vfs_write_analysis = analysis.to_dict()
+                LOG.info("VFS snapshot write is unchanged; no events generated")
+                return 0
 
             emitter = NoticeEmitter(uploaded_stage)
             try:

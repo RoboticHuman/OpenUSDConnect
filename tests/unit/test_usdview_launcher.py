@@ -151,3 +151,16 @@ def test_main_accepts_presentation_arguments(monkeypatch):
     assert captured["camera_path"] == "/World/_TestCam"
     assert captured["expected_seq"] == 262
     assert captured["scene_lights"] is True
+
+
+def test_main_reports_discovery_error_without_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(
+        launcher,
+        "launch_usdview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("usdview unavailable")),
+    )
+
+    assert launcher.main(["test_scene.usda"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: usdview unavailable\n"
