@@ -285,11 +285,6 @@ class _CachedVirtualFile:
             try:
                 data = sink.getvalue()
                 self._translate_write(data)
-                LOG.warning(
-                    "VFS write translated (%d bytes) for %s",
-                    sink.bytes_written,
-                    self.name,
-                )
             finally:
                 sink.dispose()
             return
@@ -371,6 +366,7 @@ class VirtualStageFile(_CachedVirtualFile):
         return meta
 
     def _translate_write(self, data: bytes) -> None:
+        matches_current_snapshot = data == self.read()
         try:
             stage = _open_uploaded_stage(data)
         except InvalidVfsWriteError:
@@ -381,13 +377,19 @@ class VirtualStageFile(_CachedVirtualFile):
                 self.name,
             )
             return
-        event_count = self._server.replace_from_stage_snapshot(stage)
-        LOG.warning(
-            "VFS write fallback translated %d bytes from %s into %d events",
-            len(data),
-            self.name,
-            event_count,
+        event_count = self._server.replace_from_stage_snapshot(
+            stage,
+            unchanged_snapshot=matches_current_snapshot,
         )
+        if event_count:
+            LOG.warning(
+                "VFS write fallback translated %d bytes from %s into %d events",
+                len(data),
+                self.name,
+                event_count,
+            )
+        else:
+            LOG.info("VFS write fallback accepted unchanged snapshot for %s", self.name)
 
 
 class _GeneratedTextFile(_CachedVirtualFile):

@@ -16,6 +16,17 @@ ordered event history for the next run, while `session-changes.usda` is written
 on clean shutdown as a portable managed-layer export. Relative paths are
 resolved from the shell's current directory.
 
+In a second terminal, this sends one transaction and should print
+`Sent 1 event(s)`:
+
+```bash
+uv run openusdconnect-send '{"k":"ensure_prim","prim":"/World/FirstEdit","typeName":"Xform"}'
+```
+
+The dashboard currently listens on all network interfaces even though the
+local URL above uses `127.0.0.1`. Keep it behind a trusted firewall or omit
+`--dashboard-port` when the host network is not trusted.
+
 For a bounded test that creates and cleans up its own server, run the
 [headless first run](../README.md#getting-started). For a file-picker workflow,
 use the separate [server-provided USD file](live-open.md) path.
@@ -90,6 +101,10 @@ UsdPreviewSurface:
 ```bash
 uv run --group bundled-usd openusdconnect-server --base scene.usda
 ```
+
+`uv` isolates installed packages but inherits environment variables. Start a
+fresh shell or clear project-specific `PYTHONPATH`, `PXR_PLUGINPATH_NAME`, and
+native library search paths when verifying that the bundled runtime is active.
 
 ### Project runtime
 

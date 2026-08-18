@@ -23,7 +23,8 @@ headless, bounded, and does not require Blender or Unreal Engine.
 
 Requirements: [Git](https://git-scm.com/), Python 3.13+, and
 [uv](https://docs.astral.sh/uv/). The commands below work in PowerShell and
-POSIX-compatible shells.
+POSIX-compatible shells. If Python 3.13 is not already installed, `uv` can
+download a compatible interpreter into its managed cache.
 
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git

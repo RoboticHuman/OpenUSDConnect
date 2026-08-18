@@ -44,7 +44,7 @@ auto-connects after the window is ready.
 
 If discovery fails, run `uv run python scripts/start_usdview.py --help`, confirm
 the executable independently with `usdview --help`, then pass its full path
-with `--usdview`. The launcher reports each searched source in its error.
+with `--usdview`. Both launchers report each searched source as a concise error.
 
 ## Receive Behavior
 

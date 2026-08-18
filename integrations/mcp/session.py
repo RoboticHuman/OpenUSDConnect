@@ -103,6 +103,7 @@ class ConnectionSession:
 
         if cfg.mirror_enabled:
             self._start_mirror()
+            self._drain_initial_replay()
         return self.status()
 
     def _start_mirror(self) -> None:
@@ -202,6 +203,16 @@ class ConnectionSession:
                 time.sleep(0.005)
         return self.dispatcher.last_seq >= target_seq
 
+    def _drain_initial_replay(self) -> bool:
+        """Apply the initial replay before returning when it fits the read timeout."""
+        if self.dispatcher is None or self.receiver is None:
+            return False
+        deadline = time.monotonic() + self.config.read_after_write_timeout_s
+        while not self.receiver.synchronized and time.monotonic() < deadline:
+            if self.dispatcher.drain_and_apply() == 0:
+                time.sleep(0.005)
+        return self.receiver.synchronized
+
     def pump(self) -> int:
         """Non-blocking drain so introspection reflects recent foreign edits."""
         if self.dispatcher is None:
@@ -292,6 +303,9 @@ class ConnectionSession:
         )
 
     def status(self) -> dict:
+        if self.dispatcher is not None and self.receiver is not None:
+            if not self.receiver.synchronized:
+                self.pump()
         return {
             "ok": True,
             "connected": self.connected,
@@ -300,6 +314,7 @@ class ConnectionSession:
             "client_id": self.config.client_id,
             "department": self.config.department,
             "mirror_enabled": self.config.mirror_enabled,
+            "mirror_synchronized": bool(self.receiver and self.receiver.synchronized),
             "mirror_prim_count": self._mirror_prim_count(),
             "last_seq": self.dispatcher.last_seq if self.dispatcher else 0,
             "auth_rejected": self.auth_rejected,

@@ -14,7 +14,7 @@ authoring workflow.
 |-------------|-----|
 | **Unreal Engine 5.8** | The checked-in `.uplugin` targets 5.8 and uses the pxr USD C++ SDK behind Unreal's USD wrappers. Launcher 5.8 includes the required USD headers and libraries, so a source checkout is not required. Porting the source to an older engine may be possible, but the packaged plugin is not advertised as cross-version binary compatible. |
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
-| **`USDCore` plugin enabled** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). |
+| **`USDCore` plugin available** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). Enabling `USDImporter` enables this dependency transitively. |
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
 | FlatBuffers headers | Header-only. Run `python setup_flatbuffers.py` once from the plugin folder it downloads the runtime headers matching the committed flatc-generated protocol bindings (the generated code pins the exact version via a `static_assert`, so engine-shipped copies are not used). |
 
@@ -46,7 +46,15 @@ the project. Linux follows the same layout but has not been validated here.
    python setup_flatbuffers.py
    ```
 
-2. **Enable it in your `.uproject`** (alongside `USDImporter`):
+   For the repository's Unreal test harness, also initialize the asset
+   submodule from the repository root:
+
+   ```bash
+   git submodule update --init --recursive
+   ```
+
+2. **Enable it in your `.uproject`** (alongside `USDImporter`; `USDCore` is a
+   transitive dependency of `USDImporter`):
    ```json
    {
      "Plugins": [

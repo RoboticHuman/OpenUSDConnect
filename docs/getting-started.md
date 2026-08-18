@@ -47,6 +47,10 @@ does not require an external service. Startup is complete when the terminal
 reports `Server listening on 127.0.0.1:7200` and
 `Dashboard running on http://localhost:8080`.
 
+The dashboard listener currently binds to all network interfaces. Keep it
+behind a trusted firewall, or omit `--dashboard-port` when dashboard access is
+not needed.
+
 ## Connect Blender
 
 In the first Blender instance:

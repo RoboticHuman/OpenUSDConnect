@@ -23,11 +23,13 @@ uv run python examples/shared_stage_client/demo.py --app-name observer --seconds
 uv run python examples/shared_stage_client/demo.py --app-name author --author --seconds 3
 ```
 
-Start the observer first, then the author. Both print increasing `seq` values
-and the same non-`None` sphere `position`. They exit after the configured
-duration; stop the server with `Ctrl+C`. `shared-stage-demo.db` remains in the
-repository root so the session can be replayed. Use a different event-log name
-for an independent run.
+Start the observer first, then the author. Both print increasing `seq` values;
+the observer may print `position=None` before replay arrives, then should print
+non-`None` animated sphere positions. The samples need not occur at identical
+times in both processes. They exit after the configured duration; stop the
+server with `Ctrl+C`. `shared-stage-demo.db` remains in the repository root so
+the session can be replayed. Use a different event-log name for an independent
+run.
 
 To exercise native change tracking, build the bridge with
 `openusdconnect-build-sdf-notice-bridge` and pass its printed path through

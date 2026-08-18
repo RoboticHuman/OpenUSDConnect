@@ -24,17 +24,20 @@ the repository root, send one transaction:
 uv run openusdconnect-send '{"k":"ensure_prim","prim":"/World/Looks/GlassMtlx","typeName":"Material"}' '{"k":"set_reference","prim":"/World/Looks/GlassMtlx","refs":[{"asset_path":"examples/mtlx_document/glass.mtlx","prim_path":"/MaterialX/Materials/GlassMtlx"}]}' '{"k":"set_material_binding","prim":"/World/Sphere/Geom","material_path":"/World/Looks/GlassMtlx"}'
 ```
 
+Both commands use the default sync port `7200`. If the server uses another
+port, add the same `--port PORT` to `openusdconnect-send`.
+
 The command reports `Sent 3 event(s)`. Open <http://127.0.0.1:8080> to inspect
 the transaction. Stop the server with `Ctrl+C`; this writes
 `mtlx-example-changes.usda`. Verify the unresolved reference and binding were
 exported:
 
 ```text
-uv run python -c "from pxr import Sdf; l=Sdf.Layer.FindOrOpen('mtlx-example-changes.usda'); print(bool(l.GetPrimAtPath('/World/Looks/GlassMtlx')), bool(l.GetPropertyAtPath('/World/Sphere/Geom.material:binding')))"
+uv run python -c "from pxr import Sdf; l=Sdf.Layer.FindOrOpen('mtlx-example-changes.usda'); p=l.GetPrimAtPath('/World/Looks/GlassMtlx'); r=list(p.referenceList.prependedItems)[0]; b=l.GetPropertyAtPath('/World/Sphere/Geom.material:binding'); print(r.assetPath == 'examples/mtlx_document/glass.mtlx', str(r.primPath) == '/MaterialX/Materials/GlassMtlx', [str(x) for x in b.targetPathList.prependedItems] == ['/World/Looks/GlassMtlx'])"
 ```
 
-Successful output is `True True`. The event database and exported layer remain
-in the repository root. Use different names for an independent run.
+Successful output is `True True True`. The event database and exported layer
+remain in the repository root. Use different names for an independent run.
 
 The bundled `usd-core` runtime can author and preserve the `.mtlx` reference,
 but it does not include the `usdMtlx` file-format plugin. The server may

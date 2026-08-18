@@ -124,6 +124,25 @@ def test_ancestors_auto_created_over_the_wire(server):
         session.disconnect()
 
 
+def test_connect_returns_with_existing_replay_applied(server):
+    author = _connect(server)
+    try:
+        result, _prepared = _author(
+            author,
+            [{"k": "ensure_prim", "prim": "/World/Existing", "typeName": "Xform"}],
+        )
+        assert result["mirror_synced"]
+    finally:
+        author.disconnect()
+
+    reader = _connect(server)
+    try:
+        assert reader.status()["mirror_synchronized"] is True
+        assert reader.mirror_stage.GetPrimAtPath("/World/Existing").IsValid()
+    finally:
+        reader.disconnect()
+
+
 def test_changes_since_tracks_own_and_foreign_edits(server):
     session = _connect(server)
     emitter = None

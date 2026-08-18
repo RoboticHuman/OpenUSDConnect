@@ -468,6 +468,18 @@ class TestWriteDrop:
 
 
 class TestWriteTranslate:
+    def test_writing_current_snapshot_is_noop(self, srv, translate_vfile):
+        before = translate_vfile.read()
+        before_count = srv.get_event_count()
+        before_token = srv.get_snapshot_token()
+
+        translate_vfile.write(before)
+
+        assert srv.get_event_count() == before_count
+        assert srv.get_snapshot_token() == before_token
+        assert translate_vfile.read() == before
+        assert srv.last_vfs_write_analysis["status"] == "unchanged"
+
     def test_write_replaces_live_state_with_uploaded_snapshot(self, srv, translate_vfile):
         _send(
             srv,

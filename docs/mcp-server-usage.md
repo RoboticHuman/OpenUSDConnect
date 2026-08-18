@@ -56,8 +56,11 @@ use stderr.
 Ask the MCP client to call these tools in order:
 
 1. `usd_connect()` should return `connected: true`, host `127.0.0.1`, and port
-   `7200`.
-2. `usd_status()` should report the same endpoint and `mirror_enabled: true`.
+   `7200`. On an existing session it also drains the initial replay for up to
+   the configured read timeout.
+2. `usd_status()` should report the same endpoint, `mirror_enabled: true`, and
+   `mirror_synchronized: true`. If a large initial replay exceeds the timeout,
+   poll `usd_status()` until that field becomes true before reading prims.
 3. `usd_ensure_prim(prim="/World/McpSmoke", type_name="Xform")` should return
    `ok: true`, `sent: true`, and normally `mirror_synced: true`.
 4. `usd_get_prim(path="/World/McpSmoke")` should return that path with type
@@ -86,7 +89,7 @@ Flags (CLI) override environment variables override defaults.
 | `OPENUSDCONNECT_MIRROR` | `--mirror` / `--no-mirror` | on | In-memory mirror for introspection |
 | `OPENUSDCONNECT_AUTO_CONNECT` | `--auto-connect` / `--no-auto-connect` | on | Auto-connect on first authoring tool |
 | `OPENUSDCONNECT_AUTO_ANCESTORS` | `--auto-create-ancestors` / `--no-auto-create-ancestors` | on | Auto-create missing parent prims (as `Xform`) |
-| `OPENUSDCONNECT_READ_TIMEOUT` | `--read-after-write-timeout` | `2.0` | Seconds to wait for mirror visibility after a write |
+| `OPENUSDCONNECT_READ_TIMEOUT` | `--read-after-write-timeout` | `2.0` | Seconds to wait for initial replay or post-write mirror visibility |
 
 ## Tools
 

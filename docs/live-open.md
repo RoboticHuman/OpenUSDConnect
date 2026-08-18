@@ -46,6 +46,10 @@ Unlike the standalone server, the workstation launcher defaults to
 `--vfs-write-mode translate` so applications without a plug-in can save through
 the local mirror.
 
+When enabled, the dashboard listener binds to all network interfaces. The sync
+and WebDAV services retain their configured hosts. Keep the dashboard behind a
+trusted firewall or leave `--dashboard-port` at `0` on an untrusted network.
+
 ## Virtual Resources
 
 The WebDAV collection defaults to <http://127.0.0.1:7280/usd/>.
@@ -178,6 +182,9 @@ Translate mode checks that the upload is readable USD and that its embedded
 It rejects stale saves, incomplete destructive saves, unsupported authored
 properties, and sublayer-topology changes rather than silently replacing newer
 state.
+
+Saving bytes identical to the current snapshot is accepted as a no-op: it does
+not add events or advance the snapshot token.
 
 Use `--vfs-bypass-write-validation` only for compatibility experiments. Invalid
 USD accepted through the bypass cannot be translated and is dropped.
