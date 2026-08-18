@@ -66,6 +66,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Server port; 0 selects a free port.",
     )
     parser.add_argument("--blender", help="Explicit Blender executable path.")
+    parser.add_argument(
+        "--download-blender",
+        action="store_true",
+        help="Download a repo-local portable Blender when none is installed.",
+    )
     parser.add_argument("--usdview", help="Explicit usdview executable path.")
     parser.add_argument(
         "--unreal-engine-root",
@@ -119,6 +124,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         viewers.update(("usdview", "blender"))
     if not viewers:
         parser.error("choose --show or at least one --viewers entry")
+    if args.download_blender and "blender" not in viewers:
+        parser.error("--download-blender requires the blender viewer")
     args.viewers = viewers
     return args
 
@@ -173,7 +180,27 @@ def _find_blender(explicit: str | None) -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-    raise RuntimeError("Blender not found; pass --blender or set BLENDER_EXE")
+    raise RuntimeError("Blender not found")
+
+
+def _resolve_blender(explicit: str | None, *, download_missing: bool) -> Path:
+    try:
+        return _find_blender(explicit)
+    except RuntimeError:
+        if not download_missing:
+            raise RuntimeError(
+                "Blender not found; pass --blender, set BLENDER_EXE, run "
+                "`uv run python scripts/setup_blender_test.py`, or add "
+                "--download-blender"
+            ) from None
+
+    print("Blender not found; downloading a portable runtime...", flush=True)
+    subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "setup_blender_test.py")],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    return _find_blender(explicit)
 
 
 def _stinson_beach_for_usdview(executable: Path) -> str | None:
@@ -465,6 +492,13 @@ def main() -> int:
     args = _parse_args()
     from integrations.visualtest.replay import load_events
 
+    blender_executable = None
+    if "blender" in args.viewers:
+        blender_executable = _resolve_blender(
+            args.blender,
+            download_missing=args.download_blender,
+        )
+
     usdview_executable = None
     if "usdview" in args.viewers:
         from integrations.usdview.launcher import find_usdview
@@ -528,9 +562,10 @@ def main() -> int:
                     )
                 )
             if "blender" in args.viewers:
+                assert blender_executable is not None
                 viewer_processes.append(
                     _launch_blender(
-                        _find_blender(args.blender),
+                        blender_executable,
                         temp_root,
                         port,
                         expected_seq,
@@ -607,5 +642,13 @@ def main() -> int:
     return 0
 
 
+def _run_cli() -> int:
+    try:
+        return main()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run_cli())

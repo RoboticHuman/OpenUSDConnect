@@ -120,6 +120,8 @@ The runner starts a temporary server, opens the unchanged `test_scene.usda` in
 the selected viewers, and streams the committed Material Zoo fixture plus a
 shared camera and IBL. `--show` is the Blender-and-usdview shortcut; add
 `--viewers unreal` to launch Unreal alone or select all three as shown above.
+If Blender is unavailable, add `--download-blender` to download and configure
+the repo-local portable runtime before any viewers or server are started.
 Unreal is discovered and its ABI-matched plugin package is built or reused by
 the existing test harness. Use `--unreal-engine-root` to select an engine,
 `--no-presentation` to omit camera/IBL events, and `--exit-after 0` to keep the

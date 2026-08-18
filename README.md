@@ -164,6 +164,7 @@ above.
 See the same live material scene in Blender, usdview, and Unreal Engine:
 
 ```bash
+# Add --download-blender to install a repo-local portable Blender when needed.
 uv run python scripts/run_material_zoo.py --viewers blender usdview unreal
 ```
 
