@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from .cli_common import add_vfs_resource_args
+from .cli_common import add_version_argument, add_vfs_resource_args
 from .defaults import host_for_url
 
 
@@ -347,6 +347,7 @@ def _print_macos_paths(config: MacOSMountConfig) -> None:
 
 def _build_native_parser(backend: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_version_argument(parser)
     parser.add_argument("action", nargs="?", choices=["mount", "unmount"], default="mount")
     endpoint = parser.add_argument_group("virtual file service")
     add_vfs_resource_args(endpoint, option_prefix="")
@@ -502,12 +503,18 @@ def _mount_native(config: NativeMountConfig) -> MountedLocation:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in arguments:
+        version_parser = argparse.ArgumentParser(add_help=False)
+        add_version_argument(version_parser)
+        version_parser.parse_args(["--version"])
+
     try:
         backend = native_backend()
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 2
-    config = _parse_native_config(backend, argv)
+    config = _parse_native_config(backend, arguments)
     common = config.common
 
     if common.print_only:

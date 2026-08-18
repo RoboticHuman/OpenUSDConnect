@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openusdconnect import vfs_mount
+from openusdconnect import __version__, vfs_mount
 
 
 def test_default_unc():
@@ -28,6 +28,19 @@ def test_native_backend_selection():
     assert vfs_mount.native_backend("Darwin") == "macos"
     with pytest.raises(RuntimeError, match="local_vfs_bridge.py"):
         vfs_mount.native_backend("Linux")
+
+
+def test_version_does_not_require_a_supported_mount_backend(monkeypatch, capsys):
+    def fail_backend_detection():
+        raise AssertionError("backend detection should not run")
+
+    monkeypatch.setattr(vfs_mount, "native_backend", fail_backend_detection)
+
+    with pytest.raises(SystemExit) as error:
+        vfs_mount.main(["--version"])
+
+    assert error.value.code == 0
+    assert capsys.readouterr().out.endswith(f" {__version__}\n")
 
 
 def test_default_macos_mount_point(tmp_path):

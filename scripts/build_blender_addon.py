@@ -10,7 +10,9 @@ Output:
     dist/usd_connect_blender.zip
 """
 
+import ast
 import os
+import runpy
 import shutil
 import zipfile
 from pathlib import Path
@@ -21,7 +23,39 @@ ADDON_NAME = "usd_connect"
 ZIP_NAME = "usd_connect_blender.zip"
 
 
+def _project_version() -> str:
+    namespace = runpy.run_path(REPO_ROOT / "openusdconnect" / "_version.py")
+    return str(namespace["__version__"])
+
+
+def _blender_version(path: Path) -> tuple[int, int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "bl_info" for target in node.targets
+        ):
+            value = ast.literal_eval(node.value)
+            return tuple(value["version"])
+    raise RuntimeError(f"bl_info not found in {path}")
+
+
+def _validate_version() -> None:
+    version = _project_version()
+    try:
+        expected = tuple(int(part) for part in version.split("."))
+    except ValueError as exc:
+        raise RuntimeError(f"Blender packaging requires an X.Y.Z release version, got {version}") from exc
+    addon_path = REPO_ROOT / "integrations" / "blender" / "__init__.py"
+    actual = _blender_version(addon_path)
+    if actual != expected:
+        raise RuntimeError(
+            f"Blender addon version {actual} does not match OpenUSDConnect {version}"
+        )
+
+
 def build():
+    _validate_version()
+
     # Clean
     build_dir = REPO_ROOT / "build" / ADDON_NAME
     if build_dir.exists():

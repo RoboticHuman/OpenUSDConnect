@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from nicegui import ui
 
+from openusdconnect._version import __version__
 from openusdconnect.protocol_constants import EVENT_KEYS
 from openusdconnect.server.types import ReplayModeConflictError
 
@@ -141,6 +142,7 @@ def setup_pages(srv: UsdSyncServer):
             ui.label("OpenUSDConnect Dashboard").classes(
                 "text-lg font-semibold dash-accent"
             )
+            ui.label(f"v{__version__}").classes("text-xs dash-muted")
             ui.space()
             ui.select(
                 {0: "Off", 2: "2s", 5: "5s", 10: "10s", 30: "30s"},
