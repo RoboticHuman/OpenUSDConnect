@@ -56,6 +56,16 @@ def _remove_log(path: Path) -> None:
         time.sleep(0.02)
 
 
+def _try_launch_usdview(stage: Path, host: str, port: int) -> subprocess.Popen | None:
+    from integrations.usdview.launcher import launch_usdview
+
+    try:
+        return launch_usdview(str(stage), host=host, port=port)
+    except (OSError, RuntimeError) as exc:
+        print(f"usdview unavailable ({exc}); continuing headless")
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         parents=[demo.build_parser(add_help=False)],
@@ -95,16 +105,7 @@ def main() -> int:
             return 1
 
         if not args.no_usdview:
-            from integrations.usdview.launcher import launch_usdview
-
-            try:
-                usdview = launch_usdview(
-                    str(demo.BASE_USD),
-                    host=args.host,
-                    port=args.port,
-                )
-            except RuntimeError as exc:
-                print(f"usdview unavailable ({exc}); continuing headless")
+            usdview = _try_launch_usdview(demo.BASE_USD, args.host, args.port)
 
         peer = subprocess.Popen(
             [

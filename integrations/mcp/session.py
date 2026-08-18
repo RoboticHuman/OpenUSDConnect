@@ -181,6 +181,13 @@ class ConnectionSession:
         """Send one txn and drain the mirror until it reflects the write."""
         if not self.connected:
             raise ToolError("not connected, call usd_connect first", code="not_connected")
+        if self.receiver is not None and not self.receiver.synchronized:
+            if not self._drain_initial_replay():
+                raise ToolError(
+                    "the mirror is still applying the initial replay",
+                    code="mirror_not_ready",
+                    hint="Retry after usd_status reports mirror_synchronized=true.",
+                )
         pre_seq = self.dispatcher.last_seq if self.dispatcher else 0
         if not self.sender.send_events(events):
             self.sender = None
