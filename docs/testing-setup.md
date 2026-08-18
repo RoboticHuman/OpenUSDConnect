@@ -14,11 +14,21 @@ Unreal Engine, RenderMan, operating-system mounts, or large external assets.
 | Unreal E2E | `tests/integration/test_unreal_integration.py` | requires `--unreal-tests` |
 | Visual regression | `tests/visual/` | requires `--visual-tests`, RenderMan, and FLIP |
 
-Install the normal development environment:
+Configure the project OpenUSD runtime first. On PowerShell:
+
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+```
+
+Then install the normal development environment without the bundled runtime:
 
 ```bash
-uv sync --group bundled-usd --group vfs --group dev
+uv sync --group vfs --group dev
 ```
+
+Use `uv sync --group bundled-usd --group vfs --group dev` only for a
+renderer-neutral test environment that needs neither MaterialX nor custom
+plugins.
 
 Run the common suites:
 
@@ -26,13 +36,6 @@ Run the common suites:
 uv run pytest tests/unit/ -v
 uv run pytest tests/ -v
 uv run pytest tests/unit/ --slow-tests -v
-```
-
-On PowerShell, activate the OpenUSD installation once before running tests:
-
-```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
-uv run pytest tests/ -v
 ```
 
 For automation or other shells, configure the test command through the wrapper:

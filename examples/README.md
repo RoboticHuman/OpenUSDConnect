@@ -2,11 +2,20 @@
 
 These examples exercise the same public clients and event protocol used by the
 integrations. They require Git, Python 3.13+, and `uv`; Blender and Unreal Engine
-are not required. From the repository root, install the standard OpenUSD runtime:
+are not required.
+
+## Runtime setup
+
+Configure the project OpenUSD runtime as described in the
+[runtime guide](../docs/cli-reference.md#openusd-runtime-and-custom-plugins),
+then install the base environment from the repository root:
 
 ```text
-uv sync --group bundled-usd
+uv sync
 ```
+
+Use `uv sync --group bundled-usd` only when the examples need neither MaterialX
+nor custom renderer, resolver, file-format, or shader plugins.
 
 Start with the bounded headless test:
 
@@ -28,6 +37,9 @@ stops its temporary server and clients and removes its temporary event log.
 The launchers coordinate their own server and participating processes. They use
 temporary event logs and stop their child processes on normal exit or
 `Ctrl+C`. Add `--no-usdview` when no usdview executable is installed.
+
+The Instancing Dance default Pyramid comes from the `assets` submodule. Before
+running it, use `git submodule update --init --recursive`.
 
 ## Multi-process demo
 

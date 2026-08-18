@@ -4,11 +4,8 @@ This example edits an existing sublayer through `SharedStageClient`. The same
 `Usd.Stage` receives authoritative echoes, so no separate mirror stage or
 protocol event dictionaries are needed.
 
-From the repository root, install the bundled OpenUSD runtime:
-
-```text
-uv sync --group bundled-usd
-```
+Configure OpenUSD using the shared [example runtime
+setup](../README.md#runtime-setup) before running this demo.
 
 Start a shared-stage server:
 

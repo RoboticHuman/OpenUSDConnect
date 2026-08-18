@@ -17,9 +17,27 @@ POSIX-compatible shells.
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
-uv sync --group bundled-usd --group dashboard
+```
+
+Configure the same compatible OpenUSD build and plugin environment used by the
+project. For example, in PowerShell:
+
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+```
+
+The [runtime guide](cli-reference.md#openusd-runtime-and-custom-plugins) covers
+other shells, custom plugin paths, and renderer setup. With that environment
+active, install the dashboard dependency and build the add-on:
+
+```bash
+uv sync --group dashboard
 uv run python scripts/build_blender_addon.py
 ```
+
+If this first session needs neither MaterialX nor custom renderer, resolver,
+file-format, or shader plugins, `uv sync --group bundled-usd --group dashboard`
+is the limited renderer-neutral fallback.
 
 The build creates `dist/usd_connect_blender.zip`. In Blender:
 
@@ -91,9 +109,12 @@ through the same TCP sync server used above.
 Stop the standard server with `Ctrl+C`, then run:
 
 ```bash
-uv sync --group bundled-usd --group vfs --group dashboard
+uv sync --group vfs --group dashboard
 uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port 8080 --open
 ```
+
+Bundled fallback users must also include `--group bundled-usd` in the `uv sync`
+command.
 
 The launcher starts:
 

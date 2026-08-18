@@ -10,11 +10,8 @@ This example runs two independent USD-native clients:
 The first client receives both its own authoritative sphere and the other
 client's cube. No application code authors protocol event dictionaries.
 
-From the repository root, install the bundled OpenUSD runtime:
-
-```text
-uv sync --group bundled-usd
-```
+Configure OpenUSD using the shared [example runtime
+setup](../README.md#runtime-setup) before running this demo.
 
 Run the server, both clients, and usdview with one command:
 

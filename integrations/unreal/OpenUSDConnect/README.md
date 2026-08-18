@@ -108,13 +108,19 @@ does not make the receive path layer-aware.
 
 ### 1. Start The OpenUSDConnect Server
 
-The base-file workflow is the default. From the repository root, install the
-runtime and start the server with the same scene that Unreal will open:
+The base-file workflow is the default. Configure the same compatible OpenUSD
+build and plugin environment used by the project, then install the dashboard
+dependency and start the server with the same scene that Unreal will open:
 
 ```bash
-uv sync --group bundled-usd --group dashboard
+uv sync --group dashboard
 uv run openusdconnect-server --port 7200 --base my_scene.usda --event-log unreal-session.db --dashboard-port 8080
 ```
+
+See [OpenUSD runtime and custom
+plugins](../../../docs/cli-reference.md#openusd-runtime-and-custom-plugins).
+Use `bundled-usd` only for a renderer-neutral session that needs neither
+MaterialX nor custom plugins.
 
 The dashboard is available at <http://127.0.0.1:8080>. Stop the server with
 Ctrl+C; `unreal-session.db` retains its event history.
@@ -150,9 +156,12 @@ limited to one unmuted collaboration layer and no department policy.
 From the repository root:
 
 ```bash
-uv sync --group bundled-usd --group vfs --group dashboard
+uv sync --group vfs --group dashboard
 uv run python scripts/start_live_open.py --base my_scene.usda --dashboard-port 8080 --open
 ```
+
+Bundled fallback users must also include `--group bundled-usd` in the `uv sync`
+command.
 
 The launcher prints the local file path and session state file. On Windows the
 default path is `O:\scene.usd`; on macOS and Linux use the printed mirror

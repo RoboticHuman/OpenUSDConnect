@@ -5,10 +5,12 @@ A ring of pyramids, each a scenegraph instance sharing one prototype,
 bobs on phase-offset sine waves while the prototype's own animated
 matrix transform keeps the pyramids spinning.
 
-From the repository root, install the bundled OpenUSD runtime:
+Configure OpenUSD using the shared [example runtime
+setup](../README.md#runtime-setup), then initialize the Pyramid asset used by
+the default demo:
 
 ```text
-uv sync --group bundled-usd
+git submodule update --init --recursive
 ```
 
 ## Quickstart

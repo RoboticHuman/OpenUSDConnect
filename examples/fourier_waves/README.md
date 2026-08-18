@@ -12,11 +12,8 @@ it as the prim's `Result` child. Because the evaluator is just another
 client, every connected receiver sees the expanded geometry, including ones
 with no Hydra at all.
 
-From the repository root, install the bundled OpenUSD runtime:
-
-```text
-uv sync --group bundled-usd
-```
+Configure OpenUSD using the shared [example runtime
+setup](../README.md#runtime-setup) before running this demo.
 
 ## Quickstart
 

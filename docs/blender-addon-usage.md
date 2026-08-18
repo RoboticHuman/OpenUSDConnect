@@ -86,9 +86,12 @@ The optional live-open service provides a generated USD file containing the
 current scene state and sync server address:
 
 ```bash
-uv sync --group bundled-usd --group vfs
+uv sync --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
+
+This assumes the project OpenUSD runtime is active. Add `--group bundled-usd`
+only for a renderer-neutral session without MaterialX or custom plugins.
 
 Import the reported local `scene.usd` path with prim tagging. Embedded metadata
 sets the server endpoint and `snapshot_seq`; the addon continues at

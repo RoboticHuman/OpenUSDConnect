@@ -15,9 +15,14 @@ logical layers.
 
 ## Install
 
+Configure the project OpenUSD runtime, then install the MCP dependency:
+
 ```bash
-uv sync --group bundled-usd --group mcp  # installs pxr and the official MCP SDK
+uv sync --group mcp
 ```
+
+Use `uv sync --group bundled-usd --group mcp` only for a renderer-neutral
+session that needs neither MaterialX nor custom plugins.
 
 ## Run
 
@@ -36,16 +41,26 @@ local stdio servers. Use the absolute path to the cloned repository in place of
   "mcpServers": {
     "openusdconnect": {
       "command": "uv",
-      "args": ["--directory", "<repo>", "run", "--group", "bundled-usd", "--group", "mcp", "python", "-m", "integrations.mcp"],
+      "args": ["--directory", "<repo>", "run", "--no-sync", "python", "scripts/run_with_openusd.py", "--usd-root", "<OpenUSDInstall>", "--", "python", "-m", "integrations.mcp"],
       "env": { "OPENUSDCONNECT_PORT": "7200" }
     }
   }
 }
 ```
 
-On Windows JSON paths either use forward slashes, such as
-`D:/Workspace/OpenUSDConnect`, or escape each backslash. `uv --directory
-<repo>` sets the working directory so `integrations.mcp` resolves.
+The wrapper applies the selected OpenUSD runtime to the MCP process. Add its
+repeatable `--plugin-path` or `--dll-dir` options, or `--renderman-root`, before
+the `--` separator when required. On Windows JSON paths either use forward
+slashes, such as `D:/Workspace/OpenUSDConnect`, or escape each backslash.
+
+For the bundled fallback, replace `args` with:
+
+```json
+["--directory", "<repo>", "run", "--no-sync", "python", "-m", "integrations.mcp"]
+```
+
+`uv --directory <repo>` sets the working directory so `integrations.mcp`
+resolves. `--no-sync` preserves the runtime selected during installation.
 
 The MCP client starts and owns this stdio process. It is separate from the TCP
 sync server in the first terminal. MCP protocol messages use stdout; diagnostics

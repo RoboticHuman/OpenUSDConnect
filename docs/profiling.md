@@ -55,17 +55,17 @@ The stress harness starts a temporary server and defaults to 40 send-only,
 
 ```bash
 # Performance baseline, no profiler
-uv run --group bundled-usd python scripts/stress_test_departments.py \
+uv run --isolated python scripts/stress_test_departments.py \
   --emitters 40 --receivers 40 --bidi 20 --iterations 100
 
 # Text hotspot report at a controlled sampling rate
-uv run --group bundled-usd --group profile python scripts/stress_test_departments.py \
+uv run --isolated --group profile python scripts/stress_test_departments.py \
   --emitters 40 --receivers 40 --bidi 20 --iterations 100 \
   --text-profile --profile-rate 50 \
   --profile-output stress-profile.txt
 
 # SVG flame graph
-uv run --group bundled-usd --group profile python scripts/stress_test_departments.py \
+uv run --isolated --group profile python scripts/stress_test_departments.py \
   --profile --profile-rate 50 \
   --profile-output stress-profile.svg
 ```
@@ -75,8 +75,9 @@ verification, and then checks final shared and private prim state.
 Its server inherits the selected OpenUSD runtime and plugin environment.
 RenderMan is discovered automatically when `RMANTREE` is set. The reported
 server PID is the real interpreter PID, so no manual process lookup is needed.
-For a project runtime, load its environment and replace `--group bundled-usd`
-with `--isolated` in the commands above.
+The commands assume the project OpenUSD environment is active. For a
+renderer-neutral profile that needs neither MaterialX nor custom plugins,
+replace `--isolated` with `--group bundled-usd`.
 
 Interpret its metrics separately:
 

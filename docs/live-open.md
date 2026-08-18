@@ -22,9 +22,14 @@ metadata, and server configuration.
 ## Start The Live-Open Services
 
 ```bash
-uv sync --group bundled-usd --group vfs --group dashboard
+uv sync --group vfs --group dashboard
 uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port 8080 --open
 ```
+
+This command assumes the project OpenUSD runtime is active. Use the
+`bundled-usd` group only for a renderer-neutral session that needs neither
+MaterialX nor custom renderer, resolver, file-format, or shader plugins; in
+that case, include `--group bundled-usd` in the `uv sync` command.
 
 The workstation launcher starts the sync server, WebDAV endpoint, and a
 write-capable local mirror. On Windows it also exposes the mirror through `O:`

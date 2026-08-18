@@ -5,10 +5,12 @@ its material to the sphere in `test_scene.usda`. Consumers with a native
 MaterialX pipeline can resolve the document directly instead of receiving an
 inline USD shader graph.
 
-From the repository root, install the standard runtime and dashboard:
+Configure a project OpenUSD runtime with MaterialX support as described in the
+[runtime guide](../../docs/cli-reference.md#openusd-runtime-and-custom-plugins),
+then install the dashboard dependency:
 
 ```text
-uv sync --group bundled-usd --group dashboard
+uv sync --group dashboard
 ```
 
 Start the server in the first terminal:

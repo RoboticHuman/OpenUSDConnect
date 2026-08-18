@@ -9,7 +9,7 @@ For a first run or a quick orientation:
 
 - [Project overview](../README.md) introduces the server, integrations,
   dependency groups, and core concepts.
-- [Headless first run](../README.md#getting-started) starts a temporary server
+- [Headless first run](../README.md#get-started) starts a temporary server
   and two Python clients, verifies synchronization, and exits on its own.
 - [Blender getting started](getting-started.md) covers the base-file connection
   and the optional server-provided USD file.
