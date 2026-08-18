@@ -136,8 +136,9 @@ Generation and revision. The graph is versioned by a `generation` /
 its own positive topology revision. A normal server restart restores the
 generation, revisions, and stable key registry from the database. Log
 compaction creates a new generation and resets the reachable per-parent
-revisions because it replaces the old history with one authoritative baseline;
-the durable layer keys do not change. Per-parent revisions let edits to
+revisions because it replaces the old history with a new topology baseline and
+compacted authored-content events; the durable layer keys do not change.
+Per-parent revisions let edits to
 unrelated layer stacks commit independently without weakening conflict
 detection for two concurrent edits to the same parent.
 
@@ -158,10 +159,12 @@ Event kinds. Three kinds carry shared-stage content:
   assigned, and re-broadcasts the canonical event. At most one per transaction.
 
 Baseline. A new shared-stage database begins with one `layer_graph_state`
-message: a sequenced snapshot of the whole reachable graph with `generation`,
-the baseline `revision`, `root_layer_key`, and each layer's sublayer entries and
-parent revision. Compaction atomically replaces the log with a new-generation
-baseline. Every replay therefore begins with a complete baseline, while an
-ordinary restart reuses the existing one rather than growing the log. Clients
-bind `root_layer_key` to their local root layer, materialize sublayer entries
-without resolving assets, and only then can route and apply records.
+message: a sequenced snapshot of the reachable graph's topology and routing,
+including `generation`, the baseline `revision`, `root_layer_key`, and each
+layer's sublayer entries and parent revision. Compaction atomically replaces
+the log with a new-generation topology baseline followed by compacted events
+that reconstruct the server's current authored layer contents. This preserves
+unsaved synchronized edits across replay, but it does not compare or distribute
+the participants' untouched initial asset contents. Clients bind
+`root_layer_key` to their local root layer, materialize sublayer entries without
+resolving assets, and only then can route and apply records.

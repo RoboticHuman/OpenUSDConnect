@@ -18,6 +18,12 @@ Start with `ManagedClient` unless the application needs only one direction,
 intentionally authors multiple custom layers, or must synchronize the original
 authored-layer graph.
 
+Managed clients must open equivalent base content and resolve referenced assets
+compatibly. The server synchronizes collaboration opinions and their ordered
+history; it does not distribute the base asset itself. The server-provided
+snapshot workflow is a separate flat continuation path used by the Blender and
+Unreal host integrations.
+
 ## Lifecycle and status
 
 The high-level clients share the same stage-thread and status conventions, with
@@ -265,9 +271,12 @@ version, platform, and architecture; incompatible builds are rejected before
 loading. Pass `delegate_bridge_path=` to select a specific build.
 
 `SharedStageClient` never calls `Sdf.Layer.Save()`. The server log preserves
-unsaved collaboration history, while saving file or resolver-backed layers
-remains application policy. Shared-stage rejection recovery has additional
-clean-stage requirements described in [Client recovery](client-recovery.md).
+unsaved synchronized edits, including through compaction, while saving file or
+resolver-backed layers remains application policy. The compacted log begins
+with topology/routing state and authored-content events; it does not establish
+that untouched initial assets are identical across clients. Shared-stage
+rejection recovery has additional clean-stage requirements described in
+[Client recovery](client-recovery.md).
 
 The implementation details and protocol event shapes are documented in
 [Shared-stage architecture](shared-stage-architecture.md).

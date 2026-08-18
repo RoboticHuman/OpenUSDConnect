@@ -210,7 +210,7 @@ uv run python scripts/start_live_open.py --base test_scene.usda --open
 
 Flat snapshot continuation requires one unmuted collaboration layer and no
 department policy. Use the original base scene when layer ordering or muting
-must be preserved. See the [Live-Open Quickstart](docs/live-open-quickstart.md).
+must be preserved. See [Server-provided USD files](docs/live-open.md).
 
 ### Shared-stage synchronization
 
@@ -224,11 +224,13 @@ USD hosts can optionally build the exact Sdf notice bridge with
 
 ## Documentation
 
+- [Documentation index](docs/README.md)
+- [Getting started with Blender](docs/getting-started.md)
 - [USD-native API guide](docs/usd-native-integration.md)
 - [Client recovery](docs/client-recovery.md)
 - [Blender addon](docs/blender-addon-usage.md)
 - [Live material editing](docs/live-material-editing.md)
-- [Live-open and VFS](docs/live-open-quickstart.md)
+- [Server-provided USD files and VFS](docs/live-open.md)
 - [Shared-stage architecture](docs/shared-stage-architecture.md)
 - [MCP server](docs/mcp-server-usage.md)
 - [Command-line reference](docs/cli-reference.md)

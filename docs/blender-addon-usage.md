@@ -1,8 +1,8 @@
 # Blender addon
 
-The Blender addon imports USD with stable prim-path tags, publishes Blender
-edits through a local USD authoring stage, and applies authoritative composed
-changes from a separate USD mirror back into Blender.
+The Blender add-on imports USD while recording the USD path represented by each
+Blender object. It sends supported Blender edits to the server and applies
+changes received from other connected clients.
 
 ## Install
 
@@ -59,7 +59,7 @@ One connected client may claim playback leadership. The leader can play,
 pause, or push the current frame; followers update their Blender timelines from
 the server's playback state.
 
-## Normal layered workflow
+## Base-file workflow
 
 Use this workflow when collaboration-layer order, muting, or departments must
 be preserved.
@@ -67,10 +67,7 @@ be preserved.
 1. Start a managed server on the original base scene:
 
    ```bash
-   uv run openusdconnect-server \
-     --base scene.usda \
-     --event-log events.db \
-     --port 7200
+   uv run openusdconnect-server --base scene.usda --event-log events.db --port 7200
    ```
 
 2. In each Blender instance, import the same original base through **Import USD
@@ -83,14 +80,18 @@ The authoring stage and receive mirror are intentionally separate. An authored
 opinion stays in its logical layer, while Blender displays the value composed
 from the complete authoritative layer stack.
 
-## Live-open workflow
+## Server-provided file workflow
 
-For a simple single-layer workstation session:
+The optional live-open service provides a generated USD file containing the
+current scene state and sync server address:
 
 ```bash
-uv sync --group bundled-usd --group vfs
+uv sync --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
+
+This assumes the project OpenUSD runtime is active. Add `--group bundled-usd`
+only for a renderer-neutral session without MaterialX or custom plugins.
 
 Import the reported local `scene.usd` path with prim tagging. Embedded metadata
 sets the server endpoint and `snapshot_seq`; the addon continues at
@@ -102,7 +103,8 @@ requires one unmuted collaboration layer and no department policy. A server
 that requires layered replay rejects the receiver without closing the imported
 scene. Use the original base workflow in that case.
 
-The [Live-Open Quickstart](live-open-quickstart.md) covers local mirrors,
+The [getting started guide](getting-started.md) covers the first local session. The
+[server-provided USD file guide](live-open.md) covers local mirrors,
 Windows/macOS mounts, write modes, and token behavior.
 
 ## What synchronizes
