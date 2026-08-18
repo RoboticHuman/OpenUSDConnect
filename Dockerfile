@@ -18,7 +18,7 @@ ARG DASHBOARD=0
 WORKDIR /app
 
 # Install the package, bundled OpenUSD runtime, and VFS dependencies.
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY openusdconnect/ openusdconnect/
 COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/
 

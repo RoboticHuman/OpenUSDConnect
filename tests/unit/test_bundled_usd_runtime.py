@@ -101,4 +101,5 @@ def test_docker_uses_bundled_usd_pin():
 
     assert bundled_dependencies == ["usd-core==26.8"]
     assert f"pip install --no-cache-dir {bundled_dependencies[0]}" in dockerfile
+    assert "COPY pyproject.toml README.md LICENSE NOTICE ./" in dockerfile
     assert "COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/" in dockerfile
