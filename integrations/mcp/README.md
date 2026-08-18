@@ -1,10 +1,11 @@
 # OpenUSDConnect MCP server
 
-Exposes the OpenUSDConnect event protocol as MCP tools so Claude can author USD
-scenes (meshes, references/payloads, transforms, instancing, and
-UsdPreviewSurface / MaterialX shader networks) and stream them to the sync
-server. Network client only; scene authoring uses the core event protocol, and
-the local USD mirror negotiates the optional logical-layer replay capability.
+Exposes the OpenUSDConnect event protocol as MCP tools so any MCP-compatible
+host can author USD scenes (meshes, references/payloads, transforms,
+instancing, and UsdPreviewSurface / MaterialX shader networks) and stream them
+to the sync server. Network client only; scene authoring uses the core event
+protocol, and the local USD mirror negotiates the optional logical-layer
+replay capability.
 
 ## Quick start
 
@@ -13,13 +14,13 @@ uv sync --group bundled-usd --group mcp
 uv run python -m openusdconnect.server --port 7200     # in one terminal
 ```
 
-Register with Claude Code:
+Register this stdio command with your MCP host:
 
 ```bash
-claude mcp add openusdconnect -- uv --directory <repo> run python -m integrations.mcp
+uv --directory <repo> run python -m integrations.mcp
 ```
 
-or Claude Desktop (`claude_desktop_config.json`):
+Many MCP hosts accept a configuration shaped like this:
 
 ```json
 { "mcpServers": { "openusdconnect": {

@@ -148,6 +148,20 @@ replay, reconnection, adapters, and the cases that require recovery.
 | MCP server | Author and inspect | `uv run python -m integrations.mcp` |
 | Dashboard | Administration | `uv run --group bundled-usd --group dashboard python scripts/demo_layer_dashboard.py` |
 
+### Run the cross-application Material Zoo
+
+See the same live material scene in Blender, usdview, and Unreal Engine:
+
+```bash
+uv run python scripts/run_material_zoo.py --viewers blender usdview unreal
+```
+
+The runner discovers the selected applications, starts a temporary server,
+connects each integration, and streams the Material Zoo with a shared camera
+and environment light. Select any subset of the three viewers. See the
+[testing guide](docs/testing-setup.md#inspect-the-material-zoo-interactively)
+for runtime selection and additional options.
+
 The Blender addon zip is written to `dist/usd_connect_blender.zip`. Install it
 through **Edit > Preferences > Add-ons > Install from Disk**. See the
 [Blender guide](docs/blender-addon-usage.md) for normal and live-open workflows.

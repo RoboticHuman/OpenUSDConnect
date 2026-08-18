@@ -7,8 +7,9 @@ class ToolError(Exception):
     """An invalid request the caller can fix from the message.
 
     Carries a machine-readable ``code`` plus optional locating context so the
-    error Claude sees points at the exact event/field to correct. Tool wrappers
-    catch this and return :meth:`to_dict`; unexpected exceptions propagate.
+    error returned to the MCP client points at the exact event/field to correct.
+    Tool wrappers catch this and return :meth:`to_dict`; unexpected exceptions
+    propagate.
     """
 
     def __init__(

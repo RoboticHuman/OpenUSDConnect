@@ -27,21 +27,21 @@ Start a sync server (one is required because the MCP is network-only):
 uv run python -m openusdconnect.server --port 7200
 ```
 
-Then register it with any MCP client that supports stdio servers. For example,
-with Claude Code:
+Then register it with any MCP host that supports stdio servers. The server
+command is:
 
 ```bash
-claude mcp add openusdconnect -- uv --directory D:\gamedev\OpenUSDConnect run python -m integrations.mcp
+uv --directory <repo> run python -m integrations.mcp
 ```
 
-**Claude Desktop** (`claude_desktop_config.json`):
+Many MCP hosts accept a configuration shaped like this:
 
 ```json
 {
   "mcpServers": {
     "openusdconnect": {
       "command": "uv",
-      "args": ["--directory", "D:\\gamedev\\OpenUSDConnect", "run", "python", "-m", "integrations.mcp"],
+      "args": ["--directory", "<repo>", "run", "python", "-m", "integrations.mcp"],
       "env": { "OPENUSDCONNECT_PORT": "7200" }
     }
   }

@@ -1,4 +1,4 @@
-"""Mirror-stage introspection: let Claude read current scene state.
+"""Mirror-stage introspection for MCP clients to read current scene state.
 
 All reads target the in-memory mirror the session keeps in sync with the
 server, so they reflect the composed result of the MCP's own writes and every

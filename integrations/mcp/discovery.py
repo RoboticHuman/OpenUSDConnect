@@ -1,7 +1,7 @@
 """Sdr-registry shader-node discovery.
 
-Lets Claude discover valid shader node ids and their exact input/output names
-and Sdf types, for UsdPreviewSurface, UsdUVTexture, and the ~785 MaterialX
+Lets MCP clients discover valid shader node ids and their exact input/output
+names and Sdf types, for UsdPreviewSurface, UsdUVTexture, and the ~785 MaterialX
 ``ND_*`` nodes alike, so authored ``info_id`` / ``input_types`` / connection
 endpoints match the registry instead of being guessed. Also backs the
 ``input_types`` validation and the info_id existence warning.
