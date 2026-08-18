@@ -22,6 +22,14 @@ from integrations.unreal.test_harness import (
     install_plugin_in_project,
 )
 
+MATERIALX_TEXTURE_DIR = (
+    Path(__file__).parents[2] / "assets" / "test_assets" / "MaterialXTest" / "textures"
+)
+MATERIALX_TEXTURES_AVAILABLE = all(
+    (MATERIALX_TEXTURE_DIR / name).is_file()
+    for name in ("brass_color.jpg", "brass_roughness.jpg")
+)
+
 
 def _fake_macos_engine(root: Path, version=(5, 8, 0), *, installed=True) -> Path:
     (root / "Engine" / "Binaries" / "Mac").mkdir(parents=True)
@@ -364,6 +372,10 @@ def test_interactive_editor_command_uses_gui_without_unattended(tmp_path):
     assert "-nullrhi" not in command
 
 
+@pytest.mark.skipif(
+    not MATERIALX_TEXTURES_AVAILABLE,
+    reason="USD WG assets submodule not present",
+)
 def test_scenario_expected_layers_cover_material_updates(tmp_path):
     scenario = create_scenario(tmp_path, port=17421, python_executable=Path("/python"))
     baseline = Usd.Stage.Open(str(scenario.base_stage))
@@ -434,6 +446,10 @@ def test_scenario_expected_layers_cover_material_updates(tmp_path):
     assert scenario.update_events
 
 
+@pytest.mark.skipif(
+    not MATERIALX_TEXTURES_AVAILABLE,
+    reason="USD WG assets submodule not present",
+)
 def test_create_scenario_discards_previous_run_state(tmp_path):
     stale_paths = [
         tmp_path / "events.db",

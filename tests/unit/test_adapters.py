@@ -18,6 +18,14 @@ from openusdconnect.protocol_constants import EVENT_KEYS
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 
 pytestmark_pxr = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
+INHERIT_SPECIALIZE_ASSET = (
+    Path(__file__).parents[2]
+    / "assets"
+    / "test_assets"
+    / "foundation"
+    / "stage_composition"
+    / "inherit_and_specialize.usda"
+)
 
 
 def _spec_field_event(
@@ -436,17 +444,13 @@ class TestUsdStageAdapterDirectMethods:
             == event_stage.GetRootLayer().ExportToString()
         )
 
+    @pytest.mark.skipif(
+        not INHERIT_SPECIALIZE_ASSET.is_file(),
+        reason="USD WG assets submodule not present",
+    )
     def test_direct_layer_replacement_composes_real_inherit_specialize_asset(self):
         """The repository fixture preserves implied inherit/specialize behavior."""
-        fixture = (
-            Path(__file__).parents[2]
-            / "assets"
-            / "test_assets"
-            / "foundation"
-            / "stage_composition"
-            / "inherit_and_specialize.usda"
-        )
-        source_layer = Sdf.Layer.FindOrOpen(str(fixture))
+        source_layer = Sdf.Layer.FindOrOpen(str(INHERIT_SPECIALIZE_ASSET))
         assert source_layer is not None
 
         stage, adapter = self._make_stage()

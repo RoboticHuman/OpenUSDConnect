@@ -356,6 +356,10 @@ class TestMockAdapterCamera:
         assert stored["gprim_attrs"]["projection"] == "perspective"
 
 
+@pytest.mark.skipif(
+    not STANDARD_SHADER_BALL_CAMERA.is_file(),
+    reason="USD WG assets submodule not present",
+)
 class TestRealCameraAsset:
     """E2E using the StandardShaderBall's camera layer a real authored
     UsdGeomCamera with focalLength, horizontalAperture, verticalAperture,

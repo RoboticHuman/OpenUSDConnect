@@ -328,6 +328,10 @@ class TestMockAdapterLight:
         assert sorted(stored["api_schemas"]) == ["ShadowAPI", "ShapingAPI"]
 
 
+@pytest.mark.skipif(
+    not STANDARD_SHADER_BALL.is_file(),
+    reason="USD WG assets submodule not present",
+)
 class TestRealAssetReplication:
     """E2E using the USD-WG StandardShaderBall asset (5 RectLights in a Y-up
     studio rig). Verifies that mutating a real light's intensity and translating
@@ -503,6 +507,10 @@ class TestRealAssetReplication:
             assert dst_t[axis] == pytest.approx(src_t[axis], abs=1e-3)
 
 
+@pytest.mark.skipif(
+    not REFERENCES_ENVIRONMENT.is_file(),
+    reason="USD WG assets submodule not present",
+)
 class TestRealAssetShapingAPIReplication:
     """E2E against assets/test_assets/References/utils/Environment.usda a real
     asset whose 3 SphereLights already have ShapingAPI applied (`prepend
