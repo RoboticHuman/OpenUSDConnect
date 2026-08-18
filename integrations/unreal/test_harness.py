@@ -546,6 +546,7 @@ def create_test_project(
     plugin_package: Path,
     *,
     port: int,
+    enable_substrate: bool = False,
 ) -> Path:
     """Create a content-only project with the packaged plugin installed."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -584,6 +585,21 @@ def create_test_project(
                 "bAutoStartEmitterFromLiveMetadata=False",
                 "bPersistAuthTokens=False",
                 "ReconnectDelaySecs=1.0",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    if enable_substrate:
+        (directory / "Config" / "DefaultEngine.ini").write_text(
+            "[/Script/Engine.RendererSettings]\nr.Substrate=True\n",
+            encoding="utf-8",
+        )
+    (directory / "Config" / "DefaultUSDCore.ini").write_text(
+        "\n".join(
+            (
+                "[/Script/USDClasses.UsdProjectSettings]",
+                "bShowCreateDefaultAssetCacheDialog=False",
                 "",
             )
         ),

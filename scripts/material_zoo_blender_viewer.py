@@ -1,4 +1,4 @@
-"""Open Blender as a live Material Zoo receiver and keep the UI running."""
+"""Open Blender as a live Material Zoo client and keep the UI running."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def main() -> None:
     bpy.ops.object.delete(use_global=False)
 
     scene = bpy.context.scene
-    scene.name = "OpenUSDConnect Material Zoo (Live Receiver)"
+    scene.name = "OpenUSDConnect Material Zoo (Live Sync)"
     scene.usd_connect_live_auto_start_emitter = False
     scene.usd_connect_live_auto_start_receiver = False
     scene.usd_connect_asset_root = str(repo)
@@ -89,14 +89,20 @@ def main() -> None:
     if "FINISHED" not in result:
         raise RuntimeError(f"base USD import failed: {result}")
 
+    scene.usd_connect_emit_host = args.host
+    scene.usd_connect_emit_port = args.port
     scene.usd_connect_recv_host = args.host
     scene.usd_connect_recv_port = args.port
     scene.usd_connect_recv_last_seq = 0
 
+    import usd_connect.capture as capture
     import usd_connect.receiver_addon as receiver_addon
 
     receiver_addon._LAST_SEQ = 0
     receiver_addon._ADAPTER = None
+    result = bpy.ops.usd_connect.connect_emitter()
+    if "FINISHED" not in result:
+        raise RuntimeError(f"emitter start failed: {result}")
     result = bpy.ops.usd_connect.start_receiver()
     if "FINISHED" not in result:
         raise RuntimeError(f"receiver start failed: {result}")
@@ -110,16 +116,21 @@ def main() -> None:
         if receiver is not None and receiver.auth_rejected:
             print("[Material Zoo Viewer] receiver authentication rejected", flush=True)
             return None
-        if last_seq >= args.expected_seq:
+        sender = capture.get_emitter_sender()
+        emitter_connected = sender is not None and sender.sock is not None
+        receiver_connected = receiver is not None and receiver.connected
+        if last_seq >= args.expected_seq and emitter_connected and receiver_connected:
             _present(args.camera)
             print(
-                f"[Material Zoo Viewer] READY seq={last_seq} camera={args.camera or '<free>'}",
+                f"[Material Zoo Viewer] READY seq={last_seq} emitter=connected "
+                f"receiver=connected camera={args.camera or '<free>'}",
                 flush=True,
             )
             return None
         if time.monotonic() >= deadline:
             print(
-                f"[Material Zoo Viewer] timeout seq={last_seq}/{args.expected_seq}",
+                f"[Material Zoo Viewer] timeout seq={last_seq}/{args.expected_seq} "
+                f"emitter_connected={emitter_connected} receiver_connected={receiver_connected}",
                 flush=True,
             )
             return None

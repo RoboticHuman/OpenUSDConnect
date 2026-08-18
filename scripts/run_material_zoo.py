@@ -4,8 +4,9 @@ Examples:
     uv run python scripts/run_material_zoo.py --show --renderman
     uv run python scripts/run_material_zoo.py --viewers blender
     uv run python scripts/run_material_zoo.py --viewers usdview --renderman
+    uv run python scripts/run_material_zoo.py --viewers blender usdview unreal --renderman
 
-Both viewers open only test_scene.usda, connect through their integrations, and
+The viewers open only test_scene.usda, connect through their integrations, and
 receive the same server backlog. The comparison camera and IBL are also sent as
 events unless ``--no-presentation`` is supplied. Press Ctrl+C to close the
 processes started by this runner.
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import math
 import os
 import shutil
 import socket
@@ -27,7 +30,11 @@ from pathlib import Path
 from integrations.server_process import start as start_server_process
 from integrations.server_process import stop as stop_process
 from integrations.server_process import wait_until_listening
-from openusdconnect.cli_common import nonnegative_seconds, port_or_zero
+from openusdconnect.cli_common import (
+    nonnegative_seconds,
+    port_or_zero,
+    positive_seconds,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_PATH = PROJECT_ROOT / "test_scene.usda"
@@ -36,7 +43,7 @@ CAMERA_PATH = "/World/_TestCam"
 DOME_PATH = "/World/_Dome"
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Stream the Material Zoo through a real server into live viewers."
     )
@@ -48,7 +55,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--viewers",
         nargs="+",
-        choices=("usdview", "blender"),
+        choices=("usdview", "blender", "unreal"),
         default=(),
         help="Launch only the selected viewers.",
     )
@@ -60,6 +67,25 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blender", help="Explicit Blender executable path.")
     parser.add_argument("--usdview", help="Explicit usdview executable path.")
+    parser.add_argument(
+        "--unreal-engine-root",
+        help="Explicit Unreal Engine root; otherwise use normal harness discovery.",
+    )
+    parser.add_argument(
+        "--unreal-plugin-package",
+        help="Reuse an existing packaged OpenUSDConnect Unreal plugin.",
+    )
+    parser.add_argument(
+        "--rebuild-unreal-plugin",
+        action="store_true",
+        help="Rebuild the cached Unreal plugin package before launching.",
+    )
+    parser.add_argument(
+        "--unreal-timeout",
+        type=positive_seconds,
+        default=240.0,
+        help="Seconds to wait for Unreal to open the stage and connect.",
+    )
     parser.add_argument(
         "--renderman",
         action="store_true",
@@ -87,7 +113,7 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="Automatically close launched viewers after N seconds; 0 waits until Ctrl+C.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     viewers = set(args.viewers)
     if args.show:
         viewers.update(("usdview", "blender"))
@@ -196,6 +222,27 @@ def _build_presentation_events(
     return events
 
 
+def _camera_horizontal_fov(events: list[dict], camera_path: str) -> float | None:
+    attributes = {}
+    for event in events:
+        if event.get("k") == "set_gprim_attrs" and event.get("prim") == camera_path:
+            attributes.update(event.get("attrs", {}))
+    aperture = attributes.get("horizontalAperture")
+    focal_length = attributes.get("focalLength")
+    if not aperture or not focal_length:
+        return None
+    return math.degrees(2.0 * math.atan(float(aperture) / (2.0 * float(focal_length))))
+
+
+def _connectable_input_value(events: list[dict], prim_path: str, input_name: str):
+    value = None
+    for event in events:
+        if event.get("k") == "set_connectable_input" and event.get("prim") == prim_path:
+            if input_name in event.get("inputs", {}):
+                value = event["inputs"][input_name]
+    return value
+
+
 def _launch_blender(
     executable: Path,
     temp_root: Path,
@@ -233,6 +280,159 @@ def _launch_blender(
     )
 
 
+def _prepare_unreal(temp_root: Path, port: int, args: argparse.Namespace):
+    from integrations.unreal.test_harness import (
+        UnrealTestError,
+        create_test_project,
+        package_plugin,
+        resolve_engine,
+    )
+
+    engine = resolve_engine(explicit=args.unreal_engine_root)
+    if args.unreal_plugin_package:
+        plugin_package = Path(args.unreal_plugin_package).expanduser().resolve()
+        if not (plugin_package / "OpenUSDConnect.uplugin").is_file():
+            raise UnrealTestError(f"invalid Unreal plugin package: {plugin_package}")
+    else:
+        plugin_package = package_plugin(engine, force=args.rebuild_unreal_plugin)
+    project = create_test_project(
+        temp_root / "unreal_project",
+        engine,
+        plugin_package,
+        port=port,
+        enable_substrate=True,
+    )
+    return engine, project
+
+
+def _launch_unreal(
+    engine,
+    project: Path,
+    temp_root: Path,
+    port: int,
+    camera_path: str,
+    camera_field_of_view: float | None,
+    dome_path: str,
+    dome_intensity: float | None,
+    timeout: float,
+) -> tuple[subprocess.Popen, Path, Path, Path, Path]:
+    driver = PROJECT_ROOT / "scripts" / "material_zoo_unreal_viewer.py"
+    startup_script = project.parent / "Content" / "Python" / "init_unreal.py"
+    startup_script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(driver, startup_script)
+    config_path = temp_root / "unreal_viewer.json"
+    ready_path = temp_root / "unreal_ready"
+    focused_path = temp_root / "unreal_camera_focused"
+    failure_path = temp_root / "unreal_failure.json"
+    unreal_log = temp_root / "unreal.log"
+    config_path.write_text(
+        json.dumps(
+            {
+                "base_stage": str(BASE_PATH),
+                "camera_field_of_view": camera_field_of_view,
+                "camera_path": camera_path,
+                "dome_path": dome_path,
+                "dome_intensity": dome_intensity,
+                "failure_path": str(failure_path),
+                "focused_path": str(focused_path),
+                "port": port,
+                "ready_path": str(ready_path),
+                "timeout": timeout,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["OUC_MATERIAL_ZOO_UNREAL_CONFIG"] = str(config_path)
+    process = subprocess.Popen(
+        [
+            str(engine.editor),
+            str(project),
+            "-nop4",
+            "-nosplash",
+            "-nosound",
+            f"-abslog={unreal_log}",
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
+    return process, ready_path, focused_path, failure_path, unreal_log
+
+
+def _file_tail(path: Path, lines: int = 80) -> str:
+    if not path.is_file():
+        return ""
+    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+
+
+def _wait_for_unreal_signal(
+    process: subprocess.Popen,
+    signal_path: Path,
+    failure_path: Path,
+    unreal_log: Path,
+    timeout: float,
+    description: str,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if signal_path.is_file():
+            return
+        if failure_path.is_file():
+            raise RuntimeError(
+                "Unreal Material Zoo viewer failed:\n"
+                + failure_path.read_text(encoding="utf-8", errors="replace")
+            )
+        return_code = process.poll()
+        if return_code is not None:
+            detail = _file_tail(unreal_log)
+            suffix = f"\n{detail}" if detail else ""
+            raise RuntimeError(
+                f"Unreal viewer exited before {description} with code {return_code}{suffix}"
+            )
+        time.sleep(0.1)
+    detail = _file_tail(unreal_log)
+    suffix = f"\n{detail}" if detail else ""
+    raise RuntimeError(f"Unreal viewer did not {description} within {timeout:g} seconds{suffix}")
+
+
+def _wait_for_unreal_ready(
+    process: subprocess.Popen,
+    ready_path: Path,
+    failure_path: Path,
+    unreal_log: Path,
+    timeout: float,
+) -> None:
+    _wait_for_unreal_signal(
+        process,
+        ready_path,
+        failure_path,
+        unreal_log,
+        timeout,
+        "connect",
+    )
+
+
+def _wait_for_unreal_camera(
+    process: subprocess.Popen,
+    focused_path: Path,
+    failure_path: Path,
+    unreal_log: Path,
+    timeout: float,
+) -> None:
+    _wait_for_unreal_signal(
+        process,
+        focused_path,
+        failure_path,
+        unreal_log,
+        timeout,
+        "focus the Material Zoo camera",
+    )
+
+
 def _publish(port: int, fixture_events: list[dict], presentation_events: list[dict]) -> None:
     from openusdconnect.sender import EventSender
 
@@ -258,9 +458,7 @@ def _raise_if_viewer_failed(processes: list[subprocess.Popen]) -> None:
     for process in processes:
         return_code = process.poll()
         if return_code not in (None, 0):
-            raise RuntimeError(
-                f"viewer process {process.pid} exited early with code {return_code}"
-            )
+            raise RuntimeError(f"viewer process {process.pid} exited early with code {return_code}")
 
 
 def main() -> int:
@@ -293,6 +491,9 @@ def main() -> int:
     )
     expected_seq = len(fixture_events) + len(presentation_events)
     camera_path = CAMERA_PATH if presentation_events else ""
+    camera_field_of_view = (
+        _camera_horizontal_fov(presentation_events, camera_path) if camera_path else None
+    )
     port = _select_port(args.port)
 
     if "blender" in args.viewers and not args.no_build_addon:
@@ -304,8 +505,12 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="openusdconnect-material-zoo-") as temp_dir:
         temp_root = Path(temp_dir)
+        unreal_launch = None
+        if "unreal" in args.viewers:
+            unreal_launch = _prepare_unreal(temp_root, port, args)
         server = _start_server(port, temp_root / "events.db")
         viewer_processes: list[subprocess.Popen] = []
+        unreal_camera_wait = None
         try:
             if "usdview" in args.viewers:
                 from integrations.usdview.launcher import launch_usdview
@@ -332,11 +537,51 @@ def main() -> int:
                         camera_path,
                     )
                 )
+            if unreal_launch is not None:
+                (
+                    unreal_process,
+                    ready_path,
+                    focused_path,
+                    failure_path,
+                    unreal_log,
+                ) = _launch_unreal(
+                    *unreal_launch,
+                    temp_root,
+                    port,
+                    camera_path,
+                    camera_field_of_view,
+                    DOME_PATH if presentation_events else "",
+                    _connectable_input_value(
+                        presentation_events,
+                        DOME_PATH,
+                        "intensity",
+                    ),
+                    args.unreal_timeout,
+                )
+                viewer_processes.append(unreal_process)
+                unreal_camera_wait = (
+                    unreal_process,
+                    focused_path,
+                    failure_path,
+                    unreal_log,
+                    args.unreal_timeout,
+                )
+                print("Waiting for Unreal to open the stage and connect...", flush=True)
+                _wait_for_unreal_ready(
+                    unreal_process,
+                    ready_path,
+                    failure_path,
+                    unreal_log,
+                    args.unreal_timeout,
+                )
 
             if args.publish_delay > 0:
                 time.sleep(args.publish_delay)
             _raise_if_viewer_failed(viewer_processes)
             _publish(port, fixture_events, presentation_events)
+            if unreal_camera_wait is not None:
+                print("Waiting for Unreal to focus the shared camera...", flush=True)
+                _wait_for_unreal_camera(*unreal_camera_wait)
             if _sha256(BASE_PATH) != base_hash:
                 raise RuntimeError("test_scene.usda changed while publishing live events")
 
@@ -347,9 +592,7 @@ def main() -> int:
                 flush=True,
             )
             print("Close the viewers or press Ctrl+C to stop the runner.", flush=True)
-            exit_deadline = (
-                time.monotonic() + args.exit_after if args.exit_after > 0 else None
-            )
+            exit_deadline = time.monotonic() + args.exit_after if args.exit_after > 0 else None
             while any(process.poll() is None for process in viewer_processes):
                 _raise_if_viewer_failed(viewer_processes)
                 if exit_deadline is not None and time.monotonic() >= exit_deadline:

@@ -206,7 +206,13 @@ def test_generated_project_installs_and_enables_plugin(tmp_path):
     package = tmp_path / "package"
     package.mkdir()
     (package / "OpenUSDConnect.uplugin").write_text("{}", encoding="utf-8")
-    project = create_test_project(tmp_path / "project", engine, package, port=17420)
+    project = create_test_project(
+        tmp_path / "project",
+        engine,
+        package,
+        port=17420,
+        enable_substrate=True,
+    )
 
     descriptor = json.loads(project.read_text(encoding="utf-8"))
     enabled = {item["Name"] for item in descriptor["Plugins"] if item["Enabled"]}
@@ -220,6 +226,12 @@ def test_generated_project_installs_and_enables_plugin(tmp_path):
     settings = (project.parent / "Config" / "DefaultGame.ini").read_text(encoding="utf-8")
     assert "ServerPort=17420" in settings
     assert "bAutoConnect=False" in settings
+    renderer_settings = (project.parent / "Config" / "DefaultEngine.ini").read_text(
+        encoding="utf-8"
+    )
+    assert "r.Substrate=True" in renderer_settings
+    usd_settings = (project.parent / "Config" / "DefaultUSDCore.ini").read_text(encoding="utf-8")
+    assert "bShowCreateDefaultAssetCacheDialog=False" in usd_settings
 
 
 def test_existing_project_install_enables_test_dependencies(tmp_path):

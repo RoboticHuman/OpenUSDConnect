@@ -113,13 +113,17 @@ Harness usage and extension guidance live beside the tests in
 
 ```bash
 uv run python scripts/run_material_zoo.py --show --renderman
+uv run python scripts/run_material_zoo.py --viewers blender usdview unreal --renderman
 ```
 
 The runner starts a temporary server, opens the unchanged `test_scene.usda` in
-Blender and usdview, and streams the committed Material Zoo fixture plus a
-shared camera and IBL. Use `--viewers blender` or `--viewers usdview` for one
-client, `--no-presentation` to omit camera/IBL events, and `--exit-after 0` to
-keep the session open until Ctrl+C.
+the selected viewers, and streams the committed Material Zoo fixture plus a
+shared camera and IBL. `--show` is the Blender-and-usdview shortcut; add
+`--viewers unreal` to launch Unreal alone or select all three as shown above.
+Unreal is discovered and its ABI-matched plugin package is built or reused by
+the existing test harness. Use `--unreal-engine-root` to select an engine,
+`--no-presentation` to omit camera/IBL events, and `--exit-after 0` to keep the
+session open until Ctrl+C.
 
 ## Visual regression
 

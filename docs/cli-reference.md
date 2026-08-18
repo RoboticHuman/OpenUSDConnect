@@ -134,7 +134,7 @@ Programmatic hosts can set `ServerConfig.plugin_dll_dirs` or call
 | `scripts/start_usdconnect_debug.py` | Start the server and one or two debug-enabled Blender sessions. |
 | `scripts/start_usdview.py` | Start a temporary server and connected usdview session. |
 | `scripts/run_unreal_tests.py` | Discover Unreal, package the plugin, and run the real editor integration scenario. |
-| `scripts/run_material_zoo.py` | Stream the MaterialX/OpenPBR material zoo into Blender and/or usdview. |
+| `scripts/run_material_zoo.py` | Stream the MaterialX/OpenPBR material zoo into Blender, usdview, and/or Unreal. |
 | `scripts/demo_layer_dashboard.py` | Start a populated temporary dashboard; use `--exit-after` for smoke tests. |
 | `scripts/stress_test_departments.py` | Stress managed transactions and optionally capture a py-spy profile. |
 | `scripts/check_windows_unc_webdav.py` | Diagnose a Windows WebClient UNC read and parse the result as USD. |

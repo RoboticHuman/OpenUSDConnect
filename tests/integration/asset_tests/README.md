@@ -41,12 +41,14 @@ you are debugging the harness itself.
 
 ```bash
 uv run python scripts/run_material_zoo.py --show --renderman --exit-after 0
+uv run python scripts/run_material_zoo.py --viewers blender usdview unreal --renderman --exit-after 0
 ```
 
-The runner opens the unchanged `test_scene.usda` in Blender and usdview, then
-streams the committed semantic fixture through a temporary server. Use
-`--viewers blender` or `--viewers usdview` for one client and
-`--no-presentation` to omit the shared camera and IBL.
+The runner opens the unchanged `test_scene.usda` in the selected viewers, then
+streams the committed semantic fixture through a temporary server. Select any
+combination of `blender`, `usdview`, and `unreal`; `--show` remains the shortcut
+for Blender plus usdview. Use `--no-presentation` to omit the shared camera and
+IBL.
 
 ## Add coverage
 
