@@ -122,12 +122,7 @@ and polygon material indices.
 Use one transaction for the material, terminal connection, and binding:
 
 ```bash
-uv run openusdconnect-send \
-  '{"k":"ensure_prim","prim":"/World/Looks/Brass","typeName":"Material"}' \
-  '{"k":"ensure_prim","prim":"/World/Looks/Brass/Surface","typeName":"Shader"}' \
-  '{"k":"set_connectable_input","prim":"/World/Looks/Brass/Surface","info_id":"UsdPreviewSurface","inputs":{"diffuseColor":[0.71,0.65,0.26],"roughness":0.3,"metallic":1.0},"input_types":{"diffuseColor":"color3f","roughness":"float","metallic":"float"}}' \
-  '{"k":"set_connectable_connection","prim":"/World/Looks/Brass","connections":{"outputs:surface":{"source_prim":"/World/Looks/Brass/Surface","source_attr":"outputs:surface"}}}' \
-  '{"k":"set_material_binding","prim":"/World/Model","material_path":"/World/Looks/Brass"}'
+uv run openusdconnect-send '{"k":"ensure_prim","prim":"/World/Looks/Brass","typeName":"Material"}' '{"k":"ensure_prim","prim":"/World/Looks/Brass/Surface","typeName":"Shader"}' '{"k":"set_connectable_input","prim":"/World/Looks/Brass/Surface","info_id":"UsdPreviewSurface","inputs":{"diffuseColor":[0.71,0.65,0.26],"roughness":0.3,"metallic":1.0},"input_types":{"diffuseColor":"color3f","roughness":"float","metallic":"float"}}' '{"k":"set_connectable_connection","prim":"/World/Looks/Brass","connections":{"outputs:surface":{"source_prim":"/World/Looks/Brass/Surface","source_attr":"outputs:surface"}}}' '{"k":"set_material_binding","prim":"/World/Model","material_path":"/World/Looks/Brass"}'
 ```
 
 The CLI validates the complete event batch and sends it atomically. The MCP

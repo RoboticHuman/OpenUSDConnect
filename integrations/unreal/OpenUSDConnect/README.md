@@ -1,10 +1,10 @@
 # OpenUSD Connect Unreal Engine Plugin
 
-Live two-way sync of an OpenUSD stage between Unreal Engine and any other DCC
-(Blender today, others tomorrow) via the **OpenUSDConnect** server.
-
-Edit a prim in Blender and it updates in Unreal's editor. Move a prim in
-Unreal's USD Stage editor and the change returns to Blender.
+The plugin connects an Unreal USD Stage to an OpenUSDConnect server. It receives
+the server's flat scene updates and can send transform, visibility, and
+connectable-input edits authored in Unreal. Other supported event types are
+receive-only; see [Supported events](#supported-events) before planning an
+authoring workflow.
 
 ---
 
@@ -98,54 +98,71 @@ does not make the receive path layer-aware.
 
 ## Usage
 
-### 1. Start the OpenUSDConnect server
+### 1. Start The OpenUSDConnect Server
 
-From the repo root:
-```bash
-cd <repo>/OpenUSDConnect
-.\.venv\Scripts\activate          # or `source .venv/bin/activate`
-python -m openusdconnect.server --port 7200 --base my_scene.usda --vfs-port 7280 --dashboard-port 8080
-```
-The optional `--dashboard-port 8080` enables a web UI at <http://localhost:8080> useful for verifying clients and event traffic.
-
-### 2. Open the USD stage in Unreal
-
-The **live-open** workflow:
-
-1. Mount or bridge the VFS share so `scene.usd` is browseable, for example:
-   ```bash
-   uv run python scripts/local_vfs_bridge.py --vfs-url http://127.0.0.1:7280/usd/scene.usd --mirror-dir .ouc_live_mount\usd --drive O: --force
-   ```
-2. Open the USD Stage panel and choose **File -> Open**.
-3. Pick `O:\scene.usd` or the UNC path.
-4. The plugin reads `customLayerData["openusdconnect"]`, switches to the metadata host/port, and starts the receiver from `snapshot_seq + 1`.
-5. Select the spawned `AUsdStageActor` in the World Outliner and set **Stage State -> `OpenedAndLoaded`**.
-
-For a one-command local session, run this from the repo root:
+The base-file workflow is the default. From the repository root, install the
+runtime and start the server with the same scene that Unreal will open:
 
 ```bash
-uv run python scripts/start_live_open.py --base my_scene.usda --drive O: --open --force
+uv sync --group bundled-usd --group dashboard
+uv run openusdconnect-server --port 7200 --base my_scene.usda --event-log unreal-session.db --dashboard-port 8080
 ```
 
-The older manual workflow still works:
+The dashboard is available at <http://127.0.0.1:8080>. Stop the server with
+Ctrl+C; `unreal-session.db` retains its event history.
 
-1. **Window → Virtual Production → USD Stage** (or search the menu for "USD Stage")
-2. In the USD Stage panel: **File → Open** → pick the same `.usda` the server is hosting.
-3. This spawns an `AUsdStageActor` in the level. Select it in the World Outliner.
-4. In its **Details** panel set **Stage State → `OpenedAndLoaded`**.
-   > ⚠ This is required. With `Opened`, the prims appear in the panel tree but
-   > **no scene components are generated**, so live edits have nothing to apply to.
+### 2. Open The USD Stage In Unreal
 
-### 3. Connect Blender (or any other client)
+1. Open **Window > Virtual Production > USD Stage**.
+2. Choose **File > Open** and select `my_scene.usda`.
+3. Select the spawned `AUsdStageActor` in the World Outliner.
+4. In **Details**, set **Stage State** to `OpenedAndLoaded`.
 
-Install the OpenUSDConnect Blender addon, open the same `.usda`, enable Emit + Receive.
+With `Opened`, prims appear in the USD Stage tree but Unreal does not create
+scene components for live viewport updates.
 
-### 4. It just works
+### 3. Connect Another Client
 
-Without pressing Play the subsystem ticks in the editor:
+Open the same base scene in Blender or a compatible client and connect it to
+`127.0.0.1:7200`. In Blender, start the receiver before the emitter.
 
-- Move a cube in Blender → it moves in Unreal.
-- Drag a prim in Unreal's USD Stage tree (or the level viewport) → Blender follows.
+### 4. Verify Synchronization
+
+The subsystem runs in the editor without pressing Play:
+
+- Move a transformable prim in Blender and confirm it moves in Unreal.
+- Move the corresponding prim in Unreal's viewport and confirm Blender follows.
+- Open the dashboard and confirm the Unreal receiver and emitter connections.
+
+### Optional: Open A Server-Provided USD File
+
+This path provides a generated `scene.usd` through a normal file picker. It is
+limited to one unmuted collaboration layer and no department policy.
+
+From the repository root:
+
+```bash
+uv sync --group bundled-usd --group vfs --group dashboard
+uv run python scripts/start_live_open.py --base my_scene.usda --dashboard-port 8080 --open
+```
+
+The launcher prints the local file path and session state file. On Windows the
+default path is `O:\scene.usd`; on macOS and Linux use the printed mirror
+directory. Then:
+
+1. Open the generated `scene.usd` in the USD Stage panel.
+2. Set its `AUsdStageActor` to `OpenedAndLoaded`.
+3. The plugin reads `customLayerData["openusdconnect"]`, selects the metadata
+   endpoint, and starts after the embedded snapshot sequence.
+
+Stop the launcher with:
+
+```bash
+uv run python scripts/start_live_open.py stop
+```
+
+See [Server-Provided USD Files](../../../docs/live-open.md) for custom paths,
+write fallback, authentication, and diagnostics.
 
 The **Output Log** will show:
 ```

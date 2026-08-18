@@ -9,6 +9,11 @@ updates. An integrated DCC also reads the embedded server address, then
 continues synchronization over the normal TCP connection after the last event
 included in the file.
 
+Live continuation from a flattened `scene.usd` is intended for the default
+managed session with one unmuted collaboration layer and no department policy.
+Use the original base scene for managed layered replay, or the original portable
+layer graph for `shared_stage` mode.
+
 For the primary server and Blender setup, begin with
 [Getting Started](getting-started.md). Its server-provided file section introduces
 this option; this page documents resource formats, mounting, write fallback,
@@ -17,7 +22,7 @@ metadata, and server configuration.
 ## Start The Live-Open Services
 
 ```bash
-uv sync --group server --group vfs --group dashboard
+uv sync --group bundled-usd --group vfs --group dashboard
 uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port 8080 --open
 ```
 
@@ -28,6 +33,14 @@ by default. Stop the recorded processes with:
 ```bash
 uv run python scripts/start_live_open.py stop
 ```
+
+Run both commands from the repository root. The launcher prints and records its
+process IDs in `.ouc_live_mount/live_open_session.json`; `stop` reads that same
+state file and releases the optional Windows drive alias. It stops processes but
+keeps the event database, logs, and generated mirror for inspection or restart.
+Use a distinct `--state-file`, `--log-dir`, `--mirror-dir`, port set, and drive
+alias for each concurrent session, and pass the matching `--state-file` to
+`stop`.
 
 Unlike the standalone server, the workstation launcher defaults to
 `--vfs-write-mode translate` so applications without a plug-in can save through
@@ -89,25 +102,17 @@ The bridge mirrors the managed `scene.usd` into a normal directory and uploads
 completed saves with ETag conflict protection. It accommodates applications
 that save through a temporary sibling followed by rename.
 
-```bash
-uv run python scripts/local_vfs_bridge.py \
-  --vfs-url http://127.0.0.1:7280/usd/scene.usd \
-  --mirror-dir .ouc_live_mount/usd \
-  --background \
-  --open
+```text
+uv run python scripts/local_vfs_bridge.py --vfs-url http://127.0.0.1:7280/usd/scene.usd --mirror-dir .ouc_live_mount/usd --background --open
 ```
 
 On Windows, add `--drive O:` to expose the mirror as `O:\scene.usd`. The drive
 is a local alias, not a WebDAV mapping, and normally contains only the managed
 live file. Bridge status and logs remain outside the exposed directory.
 
-```bash
-uv run python scripts/local_vfs_bridge.py status \
-  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json
-
-uv run python scripts/local_vfs_bridge.py stop \
-  --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json \
-  --stop-process
+```text
+uv run python scripts/local_vfs_bridge.py status --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json
+uv run python scripts/local_vfs_bridge.py stop --status-file .ouc_live_mount/bridge/openusdconnect_bridge_status.json --stop-process
 ```
 
 The bridge waits for a save to stabilize and uploads against the last observed
@@ -118,10 +123,11 @@ instead of overwriting newer work.
 
 ### Windows
 
-The default UNC path is:
+Windows commonly accepts either of these UNC forms:
 
 ```text
 \\127.0.0.1@7280\usd\scene.usd
+\\127.0.0.1@7280\DavWWWRoot\usd\scene.usd
 ```
 
 The Windows WebDAV redirector requires the **WebClient** service. Starting that
@@ -131,7 +137,9 @@ service may require an elevated session. Diagnose the path without mounting it:
 uv run python scripts/check_windows_unc_webdav.py --port 7280
 ```
 
-Map it through the native client when the complete WebDAV tree is required:
+Map it through the native client when the complete WebDAV tree is required. The
+helper tries the URL, `DavWWWRoot`, and short UNC forms because Windows WebClient
+behavior differs by configuration:
 
 ```powershell
 uv run openusdconnect-mount-vfs --port 7280 --drive P: --open
@@ -215,18 +223,21 @@ network boundary or authenticated proxy.
 Blender and Unreal persist TOFU tokens according to their integration settings
 and reuse them for receiver and emitter reconnects.
 
-## Run The Services Manually
+## Run The Server Endpoint Manually
 
-```bash
-uv run openusdconnect-server \
-  --host 127.0.0.1 \
-  --port 7200 \
-  --base test_scene.usda \
-  --event-log usd_events.db \
-  --vfs-port 7280 \
-  --vfs-write-mode translate \
-  --dashboard-port 8080
+The following command starts the TCP server, WebDAV endpoint, and dashboard. It
+does not create the local mirror or Windows drive alias provided by
+`start_live_open.py`.
+
+```text
+uv run openusdconnect-server --host 127.0.0.1 --port 7200 --base test_scene.usda --event-log usd_events.db --vfs-port 7280 --vfs-write-mode translate --dashboard-port 8080
 ```
+
+Run the [local mirror](#local-mirror) command separately if a filesystem path is
+required. Stop the foreground server with `Ctrl+C`, then stop a background
+bridge with its documented `stop` command. Relative event-log and mirror paths
+resolve from the current working directory, so run from the repository root or
+use absolute paths.
 
 Important VFS options:
 
@@ -249,16 +260,26 @@ address that remote DCCs can reach.
 
 Download and parse the flattened snapshot:
 
+macOS or Linux:
+
 ```bash
 curl -o ouc_scene.usd http://127.0.0.1:7280/usd/scene.usd
+```
+
+PowerShell:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:7280/usd/scene.usd -OutFile ouc_scene.usd
+```
+
+Then parse the downloaded file:
+
+```text
 uv run python -c "from pxr import Usd; s=Usd.Stage.Open('ouc_scene.usd'); print(bool(s), s.GetRootLayer().customLayerData.get('openusdconnect'))"
 ```
 
-Inspect the machine-readable manifest:
-
-```bash
-curl http://127.0.0.1:7280/usd/openusdconnect.json
-```
+Open <http://127.0.0.1:7280/usd/openusdconnect.json> to inspect the
+machine-readable manifest.
 
 For server and mount options, see the [command-line reference](cli-reference.md).
 For integration behavior, continue with the [Blender guide](blender-addon-usage.md)

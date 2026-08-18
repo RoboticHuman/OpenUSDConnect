@@ -1,5 +1,27 @@
 # Command-Line Reference
 
+## First Server Session
+
+Install the renderer-neutral OpenUSD runtime and start a persistent local
+server from the repository root:
+
+```bash
+uv sync --group bundled-usd --group dashboard
+uv run openusdconnect-server --base test_scene.usda --event-log session.db --export-diff session-changes.usda --port 7200 --dashboard-port 8080
+```
+
+The sync endpoint is `127.0.0.1:7200` and the optional dashboard is
+<http://127.0.0.1:8080>. Stop the server with Ctrl+C. `session.db` retains the
+ordered event history for the next run, while `session-changes.usda` is written
+on clean shutdown as a portable managed-layer export. Relative paths are
+resolved from the shell's current directory.
+
+For a bounded test that creates and cleans up its own server, run the
+[headless first run](../README.md#getting-started). For a file-picker workflow,
+use the separate [server-provided USD file](live-open.md) path.
+
+## Common Options
+
 OpenUSDConnect keeps endpoint names consistent across its user-facing tools:
 
 | Setting | Canonical option | Default |
@@ -45,7 +67,7 @@ its cumulative producer high-water mark are durable.
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
 `openusdconnect-mount-vfs`.
 
-## Server layer modes
+## Server Layer Modes
 
 `openusdconnect-server --layer-mode managed` is the default. It provides
 receiver-owned collaboration layers, department policy, and VFS live-open
@@ -57,7 +79,7 @@ and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
 
-## OpenUSD runtime and custom plugins
+## OpenUSD Runtime And Custom Plugins
 
 ### Bundled runtime
 

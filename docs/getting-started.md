@@ -17,7 +17,7 @@ POSIX-compatible shells.
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
-uv sync --group server --group dashboard
+uv sync --group bundled-usd --group dashboard
 uv run python scripts/build_blender_addon.py
 ```
 
@@ -29,14 +29,16 @@ The build creates `dist/usd_connect_blender.zip`. In Blender:
 4. Enable **USD Connect** if Blender does not enable it automatically.
 
 The add-on contains the OpenUSDConnect Python client. Blender does not need the
-repository's Python environment.
+repository's Python environment. The product and server are named
+**OpenUSDConnect**; the shorter **USD Connect** label is the Blender sidebar and
+add-on name.
 
 ## Start The Server
 
 Run this from the repository root:
 
 ```bash
-uv run openusdconnect-server --base test_scene.usda --port 7200 --dashboard-port 8080
+uv run openusdconnect-server --base test_scene.usda --event-log getting-started.db --export-diff getting-started-changes.usda --port 7200 --dashboard-port 8080
 ```
 
 This starts the sync server on `127.0.0.1:7200` and the dashboard at
@@ -49,21 +51,25 @@ reports `Server listening on 127.0.0.1:7200` and
 
 In the first Blender instance:
 
-1. Press `N` in the 3D viewport and open the **USD Connect** tab.
-2. In the **USD Connect** tab, choose **Import USD (with prim tagging)** and
+1. Remove Blender's default cube, camera, and light so they cannot be mistaken
+   for imported scene objects.
+2. Press `N` in the 3D viewport and open the **USD Connect** tab.
+3. In the **USD Connect** tab, choose **Import USD (with prim tagging)** and
    select `test_scene.usda`. Do not use Blender's standard **File > Import**
    command. This add-on command records the USD path represented by each
    imported Blender object so later edits can be matched correctly.
-3. Under **Network Emitter**, confirm the host and port are
-   `127.0.0.1:7200`, then choose **Connect Emitter**.
-4. Under **Network Receiver**, confirm the same host and port, then choose
+4. Under **Network Receiver**, confirm the host and port are
+   `127.0.0.1:7200`, then choose
    **Start Receiver**.
-5. Confirm that the panel shows **Emitter connected** and **Receiver running**.
+5. Under **Network Emitter**, confirm the same host and port, then choose
+   **Connect Emitter**.
+6. Confirm that the panel shows **Receiver running** and **Emitter connected**.
 
 **Connect Emitter** also begins monitoring supported Blender edits. Open a
-second Blender instance and repeat the same steps. Move, rotate, or scale any
-imported object in either instance; the matching object in the other instance
-should update shortly.
+second Blender process and repeat the same steps. On macOS, use
+`open -n -a Blender` if the Dock reuses the first process. Select the imported
+`Sphere`, `Cone`, or `Cylinder` in either instance and move, rotate, or scale
+it; the matching object in the other instance should update shortly.
 
 The emitter sends local edits to the server. The receiver applies server edits
 in Blender. The original USD file is the common starting point and is not
@@ -81,7 +87,7 @@ through the same TCP sync server used above.
 Stop the standard server with `Ctrl+C`, then run:
 
 ```bash
-uv sync --group server --group vfs --group dashboard
+uv sync --group bundled-usd --group vfs --group dashboard
 uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port 8080 --open
 ```
 
@@ -105,6 +111,12 @@ It prints the exact file to open:
 the generated file's folder in Explorer, Finder, or the platform file manager;
 it does not start Blender or import the file.
 
+The launcher records its processes in
+`<repo>/.ouc_live_mount/live_open_session.json`. Run the matching `stop`
+command from the same repository directory. For concurrent sessions, give each
+one a different `--state-file`, `--log-dir`, ports, mirror directory, and drive
+alias, then pass the same `--state-file` to its `stop` command.
+
 In Blender, leave **Auto-start Emitter** and **Auto-start Receiver** enabled,
 choose **Import USD (with prim tagging)**, and select the reported `scene.usd`.
 The add-on reads the `openusdconnect` metadata, configures the server address,
@@ -116,14 +128,17 @@ Disable **Auto-start Emitter** for receive-only use, or disable **Auto-start
 Receiver** for send-only use.
 
 On Windows, the drive is a local `subst` alias and does not require the
-WebClient service or administrator access. If `O:` is occupied, use `--drive
-P:` or `--no-drive` and open the printed mirror path.
+WebClient service or administrator access. Run the launcher and Blender under
+the same Windows user and elevation level because drive aliases can differ
+between elevated and unelevated sessions. The alias does not survive a reboot.
+If `O:` is occupied, use `--drive P:` or `--no-drive` and open the printed
+mirror path.
 
 ## Inspect The Session
 
 Open <http://127.0.0.1:8080>. After moving an object, confirm that:
 
-- Both Blender clients appear in the client list.
+- Two emitter and two receiver connections appear in the client list.
 - The sequence number at the top of the dashboard advances.
 - A transform transaction appears in the event list.
 - The server and both Blender instances agree on the final transform.
@@ -137,8 +152,15 @@ local path or a native mount rather than the diagnostic HTTP URL.
 Stop a standard server with `Ctrl+C` in its terminal.
 
 The event log remains on disk after the server stops. Starting the server again
-with the same event log resumes that session. Use a different `--event-log`
-path when you need an independent test session.
+with `--event-log getting-started.db` resumes that session. On shutdown,
+`getting-started-changes.usda` contains the server-authored collaboration
+changes and can be composed over the unchanged `test_scene.usda`. Saving a
+`.blend` file does not replace either server artifact.
+
+For an independent test, choose a new `--event-log` and `--export-diff` name.
+To reset this walkthrough completely, stop the server before deleting
+`getting-started.db`, its `-wal`/`-shm` companions if present, and
+`getting-started-changes.usda`.
 
 Stop every process recorded by the live-open launcher and release its Windows
 drive alias with:
@@ -151,6 +173,11 @@ uv run python scripts/start_live_open.py stop
 
 ### A port is already in use
 
+First stop the earlier server terminal. For a live-open session, also run
+`uv run python scripts/start_live_open.py stop` from the repository directory
+that contains its state file. Use alternate ports only after confirming the
+previous session is intentional or has stopped.
+
 For the standard server, choose unused sync and dashboard ports:
 
 ```bash
@@ -162,10 +189,15 @@ Set both Blender endpoint controls to port `7210`.
 For live-open, choose a matching set of unused ports:
 
 ```bash
-uv run python scripts/start_live_open.py --base test_scene.usda --port 7210 --vfs-port 7290 --dashboard-port 8090 --open
+uv run python scripts/start_live_open.py --base test_scene.usda --port 7210 --vfs-port 7290 --dashboard-port 8090 --state-file .ouc_live_mount/session-7210.json --open
 ```
 
 The live-open ports are embedded into `scene.usd` and discovered during import.
+Stop this alternate session with:
+
+```bash
+uv run python scripts/start_live_open.py stop --state-file .ouc_live_mount/session-7210.json
+```
 
 ### The server reports an unsupported schema version
 

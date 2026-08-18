@@ -9,6 +9,8 @@ For a first run or a quick orientation:
 
 - [Project overview](../README.md) introduces the server, integrations,
   dependency groups, and core concepts.
+- [Headless first run](../README.md#getting-started) starts a temporary server
+  and two Python clients, verifies synchronization, and exits on its own.
 - [Blender getting started](getting-started.md) covers the base-file connection
   and the optional server-provided USD file.
 - [Server-provided USD files](live-open.md) covers live-open paths, mounts, write
@@ -22,7 +24,7 @@ For artists, technical directors, operators, and tool users:
 
 | Task | Guide |
 | --- | --- |
-| Find supported commands and options | [Command-line reference](cli-reference.md) |
+| Find commands, common options, and runtime setup | [Command-line reference](cli-reference.md) |
 | Install and operate the Blender addon | [Blender addon usage](blender-addon-usage.md) |
 | Connect Pixar's reference USD viewer | [usdview integration](../integrations/usdview/README.md) |
 | Install and operate the Unreal Engine plugin | [Unreal Engine plugin](../integrations/unreal/OpenUSDConnect/README.md) |
@@ -63,5 +65,13 @@ For contributors validating or profiling changes:
   and visual test tiers, including their external requirements.
 - [Profiling](profiling.md) covers server and Blender sampling workflows and the main
   performance paths to inspect.
-- [Development commands](cli-reference.md#development-commands) lists the maintained
-  schema generation, addon packaging, and diagnostic entry points.
+- [Development commands](cli-reference.md#development-commands) lists maintained
+  addon packaging, test-launch, profiling, and diagnostic entry points.
+
+## Troubleshoot
+
+- [Blender common problems](getting-started.md#common-problems)
+- [Server-provided file verification and diagnostics](live-open.md#verify-and-diagnose)
+- [Client reconnect and recovery states](client-recovery.md)
+- [Unreal Engine troubleshooting](../integrations/unreal/OpenUSDConnect/README.md#troubleshooting)
+- [usdview requirements and discovery](../integrations/usdview/README.md#requirements)

@@ -23,33 +23,55 @@ uv sync --group bundled-usd --group mcp  # installs pxr and the official MCP SDK
 
 Start a sync server (one is required because the MCP is network-only):
 
-```bash
-uv run python -m openusdconnect.server --port 7200
+```text
+uv run openusdconnect-server --port 7200 --event-log mcp-session.db --export-diff mcp-session-changes.usda
 ```
 
-Then register it with any MCP client that supports stdio servers. For example,
-with Claude Code:
-
-```bash
-claude mcp add openusdconnect -- uv --directory D:\gamedev\OpenUSDConnect run python -m integrations.mcp
-```
-
-**Claude Desktop** (`claude_desktop_config.json`):
+Keep that terminal open. Register the MCP process with any client that supports
+local stdio servers. Use the absolute path to the cloned repository in place of
+`<repo>`:
 
 ```json
 {
   "mcpServers": {
     "openusdconnect": {
       "command": "uv",
-      "args": ["--directory", "D:\\gamedev\\OpenUSDConnect", "run", "python", "-m", "integrations.mcp"],
+      "args": ["--directory", "<repo>", "run", "--group", "bundled-usd", "--group", "mcp", "python", "-m", "integrations.mcp"],
       "env": { "OPENUSDCONNECT_PORT": "7200" }
     }
   }
 }
 ```
 
-`uv --directory <repo>` sets the working dir so `integrations.mcp` resolves. The
-MCP talks to the client over **stdio**; all of its own logging goes to stderr.
+On Windows JSON paths either use forward slashes, such as
+`D:/Workspace/OpenUSDConnect`, or escape each backslash. `uv --directory
+<repo>` sets the working directory so `integrations.mcp` resolves.
+
+The MCP client starts and owns this stdio process. It is separate from the TCP
+sync server in the first terminal. MCP protocol messages use stdout; diagnostics
+use stderr.
+
+## Verify The Connection
+
+Ask the MCP client to call these tools in order:
+
+1. `usd_connect()` should return `connected: true`, host `127.0.0.1`, and port
+   `7200`.
+2. `usd_status()` should report the same endpoint and `mirror_enabled: true`.
+3. `usd_ensure_prim(prim="/World/McpSmoke", type_name="Xform")` should return
+   `ok: true`, `sent: true`, and normally `mirror_synced: true`.
+4. `usd_get_prim(path="/World/McpSmoke")` should return that path with type
+   `Xform`.
+
+The dashboard is optional and is not required for this smoke test. To include
+it, install `--group dashboard` and start the server with
+`--dashboard-port 8080`.
+
+When finished, call `usd_disconnect()`, then let the MCP client stop its stdio
+server process. Stop the TCP sync server with `Ctrl+C`. The server keeps
+`mcp-session.db` for replay and writes `mcp-session-changes.usda` on shutdown.
+The MCP mirror itself is in memory and is not a separate saved USD file. Use new
+artifact names for an independent session.
 
 ## Configuration
 

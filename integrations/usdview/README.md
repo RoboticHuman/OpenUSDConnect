@@ -6,25 +6,23 @@ commands. While connected, every event the server broadcasts (transforms,
 visibility, material bindings, composition arcs, time samples, stage
 metadata) is applied directly to the stage usdview is rendering.
 
-This is the smallest possible DCC integration in the project usdview
-already owns a live `Usd.Stage`, so the core `UsdStageAdapter` plugs in
-unchanged. No DCC-native object mapping, no emitter (receive-only).
+usdview already owns a live `Usd.Stage`, so the integration uses the core
+`UsdStageAdapter` directly. It does not map USD to separate DCC-native objects
+and it does not send edits back to the server.
 
-The integration negotiates layered replay. It maps each opaque collaboration
-layer key to a receiver-owned anonymous layer, composes those layers in the
-advertised strong-to-weak order, and tracks live mute changes. Department
-assignment is a server policy that currently selects those logical layers; it
-is not part of the receiver's composition logic. Unrelated session sublayers
-retain their relative order and offsets. Flat replay is not used by this
-integration.
+## Requirements
 
-Authored fields from the sender's current edit-target layer are preserved as
-exact Sdf spec deltas. This includes custom properties, relationships, prim and
-layer metadata, and local variant definitions, including inactive variants.
-The protocol does not yet reproduce arbitrary client-authored sublayer graphs
-or route transactions to layers outside the managed collaboration block.
+- Python 3.13+ and `uv` for the OpenUSDConnect server environment.
+- An OpenUSD installation that includes `usdview` and its Qt dependencies.
+  The lightweight `bundled-usd` group supplies `pxr` for headless workflows but
+  does not supply the usdview application.
 
-## Quick start
+Make `usdview` discoverable on `PATH`, set `USDVIEW_PATH` to its executable, or
+pass `--usdview /path/to/usdview`. If the OpenUSD Python bindings and native
+libraries also come from that installation, configure the project runtime as
+described in [OpenUSD runtime and custom plugins](../../docs/cli-reference.md#openusd-runtime-and-custom-plugins).
+
+## Start A Temporary Session
 
 ```bash
 uv run python scripts/start_usdview.py test_scene.usda
@@ -43,6 +41,26 @@ uv run python -m integrations.usdview.launcher test_scene.usda --host 127.0.0.1 
 
 In either case, usdview opens with the **OpenUSDConnect** menu and the plugin
 auto-connects after the window is ready.
+
+If discovery fails, run `uv run python scripts/start_usdview.py --help`, confirm
+the executable independently with `usdview --help`, then pass its full path
+with `--usdview`. The launcher reports each searched source in its error.
+
+## Receive Behavior
+
+The integration negotiates layered replay. It maps each opaque collaboration
+layer key to a receiver-owned anonymous layer, composes those layers in the
+advertised strong-to-weak order, and tracks live mute changes. Department
+assignment is a server policy that currently selects those logical layers; it
+is not part of the receiver's composition logic. Unrelated session sublayers
+retain their relative order and offsets. Flat replay is not used by this
+integration.
+
+Authored fields from the sender's current edit-target layer are preserved as
+exact Sdf spec deltas. This includes custom properties, relationships, prim and
+layer metadata, and local variant definitions, including inactive variants.
+The protocol does not yet reproduce arbitrary client-authored sublayer graphs
+or route transactions to layers outside the managed collaboration block.
 
 ## RenderMan (hdPrman) renderer optional
 

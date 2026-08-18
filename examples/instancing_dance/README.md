@@ -5,6 +5,12 @@ A ring of pyramids, each a scenegraph instance sharing one prototype,
 bobs on phase-offset sine waves while the prototype's own animated
 matrix transform keeps the pyramids spinning.
 
+From the repository root, install the bundled OpenUSD runtime:
+
+```text
+uv sync --group bundled-usd
+```
+
 ## Quickstart
 
 One command, starts the server, launches usdview, and runs the
@@ -38,23 +44,19 @@ three terminals. Run it this way to see each process's logs in
 isolation, or to point arbitrary receivers (Blender, Unreal, a second
 usdview) at the same server.
 
-```bash
-# 1. Server
-uv run python -m openusdconnect.server \
-    --host 127.0.0.1 --port 7300 \
-    --base examples/instancing_dance/empty.usda
+Open three terminals in the repository root and run one command in each:
 
-# 2. usdview (or any other connected viewer)
-uv run python -m integrations.usdview.launcher \
-    examples/instancing_dance/empty.usda \
-    --host 127.0.0.1 --port 7300
+```text
+uv run openusdconnect-server --host 127.0.0.1 --port 7300 --base examples/instancing_dance/empty.usda --event-log instancing-demo.db
 
-# 3. The dance sender
+uv run python -m integrations.usdview.launcher examples/instancing_dance/empty.usda --host 127.0.0.1 --port 7300
+
 uv run python examples/instancing_dance/dance.py
 ```
 
-`Ctrl+C` the sender to stop the animation, close usdview when done,
-and `Ctrl+C` the server.
+Stop the sender with `Ctrl+C`, close usdview, and then stop the server with
+`Ctrl+C`. The server keeps `instancing-demo.db` in the repository root for
+replay; choose another event-log name for an independent run.
 
 ## Customization
 

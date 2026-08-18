@@ -67,10 +67,7 @@ be preserved.
 1. Start a managed server on the original base scene:
 
    ```bash
-   uv run openusdconnect-server \
-     --base scene.usda \
-     --event-log events.db \
-     --port 7200
+   uv run openusdconnect-server --base scene.usda --event-log events.db --port 7200
    ```
 
 2. In each Blender instance, import the same original base through **Import USD

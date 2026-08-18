@@ -18,77 +18,53 @@ Python client.
 
 ## Getting Started
 
-The basic Blender setup starts one local server and connects two Blender
-instances. Each instance imports the included `test_scene.usda` file and
-connects to the server at `127.0.0.1:7200`.
+The first test runs one temporary server and two Python/OpenUSD clients. It is
+headless, bounded, and does not require Blender or Unreal Engine.
 
-### 1. Install
-
-Requirements: [Git](https://git-scm.com/), Python 3.13+,
-[uv](https://docs.astral.sh/uv/), and Blender 4.4+. Python and `uv` run the
-server and build the add-on; Blender uses its own Python and OpenUSD runtime.
-The commands below work in PowerShell and POSIX-compatible shells.
+Requirements: [Git](https://git-scm.com/), Python 3.13+, and
+[uv](https://docs.astral.sh/uv/). The commands below work in PowerShell and
+POSIX-compatible shells.
 
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
-uv sync --group server --group dashboard
+uv sync --group bundled-usd
+```
+
+The `bundled-usd` group installs the renderer-neutral `usd-core` runtime. A
+project that needs custom resolvers, renderers, file formats, or shader plugins
+should use its own OpenUSD installation instead; see
+[OpenUSD runtime and custom plugins](docs/cli-reference.md#openusd-runtime-and-custom-plugins).
+
+Run the headless smoke test:
+
+```bash
+uv run python examples/usd_native_client/run.py --no-usdview --seconds 3
+```
+
+The launcher creates a temporary event log, starts the server and two clients,
+and stops them when the test finishes. A successful run reports
+`local_valid=True` and `peer_valid=True`.
+
+### Continue With Blender
+
+The Blender tutorial starts a persistent local server, connects two Blender
+instances, and verifies an object transform through the dashboard. It requires
+Blender 4.4 or newer; Blender supplies its own Python and OpenUSD runtime.
+
+```bash
+uv sync --group bundled-usd --group dashboard
 uv run python scripts/build_blender_addon.py
 ```
 
-Install `dist/usd_connect_blender.zip` from Blender using
-**Edit > Preferences > Add-ons > Install from Disk**.
+Install `dist/usd_connect_blender.zip` through **Edit > Preferences > Add-ons >
+Install from Disk**, then follow [Getting Started With Blender](docs/getting-started.md).
 
-### 2. Start The Server
-
-```bash
-uv run openusdconnect-server --base test_scene.usda --port 7200 --dashboard-port 8080
-```
-
-Keep this terminal open. When startup completes, it reports that the server is
-listening on `127.0.0.1:7200` and the dashboard is running on port `8080`.
-
-### 3. Open And Edit
-
-1. In a Blender 3D Viewport, press `N` and open the **USD Connect** sidebar tab.
-2. In that tab, choose **Import USD (with prim tagging)** and select
-   `test_scene.usda`. Do not use Blender's standard **File > Import** command.
-3. Confirm the emitter and receiver use `127.0.0.1:7200`.
-4. Choose **Connect Emitter**, then **Start Receiver**.
-5. Confirm the panel shows **Emitter connected** and **Receiver running**.
-6. Repeat in a second Blender instance, then move, rotate, or scale any imported
-   object in either instance.
-
-The other instance follows automatically. The dashboard at
-<http://127.0.0.1:8080> shows both clients and the resulting transactions. Stop
-the server with `Ctrl+C` in its terminal. This local setup does not require an
-external service, and synchronized edits do not overwrite `test_scene.usda`.
-
-### Alternative: Open A Server-Provided USD File
-
-The server-provided file option runs the same TCP synchronization server and
-also creates a generated `scene.usd` file containing the current scene and
-server address. It changes how an application opens and configures the scene;
-live updates still travel through the sync server. After stopping the server
-from the previous step, install the file-serving dependencies and run:
-
-```bash
-uv sync --group server --group vfs --group dashboard
-uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port 8080 --open
-```
-
-The `--open` option opens the generated file's folder in the operating system's
-file browser. In Blender, import the reported `scene.usd` from the **USD
-Connect** tab. The add-on reads the server address and the file's position in
-the event history, then can start sending and receiving changes automatically.
-Stop the processes started by the launcher with:
-
-```bash
-uv run python scripts/start_live_open.py stop
-```
-
-See the [getting started guide](docs/getting-started.md) for verification,
-platform paths, and troubleshooting.
+The base-file workflow is the default: each client opens the same base scene
+and connects to the server. As an alternative, the server can provide a
+generated `scene.usd` that carries the current scene and connection address for
+selection through a file picker. Live updates still use the TCP sync server.
+See [Server-Provided USD Files](docs/live-open.md) for that optional path.
 
 ## Integrations
 
@@ -139,7 +115,7 @@ required by each application.
 
 | Synchronization mode | Use it for |
 | --- | --- |
-| `managed` | The default for DCC integrations. The server maintains collaboration layers and an event history for replay. |
+| `managed` | The default for DCC integrations. Every participant must open an equivalent base scene and resolve its assets compatibly; the server distributes collaboration-layer edits and replay, not the base assets. |
 | `shared_stage` | Synchronizing an existing root-and-sublayer graph. Every participant must begin with equivalent authored files and asset-resolution results; see the architecture guide for graph restrictions. |
 
 See the [USD-native integration contract](docs/usd-native-integration.md) and
@@ -175,7 +151,7 @@ reference material, examples, and contributor workflows.
 With a discoverable usdview installation:
 
 ```bash
-uv sync --group server
+uv sync --group bundled-usd
 uv run python examples/instancing_dance/run.py
 ```
 
@@ -202,7 +178,7 @@ The default test suite is headless. Blender, Unreal, asset, slow, and visual
 tiers are enabled explicitly as described in the [testing guide](docs/testing-setup.md).
 
 ```bash
-uv sync --group server --group vfs --group mcp --group dev
+uv sync --group bundled-usd --group vfs --group mcp --group dev
 uv run ruff check .
 uv run pytest tests/unit -q
 ```

@@ -5,8 +5,9 @@ server. It provides live USD authoring, mirror-backed introspection, shader
 discovery, and playback tools while using the core sync protocol as a network
 client.
 
-For installation, client-neutral configuration, first-run verification, the
-tool reference, and authoring recipes, see the canonical
+For installation, client-neutral stdio configuration, a verified first run,
+process and persistence behavior, the tool reference, and authoring recipes,
+see the canonical
 [`MCP server usage guide`](../../docs/mcp-server-usage.md).
 
 ## Layout

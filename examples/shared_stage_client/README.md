@@ -4,21 +4,30 @@ This example edits an existing sublayer through `SharedStageClient`. The same
 `Usd.Stage` receives authoritative echoes, so no separate mirror stage or
 protocol event dictionaries are needed.
 
+From the repository root, install the bundled OpenUSD runtime:
+
+```text
+uv sync --group bundled-usd
+```
+
 Start a shared-stage server:
 
-```bash
-uv run openusdconnect-server \
-  --base examples/shared_stage_client/scene.usda \
-  --layer-mode shared_stage \
-  --event-log /tmp/openusdconnect-shared-stage.db
+```text
+uv run openusdconnect-server --base examples/shared_stage_client/scene.usda --layer-mode shared_stage --event-log shared-stage-demo.db
 ```
 
 Run an observer and an author in separate terminals:
 
-```bash
-uv run python examples/shared_stage_client/demo.py --app-name observer
-uv run python examples/shared_stage_client/demo.py --app-name author --author
+```text
+uv run python examples/shared_stage_client/demo.py --app-name observer --seconds 5
+uv run python examples/shared_stage_client/demo.py --app-name author --author --seconds 3
 ```
+
+Start the observer first, then the author. Both print increasing `seq` values
+and the same non-`None` sphere `position`. They exit after the configured
+duration; stop the server with `Ctrl+C`. `shared-stage-demo.db` remains in the
+repository root so the session can be replayed. Use a different event-log name
+for an independent run.
 
 To exercise native change tracking, build the bridge with
 `openusdconnect-build-sdf-notice-bridge` and pass its printed path through
