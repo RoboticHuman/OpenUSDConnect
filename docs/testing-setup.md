@@ -153,8 +153,15 @@ provide an OpenPBR adapter.
 
 ## Unreal Engine
 
-Unreal tests package the plugin and launch a real editor. Discover available
-engines with:
+Unreal tests package the plugin and launch a real editor. Initialize the asset
+submodule first:
+
+```bash
+git submodule update --init --recursive
+```
+
+The harness uses MaterialX texture fixtures from the asset submodule even
+before launching the editor. Then discover available engines with:
 
 ```bash
 uv run python scripts/run_unreal_tests.py --list-engines

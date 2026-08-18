@@ -12,6 +12,12 @@ it as the prim's `Result` child. Because the evaluator is just another
 client, every connected receiver sees the expanded geometry, including ones
 with no Hydra at all.
 
+From the repository root, install the bundled OpenUSD runtime:
+
+```text
+uv sync --group bundled-usd
+```
+
 ## Quickstart
 
 One command starts the server, usdview, the wave client, and an animated
@@ -35,18 +41,20 @@ uv run python examples/fourier_waves/run.py --frequencies 1,3.7,6.1,9.3 --amplit
 
 ## Three-terminal recipe
 
-```bash
-# 1. server (periodic compaction: continuous regeneration otherwise grows
-#    the event log by roughly 100 KB per update; --reclaim-interval returns
-#    the freed disk space to the OS)
-uv run python -m openusdconnect.server --port 7301 --base examples/fourier_waves/empty.usda --event-log /tmp/fourier.db --compact-interval 60 --reclaim-interval 120
+Open three terminals in the repository root and run one command in each:
 
-# 2. the procedural evaluator
+```text
+uv run openusdconnect-server --port 7301 --base examples/fourier_waves/empty.usda --event-log fourier-demo.db --compact-interval 60 --reclaim-interval 120
+
 uv run python examples/fourier_waves/wave_client.py --port 7301
 
-# 3. author the prim, then keep animating its phases
 uv run python examples/fourier_waves/author.py --port 7301 --animate 0
 ```
+
+The evaluator reports generated mesh updates and the author reports submitted
+parameter changes. Stop the author and evaluator with `Ctrl+C`, then stop the
+server with `Ctrl+C`. The event log remains at `fourier-demo.db`; periodic
+compaction and reclamation limit growth during long runs.
 
 Point any receiver at the same server (usdview via
 `integrations.usdview.launcher`, Blender, a `UsdStageAdapter` client) to watch

@@ -10,14 +10,22 @@ This example runs two independent USD-native clients:
 The first client receives both its own authoritative sphere and the other
 client's cube. No application code authors protocol event dictionaries.
 
+From the repository root, install the bundled OpenUSD runtime:
+
+```text
+uv sync --group bundled-usd
+```
+
 Run the server, both clients, and usdview with one command:
 
-```bash
+```text
 uv run python examples/usd_native_client/run.py
 ```
 
 Use `--no-usdview --seconds 3` for a short headless run. Successful output
-reports `local_valid=True` and `peer_valid=True`.
+reports `local_valid=True` and `peer_valid=True`. The launcher then stops its
+temporary server and peer process and removes its temporary event log. Pressing
+`Ctrl+C` performs the same cleanup during an unbounded run.
 
 The important ownership rule is visible in `demo.py`: its publisher observes
 the author stage's session layer, while `UsdReceiver` owns different session
