@@ -13,6 +13,7 @@ include = [
     "/openusdconnect",
     "/native",
     "/LICENSE",
+    "/NOTICE",
     "/README.md",
     "/pyproject.toml",
 ]
@@ -23,7 +24,7 @@ version = "0.1.0"
 description = "General-purpose real-time USD sync framework for DCC livelink"
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.13"
 dependencies = [
     "cachetools==7.0.5",

@@ -1,0 +1,10 @@
+OpenUSDConnect
+Copyright 2026 OpenUSDConnect Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file distributed with this work.
+
+The optional assets/ Git submodule comes from the ASWF USD Assets Working
+Group repository. Those assets are separate works and remain subject to the
+license notices supplied in that submodule, including per-asset notices. See
+assets/LICENSE and assets/README.md when distributing those files.
