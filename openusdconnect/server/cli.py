@@ -17,8 +17,10 @@ from dataclasses import dataclass
 import pxr
 from pxr import Ar, Usd
 
+from .._version import __version__
 from ..cli_common import (
     add_sync_endpoint_args,
+    add_version_argument,
     add_vfs_resource_args,
     comma_separated,
     file_name,
@@ -31,6 +33,7 @@ from ..cli_common import (
     validate_file_name,
     validate_path_segment,
 )
+from ..codec import SCHEMA_VERSION
 from ..defaults import (
     DEFAULT_EVENT_LOG,
     DEFAULT_HOST,
@@ -52,7 +55,7 @@ from ..plugin_environment import (
     PluginEnvironmentError,
     prepare_usd_plugin_environment,
 )
-from ..protocol_constants import LayerMode
+from ..protocol_constants import PROTOCOL_VERSION, LayerMode
 from .connection import ConnectionHandler, ThreadedTCPServer
 from .state import UsdSyncServer
 
@@ -63,6 +66,15 @@ def _log_usd_runtime() -> None:
     version = ".".join(str(part) for part in Usd.GetVersion())
     bindings = getattr(pxr, "__file__", None) or "unknown"
     LOG.info("OpenUSD runtime: %s; bindings: %s", version, bindings)
+
+
+def _log_openusdconnect_version() -> None:
+    LOG.info(
+        "OpenUSDConnect %s; protocol %d; schema %d",
+        __version__,
+        PROTOCOL_VERSION,
+        SCHEMA_VERSION,
+    )
 
 
 @dataclass(slots=True)
@@ -146,6 +158,7 @@ def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | N
 def run_server(config: ServerConfig | None = None):
     """Start the server (blocking)."""
     config = config or ServerConfig()
+    _log_openusdconnect_version()
     _log_usd_runtime()
     layer_mode = LayerMode(config.layer_mode)
     if layer_mode is LayerMode.SHARED_STAGE and config.vfs is not None:
@@ -318,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         description="OpenUSDConnect sync server",
         allow_abbrev=False,
     )
+    add_version_argument(ap)
     endpoint = ap.add_argument_group("sync endpoint")
     add_sync_endpoint_args(endpoint)
 

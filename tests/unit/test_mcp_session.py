@@ -20,6 +20,8 @@ class _FakeSender:
 
 def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
+        synchronized = True
+
         def start(self):
             started.append(self)
 
@@ -100,3 +102,14 @@ def test_disconnect_stops_receiver(monkeypatch):
     assert receiver in stopped
     assert session.receiver is None
     assert session.sender is None
+
+
+def test_status_reports_mirror_synchronization(monkeypatch):
+    started, stopped = [], []
+    _patch_net(monkeypatch, started, stopped)
+    session = session_mod.ConnectionSession(McpConfig())
+
+    status = session.connect()
+
+    assert status["mirror_synchronized"] is True
+    session.disconnect()

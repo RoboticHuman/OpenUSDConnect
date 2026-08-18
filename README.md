@@ -1,206 +1,269 @@
 # OpenUSDConnect
 
-OpenUSDConnect synchronizes supported OpenUSD scene changes between connected
-applications. For example, when a user moves an imported object in Blender, the
-Blender add-on sends that change to a central server. The server records the
-change and sends it to another Blender instance, Unreal Engine, or a compatible
-Python client.
+OpenUSDConnect synchronizes live OpenUSD scene edits across DCC applications,
+USD-native tools, and headless services. Blender, usdview, Unreal Engine, MCP,
+and Python clients use the same DCC-independent event protocol.
 
-- Send and receive supported scene edits with Blender, Unreal Engine, and Python
-  clients. usdview can receive changes, and MCP clients can inspect or edit the
-  server scene.
-- Reconnect a client and apply the changes it missed from the server's event
-  history.
-- Join by opening the original USD file and entering the server address, or by
-  opening an optional server-generated USD file that contains that information.
-- View connected clients, scene layers, prims, and recent changes in a web
-  dashboard.
+![Live synchronization between Blender and usdview](docs/images/readme/live-sync-demo.gif)
 
-## Getting Started
+An authoritative server sequences typed USD transactions, stores them in
+SQLite, and broadcasts or replays them to connected and late-joining clients.
 
-The first test runs one temporary server and two Python/OpenUSD clients. It is
-headless, bounded, and does not require Blender or Unreal Engine.
+## Capabilities
 
-Requirements: [Git](https://git-scm.com/), Python 3.13+, and
-[uv](https://docs.astral.sh/uv/). The commands below work in PowerShell and
-POSIX-compatible shells. If Python 3.13 is not already installed, `uv` can
-download a compatible interpreter into its managed cache.
+- Atomic, ordered transactions with durable acknowledgements and reconnect replay
+- Transforms, geometry, primvars, cameras, lights, visibility, and animation
+- References, payloads, variants, instances, point instancers, relationships,
+  metadata, and exact Sdf field changes
+- UsdPreviewSurface and MaterialX values, bindings, NodeGraphs, and connections
+- Managed collaboration layers and exact shared-stage layer synchronization
+- TOFU authentication, rate limiting, playback leadership, log compaction,
+  dashboard administration, and optional live-open snapshots
+
+Each integration supports the subset its host can author or display. The core
+protocol preserves broader USD state in an authoritative mirror or stage.
+
+## Get started
+
+Requirements: [Git](https://git-scm.com/), Python 3.13+,
+[uv](https://docs.astral.sh/uv/), and preferably the OpenUSD build used by your
+project. Clone with `--recursive` when you also need the USD Working Group
+assets used by asset and visual tests.
+
+### Configure your OpenUSD build
+
+Use the same compatible OpenUSD build and plugin environment as the clients in
+your project. This is the recommended path for MaterialX, custom renderers,
+resolvers, file formats, and shader definitions.
 
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
-uv sync --group bundled-usd
 ```
 
-The `bundled-usd` group installs the renderer-neutral `usd-core` runtime. A
-project that needs custom resolvers, renderers, file formats, or shader plugins
-should use its own OpenUSD installation instead; see
-[OpenUSD runtime and custom plugins](docs/cli-reference.md#openusd-runtime-and-custom-plugins).
+Activate the build for the current PowerShell terminal, then install the base
+library without the `bundled-usd` group:
 
-Run the headless smoke test:
+```powershell
+.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+uv sync
+```
+
+Pass `-RenderManRoot`, `-PluginPath`, or `-DllDir` when the project needs them.
+For automation or other shells, wrap individual commands instead:
+
+```bash
+uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
+  openusdconnect-server --base test_scene.usda
+```
+
+The [CLI reference](docs/cli-reference.md#openusd-runtime-and-custom-plugins)
+covers plugin paths, native libraries, renderer setup, and verification.
+Commands below assume that runtime remains active; wrapper users place the
+shown command after `--`.
+
+### Verify synchronization locally
+
+This bounded, headless first run starts a temporary server and two USD-native
+clients, verifies replication, and stops everything automatically:
 
 ```bash
 uv run python examples/usd_native_client/run.py --no-usdview --seconds 3
 ```
 
-The launcher creates a temporary event log, starts the server and two clients,
-and stops them when the test finishes. A successful run reports
-`local_valid=True` and `peer_valid=True`.
+A successful run reports `local_valid=True` and `peer_valid=True`.
 
-### Continue With Blender
-
-The Blender tutorial starts a persistent local server, connects two Blender
-instances, and verifies an object transform through the dashboard. It requires
-Blender 4.4 or newer; Blender supplies its own Python and OpenUSD runtime.
+### Run a persistent server
 
 ```bash
-uv sync --group bundled-usd --group dashboard
-uv run python scripts/build_blender_addon.py
+uv run openusdconnect-server --base test_scene.usda --port 7200
 ```
 
-Install `dist/usd_connect_blender.zip` through **Edit > Preferences > Add-ons >
-Install from Disk**, then follow [Getting Started With Blender](docs/getting-started.md).
+Use `uv run openusdconnect-server --help` for all options. Common additions are
+`--departments animation,lighting,fx`, `--require-token`, and
+`--dashboard-port 8080`.
 
-The base-file workflow is the default: each client opens the same base scene
-and connects to the server. As an alternative, the server can provide a
-generated `scene.usd` that carries the current scene and connection address for
-selection through a file picker. Live updates still use the TCP sync server.
-See [Server-Provided USD Files](docs/live-open.md) for that optional path.
+### Bundled core fallback
+
+Use the bundled `usd-core` runtime only when you do not need MaterialX or
+custom renderer, resolver, file-format, or shader plugins. It provides a
+renderer-neutral environment for core synchronization, standard USD schemas,
+and UsdPreviewSurface.
+
+```bash
+uv sync --group bundled-usd
+uv run python examples/usd_native_client/run.py --no-usdview --seconds 3
+```
+
+Do not add `bundled-usd` when using the project runtime path above.
 
 ## Integrations
 
-| Integration | Direction | Best starting point |
+| Integration | Direction | Start here |
 | --- | --- | --- |
-| **Blender** | Bidirectional | [Install, base-file connection, and server-provided file](docs/blender-addon-usage.md) |
-| **Unreal Engine** | Bidirectional | [Plugin installation and live stage workflow](integrations/unreal/OpenUSDConnect/README.md) |
-| **usdview** | Receive | [Launcher and viewer plug-in](integrations/usdview/README.md) |
-| **Python / OpenUSD** | Bidirectional | [USD-native integration contract](docs/usd-native-integration.md) |
-| **MCP** | Author and inspect | [Connect an MCP client](docs/mcp-server-usage.md) |
-| **Dashboard** | Observe and administer | [Getting started](docs/getting-started.md#inspect-the-session) |
+| Blender addon | Bidirectional | [Blender guide](docs/blender-addon-usage.md) |
+| usdview plugin | Receive | [usdview guide](integrations/usdview/README.md) |
+| Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal guide](integrations/unreal/OpenUSDConnect/README.md) |
+| Python / OpenUSD | Bidirectional | [USD-native API guide](docs/usd-native-integration.md) |
+| MCP server | Author and inspect | `uv run --group mcp python -m integrations.mcp`; [MCP guide](docs/mcp-server-usage.md) |
+| Dashboard | Observe and administer | `uv run --group dashboard python scripts/demo_layer_dashboard.py` |
 
-Blender and usdview can reconstruct the server's separate collaboration layers.
-Blender can also continue from a flattened server-provided file. Unreal uses a
-flattened scene state for both direct and server-provided file connections. Each
-integration guide describes its setup requirements and current limitations.
-Flattened continuation is limited to sessions with one unmuted collaboration
-layer and no department policy; see
-[server-provided USD files](docs/live-open.md#embedded-metadata).
+Build the Blender add-on with `uv run python scripts/build_blender_addon.py`, or
+start a connected usdview session with
+`uv run python scripts/start_usdview.py test_scene.usda`.
 
 ### Run the cross-application Material Zoo
 
 See the same live material scene in Blender, usdview, and Unreal Engine:
 
 ```bash
+# Add --download-blender to install a repo-local portable Blender when needed.
 uv run python scripts/run_material_zoo.py --viewers blender usdview unreal
 ```
 
 The runner discovers the selected applications, starts a temporary server,
-connects each integration, and streams the Material Zoo with a shared camera
-and environment light. Select any subset of the three viewers. See the
+connects each integration, and streams a shared camera and environment light.
+Select any subset of the three viewers, and add `--renderman` for a compatible
+RenderMan/OpenUSD installation. The
 [testing guide](docs/testing-setup.md#inspect-the-material-zoo-interactively)
-for runtime selection and additional options.
+documents runtime selection and additional options.
 
-`scripts/start_usdview.py` starts a temporary server, discovers the matching
-usdview executable, and wires the receiver plugin. Use
-`python -m integrations.usdview.launcher` to connect to an existing server.
-For MaterialX and RenderMan, add `--renderman`; the launcher configures the
-renderer environment and selects hdPrman when a compatible RenderMan/OpenUSD
-installation is available.
+<p align="center">
+  <img src="docs/images/readme/unreal-usdview-material-zoo.jpg" alt="The Material Zoo synchronized between Unreal Engine and usdview" width="100%">
+</p>
+<p align="center"><em>The same synchronized scene in Unreal Engine (left) and usdview with RenderMan (right).</em></p>
 
-## How It Works
+### Inspect collaboration in the dashboard
+
+The dashboard shows connected clients, department layers, composed stage data,
+persisted events, and log maintenance and export controls.
+
+<img src="docs/images/readme/dashboard-overview.png" alt="OpenUSDConnect collaboration dashboard" width="800">
+
+## Python client API
+
+`ManagedClient` is the usual bidirectional API for an application that owns a
+`pxr.Usd.Stage`:
+
+```python
+from pxr import Usd
+
+from openusdconnect import ClientPhase, ManagedClient
+
+stage = Usd.Stage.Open("scene.usda")
+
+with ManagedClient(stage, app_name="my-editor") as client:
+    if not client.connect(timeout=5):
+        raise ConnectionError("OpenUSDConnect server is unavailable")
+
+    while application_is_running():
+        client.update()
+        if client.status.phase is ClientPhase.READY:
+            edit_scene(stage)
+```
+
+Call `update()` on the stage-owning thread. Use `flush(timeout)` at save,
+publish, or orderly-shutdown boundaries when acknowledgement matters. Receive-
+only tools can use `UsdReceiver`; send-only tools can use `UsdPublisher`.
+The [USD-native API guide](docs/usd-native-integration.md) covers ownership,
+replay, reconnection, recovery, and shared-stage clients.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    A["DCC or USD client"] -- "typed USD transactions" --> S["OpenUSDConnect server"]
+    A["DCC or USD client"] -- "typed USD transactions" --> S["sync server"]
     S --> L[("ordered SQLite event log")]
-    L -- "broadcast and replay" --> B["other DCCs and clients"]
-    S --> V["optional server-provided USD files"]
-    S --> D["web dashboard"]
+    L -- "broadcast and replay" --> R["other clients"]
+    S --> D["dashboard and snapshots"]
 ```
 
-Each integration converts local edits into typed USD messages. The server stores
-those messages in an ordered SQLite event log and sends them to the other
-clients. A client that joins late or reconnects requests the changes after the
-last event it applied. The network protocol uses length-prefixed FlatBuffers
-messages over TCP.
+Messages use length-prefixed FlatBuffers over TCP. Managed clients reconstruct
+the authoritative USD state and let a host adapter project the subset its
+native scene represents.
 
-The core library is pure Python on top of `pxr`. Host integrations add the
-stage ownership, native scene conversion, event-loop, and lifecycle behavior
-required by each application.
+| Mode | Use it for | API |
+| --- | --- | --- |
+| `managed` (default) | DCC and service integrations that exchange semantic events through server-owned collaboration layers | `ManagedClient`, `UsdPublisher`, `UsdReceiver` |
+| `shared_stage` | Applications synchronizing an existing root and recursive sublayer graph field-for-field | `SharedStageClient` |
 
-| Synchronization mode | Use it for |
-| --- | --- |
-| `managed` | The default for DCC integrations. Every participant must open an equivalent base scene and resolve its assets compatibly; the server distributes collaboration-layer edits and replay, not the base assets. |
-| `shared_stage` | Synchronizing an existing root-and-sublayer graph. Every participant must begin with equivalent authored files and asset-resolution results; see the architecture guide for graph restrictions. |
-
-See the [USD-native integration contract](docs/usd-native-integration.md) and
+All participants must resolve equivalent base content and assets. Managed
+layered clients open the original base stage; generated live-open snapshots are
+continuation baselines only for integrations that support them. Managed clients
+keep their transient authoring layer selected while active. Shared-stage clients
+synchronize in-memory authored layer contents but do not save files.
+See the [integration contract](docs/usd-native-integration.md) and
 [shared-stage architecture](docs/shared-stage-architecture.md) before building
 a custom integration.
 
-## Feature Coverage
+## Additional workflows
 
-The project implements the following USD data across its core and bundled
-integrations. Each integration supports the subset that its host application
-can author or display; consult its guide for exact behavior.
+### Live-open snapshots
 
-- Transforms, visibility, prim lifecycle, typed attributes, primvars, and relationships
-- Meshes, curves, points, native scenegraph instances, and point instancers
-- UsdPreviewSurface, MaterialX, OpenPBR translation, textures, and material bindings
-- References, payloads, variants, list operations, and shared file-layer editing
-- Cameras, UsdLux lights and applied APIs, stage units, timelines, and playback
-- Time-sampled transforms, attributes, shader inputs, and instancer data
-- Custom property and metadata changes through exact Sdf field deltas
-
-The server also provides:
-
-- Managed collaboration layers with department ordering and mute controls
-- TOFU authentication, rate limiting, compaction, and reconnect replay
-
-The [documentation hub](docs/README.md) separates user guides, concepts,
-reference material, examples, and contributor workflows.
-
-## More Ways To Start
-
-### Animated Instancing Demo
-
-With a discoverable usdview installation:
+Expose the composed managed scene as a normal-looking local USD file while live
+updates continue through the sync server:
 
 ```bash
-uv sync --group bundled-usd
-uv run python examples/instancing_dance/run.py
+uv sync --group vfs
+uv run python scripts/start_live_open.py --base test_scene.usda --open
 ```
 
-### Material Zoo
+Flat snapshot continuation requires one unmuted collaboration layer and no
+department policy. Use the original base scene when layer ordering or muting
+must be preserved. See [Server-provided USD files](docs/live-open.md).
 
-Stream a material-rich scene into Blender, usdview, or both:
+### Shared-stage synchronization
 
 ```bash
-uv run python scripts/run_material_zoo.py --viewers blender
+uv run openusdconnect-server --base shot.usda --layer-mode shared_stage
 ```
 
-### Docker
+Every participant must begin with an equivalent root and sublayer graph. Native
+USD hosts can optionally build the exact Sdf notice bridge with
+`uv run openusdconnect-build-sdf-notice-bridge`.
 
-```bash
-docker compose --profile dashboard up
-```
+## Documentation
 
-See the [example index](examples/README.md) and
-[command-line reference](docs/cli-reference.md) for other workflows.
+- [Documentation index](docs/README.md)
+- [Getting started with Blender](docs/getting-started.md)
+- [USD-native API guide](docs/usd-native-integration.md)
+- [Client recovery](docs/client-recovery.md)
+- [Blender addon](docs/blender-addon-usage.md)
+- [Live material editing](docs/live-material-editing.md)
+- [Server-provided USD files and VFS](docs/live-open.md)
+- [Shared-stage architecture](docs/shared-stage-architecture.md)
+- [MCP server](docs/mcp-server-usage.md)
+- [Command-line reference](docs/cli-reference.md)
+- [Testing](docs/testing-setup.md)
+- [Profiling](docs/profiling.md)
 
 ## Development
 
-The default test suite is headless. Blender, Unreal, asset, slow, and visual
-tiers are enabled explicitly as described in the [testing guide](docs/testing-setup.md).
+```bash
+uv sync --group vfs --group dev
+uv run pytest tests/unit/ -v
+uv run pytest tests/ -v
+uv run ruff check
+```
+
+Blender, Unreal, asset, RenderMan, and visual tiers are opt-in because they need
+external runtimes or assets. Add `--group bundled-usd` only for a
+renderer-neutral test environment that does not need MaterialX or custom
+plugins. The [testing guide](docs/testing-setup.md) lists every tier.
+
+## Docker
+
+The included image uses the renderer-neutral `usd-core` runtime:
 
 ```bash
-uv sync --group bundled-usd --group vfs --group mcp --group dev
-uv run ruff check .
-uv run pytest tests/unit -q
+docker build -t openusdconnect-server .
+docker run -p 7200:7200 -v ./scenes:/scenes \
+  openusdconnect-server --base /scenes/scene.usda
 ```
 
 ## Acknowledgments
 
-- [USD Working Group Assets](https://github.com/usd-wg/assets) supplies the
-  optional standardized assets used by integration and visual tests.
+- [USD Working Group Assets](https://github.com/usd-wg/assets), used by the
+  integration and visual test suites
 
 Licensed under the [Apache License 2.0](LICENSE).

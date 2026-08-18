@@ -8,6 +8,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .cli_common import add_version_argument
+
 
 def _source_directory() -> Path:
     package = Path(__file__).resolve().parent
@@ -96,6 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build the Sdf notice bridge against this process's OpenUSD install.",
     )
+    add_version_argument(parser)
     parser.add_argument(
         "--pxr-dir",
         type=Path,

@@ -2,6 +2,7 @@
 
 import math
 import runpy
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -46,6 +47,65 @@ def test_show_remains_the_blender_and_usdview_shortcut():
     args = run_material_zoo._parse_args(["--show"])
 
     assert args.viewers == {"blender", "usdview"}
+
+
+def test_download_blender_requires_blender_viewer():
+    with pytest.raises(SystemExit):
+        run_material_zoo._parse_args(["--viewers", "usdview", "--download-blender"])
+
+
+def test_missing_blender_reports_setup_options(monkeypatch):
+    monkeypatch.setattr(
+        run_material_zoo,
+        "_find_blender",
+        lambda _explicit: (_ for _ in ()).throw(RuntimeError("Blender not found")),
+    )
+
+    with pytest.raises(RuntimeError, match="setup_blender_test.py") as exc_info:
+        run_material_zoo._resolve_blender(None, download_missing=False)
+
+    assert "--download-blender" in str(exc_info.value)
+
+
+def test_download_blender_uses_portable_setup_script(tmp_path, monkeypatch):
+    executable = tmp_path / "blender.exe"
+    attempts = iter((RuntimeError("Blender not found"), executable))
+    launched = {}
+
+    def find_blender(_explicit):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def run_setup(command, **kwargs):
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(run_material_zoo, "_find_blender", find_blender)
+    monkeypatch.setattr(run_material_zoo.subprocess, "run", run_setup)
+
+    assert run_material_zoo._resolve_blender(None, download_missing=True) == executable
+    assert launched["command"] == [
+        sys.executable,
+        str(run_material_zoo.PROJECT_ROOT / "scripts" / "setup_blender_test.py"),
+    ]
+    assert launched["kwargs"] == {
+        "cwd": run_material_zoo.PROJECT_ROOT,
+        "check": True,
+    }
+
+
+def test_cli_reports_runtime_errors_without_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(
+        run_material_zoo,
+        "main",
+        lambda: (_ for _ in ()).throw(RuntimeError("Blender not found")),
+    )
+
+    assert run_material_zoo._run_cli() == 1
+    assert capsys.readouterr().err == "error: Blender not found\n"
 
 
 def test_blender_viewer_configures_and_starts_emitter_and_receiver(tmp_path, monkeypatch):
