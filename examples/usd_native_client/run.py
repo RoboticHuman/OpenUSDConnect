@@ -41,11 +41,19 @@ def _terminate(process: subprocess.Popen | None) -> None:
 
 
 def _remove_log(path: Path) -> None:
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            path.with_name(path.name + suffix).unlink()
-        except OSError:
-            pass
+    pending = [path.with_name(path.name + suffix) for suffix in ("", "-wal", "-shm")]
+    deadline = time.monotonic() + 2.0
+    while pending:
+        remaining = []
+        for candidate in pending:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                remaining.append(candidate)
+        if not remaining or time.monotonic() >= deadline:
+            return
+        pending = remaining
+        time.sleep(0.02)
 
 
 def main() -> int:

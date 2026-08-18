@@ -52,7 +52,7 @@ vfs = [
     "wsgidav==4.3.3",
 ]
 mcp = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
 ]
 profile = [
     "py-spy==0.4.2",

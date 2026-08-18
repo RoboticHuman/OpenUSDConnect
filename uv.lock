@@ -1048,7 +1048,7 @@ dev = [
     { name = "pytest-cov", specifier = "==7.0.0" },
     { name = "ruff", specifier = "==0.15.6" },
 ]
-mcp = [{ name = "mcp", specifier = ">=1.2" }]
+mcp = [{ name = "mcp", specifier = ">=1.2,<2" }]
 profile = [{ name = "py-spy", specifier = "==0.4.2" }]
 vfs = [
     { name = "cheroot", specifier = "==10.0.1" },

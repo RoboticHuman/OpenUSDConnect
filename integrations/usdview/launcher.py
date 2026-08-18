@@ -302,18 +302,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     args, unknown = parser.parse_known_args(argv)
 
-    proc = launch_usdview(
-        args.stage,
-        host=args.host,
-        port=args.port,
-        token=args.token,
-        extra_args=unknown,
-        usdview_exe=args.usdview,
-        renderman=args.renderman,
-        camera_path=args.camera,
-        expected_seq=args.expected_seq,
-        scene_lights=args.scene_lights,
-    )
+    try:
+        proc = launch_usdview(
+            args.stage,
+            host=args.host,
+            port=args.port,
+            token=args.token,
+            extra_args=unknown,
+            usdview_exe=args.usdview,
+            renderman=args.renderman,
+            camera_path=args.camera,
+            expected_seq=args.expected_seq,
+            scene_lights=args.scene_lights,
+        )
+    except (OSError, RuntimeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     return proc.wait()
 
 

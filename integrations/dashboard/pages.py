@@ -489,7 +489,7 @@ def _build_prim_tree(srv: UsdSyncServer, on_focus=None, register_full_refresh=No
             ui.tree(
                 nodes, node_key="id", label_key="label",
                 on_select=lambda e: _on_select(getattr(e, "value", None)),
-            ).props("dense default-expand-all").classes(
+            ).props("dense").classes(
                 "w-full text-xs font-mono"
             )
 
