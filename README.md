@@ -5,6 +5,8 @@ USD-native tools, and headless services. Its Python core is DCC-independent;
 Blender, usdview, Unreal Engine, and MCP integrations are reference clients
 built on the same event protocol.
 
+![Live synchronization between Blender and usdview](docs/images/readme/live-sync-demo.gif)
+
 Changes are sent as typed USD operations, sequenced by an authoritative server,
 stored in SQLite, and replayed to connected or late-joining clients. The wire
 format is length-prefixed FlatBuffers over TCP.
@@ -147,6 +149,15 @@ replay, reconnection, adapters, and the cases that require recovery.
 | Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal plugin guide](integrations/unreal/OpenUSDConnect/README.md) |
 | MCP server | Author and inspect | `uv run python -m integrations.mcp` |
 | Dashboard | Administration | `uv run --group bundled-usd --group dashboard python scripts/demo_layer_dashboard.py` |
+
+### Inspect collaboration in the dashboard
+
+Monitor connected clients and department layers, inspect the composed stage,
+review persisted events, and compact or export the event log from a browser.
+Start the included multi-client dashboard demo with the command in the table
+above.
+
+<img src="docs/images/readme/dashboard-overview.png" alt="OpenUSDConnect collaboration dashboard" width="800">
 
 ### Run the cross-application Material Zoo
 
