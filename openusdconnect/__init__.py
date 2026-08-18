@@ -4,6 +4,7 @@ Core library for replicating USD stage edits over a networked event protocol.
 """
 
 from ._runtime import select_runtime as _select_runtime
+from ._version import __version__
 
 _select_runtime()
 del _select_runtime
@@ -55,8 +56,6 @@ from .shared_stage_client import (
     SharedStageClient,
 )
 from .usd_client import UsdPublisher, UsdReceiver
-
-__version__ = "0.1.0"
 
 __all__ = [
     "DCCAdapter",

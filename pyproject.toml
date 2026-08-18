@@ -20,7 +20,7 @@ include = [
 
 [project]
 name = "openusdconnect"
-version = "0.1.0"
+dynamic = ["version"]
 description = "General-purpose real-time USD sync framework for DCC livelink"
 readme = "README.md"
 license = "Apache-2.0"
@@ -31,6 +31,9 @@ dependencies = [
     "flatbuffers==25.12.19",
     "numpy==2.4.4",
 ]
+
+[tool.hatch.version]
+path = "openusdconnect/_version.py"
 
 [project.urls]
 Repository = "https://github.com/RoboticHuman/OpenUSDConnect"

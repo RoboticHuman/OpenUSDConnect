@@ -30,7 +30,7 @@ import argparse
 import json
 import sys
 
-from .cli_common import add_sync_endpoint_args
+from .cli_common import add_sync_endpoint_args, add_version_argument
 from .sender import EventSender
 
 
@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None):
         prog="openusdconnect-send",
         description="Send events to a running OpenUSDConnect server.",
     )
+    add_version_argument(parser)
     parser.add_argument(
         "events",
         nargs="*",

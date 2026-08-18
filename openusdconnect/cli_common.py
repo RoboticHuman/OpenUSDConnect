@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from ._version import __version__
 from .defaults import (
     DEFAULT_HOST,
     DEFAULT_SYNC_PORT,
@@ -11,6 +12,12 @@ from .defaults import (
     DEFAULT_VFS_PORT,
     DEFAULT_VFS_SHARE,
 )
+
+
+def add_version_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the standard OpenUSDConnect release-version flag."""
+
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
 
 def validate_port(value: str | int) -> int:

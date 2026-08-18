@@ -20,6 +20,7 @@ WORKDIR /app
 # Install the package, bundled OpenUSD runtime, and VFS dependencies.
 COPY pyproject.toml README.md LICENSE ./
 COPY openusdconnect/ openusdconnect/
+COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/
 
 RUN pip install --no-cache-dir . \
     && pip install --no-cache-dir usd-core==26.8 wsgidav==4.3.3 cheroot==10.0.1
