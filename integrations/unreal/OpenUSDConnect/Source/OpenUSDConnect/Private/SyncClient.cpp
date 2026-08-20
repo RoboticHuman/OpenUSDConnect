@@ -5,6 +5,7 @@
 #include "USDConnectProtocol.h"
 #include "USDConnectSubsystem.h"
 #include "USDWireFraming.h"
+#include "USDEventApplier.h"
 
 #include "Logging/LogMacros.h"
 #include "Sockets.h"
@@ -16,19 +17,19 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDConnect, Log, All);
 
 using namespace OUC;
 
+namespace
+{
+constexpr size_t MaxReceiverFrames = 50'000;
+}
+
 // ---------------------------------------------------------------------------
 // FSyncClient
 // ---------------------------------------------------------------------------
 
-FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
-                         const FString& InHost,
-                         int32 InPort,
-                         const FString& InDepartment,
-                         const FString& InClientId,
-                         const FString& InSessionOrigin,
-                         float InReconnectDelaySecs,
-                         int32 InInitialLastSeq,
-                         const FString& InAuthToken)
+FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner, const FString& InHost, int32 InPort,
+						 const FString& InDepartment, const FString& InClientId,
+						 const FString& InSessionOrigin, float InReconnectDelaySecs,
+						 int32 InInitialLastSeq, const FString& InAuthToken)
 	: Owner(InOwner)
 	, Host(InHost)
 	, Port(InPort)
@@ -37,8 +38,8 @@ FSyncClient::FSyncClient(UUSDConnectSubsystem* InOwner,
 	, SessionOrigin(InSessionOrigin)
 	, AuthToken(InAuthToken)
 	, ReconnectDelaySecs(InReconnectDelaySecs)
-	, LastReceivedSeq(InInitialLastSeq)
-	, LastAppliedSeq(InInitialLastSeq)
+	, ReceiverSession(InInitialLastSeq + 1, MaxReceiverFrames, true)
+	, ActiveGeneration(0)
 	, Socket(nullptr)
 	, Thread(nullptr)
 	, bShouldStop(false)
@@ -53,8 +54,7 @@ FSyncClient::~FSyncClient()
 
 bool FSyncClient::Start()
 {
-	Thread = FRunnableThread::Create(this, TEXT("OpenUSDConnect_SyncClient"),
-	                                 0, TPri_BelowNormal);
+	Thread = FRunnableThread::Create(this, TEXT("OpenUSDConnect_SyncClient"), 0, TPri_BelowNormal);
 	return Thread != nullptr;
 }
 
@@ -85,14 +85,25 @@ uint32 FSyncClient::Run()
 
 	while (!bShouldStop.load(std::memory_order_relaxed))
 	{
+		const openusdconnect::client::ConnectionStart Connection =
+			ReceiverSession.BeginConnection();
+		const uint64 ConnectionGeneration = Connection.Generation;
+		const int32 SyncFrom = Connection.SyncFrom;
+
 		// --- Create socket and connect ---
 		ISocketSubsystem* SS = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
-		if (!SS) { FPlatformProcess::Sleep(ReconnectDelaySecs); continue; }
+		if (!SS)
+		{
+			ReceiverSession.Disconnect(ConnectionGeneration);
+			FPlatformProcess::Sleep(ReconnectDelaySecs);
+			continue;
+		}
 
 		FSocket* NewSocket = SS->CreateSocket(NAME_Stream, TEXT("USDConnectRecv"), false);
 		if (!NewSocket)
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to create socket"));
+			ReceiverSession.Disconnect(ConnectionGeneration);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
 		}
@@ -103,11 +114,12 @@ uint32 FSyncClient::Run()
 		if (bShouldStop.load(std::memory_order_relaxed))
 		{
 			CloseSocket();
+			ReceiverSession.Disconnect(ConnectionGeneration);
 			break;
 		}
 
 		int32 ActualRcvBuf = 0;
-		Socket->SetReceiveBufferSize(256 * 1024, ActualRcvBuf);  // best-effort, ignore actual
+		Socket->SetReceiveBufferSize(256 * 1024, ActualRcvBuf); // best-effort, ignore actual
 
 		TSharedRef<FInternetAddr> Addr = SS->CreateInternetAddr();
 		bool bValid = false;
@@ -116,6 +128,7 @@ uint32 FSyncClient::Run()
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Invalid server address: %s"), *Host);
 			CloseSocket();
+			ReceiverSession.Disconnect(ConnectionGeneration);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
 		}
@@ -125,35 +138,35 @@ uint32 FSyncClient::Run()
 		{
 			if (bHasAnnouncedFailure)
 			{
-				UE_LOG(LogUSDConnect, Verbose,
-					TEXT("Could not connect to %s:%d retrying in %.1fs"),
-					*Host, Port, ReconnectDelaySecs);
+				UE_LOG(LogUSDConnect, Verbose, TEXT("Could not connect to %s:%d retrying in %.1fs"),
+					   *Host, Port, ReconnectDelaySecs);
 			}
 			else
 			{
-				UE_LOG(LogUSDConnect, Log,
-					TEXT("Could not connect to %s:%d retrying in %.1fs"),
-					*Host, Port, ReconnectDelaySecs);
+				UE_LOG(LogUSDConnect, Log, TEXT("Could not connect to %s:%d retrying in %.1fs"),
+					   *Host, Port, ReconnectDelaySecs);
 				bHasAnnouncedFailure = true;
 			}
 			CloseSocket();
+			ReceiverSession.Disconnect(ConnectionGeneration);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
 		}
 		bHasAnnouncedFailure = false;
 
 		// --- Send HELLO ---
-		LastReceivedSeq = LastAppliedSeq.load(std::memory_order_acquire);
-		const int32 SyncFrom = LastReceivedSeq > 0 ? LastReceivedSeq + 1 : 1;
 		UE_LOG(LogUSDConnect, Log,
-			TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"),
-			*Host, Port, SyncFrom);
-		TArray<uint8> HelloFrame =
-			OUC::BuildHelloFrame(TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department, AuthToken);
-		if (!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
+			   TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"), *Host,
+			   Port, SyncFrom);
+		OUC::FWireFrame HelloFrame;
+		const openusdconnect::client::FrameResult HelloResult = OUC::BuildHelloFrame(
+			TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department, HelloFrame, AuthToken);
+		if (HelloResult != openusdconnect::client::FrameResult::Success ||
+			!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
 			UE_LOG(LogUSDConnect, Warning, TEXT("Failed to send HELLO"));
 			CloseSocket();
+			ReceiverSession.Disconnect(ConnectionGeneration);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 			continue;
 		}
@@ -164,55 +177,80 @@ uint32 FSyncClient::Run()
 			if (!RecvFrame(Frame))
 			{
 				CloseSocket();
+				ReceiverSession.Disconnect(ConnectionGeneration);
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
 				continue;
 			}
 
-			const OpenUSDConnect::Payload PType = GetEnvelopePayloadType(Frame);
-			if (PType == OpenUSDConnect::Payload::AuthRejected)
+			openusdconnect::client::EnvelopeView Envelope;
+			if (openusdconnect::client::DecodeEnvelope(
+					Frame.GetData(), static_cast<size_t>(Frame.Num()), Envelope) !=
+				openusdconnect::client::ProtocolResult::Success)
 			{
-				UE_LOG(LogUSDConnect, Error, TEXT("OpenUSDConnect: auth rejected by server"));
-				if (Owner) { Owner->OnClientAuthRejected(TEXT("receiver")); }
+				UE_LOG(LogUSDConnect, Warning, TEXT("Invalid response to receiver HELLO"));
 				CloseSocket();
-				return 0;
-			}
-			if (PType == OpenUSDConnect::Payload::HelloRejected)
-			{
-				const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
-				const OpenUSDConnect::HelloRejected* Rejection =
-					Env ? Env->payload_as_HelloRejected() : nullptr;
-				const OpenUSDConnect::HelloRejectionCode Code = Rejection
-					? Rejection->code()
-					: OpenUSDConnect::HelloRejectionCode::Unspecified;
-				const FString CodeName = Code == OpenUSDConnect::HelloRejectionCode::Unspecified
-					? FString()
-					: FString(UTF8_TO_TCHAR(OpenUSDConnect::EnumNameHelloRejectionCode(Code)));
-				const FString Reason = Rejection ? ToFString(Rejection->reason()) : FString();
-				UE_LOG(LogUSDConnect, Error,
-					TEXT("OpenUSDConnect: receiver rejected by server (%s): %s"),
-					*CodeName, *Reason);
-				if (Owner) { Owner->OnClientHelloRejected(TEXT("receiver"), CodeName, Reason); }
-				CloseSocket();
-				return 0;
-			}
-			if (PType != OpenUSDConnect::Payload::HelloOk)
-			{
-				UE_LOG(LogUSDConnect, Warning,
-					TEXT("Unexpected response to HELLO (type=%u)"), static_cast<uint8>(PType));
-				CloseSocket();
+				ReceiverSession.Disconnect(ConnectionGeneration);
 				FPlatformProcess::Sleep(ReconnectDelaySecs);
 				continue;
 			}
-			const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
-			const OpenUSDConnect::HelloOk* HelloOk = Env ? Env->payload_as_HelloOk() : nullptr;
-			const FString IssuedToken = HelloOk ? ToFString(HelloOk->token()) : FString();
-			++ReplayGeneration;
-			if (Owner) { Owner->OnReceiverReplayGenerationChanged(ReplayGeneration); }
-			if (Owner) { Owner->OnClientHelloOk(TEXT("receiver")); }
+			const openusdconnect::client::HandshakeResponseView Response(Envelope);
+			if (Response.Kind() ==
+				openusdconnect::client::HandshakeResponseKind::AuthenticationRejected)
+			{
+				UE_LOG(LogUSDConnect, Error, TEXT("OpenUSDConnect: auth rejected by server"));
+				if (Owner)
+				{
+					Owner->OnClientAuthRejected(TEXT("receiver"));
+				}
+				CloseSocket();
+				ReceiverSession.Disconnect(ConnectionGeneration);
+				return 0;
+			}
+			if (Response.Kind() ==
+				openusdconnect::client::HandshakeResponseKind::ConfigurationRejected)
+			{
+				const OpenUSDConnect::HelloRejected* Rejection = Response.ConfigurationRejection();
+				const OpenUSDConnect::HelloRejectionCode Code = Rejection->code();
+				const FString CodeName =
+					Code == OpenUSDConnect::HelloRejectionCode::Unspecified
+						? FString()
+						: FString(UTF8_TO_TCHAR(OpenUSDConnect::EnumNameHelloRejectionCode(Code)));
+				const FString Reason = ToFString(Rejection->reason());
+				UE_LOG(LogUSDConnect, Error,
+					   TEXT("OpenUSDConnect: receiver rejected by server (%s): %s"), *CodeName,
+					   *Reason);
+				if (Owner)
+				{
+					Owner->OnClientHelloRejected(TEXT("receiver"), CodeName, Reason);
+				}
+				CloseSocket();
+				ReceiverSession.Disconnect(ConnectionGeneration);
+				return 0;
+			}
+			if (Response.Kind() != openusdconnect::client::HandshakeResponseKind::Accepted)
+			{
+				UE_LOG(LogUSDConnect, Warning, TEXT("Unexpected response to HELLO (type=%u)"),
+					   static_cast<uint8>(Envelope.PayloadType()));
+				CloseSocket();
+				ReceiverSession.Disconnect(ConnectionGeneration);
+				FPlatformProcess::Sleep(ReconnectDelaySecs);
+				continue;
+			}
+			const OpenUSDConnect::HelloOk* HelloOk = Response.Accepted();
+			const FString IssuedToken = ToFString(HelloOk->token());
+			ActiveGeneration.store(ConnectionGeneration, std::memory_order_release);
+			if (Owner)
+			{
+				Owner->OnReceiverReplayGenerationChanged(ConnectionGeneration);
+				Owner->OnClientHelloOk(TEXT("receiver"));
+			}
 			if (!IssuedToken.IsEmpty())
 			{
 				AuthToken = IssuedToken;
-				if (Owner) { Owner->OnClientTokenIssued(IssuedToken); }
+				if (Owner)
+				{
+					Owner->OnClientTokenIssued(IssuedToken);
+				}
 			}
 			UE_LOG(LogUSDConnect, Log, TEXT("HELLO_OK received entering receive loop"));
 		}
@@ -223,22 +261,30 @@ uint32 FSyncClient::Run()
 		while (!bShouldStop.load(std::memory_order_relaxed))
 		{
 			TArray<uint8> Frame;
-			if (!RecvFrame(Frame)) break;
-			if (!HandleFrame(Frame)) break;
-		}
-		if (!bShouldStop.load(std::memory_order_relaxed) && Owner)
-		{
-			Owner->OnReceiverReplayGenerationChanged(ReplayGeneration + 1);
+			if (!RecvFrame(Frame))
+				break;
+			if (!HandleFrame(ConnectionGeneration, MoveTemp(Frame)))
+				break;
 		}
 
 		bConnected.store(false, std::memory_order_relaxed);
 		CloseSocket();
+		ReceiverSession.Disconnect(ConnectionGeneration);
 
 		if (!bShouldStop.load(std::memory_order_relaxed))
 		{
-			UE_LOG(LogUSDConnect, Log,
-				TEXT("Receiver disconnected reconnecting in %.1fs"),
-				ReconnectDelaySecs);
+			if (ReceiverSession.Generation() == ConnectionGeneration)
+			{
+				const bool bRequested =
+					ReceiverSession.RequestReplayFrom(ReceiverSession.LastAppliedSequence() + 1);
+				check(bRequested);
+			}
+			if (Owner)
+			{
+				Owner->OnReceiverReplayGenerationChanged(ReceiverSession.Generation());
+			}
+			UE_LOG(LogUSDConnect, Log, TEXT("Receiver disconnected reconnecting in %.1fs"),
+				   ReconnectDelaySecs);
 			FPlatformProcess::Sleep(ReconnectDelaySecs);
 		}
 	}
@@ -251,23 +297,32 @@ void FSyncClient::Stop()
 	InterruptSocket();
 }
 
-void FSyncClient::MarkAppliedThrough(int32 Seq)
+bool FSyncClient::MarkAppliedThrough(int32 Seq)
 {
-	int32 Current = LastAppliedSeq.load(std::memory_order_acquire);
-	while (Seq > Current
-		&& !LastAppliedSeq.compare_exchange_weak(
-			Current, Seq, std::memory_order_release, std::memory_order_acquire))
-	{
-	}
+	return ReceiverSession.MarkAppliedThrough(ActiveGeneration.load(std::memory_order_acquire),
+											  Seq);
+}
+
+bool FSyncClient::TryPopFrame(FValidatedReceiverFrame& OutFrame)
+{
+	return ReceiverSession.TryPop(OutFrame);
+}
+
+bool FSyncClient::MarkReplayApplied()
+{
+	return ReceiverSession.TryMarkReplayApplied();
 }
 
 void FSyncClient::ResetAppliedProgress()
 {
-	LastAppliedSeq.store(0, std::memory_order_release);
+	ReceiverSession.ResetAppliedProgress();
 }
 
 void FSyncClient::RequestReplayFromApplied()
 {
+	const bool bRequested =
+		ReceiverSession.RequestReplayFrom(ReceiverSession.LastAppliedSequence() + 1);
+	check(bRequested);
 	InterruptSocket();
 }
 
@@ -313,11 +368,13 @@ bool FSyncClient::RecvExact(uint8* Buf, int32 Needed)
 	int32 Got = 0;
 	while (Got < Needed)
 	{
-		if (bShouldStop.load(std::memory_order_relaxed) || !Socket) return false;
+		if (bShouldStop.load(std::memory_order_relaxed) || !Socket)
+			return false;
 
 		int32 Read = 0;
 		const bool bOK = Socket->Recv(Buf + Got, Needed - Got, Read);
-		if (!bOK || Read <= 0) return false;
+		if (!bOK || Read <= 0)
+			return false;
 		Got += Read;
 	}
 	return true;
@@ -326,16 +383,15 @@ bool FSyncClient::RecvExact(uint8* Buf, int32 Needed)
 bool FSyncClient::RecvFrame(TArray<uint8>& OutFrame)
 {
 	uint8 LenBuf[4];
-	if (!RecvExact(LenBuf, 4)) return false;
-
-	const uint32 PayloadLen =
-		((uint32)LenBuf[0] << 24) | ((uint32)LenBuf[1] << 16) |
-		((uint32)LenBuf[2] << 8)  |  (uint32)LenBuf[3];
-
-	if (PayloadLen == 0 || PayloadLen > kMaxFrameSize)
+	if (!RecvExact(LenBuf, 4))
 	{
-		UE_LOG(LogUSDConnect, Warning,
-			TEXT("Bad frame length %u disconnecting"), PayloadLen);
+		return false;
+	}
+
+	std::size_t PayloadLen = 0;
+	if (!openusdconnect::client::TryReadFrameHeader(LenBuf, kMaxFrameSize, PayloadLen))
+	{
+		UE_LOG(LogUSDConnect, Warning, TEXT("Bad frame length disconnecting"));
 		return false;
 	}
 
@@ -348,7 +404,8 @@ bool FSyncClient::SendAll(const uint8* Data, int32 Len)
 	int32 Sent = 0;
 	while (Sent < Len)
 	{
-		if (!Socket) return false;
+		if (!Socket)
+			return false;
 		int32 ThisSent = 0;
 		if (!Socket->Send(Data + Sent, Len - Sent, ThisSent) || ThisSent <= 0)
 		{
@@ -359,83 +416,95 @@ bool FSyncClient::SendAll(const uint8* Data, int32 Len)
 	return true;
 }
 
-bool FSyncClient::HandleFrame(const TArray<uint8>& Frame)
+bool FSyncClient::HandleFrame(uint64 Generation, TArray<uint8>&& Frame)
 {
-	const OpenUSDConnect::Envelope* Env = GetEnvelopeFromFrame(Frame);
-	if (!Env)
+	openusdconnect::client::EnvelopeView Envelope;
+	if (openusdconnect::client::DecodeEnvelope(Frame.GetData(), static_cast<size_t>(Frame.Num()),
+											   Envelope) !=
+		openusdconnect::client::ProtocolResult::Success)
 	{
 		UE_LOG(LogUSDConnect, Error, TEXT("Invalid receiver frame requesting replay"));
 		return false;
 	}
-	const OpenUSDConnect::Payload PType =
-		Env->payload_type();
+	const openusdconnect::client::ControlMessageView Message(Envelope);
 
-	if (PType == OpenUSDConnect::Payload::BroadcastEvent)
+	if (Message.Kind() == openusdconnect::client::ControlMessageKind::BroadcastEvent)
 	{
-		const OpenUSDConnect::BroadcastEvent* BcEvent = Env->payload_as_BroadcastEvent();
-		if (!BcEvent)
-		{
-			UE_LOG(LogUSDConnect, Error, TEXT("Invalid BroadcastEvent requesting replay"));
-			return false;
-		}
+		const OpenUSDConnect::BroadcastEvent* BcEvent = Message.BroadcastEvent();
+		const OpenUSDConnect::EventWrapper* Event = BcEvent->event();
 		const int32 Seq = BcEvent->seq();
-		if (Seq <= LastReceivedSeq)
+		const FString Origin = ToFString(BcEvent->origin());
+		FValidatedReceiverFrame ValidatedFrame;
+		ValidatedFrame.Bytes = MoveTemp(Frame);
+		ValidatedFrame.Sequence = Seq;
+		ValidatedFrame.EventKind = Event->event_type();
+		ValidatedFrame.bUsesChangeBlock =
+			FUSDEventApplier::EventUsesChangeBlock(ValidatedFrame.EventKind);
+		const openusdconnect::client::AcceptResult Result =
+			ReceiverSession.Accept(Generation, openusdconnect::client::ReceiverMessageKind::Event,
+								   Seq, MoveTemp(ValidatedFrame));
+		if (Result == openusdconnect::client::AcceptResult::Accepted)
+		{
+			UE_LOG(LogUSDConnect, Verbose, TEXT("Received BroadcastEvent seq=%d origin='%s'"), Seq,
+				   *Origin);
+			return true;
+		}
+		if (Result == openusdconnect::client::AcceptResult::Duplicate)
 		{
 			UE_LOG(LogUSDConnect, Verbose, TEXT("Ignoring duplicate receiver seq=%d"), Seq);
 			return true;
 		}
-		const int32 ExpectedSeq = LastReceivedSeq + 1;
-		if (Seq != ExpectedSeq)
+		if (Result == openusdconnect::client::AcceptResult::SequenceGap)
 		{
 			UE_LOG(LogUSDConnect, Error,
-				TEXT("Receiver sequence gap: expected=%d received=%d requesting replay"),
-				ExpectedSeq, Seq);
-			return false;
+				   TEXT("Receiver sequence gap before seq=%d requesting replay"), Seq);
 		}
-		LastReceivedSeq = Seq;
-		const FString Origin = ToFString(BcEvent->origin());
-		UE_LOG(LogUSDConnect, Verbose,
-			TEXT("Received BroadcastEvent seq=%d origin='%s'"), Seq, *Origin);
-
-		TArray<uint8> Copy = Frame;
-		if (Owner)
+		else if (Result == openusdconnect::client::AcceptResult::QueueFull)
 		{
-			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
+			UE_LOG(LogUSDConnect, Error, TEXT("Receiver queue is full requesting replay"));
 		}
+		else if (Result == openusdconnect::client::AcceptResult::InvalidSequence)
+		{
+			UE_LOG(LogUSDConnect, Error, TEXT("Invalid receiver sequence %d requesting replay"),
+				   Seq);
+		}
+		return false;
 	}
-	else if (PType == OpenUSDConnect::Payload::Ping)
+	else if (Message.Kind() == openusdconnect::client::ControlMessageKind::Ping)
 	{
 		// Heartbeat receivers ignore (server is just checking the connection).
 	}
-	else if (PType == OpenUSDConnect::Payload::RateLimited)
+	else if (Message.Kind() == openusdconnect::client::ControlMessageKind::RateLimited)
 	{
-		const OpenUSDConnect::RateLimited* RL = Env->payload_as_RateLimited();
-		const float Retry = RL ? RL->retry_after() : 1.0f;
-		UE_LOG(LogUSDConnect, Warning,
-			TEXT("Rate limited sleeping %.1fs"), Retry);
+		const float Retry = Message.RateLimit()->retry_after();
+		UE_LOG(LogUSDConnect, Warning, TEXT("Rate limited sleeping %.1fs"), Retry);
 		FPlatformProcess::Sleep(Retry);
 	}
-	else if (PType == OpenUSDConnect::Payload::Resync)
+	else if (Message.Kind() == openusdconnect::client::ControlMessageKind::Resync)
 	{
 		UE_LOG(LogUSDConnect, Log, TEXT("Resync received resetting seq counter"));
-		LastReceivedSeq = 0;
-		++ReplayGeneration;
+		FValidatedReceiverFrame ValidatedFrame;
+		ValidatedFrame.Bytes = MoveTemp(Frame);
+		ValidatedFrame.bResync = true;
+		const openusdconnect::client::AcceptResult Result =
+			ReceiverSession.Accept(Generation, openusdconnect::client::ReceiverMessageKind::Resync,
+								   0, MoveTemp(ValidatedFrame));
 		if (Owner)
 		{
-			Owner->OnReceiverReplayGenerationChanged(ReplayGeneration);
-			TArray<uint8> Copy = Frame;
-			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
+			Owner->OnReceiverReplayGenerationChanged(Generation);
 		}
+		return Result == openusdconnect::client::AcceptResult::Accepted;
 	}
-	else if (PType == OpenUSDConnect::Payload::ReplayComplete)
+	else if (Message.Kind() == openusdconnect::client::ControlMessageKind::ReplayComplete)
 	{
-		// Keep the marker in the same FIFO as BroadcastEvent frames. The game
-		// thread declares READY only after every preceding replay frame applied.
-		TArray<uint8> Copy = Frame;
-		if (Owner)
+		const OpenUSDConnect::ReplayComplete* Complete = Message.ReplayComplete();
+		const openusdconnect::client::AcceptResult Result = ReceiverSession.AcceptReplayComplete(
+			Generation, Complete->head_seq(), Complete->epoch());
+		if (Result == openusdconnect::client::AcceptResult::InvalidSequence)
 		{
-			Owner->EnqueueEvent(ReplayGeneration, MoveTemp(Copy));
+			UE_LOG(LogUSDConnect, Error, TEXT("Invalid replay head %d"), Complete->head_seq());
 		}
+		return Result == openusdconnect::client::AcceptResult::Accepted;
 	}
 	// Handshake responses do not appear in the receive loop.
 	return true;

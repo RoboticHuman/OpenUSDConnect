@@ -50,12 +50,12 @@ flatc --python --gen-all --gen-onefile \
 
 echo "Python bindings generated: $OUT_DIR/messages_generated.py"
 
-# Unreal C++ bindings one self-contained header, committed alongside the
-# plugin. The generated code pins the flatc runtime version (static_assert).
-UE_SCHEMA_DIR="$ROOT/integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/Public/Schema"
+# Native C++ bindings one self-contained header shared by every integration.
+# The generated code pins the flatc runtime version (static_assert).
+UE_SCHEMA_DIR="$ROOT/native/client_core/include/openusdconnect/client/schema"
 flatc --cpp --gen-all --cpp-std c++17 \
     -I "$SCHEMA_DIR" \
     -o "$UE_SCHEMA_DIR" \
     "$SCHEMA_DIR/messages.fbs"
 
-echo "Unreal C++ bindings generated: $UE_SCHEMA_DIR/messages_generated.h (flatc $(flatc --version | grep -o '[0-9.]*'))"
+echo "Native C++ bindings generated: $UE_SCHEMA_DIR/messages_generated.h (flatc $(flatc --version | grep -o '[0-9.]*'))"

@@ -62,9 +62,9 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	{
 		const FString MachineId = FPlatformProcess::ComputerName();
 		const FString ProjectId = FApp::GetProjectName();
-		const FString Combined  = MachineId + ProjectId;
-		const uint32  Hash      = FCrc::MemCrc32(TCHAR_TO_UTF8(*Combined), Combined.Len());
-		ClientId      = FString::Printf(TEXT("unreal-%08x-%s"), Hash, *MachineId);
+		const FString Combined = MachineId + ProjectId;
+		const uint32 Hash = FCrc::MemCrc32(TCHAR_TO_UTF8(*Combined), Combined.Len());
+		ClientId = FString::Printf(TEXT("unreal-%08x-%s"), Hash, *MachineId);
 	}
 
 	// IMPORTANT: don't call Connect() here. Spawning FRunnableThreads from inside
@@ -92,17 +92,19 @@ void UUSDConnectSubsystem::Connect()
 
 void UUSDConnectSubsystem::StopClients()
 {
-	if (SyncClient) { SyncClient->StopAndWait(); SyncClient.Reset(); }
+	if (SyncClient)
+	{
+		SyncClient->StopAndWait();
+		SyncClient.Reset();
+	}
 	if (EmitClient)
 	{
-		const uint64 Pending = ProducerState
-			? ProducerState->GetPendingTransactionCount()
-			: 0;
+		const uint64 Pending = ProducerState ? ProducerState->GetPendingTransactionCount() : 0;
 		if (Pending > 0 && !EmitClient->FlushPending(2.0))
 		{
 			UE_LOG(LogUSDConnectSubsystem, Warning,
-				TEXT("Disconnecting with %llu unacknowledged producer transactions"),
-				ProducerState->GetPendingTransactionCount());
+				   TEXT("Disconnecting with %llu unacknowledged producer transactions"),
+				   ProducerState->GetPendingTransactionCount());
 		}
 		EmitClient->StopAndWait();
 		EmitClient.Reset();
@@ -112,11 +114,6 @@ void UUSDConnectSubsystem::StopClients()
 	bReplaySynchronized.store(false);
 	ReplayHeadSeq = 0;
 	ReplayEpoch = 0;
-
-	{
-		FScopeLock Lock(&EventQueueCS);
-		EventQueue.Reset();
-	}
 
 	ActiveServerHost.Empty();
 	ActiveServerPort = 0;
@@ -131,7 +128,8 @@ void UUSDConnectSubsystem::StopClients()
 void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 {
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
-	if (!Settings) return;
+	if (!Settings)
+		return;
 
 	FString TargetHost = Settings->ServerHost;
 	int32 TargetPort = Settings->ServerPort;
@@ -165,27 +163,26 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	if (bStartReceiver && !Settings->Department.IsEmpty())
 	{
 		StopClients();
-		SetStatusMessage(
-			TEXT("unsupported_configuration"),
-			TEXT("Department receive mode requires managed layered replay, which the native Unreal plugin does not implement"));
+		SetStatusMessage(TEXT("unsupported_configuration"),
+						 TEXT("Department receive mode requires managed layered replay, which the "
+							  "native Unreal plugin does not implement"));
 		UE_LOG(LogUSDConnectSubsystem, Error,
-			TEXT("Department '%s' rejected: native Unreal receivers do not support managed layered replay"),
-			*Settings->Department);
+			   TEXT("Department '%s' rejected: native Unreal receivers do not support managed "
+					"layered replay"),
+			   *Settings->Department);
 		return;
 	}
 
-	const bool bSameProducerEndpoint = ProducerState
-		&& ProducerState->MatchesEndpoint(TargetHost, TargetPort, Settings->Department);
-	if (ProducerState && !bSameProducerEndpoint
-		&& ProducerState->GetPendingTransactionCount() > 0)
+	const bool bSameProducerEndpoint =
+		ProducerState &&
+		ProducerState->MatchesEndpoint(TargetHost, TargetPort, Settings->Department);
+	if (ProducerState && !bSameProducerEndpoint && ProducerState->GetPendingTransactionCount() > 0)
 	{
-		SetStatusMessage(
-			TEXT("pending_transactions"),
-			FString::Printf(
-				TEXT("Cannot switch endpoints with %llu unacknowledged transaction(s); reconnect to %s:%d and flush first"),
-				ProducerState->GetPendingTransactionCount(),
-				*ProducerState->GetHost(),
-				ProducerState->GetPort()));
+		SetStatusMessage(TEXT("pending_transactions"),
+						 FString::Printf(TEXT("Cannot switch endpoints with %llu unacknowledged "
+											  "transaction(s); reconnect to %s:%d and flush first"),
+										 ProducerState->GetPendingTransactionCount(),
+										 *ProducerState->GetHost(), ProducerState->GetPort()));
 		return;
 	}
 	if (bSameProducerEndpoint && ProducerState->IsRecoveryRequired())
@@ -195,8 +192,8 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	}
 
 	const FString TargetToken = Settings->bPersistAuthTokens
-		? LoadAuthToken(TargetHost, TargetPort, Settings->Department)
-		: FString();
+									? LoadAuthToken(TargetHost, TargetPort, Settings->Department)
+									: FString();
 	const bool bDelayEmitterForToken =
 		bTargetRequiresToken && TargetToken.IsEmpty() && bStartReceiver && bStartEmitter;
 
@@ -208,19 +205,16 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 		bActiveUsingLiveMetadata = bUsingLiveMetadata;
 		ActiveSnapshotSeq = ReceiverInitialLastSeq;
 		ActiveAuthToken = TargetToken;
-		SetStatusMessage(
-			bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
-			TEXT("Live metadata configured; auto-start disabled"));
+		SetStatusMessage(bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
+						 TEXT("Live metadata configured; auto-start disabled"));
 		UE_LOG(LogUSDConnectSubsystem, Log,
-			TEXT("OpenUSDConnect live metadata configured %s:%d, auto-start disabled"),
-			*TargetHost, TargetPort);
+			   TEXT("OpenUSDConnect live metadata configured %s:%d, auto-start disabled"),
+			   *TargetHost, TargetPort);
 		return;
 	}
 
-	if ((SyncClient || EmitClient) &&
-		ActiveServerHost == TargetHost &&
-		ActiveServerPort == TargetPort &&
-		bActiveReceiverStarted == bStartReceiver &&
+	if ((SyncClient || EmitClient) && ActiveServerHost == TargetHost &&
+		ActiveServerPort == TargetPort && bActiveReceiverStarted == bStartReceiver &&
 		bActiveEmitterStarted == bStartEmitter)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Warning, TEXT("Already connected"));
@@ -230,19 +224,17 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	StopClients();
 	if (!bSameProducerEndpoint)
 	{
-		ProducerState = MakeShared<FProducerEndpointState>(
-			TargetHost,
-			TargetPort,
-			Settings->Department,
-			FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		ProducerState =
+			MakeShared<FProducerEndpointState>(TargetHost, TargetPort, Settings->Department,
+											   FGuid::NewGuid().ToString(EGuidFormats::Digits));
 	}
-	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"),
-		*TargetHost, TargetPort, *ClientId);
+	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"), *TargetHost,
+		   TargetPort, *ClientId);
 	if (bUsingLiveMetadata)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Log,
-			TEXT("Using USD live metadata; receiver will sync from seq=%d"),
-			ReceiverInitialLastSeq + 1);
+			   TEXT("Using USD live metadata; receiver will sync from seq=%d"),
+			   ReceiverInitialLastSeq + 1);
 	}
 
 	ActiveServerHost = TargetHost;
@@ -253,42 +245,53 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	bDeferredEmitterForToken = bDelayEmitterForToken;
 	ActiveSnapshotSeq = ReceiverInitialLastSeq;
 	ActiveAuthToken = TargetToken;
-	SetStatusMessage(
-		bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required") : TEXT("connecting"),
-		bDelayEmitterForToken
-			? TEXT("Starting receiver first to obtain auth token")
-			: TEXT("Connecting receiver/emitter"));
+	SetStatusMessage(bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required")
+																   : TEXT("connecting"),
+					 bDelayEmitterForToken ? TEXT("Starting receiver first to obtain auth token")
+										   : TEXT("Connecting receiver/emitter"));
 
 	if (bStartReceiver)
 	{
-		SyncClient = MakeShared<FSyncClient>(
-			this, TargetHost, TargetPort,
-			Settings->Department, ClientId, ProducerState->GetSessionId(),
-			Settings->ReconnectDelaySecs, ReceiverInitialLastSeq, TargetToken);
-		if (SyncClient->Start()) { bActiveReceiverStarted = true; }
-		else { SyncClient.Reset(); }
+		SyncClient =
+			MakeShared<FSyncClient>(this, TargetHost, TargetPort, Settings->Department, ClientId,
+									ProducerState->GetSessionId(), Settings->ReconnectDelaySecs,
+									ReceiverInitialLastSeq, TargetToken);
+		if (SyncClient->Start())
+		{
+			bActiveReceiverStarted = true;
+		}
+		else
+		{
+			SyncClient.Reset();
+		}
 	}
 
 	if (bStartEmitter && !bDelayEmitterForToken)
 	{
-		EmitClient = MakeShared<FEmitClient>(
-			this, ClientId, ProducerState.ToSharedRef(),
-			Settings->ReconnectDelaySecs, TargetToken);
-		if (EmitClient->Start()) { bActiveEmitterStarted = true; }
-		else { EmitClient.Reset(); }
+		EmitClient = MakeShared<FEmitClient>(this, ClientId, ProducerState.ToSharedRef(),
+											 Settings->ReconnectDelaySecs, TargetToken);
+		if (EmitClient->Start())
+		{
+			bActiveEmitterStarted = true;
+		}
+		else
+		{
+			EmitClient.Reset();
+		}
 	}
 }
 
 void UUSDConnectSubsystem::TryStartDeferredEmitter()
 {
-	if (!bDeferredEmitterForToken || EmitClient || !ProducerState
-		|| ActiveServerHost.IsEmpty() || ActiveServerPort <= 0)
+	if (!bDeferredEmitterForToken || EmitClient || !ProducerState || ActiveServerHost.IsEmpty() ||
+		ActiveServerPort <= 0)
 	{
 		return;
 	}
 
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
-	if (!Settings) return;
+	if (!Settings)
+		return;
 
 	FString Token = ActiveAuthToken;
 	if (Token.IsEmpty() && Settings->bPersistAuthTokens)
@@ -296,12 +299,12 @@ void UUSDConnectSubsystem::TryStartDeferredEmitter()
 		Token = LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department);
 		ActiveAuthToken = Token;
 	}
-	if (Token.IsEmpty()) return;
+	if (Token.IsEmpty())
+		return;
 
 	bDeferredEmitterForToken = false;
-	EmitClient = MakeShared<FEmitClient>(
-		this, ClientId, ProducerState.ToSharedRef(),
-		Settings->ReconnectDelaySecs, Token);
+	EmitClient = MakeShared<FEmitClient>(this, ClientId, ProducerState.ToSharedRef(),
+										 Settings->ReconnectDelaySecs, Token);
 	if (EmitClient->Start())
 	{
 		bActiveEmitterStarted = true;
@@ -325,27 +328,30 @@ void UUSDConnectSubsystem::Disconnect()
 
 bool UUSDConnectSubsystem::Flush(float TimeoutSeconds) const
 {
-	if (EmitClient) return EmitClient->FlushPending(TimeoutSeconds);
-	return !ProducerState
-		|| (ProducerState->GetPendingTransactionCount() == 0
-			&& !ProducerState->IsRecoveryRequired());
+	if (EmitClient)
+		return EmitClient->FlushPending(TimeoutSeconds);
+	return !ProducerState || (ProducerState->GetPendingTransactionCount() == 0 &&
+							  !ProducerState->IsRecoveryRequired());
 }
 
 void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 {
 	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
-	if (!Settings || !Settings->bUseLiveMetadataFromStage) return;
+	if (!Settings || !Settings->bUseLiveMetadataFromStage)
+		return;
 
 	FUSDLiveOpenMetadata Metadata;
-	if (!FUSDStageBridge::ReadLiveOpenMetadata(Actor, Metadata)) return;
+	if (!FUSDStageBridge::ReadLiveOpenMetadata(Actor, Metadata))
+		return;
 
 	const FString MetadataKey = Metadata.MakeKey();
-	if (MetadataKey == LastLiveMetadataKey) return;
+	if (MetadataKey == LastLiveMetadataKey)
+		return;
 
 	LastLiveMetadataKey = MetadataKey;
 	UE_LOG(LogUSDConnectSubsystem, Log,
-		TEXT("Detected OpenUSDConnect live metadata on stage: %s:%d snapshot_seq=%d vfs_url=%s"),
-		*Metadata.Host, Metadata.Port, Metadata.SnapshotSeq, *Metadata.VfsUrl);
+		   TEXT("Detected OpenUSDConnect live metadata on stage: %s:%d snapshot_seq=%d vfs_url=%s"),
+		   *Metadata.Host, Metadata.Port, Metadata.SnapshotSeq, *Metadata.VfsUrl);
 
 	if (Settings->bAutoConnect)
 	{
@@ -373,11 +379,12 @@ FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
 	Status.bEmitterConnected = EmitClient && EmitClient->IsConnected();
 	if (ProducerState)
 	{
-		Status.SubmittedTransactions = static_cast<int64>(ProducerState->GetSubmittedTransactionCount());
-		Status.AcknowledgedTransactions = static_cast<int64>(ProducerState->GetAcknowledgedTransactionCount());
+		Status.SubmittedTransactions =
+			static_cast<int64>(ProducerState->GetSubmittedTransactionCount());
+		Status.AcknowledgedTransactions =
+			static_cast<int64>(ProducerState->GetAcknowledgedTransactionCount());
 		Status.PendingTransactions = static_cast<int32>(FMath::Min<uint64>(
-			ProducerState->GetPendingTransactionCount(),
-			static_cast<uint64>(MAX_int32)));
+			ProducerState->GetPendingTransactionCount(), static_cast<uint64>(MAX_int32)));
 		Status.bRecoveryRequired = ProducerState->IsRecoveryRequired();
 		Status.RecoveryDisposition = ProducerState->GetRecoveryDisposition();
 	}
@@ -389,35 +396,25 @@ FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
 	return Status;
 }
 
-FString UUSDConnectSubsystem::LoadAuthToken(
-	const FString& Host,
-	int32 Port,
-	const FString& Department) const
+FString UUSDConnectSubsystem::LoadAuthToken(const FString& Host, int32 Port,
+											const FString& Department) const
 {
 	FString Token;
 	if (GConfig)
 	{
-		GConfig->GetString(
-			OUCAuthConfigSection,
-			*MakeAuthConfigKey(Host, Port, Department),
-			Token,
-			GGameUserSettingsIni);
+		GConfig->GetString(OUCAuthConfigSection, *MakeAuthConfigKey(Host, Port, Department), Token,
+						   GGameUserSettingsIni);
 	}
 	return Token;
 }
 
-void UUSDConnectSubsystem::SaveAuthToken(
-	const FString& Host,
-	int32 Port,
-	const FString& Department,
-	const FString& Token) const
+void UUSDConnectSubsystem::SaveAuthToken(const FString& Host, int32 Port, const FString& Department,
+										 const FString& Token) const
 {
-	if (!GConfig || Token.IsEmpty()) return;
-	GConfig->SetString(
-		OUCAuthConfigSection,
-		*MakeAuthConfigKey(Host, Port, Department),
-		*Token,
-		GGameUserSettingsIni);
+	if (!GConfig || Token.IsEmpty())
+		return;
+	GConfig->SetString(OUCAuthConfigSection, *MakeAuthConfigKey(Host, Port, Department), *Token,
+					   GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -433,13 +430,14 @@ void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
 	if (!IsInGameThread())
 	{
 		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Token]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->OnClientTokenIssued(Token);
-			}
-		});
+		AsyncTask(ENamedThreads::GameThread,
+				  [WeakThis, Token]()
+				  {
+					  if (WeakThis.IsValid())
+					  {
+						  WeakThis->OnClientTokenIssued(Token);
+					  }
+				  });
 		return;
 	}
 
@@ -451,13 +449,13 @@ void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
 		SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department, Token);
 		bPersisted = true;
 	}
-	SetStatusMessage(
-		bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
-		bPersisted ? TEXT("Auth token issued and saved") : TEXT("Auth token issued for this session"));
+	SetStatusMessage(bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
+					 bPersisted ? TEXT("Auth token issued and saved")
+								: TEXT("Auth token issued for this session"));
 	if (bDeferredEmitterForToken)
 	{
 		UE_LOG(LogUSDConnectSubsystem, Log,
-			TEXT("Auth token issued; emitter will start on the next tick"));
+			   TEXT("Auth token issued; emitter will start on the next tick"));
 	}
 }
 
@@ -466,13 +464,14 @@ void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
 	if (!IsInGameThread())
 	{
 		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->OnClientHelloOk(Role);
-			}
-		});
+		AsyncTask(ENamedThreads::GameThread,
+				  [WeakThis, Role]()
+				  {
+					  if (WeakThis.IsValid())
+					  {
+						  WeakThis->OnClientHelloOk(Role);
+					  }
+				  });
 		return;
 	}
 
@@ -482,18 +481,14 @@ void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
 void UUSDConnectSubsystem::OnReceiverReplayGenerationChanged(uint64 ReplayGeneration)
 {
 	uint64 Current = ActiveReplayGeneration.load(std::memory_order_acquire);
-	while (ReplayGeneration > Current
-		&& !ActiveReplayGeneration.compare_exchange_weak(
-			Current,
-			ReplayGeneration,
-			std::memory_order_acq_rel,
-			std::memory_order_acquire))
+	while (ReplayGeneration > Current &&
+		   !ActiveReplayGeneration.compare_exchange_weak(
+			   Current, ReplayGeneration, std::memory_order_acq_rel, std::memory_order_acquire))
 	{
 	}
-	if (ReplayGeneration < Current) return;
+	if (ReplayGeneration < Current)
+		return;
 	bReplaySynchronized.store(false);
-	FScopeLock Lock(&EventQueueCS);
-	EventQueue.Reset();
 }
 
 void UUSDConnectSubsystem::OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason)
@@ -501,21 +496,21 @@ void UUSDConnectSubsystem::OnEmitterTransactionRejected(uint64 TxnId, const FStr
 	if (!IsInGameThread())
 	{
 		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, TxnId, Reason]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->OnEmitterTransactionRejected(TxnId, Reason);
-			}
-		});
+		AsyncTask(ENamedThreads::GameThread,
+				  [WeakThis, TxnId, Reason]()
+				  {
+					  if (WeakThis.IsValid())
+					  {
+						  WeakThis->OnEmitterTransactionRejected(TxnId, Reason);
+					  }
+				  });
 		return;
 	}
 
-	SetStatusMessage(
-		TEXT("recovery_required"),
-		Reason.IsEmpty()
-			? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
-			: FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason));
+	SetStatusMessage(TEXT("recovery_required"),
+					 Reason.IsEmpty()
+						 ? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
+						 : FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason));
 }
 
 void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
@@ -523,64 +518,50 @@ void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
 	if (!IsInGameThread())
 	{
 		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->OnClientAuthRejected(Role);
-			}
-		});
+		AsyncTask(ENamedThreads::GameThread,
+				  [WeakThis, Role]()
+				  {
+					  if (WeakThis.IsValid())
+					  {
+						  WeakThis->OnClientAuthRejected(Role);
+					  }
+				  });
 		return;
 	}
 
 	SetStatusMessage(TEXT("auth_rejected"), FString::Printf(TEXT("%s auth rejected"), *Role));
 }
 
-void UUSDConnectSubsystem::OnClientHelloRejected(
-	const FString& Role,
-	const FString& Code,
-	const FString& Reason)
+void UUSDConnectSubsystem::OnClientHelloRejected(const FString& Role, const FString& Code,
+												 const FString& Reason)
 {
 	if (!IsInGameThread())
 	{
 		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Role, Code, Reason]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->OnClientHelloRejected(Role, Code, Reason);
-			}
-		});
+		AsyncTask(ENamedThreads::GameThread,
+				  [WeakThis, Role, Code, Reason]()
+				  {
+					  if (WeakThis.IsValid())
+					  {
+						  WeakThis->OnClientHelloRejected(Role, Code, Reason);
+					  }
+				  });
 		return;
 	}
 
-	const FString Message = Reason.IsEmpty()
-		? FString::Printf(TEXT("%s connection rejected"), *Role)
-		: FString::Printf(TEXT("%s connection rejected: %s"), *Role, *Reason);
+	const FString Message =
+		Reason.IsEmpty() ? FString::Printf(TEXT("%s connection rejected"), *Role)
+						 : FString::Printf(TEXT("%s connection rejected: %s"), *Role, *Reason);
 	SetStatusMessage(Code.IsEmpty() ? TEXT("connection_rejected") : Code, Message);
-}
-
-void UUSDConnectSubsystem::EnqueueEvent(
-	uint64 ReplayGeneration,
-	TArray<uint8>&& RawBytes)
-{
-	FScopeLock Lock(&EventQueueCS);
-	if (ReplayGeneration != ActiveReplayGeneration.load(std::memory_order_acquire)) return;
-	FQueuedReceiverFrame Queued;
-	Queued.ReplayGeneration = ReplayGeneration;
-	Queued.Bytes = MoveTemp(RawBytes);
-	EventQueue.Add(MoveTemp(Queued));
 }
 
 void UUSDConnectSubsystem::RequestReceiverReplay(const FString& Reason)
 {
-	const uint64 NextGeneration =
-		ActiveReplayGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
-	OnReceiverReplayGenerationChanged(NextGeneration);
 	SetStatusMessage(TEXT("receiver_recovering"), Reason);
 	if (SyncClient)
 	{
 		SyncClient->RequestReplayFromApplied();
+		OnReceiverReplayGenerationChanged(SyncClient->GetGeneration());
 	}
 }
 
@@ -652,10 +633,12 @@ AUsdStageActor* UUSDConnectSubsystem::FindStageActor() const
 	// (e.g. one per layer file), only the first one is live-synced. See the
 	// "Single stage actor" entry in PLUGIN_DEV.md.
 	UWorld* World = GetWorld();
-	if (!World) return nullptr;
+	if (!World)
+		return nullptr;
 	for (TActorIterator<AUsdStageActor> It(World); It; ++It)
 	{
-		if (*It) return *It;
+		if (*It)
+			return *It;
 	}
 	return nullptr;
 }
@@ -671,46 +654,48 @@ void UUSDConnectSubsystem::AttachToStageActor(AUsdStageActor* Actor)
 	FUsdListener& Listener = Actor->GetUsdListener();
 	ObjectsChangedHandle = Listener.GetOnObjectsChanged().AddLambda(
 		[this](const UsdUtils::FObjectChangesByPath& InfoChanges,
-		       const UsdUtils::FObjectChangesByPath& ResyncChanges)
-	{
-		// Echo guard: drop notices generated by our own DrainAndApply.
-		if (bSuppressEmit.load()) return;
-
-		FScopeLock Lock(&PendingEmitPathsCS);
-		auto Collect = [this](const UsdUtils::FObjectChangesByPath& Map)
+			   const UsdUtils::FObjectChangesByPath& ResyncChanges)
 		{
-			for (const auto& Pair : Map)
-			{
-				const FString& Path = Pair.Key;
-				if (Path.IsEmpty() || Path == TEXT("/")) continue;
+			// Echo guard: drop notices generated by our own DrainAndApply.
+			if (bSuppressEmit.load())
+				return;
 
-				// Strip property suffix ".attrName" we want the prim path.
-				// Changed "inputs:*" properties keep their name so the drain
-				// can emit just the edited shader inputs.
-				int32 DotIdx = INDEX_NONE;
-				if (Path.FindChar(TEXT('.'), DotIdx))
+			FScopeLock Lock(&PendingEmitPathsCS);
+			auto Collect = [this](const UsdUtils::FObjectChangesByPath& Map)
+			{
+				for (const auto& Pair : Map)
 				{
-					FString PrimPath = Path.Left(DotIdx);
-					FString PropName = Path.RightChop(DotIdx + 1);
-					if (PropName.StartsWith(TEXT("inputs:")))
+					const FString& Path = Pair.Key;
+					if (Path.IsEmpty() || Path == TEXT("/"))
+						continue;
+
+					// Strip property suffix ".attrName" we want the prim path.
+					// Changed "inputs:*" properties keep their name so the drain
+					// can emit just the edited shader inputs.
+					int32 DotIdx = INDEX_NONE;
+					if (Path.FindChar(TEXT('.'), DotIdx))
 					{
-						PendingEmitInputs.FindOrAdd(PrimPath).Add(MoveTemp(PropName));
+						FString PrimPath = Path.Left(DotIdx);
+						FString PropName = Path.RightChop(DotIdx + 1);
+						if (PropName.StartsWith(TEXT("inputs:")))
+						{
+							PendingEmitInputs.FindOrAdd(PrimPath).Add(MoveTemp(PropName));
+						}
+						PendingEmitPaths.Add(MoveTemp(PrimPath));
 					}
-					PendingEmitPaths.Add(MoveTemp(PrimPath));
+					else
+					{
+						PendingEmitPaths.Add(Path);
+					}
 				}
-				else
-				{
-					PendingEmitPaths.Add(Path);
-				}
-			}
-		};
-		Collect(InfoChanges);
-		Collect(ResyncChanges);
-	});
+			};
+			Collect(InfoChanges);
+			Collect(ResyncChanges);
+		});
 
 	UE_LOG(LogUSDConnectSubsystem, Log,
-		TEXT("Attached to AUsdStageActor (%s) subscribed to FUsdListener::OnObjectsChanged"),
-		*Actor->GetName());
+		   TEXT("Attached to AUsdStageActor (%s) subscribed to FUsdListener::OnObjectsChanged"),
+		   *Actor->GetName());
 }
 
 void UUSDConnectSubsystem::DetachFromStageActor()
@@ -741,140 +726,74 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 
 void UUSDConnectSubsystem::DrainAndApply()
 {
+	if (!SyncClient)
+	{
+		return;
+	}
+
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
 	{
-		// Keep the HELLO replay until a stage appears, but never truncate it: a
-		// truncated prefix cannot safely advance the applied sequence cursor.
 		constexpr int32 MaxBufferedFrames = 5000;
-		bool bOverflowed = false;
-		{
-			FScopeLock Lock(&EventQueueCS);
-			bOverflowed = EventQueue.Num() > MaxBufferedFrames;
-			if (bOverflowed) EventQueue.Reset();
-		}
-		if (bOverflowed)
+		if (SyncClient->GetPendingFrameCount() > MaxBufferedFrames)
 		{
 			RequestReceiverReplay(
-				TEXT("Receiver queue overflowed before a USD stage was available; replay requested from the last applied sequence"));
+				TEXT("Receiver queue overflowed before a USD stage was available; replay requested "
+					 "from the last applied sequence"));
 		}
 		return;
 	}
 
-	// Apply in bounded chunks. Each ApplyFrame triggers AUsdStageActor to
-	// resync Unreal scene components for the affected prim when the HELLO
-	// replay delivers thousands of events, applying them all on a single
-	// tick freezes the editor for seconds. Cap by both count and wall-time
-	// so a single tick stays interactive; the rest stays queued for the
-	// next tick.
-	constexpr int32  MaxApplyPerTick        = 512;
-	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms preserves ~60 fps
-
-	int32 ChunkSize = 0;
+	auto PublishReplayIfApplied = [this]()
 	{
-		FScopeLock Lock(&EventQueueCS);
-		ChunkSize = FMath::Min(EventQueue.Num(), MaxApplyPerTick);
-	}
-	if (ChunkSize == 0) return;
-
-	TArray<FQueuedReceiverFrame> Chunk;
-	Chunk.Reserve(ChunkSize);
-	{
-		FScopeLock Lock(&EventQueueCS);
-		for (int32 i = 0; i < ChunkSize && i < EventQueue.Num(); ++i)
+		if (!SyncClient || !SyncClient->MarkReplayApplied())
 		{
-			Chunk.Add(MoveTemp(EventQueue[i]));
+			return;
 		}
-		EventQueue.RemoveAt(0, ChunkSize, EAllowShrinking::No);
+		ReplayHeadSeq = SyncClient->GetReplayHeadSeq();
+		ReplayEpoch = SyncClient->GetReplayEpoch();
+		bReplaySynchronized.store(true);
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			   TEXT("Receiver replay applied through seq=%d epoch=%llu publishing enabled"),
+			   ReplayHeadSeq, static_cast<unsigned long long>(ReplayEpoch));
+	};
+
+	PublishReplayIfApplied();
+	if (SyncClient->GetPendingFrameCount() == 0)
+	{
+		return;
 	}
+
+	constexpr int32 MaxApplyPerTick = 512;
+	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms preserves ~60 fps
 
 	const double Start = FPlatformTime::Seconds();
 	int32 Applied = 0;
+	int32 LastApplied = SyncClient->GetLastAppliedSeq();
 	bool bNeedsReplay = false;
-	bool bGenerationChanged = false;
 	FString RecoveryReason;
 
 	bSuppressEmit.store(true);
 	{
-		// Contiguous value events share one SdfChangeBlock so their notices
-		// fire as a single batch the stage actor's per-notice component
-		// resync dominates replay throughput. Structural events cannot apply
-		// inside a block (UsdStage::DefinePrim and composition-arc edits need
-		// the stage to recompose immediately), so the run's block closes
-		// before one applies and a fresh block opens for the next value run.
 		TUniquePtr<FUSDEventChangeBlock> RunBlock;
-		for (FQueuedReceiverFrame& Queued : Chunk)
+		while (Applied < MaxApplyPerTick &&
+			   FPlatformTime::Seconds() - Start <= MaxApplySecondsPerTick)
 		{
-			if (Queued.ReplayGeneration
-				!= ActiveReplayGeneration.load(std::memory_order_acquire))
+			FValidatedReceiverFrame Frame;
+			if (!SyncClient->TryPopFrame(Frame))
 			{
-				bGenerationChanged = true;
 				break;
 			}
-			TArray<uint8>& Frame = Queued.Bytes;
-			const OpenUSDConnect::Envelope* Envelope = OUC::GetEnvelopeFromFrame(Frame);
-			if (!Envelope)
-			{
-				bNeedsReplay = true;
-				RecoveryReason = TEXT("Receiver dequeued an invalid frame");
-				break;
-			}
-			if (Envelope && Envelope->payload_type() == OpenUSDConnect::Payload::Resync)
+			if (Frame.bResync)
 			{
 				RunBlock.Reset();
-				if (SyncClient) SyncClient->ResetAppliedProgress();
+				SyncClient->ResetAppliedProgress();
+				LastApplied = 0;
 				bReplaySynchronized.store(false);
 				++Applied;
 				continue;
 			}
-			if (Envelope
-				&& Envelope->payload_type() == OpenUSDConnect::Payload::ReplayComplete)
-			{
-				RunBlock.Reset();
-				const OpenUSDConnect::ReplayComplete* Complete =
-					Envelope->payload_as_ReplayComplete();
-				if (!Complete)
-				{
-					bNeedsReplay = true;
-					RecoveryReason = TEXT("Receiver could not decode ReplayComplete");
-					break;
-				}
-				const int32 AppliedSeq = SyncClient ? SyncClient->GetLastAppliedSeq() : 0;
-				if (AppliedSeq != Complete->head_seq())
-				{
-					bNeedsReplay = true;
-					RecoveryReason = FString::Printf(
-						TEXT("ReplayComplete advertised seq=%d but applied cursor is seq=%d"),
-						Complete->head_seq(), AppliedSeq);
-					break;
-				}
-				ReplayHeadSeq = Complete->head_seq();
-				ReplayEpoch = Complete->epoch();
-				bReplaySynchronized.store(true);
-				UE_LOG(LogUSDConnectSubsystem, Log,
-					TEXT("Receiver replay applied through seq=%d epoch=%llu publishing enabled"),
-					ReplayHeadSeq,
-					static_cast<unsigned long long>(ReplayEpoch));
-				++Applied;
-				continue;
-			}
-			if (Envelope->payload_type() != OpenUSDConnect::Payload::BroadcastEvent)
-			{
-				bNeedsReplay = true;
-				RecoveryReason = TEXT("Unexpected payload entered the receiver apply queue");
-				break;
-			}
-
-			const OpenUSDConnect::BroadcastEvent* Broadcast =
-				Envelope->payload_as_BroadcastEvent();
-			if (!Broadcast || !SyncClient)
-			{
-				bNeedsReplay = true;
-				RecoveryReason = TEXT("Receiver could not decode or route a broadcast event");
-				break;
-			}
-			const int32 Seq = Broadcast->seq();
-			const int32 LastApplied = SyncClient->GetLastAppliedSeq();
+			const int32 Seq = Frame.Sequence;
 			if (Seq <= LastApplied)
 			{
 				++Applied;
@@ -884,12 +803,11 @@ void UUSDConnectSubsystem::DrainAndApply()
 			{
 				bNeedsReplay = true;
 				RecoveryReason = FString::Printf(
-					TEXT("Receiver apply gap: expected=%d dequeued=%d"),
-					LastApplied + 1, Seq);
+					TEXT("Receiver apply gap: expected=%d dequeued=%d"), LastApplied + 1, Seq);
 				break;
 			}
 
-			if (FUSDEventApplier::FrameUsesChangeBlock(Frame))
+			if (Frame.bUsesChangeBlock)
 			{
 				if (!RunBlock)
 				{
@@ -901,71 +819,46 @@ void UUSDConnectSubsystem::DrainAndApply()
 				RunBlock.Reset();
 			}
 			FString TouchedPrim;
-			OpenUSDConnect::EventPayload EventKind = OpenUSDConnect::EventPayload::NONE;
-			if (!FUSDEventApplier::ApplyFrame(Frame, StageActor, &TouchedPrim, &EventKind))
+			if (!FUSDEventApplier::ApplyValidatedFrame(Frame.Bytes, StageActor, &TouchedPrim))
+			{
+				RunBlock.Reset();
+				bNeedsReplay = true;
+				RecoveryReason = FString::Printf(TEXT("Failed to apply receiver sequence %d"), Seq);
+				break;
+			}
+			LastApplied = Seq;
+			if (!SyncClient->MarkAppliedThrough(Seq))
 			{
 				RunBlock.Reset();
 				bNeedsReplay = true;
 				RecoveryReason = FString::Printf(
-					TEXT("Failed to apply receiver sequence %d"), Seq);
+					TEXT("Receiver could not advance the applied cursor through seq=%d"), Seq);
 				break;
 			}
-			SyncClient->MarkAppliedThrough(Seq);
 			// Received network edits dirty their owning material for the
 			// materializer. EnsurePrim is included because shader-node
 			// creation changes the network without a connectable event.
-			if (!TouchedPrim.IsEmpty()
-				&& (EventKind == OpenUSDConnect::EventPayload::SetConnectableInput
-					|| EventKind == OpenUSDConnect::EventPayload::SetConnectableConnection
-					|| EventKind == OpenUSDConnect::EventPayload::EnsurePrim))
+			if (!TouchedPrim.IsEmpty() &&
+				(Frame.EventKind == OpenUSDConnect::EventPayload::SetConnectableInput ||
+				 Frame.EventKind == OpenUSDConnect::EventPayload::SetConnectableConnection ||
+				 Frame.EventKind == OpenUSDConnect::EventPayload::EnsurePrim))
 			{
 				PendingMaterializePrims.Add(MoveTemp(TouchedPrim));
 			}
 			++Applied;
-			if (FPlatformTime::Seconds() - Start > MaxApplySecondsPerTick)
-			{
-				break;
-			}
 		}
 	}
 	bSuppressEmit.store(false);
-	if (bGenerationChanged)
-	{
-		return;
-	}
 	if (bNeedsReplay)
 	{
 		RequestReceiverReplay(RecoveryReason);
 		return;
 	}
 
-	// If we hit the time budget before draining the chunk, push the unprocessed
-	// tail back to the front of the queue so we resume next tick.
-	if (Applied < Chunk.Num())
-	{
-		FScopeLock Lock(&EventQueueCS);
-		const int32 Remaining = Chunk.Num() - Applied;
-		TArray<FQueuedReceiverFrame> Merged;
-		Merged.Reserve(Remaining + EventQueue.Num());
-		for (int32 i = Applied; i < Chunk.Num(); ++i)
-		{
-			Merged.Add(MoveTemp(Chunk[i]));
-		}
-		for (FQueuedReceiverFrame& Frame : EventQueue)
-		{
-			Merged.Add(MoveTemp(Frame));
-		}
-		EventQueue = MoveTemp(Merged);
-	}
-
-	int32 QueueRemaining = 0;
-	{
-		FScopeLock Lock(&EventQueueCS);
-		QueueRemaining = EventQueue.Num();
-	}
+	PublishReplayIfApplied();
+	const int32 QueueRemaining = SyncClient->GetPendingFrameCount();
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		TEXT("Applied %d event(s) this tick (queue remaining: %d)"),
-		Applied, QueueRemaining);
+		   TEXT("Applied %d event(s) this tick (queue remaining: %d)"), Applied, QueueRemaining);
 }
 
 // ---------------------------------------------------------------------------
@@ -974,9 +867,12 @@ void UUSDConnectSubsystem::DrainAndApply()
 
 void UUSDConnectSubsystem::DrainAndEmit()
 {
-	if (!EmitClient || !EmitClient->IsConnected()) return;
-	if (!bReplaySynchronized.load()) return;
-	if (bSuppressEmit.load()) return;
+	if (!EmitClient || !EmitClient->IsConnected())
+		return;
+	if (!bReplaySynchronized.load())
+		return;
+	if (bSuppressEmit.load())
+		return;
 
 	const uint64 ConnectionGeneration = EmitClient->GetConnectionGeneration();
 	if (ConnectionGeneration != LastEmitConnectionGeneration)
@@ -996,13 +892,15 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	}
 
 	AUsdStageActor* StageActor = CachedStageActor.Get();
-	if (!StageActor || !IsValid(StageActor)) return;
+	if (!StageActor || !IsValid(StageActor))
+		return;
 
 	TSet<FString> Changed;
 	TMap<FString, TSet<FString>> ChangedInputs;
 	{
 		FScopeLock Lock(&PendingEmitPathsCS);
-		if (PendingEmitPaths.Num() == 0 && PendingEmitInputs.Num() == 0) return;
+		if (PendingEmitPaths.Num() == 0 && PendingEmitInputs.Num() == 0)
+			return;
 		Changed = MoveTemp(PendingEmitPaths);
 		ChangedInputs = MoveTemp(PendingEmitInputs);
 		PendingEmitPaths.Reset();
@@ -1010,7 +908,7 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	}
 
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		TEXT("Draining %d changed prim path(s) from FUsdListener"), Changed.Num());
+		   TEXT("Draining %d changed prim path(s) from FUsdListener"), Changed.Num());
 
 	for (const FString& Path : Changed)
 	{
@@ -1022,7 +920,8 @@ void UUSDConnectSubsystem::DrainAndEmit()
 		// local artifacts; reroute them onto the inline shader instead of
 		// emitting an orphan material-level event. The shader authoring
 		// re-enters this path next tick and emits/rematerializes normally.
-		if (FUSDMaterialXMaterializer::RerouteMaterialInterfaceEdit(StageActor, Pair.Key, Pair.Value))
+		if (FUSDMaterialXMaterializer::RerouteMaterialInterfaceEdit(StageActor, Pair.Key,
+																	Pair.Value))
 		{
 			continue;
 		}
@@ -1050,17 +949,25 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 				bSuppressEmit.store(false);
 			}
 
-			TArray<FEmitXformTrs> Batch = { Xform };
+			TArray<FEmitXformTrs> Batch = {Xform};
 			const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(PrimPath);
 			const uint64 TxnId = ProducerState->GetNextTransactionId();
-			TArray<uint8> Frame = BuildXformTxnFrame(
-				TxnId, Batch, bIncludeEnsureXformOps);
+			OUC::FWireFrame Frame;
+			const openusdconnect::client::FrameResult FrameResult =
+				BuildXformTxnFrame(TxnId, Batch, Frame, bIncludeEnsureXformOps);
+			if (FrameResult != openusdconnect::client::FrameResult::Success)
+			{
+				UE_LOG(LogUSDConnectSubsystem, Error,
+					   TEXT("EmitPrimChange(%s): failed to build TRS frame"), *PrimPath);
+				return;
+			}
 			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); enqueueing"),
-				*PrimPath, Frame.Num(), Xform.Fields,
-				bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""),
-				bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));
-			if (Frame.Num() > 0 && EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame)))
+				   TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); "
+						"enqueueing"),
+				   *PrimPath, Frame.Num(), Xform.Fields,
+				   bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""),
+				   bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));
+			if (EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame)))
 			{
 				EmittedXformPrims.Add(PrimPath);
 			}
@@ -1072,20 +979,30 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 		FEmitVisibility Vis;
 		if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Vis))
 		{
-			TArray<FEmitVisibility> Batch = { Vis };
+			TArray<FEmitVisibility> Batch = {Vis};
 			const uint64 TxnId = ProducerState->GetNextTransactionId();
-			TArray<uint8> Frame = BuildVisibilityTxnFrame(
-				TxnId, Batch);
-			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				TEXT("EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) enqueueing"),
+			OUC::FWireFrame Frame;
+			const openusdconnect::client::FrameResult FrameResult =
+				BuildVisibilityTxnFrame(TxnId, Batch, Frame);
+			if (FrameResult != openusdconnect::client::FrameResult::Success)
+			{
+				UE_LOG(LogUSDConnectSubsystem, Error,
+					   TEXT("EmitPrimChange(%s): failed to build visibility frame"), *PrimPath);
+				return;
+			}
+			UE_LOG(
+				LogUSDConnectSubsystem, Verbose,
+				TEXT(
+					"EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) enqueueing"),
 				*PrimPath, Frame.Num(), Vis.bVisible ? 1 : 0);
-			if (Frame.Num() > 0) EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
+			EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
 		}
 	}
 }
 
-void UUSDConnectSubsystem::EmitConnectableInputs(
-	AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames)
+void UUSDConnectSubsystem::EmitConnectableInputs(AUsdStageActor* StageActor,
+												 const FString& PrimPath,
+												 const TSet<FString>& InputAttrNames)
 {
 	FEmitConnectableInput Event;
 	if (!FUSDStageBridge::ReadConnectableInputs(StageActor, PrimPath, InputAttrNames, Event))
@@ -1093,14 +1010,21 @@ void UUSDConnectSubsystem::EmitConnectableInputs(
 		return;
 	}
 
-	TArray<FEmitConnectableInput> Batch = { MoveTemp(Event) };
+	TArray<FEmitConnectableInput> Batch = {MoveTemp(Event)};
 	const uint64 TxnId = ProducerState->GetNextTransactionId();
-	TArray<uint8> Frame = BuildConnectableInputTxnFrame(
-		TxnId, Batch);
+	OUC::FWireFrame Frame;
+	const openusdconnect::client::FrameResult FrameResult =
+		BuildConnectableInputTxnFrame(TxnId, Batch, Frame);
+	if (FrameResult != openusdconnect::client::FrameResult::Success)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Error,
+			   TEXT("EmitConnectableInputs(%s): failed to build frame"), *PrimPath);
+		return;
+	}
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes enqueueing"),
-		*PrimPath, Batch[0].Inputs.Num(), Frame.Num());
-	if (Frame.Num() > 0) EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
+		   TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes enqueueing"), *PrimPath,
+		   Batch[0].Inputs.Num(), Frame.Num());
+	EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,8 +1055,8 @@ void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
 	bSuppressEmit.store(true);
 	{
 #if WITH_EDITOR
-		const FScopedTransaction Transaction(
-			NSLOCTEXT("OpenUSDConnect", "InitialMaterialXRefresh", "Prepare live MaterialX materials"));
+		const FScopedTransaction Transaction(NSLOCTEXT("OpenUSDConnect", "InitialMaterialXRefresh",
+													   "Prepare live MaterialX materials"));
 #endif
 
 		for (const FString& Material : Materials)
@@ -1155,8 +1079,10 @@ void UUSDConnectSubsystem::QueueInitialMaterializations(AUsdStageActor* Actor)
 	bSuppressEmit.store(false);
 
 	UE_LOG(LogUSDConnectSubsystem, Log,
-		TEXT("Initial OpenUSDConnect MaterialX refresh scanned %d material(s), updated %d, render_context=%s"),
-		Materials.Num(), Changed, bChangedRenderContext ? TEXT("mtlx (selected)") : TEXT("mtlx"));
+		   TEXT("Initial OpenUSDConnect MaterialX refresh scanned %d material(s), updated %d, "
+				"render_context=%s"),
+		   Materials.Num(), Changed,
+		   bChangedRenderContext ? TEXT("mtlx (selected)") : TEXT("mtlx"));
 }
 
 void UUSDConnectSubsystem::ProcessPendingMaterializations()
@@ -1192,18 +1118,18 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 
 	{
 #if WITH_EDITOR
-	const FScopedTransaction Transaction(
-		NSLOCTEXT("OpenUSDConnect", "LiveMaterialXRefresh", "Refresh live MaterialX materials"));
+		const FScopedTransaction Transaction(NSLOCTEXT("OpenUSDConnect", "LiveMaterialXRefresh",
+													   "Refresh live MaterialX materials"));
 #endif
 
-	// The session-layer authoring below fires stage notices; suppress our own
-	// listener so they don't loop back into the emit path. The stage actor's
-	// listener still sees them that's what triggers the re-import.
-	bSuppressEmit.store(true);
-	for (const FString& Material : Materials)
-	{
-		FUSDMaterialXMaterializer::MaterializeMaterial(StageActor, Material);
-	}
+		// The session-layer authoring below fires stage notices; suppress our own
+		// listener so they don't loop back into the emit path. The stage actor's
+		// listener still sees them that's what triggers the re-import.
+		bSuppressEmit.store(true);
+		for (const FString& Material : Materials)
+		{
+			FUSDMaterialXMaterializer::MaterializeMaterial(StageActor, Material);
+		}
 	}
 	bSuppressEmit.store(false);
 }

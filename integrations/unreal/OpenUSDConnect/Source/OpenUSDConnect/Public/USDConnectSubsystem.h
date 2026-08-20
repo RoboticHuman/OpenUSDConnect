@@ -19,53 +19,52 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	FString EndpointHost;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	int32 EndpointPort = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bUsingLiveMetadata = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	int32 SnapshotSeq = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bReceiverStarted = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bReceiverConnected = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bReceiverSynchronized = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bEmitterStarted = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bEmitterConnected = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	int64 SubmittedTransactions = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	int64 AcknowledgedTransactions = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	int32 PendingTransactions = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	bool bRecoveryRequired = false;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
-	EUSDConnectRecoveryDisposition RecoveryDisposition =
-		EUSDConnectRecoveryDisposition::None;
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
+	EUSDConnectRecoveryDisposition RecoveryDisposition = EUSDConnectRecoveryDisposition::None;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	FString AuthState;
 
-	UPROPERTY(BlueprintReadOnly, Category="OpenUSD Connect")
+	UPROPERTY(BlueprintReadOnly, Category = "OpenUSD Connect")
 	FString LastMessage;
 };
 
@@ -104,37 +103,43 @@ public:
 	// UTickableWorldSubsystem
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
-	virtual bool IsTickable() const override { return true; }
+	virtual bool IsTickable() const override
+	{
+		return true;
+	}
 
 	// Live sync must run in the editor (without PIE), not just during Play.
 	// UTickableWorldSubsystem defaults this to false we override to true.
-	virtual bool IsTickableInEditor() const override { return true; }
+	virtual bool IsTickableInEditor() const override
+	{
+		return true;
+	}
 
 	// Keep ticking when the game is paused so sync stays responsive.
-	virtual bool IsTickableWhenPaused() const override { return true; }
+	virtual bool IsTickableWhenPaused() const override
+	{
+		return true;
+	}
 
 	/** Manually connect receiver and emitter */
-	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	UFUNCTION(BlueprintCallable, Category = "OpenUSD Connect")
 	void Connect();
 
 	/** Disconnect both receiver and emitter */
-	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	UFUNCTION(BlueprintCallable, Category = "OpenUSD Connect")
 	void Disconnect();
 
 	/** Wait until all submitted emitter transactions are durably acknowledged. */
-	UFUNCTION(BlueprintCallable, Category="OpenUSD Connect")
+	UFUNCTION(BlueprintCallable, Category = "OpenUSD Connect")
 	bool Flush(float TimeoutSeconds = 5.0f) const;
 
 	/** True while the receiver TCP connection is established */
-	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
+	UFUNCTION(BlueprintPure, Category = "OpenUSD Connect")
 	bool IsConnected() const;
 
 	/** Runtime connection/auth status for UI panels or debugging widgets. */
-	UFUNCTION(BlueprintPure, Category="OpenUSD Connect")
+	UFUNCTION(BlueprintPure, Category = "OpenUSD Connect")
 	FUSDConnectStatus GetStatus() const;
-
-	/** Called from FSyncClient background thread pushes one replay-generation frame. */
-	void EnqueueEvent(uint64 ReplayGeneration, TArray<uint8>&& RawBytes);
 
 	/** Called from client background threads when the server issues a TOFU token. */
 	void OnClientTokenIssued(const FString& Token);
@@ -152,18 +157,9 @@ public:
 	void OnClientAuthRejected(const FString& Role);
 
 	/** Called from client background threads when the requested mode is rejected. */
-	void OnClientHelloRejected(
-		const FString& Role,
-		const FString& Code,
-		const FString& Reason);
+	void OnClientHelloRejected(const FString& Role, const FString& Code, const FString& Reason);
 
 private:
-	struct FQueuedReceiverFrame
-	{
-		uint64 ReplayGeneration = 0;
-		TArray<uint8> Bytes;
-	};
-
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
@@ -173,7 +169,8 @@ private:
 	void TryStartDeferredEmitter();
 	void QueueInitialMaterializations(AUsdStageActor* Actor);
 	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
-	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department, const FString& Token) const;
+	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department,
+					   const FString& Token) const;
 	void SetStatusMessage(const FString& AuthState, const FString& Message);
 	void RequestReceiverReplay(const FString& Reason);
 
@@ -186,15 +183,14 @@ private:
 	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
 
 	/** Build and send a SetConnectableInput Txn for changed shader inputs on one prim */
-	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath, const TSet<FString>& InputAttrNames);
+	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath,
+							   const TSet<FString>& InputAttrNames);
 
 	/** Refresh local .mtlx documents for materials dirtied this tick */
 	void ProcessPendingMaterializations();
 
 	// --- Receiver ---
 	TSharedPtr<FSyncClient> SyncClient;
-	FCriticalSection EventQueueCS;
-	TArray<FQueuedReceiverFrame> EventQueue;
 
 	// --- Emitter ---
 	TSharedPtr<FEmitClient> EmitClient;

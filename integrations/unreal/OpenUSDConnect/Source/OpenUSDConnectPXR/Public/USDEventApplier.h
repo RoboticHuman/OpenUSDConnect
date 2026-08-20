@@ -11,7 +11,7 @@ class AUsdStageActor;
  * and applies the contained USD event to the pxr stage owned by the given
  * AUsdStageActor.
  *
- * Decoding uses the flatc-generated bindings (Schema/messages_generated.h).
+ * Decoding uses the flatc-generated bindings staged with the shared native core.
  * All pxr USD API calls are guarded by #if USE_USD_SDK so the module
  * compiles even without the USD SDK, though event application will be a
  * no-op in that case.
@@ -33,8 +33,20 @@ public:
 	 * @param OutEventKind  Optional: receives the wire event kind.
 	 */
 	static bool ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
-	                       FString* OutTouchedPrim = nullptr,
-	                       OpenUSDConnect::EventPayload* OutEventKind = nullptr);
+						   FString* OutTouchedPrim = nullptr,
+						   OpenUSDConnect::EventPayload* OutEventKind = nullptr);
+
+	/**
+	 * Apply a frame already schema-verified at the network boundary. The caller
+	 * owns any
+	 * surrounding SdfChangeBlock according to EventUsesChangeBlock().
+	 */
+	static bool ApplyValidatedFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+									FString* OutTouchedPrim = nullptr,
+									OpenUSDConnect::EventPayload* OutEventKind = nullptr);
+
+	/** Whether a validated event kind can join an existing SdfChangeBlock. */
+	static bool EventUsesChangeBlock(OpenUSDConnect::EventPayload EventKind);
 
 	/**
 	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.

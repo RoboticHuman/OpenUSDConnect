@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from openusdconnect import _client_backend
 from openusdconnect.codec import TransactionRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_transaction_result
@@ -40,9 +41,7 @@ class TestEventSenderConnect:
     def test_malformed_events_fail_before_encoding_or_outbox_ownership(self):
         sender = EventSender("127.0.0.1", 1, client_id="validation-client")
         with pytest.raises(ValueError, match="transform fields"):
-            sender.send_events(
-                [{"k": "set_xform_trs", "prim": "/World/X", "fields": ["bogus"]}]
-            )
+            sender.send_events([{"k": "set_xform_trs", "prim": "/World/X", "fields": ["bogus"]}])
         assert sender.pending_transaction_count == 0
         assert sender._next_txn_id == 1
 
@@ -105,23 +104,25 @@ class TestEventSenderConnect:
                         self._second_released.set()
 
         sender = EventSender("127.0.0.1", 1, client_id="concurrent-client")
+        connection = sender._session.begin_connection()
+        assert (
+            sender._session.accept_hello(connection.generation, 0)
+            == _client_backend.ProducerResult.ACCEPTED
+        )
+        sender._socket_generation = connection.generation
         sender.sock = object()
         sender._send_lock = _SecondCallerFirstLock()
         wire_txn_ids = []
         monkeypatch.setattr(
             "openusdconnect.sender.send_raw",
-            lambda _sock, payload: wire_txn_ids.append(
-                message_to_dict(payload)["txn_id"]
-            ),
+            lambda _sock, payload: wire_txn_ids.append(message_to_dict(payload)["txn_id"]),
         )
 
         results = []
         threads = [
             threading.Thread(
                 target=lambda prim=prim: results.append(
-                    sender.send_events(
-                        [{"k": "ensure_prim", "prim": prim, "typeName": "Xform"}]
-                    )
+                    sender.send_events([{"k": "ensure_prim", "prim": prim, "typeName": "Xform"}])
                 )
             )
             for prim in ("/World/First", "/World/Second")
@@ -134,7 +135,7 @@ class TestEventSenderConnect:
         assert all(not thread.is_alive() for thread in threads)
         assert results == [True, True]
         assert wire_txn_ids == [1, 2]
-        assert list(sender._pending) == [1, 2]
+        assert [entry[0] for entry in sender._session.entries()] == [1, 2]
 
     def test_socket_has_nodelay(self):
         """Interactive txn frames are small; Nagle must not delay them."""
@@ -165,11 +166,39 @@ class TestEventSenderConnect:
     def test_connect_failure_returns_false(self):
         srv, port = _make_server()
         srv.close()  # nothing listening on the port anymore
-        sender = EventSender(
-            "127.0.0.1", port, client_id="test-client", handshake_timeout=0.5
-        )
+        sender = EventSender("127.0.0.1", port, client_id="test-client", handshake_timeout=0.5)
         assert sender.connect() is False
         assert sender.sock is None
+
+    def test_server_highwater_ahead_of_local_session_requires_recovery(self):
+        srv, port = _make_server()
+        sender = EventSender(
+            "127.0.0.1",
+            port,
+            client_id="highwater-client",
+            session_id="highwater-session",
+        )
+
+        def _serve():
+            conn = srv.accept()[0]
+            recv_framed(conn)
+            send_framed(
+                conn,
+                encode_message({"type": "hello_ok", "committed_through": 1}),
+            )
+            conn.close()
+
+        thread = threading.Thread(target=_serve)
+        thread.start()
+        try:
+            assert sender.connect() is False
+            assert sender.recovery_required is True
+            assert sender.recovery_disposition is RejectionDisposition.SESSION_FATAL
+            assert "ahead of local transaction 0" in sender.transaction_error
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
 
     def test_token_callback_failure_does_not_poison_completed_handshake(self):
         srv, port = _make_server()
@@ -476,10 +505,7 @@ class TestEventSenderConnect:
             with pytest.raises(TransactionRejectedError):
                 sender.flush(timeout=2)
 
-            assert (
-                sender.repair_rejected_transaction([repaired], layer_key="new-layer")
-                == 1
-            )
+            assert sender.repair_rejected_transaction([repaired], layer_key="new-layer") == 1
             assert sender.connect()
             assert sender.flush(timeout=2)
 

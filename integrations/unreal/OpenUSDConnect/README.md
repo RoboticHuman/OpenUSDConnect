@@ -18,10 +18,11 @@ authoring workflow.
 | **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
 | FlatBuffers headers | Header-only. Run `python setup_flatbuffers.py` once from the plugin folder it downloads the runtime headers matching the committed flatc-generated protocol bindings (the generated code pins the exact version via a `static_assert`, so engine-shipped copies are not used). |
 
-**Development note:** the protocol bindings under `Source/OpenUSDConnectPXR/Public/Schema/`
-are generated from the repo's FlatBuffers schemas and committed, so plugin *users*
-never need the compiler. Changing the schemas requires `flatc` available from the
-official scoop repo (`scoop install main/flatc`) and one run of
+**Development note:** the protocol bindings under
+`native/client_core/include/openusdconnect/client/schema/` are generated from the
+repo's FlatBuffers schemas and committed, so plugin *users* never need the compiler.
+Changing the schemas requires `flatc` available from the official scoop repo
+(`scoop install main/flatc`) and one run of
 `bash scripts/generate_flatbuffers.sh` from the repo root, which regenerates the
 Python and Unreal bindings together. Keep `setup_flatbuffers.py`'s `DEFAULT_VERSION`
 in lockstep with the `flatc` version used to regenerate.
@@ -34,16 +35,17 @@ The plugin package and project entry are identical on Windows and macOS. It
 contains two internal runtime modules, but only `OpenUSDConnect` is enabled in
 the project. Linux follows the same layout but has not been validated here.
 
-1. **Copy the plugin folder** into your project:
+1. **Install a packaged plugin** into your project:
    ```
    <YourProject>/Plugins/OpenUSDConnect/
    ```
 
-   Fetch the FlatBuffers runtime headers once (header-only download, any
-   engine flavor):
-   ```
-   cd <YourProject>/Plugins/OpenUSDConnect
-   python setup_flatbuffers.py
+   Release packages are self-contained. From a repository checkout, build and
+   install the package with the Unreal harness; it stages the canonical native
+   client core and FlatBuffers headers before invoking `BuildPlugin`:
+
+   ```powershell
+   uv run python scripts/run_unreal_tests.py --project <path-to-project.uproject> --install-plugin
    ```
 
    For the repository's Unreal test harness, also initialize the asset

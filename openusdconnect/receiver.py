@@ -20,6 +20,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 
+from . import _client_backend
 from .codec import (
     HelloRejectionCode,
     PayloadType,
@@ -114,20 +115,13 @@ class ReceiverThread(threading.Thread):
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
         self._socket_lock = threading.Lock()
-        self._incoming: deque = deque()
-        self._incoming_lock = threading.Lock()
-        self._replay_from: int | None = None
-        self._replay_generation = 0
+        self._inbox = _client_backend.ReceiverInbox(sync_from, max_queue)
         self._connected_event = threading.Event()
         self._synchronized_event = threading.Event()
         self._handshake_event = threading.Event()
-        self._incoming_serial = 0
-        self._last_drained_serial = 0
         self._received_replay_complete: tuple[int, int, int, int] | None = None
         self.replay_head_seq = 0
         self.replay_epoch = 0
-        self.last_seq: int = 0
-        self._queue_overflow = False
         self.auth_rejected = False
         self.hello_rejected = False
         self.rejection_code = HelloRejectionCode.Unspecified
@@ -146,13 +140,17 @@ class ReceiverThread(threading.Thread):
         else:
             self._connected_event.clear()
             self._synchronized_event.clear()
-            with self._incoming_lock:
-                self._received_replay_complete = None
+            self._inbox.disconnect(self._inbox.generation)
+            self._received_replay_complete = None
 
     @property
     def synchronized(self) -> bool:
         """Whether replay through the server's advertised head was applied."""
         return self.connected and self._synchronized_event.is_set()
+
+    @property
+    def last_seq(self) -> int:
+        return self._inbox.last_sequence
 
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Wait for the current handshake result, not for replay completion."""
@@ -170,17 +168,12 @@ class ReceiverThread(threading.Thread):
 
     def mark_replay_applied(self) -> bool:
         """Publish READY after a successful drain applied the replay prefix."""
-        with self._incoming_lock:
-            marker = self._received_replay_complete
-            if marker is None:
-                return False
-            generation, head_seq, epoch, serial = marker
-            if generation != self._replay_generation or self._last_drained_serial < serial:
-                return False
-            self.replay_head_seq = head_seq
-            self.replay_epoch = epoch
-            self._synchronized_event.set()
-            return True
+        if not self._inbox.mark_replay_applied():
+            return False
+        self.replay_head_seq = self._inbox.replay_head_sequence
+        self.replay_epoch = self._inbox.replay_epoch
+        self._synchronized_event.set()
+        return True
 
     def run(self):
         delay = self._reconnect_base_delay
@@ -210,17 +203,16 @@ class ReceiverThread(threading.Thread):
 
             self._handshake_event.clear()
 
-            if self._queue_overflow:
+            if self._inbox.overflowed:
                 # Intentional disconnect wait for main thread to drain
                 # before reconnecting, otherwise we'll overflow again.
-                self._queue_overflow = False
+                self._inbox.clear_overflow()
                 delay = self._reconnect_base_delay
                 LOG.info("ReceiverThread: waiting for queue to drain before reconnect")
                 drain_start = time.monotonic()
                 while not self._stop_event.is_set():
-                    with self._incoming_lock:
-                        if len(self._incoming) == 0:
-                            break
+                    if self._inbox.size == 0:
+                        break
                     if time.monotonic() - drain_start > self._reconnect_max_delay:
                         LOG.warning("ReceiverThread: drain wait timed out, reconnecting anyway")
                         break
@@ -253,14 +245,11 @@ class ReceiverThread(threading.Thread):
             self._close_socket(sock)
             return
 
-        with self._incoming_lock:
-            self._replay_generation += 1
-            connection_generation = self._replay_generation
-            self._synchronized_event.clear()
-            self._received_replay_complete = None
-            sync_from = self._replay_from
-            if sync_from is None:
-                sync_from = self.last_seq + 1 if self.last_seq > 0 else self.sync_from
+        connection = self._inbox.begin_connection()
+        connection_generation = connection.generation
+        sync_from = connection.sync_from
+        self._synchronized_event.clear()
+        self._received_replay_complete = None
 
         # Send hello as receiver, normally resuming after the latest queued
         # sequence. A decode failure can override this with the last sequence
@@ -301,23 +290,20 @@ class ReceiverThread(threading.Thread):
                 )
                 continue
             except (IncompleteRead, MessageTooLarge):
-                with self._incoming_lock:
-                    current_generation = connection_generation == self._replay_generation
+                current_generation = connection_generation == self._inbox.generation
                 if not self._stop_event.is_set() and current_generation:
                     LOG.warning("ReceiverThread: framing error during read")
                 break
             except OSError:
-                with self._incoming_lock:
-                    current_generation = connection_generation == self._replay_generation
+                current_generation = connection_generation == self._inbox.generation
                 if not self._stop_event.is_set() and current_generation:
                     LOG.warning("ReceiverThread: socket error during read")
                 break
 
             consecutive_timeouts = 0
 
-            with self._incoming_lock:
-                if connection_generation != self._replay_generation:
-                    return
+            if connection_generation != self._inbox.generation:
+                return
 
             # Pre-handshake: check for auth/hello_ok messages
             if not self.connected:
@@ -399,9 +385,6 @@ class ReceiverThread(threading.Thread):
                                     LOG.exception(
                                         "ReceiverThread: on_stage_metadata callback failed",
                                     )
-                    with self._incoming_lock:
-                        if connection_generation == self._replay_generation:
-                            self._replay_from = None
                     self.connected = True
                     self._handshake_event.set()
                     LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
@@ -417,15 +400,19 @@ class ReceiverThread(threading.Thread):
             # do not enqueue (the queue is reserved for stage-event bytes).
             if pt == PayloadType.ReplayComplete:
                 complete = message_to_dict(buf)
-                with self._incoming_lock:
-                    if connection_generation != self._replay_generation:
-                        return
-                    self._received_replay_complete = (
-                        connection_generation,
-                        int(complete["head_seq"]),
-                        int(complete["epoch"]),
-                        self._incoming_serial,
-                    )
+                result = self._inbox.accept_replay_complete(
+                    connection_generation,
+                    int(complete["head_seq"]),
+                    int(complete["epoch"]),
+                )
+                if result == _client_backend.AcceptResult.STALE_GENERATION:
+                    return
+                self._received_replay_complete = (
+                    connection_generation,
+                    int(complete["head_seq"]),
+                    int(complete["epoch"]),
+                    0,
+                )
                 continue
             if pt in (
                 PayloadType.PlaybackState,
@@ -447,28 +434,37 @@ class ReceiverThread(threading.Thread):
                         LOG.exception("ReceiverThread: playback callback failed")
                 continue
 
-            with self._incoming_lock:
-                if connection_generation != self._replay_generation:
-                    return
-                if len(self._incoming) >= self.max_queue:
-                    LOG.warning(
-                        "ReceiverThread: queue full (%d), disconnecting to replay from server",
-                        self.max_queue,
-                    )
-                    self._queue_overflow = True
-                    break
-                is_sequenced = pt in (
-                    PayloadType.BroadcastEvent,
-                    PayloadType.LayerGraphState,
+            if pt == PayloadType.BroadcastEvent:
+                kind = _client_backend.ReceiverMessageKind.EVENT
+            elif pt == PayloadType.LayerGraphState:
+                kind = _client_backend.ReceiverMessageKind.LAYER_GRAPH_STATE
+            elif pt == PayloadType.Resync:
+                kind = _client_backend.ReceiverMessageKind.RESYNC
+                self._synchronized_event.clear()
+                self._received_replay_complete = None
+            else:
+                kind = _client_backend.ReceiverMessageKind.OTHER
+
+            result = self._inbox.accept(connection_generation, kind, seq, buf)
+            if result == _client_backend.AcceptResult.STALE_GENERATION:
+                return
+            if result == _client_backend.AcceptResult.DUPLICATE:
+                continue
+            if result == _client_backend.AcceptResult.SEQUENCE_GAP:
+                replay_from = self._inbox.last_applied_sequence + 1
+                LOG.error(
+                    "ReceiverThread: sequence gap before %d; replaying from applied %d",
+                    seq,
+                    replay_from,
                 )
-                if pt == PayloadType.Resync:
-                    self.last_seq = 0
-                    self._synchronized_event.clear()
-                    self._received_replay_complete = None
-                elif is_sequenced and seq > self.last_seq:
-                    self.last_seq = seq
-                self._incoming.append(buf)
-                self._incoming_serial += 1
+                self._inbox.request_replay_from(replay_from)
+                return
+            if result == _client_backend.AcceptResult.QUEUE_FULL:
+                LOG.warning(
+                    "ReceiverThread: queue full (%d), disconnecting to replay from server",
+                    self.max_queue,
+                )
+                break
 
     def request_replay_from(self, seq_start: int) -> None:
         """Reconnect and request replay beginning at ``seq_start``.
@@ -481,15 +477,9 @@ class ReceiverThread(threading.Thread):
         if seq_start < 1:
             raise ValueError("replay sequence must be at least 1")
 
-        with self._incoming_lock:
-            self._replay_generation += 1
-            self._replay_from = seq_start
-            self.last_seq = seq_start - 1
-            self._incoming.clear()
-            self._last_drained_serial = self._incoming_serial
-            self._queue_overflow = False
-            self._synchronized_event.clear()
-            self._received_replay_complete = None
+        self._inbox.request_replay_from(seq_start)
+        self._synchronized_event.clear()
+        self._received_replay_complete = None
         self._close_socket()
 
     def _close_socket(self, sock: socket.socket | None = None) -> None:
@@ -520,15 +510,7 @@ class ReceiverThread(threading.Thread):
             isinstance(max_messages, bool) or not isinstance(max_messages, int) or max_messages < 1
         ):
             raise ValueError("max_messages must be a positive integer or None")
-        with self._incoming_lock:
-            if max_messages is None or max_messages >= len(self._incoming):
-                drained = self._incoming
-                self._incoming = deque()
-                self._last_drained_serial = self._incoming_serial
-                return drained
-            drained = deque(self._incoming.popleft() for _ in range(max_messages))
-            self._last_drained_serial += len(drained)
-            return drained
+        return deque(self._inbox.drain(max_messages))
 
     def stop(self):
         """Request clean shutdown."""
