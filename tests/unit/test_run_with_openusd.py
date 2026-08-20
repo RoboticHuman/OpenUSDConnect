@@ -1,6 +1,10 @@
 """Tests for the project OpenUSD command wrapper."""
 
+import json
 import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -110,6 +114,64 @@ def test_build_environment_accepts_python_bindings_outside_prefix(tmp_path):
 
     assert selected == python_path
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(python_path)
+
+
+def test_build_environment_discovers_bindings_in_active_venv(tmp_path, monkeypatch):
+    root = tmp_path / "OpenUSDInstall"
+    root.mkdir()
+    python_path = _pxr_package(tmp_path / "OpenUSD" / ".venv" / "Lib" / "site-packages")
+    monkeypatch.setattr(
+        openusd_runtime,
+        "_active_venv_python_paths",
+        lambda: [python_path],
+    )
+
+    env, selected = run_with_openusd.build_environment(root, base={})
+
+    assert selected == python_path
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(python_path)
+
+
+def test_runtime_cli_discovers_bindings_from_real_active_venv(tmp_path):
+    root = tmp_path / "OpenUSDInstall"
+    root.mkdir()
+    venv = tmp_path / "OpenUSD" / ".venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True,
+    )
+    executable = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    result = subprocess.run(
+        [
+            str(executable),
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('purelib'))",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    python_path = _pxr_package(Path(result.stdout.strip()))
+    env = dict(os.environ)
+    env.update(PYTHONPATH="", RMANTREE="")
+
+    result = subprocess.run(
+        [
+            str(executable),
+            str(openusd_runtime.__file__),
+            "--usd-root",
+            str(root),
+            "--format",
+            "json",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    configuration = json.loads(result.stdout)
+
+    assert configuration["python_path"] == str(python_path)
 
 
 def test_build_environment_uses_inherited_rmantree(tmp_path):

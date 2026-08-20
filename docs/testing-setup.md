@@ -22,8 +22,8 @@ Configure the project OpenUSD runtime first. On PowerShell:
 
 Current Windows and Unix OpenUSD Python layouts and the legacy `lib/python`
 layout are detected automatically. If the bindings were installed into a
-separate virtual environment, add
-`-PythonPath "D:\OpenUSD\.venv\Lib\site-packages"`. An existing valid
+virtual environment, activate it first; its site-packages is also searched.
+Use `-PythonPath` only for bindings outside both locations. An existing valid
 `RMANTREE` is also configured automatically.
 
 Then install the normal development environment without the bundled runtime:

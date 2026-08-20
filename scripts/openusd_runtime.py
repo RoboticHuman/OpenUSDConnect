@@ -7,10 +7,18 @@ import json
 import os
 import shlex
 import sys
+import sysconfig
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 USD_ROOT_ENV = "OPENUSDCONNECT_USD_ROOT"
+
+
+def _active_venv_python_paths() -> list[Path]:
+    if sys.prefix == sys.base_prefix:
+        return []
+    paths = sysconfig.get_paths()
+    return [Path(paths[name]).resolve() for name in ("purelib", "platlib")]
 
 
 def _prepend(env: dict[str, str], key: str, paths: Sequence[Path]) -> None:
@@ -36,14 +44,15 @@ def _python_path(usd_root: Path, python_path: str | os.PathLike | None = None) -
             candidates.extend(sorted(lib.glob("python*/site-packages")))
             candidates.extend(sorted(lib.glob("python*/dist-packages")))
         candidates.append(usd_root / "lib" / "python")
+        candidates.extend(_active_venv_python_paths())
     for candidate in candidates:
         if (candidate / "pxr" / "__init__.py").is_file():
             return candidate
     if python_path is not None:
         raise RuntimeError(f"no pxr Python package found in Python path: {candidates[0]}")
     raise RuntimeError(
-        f"no pxr Python package found under OpenUSD install: {usd_root}; "
-        "pass --python-path when the bindings were installed outside the prefix"
+        f"no pxr Python package found under OpenUSD install or active venv: {usd_root}; "
+        "pass --python-path when the bindings are in another location"
     )
 
 

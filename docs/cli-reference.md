@@ -112,29 +112,24 @@ leading dot and space dot-source the script; nothing is changed persistently:
 uv run --isolated openusdconnect-server --base scene.usda
 ```
 
-The first positional argument is the OpenUSD install prefix. The script checks
-the current OpenUSD Python install layouts (`Lib/site-packages` on Windows and
-`lib/pythonX.Y/site-packages` on Unix), `dist-packages`, and the legacy
-`lib/python` layout.
+The first positional argument is the OpenUSD install prefix. Binding discovery
+checks `Lib/site-packages` on Windows, `lib/pythonX.Y/site-packages` and
+`dist-packages` on Unix, the legacy `lib/python` layout, and the active venv's
+site-packages. Install-prefix locations take precedence over the active venv.
 
-There are two distinct virtual-environment cases:
-
-1. If the venv itself was `CMAKE_INSTALL_PREFIX`, activate it and pass the venv
-   directory as `UsdRoot`. Its bindings are found automatically.
-2. If OpenUSD has a separate native prefix and `PXR_PYTHON_INSTALL_DIR` points
-   into a venv, activate that venv, pass the native prefix as `UsdRoot`, and
-   provide its site-packages directory explicitly.
+If OpenUSD's bindings were installed into a venv, activate it before running
+the launcher. This works whether the venv itself is the native install prefix
+or `PXR_PYTHON_INSTALL_DIR` points into a venv outside the native prefix:
 
 ```powershell
 & "D:\OpenUSD\.venv\Scripts\Activate.ps1"
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
-    -PythonPath "D:\OpenUSD\.venv\Lib\site-packages"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
 
-In either case, the active interpreter must match the Python version against
-which OpenUSD was built. Activating the venv also ensures generated commands
-such as `usdview.cmd` resolve that interpreter from `PATH`. Alternatively, pass
-`-PythonExecutable "D:\OpenUSD\.venv\Scripts\python.exe"`.
+The active interpreter must match the Python version against which OpenUSD was
+built. Activating the venv also ensures generated commands such as
+`usdview.cmd` resolve that interpreter from `PATH`. Pass `-PythonPath` only if
+the bindings are neither under the install prefix nor in the active venv.
 
 A valid `RMANTREE` already present in the process is configured automatically.
 Use `-RenderManRoot` to select or override it, and pass arrays to `-PluginPath`

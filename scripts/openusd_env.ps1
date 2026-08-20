@@ -16,7 +16,6 @@ Matching Python executable to place first on PATH. The active Python is used by 
 
 .EXAMPLE
 . .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
-    -PythonPath "D:\OpenUSD\.venv\Lib\site-packages" `
     -PythonExecutable "D:\OpenUSD\.venv\Scripts\python.exe"
 #>
 [CmdletBinding()]

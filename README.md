@@ -46,7 +46,8 @@ OpenUSD was built against.
 The launchers search the install prefix for current Windows
 `Lib/site-packages`, Unix `lib/pythonX.Y/site-packages` or `dist-packages`, and
 legacy `lib/python` layouts. Activate the matching venv first when necessary;
-bindings installed outside the prefix require `-PythonPath` or `--python-path`.
+its site-packages is also searched. Use `-PythonPath` or `--python-path` only
+when the bindings are in another location.
 
 Configure the current PowerShell session on Windows:
 
