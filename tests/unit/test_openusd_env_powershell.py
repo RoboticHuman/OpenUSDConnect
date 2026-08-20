@@ -16,8 +16,13 @@ SCRIPT = Path(__file__).parents[2] / "scripts" / "openusd_env.ps1"
 
 
 def _pxr_package(path: Path) -> Path:
-    (path / "pxr").mkdir(parents=True)
-    (path / "pxr" / "__init__.py").touch()
+    pkg = path / "pxr"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").touch()
+    (pkg / "Tf").mkdir()
+    (pkg / "Tf" / "__init__.py").touch()
+    (pkg / "Usd").mkdir()
+    (pkg / "Usd" / "__init__.py").write_text("def GetVersion():\n    return (0, 0, 0)\n")
     return path
 
 

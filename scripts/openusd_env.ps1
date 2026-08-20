@@ -77,9 +77,15 @@ foreach ($path in $DllDir) {
     $arguments += @("--dll-dir", $path)
 }
 
+# Relax the Stop preference so the resolver's own stderr prints as written,
+# instead of being wrapped in a NativeCommandError with a PowerShell stack trace.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $json = & $python @arguments
-if ($LASTEXITCODE -ne 0) {
-    throw "OpenUSD environment resolution failed with exit code $LASTEXITCODE."
+$resolverExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorAction
+if ($resolverExitCode -ne 0) {
+    return
 }
 $configuration = $json | ConvertFrom-Json
 foreach ($property in $configuration.environment.PSObject.Properties) {

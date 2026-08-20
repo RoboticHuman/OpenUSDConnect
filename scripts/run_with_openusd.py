@@ -10,11 +10,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 if __package__:
-    from .openusd_runtime import USD_ROOT_ENV, build_environment
+    from .openusd_runtime import USD_ROOT_ENV, build_environment, verify_bindings
 else:
-    from openusd_runtime import USD_ROOT_ENV, build_environment
+    from openusd_runtime import USD_ROOT_ENV, build_environment, verify_bindings
 
-__all__ = ["USD_ROOT_ENV", "build_environment"]
+__all__ = ["USD_ROOT_ENV", "build_environment", "verify_bindings"]
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -85,6 +85,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             python_executable=args.python_executable,
             renderman_root=args.renderman_root,
         )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        verify_bindings(env, python_path, args.python_executable)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

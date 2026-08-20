@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
 import sys
 import sysconfig
 from collections.abc import Mapping, Sequence
@@ -147,6 +148,50 @@ def environment_delta(base: Mapping[str, str], configured: Mapping[str, str]) ->
     return {key: value for key, value in configured.items() if base.get(key) != value}
 
 
+def verify_bindings(
+    env: Mapping[str, str],
+    python_path: str | os.PathLike,
+    python_executable: str | os.PathLike | None = None,
+) -> str:
+    """Import pxr with the resolved interpreter to confirm the bindings load.
+
+    Finding the ``pxr`` package on disk is not enough: its native modules are
+    compiled against one specific Python version, so an interpreter that differs
+    from the one OpenUSD was built against fails at import time. Run that import
+    in a subprocess under the configured environment and raise a clear error
+    when it fails instead of leaving a cryptic DLL/so failure for a later launch.
+    """
+    interpreter = (
+        Path(python_executable).expanduser().resolve()
+        if python_executable is not None
+        else Path(sys.executable)
+    )
+    probe = "from pxr import Tf, Usd; print(Usd.GetVersion())"
+    result = subprocess.run(
+        [str(interpreter), "-c", probe],
+        env=dict(env),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        tail = detail[-1] if detail else "unknown import error"
+        raise RuntimeError(
+            "could not import OpenUSD (pxr) with the selected interpreter.\n"
+            f"  interpreter:  {interpreter}\n"
+            f"  bindings:     {python_path}\n"
+            f"  import error: {tail}\n"
+            "\n"
+            "The interpreter's Python version likely differs from the one OpenUSD "
+            "was built against.\n"
+            "Fix it by activating the matching virtual environment, or by selecting "
+            "its interpreter\n"
+            "with -PythonExecutable (openusd_env.ps1) or --python-executable "
+            "(run_with_openusd.py)."
+        )
+    return result.stdout.strip()
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Resolve an OpenUSD runtime environment.")
     parser.add_argument(
@@ -179,6 +224,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             python_executable=args.python_executable,
             renderman_root=args.renderman_root,
         )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        verify_bindings(env, python_path, args.python_executable)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

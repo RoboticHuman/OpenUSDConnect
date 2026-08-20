@@ -12,17 +12,25 @@ import pytest
 from scripts import openusd_runtime, run_with_openusd
 
 
+def _write_pxr(pkg):
+    """Create an importable pxr stub so the runtime binding check passes."""
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").touch()
+    (pkg / "Tf").mkdir()
+    (pkg / "Tf" / "__init__.py").touch()
+    (pkg / "Usd").mkdir()
+    (pkg / "Usd" / "__init__.py").write_text("def GetVersion():\n    return (0, 0, 0)\n")
+
+
 def _usd_install(tmp_path):
     root = tmp_path / "OpenUSD"
-    (root / "lib" / "python" / "pxr").mkdir(parents=True)
-    (root / "lib" / "python" / "pxr" / "__init__.py").touch()
+    _write_pxr(root / "lib" / "python" / "pxr")
     (root / "bin").mkdir()
     return root
 
 
 def _pxr_package(path):
-    (path / "pxr").mkdir(parents=True)
-    (path / "pxr" / "__init__.py").touch()
+    _write_pxr(path / "pxr")
     return path
 
 
@@ -61,6 +69,7 @@ def test_main_forwards_command_and_exit_code(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=7)
 
     monkeypatch.setattr(run_with_openusd.subprocess, "run", fake_run)
+    monkeypatch.setattr(run_with_openusd, "verify_bindings", lambda *a, **k: "0.0.0")
 
     result = run_with_openusd.main(
         ["--usd-root", str(root), "--", "python", "-c", "print('ok')"]
@@ -224,3 +233,71 @@ def test_environment_delta_contains_only_changes():
         {"PATH": "before", "UNCHANGED": "value"},
         {"PATH": "after", "UNCHANGED": "value", "ADDED": "new"},
     ) == {"PATH": "after", "ADDED": "new"}
+
+
+def test_verify_bindings_uses_selected_interpreter_and_environment(monkeypatch):
+    captured = {}
+
+    def fake_run(command, *, env, text, capture_output):
+        captured.update(command=command, env=env)
+        return SimpleNamespace(returncode=0, stdout="(0, 26, 11)\n", stderr="")
+
+    monkeypatch.setattr(openusd_runtime.subprocess, "run", fake_run)
+
+    version = openusd_runtime.verify_bindings(
+        {"PYTHONPATH": "bindings"},
+        "bindings",
+        python_executable=sys.executable,
+    )
+
+    assert version == "(0, 26, 11)"
+    assert captured["command"][0] == str(Path(sys.executable).resolve())
+    assert "from pxr import Tf, Usd" in captured["command"][-1]
+    assert captured["env"] == {"PYTHONPATH": "bindings"}
+
+
+def test_verify_bindings_reports_actionable_error_on_import_failure(monkeypatch):
+    def fake_run(command, *, env, text, capture_output):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="ImportError: DLL load failed while importing _tf",
+        )
+
+    monkeypatch.setattr(openusd_runtime.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        openusd_runtime.verify_bindings(
+            {}, "bindings", python_executable=sys.executable
+        )
+
+    message = str(excinfo.value)
+    assert "could not import OpenUSD" in message
+    assert "-PythonExecutable" in message
+    assert "_tf" in message
+
+
+def test_main_verifies_bindings_before_emitting_environment(tmp_path, monkeypatch):
+    root = _usd_install(tmp_path)
+    calls = {}
+
+    def fake_verify(env, python_path, python_executable):
+        calls.update(env=env, python_path=python_path)
+        return "0.0.0"
+
+    monkeypatch.setattr(openusd_runtime, "verify_bindings", fake_verify)
+
+    assert openusd_runtime.main(["--usd-root", str(root), "--format", "json"]) == 0
+    assert calls["python_path"] == root / "lib" / "python"
+
+
+def test_main_reports_verification_failure(tmp_path, monkeypatch, capsys):
+    root = _usd_install(tmp_path)
+
+    def fake_verify(*args, **kwargs):
+        raise RuntimeError("bindings could not be imported: boom")
+
+    monkeypatch.setattr(openusd_runtime, "verify_bindings", fake_verify)
+
+    assert openusd_runtime.main(["--usd-root", str(root), "--format", "json"]) == 2
+    assert "could not be imported" in capsys.readouterr().err
