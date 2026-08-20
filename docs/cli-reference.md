@@ -103,17 +103,73 @@ Use the same compatible OpenUSD build and plugin environment as the clients in
 your project. This is the primary path and is required for MaterialX, custom
 renderers, resolvers, file formats, and shader definitions.
 
-From the repository root, activate the selected install for the current
-PowerShell terminal, then run without enabling the `bundled-usd` group:
+From the repository root, configure the selected install for the current
+PowerShell process, then run without enabling the `bundled-usd` group. The
+leading dot and space dot-source the script; nothing is changed persistently:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 uv run --isolated openusdconnect-server --base scene.usda
 ```
 
-The first positional argument is the OpenUSD install directory containing
-`bin` and `lib`. Use `-RenderManRoot` for hdPrman and pass arrays to
-`-PluginPath` or `-DllDir` for project additions.
+The first positional argument is the OpenUSD install prefix. Binding discovery
+checks `Lib/site-packages` on Windows, `lib/pythonX.Y/site-packages` and
+`dist-packages` on Unix, the legacy `lib/python` layout, and the active venv's
+site-packages. Install-prefix locations take precedence over the active venv.
+
+The active interpreter must match the Python version against which OpenUSD was
+built; a mismatched interpreter cannot load the native `pxr` extension modules.
+When the bindings, their dependencies (such as PySide6), or the matching
+interpreter live in a separate virtual environment (including the common layout
+where the OpenUSD install prefix and the venv are different directories),
+activate that venv before configuring the runtime:
+
+- **uv-managed venv:** create it with `uv venv` and run the activation command it
+  prints, or use `uv run` so the project venv is selected automatically.
+- **pip/`python -m venv` venv:** activate with `.venv\Scripts\Activate.ps1` in
+  PowerShell, or `source .venv/bin/activate` in Bash/Zsh.
+
+```powershell
+& "E:\OpenUSD_venv\Scripts\Activate.ps1"
+. .\scripts\openusd_env.ps1 "E:\OpenUSD_install"
+```
+
+Activating the venv puts the matching interpreter first on `PATH`, so both the
+runtime configuration and generated commands such as `usdview.cmd` resolve it.
+Pass `-PythonExecutable` (or `--python-executable` for the wrapper) to select
+that interpreter without activating, and `-PythonPath` only if the bindings are
+neither under the install prefix nor in the active venv.
+
+`uv run` always uses the project `.venv`, so with another venv active it may
+print a `VIRTUAL_ENV does not match` warning. That warning is harmless: the
+child process inherits the sourced OpenUSD environment for `pxr` and the
+viewers, while `openusdconnect` and its dependencies resolve from `.venv`.
+
+A valid `RMANTREE` already present in the process is configured automatically.
+Use `-RenderManRoot` to select or override it, and pass arrays to `-PluginPath`
+or `-DllDir` for project additions.
+
+For example, configure hdPrman explicitly and launch usdview:
+
+```powershell
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
+    -RenderManRoot "C:\Program Files\Pixar\RenderManProServer-27.3"
+usdview scene.usda --renderer HdPrmanLoaderRendererPlugin
+```
+
+For an interactive Bash or Zsh session, source the Unix adapter. Its options
+use the same long names as the command wrapper:
+
+```bash
+source /opt/OpenUSD/.venv/bin/activate
+source scripts/openusd_env.sh /opt/OpenUSDInstall \
+  --python-path /opt/OpenUSD/.venv/lib/python3.13/site-packages \
+  --renderman-root /opt/pixar/RenderManProServer-27.3
+```
+
+Both activation scripts delegate discovery and path construction to
+`openusd_runtime.py`; the adapters only apply its environment delta to their
+current shell.
 
 For automation or other shells, configure one command through the
 cross-platform wrapper:
@@ -123,11 +179,18 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
   openusdconnect-server --base scene.usda
 ```
 
-Use repeatable `--plugin-path` and `--dll-dir` options for project additions, or
-`--renderman-root /path/to/RenderManProServer` to configure hdPrman.
+Use `--python-path /external/site-packages` for Python bindings outside the
+prefix and `--python-executable` to select the matching interpreter. Use
+repeatable `--plugin-path` and `--dll-dir` options for project additions, or
+`--renderman-root /path/to/RenderManProServer` to configure or override
+hdPrman. An inherited valid `RMANTREE` is also configured.
 
-The environment must expose the intended `pxr` bindings. For custom plugins,
-configure:
+The launchers import the selected `pxr` package with the resolved interpreter
+before changing the runtime environment, so an interpreter whose Python version
+cannot load the native modules fails immediately rather than at first use. They
+deliberately do not recursively search unrelated virtual environments: an
+absolute CMake Python install directory has no discoverable relationship to the
+OpenUSD prefix. For custom plugins, configure:
 
 - plugin discovery through `PXR_PLUGINPATH_NAME`
 - native dependencies through `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,

@@ -41,16 +41,28 @@ git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
 ```
 
-Activate the build for the current PowerShell terminal, then install the base
-library without the `bundled-usd` group:
+The active interpreter must use the same Python major/minor version that
+OpenUSD was built against.
+The launchers search the install prefix for current Windows
+`Lib/site-packages`, Unix `lib/pythonX.Y/site-packages` or `dist-packages`, and
+legacy `lib/python` layouts. Activate the matching venv first when necessary;
+its site-packages is also searched. Use `-PythonPath` or `--python-path` only
+when the bindings are in another location.
+
+Configure the current PowerShell session on Windows:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 uv sync
 ```
 
-Pass `-RenderManRoot`, `-PluginPath`, or `-DllDir` when the project needs them.
-For automation or other shells, wrap individual commands instead:
+Or configure the current Bash/Zsh session on Linux or macOS:
+
+```bash
+source scripts/openusd_env.sh /opt/OpenUSDInstall
+```
+
+For automation or CI, configure only the child command:
 
 ```bash
 uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
@@ -58,9 +70,9 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
 ```
 
 The [CLI reference](docs/cli-reference.md#openusd-runtime-and-custom-plugins)
-covers plugin paths, native libraries, renderer setup, and verification.
-Commands below assume that runtime remains active; wrapper users place the
-shown command after `--`.
+covers venv layouts, external bindings, interpreter selection, plugin and DLL
+paths, RenderMan, verification, and every launcher option. Commands below
+assume that runtime remains active; wrapper users place them after `--`.
 
 ### Verify synchronization locally
 

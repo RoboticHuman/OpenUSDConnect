@@ -17,8 +17,14 @@ Unreal Engine, RenderMan, operating-system mounts, or large external assets.
 Configure the project OpenUSD runtime first. On PowerShell:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
+
+Current Windows and Unix OpenUSD Python layouts and the legacy `lib/python`
+layout are detected automatically. If the bindings were installed into a
+virtual environment, activate it first; its site-packages is also searched.
+Use `-PythonPath` only for bindings outside both locations. An existing valid
+`RMANTREE` is also configured automatically.
 
 Then install the normal development environment without the bundled runtime:
 
@@ -44,6 +50,8 @@ For automation or other shells, configure the test command through the wrapper:
 uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
   pytest tests/ -v
 ```
+
+The wrapper accepts the equivalent `--python-path` option.
 
 Add `--renderman-root /path/to/RenderManProServer` when running the visual tier.
 
