@@ -1,17 +1,32 @@
 <#
 .SYNOPSIS
-Activates a project OpenUSD installation in the current PowerShell terminal.
+Activates an OpenUSD runtime in the current PowerShell process.
 
 .PARAMETER UsdRoot
-OpenUSD install directory containing bin and lib.
+OpenUSD install prefix.
+
+.PARAMETER PythonPath
+Directory containing pxr when the bindings are outside UsdRoot.
+
+.PARAMETER PythonExecutable
+Matching Python executable to place first on PATH. The active Python is used by default.
 
 .EXAMPLE
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+
+.EXAMPLE
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
+    -PythonPath "D:\OpenUSD\.venv\Lib\site-packages" `
+    -PythonExecutable "D:\OpenUSD\.venv\Scripts\python.exe"
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
     [string] $UsdRoot,
+
+    [string] $PythonPath,
+
+    [string] $PythonExecutable,
 
     [string] $RenderManRoot,
 
@@ -22,90 +37,63 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Resolve-RequiredDirectory {
-    param(
-        [string] $Path,
-        [string] $Label
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        throw "$Label does not exist: $Path"
+if ($PythonExecutable) {
+    if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
+        throw "Python executable does not exist: $PythonExecutable"
     }
-    return (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\', '/')
-}
-
-function Add-EnvironmentPath {
-    param(
-        [string] $Name,
-        [string[]] $Path
-    )
-
-    $values = @($Path | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) })
-    $current = [Environment]::GetEnvironmentVariable($Name, "Process")
-    if ($current) {
-        $values += $current -split [IO.Path]::PathSeparator
+    $python = (Resolve-Path -LiteralPath $PythonExecutable).Path
+} else {
+    $pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $pythonCommand) {
+        $pythonCommand = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
     }
-
-    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $unique = foreach ($value in $values) {
-        $resolved = if (Test-Path -LiteralPath $value -PathType Container) {
-            (Resolve-Path -LiteralPath $value).Path.TrimEnd('\', '/')
-        } else {
-            $value
-        }
-        if ($seen.Add($resolved)) { $resolved }
+    if (-not $pythonCommand) {
+        throw "Python was not found. Activate the matching venv or pass -PythonExecutable."
     }
-    if ($unique) {
-        [Environment]::SetEnvironmentVariable(
-            $Name,
-            ($unique -join [IO.Path]::PathSeparator),
-            "Process"
-        )
-    }
+    $python = $pythonCommand.Source
 }
 
-$usd = Resolve-RequiredDirectory $UsdRoot "OpenUSD root"
-$usdPython = Join-Path $usd "lib\python"
-if (-not (Test-Path -LiteralPath (Join-Path $usdPython "pxr\__init__.py") -PathType Leaf)) {
-    throw "No pxr Python package found under OpenUSD install: $usd"
+$resolver = Join-Path $PSScriptRoot "openusd_runtime.py"
+$arguments = @(
+    $resolver
+    "--usd-root"
+    $UsdRoot
+    "--python-executable"
+    $python
+    "--format"
+    "json"
+)
+if ($PythonPath) {
+    $arguments += @("--python-path", $PythonPath)
 }
-
-$plugins = foreach ($path in $PluginPath) {
-    Resolve-RequiredDirectory $path "Plugin path"
-}
-$nativeDirs = foreach ($path in $DllDir) {
-    Resolve-RequiredDirectory $path "Native-library directory"
-}
-
-$env:OPENUSDCONNECT_USD_ROOT = $usd
-Add-EnvironmentPath "PYTHONPATH" @($usdPython)
-Add-EnvironmentPath "PATH" @((Join-Path $usd "bin"), (Join-Path $usd "lib"))
-Add-EnvironmentPath "PATH" @($nativeDirs)
-Add-EnvironmentPath "PXR_PLUGINPATH_NAME" @($plugins)
-
 if ($RenderManRoot) {
-    $rman = Resolve-RequiredDirectory $RenderManRoot "RenderMan root"
-    $env:RMANTREE = $rman
-    Add-EnvironmentPath "PATH" @((Join-Path $rman "bin"), (Join-Path $rman "lib"))
-
-    $rmanPlugins = Join-Path $rman "lib\plugins"
-    $usdPlugin = Join-Path $usd "plugin\usd"
-    $env:RMAN_SHADERPATH = @(
-        (Join-Path $rman "lib\shaders")
-        (Join-Path $usdPlugin "resources\shaders")
-    ) -join [IO.Path]::PathSeparator
-    $env:RMAN_RIXPLUGINPATH = $rmanPlugins
-    $env:RMAN_TEXTUREPATH = @(
-        (Join-Path $rman "lib\textures")
-        $rmanPlugins
-        $usdPlugin
-    ) -join [IO.Path]::PathSeparator
-    $env:RMAN_DISPLAYPATH = $rmanPlugins
-    $env:RMAN_PROCEDURALPATH = $rmanPlugins
+    $arguments += @("--renderman-root", $RenderManRoot)
+}
+foreach ($path in $PluginPath) {
+    $arguments += @("--plugin-path", $path)
+}
+foreach ($path in $DllDir) {
+    $arguments += @("--dll-dir", $path)
 }
 
-Write-Host "OpenUSD environment ready: $usd"
-Write-Host "Python bindings: $usdPython"
-if ($RenderManRoot) {
-    Write-Host "RenderMan: $env:RMANTREE"
+$json = & $python @arguments
+if ($LASTEXITCODE -ne 0) {
+    throw "OpenUSD environment resolution failed with exit code $LASTEXITCODE."
+}
+$configuration = $json | ConvertFrom-Json
+foreach ($property in $configuration.environment.PSObject.Properties) {
+    [Environment]::SetEnvironmentVariable(
+        $property.Name,
+        [string] $property.Value,
+        "Process"
+    )
+}
+
+Write-Host "OpenUSD environment ready: $($configuration.usd_root)"
+Write-Host "Python bindings: $($configuration.python_path)"
+Write-Host "Python executable: $python"
+if ($configuration.renderman_root) {
+    Write-Host "RenderMan: $($configuration.renderman_root)"
 }

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts import run_with_openusd
+from scripts import openusd_runtime, run_with_openusd
 
 
 def _usd_install(tmp_path):
@@ -16,6 +16,12 @@ def _usd_install(tmp_path):
     return root
 
 
+def _pxr_package(path):
+    (path / "pxr").mkdir(parents=True)
+    (path / "pxr" / "__init__.py").touch()
+    return path
+
+
 def test_build_environment_selects_project_runtime(tmp_path, monkeypatch):
     root = _usd_install(tmp_path)
     plugin = tmp_path / "plugins"
@@ -24,7 +30,7 @@ def test_build_environment_selects_project_runtime(tmp_path, monkeypatch):
     for path in (plugin, dll, rman / "bin", rman / "lib"):
         path.mkdir(parents=True)
 
-    monkeypatch.setattr(run_with_openusd, "_loader_path_key", lambda: "PATH")
+    monkeypatch.setattr(openusd_runtime, "_loader_path_key", lambda: "PATH")
     env, python_path = run_with_openusd.build_environment(
         root,
         base={"PATH": "existing", "PYTHONPATH": "existing-python"},
@@ -71,3 +77,81 @@ def test_build_environment_rejects_missing_plugin_path(tmp_path):
 
     with pytest.raises(RuntimeError, match="plugin path does not exist"):
         run_with_openusd.build_environment(root, plugin_paths=[tmp_path / "missing"])
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ("Lib", "site-packages"),
+        ("lib", "python3.13", "site-packages"),
+        ("lib64", "python3.13", "dist-packages"),
+    ],
+)
+def test_build_environment_discovers_current_openusd_python_layouts(
+    tmp_path, relative_path
+):
+    root = tmp_path / "OpenUSD"
+    root.mkdir()
+    expected = _pxr_package(root.joinpath(*relative_path))
+
+    _, python_path = run_with_openusd.build_environment(root, base={})
+
+    assert python_path == expected
+
+
+def test_build_environment_accepts_python_bindings_outside_prefix(tmp_path):
+    root = tmp_path / "OpenUSD"
+    root.mkdir()
+    python_path = _pxr_package(tmp_path / "venv" / "Lib" / "site-packages")
+
+    env, selected = run_with_openusd.build_environment(
+        root, base={}, python_path=python_path
+    )
+
+    assert selected == python_path
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(python_path)
+
+
+def test_build_environment_uses_inherited_rmantree(tmp_path, monkeypatch):
+    root = _usd_install(tmp_path)
+    rman = tmp_path / "RenderMan"
+    (rman / "bin").mkdir(parents=True)
+    (rman / "lib").mkdir()
+    monkeypatch.setattr(openusd_runtime, "_loader_path_key", lambda: "PATH")
+
+    env, _ = run_with_openusd.build_environment(
+        root, base={"RMANTREE": str(rman), "PATH": "existing"}
+    )
+
+    assert env["RMANTREE"] == str(rman)
+    assert env["PATH"].split(os.pathsep)[:2] == [str(rman / "lib"), str(rman / "bin")]
+
+
+def test_build_environment_rejects_invalid_inherited_rmantree(tmp_path):
+    root = _usd_install(tmp_path)
+
+    with pytest.raises(RuntimeError, match="RenderMan root does not exist"):
+        run_with_openusd.build_environment(
+            root, base={"RMANTREE": str(tmp_path / "missing")}
+        )
+
+
+def test_build_environment_selects_python_executable(tmp_path):
+    root = _usd_install(tmp_path)
+    executable = tmp_path / "OpenUSD" / ".venv" / "Scripts" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+
+    env, _ = run_with_openusd.build_environment(
+        root, base={"PATH": "existing"}, python_executable=executable
+    )
+
+    assert env["OPENUSDCONNECT_PYTHON_EXECUTABLE"] == str(executable)
+    assert env["PATH"].split(os.pathsep)[0] == str(executable.parent)
+
+
+def test_environment_delta_contains_only_changes():
+    assert openusd_runtime.environment_delta(
+        {"PATH": "before", "UNCHANGED": "value"},
+        {"PATH": "after", "UNCHANGED": "value", "ADDED": "new"},
+    ) == {"PATH": "after", "ADDED": "new"}

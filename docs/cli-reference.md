@@ -103,17 +103,64 @@ Use the same compatible OpenUSD build and plugin environment as the clients in
 your project. This is the primary path and is required for MaterialX, custom
 renderers, resolvers, file formats, and shader definitions.
 
-From the repository root, activate the selected install for the current
-PowerShell terminal, then run without enabling the `bundled-usd` group:
+From the repository root, configure the selected install for the current
+PowerShell process, then run without enabling the `bundled-usd` group. The
+leading dot and space dot-source the script; nothing is changed persistently:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 uv run --isolated openusdconnect-server --base scene.usda
 ```
 
-The first positional argument is the OpenUSD install directory containing
-`bin` and `lib`. Use `-RenderManRoot` for hdPrman and pass arrays to
-`-PluginPath` or `-DllDir` for project additions.
+The first positional argument is the OpenUSD install prefix. The script checks
+the current OpenUSD Python install layouts (`Lib/site-packages` on Windows and
+`lib/pythonX.Y/site-packages` on Unix), `dist-packages`, and the legacy
+`lib/python` layout.
+
+There are two distinct virtual-environment cases:
+
+1. If the venv itself was `CMAKE_INSTALL_PREFIX`, activate it and pass the venv
+   directory as `UsdRoot`. Its bindings are found automatically.
+2. If OpenUSD has a separate native prefix and `PXR_PYTHON_INSTALL_DIR` points
+   into a venv, activate that venv, pass the native prefix as `UsdRoot`, and
+   provide its site-packages directory explicitly.
+
+```powershell
+& "D:\OpenUSD\.venv\Scripts\Activate.ps1"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
+    -PythonPath "D:\OpenUSD\.venv\Lib\site-packages"
+```
+
+In either case, the active interpreter must match the Python version against
+which OpenUSD was built. Activating the venv also ensures generated commands
+such as `usdview.cmd` resolve that interpreter from `PATH`. Alternatively, pass
+`-PythonExecutable "D:\OpenUSD\.venv\Scripts\python.exe"`.
+
+A valid `RMANTREE` already present in the process is configured automatically.
+Use `-RenderManRoot` to select or override it, and pass arrays to `-PluginPath`
+or `-DllDir` for project additions.
+
+For example, configure hdPrman explicitly and launch usdview:
+
+```powershell
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
+    -RenderManRoot "C:\Program Files\Pixar\RenderManProServer-27.3"
+usdview scene.usda --renderer HdPrmanLoaderRendererPlugin
+```
+
+For an interactive Bash or Zsh session, source the Unix adapter. Its options
+use the same long names as the command wrapper:
+
+```bash
+source /opt/OpenUSD/.venv/bin/activate
+source scripts/openusd_env.sh /opt/OpenUSDInstall \
+  --python-path /opt/OpenUSD/.venv/lib/python3.13/site-packages \
+  --renderman-root /opt/pixar/RenderManProServer-27.3
+```
+
+Both activation scripts delegate discovery and path construction to
+`openusd_runtime.py`; the adapters only apply its environment delta to their
+current shell.
 
 For automation or other shells, configure one command through the
 cross-platform wrapper:
@@ -123,11 +170,16 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
   openusdconnect-server --base scene.usda
 ```
 
-Use repeatable `--plugin-path` and `--dll-dir` options for project additions, or
-`--renderman-root /path/to/RenderManProServer` to configure hdPrman.
+Use `--python-path /external/site-packages` for Python bindings outside the
+prefix and `--python-executable` to select the matching interpreter. Use
+repeatable `--plugin-path` and `--dll-dir` options for project additions, or
+`--renderman-root /path/to/RenderManProServer` to configure or override
+hdPrman. An inherited valid `RMANTREE` is also configured.
 
-The environment must expose the intended `pxr` bindings. For custom plugins,
-configure:
+The launchers validate the selected `pxr` package before changing the runtime
+environment. They deliberately do not recursively search unrelated virtual
+environments: an absolute CMake Python install directory has no discoverable
+relationship to the OpenUSD prefix. For custom plugins, configure:
 
 - plugin discovery through `PXR_PLUGINPATH_NAME`
 - native dependencies through `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,

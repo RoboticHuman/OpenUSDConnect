@@ -23,7 +23,7 @@ Configure the same compatible OpenUSD build and plugin environment used by the
 project. For example, in PowerShell:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
 
 The [runtime guide](cli-reference.md#openusd-runtime-and-custom-plugins) covers
