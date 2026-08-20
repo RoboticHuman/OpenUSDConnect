@@ -112,19 +112,26 @@ def test_build_environment_accepts_python_bindings_outside_prefix(tmp_path):
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(python_path)
 
 
-def test_build_environment_uses_inherited_rmantree(tmp_path, monkeypatch):
+def test_build_environment_uses_inherited_rmantree(tmp_path):
     root = _usd_install(tmp_path)
     rman = tmp_path / "RenderMan"
     (rman / "bin").mkdir(parents=True)
     (rman / "lib").mkdir()
-    monkeypatch.setattr(openusd_runtime, "_loader_path_key", lambda: "PATH")
+    loader_key = openusd_runtime._loader_path_key()
+    base = {"RMANTREE": str(rman), "PATH": "existing"}
+    if loader_key != "PATH":
+        base[loader_key] = "existing-loader"
 
-    env, _ = run_with_openusd.build_environment(
-        root, base={"RMANTREE": str(rman), "PATH": "existing"}
-    )
+    env, _ = run_with_openusd.build_environment(root, base=base)
 
     assert env["RMANTREE"] == str(rman)
-    assert env["PATH"].split(os.pathsep)[:2] == [str(rman / "lib"), str(rman / "bin")]
+    assert str(rman / "bin") in env["PATH"].split(os.pathsep)
+    expected_loader_prefix = (
+        [str(rman / "lib"), str(rman / "bin")]
+        if os.name == "nt"
+        else [str(rman / "bin"), str(rman / "lib")]
+    )
+    assert env[loader_key].split(os.pathsep)[:2] == expected_loader_prefix
 
 
 def test_build_environment_rejects_invalid_inherited_rmantree(tmp_path):

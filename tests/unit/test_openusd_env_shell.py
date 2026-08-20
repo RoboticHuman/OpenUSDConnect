@@ -60,10 +60,14 @@ def _bash(command: str, *, check: bool = True) -> subprocess.CompletedProcess[st
 
 def _read_environment(command: str) -> dict[str, str]:
     result = _bash(
+        "unset OPENUSDCONNECT_ENV_PYTHON; "
+        "EXPECTED_PYTHON=$(python3 -c 'from pathlib import Path; import sys; "
+        "print(Path(sys.executable).resolve())'); "
         f"unset PYTHONPATH LD_LIBRARY_PATH RMANTREE; {command}; "
-        "printf 'PYTHONPATH=%s\\nLD_LIBRARY_PATH=%s\\nRMANTREE=%s\\nPYTHON=%s\\n' "
+        "printf 'PYTHONPATH=%s\\nLD_LIBRARY_PATH=%s\\nRMANTREE=%s\\nPYTHON=%s\\n"
+        "EXPECTED_PYTHON=%s\\n' "
         '"$PYTHONPATH" "$LD_LIBRARY_PATH" "$RMANTREE" '
-        '"$OPENUSDCONNECT_PYTHON_EXECUTABLE"'
+        '"$OPENUSDCONNECT_PYTHON_EXECUTABLE" "$EXPECTED_PYTHON"'
     )
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
@@ -82,7 +86,7 @@ def test_discovers_posix_prefix_with_spaces(tmp_path):
         _shell_path(root / "lib"),
         _shell_path(root / "lib64"),
     ]
-    assert result["PYTHON"].startswith("/usr/bin/python3")
+    assert result["PYTHON"] == result["EXPECTED_PYTHON"]
 
 
 def test_accepts_external_bindings_and_inherited_rmantree(tmp_path):

@@ -35,6 +35,7 @@ def _run_script(root: Path, *, python_path: Path | None = None, rman: Path | Non
     command = (
         f". $env:TEST_SCRIPT $env:TEST_USD_ROOT{arguments}; "
         "[PSCustomObject]@{PythonPath=$env:PYTHONPATH; Path=$env:PATH; "
+        "LdLibraryPath=$env:LD_LIBRARY_PATH; DyldLibraryPath=$env:DYLD_LIBRARY_PATH; "
         "RenderMan=$env:RMANTREE; LoaderPython=$env:OPENUSDCONNECT_PYTHON_EXECUTABLE} "
         "| ConvertTo-Json -Compress"
     )
@@ -80,6 +81,13 @@ def test_configures_inherited_rmantree(tmp_path):
     result = _run_script(root, rman=rman)
 
     path = result["Path"].split(os.pathsep)
+    if os.name == "nt":
+        loader_path = path
+    elif sys.platform == "darwin":
+        loader_path = result["DyldLibraryPath"].split(os.pathsep)
+    else:
+        loader_path = result["LdLibraryPath"].split(os.pathsep)
     assert result["RenderMan"] == str(rman)
     assert str(rman / "bin") in path
-    assert str(rman / "lib") in path
+    assert str(rman / "bin") in loader_path
+    assert str(rman / "lib") in loader_path
