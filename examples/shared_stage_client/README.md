@@ -32,7 +32,7 @@ To exercise native change tracking, build the bridge with
 `openusdconnect-build-sdf-notice-bridge` and pass its printed path through
 `--sdf-notice-bridge`.
 
-Both processes open the same example files here. In a production deployment,
+Both demo processes open the same files. In a production deployment,
 each process may use a different filesystem root or a custom `ArResolver`, as
 long as the root document and recursive sublayer graph resolve to equivalent
 authored contents. OpenUSDConnect does not compare the complete untouched

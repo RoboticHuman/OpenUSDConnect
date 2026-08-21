@@ -1,19 +1,16 @@
 # OpenUSDConnect MCP server
 
-This package exposes the OpenUSDConnect event protocol as a local stdio MCP
-server. It provides live USD authoring, mirror-backed introspection, shader
-discovery, and playback tools while using the core sync protocol as a network
-client.
+This package is the stdio entry point for the OpenUSDConnect MCP integration.
+It publishes USD authoring, mirror inspection, shader discovery, and playback
+tools while connecting to the sync server as a normal network client.
 
-For installation, client-neutral stdio configuration, a verified first run,
-process and persistence behavior, the tool reference, and authoring recipes,
-see the canonical
-[`MCP server usage guide`](../../docs/mcp-server-usage.md).
+See the [MCP server guide](../../docs/mcp-server-usage.md) for installation,
+stdio configuration, the tool reference, and authoring examples.
 
 ## Layout
 
 | Module | Responsibility |
-|---|---|
+| --- | --- |
 | `cli.py` / `__main__.py` | Entry point (`python -m integrations.mcp`, stdio) |
 | `config.py` | `McpConfig` (env + flags) |
 | `session.py` | `ConnectionSession`: sender + mirror + read-after-write |

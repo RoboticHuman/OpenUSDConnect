@@ -1,8 +1,8 @@
 # Live material editing
 
-OpenUSDConnect synchronizes material bindings and `UsdShade.ConnectableAPI`
-networks without making the wire protocol depend on a particular renderer or
-DCC node system.
+Material events represent `UsdShade.ConnectableAPI` values, connections, and
+bindings. The protocol does not encode renderer-specific or DCC-specific node
+types.
 
 ## Protocol model
 
@@ -16,9 +16,9 @@ Three event kinds carry material state:
 - `set_connectable_connection` authors or clears input and output connection
   edges, including interface forwarding through Material and NodeGraph inputs.
 
-Any valid shader identifier and typed input can pass through the core. A DCC
-adapter decides which networks it can display natively; unsupported authored
-state remains available in its USD mirror.
+The core accepts valid shader identifiers and typed inputs. A DCC adapter maps
+the networks it understands; all other authored state remains in its USD
+mirror.
 
 ## Data flow
 
@@ -66,8 +66,8 @@ base-color and IOR controls. OpenPBR inputs are translated to the corresponding
 standard-surface behavior, including computed coat and fuzz channels when
 needed.
 
-The mapping is deliberately practical rather than a claim of renderer-identical
-shading. The USD mirror remains the authoritative graph.
+These mappings approximate the source graph in Blender; they do not promise
+renderer-identical output. The USD mirror remains authoritative.
 
 ## Referenced and nested interfaces
 
@@ -174,7 +174,7 @@ authored-opinion detection, and receive dispatch. The integration remains
 responsible for native node creation, socket mapping, asset loading, and
 host-thread scheduling.
 
-## Care points
+## Integration constraints
 
 - Preserve the authored `input_types`. When reverse-authoring a previously
   unknown input, prefer the existing USD input type, then the Sdr definition,

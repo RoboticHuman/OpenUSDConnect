@@ -1,7 +1,7 @@
 # Testing
 
-OpenUSDConnect separates fast core coverage from tests that require Blender,
-Unreal Engine, RenderMan, operating-system mounts, or large external assets.
+The default suite is headless. Blender, Unreal Engine, RenderMan, native mount,
+asset, and visual tests are opt-in.
 
 ## Test tiers
 
@@ -17,8 +17,14 @@ Unreal Engine, RenderMan, operating-system mounts, or large external assets.
 Configure the project OpenUSD runtime first. On PowerShell:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
+
+Current Windows and Unix OpenUSD Python layouts and the legacy `lib/python`
+layout are detected automatically. If the bindings were installed into a
+virtual environment, activate it first; its site-packages is also searched.
+Use `-PythonPath` only for bindings outside both locations. An existing valid
+`RMANTREE` is also configured automatically.
 
 Then install the normal development environment without the bundled runtime:
 
@@ -45,6 +51,8 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
   pytest tests/ -v
 ```
 
+The wrapper accepts the equivalent `--python-path` option.
+
 Add `--renderman-root /path/to/RenderManProServer` when running the visual tier.
 
 `tests/` includes headless integration tests. Tests that need a missing external
@@ -60,7 +68,7 @@ order:
 3. the first non-comment line of `blender.test.cfg`
 4. skip if none is configured
 
-The easiest setup is the portable runtime:
+To use a repository-local Blender runtime:
 
 ```bash
 uv run python scripts/setup_blender_test.py --version 5.0.1
@@ -98,7 +106,7 @@ Then run:
 uv run pytest tests/integration/asset_tests/ --asset-tests -v
 ```
 
-These tests launch Blender and exercise the real server, addon, native USD
+These tests launch Blender and exercise the real server, add-on, native USD
 import, references and payloads, variants, texture loading, MaterialX
 NodeGraphs, material identity, bindings, cameras, and backlog replay. Scope a
 failure to one test while iterating:
@@ -246,8 +254,8 @@ uv run python scripts/start_usdconnect_debug.py --reload
 ```
 
 Use `--start-emitter`, `--start-receiver`, `--no-server`, `--base`, and
-`--event-log` as needed. The complete current flag list is available through
-`--help`.
+`--event-log` as needed. Run the launcher with `--help` for the complete option
+list.
 
 ## Coverage and lint
 

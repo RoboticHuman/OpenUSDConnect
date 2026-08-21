@@ -1,24 +1,20 @@
-# Fourier waves: a compute-client procedural
+# Fourier waves
 
-A live demonstration of evaluating a `UsdProcGenerativeProcedural` prim with
-an ordinary OpenUSDConnect network client instead of a C++ Hydra plugin.
+This example evaluates a `UsdProcGenerativeProcedural` prim in an
+OpenUSDConnect client instead of a C++ Hydra plugin.
 
-The authored prim is declaration-only, exactly as the UsdProc schema intends:
-a `proceduralSystem` token plus wave parameters as primvars (`frequencies`,
-`amplitudes`, `phases`, `resolution`, `size`). The wave client subscribes to
-it over the sync protocol and, on every parameter change, regenerates a
-wave-displaced grid mesh (a sum of golden-angle-directed sinusoids) and emits
-it as the prim's `Result` child. Because the evaluator is just another
-client, every connected receiver sees the expanded geometry, including ones
-with no Hydra at all.
+The authored prim contains a `proceduralSystem` token and wave parameters as
+primvars: `frequencies`, `amplitudes`, `phases`, `resolution`, and `size`. When
+a parameter changes, the compute client regenerates a displaced grid from a
+sum of golden-angle-directed sinusoids and publishes it below `Result`.
+Receivers consume ordinary mesh events and do not need Hydra support.
 
 Configure OpenUSD using the shared [example runtime
 setup](../README.md#runtime-setup) before running this demo.
 
 ## Quickstart
 
-One command starts the server, usdview, the wave client, and an animated
-author; `Ctrl+C` stops everything cleanly:
+One command starts the server, usdview, compute client, and animated author:
 
 ```bash
 uv run python examples/fourier_waves/run.py
@@ -26,7 +22,7 @@ uv run python examples/fourier_waves/run.py
 
 In usdview, frame `/World/FourierWave/Result` and watch the wave roll.
 
-`--help` lists every knob. Some combinations to try:
+Run with `--help` for all options. For example:
 
 ```bash
 # calm single swell, coarse grid
@@ -53,12 +49,12 @@ parameter changes. Stop the author and evaluator with `Ctrl+C`, then stop the
 server with `Ctrl+C`. The event log remains at `fourier-demo.db`; periodic
 compaction and reclamation limit growth during long runs.
 
-Point any receiver at the same server (usdview via
-`integrations.usdview.launcher`, Blender, a `UsdStageAdapter` client) to watch
-the same result. Editing any parameter primvar from any client (for example
-`primvars:frequencies` via the MCP server) regenerates the wave everywhere.
+Any receiver can connect to the same server: usdview through
+`integrations.usdview.launcher`, Blender, or a `UsdStageAdapter` client. Editing
+a parameter primvar from any author, including `primvars:frequencies` through
+MCP, triggers a new mesh.
 
-## What this exercises
+## Protocol features
 
 - `ensure_prim` with typeName `GenerativeProcedural` and the
   `HydraGenerativeProceduralAPI` applied schema.
@@ -69,5 +65,5 @@ the same result. Editing any parameter primvar from any client (for example
 - Mesh geometry (points, quad topology, extent) emitted by a client and
   replicated to all receivers.
 
-The same authored prim remains consumable by a real Hydra
-`HdGpGenerativeProcedural` plugin later; only the evaluator differs.
+The authored prim can also be consumed by a Hydra
+`HdGpGenerativeProcedural` plugin; only the evaluator changes.

@@ -1,7 +1,7 @@
 # Profiling
 
-Use [py-spy](https://github.com/benfred/py-spy) to sample the server or a DCC
-without modifying its Python code.
+[py-spy](https://github.com/benfred/py-spy) samples the server or a DCC without
+instrumenting its Python code.
 
 ## Install
 
@@ -35,8 +35,8 @@ py-spy top --pid <PID>
 
 Stop a recording with Ctrl+C so py-spy can flush the output.
 
-Sampling is not free. Always run the same workload without profiling and treat
-that run as the throughput and latency baseline. In one local 40-emitter,
+Sampling changes the workload. Run it once without profiling and use that as
+the throughput and latency baseline. In one local 40-emitter,
 40-receiver, 20-bidirectional saturation run, 50 Hz sampling approximately
 halved durable throughput; 200 Hz fell far behind and slowed the workload by an
 order of magnitude. The exact overhead is machine and workload dependent.

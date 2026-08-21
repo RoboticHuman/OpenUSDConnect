@@ -1,25 +1,24 @@
-# Server-Provided USD Files
+# Server-provided USD files
 
-The server-provided file service, also called live-open, publishes the current
-server scene as USD files through HTTP/WebDAV and a local filesystem mirror. An
-application without an OpenUSDConnect integration can open the current scene as
-a snapshot. With write fallback enabled, supported changes saved to that file
-can be sent to the server, but the application does not receive incremental
-updates. An integrated DCC also reads the embedded server address, then
-continues synchronization over the normal TCP connection after the last event
-included in the file.
+Live-open publishes the current server scene through HTTP/WebDAV and mirrors it
+to a local filesystem path. A program without an OpenUSDConnect integration can
+open the file as a snapshot. In `translate` write mode, the service converts
+supported saved changes into server transactions, but the program still does
+not receive incremental updates.
+
+An integrated DCC reads the endpoint and sequence number embedded in the USD
+file, then continues synchronization over the normal TCP connection.
 
 Live continuation from a flattened `scene.usd` is intended for the default
 managed session with one unmuted collaboration layer and no department policy.
 Use the original base scene for managed layered replay, or the original portable
 layer graph for `shared_stage` mode.
 
-For the primary server and Blender setup, begin with
-[Getting Started](getting-started.md). Its server-provided file section introduces
-this option; this page documents resource formats, mounting, write fallback,
-metadata, and server configuration.
+For a first Blender session, start with [Getting started](getting-started.md).
+This page is the reference for generated resources, mounts, save translation,
+metadata, and server options.
 
-## Start The Live-Open Services
+## Start live-open
 
 ```bash
 uv sync --group vfs --group dashboard
@@ -55,7 +54,7 @@ When enabled, the dashboard listener binds to all network interfaces. The sync
 and WebDAV services retain their configured hosts. Keep the dashboard behind a
 trusted firewall or leave `--dashboard-port` at `0` on an untrusted network.
 
-## Virtual Resources
+## Virtual resources
 
 The WebDAV collection defaults to <http://127.0.0.1:7280/usd/>.
 
@@ -71,7 +70,7 @@ Their contents and ETags do not change merely because time passes; they change
 when an edit, compaction, purge, or other visible stage-state transition changes
 that token.
 
-### `scene.usd`: Flattened Snapshot
+### `scene.usd`: flattened snapshot
 
 Use `scene.usd` for DCC import, non-integrated viewers, file downloads,
 and the Blender or Unreal live-open workflow. It contains the composed stage at
@@ -82,7 +81,7 @@ layers. An integrated client therefore continues from `snapshot_seq + 1` in
 flat replay rather than reconstructing the historical collaboration-layer
 stack.
 
-### `scene.live.usda`: Composition Root
+### `scene.live.usda`: composition root
 
 Use `scene.live.usda` when inspecting the server's exported composition or when
 a USD runtime can resolve the companion `_layers` directory. It keeps the base
@@ -92,7 +91,7 @@ opinions visible.
 It is less portable than `scene.usd`: copying only the root file breaks its
 sublayer references. It is not the default live-open target for DCC import.
 
-## Choose A File Path
+## Choose a file path
 
 | Path | Recommended use |
 | --- | --- |
@@ -105,7 +104,7 @@ sublayer references. It is not the default live-open target for DCC import.
 Raw HTTP is not a universal OpenUSD asset resolver. Prefer the local mirror or
 a native filesystem path when an application expects a file.
 
-## Local Mirror
+## Local mirror
 
 The bridge mirrors the managed `scene.usd` into a normal directory and uploads
 completed saves with ETag conflict protection. It accommodates applications
@@ -128,7 +127,7 @@ The bridge waits for a save to stabilize and uploads against the last observed
 ETag. A concurrent remote edit places it in an explicit conflict/recovery state
 instead of overwriting newer work.
 
-## Native WebDAV Paths
+## Native WebDAV paths
 
 ### Windows
 
@@ -172,7 +171,7 @@ reads, so integrated clients use TCP live sync after the initial open.
 Use the local mirror by default. The mount helper does not install or configure
 a system FUSE/WebDAV client.
 
-## Write Fallback
+## Save translation
 
 The server controls direct `PUT` behavior with `--vfs-write-mode`:
 
@@ -198,7 +197,7 @@ Translate mode is available only for the default managed collaboration layer.
 Department-layer and shared-stage sessions preserve composition through their
 native protocols and do not accept flattened write translation.
 
-## Embedded Metadata
+## Embedded metadata
 
 Both live-open USD roots contain `customLayerData["openusdconnect"]`.
 
@@ -223,7 +222,7 @@ department policy. A server that must preserve managed layer ordering rejects
 flat replay with a clear reason. Open the original base stage with a
 layer-capable integration for that workflow.
 
-## Authentication And Exposure
+## Authentication and exposure
 
 `--require-token` protects the TCP synchronization protocol. Authentication
 tokens are never embedded in USD files or the manifest.
@@ -235,7 +234,7 @@ network boundary or authenticated proxy.
 Blender and Unreal persist TOFU tokens according to their integration settings
 and reuse them for receiver and emitter reconnects.
 
-## Run The Server Endpoint Manually
+## Run the endpoint manually
 
 The following command starts the TCP server, WebDAV endpoint, and dashboard. It
 does not create the local mirror or Windows drive alias provided by
@@ -251,7 +250,7 @@ bridge with its documented `stop` command. Relative event-log and mirror paths
 resolve from the current working directory, so run from the repository root or
 use absolute paths.
 
-Important VFS options:
+VFS options:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
@@ -268,7 +267,7 @@ Important VFS options:
 When binding the server to `0.0.0.0`, set `--advertise-host` to the hostname or
 address that remote DCCs can reach.
 
-## Verify And Diagnose
+## Verify and diagnose
 
 Download and parse the flattened snapshot:
 

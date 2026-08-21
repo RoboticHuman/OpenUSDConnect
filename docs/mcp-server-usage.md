@@ -1,11 +1,10 @@
-# OpenUSDConnect MCP Server
+# OpenUSDConnect MCP server
 
-An [MCP](https://modelcontextprotocol.io) server that exposes OpenUSDConnect as
-tools. An MCP client can author meshes, composition arcs, transforms,
-instancing, and `UsdShade.ConnectableAPI` networks, then inspect the composed
-result through a local USD mirror.
+The [MCP](https://modelcontextprotocol.io) integration exposes OpenUSDConnect
+operations as local stdio tools. A client can author USD transactions and
+inspect the composed result through an in-memory mirror.
 
-The MCP is a network **client** built on the core library (`EventSender` +
+The MCP process is a network client built on the core library (`EventSender` +
 `ReceiverThread` + `EventDispatcher` + `UsdStageAdapter`), the same shape as the
 `usdview` integration. Every scene event it sends uses the core protocol. Its
 USD mirror also negotiates the optional layered-replay capability so authored
@@ -66,7 +65,7 @@ The MCP client starts and owns this stdio process. It is separate from the TCP
 sync server in the first terminal. MCP protocol messages use stdout; diagnostics
 use stderr.
 
-## Verify The Connection
+## Verify the connection
 
 Ask the MCP client to call these tools in order:
 
@@ -109,6 +108,7 @@ Flags (CLI) override environment variables override defaults.
 ## Tools
 
 ### Session
+
 - `usd_connect(host?, port?, client_id?, department?)` connect + start mirror.
 - `usd_status()` connection state, mirror prim count, last sequence, metadata.
 - `usd_disconnect()`.
@@ -118,6 +118,7 @@ introspection requires an established connection, so call `usd_connect` before
 inspecting a fresh session or when targeting a non-default server.
 
 ### Authoring
+
 - `usd_send_events(events)` validates and sends managed authoring event dicts as
   **one atomic transaction**. It is the primary tool for composite authoring,
   such as a whole mesh or shader network.
@@ -132,7 +133,8 @@ inspecting a fresh session or when targeting a non-default server.
 `usd_set_xform_trs` accepts a quaternion `r=[w,x,y,z]` or, for convenience,
 `rotate_euler=[rx,ry,rz]` degrees + `rotate_order` (converted to a quaternion).
 
-### Introspection (mirror-backed)
+### Introspection
+
 - `usd_scene_summary(under?)`: total/active/material counts, max depth, and a
   count-by-type histogram. Cheap orientation before listing a large scene.
 - `usd_list_prims(under?, type_name?, is_a?, max?, offset?, depth?)`: filter by
@@ -157,7 +159,10 @@ inspecting a fresh session or when targeting a non-default server.
 - `usd_describe_shader_network(material_path)`: full ConnectableAPI topology.
 - `usd_get_stage_metadata()`
 
-### Shader discovery (no connection needed)
+### Shader discovery
+
+These tools read the local Sdr registry and do not require a server connection.
+
 - `usd_list_shader_nodes(filter?, source_type?, max?)` `source_type` is
   `"mtlx"` (MaterialX), `"glslfx"` (UsdPreviewSurface family), or `"USD"`.
 - `usd_describe_shader_node(info_id)` exact input/output names + Sdf types +
@@ -165,13 +170,16 @@ inspecting a fresh session or when targeting a non-default server.
   endpoints.
 
 ### Playback
+
 - `usd_claim_playback(time?)`, `usd_playback_control(action, time?, rate?)`.
 - `usd_playback_status()` read the shared playhead (playing/time/rate, leader
   client id, whether this client leads) from the latest broadcast PlaybackState.
 
 ## Authoring recipes
 
-**Procedural mesh** (one atomic transaction; ancestors auto-created):
+#### Procedural mesh
+
+This is one atomic transaction; missing ancestors are created automatically.
 
 ```json
 [
@@ -186,7 +194,9 @@ inspecting a fresh session or when targeting a non-default server.
 ]
 ```
 
-**UsdPreviewSurface material + bind** discover input types first with
+#### UsdPreviewSurface material and binding
+
+Discover input types first with
 `usd_describe_shader_node("UsdPreviewSurface")`, then send one transaction:
 
 ```json
@@ -204,8 +214,8 @@ inspecting a fresh session or when targeting a non-default server.
 ]
 ```
 
-**MaterialX** is identical except the shader's `info_id` is an `ND_*` id (e.g.
-`ND_standard_surface_surfaceshader`) and the Material terminal is
+For **MaterialX**, use an `ND_*` shader ID (for example,
+`ND_standard_surface_surfaceshader`). The Material terminal is
 `outputs:mtlx:surface` connected to the shader's `outputs:out`. Reference an
 external `.mtlx` document instead with `set_reference`
 (`asset_path` ending in `.mtlx`).
@@ -213,7 +223,7 @@ external `.mtlx` document instead with `set_reference`
 Verify any network with
 `usd_describe_shader_network("/World/Looks/Brass")`.
 
-## How it works
+## Implementation notes
 
 - **Emit + mirror.** The MCP emits via `EventSender` and keeps a read-only
   `Usd.Stage` mirror through `ReceiverThread`, replaying from sequence 1. The
@@ -237,8 +247,9 @@ Verify any network with
 
 To expose a newly added core event kind through the MCP, add one row to
 `TOOL_TABLE` in `integrations/mcp/registry.py`. `test_mcp_registry_consistency`
-fails until the row exists. New shader nodes (MaterialX, custom) need no MCP
-changes `usd_describe_shader_node` reads them from the Sdr registry.
+fails until the row exists. New shader nodes, including custom MaterialX nodes,
+need no MCP changes; `usd_describe_shader_node` reads them from the Sdr
+registry.
 
 ## Testing
 

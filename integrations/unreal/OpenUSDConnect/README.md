@@ -1,39 +1,33 @@
-# OpenUSD Connect Unreal Engine Plugin
+# Unreal Engine plugin
 
-The plugin connects an Unreal USD Stage to an OpenUSDConnect server. It receives
-the server's flat scene updates and can send transform, visibility, and
-connectable-input edits authored in Unreal. Other supported event types are
-receive-only; see [Supported events](#supported-events) before planning an
-authoring workflow.
-
----
+The plugin connects an Unreal `AUsdStageActor` to OpenUSDConnect. It receives a
+flat event stream and publishes transform, visibility, and connectable-input
+edits made in Unreal. Other event types are receive-only; check
+[Supported events](#supported-events) before relying on Unreal as an author.
 
 ## Requirements
 
 | Requirement | Why |
 |-------------|-----|
-| **Unreal Engine 5.8** | The checked-in `.uplugin` targets 5.8 and uses the pxr USD C++ SDK behind Unreal's USD wrappers. Launcher 5.8 includes the required USD headers and libraries, so a source checkout is not required. Porting the source to an older engine may be possible, but the packaged plugin is not advertised as cross-version binary compatible. |
+| **Unreal Engine 5.8** | The checked-in `.uplugin` targets 5.8 and uses the pxr USD C++ SDK behind Unreal's wrappers. Launcher 5.8 contains the required headers and libraries. Build separately for other engine versions. |
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
 | **`USDCore` plugin available** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). Enabling `USDImporter` enables this dependency transitively. |
-| **Python OpenUSDConnect server** | The hub all clients connect to. See repo root for the server. |
-| FlatBuffers headers | Header-only. Run `python setup_flatbuffers.py` once from the plugin folder it downloads the runtime headers matching the committed flatc-generated protocol bindings (the generated code pins the exact version via a `static_assert`, so engine-shipped copies are not used). |
+| **OpenUSDConnect server** | Run the Python server from the repository root. |
+| FlatBuffers headers | Included in release packages. For source builds, run `python setup_flatbuffers.py` or use the Unreal harness, which stages the pinned headers automatically. |
 
-**Development note:** the protocol bindings under
-`native/client_core/include/openusdconnect/client/schema/` are generated from the
-repo's FlatBuffers schemas and committed, so plugin *users* never need the compiler.
-Changing the schemas requires `flatc` available from the official scoop repo
-(`scoop install main/flatc`) and one run of
-`bash scripts/generate_flatbuffers.sh` from the repo root, which regenerates the
-Python and Unreal bindings together. Keep `setup_flatbuffers.py`'s `DEFAULT_VERSION`
-in lockstep with the `flatc` version used to regenerate.
-
----
+Generated protocol bindings are committed under
+`native/client_core/include/openusdconnect/client/schema/`; users do not need
+`flatc`. Schema
+changes require the compiler (`scoop install main/flatc` on Windows) and
+`bash scripts/generate_flatbuffers.sh` from the repository root. That script
+regenerates both Python and native C++ bindings. Keep
+`setup_flatbuffers.py::DEFAULT_VERSION` aligned with the compiler version.
 
 ## Installation
 
-The plugin package and project entry are identical on Windows and macOS. It
-contains two internal runtime modules, but only `OpenUSDConnect` is enabled in
-the project. Linux follows the same layout but has not been validated here.
+Windows and macOS use the same plugin layout. The plugin contains two runtime
+modules, but the project only enables `OpenUSDConnect`. The Linux layout is the
+same but has not been validated.
 
 1. **Install a packaged plugin** into your project:
    ```
@@ -66,10 +60,9 @@ the project. Linux follows the same layout but has not been validated here.
    }
    ```
 
-3. **Regenerate project files** using the platform's normal Unreal workflow.
-   On Windows, right-click the `.uproject` and choose *Generate Visual Studio
-   project files*. On macOS, generate Xcode project files or build the editor
-   target directly with UnrealBuildTool.
+3. **Regenerate project files.** On Windows, right-click the `.uproject` and
+   choose **Generate Visual Studio project files**. On macOS, generate Xcode
+   files or build the editor target directly with UnrealBuildTool.
 
 4. **Build** the editor target in Development configuration:
    ```
@@ -79,8 +72,6 @@ the project. Linux follows the same layout but has not been validated here.
    # macOS
    Engine/Build/BatchFiles/Mac/Build.sh <ProjectName>Editor Mac Development -Project=<path-to-.uproject>
    ```
-
----
 
 ## Configuration
 
@@ -98,17 +89,15 @@ the project. Linux follows the same layout but has not been validated here.
 | Persist Auth Tokens | `true` | Save server-issued TOFU tokens in the user's Unreal config and reuse them on reconnect. |
 | Reconnect Delay (s) | `3.0` | Wait time between reconnect attempts |
 
-The native plugin currently receives through flat replay. Use it with one
+The plugin receives through flat replay. Use it with one
 unmuted collaboration layer and no server department policy. A department
 server rejects the receiver with a clear status message; layered Unreal replay
 is future work. The Department setting remains available to the emitter but
 does not make the receive path layer-aware.
 
----
-
 ## Usage
 
-### 1. Start The OpenUSDConnect Server
+### 1. Start the server
 
 The base-file workflow is the default. Configure the same compatible OpenUSD
 build and plugin environment used by the project, then install the dashboard
@@ -127,7 +116,7 @@ MaterialX nor custom plugins.
 The dashboard is available at <http://127.0.0.1:8080>. Stop the server with
 Ctrl+C; `unreal-session.db` retains its event history.
 
-### 2. Open The USD Stage In Unreal
+### 2. Open the USD stage in Unreal
 
 1. Open **Window > Virtual Production > USD Stage**.
 2. Choose **File > Open** and select `my_scene.usda`.
@@ -137,12 +126,12 @@ Ctrl+C; `unreal-session.db` retains its event history.
 With `Opened`, prims appear in the USD Stage tree but Unreal does not create
 scene components for live viewport updates.
 
-### 3. Connect Another Client
+### 3. Connect another client
 
 Open the same base scene in Blender or a compatible client and connect it to
 `127.0.0.1:7200`. In Blender, start the receiver before the emitter.
 
-### 4. Verify Synchronization
+### 4. Verify synchronization
 
 The subsystem runs in the editor without pressing Play:
 
@@ -150,10 +139,10 @@ The subsystem runs in the editor without pressing Play:
 - Move the corresponding prim in Unreal's viewport and confirm Blender follows.
 - Open the dashboard and confirm the Unreal receiver and emitter connections.
 
-### Optional: Open A Server-Provided USD File
+### Optional: open a server-provided USD file
 
-This path provides a generated `scene.usd` through a normal file picker. It is
-limited to one unmuted collaboration layer and no department policy.
+Live-open provides a generated `scene.usd` through a normal file picker. It
+requires one unmuted collaboration layer and no department policy.
 
 From the repository root:
 
@@ -183,7 +172,7 @@ uv run python scripts/start_live_open.py stop
 See [Server-Provided USD Files](../../../docs/live-open.md) for custom paths,
 write fallback, authentication, and diagnostics.
 
-The **Output Log** will show:
+The **Output Log** should contain:
 ```
 LogUSDConnectSubsystem:   Detected OpenUSDConnect live metadata on stage: 127.0.0.1:7200 snapshot_seq=...
 LogUSDConnectSubsystem:   Using USD live metadata; receiver will sync from seq=...
@@ -193,7 +182,8 @@ LogUSDEmit:               Emitter connected to 127.0.0.1:7200
 LogUSDEmit:               Emitter HELLO_OK ready to send
 LogUSDConnectSubsystem:   Attached to AUsdStageActor (UsdStageActor_0)
 ```
-Per-event chatter is at `Verbose` level enable it via `LogUSDConnect Verbose` in the console if you need to debug traffic.
+Per-event messages use the `Verbose` level. Enable them with
+`LogUSDConnect Verbose` in the editor console.
 
 Blueprint or editor utility tooling can call `GetStatus()` on the
 `USDConnectSubsystem` to display the active endpoint, metadata source,
@@ -207,9 +197,7 @@ Token-required live-open:
 - If the emitter was waiting for that first token, it starts on the next tick.
 - Future reconnects send the saved token on both receiver and emitter sockets.
 
----
-
-## How it works (high level)
+## Architecture
 
 ```
                     Server :7200
@@ -219,25 +207,25 @@ Blender ←recv───   │   pxr stage  ←───────────
                    └────────────┘
 ```
 
-The plugin opens **two** TCP connections to the server:
+The plugin opens two TCP connections:
 
-- **Receiver** gets `BroadcastEvent` frames and applies them to the pxr stage that `AUsdStageActor` is holding. The stage actor's USD notice listener then refreshes the Unreal scene components.
-- **Emitter** subscribes to the stage actor's USD listener; when a prim is edited locally (viewport transforms, USD Stage panel properties), reads the prim's TRS/visibility and for shader prims, the edited `inputs:*` values from the pxr stage and sends a `Txn` frame.
+- The receiver applies `BroadcastEvent` frames to the pxr stage owned by
+  `AUsdStageActor`. The actor's USD notice listener refreshes the corresponding
+  Unreal components.
+- The emitter watches the stage actor's USD notices. For supported local edits,
+  it reads TRS, visibility, or shader `inputs:*` values and sends a `Txn` frame.
 
-An echo guard (origin matching + an in-flight `bSuppressEmit` flag) prevents the receiver from re-emitting events it just applied.
+Origin matching and `bSuppressEmit` prevent received events from being
+published again.
 
-Full architecture and protocol notes: see [`PLUGIN_DEV.md`](PLUGIN_DEV.md).
-
----
+See [Plugin developer notes](PLUGIN_DEV.md) for threading and protocol details.
 
 ## Automated integration test
 
-From the repository root, the opt-in harness can discover a Launcher or source
-engine, package this plugin, generate an enabled project, and run two-way stage and
-material parity checks:
+The opt-in harness finds a Launcher or source engine, packages the plugin,
+generates a test project, and checks bidirectional stage and material parity.
 
-The harness installs the pinned FlatBuffers headers automatically when they are
-missing from a clean checkout.
+It installs the pinned FlatBuffers headers when they are missing.
 
 ```bash
 uv run python scripts/run_unreal_tests.py --list-engines
@@ -246,8 +234,6 @@ uv run python scripts/run_unreal_tests.py --engine-root /path/to/UnrealEngine
 
 See [Unreal Engine testing](../../../docs/testing-setup.md#unreal-engine)
 for pytest, existing-project, cache, and interactive options.
-
----
 
 ## Troubleshooting
 
@@ -264,12 +250,12 @@ Live-open-specific checks:
 
 | Symptom | Cause / Fix |
 |---------|-------------|
-| `Could not connect to 127.0.0.1:7200 retrying` | Server isn't running, or port mismatch. Start the server. |
+| `Could not connect to 127.0.0.1:7200 retrying` | The server is not running or the endpoint differs. Start the server and check the configured port. |
 | `LogPluginManager: ... incompatible with engine version` | The `.uplugin` declares 5.8. Rebuild and deliberately source-port the plugin for another engine version rather than editing only the descriptor. |
 | Connection works but edits don't reflect in Unreal viewport | The stage actor's `Stage State` is `Opened` instead of `OpenedAndLoaded`. Change it in the Details panel. |
 | Geometry imports but renders default gray | The asset's materials only author a MaterialX context (`outputs:mtlx:surface`, e.g. the usd-wg OpenChessSet), and the stage actor defaults to the `universal` (UsdPreviewSurface) context. Set **Render Context → `mtlx`** on the `AUsdStageActor` Details panel. |
 | `LogUsd: ... failed to find a valid referenced MaterialX file. Reverting to parsing the generated Material prims` | The fallback prim parse **does not translate MaterialX values**. The plugin's auto-materializer normally prevents this state for supported synced inline networks by generating a local `.mtlx` document (see *MaterialX rendering* below). Persistent warnings can mean the material was deliberately skipped, such as a renderer-specific node (`PxrSurface`, Lama) or an unmapped input type. |
-| Inline MaterialX materials render default gray or black | UE 5.8 translates MaterialX only from **referenced `.mtlx` documents** (via Interchange); inline `ND_*` prim networks are recognized structurally but their values are not translated. The plugin works around this automatically see *MaterialX rendering* below. Consider **Substrate Adaptive GBuffer** (Project Settings → Rendering) for full standard_surface fidelity. UsdPreviewSurface inline networks are unaffected they translate through the universal context. |
+| Inline MaterialX materials render gray or black | UE 5.8 translates referenced `.mtlx` documents but not values from inline `ND_*` networks. The plugin materializes supported networks automatically; see [MaterialX rendering](#materialx-rendering-auto-materializer). Enable **Substrate Adaptive GBuffer** for fuller `standard_surface` support. UsdPreviewSurface uses the universal context and is unaffected. |
 | Generated meshes are named after a **container** prim instead of the individual objects (e.g. `SM_World1`, `SM_World2`, … for a root prim called `World`), every synced edit rebuilds them, and materials jump between objects on visibility changes | That container prim is being **collapsed**: it has no `kind`, and UE collapses kind-less subtrees by default (`USD.CollapsePrimsWithoutKind` is true), folding the whole subtree into **one** static mesh whose sections and material slots re-index on every rebuild. Author `kind = "group"` on scene-root Xforms (correct USD model hierarchy), or set `USD.CollapsePrimsWithoutKind 0`, or uncheck **Use Prim Kinds For Collapsing** on the stage actor. |
 | Generated assets churn constantly (new transient packages per edit); appearance drifts until a full stage reload | No persistent asset cache: each stage actor defaults to a throwaway transient cache. Create a **USD Asset Cache** asset and assign it on the stage actor (or Project Settings → USDCore → Default Asset Cache). Consider also disabling **Share Assets for Identical Prims**, so prims with identical geometry but different materials don't share one mesh asset. |
 | Edits in Unreal don't reach Blender | Confirm the **Emitter HELLO_OK** line appears in the log; if not, the emitter socket failed. Check the dashboard's *Clients* tab. |
@@ -282,8 +268,6 @@ Log LogUSDConnectSubsystem Verbose
 Log LogUSDEmit Verbose
 Log LogUSDEventApplier Verbose
 ```
-
----
 
 ## Supported events
 
@@ -307,70 +291,57 @@ Log LogUSDEventApplier Verbose
 | SetConnectableInput (shader/material/light parameters) | ✅ | ✅ |
 | SetConnectableConnection (connection edges) | ✅ | |
 
-`SetConnectableInput` / `SetConnectableConnection` author the shader network onto
-the pxr stage (typed values, `info:id`, connection edges); what renders from it
-is up to UE's USD material translation and the stage actor's **Render Context**
-(see Troubleshooting).
+`SetConnectableInput` and `SetConnectableConnection` author typed values,
+`info:id`, and connection edges on the pxr stage. Rendering depends on Unreal's
+USD material translation and the stage actor's **Render Context**.
 
 ## MaterialX rendering (auto-materializer)
 
-The engine renders MaterialX only from referenced `.mtlx` documents inline
-`ND_*` prim networks are recognized but their values are not translated. The
-plugin bridges supported networks automatically: whenever a synced or
-locally-edited material with an `mtlx` surface output changes, it serializes
-the composed network to a document under
+Unreal renders MaterialX from referenced `.mtlx` documents. It recognizes
+inline `ND_*` networks but does not translate their values. For supported
+networks, the plugin serializes the composed graph to
 `<Project>/Saved/OpenUSDConnect/MaterialX/<Prim_Path>.mtlx` and references it
-on the material prim in the stage's **session layer**. Session-layer state is
-local to this Unreal instance it never reaches the sync server, so every
-other client keeps consuming the inline network untouched.
+from the material prim's session-layer opinion. This local reference is never
+sent to the server; other clients continue to consume the inline graph.
 
-Documents are content-addressed (`<Prim_Path>.<hash>.mtlx`): every
-regeneration produces a new file and swaps the session reference to it a
-real composition change the stage actor must re-import, so live material
-edits from any client (or Unreal's own USD Stage panel) update the Unreal
-render within a tick. Superseded revisions are deleted best-effort.
+Documents are content-addressed as `<Prim_Path>.<hash>.mtlx`. Regeneration
+writes a new file and updates the session reference, forcing the stage actor to
+re-import the material. Superseded files are removed when possible.
 
-One side effect of the document reference: usdMtlx projects the document's
-values as **interface inputs on the Material prim**, so the USD Stage panel
-shows editable-looking inputs at the material level that exist only in this
-Unreal instance. Edits there are rerouted onto the inline surface shader's
-same-named inputs automatically (the generated document guarantees the
-mapping), so editing either level reaches the shared scene but the shader's
-inputs are the real authored state.
+usdMtlx projects document values as interface inputs on the Material prim, so
+the USD Stage panel shows local material-level inputs. The plugin redirects
+edits on those inputs to the same-named inputs on the inline surface shader.
+The shader inputs remain the shared authored state.
 
-**UsdPreviewSurface** materials never get documents the engine translates
-them to material instances whose parameters update in place (no shader
-compile, unlike a document re-import). The engine's own update chain misses
-those value edits under the `mtlx` render context, so the plugin re-pulls the
-linked instances' parameters with the engine's converter instead.
+UsdPreviewSurface materials are not materialized. Unreal translates them to
+material instances and can update their parameters without recompiling a
+shader. Under the `mtlx` render context, the plugin explicitly refreshes those
+instances because Unreal's normal update path misses the value changes.
 
-Skipped (left exactly as authored): renderer-specific shaders (`PxrSurface`,
-Lama), networks with input types that have no MaterialX equivalent, and
-materials already backed by a foreign `.mtlx` document reference.
+The plugin leaves renderer-specific shaders (`PxrSurface`, Lama), unsupported
+input types, and materials with an existing external `.mtlx` reference
+unchanged.
 
-## Unreal-specific quirks
+## Unreal behavior
 
-Engine behaviors worth knowing when Unreal is one of the synced clients. The
-plugin compensates for each; the notes explain what you'll observe and why.
+The following engine behavior affects synchronized stages:
 
 - **Viewport moves collapse xform op stacks.** The engine's component
   write-back (`UnrealToUsd::ConvertXformable`) replaces a prim's entire op
-  stack with a single `xformOp:transform` matrix on every gizmo move. Left
-  alone, this orphans the canonical `translate`/`orient`/`scale` attributes
-  (per-op edits in the USD Stage panel stop doing anything) and breaks
-  TRS-based sync. The plugin decomposes the matrix for the wire and restores
-  the canonical op stack right after each move same composed transform, so
-  nothing jumps. Prims that natively author matrix ops (foreign assets) keep
-  their structure; their moves sync through decomposition.
+  stack with one `xformOp:transform` matrix after a gizmo move. That would
+  disconnect the canonical `translate`/`orient`/`scale` attributes from the
+  composed transform. The plugin sends the decomposed TRS and restores the
+  canonical stack without changing the composed transform. Prims that already
+  use matrix ops keep their structure.
 - **Component write-back can re-author shape attributes.** The engine bakes
   gprim attributes (sphere radius, cube size, …) together with the xform into
   one component transform, and resets those attributes when writing a moved
   component back to USD. These are engine-local opinions the plugin does not
   emit; a stage reload replays the shared-scene values.
-- **The color picker authors HDR.** Unreal's picker happily writes component
-  values above 1.0 into USD color attributes. Other renderers will show
-  blow-outs (a `(10, 1, 1)` "red" renders white-hot). Keep values in 0–1
-  unless HDR is intended.
+- **The color picker authors HDR values.** Unreal can write components above
+  1.0 to USD color attributes. Other renderers preserve that intensity, so a
+  `(10, 1, 1)` color will not behave like normalized red. Keep components in
+  the 0–1 range unless HDR output is intentional.
 - **Material edits belong on the shader prim.** The material-level inputs the
   USD Stage panel shows on document-backed materials are usdMtlx projections
   local to this Unreal instance. The plugin reroutes edits made there onto the
@@ -379,8 +350,9 @@ plugin compensates for each; the notes explain what you'll observe and why.
 - **Don't save the root layer over your source file.** Live sync authors its
   opinions into the stage's root layer in memory, so the editor's
   "Save USD Layers" prompt appears on level changes. Saving would bake the
-  entire synced session into the `.usda` on disk discard unless that's what
-  you want. Everything the plugin adds for itself (documents, references)
-  lives in the session layer and `Saved/`, and never prompts.
+  entire synchronized session into the `.usda` on disk. Discard the prompt
+  unless that is intentional. Plugin-owned documents and references live in
+  the session layer and `Saved/`.
 
-See [`PLUGIN_DEV.md`](PLUGIN_DEV.md) for the protocol details and a list of remaining work.
+See [Plugin developer notes](PLUGIN_DEV.md) for protocol details and known
+gaps.

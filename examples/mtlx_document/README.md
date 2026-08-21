@@ -1,9 +1,8 @@
-# Referenced MaterialX Document
+# Referenced MaterialX document
 
-This recipe authors a reference to the included `glass.mtlx` document and binds
-its material to the sphere in `test_scene.usda`. Consumers with a native
-MaterialX pipeline can resolve the document directly instead of receiving an
-inline USD shader graph.
+This recipe references `glass.mtlx` and binds its material to the sphere in
+`test_scene.usda`. A client with MaterialX support resolves the document
+directly; the protocol does not expand it into an inline USD shader graph.
 
 Configure a project OpenUSD runtime with MaterialX support as described in the
 [runtime guide](../../docs/cli-reference.md#openusd-runtime-and-custom-plugins),

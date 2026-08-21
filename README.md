@@ -1,13 +1,15 @@
 # OpenUSDConnect
 
-OpenUSDConnect synchronizes live OpenUSD scene edits across DCC applications,
-USD-native tools, and headless services. Blender, usdview, Unreal Engine, MCP,
-and Python clients use the same DCC-independent event protocol.
+OpenUSDConnect replicates USD edits between DCCs, USD-native tools, and
+headless services. The repository includes reference integrations for Blender,
+usdview, Unreal Engine, MCP, and Python. They all use the same protocol; the
+core has no dependency on a DCC.
 
 ![Live synchronization between Blender and usdview](docs/images/readme/live-sync-demo.gif)
 
-An authoritative server sequences typed USD transactions, stores them in
-SQLite, and broadcasts or replays them to connected and late-joining clients.
+The server orders typed transactions, commits them to SQLite, and broadcasts
+them to connected clients. A client that joins late or reconnects replays the
+same log.
 
 ## Capabilities
 
@@ -20,37 +22,50 @@ SQLite, and broadcasts or replays them to connected and late-joining clients.
 - TOFU authentication, rate limiting, playback leadership, log compaction,
   dashboard administration, and optional live-open snapshots
 
-Each integration supports the subset its host can author or display. The core
-protocol preserves broader USD state in an authoritative mirror or stage.
+Host integrations only project the USD features their application can
+represent. Unsupported state remains in the authoritative USD stage or the
+client's receive mirror.
 
 ## Get started
 
-Requirements: [Git](https://git-scm.com/), Python 3.13+,
-[uv](https://docs.astral.sh/uv/), and preferably the OpenUSD build used by your
-project. Clone with `--recursive` when you also need the USD Working Group
+You need [Git](https://git-scm.com/), Python 3.13+, and
+[uv](https://docs.astral.sh/uv/). Use the OpenUSD build from your project when
+possible. Clone with `--recursive` only if you need the USD Working Group
 assets used by asset and visual tests.
 
 ### Configure your OpenUSD build
 
-Use the same compatible OpenUSD build and plugin environment as the clients in
-your project. This is the recommended path for MaterialX, custom renderers,
-resolvers, file formats, and shader definitions.
+Use the same compatible OpenUSD build and plugin environment as the other
+clients in the session. MaterialX and custom renderers, resolvers, file
+formats, and shader definitions depend on that environment.
 
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
 ```
 
-Activate the build for the current PowerShell terminal, then install the base
-library without the `bundled-usd` group:
+The active interpreter must use the same Python major/minor version that
+OpenUSD was built against.
+The launchers search the install prefix for current Windows
+`Lib/site-packages`, Unix `lib/pythonX.Y/site-packages` or `dist-packages`, and
+legacy `lib/python` layouts. Activate the matching venv first when necessary;
+its site-packages is also searched. Use `-PythonPath` or `--python-path` only
+when the bindings are in another location.
+
+Configure the current PowerShell session on Windows:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 uv sync
 ```
 
-Pass `-RenderManRoot`, `-PluginPath`, or `-DllDir` when the project needs them.
-For automation or other shells, wrap individual commands instead:
+Or configure the current Bash/Zsh session on Linux or macOS:
+
+```bash
+source scripts/openusd_env.sh /opt/OpenUSDInstall
+```
+
+For automation or CI, configure only the child command:
 
 ```bash
 uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
@@ -58,14 +73,14 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
 ```
 
 The [CLI reference](docs/cli-reference.md#openusd-runtime-and-custom-plugins)
-covers plugin paths, native libraries, renderer setup, and verification.
-Commands below assume that runtime remains active; wrapper users place the
-shown command after `--`.
+covers venv layouts, external bindings, interpreter selection, plugin and DLL
+paths, RenderMan, verification, and every launcher option. Commands below
+assume that runtime remains active; wrapper users place them after `--`.
 
 ### Verify synchronization locally
 
-This bounded, headless first run starts a temporary server and two USD-native
-clients, verifies replication, and stops everything automatically:
+This command starts a temporary server and two USD-native clients, checks both
+directions of replication, and exits:
 
 ```bash
 uv run python examples/usd_native_client/run.py --no-usdview --seconds 3
@@ -85,10 +100,9 @@ Use `uv run openusdconnect-server --help` for all options. Common additions are
 
 ### Bundled core fallback
 
-Use the bundled `usd-core` runtime only when you do not need MaterialX or
-custom renderer, resolver, file-format, or shader plugins. It provides a
-renderer-neutral environment for core synchronization, standard USD schemas,
-and UsdPreviewSurface.
+The bundled `usd-core` runtime is suitable for core synchronization, standard
+USD schemas, and UsdPreviewSurface. It does not include MaterialX or custom
+renderer, resolver, file-format, or shader plugins.
 
 ```bash
 uv sync --group bundled-usd
@@ -121,10 +135,10 @@ See the same live material scene in Blender, usdview, and Unreal Engine:
 uv run python scripts/run_material_zoo.py --viewers blender usdview unreal
 ```
 
-The runner discovers the selected applications, starts a temporary server,
-connects each integration, and streams a shared camera and environment light.
-Select any subset of the three viewers, and add `--renderman` for a compatible
-RenderMan/OpenUSD installation. The
+The runner finds the selected applications, starts a temporary server, and
+streams a shared camera and environment light. Pass any subset of the three
+viewers. When usdview is selected, add `--renderman` to launch it with a
+compatible hdPrman setup. The
 [testing guide](docs/testing-setup.md#inspect-the-material-zoo-interactively)
 documents runtime selection and additional options.
 
@@ -142,7 +156,7 @@ persisted events, and log maintenance and export controls.
 
 ## Python client API
 
-`ManagedClient` is the usual bidirectional API for an application that owns a
+Use `ManagedClient` for a bidirectional application that owns a
 `pxr.Usd.Stage`:
 
 ```python
@@ -178,9 +192,9 @@ flowchart LR
     S --> D["dashboard and snapshots"]
 ```
 
-Messages use length-prefixed FlatBuffers over TCP. Managed clients reconstruct
-the authoritative USD state and let a host adapter project the subset its
-native scene represents.
+Messages are length-prefixed FlatBuffers frames over TCP. Managed clients
+reconstruct the authoritative USD state; host adapters project representable
+changes into the native scene.
 
 | Mode | Use it for | API |
 | --- | --- | --- |
@@ -200,8 +214,8 @@ a custom integration.
 
 ### Live-open snapshots
 
-Expose the composed managed scene as a normal-looking local USD file while live
-updates continue through the sync server:
+Expose the composed managed scene as a local USD file while updates continue
+through the sync server:
 
 ```bash
 uv sync --group vfs

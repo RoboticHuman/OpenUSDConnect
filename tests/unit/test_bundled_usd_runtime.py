@@ -4,7 +4,21 @@ import os
 import tomllib
 from pathlib import Path
 
+import pytest
+
 import openusdconnect._runtime as runtime
+
+
+@pytest.fixture(autouse=True)
+def _clean_runtime_env(monkeypatch):
+    """Isolate runtime selection from a shell that already configured OpenUSD.
+
+    The documented setup sources ``openusd_env`` and sets these variables, which
+    would otherwise short-circuit ``select_runtime`` and mask the behavior under
+    test. Individual tests still set them explicitly when that is the case.
+    """
+    monkeypatch.delenv(runtime.USD_ROOT_ENV, raising=False)
+    monkeypatch.delenv(runtime.BUNDLED_USD_ENV, raising=False)
 
 
 def test_bundled_runtime_ignores_only_conflicting_pxr(monkeypatch, tmp_path):

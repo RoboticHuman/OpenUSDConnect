@@ -1,10 +1,7 @@
-# OpenUSD Connect Plugin Developer Notes
+# Unreal plugin developer notes
 
-End-user installation/usage docs live in [`README.md`](README.md). This file documents the
-plugin's internals: architecture, threading, protocol, and the rough edges that future
-work will need to address.
-
----
+See [README.md](README.md) for installation and usage. This document describes
+the plugin's modules, threading model, protocol implementation, and known gaps.
 
 ## Architecture
 
@@ -56,8 +53,6 @@ attribute this plugin instance's broadcasts; the server publishes every committe
 record to every receiver, and the subsystem suppresses notice emission while it
 applies received frames.
 
----
-
 ## Module map
 
 | File | Class / Symbol | Role |
@@ -74,8 +69,6 @@ applies received frames.
 | `OpenUSDConnectPXR/Public/USDStageBridge.h`, `Private/USDStageBridge.cpp` | `FUSDStageBridge` | Keeps direct pxr stage reads and writes out of the no-RTTI UObject module. |
 | `OpenUSDConnectPXR/Public/USDMaterialXMaterializer.h`, `Private/USDMaterialXMaterializer.cpp` | `FUSDMaterialXMaterializer` | Maintains Unreal-local MaterialX documents for inline networks. |
 | `OpenUSDConnect.uplugin`, `Source/*/*.Build.cs` | - | Registers the runtime and PXR modules and their engine dependencies. |
-
----
 
 ## Wire protocol
 
@@ -119,26 +112,25 @@ the FlatBuffers runtime version with a `static_assert`; keep
 `setup_flatbuffers.py` on the same version so plugin builds fetch compatible
 headers.
 
-### Threading & framing rules learned the hard way
+### Threading and framing rules
 
-- The frame-length prefix is **big-endian** (`struct.pack(">I", ...)` on the server),
+- The frame-length prefix is big-endian (`struct.pack(">I", ...)` on the server),
   but the FlatBuffers payload itself is little-endian as always.
 - Emitter builders call `FinishSizePrefixed`, rewrite only that four-byte prefix
   to big-endian, and detach FlatBuffers' allocation into `FWireFrame`. The outbox
   shares that immutable allocation through reconnect and acknowledgement; do not
   materialize a second `TArray<uint8>`.
-- The frame size limit is **16 MiB** (`OUC::kMaxFrameSize`) match the server's value.
+- The frame size limit is 16 MiB (`OUC::kMaxFrameSize`) and must match the
+  server.
 - Emitter and receiver each open their own TCP socket. `client_id` is the stable
   authentication and producer identity. `origin` is diagnostic metadata, while
   the emitter's `producer_session_id` provides exactly-once transaction identity.
   The plugin reuses one endpoint-scoped producer session across ordinary
   reconnects and creates a new one after changing endpoint or department.
 
----
+## Editor and PIE behavior
 
-## Editor-vs-PIE behaviour
-
-Two non-obvious facts:
+Two engine constraints shape startup:
 
 1. **`UTickableWorldSubsystem::IsTickableInEditor()` defaults to `false`.** Without
    overriding it, the subsystem only ticks during PIE. We override it to `true` so
@@ -148,22 +140,19 @@ Two non-obvious facts:
    no `USceneComponent`s to receive transform updates. The early-return at
    `USDStageActor.cpp:1320–1340` is the authoritative source for this behaviour.
 
-The subsystem `Initialize()` is intentionally lightweight (just generates IDs and sets
-`bPendingAutoConnect`). The real connect happens on the first tick that observes
+`Initialize()` only generates IDs and sets `bPendingAutoConnect`. Connection
+starts on the first tick that observes
 `World->bIsWorldInitialized && !World->bIsTearingDown`. Spawning `FRunnableThread`s
 from within `Initialize()` was previously found to race with editor startup and
 deadlock loading at ~90 %.
-
----
 
 ## Echo / feedback-loop guards
 
 Two independent guards keep changes from bouncing forever:
 
-1. **`FSyncClient`** compares the incoming BroadcastEvent's `origin` against its own
-   `SessionOrigin` and drops the frame if they match. This catches the server's
-   echo of our own emits.
-2. **`UUSDConnectSubsystem::bSuppressEmit`** (a `std::atomic<bool>`) is set while
+1. `FSyncClient` compares the incoming `BroadcastEvent.origin` with its own
+   `SessionOrigin` and drops matching frames.
+2. `UUSDConnectSubsystem::bSuppressEmit` (a `std::atomic<bool>`) is set while
    `DrainAndApply()` and plugin-owned USD authoring are running. The attached
    `FUsdListener::OnObjectsChanged` callback ignores notices during that window,
    preventing received changes and local MaterialX support opinions from being
@@ -172,8 +161,6 @@ Two independent guards keep changes from bouncing forever:
 The listener reports exact Sdf paths. They are coalesced in `PendingEmitPaths`
 and drained once per tick, avoiding the ancestor roll-up behavior of
 `AUsdStageActor::OnPrimChanged`.
-
----
 
 ## Build configuration
 
@@ -211,9 +198,7 @@ the nanobind extension.
 The PXR module's `PublicSystemIncludePaths` exposes the pinned, plugin-local
 FlatBuffers headers installed by `setup_flatbuffers.py` to both modules.
 
----
-
-## Known gaps / future work
+## Known gaps
 
 - **Emitter coverage is narrower than receiver coverage.** Unreal currently
   emits TRS, visibility, and edited connectable input values. Geometry,
@@ -221,10 +206,8 @@ FlatBuffers headers installed by `setup_flatbuffers.py` to both modules.
   server to Unreal but are not authored back from Unreal yet.
 - **Single stage actor.** `TActorIterator<AUsdStageActor>` picks the first one in
   the world. If multiple stage actors are present (e.g. one per layer file), only
-  the first gets live sync. Future: match by `RootLayer` against the connected
-  server's base file.
-
----
+  the first gets live sync. A multi-stage implementation should match
+  `RootLayer` against the connected server's base file.
 
 ## Diagnostics
 
@@ -239,5 +222,5 @@ Log LogUSDEmit               Verbose
 Log LogUSDEventApplier       Verbose
 ```
 
-The server-side `--dashboard-port 8080` web UI is invaluable for confirming events are
-flowing through the server when debugging client-side silence.
+Use the server dashboard (`--dashboard-port 8080`) to distinguish a silent
+client from a transaction that never reached the server.

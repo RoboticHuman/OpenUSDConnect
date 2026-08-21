@@ -1,19 +1,17 @@
-# Command-Line Reference
+# Command-line reference
 
-## First Server Session
+## First server session
 
-Configure the project OpenUSD runtime as described below, then install the
-dashboard dependency and start a persistent local server from the repository
-root:
+After configuring the project OpenUSD runtime, start a persistent local server
+from the repository root:
 
 ```bash
 uv sync --group dashboard
 uv run openusdconnect-server --base test_scene.usda --event-log session.db --export-diff session-changes.usda --port 7200 --dashboard-port 8080
 ```
 
-For a core-only session that needs neither MaterialX nor custom renderer,
-resolver, file-format, or shader plugins, use the limited renderer-neutral
-fallback: `uv sync --group bundled-usd --group dashboard`.
+For a renderer-neutral session without MaterialX or custom plugins, replace the
+first command with `uv sync --group bundled-usd --group dashboard`.
 
 The sync endpoint is `127.0.0.1:7200` and the optional dashboard is
 <http://127.0.0.1:8080>. Stop the server with Ctrl+C. `session.db` retains the
@@ -36,9 +34,9 @@ For a bounded test that creates and cleans up its own server, run the
 [headless first run](../README.md#get-started). For a file-picker workflow,
 use the separate [server-provided USD file](live-open.md) path.
 
-## Common Options
+## Common options
 
-OpenUSDConnect keeps endpoint names consistent across its user-facing tools:
+Endpoint options use the following names:
 
 | Setting | Canonical option | Default |
 | --- | --- | --- |
@@ -63,7 +61,7 @@ writes that do not carry producer progress. Client `Txn` acknowledgements keep
 their exactly-once contract in either mode: an acknowledged transaction and
 its cumulative producer high-water mark are durable.
 
-## Primary Commands
+## Primary commands
 
 | Command | Purpose | Dependency groups |
 | --- | --- | --- |
@@ -83,7 +81,7 @@ its cumulative producer high-water mark are durable.
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
 `openusdconnect-mount-vfs`.
 
-## Server Layer Modes
+## Server layer modes
 
 `openusdconnect-server --layer-mode managed` is the default. It provides
 receiver-owned collaboration layers, department policy, and VFS live-open
@@ -95,25 +93,81 @@ and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
 
-## OpenUSD Runtime And Custom Plugins
+## OpenUSD runtime and custom plugins
 
 ### Project runtime
 
-Use the same compatible OpenUSD build and plugin environment as the clients in
-your project. This is the primary path and is required for MaterialX, custom
-renderers, resolvers, file formats, and shader definitions.
+Use a compatible OpenUSD build and the same plugin environment as the other
+clients. MaterialX and custom renderers, resolvers, file formats, and shader
+definitions require this path.
 
-From the repository root, activate the selected install for the current
-PowerShell terminal, then run without enabling the `bundled-usd` group:
+From the repository root, configure the selected install for the current
+PowerShell process, then run without enabling the `bundled-usd` group. The
+leading dot and space dot-source the script; nothing is changed persistently:
 
 ```powershell
-.\scripts\openusd_env.ps1 "C:\path\to\OpenUSDInstall"
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 uv run --isolated openusdconnect-server --base scene.usda
 ```
 
-The first positional argument is the OpenUSD install directory containing
-`bin` and `lib`. Use `-RenderManRoot` for hdPrman and pass arrays to
-`-PluginPath` or `-DllDir` for project additions.
+The first positional argument is the OpenUSD install prefix. Binding discovery
+checks `Lib/site-packages` on Windows, `lib/pythonX.Y/site-packages` and
+`dist-packages` on Unix, the legacy `lib/python` layout, and the active venv's
+site-packages. Install-prefix locations take precedence over the active venv.
+
+The active interpreter must match the Python version against which OpenUSD was
+built; a mismatched interpreter cannot load the native `pxr` extension modules.
+When the bindings, their dependencies (such as PySide6), or the matching
+interpreter live in a separate virtual environment (including the common layout
+where the OpenUSD install prefix and the venv are different directories),
+activate that venv before configuring the runtime:
+
+- **uv-managed venv:** create it with `uv venv` and run the activation command it
+  prints, or use `uv run` so the project venv is selected automatically.
+- **pip/`python -m venv` venv:** activate with `.venv\Scripts\Activate.ps1` in
+  PowerShell, or `source .venv/bin/activate` in Bash/Zsh.
+
+```powershell
+& "E:\OpenUSD_venv\Scripts\Activate.ps1"
+. .\scripts\openusd_env.ps1 "E:\OpenUSD_install"
+```
+
+Activating the venv puts the matching interpreter first on `PATH`, so both the
+runtime configuration and generated commands such as `usdview.cmd` resolve it.
+Pass `-PythonExecutable` (or `--python-executable` for the wrapper) to select
+that interpreter without activating, and `-PythonPath` only if the bindings are
+neither under the install prefix nor in the active venv.
+
+`uv run` always uses the project `.venv`, so with another venv active it may
+print a `VIRTUAL_ENV does not match` warning. That warning is harmless: the
+child process inherits the sourced OpenUSD environment for `pxr` and the
+viewers, while `openusdconnect` and its dependencies resolve from `.venv`.
+
+A valid `RMANTREE` already present in the process is configured automatically.
+Use `-RenderManRoot` to select or override it, and pass arrays to `-PluginPath`
+or `-DllDir` for project additions.
+
+For example, configure hdPrman explicitly and launch usdview:
+
+```powershell
+. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
+    -RenderManRoot "C:\Program Files\Pixar\RenderManProServer-27.3"
+usdview scene.usda --renderer HdPrmanLoaderRendererPlugin
+```
+
+For an interactive Bash or Zsh session, source the Unix adapter. Its options
+use the same long names as the command wrapper:
+
+```bash
+source /opt/OpenUSD/.venv/bin/activate
+source scripts/openusd_env.sh /opt/OpenUSDInstall \
+  --python-path /opt/OpenUSD/.venv/lib/python3.13/site-packages \
+  --renderman-root /opt/pixar/RenderManProServer-27.3
+```
+
+Both activation scripts delegate discovery and path construction to
+`openusd_runtime.py`; the adapters only apply its environment delta to their
+current shell.
 
 For automation or other shells, configure one command through the
 cross-platform wrapper:
@@ -123,11 +177,18 @@ uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
   openusdconnect-server --base scene.usda
 ```
 
-Use repeatable `--plugin-path` and `--dll-dir` options for project additions, or
-`--renderman-root /path/to/RenderManProServer` to configure hdPrman.
+Use `--python-path /external/site-packages` for Python bindings outside the
+prefix and `--python-executable` to select the matching interpreter. Use
+repeatable `--plugin-path` and `--dll-dir` options for project additions, or
+`--renderman-root /path/to/RenderManProServer` to configure or override
+hdPrman. An inherited valid `RMANTREE` is also configured.
 
-The environment must expose the intended `pxr` bindings. For custom plugins,
-configure:
+The launchers import the selected `pxr` package with the resolved interpreter
+before changing the runtime environment. A Python ABI mismatch therefore fails
+during setup, not on first use. They do not search unrelated virtual
+environments: an
+absolute CMake Python install directory has no discoverable relationship to the
+OpenUSD prefix. For custom plugins, configure:
 
 - plugin discovery through `PXR_PLUGINPATH_NAME`
 - native dependencies through `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,
@@ -166,7 +227,7 @@ uv run --group bundled-usd openusdconnect-server --base scene.usda
 fresh shell or clear project-specific `PYTHONPATH`, `PXR_PLUGINPATH_NAME`, and
 native library search paths when verifying that the bundled runtime is active.
 
-## Development Commands
+## Development commands
 
 | Command | Purpose |
 | --- | --- |

@@ -1,26 +1,20 @@
 # Documentation
 
-Choose the guide that matches the task. Setup and command details stay in the
-linked pages so each topic has one maintained reference.
+Documentation is grouped by task. Command details live in one place and are
+linked from the shorter workflow guides.
 
 ## Start
 
-For a first run or a quick orientation:
-
-- [Project overview](../README.md) introduces the server, integrations,
-  dependency groups, and core concepts.
-- [Headless first run](../README.md#get-started) starts a temporary server
-  and two Python clients, verifies synchronization, and exits on its own.
-- [Blender getting started](getting-started.md) covers the base-file connection
-  and the optional server-provided USD file.
-- [Server-provided USD files](live-open.md) covers live-open paths, mounts, write
-  fallback, metadata, authentication, and diagnostics.
-- [Runnable examples](../examples/README.md) offers smaller demonstrations organized
-  by launch style and feature.
+- [Project overview](../README.md): architecture, integrations, dependencies,
+  and a headless smoke test.
+- [Blender getting started](getting-started.md): build the add-on and connect
+  two Blender processes.
+- [Server-provided USD files](live-open.md): live-open paths, mounts, save
+  translation, metadata, and diagnostics.
+- [Runnable examples](../examples/README.md): small, isolated protocol and API
+  examples.
 
 ## Use
-
-For artists, technical directors, operators, and tool users:
 
 | Task | Guide |
 | --- | --- |
@@ -33,40 +27,33 @@ For artists, technical directors, operators, and tool users:
 
 ## Understand
 
-For the design and behavior behind the user workflows:
-
-- [System overview](../README.md#how-it-works) describes the server, event log,
-  synchronization modes, and clients.
-- [Server-provided USD files](live-open.md) explains generated snapshots, local
-  mirrors, WebDAV access, and write fallback.
-- [Shared stage architecture](shared-stage-architecture.md) explains direct
+- [System overview](../README.md#how-it-works): server, event log, clients, and
+  synchronization modes.
+- [Server-provided USD files](live-open.md): generated snapshots, local
+  mirrors, WebDAV access, and save translation.
+- [Shared stage architecture](shared-stage-architecture.md): field-level
   synchronization of authored USD layer graphs.
-- [Client recovery](client-recovery.md) covers reconnect, replay, compaction,
-  and recovery states.
+- [Client recovery](client-recovery.md): rejected transactions, quarantined
+  edits, and recovery APIs.
 
 ## Extend
 
-For developers adding a host, client, protocol-facing tool, or synchronization mode:
-
-- [USD-native integration contract](usd-native-integration.md) covers lifecycle,
-  stage ownership, managed clients, publishers, receivers, and resolver behavior.
-- [Shared stage architecture](shared-stage-architecture.md) explains exact file-layer
-  synchronization and how it differs from managed collaboration layers.
-- [MCP integration layout](../integrations/mcp/README.md#layout) identifies the MCP
-  extension points and module responsibilities.
-- [Unreal plugin developer notes](../integrations/unreal/OpenUSDConnect/PLUGIN_DEV.md)
-  documents threading, framing, module boundaries, and current gaps.
+- [USD-native Python API](usd-native-integration.md): lifecycle, stage
+  ownership, managed clients, publishers, receivers, and resolver behavior.
+- [Shared stage architecture](shared-stage-architecture.md): exact file-layer
+  synchronization and its protocol.
+- [MCP integration layout](../integrations/mcp/README.md#layout): extension
+  points and module ownership.
+- [Unreal plugin developer notes](../integrations/unreal/OpenUSDConnect/PLUGIN_DEV.md):
+  threading, framing, module boundaries, and known gaps.
 
 ## Contribute
 
-For contributors validating or profiling changes:
-
-- [Testing setup](testing-setup.md) describes the unit, integration, asset, Unreal,
-  and visual test tiers, including their external requirements.
-- [Profiling](profiling.md) covers server and Blender sampling workflows and the main
-  performance paths to inspect.
-- [Development commands](cli-reference.md#development-commands) lists maintained
-  addon packaging, test-launch, profiling, and diagnostic entry points.
+- [Testing](testing-setup.md): unit, integration, asset, Unreal, and visual test
+  tiers.
+- [Profiling](profiling.md): server and Blender sampling workflows.
+- [Development commands](cli-reference.md#development-commands): packaging,
+  test launchers, benchmarks, and diagnostics.
 
 ## Troubleshoot
 
