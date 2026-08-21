@@ -24,6 +24,9 @@ def _clean_runtime_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
     monkeypatch.setattr(runtime, "ACTIVE_RUNTIME_FILE", tmp_path / "missing-active.json")
+    monkeypatch.setattr(
+        runtime, "LEGACY_ACTIVE_RUNTIME_FILE", tmp_path / "missing-legacy-active.json"
+    )
 
 
 def test_bundled_runtime_ignores_only_conflicting_pxr(monkeypatch, tmp_path):

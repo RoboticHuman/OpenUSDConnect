@@ -26,10 +26,20 @@ from typing import Never
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIN_FILE = REPO_ROOT / "openusd.lock.json"
 PYTHON_VERSION_FILE = REPO_ROOT / ".python-version"
-ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / "active.json"
 MINIMUM_CMAKE = (3, 27)
 SUPPORTED_PLATFORMS = {"win32", "linux", "darwin"}
 DEFAULT_JOBS = min(os.cpu_count() or 1, 8)
+
+
+def _platform_key() -> str:
+    system = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return f"{system}-{machine}"
+
+
+ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / f"active-{_platform_key()}.json"
+LEGACY_ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / "active.json"
 
 
 def load_required_python(path: Path = PYTHON_VERSION_FILE) -> tuple[int, int]:
@@ -128,7 +138,19 @@ def _path(value: str) -> Path:
 
 
 def _default_root(pin: OpenUSDPin) -> Path:
-    return REPO_ROOT / ".openusd" / pin.version.removeprefix("0.")
+    version_root = REPO_ROOT / ".openusd" / pin.version.removeprefix("0.")
+    try:
+        legacy = json.loads(LEGACY_ACTIVE_RUNTIME_FILE.read_text(encoding="utf-8"))
+        legacy_install = Path(str(legacy["usd_root"])).resolve()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        legacy_install = None
+    if (
+        legacy_install is not None
+        and legacy_install == (version_root / "install").resolve()
+        and legacy_install.is_dir()
+    ):
+        return version_root
+    return version_root / _platform_key()
 
 
 def _parser(pin: OpenUSDPin) -> argparse.ArgumentParser:
@@ -643,12 +665,11 @@ def write_manifest(plan: BuildPlan) -> Path:
     return path
 
 
-def write_runtime_config(
-    plan: BuildPlan, path: Path = ACTIVE_RUNTIME_FILE
-) -> Path | None:
+def write_runtime_config(plan: BuildPlan, path: Path | None = None) -> Path | None:
     """Register a managed build for automatic project-local runtime selection."""
     if not plan.features.python:
         return None
+    path = ACTIVE_RUNTIME_FILE if path is None else path
     python_path = _python_package(plan.layout.install)
     if python_path is None:
         raise RuntimeError(

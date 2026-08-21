@@ -70,7 +70,8 @@ uv run python scripts/run_with_openusd.py -- usdview scene.usda
 
 The [OpenUSD build guide](docs/building-openusd.md) covers the usdview profile,
 MaterialX, Embree, RenderMan, compiler discovery, build directories, and
-external OpenUSD installations.
+external OpenUSD installations. Managed build artifacts are platform-specific,
+so a checkout shared with WSL does not reuse Windows binaries.
 
 ### Verify synchronization locally
 

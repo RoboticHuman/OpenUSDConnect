@@ -36,10 +36,10 @@ OpenUSD's upstream `build_usd.py`. It owns these paths by default:
 
 | Purpose | Path |
 | --- | --- |
-| OpenUSD checkout | `.openusd/<version>/checkout` |
-| Downloaded dependency sources | `.openusd/<version>/sources` |
-| Build tree | `.openusd/<version>/build` |
-| Installation | `.openusd/<version>/install` |
+| OpenUSD checkout | `.openusd/<version>/<platform>/checkout` |
+| Downloaded dependency sources | `.openusd/<version>/<platform>/sources` |
+| Build tree | `.openusd/<version>/<platform>/build` |
+| Installation | `.openusd/<version>/<platform>/install` |
 
 Use `--root` to relocate all four paths. `--checkout-dir`,
 `--dependency-source-dir`, `--build-dir`, and `--install-dir` override them
@@ -93,11 +93,13 @@ on machines with many logical cores. Override that limit with `--jobs`. Use
 
 ## Managed runtime selection
 
-After a successful Python-enabled build, the wrapper writes
-`.openusd/active.json`. OpenUSDConnect reads this project-local file before the
-optional `usd-core` fallback and configures the Python bindings, native library
-paths, and recorded RenderMan installation automatically. Normal project
-commands need no shell activation:
+After a successful Python-enabled build, the wrapper writes a platform-specific
+record such as `.openusd/active-windows-x86_64.json`. OpenUSDConnect reads this
+project-local file before the optional `usd-core` fallback and configures the
+Python bindings, native library paths, and recorded RenderMan installation
+automatically. Platform-specific roots and records keep Windows, WSL/Linux, and
+macOS artifacts separate when they share a checkout. Normal project commands
+need no shell activation:
 
 ```bash
 uv run openusdconnect-server --base scene.usda

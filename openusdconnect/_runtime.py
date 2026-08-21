@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 import warnings
 from importlib import metadata
@@ -11,7 +12,18 @@ from pathlib import Path
 
 BUNDLED_USD_ENV = "OPENUSDCONNECT_BUNDLED_USD"
 USD_ROOT_ENV = "OPENUSDCONNECT_USD_ROOT"
-ACTIVE_RUNTIME_FILE = Path(__file__).resolve().parents[1] / ".openusd" / "active.json"
+
+
+def _platform_key() -> str:
+    system = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return f"{system}-{machine}"
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ACTIVE_RUNTIME_FILE = _PROJECT_ROOT / ".openusd" / f"active-{_platform_key()}.json"
+LEGACY_ACTIVE_RUNTIME_FILE = _PROJECT_ROOT / ".openusd" / "active.json"
 _DLL_DIRECTORY_HANDLES: list[object] = []
 
 
@@ -49,26 +61,29 @@ def _prepend_environment(key: str, paths: list[Path]) -> None:
         os.environ[key] = os.pathsep.join(unique)
 
 
-def _managed_runtime_config() -> dict[str, object] | None:
-    if not ACTIVE_RUNTIME_FILE.is_file():
-        return None
-    try:
-        data = json.loads(ACTIVE_RUNTIME_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        warnings.warn(
-            f"Ignoring unreadable managed OpenUSD runtime config {ACTIVE_RUNTIME_FILE}: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
-    if data.get("schema") != 1:
-        warnings.warn(
-            f"Ignoring unsupported managed OpenUSD runtime config {ACTIVE_RUNTIME_FILE}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
-    return data
+def _managed_runtime_configs() -> list[dict[str, object]]:
+    configs = []
+    for path in (ACTIVE_RUNTIME_FILE, LEGACY_ACTIVE_RUNTIME_FILE):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.warn(
+                f"Ignoring unreadable managed OpenUSD runtime config {path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        if data.get("schema") != 1:
+            warnings.warn(
+                f"Ignoring unsupported managed OpenUSD runtime config {path}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        configs.append(data)
+    return configs
 
 
 def _activate_managed_runtime(config: dict[str, object]) -> bool:
@@ -165,9 +180,9 @@ def select_runtime() -> None:
         return
     loaded_pxr = _loaded_pxr_path()
     if loaded_pxr is None:
-        managed = _managed_runtime_config()
-        if managed is not None and _activate_managed_runtime(managed):
-            return
+        for managed in _managed_runtime_configs():
+            if _activate_managed_runtime(managed):
+                return
     bundled_pxr = _bundled_pxr_path()
     if bundled_pxr is None:
         os.environ.pop(BUNDLED_USD_ENV, None)

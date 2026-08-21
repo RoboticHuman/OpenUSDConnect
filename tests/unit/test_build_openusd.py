@@ -69,6 +69,27 @@ def test_default_parallelism_is_conservatively_capped(tmp_path):
     assert 1 <= plan.jobs <= 8
 
 
+def test_default_build_root_is_platform_specific_without_usable_legacy(
+    tmp_path, monkeypatch
+):
+    pin = build_openusd.load_pin()
+    monkeypatch.setattr(build_openusd, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        build_openusd,
+        "LEGACY_ACTIVE_RUNTIME_FILE",
+        tmp_path / ".openusd" / "missing-active.json",
+    )
+
+    root = build_openusd._default_root(pin)
+
+    assert root == (
+        tmp_path
+        / ".openusd"
+        / pin.version.removeprefix("0.")
+        / build_openusd._platform_key()
+    )
+
+
 def test_usdview_profile_enables_python_imaging_and_materialx(tmp_path):
     pin, args = _args(tmp_path, "--profile", "usdview", "--embree")
     plan = build_openusd.create_plan(args, pin)

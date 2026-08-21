@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -14,27 +15,49 @@ from pathlib import Path
 
 USD_ROOT_ENV = "OPENUSDCONNECT_USD_ROOT"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / "active.json"
+
+
+def _platform_key() -> str:
+    system = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return f"{system}-{machine}"
+
+
+ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / f"active-{_platform_key()}.json"
+LEGACY_ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / "active.json"
 
 
 def managed_runtime_config(path: Path | None = None) -> dict[str, str | None] | None:
     """Read the runtime registered by build_openusd.py, if one exists."""
-    path = ACTIVE_RUNTIME_FILE if path is None else path
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not read managed OpenUSD runtime config {path}: {exc}") from exc
-    if data.get("schema") != 1:
-        raise RuntimeError(f"unsupported managed OpenUSD runtime config schema in {path}")
-    required = ("usd_root", "python_path", "python_executable", "version")
-    if any(not isinstance(data.get(key), str) or not data[key] for key in required):
-        raise RuntimeError(f"invalid managed OpenUSD runtime config: {path}")
-    renderman = data.get("renderman_root")
-    if renderman is not None and not isinstance(renderman, str):
-        raise RuntimeError(f"invalid RenderMan path in managed runtime config: {path}")
-    return {key: data.get(key) for key in (*required, "renderman_root")}
+    candidates = (path,) if path is not None else (ACTIVE_RUNTIME_FILE, LEGACY_ACTIVE_RUNTIME_FILE)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"could not read managed OpenUSD runtime config {candidate}: {exc}"
+            ) from exc
+        if data.get("schema") != 1:
+            raise RuntimeError(
+                f"unsupported managed OpenUSD runtime config schema in {candidate}"
+            )
+        required = ("usd_root", "python_path", "python_executable", "version")
+        if any(not isinstance(data.get(key), str) or not data[key] for key in required):
+            raise RuntimeError(f"invalid managed OpenUSD runtime config: {candidate}")
+        renderman = data.get("renderman_root")
+        if renderman is not None and not isinstance(renderman, str):
+            raise RuntimeError(f"invalid RenderMan path in managed runtime config: {candidate}")
+        root = Path(data["usd_root"]).expanduser().resolve()
+        python_path = Path(data["python_path"]).expanduser().resolve()
+        if not root.is_dir() or not (python_path / "pxr" / "__init__.py").is_file():
+            if path is not None:
+                return {key: data.get(key) for key in (*required, "renderman_root")}
+            continue
+        return {key: data.get(key) for key in (*required, "renderman_root")}
+    return None
 
 
 def _option_is_present(argv: Sequence[str] | None, option: str) -> bool:

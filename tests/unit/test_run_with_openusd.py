@@ -148,6 +148,31 @@ def test_explicit_root_does_not_inherit_managed_build_options(tmp_path, monkeypa
     assert args.renderman_root is None
 
 
+def test_foreign_platform_managed_runtime_is_ignored(tmp_path, monkeypatch):
+    config = tmp_path / "active-foreign.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "usd_root": r"Z:\foreign\OpenUSD",
+                "python_path": r"Z:\foreign\OpenUSD\lib\python",
+                "python_executable": r"Z:\foreign\python.exe",
+                "renderman_root": None,
+                "version": OPENUSD_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(openusd_runtime, "ACTIVE_RUNTIME_FILE", config)
+    monkeypatch.setattr(
+        openusd_runtime,
+        "LEGACY_ACTIVE_RUNTIME_FILE",
+        tmp_path / "missing-legacy.json",
+    )
+
+    assert openusd_runtime.managed_runtime_config() is None
+
+
 def test_windows_batch_command_uses_cmd(monkeypatch):
     monkeypatch.setattr(run_with_openusd.os, "name", "nt")
     monkeypatch.setattr(
