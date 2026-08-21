@@ -1,4 +1,4 @@
-# Getting Started With Blender
+# Getting started with Blender
 
 ## Requirements
 
@@ -8,9 +8,9 @@
 - [uv](https://docs.astral.sh/uv/)
 - Blender 4.4 or newer
 
-Python and `uv` run the server and build the add-on. Blender uses its own Python
-and OpenUSD runtime. The commands in this guide work in PowerShell and
-POSIX-compatible shells.
+Python and `uv` run the server and build the add-on. Blender supplies its own
+Python and OpenUSD runtime. Unless marked otherwise, the commands work in
+PowerShell and POSIX shells.
 
 ## Install
 
@@ -19,8 +19,7 @@ git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
 ```
 
-Configure the same compatible OpenUSD build and plugin environment used by the
-project. For example, in PowerShell:
+Configure the OpenUSD build used by the project. In PowerShell:
 
 ```powershell
 . .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
@@ -35,9 +34,8 @@ uv sync --group dashboard
 uv run python scripts/build_blender_addon.py
 ```
 
-If this first session needs neither MaterialX nor custom renderer, resolver,
-file-format, or shader plugins, `uv sync --group bundled-usd --group dashboard`
-is the limited renderer-neutral fallback.
+For a renderer-neutral session without MaterialX or custom plugins, run
+`uv sync --group bundled-usd --group dashboard` instead.
 
 The build creates `dist/usd_connect_blender.zip`. In Blender:
 
@@ -51,7 +49,7 @@ repository's Python environment. The product and server are named
 **OpenUSDConnect**; the shorter **USD Connect** label is the Blender sidebar and
 add-on name.
 
-## Start The Server
+## Start the server
 
 Run this from the repository root:
 
@@ -59,7 +57,7 @@ Run this from the repository root:
 uv run openusdconnect-server --base test_scene.usda --event-log getting-started.db --export-diff getting-started-changes.usda --port 7200 --dashboard-port 8080
 ```
 
-This starts the sync server on `127.0.0.1:7200` and the dashboard at
+The sync server listens on `127.0.0.1:7200`; the dashboard is at
 <http://127.0.0.1:8080>. Keep the terminal running. The walkthrough is local and
 does not require an external service. Startup is complete when the terminal
 reports `Server listening on 127.0.0.1:7200` and
@@ -87,24 +85,22 @@ In the first Blender instance:
    **Connect Emitter**.
 6. Confirm that the panel shows **Receiver running** and **Emitter connected**.
 
-**Connect Emitter** also begins monitoring supported Blender edits. Open a
+**Connect Emitter** also starts monitoring supported Blender edits. Open a
 second Blender process and repeat the same steps. On macOS, use
 `open -n -a Blender` if the Dock reuses the first process. Select the imported
 `Sphere`, `Cone`, or `Cylinder` in either instance and move, rotate, or scale
 it; the matching object in the other instance should update shortly.
 
-The emitter sends local edits to the server. The receiver applies server edits
-in Blender. The original USD file is the common starting point and is not
-overwritten; the server stores synchronized changes in its event history and
-collaboration layers.
+The emitter publishes local edits; the receiver applies committed server
+events. The original USD file is only the common baseline and is never
+overwritten. The server stores edits in its event log and collaboration
+layers.
 
-## Alternative: Open A Server-Provided USD File
+## Alternative: open a server-provided USD file
 
-The server-provided file workflow is an optional alternative to opening the base
-file and entering the connection fields manually. It creates a local
-`scene.usd` containing the current scene state and sync server address. An
-integrated application opens that file, then sends and receives live changes
-through the same TCP sync server used above.
+Live-open creates a local `scene.usd` containing a snapshot and the sync server
+address. An integrated application can open that file and continue from its
+embedded sequence number, avoiding separate base-file and endpoint setup.
 
 Stop the standard server with `Ctrl+C`, then run:
 
@@ -159,7 +155,7 @@ between elevated and unelevated sessions. The alias does not survive a reboot.
 If `O:` is occupied, use `--drive P:` or `--no-drive` and open the printed
 mirror path.
 
-## Inspect The Session
+## Inspect the session
 
 Open <http://127.0.0.1:8080>. After moving an object, confirm that:
 
@@ -172,7 +168,7 @@ For a live-open session, the served snapshot is also available at
 <http://127.0.0.1:7280/usd/scene.usd>. DCC file pickers should use the reported
 local path or a native mount rather than the diagnostic HTTP URL.
 
-## Stop The Session
+## Stop the session
 
 Stop a standard server with `Ctrl+C` in its terminal.
 
@@ -194,7 +190,7 @@ drive alias with:
 uv run python scripts/start_live_open.py stop
 ```
 
-## Common Problems
+## Common problems
 
 ### A port is already in use
 
@@ -267,11 +263,11 @@ uv run python scripts/start_live_open.py --base test_scene.usda --dashboard-port
 
 ### You need a native WebDAV mount
 
-The local mirror is recommended because it supports DCC save patterns without
-administrator access. Native Windows UNC and macOS WebDAV mounts are available
-for environments that require them; see [server-provided USD files](live-open.md).
+The local mirror handles DCC save patterns without administrator access. Use a
+native Windows UNC or macOS WebDAV mount only when a normal local path is not
+suitable; see [server-provided USD files](live-open.md).
 
-## Next Steps
+## Next steps
 
 - [Documentation index](README.md)
 - [Blender add-on controls and layered workflows](blender-addon-usage.md)

@@ -1,9 +1,8 @@
 # USD-native Python API
 
-This guide covers the high-level APIs for applications that already own a
-`pxr.Usd.Stage`. OpenUSDConnect performs network I/O in background threads, but
-the application remains responsible for calling `update()` on the thread that
-owns the stage.
+These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
+Network I/O runs on background threads. Stage mutation does not: the
+application must call `update()` from the stage-owning thread.
 
 ## Choose an API
 
@@ -14,9 +13,9 @@ owns the stage.
 | `UsdPublisher` | Send | Current edit-target layer | Producer with a separate receive stage, or send-only tool |
 | `SharedStageClient` | Bidirectional | Existing portable root and recursive sublayers | Exact production-layer editing |
 
-Start with `ManagedClient` unless the application needs only one direction,
-intentionally authors multiple custom layers, or must synchronize the original
-authored-layer graph.
+Use `ManagedClient` by default. Choose a directional client for send-only or
+receive-only work, or `SharedStageClient` when the application must edit its
+existing authored-layer graph.
 
 Managed clients must open equivalent base content and resolve referenced assets
 compatibly. The server synchronizes collaboration opinions and their ordered
@@ -26,8 +25,7 @@ Unreal host integrations.
 
 ## Lifecycle and status
 
-The high-level clients share the same stage-thread and status conventions, with
-role-specific networking:
+All high-level clients use the same lifecycle:
 
 1. Construction validates the stage and initializes the role-specific stage
    state.
@@ -44,7 +42,7 @@ role-specific networking:
 6. `close()` stops networking. It does not implicitly turn every pending edit
    into a blocking flush.
 
-`client.status` is an immutable `ClientStatus`. Its `phase` is one of
+`client.status` is an immutable `ClientStatus`; `phase` is one of
 `OFFLINE`, `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`,
 or `CLOSED`. Bidirectional applications should enable editing only in `READY`.
 The directional connection fields distinguish partial connectivity from a
@@ -93,7 +91,7 @@ history over it would duplicate opinions. Snapshot continuation is a separate
 flat integration path used by the live-open host plugins.
 
 Use `rebind_stage(new_stage)` when a host replaces its stage. Passing `None`
-parks application while the network queue continues to receive data.
+parks stage application while the network queue continues to receive data.
 
 Application callbacks such as `on_applied` and `on_applied_events` run inside
 `update()` on the calling thread. Transport callbacks, including token,
@@ -247,7 +245,7 @@ The session layer and layers introduced only by references or payloads are not
 part of the synchronized graph.
 
 The contract assumes equivalent initial authored contents. OpenUSDConnect does
-not currently compare or publish a complete baseline, so unchanged fields can
+not compare or publish a complete baseline, so unchanged fields can
 differ silently if resolver contexts or deployed asset versions disagree.
 Production integrations should use immutable/versioned assets or an explicit
 baseline identity policy before enabling edits.
@@ -320,6 +318,6 @@ public for custom scheduling, DCC adapters, and constrained flat snapshot
 continuation. `ReceiverThread` requests layered replay by default; passing
 `layered_replay=False` selects the single-layer flat contract.
 
-Prefer constructing low-level objects directly over mutating the components
-inside a high-level client. The high-level wrappers expose their components for
-diagnostics, but their lifecycle invariants remain owned by the wrapper.
+Construct low-level objects directly. Components exposed by a high-level
+client are diagnostic handles; mutating them bypasses the wrapper's lifecycle
+invariants.

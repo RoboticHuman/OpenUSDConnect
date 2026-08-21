@@ -1,19 +1,17 @@
-# Command-Line Reference
+# Command-line reference
 
-## First Server Session
+## First server session
 
-Configure the project OpenUSD runtime as described below, then install the
-dashboard dependency and start a persistent local server from the repository
-root:
+After configuring the project OpenUSD runtime, start a persistent local server
+from the repository root:
 
 ```bash
 uv sync --group dashboard
 uv run openusdconnect-server --base test_scene.usda --event-log session.db --export-diff session-changes.usda --port 7200 --dashboard-port 8080
 ```
 
-For a core-only session that needs neither MaterialX nor custom renderer,
-resolver, file-format, or shader plugins, use the limited renderer-neutral
-fallback: `uv sync --group bundled-usd --group dashboard`.
+For a renderer-neutral session without MaterialX or custom plugins, replace the
+first command with `uv sync --group bundled-usd --group dashboard`.
 
 The sync endpoint is `127.0.0.1:7200` and the optional dashboard is
 <http://127.0.0.1:8080>. Stop the server with Ctrl+C. `session.db` retains the
@@ -36,9 +34,9 @@ For a bounded test that creates and cleans up its own server, run the
 [headless first run](../README.md#get-started). For a file-picker workflow,
 use the separate [server-provided USD file](live-open.md) path.
 
-## Common Options
+## Common options
 
-OpenUSDConnect keeps endpoint names consistent across its user-facing tools:
+Endpoint options use the following names:
 
 | Setting | Canonical option | Default |
 | --- | --- | --- |
@@ -63,7 +61,7 @@ writes that do not carry producer progress. Client `Txn` acknowledgements keep
 their exactly-once contract in either mode: an acknowledged transaction and
 its cumulative producer high-water mark are durable.
 
-## Primary Commands
+## Primary commands
 
 | Command | Purpose | Dependency groups |
 | --- | --- | --- |
@@ -83,7 +81,7 @@ its cumulative producer high-water mark are durable.
 `scripts/mount_vfs_share.py` remains a compatibility wrapper for
 `openusdconnect-mount-vfs`.
 
-## Server Layer Modes
+## Server layer modes
 
 `openusdconnect-server --layer-mode managed` is the default. It provides
 receiver-owned collaboration layers, department policy, and VFS live-open
@@ -95,13 +93,13 @@ and cannot be combined with departments, VFS, `--export-diff`, or purge.
 Managed and shared-stage clients are rejected when they connect to a
 server running the other mode.
 
-## OpenUSD Runtime And Custom Plugins
+## OpenUSD runtime and custom plugins
 
 ### Project runtime
 
-Use the same compatible OpenUSD build and plugin environment as the clients in
-your project. This is the primary path and is required for MaterialX, custom
-renderers, resolvers, file formats, and shader definitions.
+Use a compatible OpenUSD build and the same plugin environment as the other
+clients. MaterialX and custom renderers, resolvers, file formats, and shader
+definitions require this path.
 
 From the repository root, configure the selected install for the current
 PowerShell process, then run without enabling the `bundled-usd` group. The
@@ -186,9 +184,9 @@ repeatable `--plugin-path` and `--dll-dir` options for project additions, or
 hdPrman. An inherited valid `RMANTREE` is also configured.
 
 The launchers import the selected `pxr` package with the resolved interpreter
-before changing the runtime environment, so an interpreter whose Python version
-cannot load the native modules fails immediately rather than at first use. They
-deliberately do not recursively search unrelated virtual environments: an
+before changing the runtime environment. A Python ABI mismatch therefore fails
+during setup, not on first use. They do not search unrelated virtual
+environments: an
 absolute CMake Python install directory has no discoverable relationship to the
 OpenUSD prefix. For custom plugins, configure:
 
@@ -229,7 +227,7 @@ uv run --group bundled-usd openusdconnect-server --base scene.usda
 fresh shell or clear project-specific `PYTHONPATH`, `PXR_PLUGINPATH_NAME`, and
 native library search paths when verifying that the bundled runtime is active.
 
-## Development Commands
+## Development commands
 
 | Command | Purpose |
 | --- | --- |

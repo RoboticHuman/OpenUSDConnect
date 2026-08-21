@@ -1,14 +1,13 @@
 # OpenUSDConnect usdview integration
 
-Receive-side integration for Pixar's reference USD viewer. Adds an
-**OpenUSDConnect** menu to usdview with Connect / Disconnect / Status
-commands. While connected, every event the server broadcasts (transforms,
-visibility, material bindings, composition arcs, time samples, stage
-metadata) is applied directly to the stage usdview is rendering.
+This receive-only plugin adds **OpenUSDConnect** connect, disconnect, and
+status commands to usdview. It applies server events directly to the stage
+usdview renders, including transforms, visibility, materials, composition
+arcs, time samples, and stage metadata.
 
-usdview already owns a live `Usd.Stage`, so the integration uses the core
-`UsdStageAdapter` directly. It does not map USD to separate DCC-native objects
-and it does not send edits back to the server.
+Because usdview already owns a `Usd.Stage`, the plugin uses `UsdStageAdapter`
+directly. It does not create a separate native scene and does not publish
+usdview edits.
 
 ## Requirements
 
@@ -20,18 +19,19 @@ and it does not send edits back to the server.
 Make `usdview` discoverable on `PATH`, set `USDVIEW_PATH` to its executable, or
 pass `--usdview /path/to/usdview`. If the OpenUSD Python bindings and native
 libraries also come from that installation, configure the project runtime as
-described in [OpenUSD runtime and custom plugins](../../docs/cli-reference.md#openusd-runtime-and-custom-plugins).
+described in [OpenUSD runtime and custom
+plugins](../../docs/cli-reference.md#openusd-runtime-and-custom-plugins).
 
-## Start A Temporary Session
+## Start a temporary session
 
 ```bash
 uv run python scripts/start_usdview.py test_scene.usda
 ```
 
 The launcher selects an unused port, starts a server with a temporary event
-log, discovers usdview from the active OpenUSD environment, and opens it with
-the receiver plugin already configured. Closing usdview or pressing Ctrl+C
-also stops the server. Pass `--event-log events.db` to preserve the session.
+log, finds usdview in the active OpenUSD environment, and enables the receiver
+plugin. Closing usdview or pressing `Ctrl+C` stops the server. Pass
+`--event-log events.db` to keep the session.
 
 To connect usdview to a server that is already running instead:
 
@@ -46,7 +46,7 @@ If discovery fails, run `uv run python scripts/start_usdview.py --help`, confirm
 the executable independently with `usdview --help`, then pass its full path
 with `--usdview`. Both launchers report each searched source as a concise error.
 
-## Receive Behavior
+## Receive behavior
 
 The integration negotiates layered replay. It maps each opaque collaboration
 layer key to a receiver-owned anonymous layer, composes those layers in the
@@ -62,48 +62,41 @@ layer metadata, and local variant definitions, including inactive variants.
 The protocol does not yet reproduce arbitrary client-authored sublayer graphs
 or route transactions to layers outside the managed collaboration block.
 
-## RenderMan (hdPrman) renderer optional
+## RenderMan
 
-Pixar's **hdPrman** Hydra delegate is off by default. Pass `--renderman`
-to make it available and start usdview in it:
+Pass `--renderman` to configure the hdPrman Hydra delegate and select it at
+startup:
 
 ```bash
 uv run python scripts/start_usdview.py test_scene.usda --renderman
 ```
 
-The flag sets the `RMAN_*` search paths from `$RMANTREE` plus the OpenUSD
-install that ships hdPrman (discovered the same way as `usdview`), prepends
-`$RMANTREE\bin` and `$RMANTREE\lib` to `PATH` so `libprman.dll` loads, and
-selects the `HdPrmanLoaderRendererPlugin` delegate ("RenderMan RIS"). It
-requires a RenderManProServer install with `RMANTREE` set and an OpenUSD
-build made with the RenderMan imaging plugin (`PXR_BUILD_PRMAN_PLUGIN=ON`).
+This requires a RenderManProServer installation with `RMANTREE` set and an
+OpenUSD build made with `PXR_BUILD_PRMAN_PLUGIN=ON`. The launcher configures
+the `RMAN_*` variables and native library paths, then selects
+`HdPrmanLoaderRendererPlugin`.
 
-Without `--renderman` nothing changes usdview runs Storm-only as before.
-You can still switch renderers from usdview's **Renderer** menu once
-`--renderman` is on, and you can override which delegate it starts in by
-forwarding your own `--renderer` (e.g. `--renderman --renderer Storm` opens
-in Storm with RenderMan available in the menu). See
-https://openusd.org/release/plugins_renderman.html
+Without `--renderman`, the launcher leaves renderer configuration unchanged.
+Use `--renderman --renderer Storm` to start in Storm while keeping RenderMan
+available in usdview's **Renderer** menu. See the
+[OpenUSD RenderMan plugin documentation](https://openusd.org/release/plugins_renderman.html).
 
 ## How usdview discovery works
 
-Both launchers use `find_usdview()`, which tries three strategies in order:
+Both launchers call `find_usdview()`, which checks these sources in order:
 
-1. `shutil.which("usdview.cmd"/"usdview.exe"/"usdview")` works when
-   the OpenUSD `bin/` directory is on `PATH`.
-2. Walk up from `pxr.__file__` to the install root and probe
-   `bin/usdview*`. `pxr` imports without PySide6 (only `pxr.Usdviewq`
-   needs Qt), so this works in any env where the pxr Python bindings
-   are reachable.
-3. `USDVIEW_PATH` env var as an explicit override.
+1. `usdview.cmd`, `usdview.exe`, or `usdview` on `PATH`.
+2. `bin/usdview*` below the OpenUSD installation inferred from
+   `pxr.__file__`.
+3. The path in `USDVIEW_PATH`.
 
 If you have a non-standard install, set `USDVIEW_PATH` to the executable
 and the launcher will use it directly.
 
-## Manual install (for system-wide usdview, no launcher)
+## Manual installation
 
-If you want the plugin to load whenever you run usdview directly
-(without going through the launcher):
+To load the plugin when starting usdview directly, add the plugin and repository
+paths to the environment:
 
 ```bash
 # Bash / Zsh
@@ -119,9 +112,8 @@ $env:PYTHONPATH = "D:\gamedev\OpenUSDConnect;$env:PYTHONPATH"
 usdview some_scene.usda
 ```
 
-Without `OPENUSDCONNECT_HOST` set, the menu is present but won't
-auto-connect pick **Connect to OpenUSDConnect…** from the menu and
-enter the host/port.
+Without `OPENUSDCONNECT_HOST`, the menu loads but does not auto-connect. Choose
+**Connect to OpenUSDConnect…** and enter the endpoint.
 
 ## Refreshing a late asset dependency
 
@@ -162,10 +154,10 @@ tracked arcs whose resolution changes in the same refresh are updated too.
 | `PYTHONPATH` | Must include the OpenUSDConnect repo root so `integrations.usdview` and `openusdconnect` resolve |
 | `RMANTREE` | RenderManProServer install root. Read only when `--renderman` is passed; the launcher derives all `RMAN_*` paths from it. |
 
-## Out of scope (later phases)
+## Limitations
 
 - Sending edits from usdview back to the server (usdview has no native
   authoring UX)
 - Playback leader control
-- Custom Qt sidebar panel (usdview's plugin API only exposes menus and
-  new top-level windows)
+- A custom Qt sidebar; usdview's plugin API exposes menus and new top-level
+  windows, not dockable panels

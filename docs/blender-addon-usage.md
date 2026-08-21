@@ -1,8 +1,7 @@
-# Blender addon
+# Blender add-on
 
-The Blender add-on imports USD while recording the USD path represented by each
-Blender object. It sends supported Blender edits to the server and applies
-changes received from other connected clients.
+The Blender add-on tags imported objects with their USD paths, publishes
+supported Blender edits, and applies committed changes from the server.
 
 ## Install
 
@@ -32,14 +31,14 @@ can auto-start the emitter and receiver. **Skip Leaf /Geom Prim Paths** avoids
 tagging common importer-generated leaf geometry objects when their parent is
 the useful scene identity.
 
-### Local Capture
+### Local capture
 
 Local Capture observes Blender changes and writes them into a USD session-layer
 delta without networking. Use **Emit Diff** to export the authored delta and
 **Clear Diff** to discard it. **Coalesce (sec)** controls the local batching
 window.
 
-### Network Emitter
+### Network emitter
 
 The emitter connects to the sync server and publishes changes detected from
 Blender. Configure host, port, optional department, and send rate. Department
@@ -47,13 +46,13 @@ ordering applies only when the server was started with `--departments`.
 **Auto-track New Objects** assigns untagged objects a path below **Root Prim**
 when they are first edited.
 
-### Network Receiver
+### Network receiver
 
 The receiver reads the authoritative stream in a background thread and applies
 it from Blender's timer loop. **Rebuild Replay** discards retained receive state
 and reconstructs it from the configured base or live snapshot sequence.
 
-### Playback Sync
+### Playback sync
 
 One connected client may claim playback leadership. The leader can play,
 pause, or push the current frame; followers update their Blender timelines from
@@ -82,16 +81,17 @@ from the complete authoritative layer stack.
 
 ## Server-provided file workflow
 
-The optional live-open service provides a generated USD file containing the
-current scene state and sync server address:
+Live-open generates a USD snapshot containing the current scene and sync server
+address:
 
 ```bash
 uv sync --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
 
-This assumes the project OpenUSD runtime is active. Add `--group bundled-usd`
-only for a renderer-neutral session without MaterialX or custom plugins.
+These commands assume that the project OpenUSD runtime is active. For a
+renderer-neutral session without MaterialX or custom plugins, add
+`--group bundled-usd`.
 
 Import the reported local `scene.usd` path with prim tagging. Embedded metadata
 sets the server endpoint and `snapshot_seq`; the addon continues at
@@ -109,7 +109,7 @@ Windows/macOS mounts, write modes, and token behavior.
 
 ## What synchronizes
 
-The Blender integration currently handles these groups:
+The Blender integration handles:
 
 - Prim creation, deletion, deactivation, rename, visibility, and type changes
 - Local transforms using USD translate/orient/scale, including quaternion
@@ -173,9 +173,9 @@ object a path below the configured root. Primitive type inference is
 best-effort: recognizable Blender primitives map to their USD schema types,
 other meshes use `Mesh`, and other objects use `Xform`.
 
-Auto-tracking creates collaboration identity for the object. It is not a
-general USD exporter and does not infer every Blender modifier, constraint, or
-material graph.
+Auto-tracking gives the object a stable collaboration identity. It is not a
+USD exporter: modifiers, constraints, and arbitrary material graphs are not
+inferred.
 
 ## Replay and feedback behavior
 

@@ -24,7 +24,7 @@ reports `local_valid=True` and `peer_valid=True`. The launcher then stops its
 temporary server and peer process and removes its temporary event log. Pressing
 `Ctrl+C` performs the same cleanup during an unbounded run.
 
-The important ownership rule is visible in `demo.py`: its publisher observes
+The ownership rule is visible in `demo.py`: its publisher observes
 the author stage's session layer, while `UsdReceiver` owns different session
 layers on the mirror stage. All three stages share the same read-only base
 layer.

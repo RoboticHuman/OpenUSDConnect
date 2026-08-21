@@ -1,22 +1,22 @@
 # Shared stage mode architecture
 
-Shared stage mode synchronizes the authored root-layer graph between processes
-that each open an equivalent portable, non-anonymous USD stage. Where managed mode applies
-semantic event kinds over server-owned collaboration layers, shared stage mode
-treats each client's application-owned layers, root layer and sublayers alike, as the
-synchronized data. `SharedStageClient` is the entry point, with the same
-`start()` / `connect()` / `update()` / `close()` lifecycle as
-`ManagedClient`.
+Shared stage mode replicates authored fields across equivalent root and
+sublayer graphs. Each process opens its own portable, non-anonymous USD stage.
+Unlike managed mode, the application-owned layers are the synchronized data;
+the server does not place semantic edits in collaboration layers.
+
+`SharedStageClient` uses the same `start()`, `connect()`, `update()`, and
+`close()` lifecycle as `ManagedClient`.
 
 ## What shared stage does
 
 Every process opens its own equivalent stage and resolver context. Layers may
 come from a filesystem or custom `ArResolver`; the authored root and recursive
 sublayer contents must be equivalent and editable by participating authors.
-The server runs an authoritative mirror of the same graph. Edits made on any client's
-layers are detected, sent as exact Sdf-spec deltas, canonicalized and sequenced
-by the server, broadcast, and applied to the matching local layers on every
-participant, including the authoring participant's authoritative echo.
+The server holds an authoritative mirror of the graph. A client detects edits
+to its layers and sends exact Sdf spec deltas. The server validates, orders,
+and broadcasts those deltas; every participant applies them to its matching
+local layers, including the author.
 
 Shared-stage mode does not publish or compare a complete initial baseline.
 Opaque keys prove layer routing, not content identity. If two resolver contexts
@@ -30,7 +30,7 @@ Both kinds of state replicate:
 - Topology: the ordered sublayer list of every layer, including sublayer paths,
   offsets, and scales. Composition arc edits (add, remove, reorder, retarget a
   sublayer) are first-class events.
-- Authored SDF opinions on the supported layer, prim, attribute, relationship,
+- Authored Sdf opinions on the supported layer, prim, attribute, relationship,
   variant-set, and variant spec types, including their metadata.
 
 Local identifiers and resolved filesystem paths never cross the wire. Opaque
@@ -59,8 +59,8 @@ the dashboard, the MCP server, and department policies consume. The emitter
 diffs composed stage state, and the dispatcher pipelines receive-side
 application.
 
-Shared stage mode skips that machinery. There is no emitter, no dispatcher, no
-collaboration layer stack. Edits author directly into the app's existing file
+Shared stage mode has no semantic emitter, receive dispatcher, or collaboration
+layer stack. Edits are authored directly into the application's existing file
 layers, and the protocol carries Sdf-spec deltas: which spec changed, which
 fields, and the new field values as a USDA fragment. The server validates,
 canonicalizes topology, assigns sequence numbers, and broadcasts, but it does
@@ -72,13 +72,13 @@ or departments.
 
 ## When to use each
 
-Choose shared stage mode when all processes open equivalent versioned assets
+Use shared stage mode when all processes open equivalent versioned assets
 through a filesystem, VFS, or resolver and field-level Sdf fidelity matters.
 Edits replicate across the application-owned layers, including sublayer
 topology, per-layer variant opinions, and layer metadata. Saving those layers
 to their backing stores remains an application decision.
 
-Choose managed mode when the server owns the collaboration data model: semantic
+Use managed mode when the server owns the collaboration data model: semantic
 event kinds must reach non-USD consumers (DCC adapters, the dashboard, the MCP
 server), collaboration content should live above the base stage rather than in
 it, or features like departments and playback leadership are
@@ -89,7 +89,7 @@ not have a specialized semantic event.
 
 ## Data flow
 
-Each client `update()` runs the same shape:
+Each `update()` runs four phases:
 
 1. Prepare freeze. `prepare_local_changes()` snapshots the current local state
    of every dirty layer into prepared batches: validated candidate deltas where
@@ -111,19 +111,20 @@ Each client `update()` runs the same shape:
    with that `layer_key`; a successful send advances the baseline
    (`mark_prepared_sent`) so the batch is not re-emitted.
 
-Server side, one shared transaction is serialized by a commit lock, validated
-(`validate_spec_delta`, `validate_layer_content_replacement`), and applied to
-the mirror stage under `atomic_apply` plus a graph transaction that rolls back
+On the server, a commit lock serializes each shared transaction. The server
+validates it with `validate_spec_delta` or
+`validate_layer_content_replacement`, then applies it to the mirror stage under
+`atomic_apply` plus a graph transaction that rolls back
 routing state on failure. Topology events are canonicalized first: the server
 assigns authoritative child layer keys, advances the edited parent layer's
 topology revision, and discovers routing state for newly reachable descendant
 layers. Every canonical event is then seq-assigned, persisted, and broadcast to
 all clients in order.
 
-## Protocol design
+## Protocol
 
-Layer keys. The server's authoritative graph assigns each layer an opaque key
-of the form `layer:{uuid4.hex}`. Sublayer entries on the wire carry
+**Layer keys.** The server assigns each layer an opaque key of the form
+`layer:{uuid4.hex}`. Sublayer entries on the wire carry
 `authored_path`, `offset`, `scale`, and once mapped, the child `layer_key`.
 Keys are the only layer identity on the wire; `Sdf.Layer.identifier` stays
 local. The authoritative server persists its identifier-to-key assignments in
@@ -131,18 +132,18 @@ a normalized SQLite table. This registry retains detached layers, so the same
 logical layer receives the same key if it is later reattached or the server
 restarts. Identifier strings remain server-local and are never sent to clients.
 
-Generation and revision. The graph is versioned by a `generation` /
+**Generation and revision.** The graph is versioned by a `generation` /
 `revision` pair for baseline ordering, while every mapped parent layer also has
 its own positive topology revision. A normal server restart restores the
 generation, revisions, and stable key registry from the database. Log
 compaction creates a new generation and resets the reachable per-parent
 revisions because it replaces the old history with a new topology baseline and
 compacted authored-content events; the durable layer keys do not change.
-Per-parent revisions let edits to
-unrelated layer stacks commit independently without weakening conflict
+Per-parent revisions let edits to unrelated layer stacks commit independently
+without weakening conflict
 detection for two concurrent edits to the same parent.
 
-Event kinds. Three kinds carry shared-stage content:
+**Event kinds.** Three kinds carry shared-stage content:
 
 - `set_sdf_spec_fields`: an exact field delta for one Sdf spec (prim,
   attribute, relationship, variant set, variant, property, or the layer
@@ -158,7 +159,7 @@ Event kinds. Three kinds carry shared-stage content:
   to the targeted parent's authoritative `revision + 1` with child keys
   assigned, and re-broadcasts the canonical event. At most one per transaction.
 
-Baseline. A new shared-stage database begins with one `layer_graph_state`
+**Baseline.** A new shared-stage database begins with one `layer_graph_state`
 message: a sequenced snapshot of the reachable graph's topology and routing,
 including `generation`, the baseline `revision`, `root_layer_key`, and each
 layer's sublayer entries and parent revision. Compaction atomically replaces

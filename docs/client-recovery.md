@@ -1,11 +1,12 @@
 # Client recovery
 
-This guide covers deterministic producer rejections. Network disconnects do
-not normally require application recovery: the sender retains the exact
-transaction and retries it with the same producer session and transaction ID.
+Network disconnects normally recover without application involvement. The
+sender retains an unacknowledged transaction and retries it with the same
+producer session and transaction ID.
 
-A deterministic rejection is different. The rejected transaction and its
-ordered suffix are quarantined because later IDs cannot safely pass the gap.
+A deterministic producer rejection requires an explicit policy. The rejected
+transaction and its ordered suffix are quarantined because later IDs cannot
+safely pass the gap.
 `ManagedClient` and `SharedStageClient` report this through
 `client.status.phase == ClientPhase.RECOVERY_REQUIRED`,
 `client.status.recovery`, and `client.recovery_artifact`.
@@ -16,8 +17,8 @@ recovery commands may raise `RecoveryError`, `TimeoutError`, or
 
 ## Managed client
 
-`ManagedClient` owns one transient `authoring_layer`, which gives it two safe
-recovery choices.
+`ManagedClient` owns one transient `authoring_layer`, so it can either discard
+the active layer in favor of server state or replace the rejected transaction.
 
 ### Use the server state
 
@@ -84,7 +85,7 @@ state. Keep the assessment for as long as those objects are needed.
 
 ### Use the server state with a clean stage
 
-The baseline operation requires an equivalent clean stage whose loaded
+This operation requires an equivalent clean stage whose loaded
 `Sdf.Layer` identifiers do not overlap the rejected stage:
 
 ```python
@@ -173,7 +174,7 @@ Stable codes include `no_incident`, `wrong_recovery_kind`,
 
 ## UI guidance
 
-A host UI should be phase-driven:
+Drive editing state from `client.status.phase`:
 
 - `READY`: enable authoring
 - `CONNECTING` or `REPLAYING`: keep calling `update()`, but disable authoring
