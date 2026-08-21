@@ -29,11 +29,12 @@ client's receive mirror.
 ## Get started
 
 You need [Git](https://git-scm.com/), Python 3.13+,
-[uv](https://docs.astral.sh/uv/), CMake 3.20+, and a C++17 compiler. MSVC,
-GCC, and Clang are supported through CMake. OpenUSDConnect targets OpenUSD
-0.26.8; the bundled fallback pins `usd-core==26.8`. Blender and Unreal use the
-OpenUSD runtime shipped by the host application. Clone with `--recursive` only
-if you need the USD Working Group assets used by asset and visual tests.
+[uv](https://docs.astral.sh/uv/), CMake 3.27+, and a 64-bit C++17 toolchain.
+These match the common build requirements of OpenUSD 0.26.8. MSVC, GCC, and
+Clang are supported through CMake. The bundled fallback pins
+`usd-core==26.8`. Blender and Unreal use the OpenUSD runtime shipped by the
+host application. Clone with `--recursive` only if you need the USD Working
+Group assets used by asset and visual tests.
 
 `uv sync` builds the native client extension. Make sure the compiler is
 available in the current shell before running it. On Windows, install the
@@ -41,7 +42,7 @@ Desktop development with C++ workload from Visual Studio or Build Tools. On
 macOS, install the Xcode command-line tools. On Linux, install CMake and the
 compiler toolchain through the system package manager.
 
-### Configure your OpenUSD build
+### Select an OpenUSD build
 
 Use OpenUSD 0.26.8 for the server, usdview, and USD-native clients. Keep the
 plugin environment consistent across clients that resolve the same scene:
@@ -53,38 +54,23 @@ git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
 ```
 
-The active interpreter must use the same Python major/minor version that
-OpenUSD was built against.
-The launchers search the install prefix for current Windows
-`Lib/site-packages`, Unix `lib/pythonX.Y/site-packages` or `dist-packages`, and
-legacy `lib/python` layouts. Activate the matching venv first when necessary;
-its site-packages is also searched. Use `-PythonPath` or `--python-path` only
-when the bindings are in another location.
-
-Configure the current PowerShell session on Windows:
-
-```powershell
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
-uv sync
-```
-
-Or configure the current Bash/Zsh session on Linux or macOS:
+The managed builder clones and compiles the exact supported OpenUSD commit. Its
+default profile includes Python bindings and command-line tools:
 
 ```bash
-source scripts/openusd_env.sh /opt/OpenUSDInstall
+uv run python scripts/build_openusd.py
 ```
 
-For automation or CI, configure only the child command:
+After the build, OpenUSDConnect selects the managed installation automatically;
+no activation step is required. OpenUSD tools can use the same environment:
 
 ```bash
-uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \
-  openusdconnect-server --base test_scene.usda
+uv run python scripts/run_with_openusd.py -- usdview scene.usda
 ```
 
-The [CLI reference](docs/cli-reference.md#openusd-runtime-and-custom-plugins)
-covers venv layouts, external bindings, interpreter selection, plugin and DLL
-paths, RenderMan, verification, and every launcher option. Commands below
-assume that runtime remains active; wrapper users place them after `--`.
+The [OpenUSD build guide](docs/building-openusd.md) covers the usdview profile,
+MaterialX, Embree, RenderMan, compiler discovery, build directories, and
+external OpenUSD installations.
 
 ### Verify synchronization locally
 
@@ -249,6 +235,7 @@ USD hosts can optionally build the exact Sdf notice bridge with
 
 - [Documentation index](docs/README.md)
 - [Getting started with Blender](docs/getting-started.md)
+- [Building and selecting OpenUSD](docs/building-openusd.md)
 - [USD-native API guide](docs/usd-native-integration.md)
 - [Client recovery](docs/client-recovery.md)
 - [Blender addon](docs/blender-addon-usage.md)

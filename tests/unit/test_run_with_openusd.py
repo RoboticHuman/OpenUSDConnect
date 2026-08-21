@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import openusd_runtime, run_with_openusd
+from tests.openusd_pin import OPENUSD_VERSION
+from tests.python_version import PYTHON_SITE_DIRECTORY
 
 
 def _write_pxr(pkg):
@@ -85,6 +87,90 @@ def test_main_forwards_command_and_exit_code(tmp_path, monkeypatch):
     assert captured["check"] is False
 
 
+def test_managed_build_is_the_default_runtime(tmp_path, monkeypatch):
+    root = _usd_install(tmp_path)
+    python_path = root / "lib" / "python"
+    executable = tmp_path / "venv" / "python"
+    executable.parent.mkdir()
+    executable.touch()
+    config = tmp_path / "active.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "usd_root": str(root),
+                "python_path": str(python_path),
+                "python_executable": str(executable),
+                "renderman_root": None,
+                "version": OPENUSD_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(openusd_runtime.USD_ROOT_ENV, raising=False)
+    monkeypatch.setattr(openusd_runtime, "ACTIVE_RUNTIME_FILE", config)
+
+    args = run_with_openusd._parse_args(["--", "python", "-V"])
+
+    assert args.usd_root == str(root)
+    assert args.python_path == str(python_path)
+    assert args.python_executable == str(executable)
+
+
+def test_explicit_root_does_not_inherit_managed_build_options(tmp_path, monkeypatch):
+    managed = _usd_install(tmp_path / "managed")
+    external = _usd_install(tmp_path / "external")
+    config = tmp_path / "active.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "usd_root": str(managed),
+                "python_path": str(managed / "lib" / "python"),
+                "python_executable": str(tmp_path / "managed-python"),
+                "renderman_root": str(tmp_path / "RenderMan"),
+                "version": OPENUSD_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(openusd_runtime.USD_ROOT_ENV, raising=False)
+    monkeypatch.delenv("RMANTREE", raising=False)
+    monkeypatch.setattr(openusd_runtime, "ACTIVE_RUNTIME_FILE", config)
+
+    args = run_with_openusd._parse_args(
+        ["--usd-root", str(external), "--", "python", "-V"]
+    )
+
+    assert args.usd_root == str(external)
+    assert args.python_path is None
+    assert args.python_executable is None
+    assert args.renderman_root is None
+
+
+def test_windows_batch_command_uses_cmd(monkeypatch):
+    monkeypatch.setattr(run_with_openusd.os, "name", "nt")
+    monkeypatch.setattr(
+        run_with_openusd.shutil,
+        "which",
+        lambda command, *, path: r"C:\OpenUSD\bin\usdview.cmd",
+    )
+
+    resolved = run_with_openusd._resolve_command(
+        ["usdview", "--help"],
+        env={"PATH": r"C:\OpenUSD\bin", "COMSPEC": r"C:\Windows\System32\cmd.exe"},
+    )
+
+    assert resolved == [
+        r"C:\Windows\System32\cmd.exe",
+        "/d",
+        "/c",
+        "call",
+        r"C:\OpenUSD\bin\usdview.cmd",
+        "--help",
+    ]
+
+
 def test_build_environment_rejects_missing_plugin_path(tmp_path):
     root = _usd_install(tmp_path)
 
@@ -96,8 +182,8 @@ def test_build_environment_rejects_missing_plugin_path(tmp_path):
     "relative_path",
     [
         ("Lib", "site-packages"),
-        ("lib", "python3.13", "site-packages"),
-        ("lib64", "python3.13", "dist-packages"),
+        ("lib", PYTHON_SITE_DIRECTORY, "site-packages"),
+        ("lib64", PYTHON_SITE_DIRECTORY, "dist-packages"),
     ],
 )
 def test_build_environment_discovers_current_openusd_python_layouts(
@@ -240,7 +326,7 @@ def test_verify_bindings_uses_selected_interpreter_and_environment(monkeypatch):
 
     def fake_run(command, *, env, text, capture_output):
         captured.update(command=command, env=env)
-        return SimpleNamespace(returncode=0, stdout="(0, 26, 11)\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="(9, 8, 7)\n", stderr="")
 
     monkeypatch.setattr(openusd_runtime.subprocess, "run", fake_run)
 
@@ -250,7 +336,7 @@ def test_verify_bindings_uses_selected_interpreter_and_environment(monkeypatch):
         python_executable=sys.executable,
     )
 
-    assert version == "(0, 26, 11)"
+    assert version == "(9, 8, 7)"
     assert captured["command"][0] == str(Path(sys.executable).resolve())
     assert "from pxr import Tf, Usd" in captured["command"][-1]
     assert captured["env"] == {"PYTHONPATH": "bindings"}

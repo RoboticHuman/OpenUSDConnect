@@ -19,15 +19,18 @@ git clone https://github.com/RoboticHuman/OpenUSDConnect.git
 cd OpenUSDConnect
 ```
 
-Configure the OpenUSD build used by the project. In PowerShell:
+If you used `scripts/build_openusd.py`, its completed installation is selected
+automatically and this step is unnecessary. For an OpenUSD installation built
+outside the repository workflow, configure it in the current PowerShell
+session:
 
 ```powershell
 . .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
 
-The [runtime guide](cli-reference.md#openusd-runtime-and-custom-plugins) covers
-other shells, custom plugin paths, and renderer setup. With that environment
-active, install the dashboard dependency and build the add-on:
+The [OpenUSD build guide](building-openusd.md) covers the managed builder,
+other shells, custom plugin paths, and renderer setup.
+Install the dashboard dependency and build the add-on:
 
 ```bash
 uv sync --group dashboard

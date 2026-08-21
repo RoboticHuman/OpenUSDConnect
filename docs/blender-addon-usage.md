@@ -89,9 +89,9 @@ uv sync --group vfs
 uv run python scripts/start_live_open.py --base scene.usda --open
 ```
 
-These commands assume that the project OpenUSD runtime is active. For a
-renderer-neutral session without MaterialX or custom plugins, add
-`--group bundled-usd`.
+These commands use the registered managed runtime or an explicitly configured
+external runtime. For a renderer-neutral session without MaterialX or custom
+plugins, add `--group bundled-usd`.
 
 Import the reported local `scene.usd` path with prim tagging. Embedded metadata
 sets the server endpoint and `snapshot_seq`; the addon continues at

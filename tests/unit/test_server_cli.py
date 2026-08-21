@@ -12,6 +12,7 @@ from openusdconnect.server.cli import (
     _normalize_vfs_share,
     _validate_vfs_name,
 )
+from tests.openusd_pin import OPENUSD_VERSION, OPENUSD_VERSION_PARTS
 
 
 def test_default_advertise_host_for_wildcard_binds():
@@ -83,7 +84,7 @@ def test_server_config_disables_vfs_by_default():
 
 def test_log_usd_runtime_reports_version_and_bindings(monkeypatch):
     calls = []
-    monkeypatch.setattr(server_cli.Usd, "GetVersion", lambda: (0, 26, 8))
+    monkeypatch.setattr(server_cli.Usd, "GetVersion", lambda: OPENUSD_VERSION_PARTS)
     monkeypatch.setattr(server_cli.pxr, "__file__", "/project/usd/pxr/__init__.py")
     monkeypatch.setattr(server_cli.LOG, "info", lambda *args: calls.append(args))
 
@@ -92,7 +93,7 @@ def test_log_usd_runtime_reports_version_and_bindings(monkeypatch):
     assert calls == [
         (
             "OpenUSD runtime: %s; bindings: %s",
-            "0.26.8",
+            OPENUSD_VERSION,
             "/project/usd/pxr/__init__.py",
         )
     ]

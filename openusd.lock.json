@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/PixarAnimationStudios/OpenUSD.git",
+  "tag": "v26.08",
+  "commit": "ee47c679abde5b467a7b6a41f3b2285564a4222e",
+  "version": "0.26.8",
+  "usd_core": "26.8"
+}

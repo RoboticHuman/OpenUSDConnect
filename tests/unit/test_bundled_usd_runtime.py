@@ -1,5 +1,6 @@
 """Tests for bundled OpenUSD selection and packaging."""
 
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -7,10 +8,11 @@ from pathlib import Path
 import pytest
 
 import openusdconnect._runtime as runtime
+from tests.openusd_pin import OPENUSD_CORE_VERSION
 
 
 @pytest.fixture(autouse=True)
-def _clean_runtime_env(monkeypatch):
+def _clean_runtime_env(monkeypatch, tmp_path):
     """Isolate runtime selection from a shell that already configured OpenUSD.
 
     The documented setup sources ``openusd_env`` and sets these variables, which
@@ -19,6 +21,9 @@ def _clean_runtime_env(monkeypatch):
     """
     monkeypatch.delenv(runtime.USD_ROOT_ENV, raising=False)
     monkeypatch.delenv(runtime.BUNDLED_USD_ENV, raising=False)
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setattr(runtime, "ACTIVE_RUNTIME_FILE", tmp_path / "missing-active.json")
 
 
 def test_bundled_runtime_ignores_only_conflicting_pxr(monkeypatch, tmp_path):
@@ -98,6 +103,30 @@ def test_explicit_project_runtime_overrides_installed_bundle(monkeypatch):
     assert runtime.BUNDLED_USD_ENV not in runtime.os.environ
 
 
+def test_managed_project_runtime_is_selected_before_bundle(monkeypatch, tmp_path):
+    root = tmp_path / "managed-usd"
+    python_path = root / "Lib" / "site-packages"
+    (python_path / "pxr").mkdir(parents=True)
+    (python_path / "pxr" / "__init__.py").touch()
+    config = tmp_path / "active.json"
+    config.write_text(
+        json.dumps(
+            {"schema": 1, "usd_root": str(root), "python_path": str(python_path)}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "ACTIVE_RUNTIME_FILE", config)
+    monkeypatch.setattr(runtime, "_loaded_pxr_path", lambda: None)
+    monkeypatch.setattr(runtime, "_bundled_pxr_path", lambda: str(tmp_path / "bundled"))
+    monkeypatch.setattr(runtime.sys, "path", [])
+
+    runtime.select_runtime()
+
+    assert runtime.sys.path[0] == str(python_path)
+    assert runtime.os.environ[runtime.USD_ROOT_ENV] == str(root)
+    assert runtime.BUNDLED_USD_ENV not in runtime.os.environ
+
+
 def test_server_entry_point_uses_package_module():
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -113,7 +142,7 @@ def test_docker_uses_bundled_usd_pin():
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
     bundled_dependencies = project["dependency-groups"]["bundled-usd"]
 
-    assert bundled_dependencies == ["usd-core==26.8"]
+    assert bundled_dependencies == [f"usd-core=={OPENUSD_CORE_VERSION}"]
     assert f"pip install --no-cache-dir {bundled_dependencies[0]}" in dockerfile
     assert "COPY pyproject.toml README.md LICENSE NOTICE ./" in dockerfile
     assert "COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/" in dockerfile

@@ -9,14 +9,15 @@ OpenUSD install prefix.
 Directory containing pxr when the bindings are outside UsdRoot.
 
 .PARAMETER PythonExecutable
-Matching Python executable to place first on PATH. The active Python is used by default.
+Matching Python executable to place first on PATH. By default, the script uses
+the repository's .venv when present, then falls back to Python on PATH.
 
 .EXAMPLE
 . .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 
 .EXAMPLE
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall" `
-    -PythonExecutable "D:\OpenUSD\.venv\Scripts\python.exe"
+. .\scripts\openusd_env.ps1 "E:\OpenUSDInstall" `
+    -PythonExecutable "E:\OpenUSD-venv\Scripts\python.exe"
 #>
 [CmdletBinding()]
 param(
@@ -42,16 +43,22 @@ if ($PythonExecutable) {
     }
     $python = (Resolve-Path -LiteralPath $PythonExecutable).Path
 } else {
-    $pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $pythonCommand) {
-        $pythonCommand = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $repoPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $repoPython -PathType Leaf) {
+        $python = (Resolve-Path -LiteralPath $repoPython).Path
+    } else {
+        $pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
             Select-Object -First 1
+        if (-not $pythonCommand) {
+            $pythonCommand = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        }
+        if (-not $pythonCommand) {
+            throw "Python was not found. Create .venv or pass -PythonExecutable."
+        }
+        $python = $pythonCommand.Source
     }
-    if (-not $pythonCommand) {
-        throw "Python was not found. Activate the matching venv or pass -PythonExecutable."
-    }
-    $python = $pythonCommand.Source
 }
 
 $resolver = Join-Path $PSScriptRoot "openusd_runtime.py"

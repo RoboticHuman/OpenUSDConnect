@@ -1,8 +1,22 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.27)
 
 project(OpenUSDConnectClient LANGUAGES CXX)
 
-find_package(Python 3.13 REQUIRED
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/.python-version"
+    OPENUSDCONNECT_PYTHON_VERSION
+    LIMIT_COUNT 1
+)
+if(NOT OPENUSDCONNECT_PYTHON_VERSION MATCHES "^[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Invalid or missing .python-version")
+endif()
+
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR
+        "OpenUSDConnect requires a 64-bit toolchain to match the supported OpenUSD build."
+    )
+endif()
+
+find_package(Python ${OPENUSDCONNECT_PYTHON_VERSION} REQUIRED
     COMPONENTS Interpreter Development.Module
     OPTIONAL_COMPONENTS Development.SABIModule
 )

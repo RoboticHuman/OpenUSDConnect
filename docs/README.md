@@ -18,7 +18,8 @@ linked from the shorter workflow guides.
 
 | Task | Guide |
 | --- | --- |
-| Find commands, common options, and runtime setup | [Command-line reference](cli-reference.md) |
+| Build or select an OpenUSD runtime | [Building and selecting OpenUSD](building-openusd.md) |
+| Find commands and common options | [Command-line reference](cli-reference.md) |
 | Install and operate the Blender addon | [Blender addon usage](blender-addon-usage.md) |
 | Connect Pixar's reference USD viewer | [usdview integration](../integrations/usdview/README.md) |
 | Install and operate the Unreal Engine plugin | [Unreal Engine plugin](../integrations/unreal/OpenUSDConnect/README.md) |

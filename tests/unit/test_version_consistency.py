@@ -31,11 +31,11 @@ def test_standard_cli_version_output(capsys):
 
 def test_docker_version_parser_ignores_comments_and_stale_active_pins():
     dockerfile = """\
-    # FROM python:3.13-slim
-    FROM python:3.12-slim AS base
-    # usd-core==26.8
-    RUN pip install --no-cache-dir usd-core==26.7
+    # FROM python:9.8-slim
+    FROM python:9.7-slim AS base
+    # usd-core==99.8
+    RUN pip install --no-cache-dir usd-core==99.7
     """
 
-    assert _docker_base_images(dockerfile) == ["python:3.12-slim"]
-    assert _docker_pip_pins(dockerfile) == {"usd-core": "26.7"}
+    assert _docker_base_images(dockerfile) == ["python:9.7-slim"]
+    assert _docker_pip_pins(dockerfile) == {"usd-core": "99.7"}

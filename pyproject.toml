@@ -11,11 +11,14 @@ build-dir = "build/{wheel_tag}"
 wheel.packages = ["openusdconnect"]
 wheel.py-api = "cp312"
 sdist.include = [
+    ".python-version",
     "CMakeLists.txt",
     "openusdconnect/*.py",
     "openusdconnect/**/*.py",
     "openusdconnect/schema/*.fbs",
     "native/**",
+    "openusd.lock.json",
+    "scripts/build_openusd.py",
     "LICENSE",
     "NOTICE",
     "README.md",
@@ -70,6 +73,10 @@ mcp = [
 ]
 profile = [
     "py-spy==0.4.2",
+]
+usdview = [
+    "PyOpenGL==3.1.10",
+    "PySide6==6.11.0",
 ]
 visual = [
     "flip-evaluator==1.7",

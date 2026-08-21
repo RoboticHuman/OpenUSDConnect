@@ -103,6 +103,7 @@ def collect_errors() -> list[str]:
     errors: list[str] = []
     pyproject = tomllib.loads(_read("pyproject.toml"))
     release = str(runpy.run_path(ROOT / "openusdconnect" / "_version.py")["__version__"])
+    openusd = json.loads(_read("openusd.lock.json"))
 
     if not SEMVER.fullmatch(release):
         errors.append(f"OpenUSDConnect release must use X.Y.Z SemVer, got {release!r}")
@@ -167,6 +168,13 @@ def collect_errors() -> list[str]:
         if not expected or docker_pins.get(package) != expected:
             errors.append(f"Docker {package} pin must match pyproject dependency group {group}")
 
+    bundled_openusd = _dependency_pin(pyproject, "bundled-usd", "usd-core")
+    if openusd.get("usd_core") != bundled_openusd:
+        errors.append("OpenUSD source lock and bundled usd-core version must match")
+    source_version = str(openusd.get("version", ""))
+    if source_version.removeprefix("0.") != bundled_openusd:
+        errors.append("OpenUSD source version and bundled usd-core version must match")
+
     return errors
 
 
@@ -174,6 +182,7 @@ def version_summary() -> list[str]:
     pyproject = tomllib.loads(_read("pyproject.toml"))
     release = str(runpy.run_path(ROOT / "openusdconnect" / "_version.py")["__version__"])
     unreal = json.loads(_read("integrations/unreal/OpenUSDConnect/OpenUSDConnect.uplugin"))
+    openusd = json.loads(_read("openusd.lock.json"))
     return [
         f"OpenUSDConnect / Blender: {release}",
         f"Unreal plugin: {unreal['VersionName']} (build {unreal['Version']})",
@@ -183,6 +192,7 @@ def version_summary() -> list[str]:
         f"Python: {pyproject['project']['requires-python']}",
         f"Blender: >={'.'.join(str(part) for part in _blender_info()['blender'])}",
         f"Unreal Engine: {unreal['EngineVersion']}",
+        f"OpenUSD: {openusd['version']} ({openusd['tag']})",
         f"Bundled OpenUSD: {_dependency_pin(pyproject, 'bundled-usd', 'usd-core')}",
     ]
 

@@ -23,8 +23,18 @@ _openusd_activate() {
 
     _openusd_root=$1
     shift
+    if [ -n "${BASH_VERSION:-}" ]; then
+        _openusd_script=${BASH_SOURCE[0]}
+    else
+        _openusd_script=$0
+    fi
+    _openusd_script_dir=$(CDPATH= cd -- "$(dirname -- "$_openusd_script")" && pwd)
+    _openusd_repo_root=$(CDPATH= cd -- "$_openusd_script_dir/.." && pwd)
+
     if [ -n "${OPENUSDCONNECT_ENV_PYTHON:-}" ]; then
         _openusd_python=$OPENUSDCONNECT_ENV_PYTHON
+    elif [ -x "$_openusd_repo_root/.venv/bin/python" ]; then
+        _openusd_python=$_openusd_repo_root/.venv/bin/python
     elif command -v python3 >/dev/null 2>&1; then
         _openusd_python=$(command -v python3)
     elif command -v python >/dev/null 2>&1; then
@@ -34,12 +44,6 @@ _openusd_activate() {
         return 2
     fi
 
-    if [ -n "${BASH_VERSION:-}" ]; then
-        _openusd_script=${BASH_SOURCE[0]}
-    else
-        _openusd_script=$0
-    fi
-    _openusd_script_dir=$(CDPATH= cd -- "$(dirname -- "$_openusd_script")" && pwd)
     _openusd_output=$(
         "$_openusd_python" "$_openusd_script_dir/openusd_runtime.py" \
             --usd-root "$_openusd_root" \
@@ -53,7 +57,8 @@ _openusd_activate() {
 _openusd_activate "$@"
 _openusd_status=$?
 _openusd_finish() {
-    unset _openusd_output _openusd_python _openusd_root _openusd_script _openusd_script_dir
+    unset _openusd_output _openusd_python _openusd_repo_root _openusd_root
+    unset _openusd_script _openusd_script_dir
     unset _openusd_status
     unset -f _openusd_activate _openusd_finish 2>/dev/null || \
         unfunction _openusd_activate _openusd_finish 2>/dev/null

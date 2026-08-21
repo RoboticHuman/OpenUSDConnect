@@ -14,7 +14,9 @@ logical layers.
 
 ## Install
 
-Configure the project OpenUSD runtime, then install the MCP dependency:
+The managed runtime from `scripts/build_openusd.py` is selected automatically.
+Configure an external OpenUSD build when applicable, then install the MCP
+dependency:
 
 ```bash
 uv sync --group mcp
@@ -40,14 +42,15 @@ local stdio servers. Use the absolute path to the cloned repository in place of
   "mcpServers": {
     "openusdconnect": {
       "command": "uv",
-      "args": ["--directory", "<repo>", "run", "--no-sync", "python", "scripts/run_with_openusd.py", "--usd-root", "<OpenUSDInstall>", "--", "python", "-m", "integrations.mcp"],
+      "args": ["--directory", "<repo>", "run", "--no-sync", "python", "scripts/run_with_openusd.py", "--", "python", "-m", "integrations.mcp"],
       "env": { "OPENUSDCONNECT_PORT": "7200" }
     }
   }
 }
 ```
 
-The wrapper applies the selected OpenUSD runtime to the MCP process. Add its
+The wrapper applies the registered managed runtime to the MCP process. Add
+`--usd-root <OpenUSDInstall>` before `--` for an external build. Add its
 repeatable `--plugin-path` or `--dll-dir` options, or `--renderman-root`, before
 the `--` separator when required. On Windows JSON paths either use forward
 slashes, such as `D:/Workspace/OpenUSDConnect`, or escape each backslash.
