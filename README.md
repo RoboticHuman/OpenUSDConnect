@@ -28,8 +28,14 @@ client's receive mirror.
 
 ## Get started
 
-You need [Git](https://git-scm.com/), Python 3.13+,
-[uv](https://docs.astral.sh/uv/), CMake 3.27+, and a 64-bit C++17 toolchain.
+You need:
+
+- [Git](https://git-scm.com/)
+- Python 3.13 or newer
+- [uv](https://docs.astral.sh/uv/)
+- CMake 3.27 or newer
+- A 64-bit C++17 toolchain
+
 These match the common build requirements of OpenUSD 0.26.8. MSVC, GCC, and
 Clang are supported through CMake. The bundled fallback pins
 `usd-core==26.8`. Blender and Unreal use the OpenUSD runtime shipped by the
