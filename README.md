@@ -28,16 +28,25 @@ client's receive mirror.
 
 ## Get started
 
-You need [Git](https://git-scm.com/), Python 3.13+, and
-[uv](https://docs.astral.sh/uv/). Use the OpenUSD build from your project when
-possible. Clone with `--recursive` only if you need the USD Working Group
-assets used by asset and visual tests.
+You need [Git](https://git-scm.com/), Python 3.13+,
+[uv](https://docs.astral.sh/uv/), CMake 3.20+, and a C++17 compiler. MSVC,
+GCC, and Clang are supported through CMake. OpenUSDConnect targets OpenUSD
+0.26.8; the bundled fallback pins `usd-core==26.8`. Blender and Unreal use the
+OpenUSD runtime shipped by the host application. Clone with `--recursive` only
+if you need the USD Working Group assets used by asset and visual tests.
+
+`uv sync` builds the native client extension. Make sure the compiler is
+available in the current shell before running it. On Windows, install the
+Desktop development with C++ workload from Visual Studio or Build Tools. On
+macOS, install the Xcode command-line tools. On Linux, install CMake and the
+compiler toolchain through the system package manager.
 
 ### Configure your OpenUSD build
 
-Use the same compatible OpenUSD build and plugin environment as the other
-clients in the session. MaterialX and custom renderers, resolvers, file
-formats, and shader definitions depend on that environment.
+Use OpenUSD 0.26.8 for the server, usdview, and USD-native clients. Keep the
+plugin environment consistent across clients that resolve the same scene:
+MaterialX and custom renderers, resolvers, file formats, and shader definitions
+depend on it.
 
 ```bash
 git clone https://github.com/RoboticHuman/OpenUSDConnect.git
