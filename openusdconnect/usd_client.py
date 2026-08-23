@@ -265,7 +265,9 @@ class UsdReceiver:
             raise TypeError("UsdReceiver requires a Usd.Stage composition source")
         validate_layered_source(stage)
         self._stage = stage
-        if self._owns_stage_adapter:
+        if isinstance(self._dispatcher.adapter, UsdStageAdapter):
+            self._dispatcher.adapter.stage = stage
+        elif self._owns_stage_adapter:
             self._dispatcher.adapter = UsdStageAdapter(stage)
         self._dispatcher.mirror_stage = (
             None if self._dispatcher.adapter.targets_stage() is stage else stage

@@ -11,6 +11,7 @@ from openusdconnect import (
     RecoveryError,
     SyncUpdate,
     TransactionFailure,
+    UsdStageAdapter,
 )
 from openusdconnect import coalescing as coalescing_module
 from openusdconnect.codec import TransactionRejectionCode
@@ -174,6 +175,71 @@ def test_receiver_owns_external_adapter_projection_lifecycle():
         assert receiver.stage is replacement
         assert receiver._dispatcher.adapter is adapter
         assert receiver._dispatcher.mirror_stage is replacement
+    finally:
+        receiver.close()
+
+
+def test_receiver_rebinds_an_explicit_usd_stage_adapter():
+    original = Usd.Stage.CreateInMemory()
+    adapter = UsdStageAdapter(original)
+    receiver = UsdReceiver(
+        original,
+        app_name="explicit-stage-adapter",
+        adapter=adapter,
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        replacement = Usd.Stage.CreateInMemory()
+        receiver.rebind_stage(replacement)
+
+        assert receiver._dispatcher.adapter is adapter
+        assert adapter.targets_stage() is replacement
+        assert receiver._dispatcher.mirror_stage is None
+
+        adapter.ensure_prim("/World/Rebound", "Xform")
+        assert replacement.GetPrimAtPath("/World/Rebound")
+        assert not original.GetPrimAtPath("/World/Rebound")
+    finally:
+        receiver.close()
+
+
+def test_receiver_surfaces_and_acknowledges_native_scene_rebuild():
+    class _ProjectionState:
+        native_scene_rebuild_required = True
+
+        def __init__(self):
+            self.acknowledgements = 0
+
+        def acknowledge_native_scene_rebuilt(self):
+            self.acknowledgements += 1
+            self.native_scene_rebuild_required = False
+
+        def close(self):
+            pass
+
+    receiver = UsdReceiver(
+        Usd.Stage.CreateInMemory(),
+        app_name="native-scene-recovery",
+        adapter=MockAdapter(),
+        persist_token=False,
+        reconnect=False,
+    )
+    state = _ProjectionState()
+    receiver._dispatcher._projection_state = state
+    receiver._started = True
+    receiver._receiver.connected = True
+    receiver._receiver._synchronized_event.set()
+    try:
+        assert receiver.native_scene_rebuild_required
+        assert receiver.status.phase is ClientPhase.RECOVERY_REQUIRED
+        assert "must be rebuilt" in receiver.status.reason
+
+        receiver.acknowledge_native_scene_rebuilt()
+
+        assert state.acknowledgements == 1
+        assert not receiver.native_scene_rebuild_required
+        assert receiver.status.phase is ClientPhase.READY
     finally:
         receiver.close()
 
