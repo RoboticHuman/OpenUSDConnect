@@ -149,5 +149,5 @@ def test_docker_uses_bundled_usd_pin():
     assert bundled_dependencies == [f"usd-core=={OPENUSD_CORE_VERSION}"]
     assert bundled_dependencies[0] in complete
     assert '"openusdconnect[complete]"' in dockerfile
-    assert "COPY pyproject.toml README.md LICENSE NOTICE" in dockerfile
-    assert "COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/" in dockerfile
+    assert '"openusdconnect[runtime]"' in dockerfile
+    assert "FROM build-base AS release-builder" in dockerfile

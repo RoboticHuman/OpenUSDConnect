@@ -88,9 +88,13 @@ jobs:
           if-no-files-found: error
 
   docker-image:
-    name: Docker image
+    name: Docker image (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [server, live-open, complete, mcp]
 
     steps:
       - name: Check out repository
@@ -107,4 +111,30 @@ jobs:
       - name: Build and smoke-test image
         run: >-
           uv run --frozen python scripts/build_distribution.py
-          --component docker --output-dir dist/package-output --clean-output
+          --component docker --docker-target ${{ matrix.target }}
+          --docker-tag openusdconnect-${{ matrix.target }}:ci
+          --output-dir dist/package-output --clean-output
+
+  docker-linux-packages:
+    name: Linux packages through Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and export Linux packages
+        run: >-
+          docker build --target release-packages
+          --build-arg OPENUSDCONNECT_BUILD_COMMIT=${{ github.sha }}
+          --output type=local,dest=dist/package-output .
+
+      - name: Upload packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-linux-docker
+          path: dist/package-output/
+          if-no-files-found: error

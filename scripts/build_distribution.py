@@ -49,6 +49,8 @@ from scripts.build_blender_addon import (
 )
 
 DEFAULT_COMPONENTS = ("python", "server", "blender", "unreal", "cpp-sdk", "docker")
+OPTIONAL_COMPONENTS = ("linux-packages",)
+DOCKER_TARGETS = ("server", "live-open", "complete", "mcp")
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,9 +478,7 @@ def build_server_bundle(
         )
     archive = _archive_server_bundle(bundle, output_dir, root_name)
     if smoke_test:
-        with _temporary_directory(
-            prefix="openusdconnect-extracted-server-package-"
-        ) as temporary:
+        with _temporary_directory(prefix="openusdconnect-extracted-server-package-") as temporary:
             _extract_server_bundle(archive, temporary)
             extracted_bundle = temporary / root_name
             _smoke_test_server_bundle(
@@ -675,11 +675,16 @@ def build_cpp_sdk(
     return _file_artifact("cpp-sdk", archive, "source-sdk")
 
 
-def build_docker(*, tag: str, smoke_test: bool, command: str) -> Artifact:
+def _docker_command_prefix(command: str) -> list[str]:
     prefix = shlex.split(command, posix=os.name != "nt")
     if not prefix:
         raise RuntimeError("Docker command cannot be empty")
-    _checked_run([*prefix, "build", "--tag", tag, "."])
+    return prefix
+
+
+def build_docker(*, tag: str, target: str, smoke_test: bool, command: str) -> Artifact:
+    prefix = _docker_command_prefix(command)
+    _checked_run([*prefix, "build", "--target", target, "--tag", tag, "."])
     image = _checked_run(
         [
             *prefix,
@@ -697,6 +702,18 @@ def build_docker(*, tag: str, smoke_test: bool, command: str) -> Artifact:
     architecture = {"amd64": "x64", "arm64": "arm64"}.get(image_arch, image_arch)
     if smoke_test:
         _checked_run([*prefix, "run", "--rm", tag, "--help"], timeout=30.0)
+        if target == "mcp":
+            return Artifact(
+                component="docker",
+                name=tag,
+                kind="docker-image",
+                target=f"{image_os}-{architecture}",
+                metadata={
+                    "docker_target": target,
+                    "image_id": image_id_value,
+                    "image_size": int(image_size),
+                },
+            )
         container = f"openusdconnect-release-smoke-{os.getpid()}"
         _checked_run(
             [*prefix, "run", "--detach", "--name", container, tag],
@@ -736,6 +753,34 @@ def build_docker(*, tag: str, smoke_test: bool, command: str) -> Artifact:
                 raise RuntimeError(
                     f"Docker smoke container did not become healthy ({status}):\n{logs}"
                 )
+            if target in {"live-open", "complete"}:
+                _checked_run(
+                    [
+                        *prefix,
+                        "exec",
+                        container,
+                        "python",
+                        "-c",
+                        "import urllib.request; "
+                        "urllib.request.urlopen('http://127.0.0.1:7280/usd/scene.usd', "
+                        "timeout=3).read()",
+                    ],
+                    timeout=30.0,
+                )
+            if target == "complete":
+                _checked_run(
+                    [
+                        *prefix,
+                        "exec",
+                        container,
+                        "python",
+                        "-c",
+                        "import urllib.request; "
+                        "urllib.request.urlopen('http://127.0.0.1:8080/api/status', "
+                        "timeout=3).read()",
+                    ],
+                    timeout=30.0,
+                )
         finally:
             subprocess.run(
                 [*prefix, "rm", "--force", container],
@@ -749,13 +794,95 @@ def build_docker(*, tag: str, smoke_test: bool, command: str) -> Artifact:
         name=tag,
         kind="docker-image",
         target=f"{image_os}-{architecture}",
-        metadata={"image_id": image_id_value, "image_size": int(image_size)},
+        metadata={
+            "docker_target": target,
+            "image_id": image_id_value,
+            "image_size": int(image_size),
+        },
     )
+
+
+def _build_commit() -> str:
+    commit = os.environ.get("OPENUSDCONNECT_BUILD_COMMIT") or os.environ.get("GITHUB_SHA")
+    if commit:
+        return commit
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def build_linux_packages_with_docker(
+    output_dir: Path,
+    staging: Path,
+    *,
+    command: str,
+) -> list[Artifact]:
+    prefix = _docker_command_prefix(command)
+    exported = staging / "docker-linux-packages"
+    if exported.exists():
+        shutil.rmtree(exported)
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    relative_export = exported.relative_to(REPO_ROOT).as_posix()
+    _checked_run(
+        [
+            *prefix,
+            "build",
+            "--target",
+            "release-packages",
+            "--build-arg",
+            f"OPENUSDCONNECT_BUILD_COMMIT={_build_commit()}",
+            "--output",
+            f"type=local,dest={relative_export}",
+            ".",
+        ]
+    )
+    manifest_path = exported / "release-manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("Docker Linux package build did not export a release manifest")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = []
+    for record in manifest.get("artifacts", []):
+        packaged_path = record.get("path")
+        if not packaged_path:
+            continue
+        source = exported / Path(packaged_path).name
+        if not source.is_file():
+            raise RuntimeError(f"Docker Linux package build omitted {source.name}")
+        destination = output_dir / source.name
+        portable_duplicate = record["kind"] == "source-sdk" or (
+            record["component"] == "python" and source.name.endswith(".tar.gz")
+        )
+        if destination.exists():
+            if portable_duplicate:
+                continue
+            raise RuntimeError(f"Docker Linux package collides with existing {destination.name}")
+        shutil.copy2(source, destination)
+        artifacts.append(
+            _file_artifact(
+                f"linux-{record['component']}",
+                destination,
+                record["kind"],
+                target=record.get("target") or "linux-x64",
+                metadata={"built_with": "docker"},
+            )
+        )
+    if not artifacts:
+        raise RuntimeError("Docker Linux package build exported no file artifacts")
+    return artifacts
 
 
 def _components(values: list[str]) -> list[str]:
     requested = values or ["all"]
-    expanded = list(DEFAULT_COMPONENTS) if "all" in requested else requested
+    expanded = (
+        [*DEFAULT_COMPONENTS, *(value for value in requested if value != "all")]
+        if "all" in requested
+        else requested
+    )
     return list(dict.fromkeys(expanded))
 
 
@@ -764,7 +891,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--component",
         action="append",
-        choices=(*DEFAULT_COMPONENTS, "all"),
+        choices=(*DEFAULT_COMPONENTS, *OPTIONAL_COMPONENTS, "all"),
         default=[],
         help="Artifact to build; repeat as needed. Default: all.",
     )
@@ -788,6 +915,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--docker-tag", default=f"openusdconnect-server:{_version()}")
     parser.add_argument(
+        "--docker-target",
+        choices=DOCKER_TARGETS,
+        default="server",
+        help="Docker runtime image target. Default: server.",
+    )
+    parser.add_argument(
         "--docker-command",
         default=os.environ.get("OPENUSDCONNECT_DOCKER_COMMAND", "docker"),
         help="Docker CLI command or command prefix",
@@ -797,16 +930,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _write_release_manifest(output_dir: Path, artifacts: list[Artifact]) -> None:
-    commit = os.environ.get("OPENUSDCONNECT_BUILD_COMMIT") or os.environ.get("GITHUB_SHA")
-    if not commit:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        commit = result.stdout.strip() if result.returncode == 0 else "unknown"
     artifact_records = []
     for artifact in artifacts:
         record = asdict(artifact)
@@ -816,7 +939,7 @@ def _write_release_manifest(output_dir: Path, artifacts: list[Artifact]) -> None
     manifest = {
         "schema": 1,
         "version": _version(),
-        "commit": commit,
+        "commit": _build_commit(),
         "host": {"platform": _platform_tag(), "python": platform.python_version()},
         "artifacts": artifact_records,
     }
@@ -914,7 +1037,16 @@ def main(argv: list[str] | None = None) -> int:
             artifacts.append(
                 build_docker(
                     tag=args.docker_tag,
+                    target=args.docker_target,
                     smoke_test=args.smoke_test,
+                    command=args.docker_command,
+                )
+            )
+        if "linux-packages" in components:
+            artifacts.extend(
+                build_linux_packages_with_docker(
+                    output_dir,
+                    staging,
                     command=args.docker_command,
                 )
             )

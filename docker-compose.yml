@@ -1,33 +1,91 @@
+x-server-common: &server-common
+  init: true
+  stop_grace_period: 20s
+  environment:
+    OPENUSDCONNECT_HEALTH_PORT: "${OPENUSDCONNECT_PORT:-7200}"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    - ./test_scene.usda:/scenes/scene.usda:ro
+    - server-data:/data
+
 services:
   server:
+    <<: *server-common
+    image: openusdconnect-server:local
     build:
       context: .
+      target: server
     ports:
-      - "7200:7200"
-      - "7280:7280"
-      - "8080:8080"
-    volumes:
-      - ./scenes:/scenes
-      - server-data:/data
+      - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"
     command:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "7200"
-      - "--base"
-      - "/scenes/test_scene.usda"
-      - "--event-log"
-      - "/data/events.db"
-      - "--dashboard-port"
-      - "8080"
-      - "--vfs-host"
-      - "0.0.0.0"
-      - "--vfs-port"
-      - "7280"
-      - "--advertise-host"
-      - "127.0.0.1"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${OPENUSDCONNECT_PORT:-7200}"
+      - --base
+      - /scenes/scene.usda
+      - --event-log
+      - /data/events.db
+
+  server-live-open:
+    <<: *server-common
+    image: openusdconnect-server:live-open
+    build:
+      context: .
+      target: live-open
+    ports:
+      - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"
+      - "${OPENUSDCONNECT_VFS_PORT:-7280}:${OPENUSDCONNECT_VFS_PORT:-7280}"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${OPENUSDCONNECT_PORT:-7200}"
+      - --base
+      - /scenes/scene.usda
+      - --event-log
+      - /data/events.db
+      - --vfs-host
+      - 0.0.0.0
+      - --vfs-port
+      - "${OPENUSDCONNECT_VFS_PORT:-7280}"
+      - --advertise-host
+      - "${OPENUSDCONNECT_ADVERTISE_HOST:-127.0.0.1}"
     profiles:
-      - default
+      - live-open
+
+  server-complete:
+    <<: *server-common
+    image: openusdconnect-server:complete
+    build:
+      context: .
+      target: complete
+    ports:
+      - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"
+      - "${OPENUSDCONNECT_VFS_PORT:-7280}:${OPENUSDCONNECT_VFS_PORT:-7280}"
+      - "${OPENUSDCONNECT_DASHBOARD_PORT:-8080}:${OPENUSDCONNECT_DASHBOARD_PORT:-8080}"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${OPENUSDCONNECT_PORT:-7200}"
+      - --base
+      - /scenes/scene.usda
+      - --event-log
+      - /data/events.db
+      - --vfs-host
+      - 0.0.0.0
+      - --vfs-port
+      - "${OPENUSDCONNECT_VFS_PORT:-7280}"
+      - --advertise-host
+      - "${OPENUSDCONNECT_ADVERTISE_HOST:-127.0.0.1}"
+      - --dashboard-port
+      - "${OPENUSDCONNECT_DASHBOARD_PORT:-8080}"
+    profiles:
+      - complete
 
 volumes:
   server-data:

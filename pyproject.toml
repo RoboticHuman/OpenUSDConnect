@@ -69,6 +69,14 @@ dependencies = [
 [project.optional-dependencies]
 # Customer-facing installation profiles. Dependency groups below remain the
 # contributor environments used by uv sync.
+runtime = [
+    "usd-core==26.8",
+]
+vfs = [
+    "cheroot==10.0.1",
+    "usd-core==26.8",
+    "wsgidav==4.3.3",
+]
 server = [
     "cheroot==10.0.1",
     "nicegui==3.9.0",

@@ -272,13 +272,26 @@ plugins. The [testing guide](docs/testing-setup.md) lists every tier.
 
 ## Docker
 
-The included image uses the renderer-neutral `usd-core` runtime:
+The default image is the plain TCP sync server and uses the renderer-neutral
+`usd-core` runtime:
 
 ```bash
 docker build -t openusdconnect-server .
-docker run -p 7200:7200 -v ./scenes:/scenes \
-  openusdconnect-server --base /scenes/scene.usda
+docker compose up --build server
 ```
+
+Additional image targets add only the services they need:
+
+```bash
+docker compose --profile live-open up --build server-live-open
+docker compose --profile complete up --build server-complete
+docker build --target mcp -t openusdconnect-mcp .
+```
+
+The live-open profile exposes WebDAV on `7280`; the complete profile also
+exposes the dashboard on `8080`. See
+[Packaging and distribution](docs/distribution.md) for image targets and the
+optional Docker-based Linux artifact build.
 
 ## Acknowledgments
 

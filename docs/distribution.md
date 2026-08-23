@@ -87,6 +87,10 @@ uv tool install "openusdconnect[complete]"
 and the MCP runtime. `complete` includes both. The base package remains
 suitable for a host that already supplies its own OpenUSD runtime.
 
+The smaller `runtime` and `vfs` profiles back the container targets. `runtime`
+contains the TCP server and OpenUSD; `vfs` adds WebDAV without the dashboard or
+MCP dependencies.
+
 ## Blender packages
 
 Pass the exact Blender executable being targeted:
@@ -126,14 +130,48 @@ the matching header-only FlatBuffers runtime. Consumers can use
 `add_subdirectory()` and link `OpenUSDConnect::ClientCore` or
 `OpenUSDConnect::ClientProtocol`.
 
-Build the container directly or through the release command:
+The Dockerfile exposes separate runtime targets:
+
+| Target | Contents |
+| --- | --- |
+| `server` | TCP sync server and OpenUSD |
+| `live-open` | TCP server, OpenUSD, and WebDAV live-open |
+| `complete` | TCP server, live-open, dashboard, and MCP package support |
+| `mcp` | Stdio MCP server and OpenUSD |
+
+A plain Docker build intentionally selects `server`. Build another target
+explicitly or use the matching Compose profile:
 
 ```bash
 docker build -t openusdconnect-server .
-uv run python scripts/build_distribution.py --component docker
+docker build --target mcp -t openusdconnect-mcp .
+docker compose --profile live-open up --build server-live-open
+docker compose --profile complete up --build server-complete
 ```
 
-The runtime image contains the complete server profile and runs as a non-root
-user. `docker compose up server` exposes sync, VFS, and dashboard ports.
+All runtime targets are multi-stage, resolve dependencies from `uv.lock`,
+exclude compilers and wheel caches, run as a non-root user, and include a
+health check where applicable. Build and test a specific image through the
+release command with `--docker-target`:
+
+```bash
+uv run python scripts/build_distribution.py \
+  --component docker --docker-target complete
+```
+
+Docker can also produce the portable Linux artifacts on a Windows or macOS
+build host. This exports the Linux Python wheel/source archive,
+self-contained server, and C++ SDK; Blender and Unreal remain native host
+builds because they must match the selected DCC Python ABI or Unreal Engine:
+
+```bash
+docker build --target release-packages \
+  --build-arg OPENUSDCONNECT_BUILD_COMMIT=$(git rev-parse HEAD) \
+  --output type=local,dest=dist/linux .
+
+uv run python scripts/build_distribution.py \
+  --component linux-packages --clean-output
+```
+
 Use `--docker-command` when the Docker CLI requires a command prefix, such as a
 specific WSL distribution or a remote Docker context.

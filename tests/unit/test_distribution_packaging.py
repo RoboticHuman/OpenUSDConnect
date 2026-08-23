@@ -97,6 +97,8 @@ def test_customer_install_profiles_match_packaged_entrypoints():
     extras = project["project"]["optional-dependencies"]
     scripts = project["project"]["scripts"]
 
+    assert extras["runtime"] == ["usd-core==26.8"]
+    assert "wsgidav==4.3.3" in extras["vfs"]
     assert "usd-core==26.8" in extras["server"]
     assert "usd-core==26.8" in extras["mcp"]
     assert "mcp>=1.2,<2" in extras["complete"]
@@ -106,21 +108,106 @@ def test_customer_install_profiles_match_packaged_entrypoints():
 
 def test_docker_runtime_is_multistage_non_root_and_health_checked():
     dockerfile = (distribution.REPO_ROOT / "Dockerfile").read_text()
-    runtime = dockerfile.split("FROM python:3.13-slim AS runtime", maxsplit=1)[1]
+    runtime = dockerfile.split("FROM python:3.13-slim AS runtime-base", maxsplit=1)[1]
 
-    assert dockerfile.count("FROM python:3.13-slim") == 2
     assert "build-essential" not in runtime
-    assert '"openusdconnect[complete]"' in runtime
+    for target, profile in (
+        ("server", "runtime"),
+        ("live-open", "vfs"),
+        ("complete", "complete"),
+        ("mcp", "mcp"),
+    ):
+        assert f"FROM runtime-base AS {target}" in dockerfile
+        assert f'"openusdconnect[{profile}]"' in dockerfile
     assert "USER openusdconnect" in runtime
     assert "HEALTHCHECK" in runtime
+    assert "uv export --frozen" in dockerfile
+    assert "--mount=type=bind,from=wheel-builder" in dockerfile
+    assert "FROM build-base AS release-builder" in dockerfile
+    assert "FROM scratch AS release-packages" in dockerfile
+
+
+def test_compose_defaults_to_plain_server_and_uses_existing_scene():
+    compose = (distribution.REPO_ROOT / "docker-compose.yml").read_text()
+
+    assert "./test_scene.usda:/scenes/scene.usda:ro" in compose
+    assert "target: server" in compose
+    assert "target: live-open" in compose
+    assert "target: complete" in compose
+    assert "server-live-open:" in compose
+    assert "server-complete:" in compose
+    assert "cap_drop:" in compose
+
+
+def test_docker_context_excludes_local_runtimes_and_assets():
+    ignored = (distribution.REPO_ROOT / ".dockerignore").read_text().splitlines()
+
+    for path in (".git/", ".openusd/", ".tmp/", "MVP/", "assets/", "build/", "tests/"):
+        assert path in ignored
 
 
 def test_all_component_expansion_is_stable():
     assert distribution._components(["all"]) == list(distribution.DEFAULT_COMPONENTS)
+    assert distribution._components(["all", "linux-packages"]) == [
+        *distribution.DEFAULT_COMPONENTS,
+        "linux-packages",
+    ]
     assert distribution._components(["python", "python", "cpp-sdk"]) == [
         "python",
         "cpp-sdk",
     ]
+
+
+def test_docker_linux_package_export_is_added_to_release(tmp_path, monkeypatch):
+    staging = distribution.REPO_ROOT / "build" / f"distribution-test-{tmp_path.name}"
+    exported = staging / "docker-linux-packages"
+    existing_sdk = tmp_path / "openusdconnect-client-sdk.zip"
+    existing_sdk.write_bytes(b"host-sdk")
+
+    def fake_run(_command, **_kwargs):
+        exported.mkdir(parents=True)
+        package = exported / "openusdconnect-server-linux.tar.gz"
+        package.write_bytes(b"linux-package")
+        sdk = exported / existing_sdk.name
+        sdk.write_bytes(b"docker-sdk")
+        (exported / "release-manifest.json").write_text(
+            json.dumps(
+                {
+                    "artifacts": [
+                        {
+                            "component": "server",
+                            "kind": "self-contained-runtime",
+                            "path": package.name,
+                            "target": "linux-x64",
+                        },
+                        {
+                            "component": "cpp-sdk",
+                            "kind": "source-sdk",
+                            "path": sdk.name,
+                            "target": None,
+                        },
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr(distribution, "_checked_run", fake_run)
+    try:
+        artifacts = distribution.build_linux_packages_with_docker(
+            tmp_path,
+            staging,
+            command="docker",
+        )
+    finally:
+        if staging.exists():
+            distribution.shutil.rmtree(staging)
+
+    assert len(artifacts) == 1
+    assert artifacts[0].component == "linux-server"
+    assert artifacts[0].target == "linux-x64"
+    assert artifacts[0].metadata == {"built_with": "docker"}
+    assert (tmp_path / "openusdconnect-server-linux.tar.gz").read_bytes() == b"linux-package"
+    assert existing_sdk.read_bytes() == b"host-sdk"
 
 
 def test_windows_bundle_smoke_terminates_launcher_process_tree(monkeypatch):

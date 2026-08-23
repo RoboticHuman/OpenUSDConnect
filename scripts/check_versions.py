@@ -161,9 +161,11 @@ def collect_errors() -> list[str]:
     if f"python:{python_minor}-slim" not in _docker_base_images(docker):
         errors.append("Docker Python image must match .python-version")
 
-    if '"openusdconnect[complete]"' not in docker:
-        errors.append("Docker runtime must install the complete package profile")
-    complete = pyproject["project"]["optional-dependencies"].get("complete", [])
+    profiles = pyproject["project"]["optional-dependencies"]
+    for profile in ("runtime", "vfs", "complete", "mcp"):
+        if f'"openusdconnect[{profile}]"' not in docker:
+            errors.append(f"Docker must install its {profile} package profile")
+    complete = profiles.get("complete", [])
     for group, package in (
         ("bundled-usd", "usd-core"),
         ("vfs", "wsgidav"),
@@ -176,6 +178,30 @@ def collect_errors() -> list[str]:
             errors.append(
                 f"Complete package {package} pin must match pyproject dependency group {group}"
             )
+    for profile, requirements in (
+        ("runtime", (("bundled-usd", "usd-core"),)),
+        (
+            "vfs",
+            (
+                ("bundled-usd", "usd-core"),
+                ("vfs", "wsgidav"),
+                ("vfs", "cheroot"),
+            ),
+        ),
+        ("mcp", (("bundled-usd", "usd-core"),)),
+    ):
+        packaged_requirements = profiles.get(profile, [])
+        for group, package in requirements:
+            expected = _dependency_pin(pyproject, group, package)
+            packaged = _requirement_pin(packaged_requirements, package)
+            if not expected or packaged != expected:
+                errors.append(
+                    f"{profile.title()} package {package} pin must match "
+                    f"pyproject dependency group {group}"
+                )
+    mcp_requirements = pyproject["dependency-groups"]["mcp"]
+    if len(mcp_requirements) != 1 or mcp_requirements[0] not in profiles.get("mcp", []):
+        errors.append("MCP package requirement must match pyproject dependency group mcp")
 
     bundled_openusd = _dependency_pin(pyproject, "bundled-usd", "usd-core")
     if openusd.get("usd_core") != bundled_openusd:
