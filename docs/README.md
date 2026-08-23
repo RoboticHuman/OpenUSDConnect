@@ -25,6 +25,7 @@ linked from the shorter workflow guides.
 | Install and operate the Unreal Engine plugin | [Unreal Engine plugin](../integrations/unreal/OpenUSDConnect/README.md) |
 | Author and inspect scenes through an MCP client | [MCP server usage](mcp-server-usage.md) |
 | Work with synchronized materials and shaders | [Live material editing](live-material-editing.md) |
+| Build installable release artifacts | [Packaging and distribution](distribution.md) |
 
 ## Understand
 

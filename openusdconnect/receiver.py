@@ -152,6 +152,12 @@ class ReceiverThread(threading.Thread):
     def last_seq(self) -> int:
         return self._inbox.last_sequence
 
+    @property
+    def queued_message_count(self) -> int:
+        """Number of received messages waiting for the owning thread to drain."""
+
+        return self._inbox.size
+
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Wait for the current handshake result, not for replay completion."""
         if self.connected:

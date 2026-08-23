@@ -1,0 +1,110 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-packages:
+    name: Core packages (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: macos-14
+            target: macos
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Build and smoke-test packages
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component python --component server --component cpp-sdk
+          --output-dir dist/package-output --clean-output
+
+      - name: Upload packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-${{ matrix.target }}
+          path: dist/package-output/
+          if-no-files-found: error
+
+  blender-packages:
+    name: Blender package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: blender-windows-x64
+          - os: ubuntu-latest
+            target: blender-linux-x64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Download portable Blender LTS
+        run: uv run --frozen python scripts/setup_blender_test.py --lts
+
+      - name: Build and smoke-test Blender package
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component blender --output-dir dist/package-output --clean-output
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-${{ matrix.target }}
+          path: dist/package-output/
+          if-no-files-found: error
+
+  docker-image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Build and smoke-test image
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component docker --output-dir dist/package-output --clean-output

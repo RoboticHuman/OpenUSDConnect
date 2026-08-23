@@ -17,10 +17,8 @@ def _is_windows() -> bool:
 
 
 def python_executable() -> str:
-    """Return the real interpreter instead of a short-lived uv launcher."""
+    """Return the active interpreter, preserving its installed native modules."""
 
-    if _is_windows():
-        return str(getattr(sys, "_base_executable", sys.executable))
     return sys.executable
 
 

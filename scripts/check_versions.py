@@ -31,15 +31,19 @@ def _blender_info() -> dict:
     return _assignment("integrations/blender/__init__.py", "bl_info")
 
 
+def _requirement_pin(dependencies: list[str], package: str) -> str | None:
+    prefix = f"{package}=="
+    matches = [item[len(prefix) :] for item in dependencies if item.lower().startswith(prefix)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _dependency_pin(pyproject: dict, group: str, package: str) -> str | None:
     dependencies = (
         pyproject["project"]["dependencies"]
         if group == "project"
         else pyproject["dependency-groups"][group]
     )
-    prefix = f"{package}=="
-    matches = [item[len(prefix) :] for item in dependencies if item.lower().startswith(prefix)]
-    return matches[0] if len(matches) == 1 else None
+    return _requirement_pin(dependencies, package)
 
 
 def _generated_flatbuffers_version() -> str | None:
@@ -157,7 +161,9 @@ def collect_errors() -> list[str]:
     if f"python:{python_minor}-slim" not in _docker_base_images(docker):
         errors.append("Docker Python image must match .python-version")
 
-    docker_pins = _docker_pip_pins(docker)
+    if '"openusdconnect[complete]"' not in docker:
+        errors.append("Docker runtime must install the complete package profile")
+    complete = pyproject["project"]["optional-dependencies"].get("complete", [])
     for group, package in (
         ("bundled-usd", "usd-core"),
         ("vfs", "wsgidav"),
@@ -165,8 +171,11 @@ def collect_errors() -> list[str]:
         ("dashboard", "nicegui"),
     ):
         expected = _dependency_pin(pyproject, group, package)
-        if not expected or docker_pins.get(package) != expected:
-            errors.append(f"Docker {package} pin must match pyproject dependency group {group}")
+        packaged = _requirement_pin(complete, package)
+        if not expected or packaged != expected:
+            errors.append(
+                f"Complete package {package} pin must match pyproject dependency group {group}"
+            )
 
     bundled_openusd = _dependency_pin(pyproject, "bundled-usd", "usd-core")
     if openusd.get("usd_core") != bundled_openusd:

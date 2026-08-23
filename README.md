@@ -127,6 +127,8 @@ Do not add `bundled-usd` when using the project runtime path above.
 Build the Blender add-on with `uv run python scripts/build_blender_addon.py`, or
 start a connected usdview session with
 `uv run python scripts/start_usdview.py test_scene.usda`.
+For self-contained server, DCC, Python, C++, and container artifacts, see
+[Packaging and distribution](docs/distribution.md).
 
 ### Run the cross-application Material Zoo
 

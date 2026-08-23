@@ -2,37 +2,6 @@ services:
   server:
     build:
       context: .
-      args:
-        DASHBOARD: "0"
-    ports:
-      - "7200:7200"
-      - "7280:7280"
-    volumes:
-      - ./scenes:/scenes
-      - server-data:/data
-    command:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "7200"
-      - "--base"
-      - "/scenes/test_scene.usda"
-      - "--event-log"
-      - "/data/events.db"
-      - "--vfs-host"
-      - "0.0.0.0"
-      - "--vfs-port"
-      - "7280"
-      - "--advertise-host"
-      - "127.0.0.1"
-    profiles:
-      - default
-
-  server-dashboard:
-    build:
-      context: .
-      args:
-        DASHBOARD: "1"
     ports:
       - "7200:7200"
       - "7280:7280"
@@ -58,7 +27,7 @@ services:
       - "--advertise-host"
       - "127.0.0.1"
     profiles:
-      - dashboard
+      - default
 
 volumes:
   server-data:
