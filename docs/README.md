@@ -38,8 +38,8 @@ linked from the shorter workflow guides.
 
 ## Extend
 
-- [USD-native Python API](usd-native-integration.md): lifecycle, stage
-  ownership, managed clients, publishers, receivers, and resolver behavior.
+- [Python client and host-integration API](usd-native-integration.md): lifecycle,
+  stage ownership, native adapters, publishers, receivers, and resolver behavior.
 - [Shared stage architecture](shared-stage-architecture.md): exact file-layer
   synchronization and its protocol.
 - [MCP integration layout](../integrations/mcp/README.md#layout): extension

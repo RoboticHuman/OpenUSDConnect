@@ -1,4 +1,4 @@
-# USD-native Python API
+# Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
 Network I/O runs on background threads. Stage mutation does not: the
@@ -9,7 +9,7 @@ application must call `update()` from the stage-owning thread.
 | API | Direction | Layer model | Typical use |
 | --- | --- | --- | --- |
 | `ManagedClient` | Bidirectional | Server-owned collaboration layers plus one client-owned authoring layer | USD editor or DCC integration |
-| `UsdReceiver` | Receive | Server-owned collaboration layers | Viewer or read-only service |
+| `UsdReceiver` | Receive | Server-owned collaboration layers | USD viewer or `DCCAdapter`-backed native scene |
 | `UsdPublisher` | Send | Current edit-target layer | Producer with a separate receive stage, or send-only tool |
 | `SharedStageClient` | Bidirectional | Existing portable root and recursive sublayers | Exact production-layer editing |
 
@@ -47,6 +47,10 @@ All high-level clients use the same lifecycle:
 or `CLOSED`. Bidirectional applications should enable editing only in `READY`.
 The directional connection fields distinguish partial connectivity from a
 role that is not present.
+
+An adapter-backed `UsdReceiver` also enters `RECOVERY_REQUIRED` when resolver
+recomposition makes incremental projection unsafe. Rebuild the native scene,
+then call `acknowledge_native_scene_rebuilt()`.
 
 `ManagedClient.update()` and `SharedStageClient.update()` return `SyncUpdate`:
 
@@ -97,6 +101,36 @@ Application callbacks such as `on_applied` and `on_applied_events` run inside
 `update()` on the calling thread. Transport callbacks, including token,
 metadata, and playback notifications, may run on a background connection
 thread and must be marshalled before touching a UI.
+
+### Receive into an application-owned scene
+
+For a host that does not use a `Usd.Stage` as its scene, pass a `DCCAdapter` to
+the same high-level receiver. The stage becomes a composition mirror; only the
+adapter mutates the host scene:
+
+```python
+from pxr import Usd
+
+from openusdconnect import UsdReceiver
+
+mirror_stage = Usd.Stage.Open("shot.usda")
+adapter = MyHostAdapter(document)
+
+with UsdReceiver(
+    mirror_stage,
+    app_name="my-host",
+    adapter=adapter,
+    on_resync=adapter.reset,
+) as client:
+    while application_is_running():
+        client.update()  # call from the host's scene/UI thread
+```
+
+The client owns transport, replay, logical collaboration layers, and composed
+projection. The integration owns the adapter's mapping to native objects,
+stable object identity, units and axes, undo policy, and UI-thread scheduling.
+It must open equivalent base content in the mirror so OpenUSD composition sees
+the same references and weaker opinions as other participants.
 
 ## Publish USD edits
 
@@ -194,6 +228,11 @@ without raising from an ordinary interactive `update()`. See
 [Client recovery](client-recovery.md) before designing the host UI.
 
 ## Adapter destination contract
+
+`DCCAdapter` is the receiving boundary for an application-owned scene. It is
+not the outbound document-change observer. A bidirectional host separately
+captures its native edits and publishes them, commonly through an authoring
+stage and `UsdPublisher`.
 
 Layered receivers always reconstruct authoritative state in a USD mirror. What
 happens next depends on `DCCAdapter.targets_stage()`:
@@ -296,10 +335,11 @@ dependencies.
 A context-only resolver remap is a special case for adapters targeting a
 non-USD native scene. It can recompose both the live and previous-state stages
 before projection observes the old topology. The dispatcher then sets
-`native_scene_rebuild_required` and stops incremental delivery. Recreate or
-rebind the receiver/dispatcher, or rebuild the native destination and call
-`acknowledge_native_scene_rebuilt()` before resuming. An ordinary reconnect
-does not clear this guard.
+`native_scene_rebuild_required` and stops incremental delivery. The high-level
+client exposes this through `client.native_scene_rebuild_required` and
+`client.status`. Rebuild the native destination and call
+`client.acknowledge_native_scene_rebuilt()` before resuming. An ordinary
+reconnect does not clear this guard.
 
 ## Identity and authentication
 
@@ -314,9 +354,11 @@ and use `on_token_issued` to integrate with a host-specific store.
 ## Low-level APIs
 
 `NoticeEmitter`, `EventSender`, `ReceiverThread`, and `EventDispatcher` remain
-public for custom scheduling, DCC adapters, and constrained flat snapshot
-continuation. `ReceiverThread` requests layered replay by default; passing
-`layered_replay=False` selects the single-layer flat contract.
+public for integrations whose scheduling or continuation requirements cannot
+use the high-level clients. `ReceiverThread` requests layered replay by default;
+passing `layered_replay=False` selects the single-layer flat contract. Ordinary
+native-scene integrations should use `UsdReceiver(adapter=...)` instead of
+assembling these components.
 
 Construct low-level objects directly. Components exposed by a high-level
 client are diagnostic handles; mutating them bypasses the wrapper's lifecycle
