@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from pxr import Sdf, Usd, UsdGeom
 
-from openusdconnect import ClientPhase, RecoveryError, SyncUpdate, TransactionFailure
+from openusdconnect import (
+    ClientPhase,
+    MockAdapter,
+    RecoveryError,
+    SyncUpdate,
+    TransactionFailure,
+)
 from openusdconnect import coalescing as coalescing_module
 from openusdconnect.codec import TransactionRejectionCode
 from openusdconnect.managed_client import ManagedClient
@@ -143,6 +149,31 @@ def test_receiver_update_forwards_message_budget(monkeypatch):
 
         assert receiver.update(max_messages=128) == 3
         assert calls == [128]
+    finally:
+        receiver.close()
+
+
+def test_receiver_owns_external_adapter_projection_lifecycle():
+    mirror = Usd.Stage.CreateInMemory()
+    adapter = MockAdapter()
+    receiver = UsdReceiver(
+        mirror,
+        app_name="native-scene-receiver",
+        adapter=adapter,
+        persist_token=False,
+        reconnect=False,
+    )
+    try:
+        assert receiver.stage is mirror
+        assert receiver._dispatcher.adapter is adapter
+        assert receiver._dispatcher.mirror_stage is mirror
+
+        replacement = Usd.Stage.CreateInMemory()
+        receiver.rebind_stage(replacement)
+
+        assert receiver.stage is replacement
+        assert receiver._dispatcher.adapter is adapter
+        assert receiver._dispatcher.mirror_stage is replacement
     finally:
         receiver.close()
 

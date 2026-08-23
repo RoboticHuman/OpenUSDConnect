@@ -23,7 +23,7 @@ from ._client_utils import (
     resolve_client_token,
     validate_layered_source,
 )
-from .adapters import UsdStageAdapter
+from .adapters import DCCAdapter, UsdStageAdapter
 from .client_id import make_stable_client_id
 from .coalescing import TransformCoalescingWindow
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
@@ -46,10 +46,13 @@ _DEFAULT_PORT = 7200
 
 
 class UsdReceiver:
-    """Receive authoritative layered replay into one application-owned stage.
+    """Receive authoritative layered replay through a high-level lifecycle.
 
     ``start`` launches only the socket reader. ``update`` drains and applies
-    queued events synchronously and must run on the stage-owning thread.
+    queued events synchronously and must run on the stage- or scene-owning
+    thread. By default, events apply directly to ``stage``. Pass an external
+    ``DCCAdapter`` to keep ``stage`` as the composition mirror and project its
+    composed values into an application-owned scene.
     """
 
     def __init__(
@@ -64,6 +67,7 @@ class UsdReceiver:
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
+        adapter: DCCAdapter | None = None,
         on_imported: Callable[[list[str]], None] | None = None,
         on_resync: Callable[[], None] | None = None,
         on_applied: Callable[[list[str]], None] | None = None,
@@ -75,8 +79,11 @@ class UsdReceiver:
         on_token_issued: Callable[[str], None] | None = None,
     ):
         app_name = require_app_name(app_name)
-        adapter = UsdStageAdapter(stage)
+        if not isinstance(stage, Usd.Stage):
+            raise TypeError("UsdReceiver requires a Usd.Stage composition source")
         validate_layered_source(stage)
+        self._owns_stage_adapter = adapter is None
+        destination_adapter = adapter or UsdStageAdapter(stage)
         resolved_token = resolve_client_token(host, port, token, persist_token)
         self._stage = stage
         self._host = host
@@ -99,7 +106,8 @@ class UsdReceiver:
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
-            adapter=adapter,
+            adapter=destination_adapter,
+            mirror_stage=(None if destination_adapter.targets_stage() is stage else stage),
             on_imported=on_imported,
             on_resync=on_resync,
             on_applied=on_applied,
@@ -110,7 +118,11 @@ class UsdReceiver:
 
     @property
     def stage(self) -> Usd.Stage | None:
-        """Application-owned stage receiving authoritative changes, or ``None`` while parked."""
+        """Composition stage receiving authoritative changes, or ``None`` while parked.
+
+        With an external adapter this is the receiver's USD mirror, not the
+        adapter-owned destination scene.
+        """
         return self._stage
 
     @property
@@ -120,6 +132,8 @@ class UsdReceiver:
             phase = ClientPhase.CLOSED
         elif self.auth_rejected or self.connection_rejected:
             phase = ClientPhase.REJECTED
+        elif self.native_scene_rebuild_required:
+            phase = ClientPhase.RECOVERY_REQUIRED
         elif self.synchronized:
             phase = ClientPhase.READY
         elif self.connected:
@@ -133,7 +147,11 @@ class UsdReceiver:
             connected=self.connected,
             synchronized=self.synchronized,
             receiver_connected=self._receiver.connected,
-            reason=self._receiver.rejection_reason,
+            reason=(
+                "the adapter-owned scene must be rebuilt after resolver recomposition"
+                if self.native_scene_rebuild_required
+                else self._receiver.rejection_reason
+            ),
         )
 
     @property
@@ -177,6 +195,11 @@ class UsdReceiver:
     @property
     def pending_asset_dependencies(self) -> tuple[str, ...]:
         return self._dispatcher.pending_asset_dependencies
+
+    @property
+    def native_scene_rebuild_required(self) -> bool:
+        """Whether an external adapter destination needs a complete rebuild."""
+        return self._dispatcher.native_scene_rebuild_required
 
     def start(self) -> UsdReceiver:
         """Start the background socket reader and return this receiver."""
@@ -226,11 +249,11 @@ class UsdReceiver:
         return self._dispatcher.drain_and_apply(max_messages=max_messages)
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
-        """Move receive-side application and managed layers to a new stage.
+        """Move receive-side composition and managed layers to a new stage.
 
         Pass ``None`` to park: the receiver stays connected and the queue
         continues to fill, but ``update()`` returns zero until a new stage
-        is bound.
+        is bound. A caller-provided external adapter remains attached.
         """
         if self._closed:
             raise RuntimeError("UsdReceiver is closed")
@@ -238,10 +261,15 @@ class UsdReceiver:
             self._stage = None
             self._dispatcher.unbind_stage()
             return
-        adapter = UsdStageAdapter(stage)
+        if not isinstance(stage, Usd.Stage):
+            raise TypeError("UsdReceiver requires a Usd.Stage composition source")
         validate_layered_source(stage)
         self._stage = stage
-        self._dispatcher.adapter = adapter
+        if self._owns_stage_adapter:
+            self._dispatcher.adapter = UsdStageAdapter(stage)
+        self._dispatcher.mirror_stage = (
+            None if self._dispatcher.adapter.targets_stage() is stage else stage
+        )
         self._dispatcher.bind_layered_stage(stage)
 
     def refresh_asset_dependency(
@@ -252,6 +280,12 @@ class UsdReceiver:
         if self._closed:
             raise RuntimeError("UsdReceiver is closed")
         return self._dispatcher.refresh_asset_dependency(asset_path)
+
+    def acknowledge_native_scene_rebuilt(self) -> None:
+        """Resume projection after rebuilding an external adapter destination."""
+        if self._closed:
+            raise RuntimeError("UsdReceiver is closed")
+        self._dispatcher.acknowledge_native_scene_rebuilt()
 
     def close(self) -> None:
         """Stop networking and release receiver-owned collaboration layers."""
