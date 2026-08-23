@@ -251,6 +251,13 @@ Native projection can express only the adapter event vocabulary. Generic Sdf
 opinions remain correct in the mirror even when the native scene has no
 equivalent operation.
 
+The [Qt native-scene example](../examples/qt_native_viewer/README.md) shows this
+receive path in a standalone application. `UsdReceiver` maintains the USD
+composition mirror and delivers composed changes to a `DCCAdapter`; the
+viewport reads only the adapter-owned scene. To adapt the example for another
+host, replace `NativeSceneAdapter`'s in-memory mutations with calls to the host
+scene API and run `client.update()` from the thread that owns that scene.
+
 ## Shared authored-layer editing
 
 `SharedStageClient` synchronizes authored state in an existing portable root

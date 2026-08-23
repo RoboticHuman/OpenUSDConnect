@@ -60,6 +60,9 @@ mcp = [
 profile = [
     "py-spy==0.4.2",
 ]
+qt-example = [
+    "PySide6-Essentials==6.11.1",
+]
 visual = [
     "flip-evaluator==1.7",
 ]

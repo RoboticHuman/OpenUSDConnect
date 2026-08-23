@@ -119,6 +119,7 @@ Do not add `bundled-usd` when using the project runtime path above.
 | usdview plugin | Receive | [usdview guide](integrations/usdview/README.md) |
 | Unreal Engine plugin | Bidirectional, currently flat receive | [Unreal guide](integrations/unreal/OpenUSDConnect/README.md) |
 | Python / OpenUSD | Bidirectional | [USD-native API guide](docs/usd-native-integration.md) |
+| Custom native scene | Receive | [Qt integration example](examples/qt_native_viewer/README.md) |
 | MCP server | Author and inspect | `uv run --group mcp python -m integrations.mcp`; [MCP guide](docs/mcp-server-usage.md) |
 | Dashboard | Observe and administer | `uv run --group dashboard python scripts/demo_layer_dashboard.py` |
 
