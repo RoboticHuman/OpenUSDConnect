@@ -78,6 +78,10 @@ The C++ SDK supports `add_subdirectory()` and linking
 
 ## DCC builds
 
+Unreal smoke tests use the asset submodule: initialize it with
+`git submodule update --init assets`. Their Python dependencies are provisioned
+in an isolated environment by the builder.
+
 ```bash
 uv run python scripts/build_distribution.py \
   --component blender --blender /path/to/blender --output-dir dist/blender

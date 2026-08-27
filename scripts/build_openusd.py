@@ -315,6 +315,7 @@ def clone_command(plan: BuildPlan) -> list[str]:
     return [
         "git",
         "clone",
+        *(["--config", "core.longpaths=true"] if os.name == "nt" else []),
         "--branch",
         plan.pin.tag,
         "--depth",

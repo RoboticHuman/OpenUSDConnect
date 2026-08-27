@@ -148,6 +148,8 @@ def test_docker_uses_bundled_usd_pin():
 
     assert bundled_dependencies == [f"usd-core=={OPENUSD_CORE_VERSION}"]
     assert bundled_dependencies[0] in complete
-    assert '"openusdconnect[complete]"' in dockerfile
-    assert '"openusdconnect[runtime]"' in dockerfile
+    assert "--requirement /requirements/complete.txt" in dockerfile
+    assert "--only-group bundled-usd" in dockerfile
+    assert "--no-emit-package usd-core" in dockerfile
+    assert "--requirement /requirements/runtime.txt" in dockerfile
     assert "FROM build-base AS release-builder" in dockerfile

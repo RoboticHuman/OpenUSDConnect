@@ -35,7 +35,6 @@ if str(REPO_ROOT) not in sys.path:
 from integrations.unreal.test_harness import (  # noqa: E402
     package_plugin,
     resolve_engine,
-    run_unreal_e2e,
 )
 from scripts.build_blender_addon import (  # noqa: E402
     build_native_module,
@@ -612,11 +611,30 @@ def build_unreal(
         smoke_dir = staging / "unreal-smoke"
         if smoke_dir.exists():
             shutil.rmtree(smoke_dir)
-        run_unreal_e2e(
-            engine,
-            smoke_dir,
-            plugin_package=staged,
-            timeout=300.0,
+        env = os.environ.copy()
+        for key in ("PYTHONPATH", "PYTHONHOME", "OPENUSDCONNECT_USD_ROOT", "PXR_PLUGINPATH_NAME"):
+            env.pop(key, None)
+        _checked_run(
+            [
+                "uv",
+                "run",
+                "--isolated",
+                "--frozen",
+                "--extra",
+                "runtime",
+                "python",
+                str(REPO_ROOT / "scripts/run_unreal_tests.py"),
+                "--engine-root",
+                str(engine.root),
+                "--work-dir",
+                str(smoke_dir),
+                "--plugin-package",
+                str(staged),
+                "--timeout",
+                "300",
+            ],
+            env=env,
+            timeout=600.0,
         )
     archive = output_dir / f"{root_name}.zip"
     _zip_tree(staged.parent, archive, root_name)

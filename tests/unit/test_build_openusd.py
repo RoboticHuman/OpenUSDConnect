@@ -48,6 +48,14 @@ def test_pin_matches_openusd_lock():
     assert pin.commit == OPENUSD_COMMIT
 
 
+def test_windows_dependency_clone_enables_long_paths_locally(tmp_path):
+    pin, args = _args(tmp_path)
+    command = build_openusd.clone_command(build_openusd.create_plan(args, pin))
+    if build_openusd.os.name == "nt":
+        assert command[command.index("--config") + 1] == "core.longpaths=true"
+    assert "--global" not in command
+
+
 def test_runtime_profile_builds_headless_python_runtime(tmp_path):
     pin, args = _args(tmp_path)
     plan = build_openusd.create_plan(args, pin)
