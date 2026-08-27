@@ -108,7 +108,7 @@ def test_customer_install_profiles_match_packaged_entrypoints():
 
 def test_docker_runtime_is_multistage_non_root_and_health_checked():
     dockerfile = (distribution.REPO_ROOT / "Dockerfile").read_text()
-    runtime = dockerfile.split("FROM python:3.13-slim AS runtime-base", maxsplit=1)[1]
+    runtime = dockerfile.split("FROM python:3.13-slim-trixie AS runtime-base", maxsplit=1)[1]
 
     assert "build-essential" not in runtime
     for target, profile in (
@@ -118,13 +118,16 @@ def test_docker_runtime_is_multistage_non_root_and_health_checked():
         ("mcp", "mcp"),
     ):
         assert f"FROM runtime-base AS {target}" in dockerfile
-        assert f'"openusdconnect[{profile}]"' in dockerfile
+        assert f"--requirement /requirements/{profile}.txt" in dockerfile
     assert "USER openusdconnect" in runtime
     assert "HEALTHCHECK" in runtime
     assert "uv export --frozen" in dockerfile
     assert "--mount=type=bind,from=wheel-builder" in dockerfile
     assert "FROM build-base AS release-builder" in dockerfile
     assert "FROM scratch AS release-packages" in dockerfile
+    assert "FROM usd-${USD_PROFILE} AS usd-builder" in dockerfile
+    assert '"-I", "/opt/ouc/_launch.py"' in runtime
+    assert "--no-emit-package usd-core" in dockerfile
 
 
 def test_compose_defaults_to_plain_server_and_uses_existing_scene():
@@ -179,6 +182,7 @@ def test_docker_linux_package_export_is_added_to_release(tmp_path, monkeypatch):
                             "kind": "self-contained-runtime",
                             "path": package.name,
                             "target": "linux-x64",
+                            "metadata": {"openusd": {"profile": "full", "materialx": True}},
                         },
                         {
                             "component": "cpp-sdk",
@@ -205,9 +209,38 @@ def test_docker_linux_package_export_is_added_to_release(tmp_path, monkeypatch):
     assert len(artifacts) == 1
     assert artifacts[0].component == "linux-server"
     assert artifacts[0].target == "linux-x64"
-    assert artifacts[0].metadata == {"built_with": "docker"}
+    assert artifacts[0].metadata == {
+        "built_with": "docker",
+        "openusd": {"profile": "full", "materialx": True},
+    }
     assert (tmp_path / "openusdconnect-server-linux.tar.gz").read_bytes() == b"linux-package"
     assert existing_sdk.read_bytes() == b"host-sdk"
+
+
+def test_distribution_defaults_to_full_usd():
+    assert distribution._parser().parse_args([]).usd_profile == "full"
+    assert distribution._docker_usd_options("core", None, [], False) == [
+        "--build-arg",
+        "USD_PROFILE=core",
+    ]
+
+
+def test_external_docker_inputs_use_portable_relative_contexts(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, "REPO_ROOT", tmp_path / "repo")
+    source = tmp_path / "usd"
+    source.mkdir()
+    (source / "runtime-marker").touch()
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "plugInfo.json").write_text("{}")
+    options = distribution._docker_usd_options("external", source, [plugin], True)
+    assert "USD_PROFILE=external" in options
+    assert "ALLOW_UNPINNED_USD=1" in options
+    assert "usd_runtime=build/distribution/docker-inputs/runtime" in options
+    assert "usd_plugins=build/distribution/docker-inputs/plugins" in options
+    inputs = distribution.REPO_ROOT / "build/distribution/docker-inputs"
+    assert (inputs / "runtime/runtime-marker").exists()
+    assert (inputs / "plugins/0/plugInfo.json").exists()
 
 
 def test_windows_bundle_smoke_terminates_launcher_process_tree(monkeypatch):

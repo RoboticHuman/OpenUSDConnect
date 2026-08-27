@@ -1,177 +1,123 @@
 # Packaging and distribution
 
-`scripts/build_distribution.py` creates installable artifacts for each
-OpenUSDConnect consumer. Build only the components needed for a release; a
-Blender or Unreal package is always tied to the host version used to build it.
+`scripts/build_distribution.py` builds Python, standalone server/MCP, Blender,
+Unreal, C++ SDK, Docker, and Linux artifacts. Use the target platform's toolchain.
 
-| Artifact | Consumer setup | Compatibility boundary |
-| --- | --- | --- |
-| Self-contained server archive | Extract and run the included server or MCP launcher | Operating system and CPU architecture |
-| Python wheel and source archive | Install with `pip`, `uv pip`, or `uv tool` | Python 3.13+ and supported wheel platform |
-| Blender add-on ZIP | Install from Blender's Add-ons preferences | Operating system, CPU architecture, and Blender's embedded Python ABI |
-| Unreal Engine plugin ZIP | Extract to `<Project>/Plugins/OpenUSDConnect` | Unreal Engine version and target platform |
-| C++ client SDK ZIP | Add with CMake and link an exported target | C++17 compiler and target platform |
-| Docker image | Run with Docker or Compose | Container platform |
-
-Every file artifact is recorded in `release-manifest.json` and
-`SHA256SUMS`. Build metadata inside the server, Blender, and Unreal packages
-identifies the release and target used to create it.
-
-## Build release artifacts
-
-Install the repository environment first:
+## Build
 
 ```bash
 uv sync --frozen
+uv run python scripts/build_distribution.py \
+  --component python --component server --component cpp-sdk --usd-profile full
 ```
 
-Build any combination by repeating `--component`:
+Repeat `--component` to select outputs; its default, `all`, also requires
+Blender, Unreal Engine, and Docker. `linux-packages` is opt-in.
+Output defaults to `dist/release/<version>`; use `--output-dir PATH` to change it.
+Choose a new output directory for another build, or `--clean-output` to replace it.
+
+The builder writes `release-manifest.json` and file checksums in `SHA256SUMS`.
+Smoke tests run by default, including unattended Blender and Unreal checks in
+temporary profiles/projects. No manual UI interaction is required.
+These checks do not establish rendering support on every platform.
+
+## USD profiles
+
+`--usd-profile core|full|external` defaults to `full`. It selects USD for standalone
+server/MCP, Docker, and Linux artifacts, not Blender or Unreal's bundled USD.
+
+| Profile | Runtime |
+| --- | --- |
+| `full` | Pinned OpenUSD plus MaterialX, built from source without renderers, usdview, or Qt. |
+| `core` | Pinned `usd-core`, without MaterialX or custom plugins. |
+| `external` | Provided installation, validated for version, ABI, and capabilities before bundling. |
+
+`external` requires `--usd-root PATH`. Optional `--usd-plugin-path PATH` is
+repeatable; `--allow-unpinned-usd` permits a version outside the pin.
+All three options are external-only.
+The supplied runtime and plugins must match the package's OS, architecture, and
+Python version (`--server-python`, default `3.13`). The builder loads them before
+packaging; it does not rebuild external plugins or supply missing dependencies.
 
 ```bash
 uv run python scripts/build_distribution.py \
-  --component python \
-  --component server \
-  --component cpp-sdk
+  --component server --usd-profile external --usd-root /path/to/OpenUSD \
+  --usd-plugin-path /path/to/plugins
 ```
 
-The default output is `dist/release/<version>`. A subsequent build refuses to
-mix files into that release directory; pass `--clean-output` to replace it.
+Server archive names end in `-usd-core`, `-usd-full`, or `-usd-external` before
+the extension: `.zip` on Windows, `.tar.gz` on Linux/macOS.
+`usd-runtime.json` records the USD version, file formats, and plugin capabilities.
+Smoke tests check a relocated package and, when available, an external `.mtlx`
+reference through the server and VFS snapshot.
 
-The `all` component also requires Blender, Unreal Engine, and Docker:
+## Install
 
-```powershell
-uv run python scripts/build_distribution.py `
-  --component all `
-  --blender D:\path\to\blender.exe `
-  --unreal-engine D:\path\to\UnrealEngine `
-  --clean-output
-```
-
-Each component can be built independently on its target machine. This is the
-expected way to produce a platform matrix; do not copy a native DCC package to
-a different operating system, architecture, Python ABI, or engine version.
-Maintainers can run the dispatch-only `Build release packages` workflow to
-build and smoke-test core packages across Windows, Linux, and macOS and Blender
-packages across Windows and Linux. It uploads workflow artifacts but does not
-publish a release. Unreal packages remain engine-local builds.
-
-## Self-contained server and MCP
-
-The server archive contains its own Python runtime, OpenUSD, VFS and dashboard
-dependencies, and MCP server. Windows releases use ZIP; Linux and macOS use
-`tar.gz` so launcher permissions are preserved. The destination machine does
-not need Python or the repository.
-
-On Windows:
-
-```powershell
-.\openusdconnect-server.cmd --base C:\scenes\scene.usda --vfs-port 7280 --dashboard-port 8080
-.\openusdconnect-mcp.cmd --host 127.0.0.1 --port 7200
-```
-
-On Linux or macOS, use `./openusdconnect-server` and
-`./openusdconnect-mcp`.
-
-## Python installation profiles
-
-The wheel exposes installation profiles for consumers that prefer a managed
-Python environment:
+Extract a server archive and run its launchers without installing Python:
 
 ```bash
-uv tool install "openusdconnect[server]"
-uv tool install "openusdconnect[mcp]"
-uv tool install "openusdconnect[complete]"
+./openusdconnect-server --base scene.usda
+./openusdconnect-mcp --host 127.0.0.1 --port 7200
 ```
 
-`server` includes OpenUSD, WebDAV, and the dashboard. `mcp` includes OpenUSD
-and the MCP runtime. `complete` includes both. The base package remains
-suitable for a host that already supplies its own OpenUSD runtime.
+On Windows use `.\openusdconnect-server.cmd` and `.\openusdconnect-mcp.cmd`.
 
-The smaller `runtime` and `vfs` profiles back the container targets. `runtime`
-contains the TCP server and OpenUSD; `vfs` adds WebDAV without the dashboard or
-MCP dependencies.
+Install a built wheel in a managed Python environment:
 
-## Blender packages
-
-Pass the exact Blender executable being targeted:
-
-```powershell
-uv run python scripts/build_distribution.py `
-  --component blender `
-  --blender D:\path\to\blender.exe
+```bash
+uv pip install "path/to/openusdconnect-<version>-<tags>.whl"
 ```
 
-The builder queries Blender for its embedded Python version and extension
-suffix, compiles the native client for that ABI, creates a platform-tagged
-add-on ZIP, and installs it into a clean temporary Blender profile as a smoke
-test. The builder provisions a matching uv-managed Python development runtime
-for compilation. `--blender-python-sdk` is available for build environments
-that maintain an explicit matching SDK.
+The base wheel expects an existing USD runtime. Python extras `server`, `mcp`,
+and `complete` supply `usd-core` and service dependencies; they are separate from
+the distribution builder's USD profiles.
 
-## Unreal Engine packages
-
-BuildPlugin must run against each supported engine and target platform:
-
-```powershell
-uv run python scripts/build_distribution.py `
-  --component unreal `
-  --unreal-engine D:\path\to\UnrealEngine
-```
-
-The output contains the staged native client and pinned FlatBuffers headers,
-then removes build logs, intermediate files, and debug symbols from the
-customer archive. With smoke tests enabled, the cleaned package is installed
-into a temporary Unreal project and exercised by the integration harness.
-
-## C++ SDK and Docker
-
-The C++ SDK includes the native client core, generated protocol bindings, and
-the matching header-only FlatBuffers runtime. Consumers can use
-`add_subdirectory()` and link `OpenUSDConnect::ClientCore` or
+The C++ SDK supports `add_subdirectory()` and linking
+`OpenUSDConnect::ClientCore` or
 `OpenUSDConnect::ClientProtocol`.
 
-The Dockerfile exposes separate runtime targets:
-
-| Target | Contents |
-| --- | --- |
-| `server` | TCP sync server and OpenUSD |
-| `live-open` | TCP server, OpenUSD, and WebDAV live-open |
-| `complete` | TCP server, live-open, dashboard, and MCP package support |
-| `mcp` | Stdio MCP server and OpenUSD |
-
-A plain Docker build intentionally selects `server`. Build another target
-explicitly or use the matching Compose profile:
-
-```bash
-docker build -t openusdconnect-server .
-docker build --target mcp -t openusdconnect-mcp .
-docker compose --profile live-open up --build server-live-open
-docker compose --profile complete up --build server-complete
-```
-
-All runtime targets are multi-stage, resolve dependencies from `uv.lock`,
-exclude compilers and wheel caches, run as a non-root user, and include a
-health check where applicable. Build and test a specific image through the
-release command with `--docker-target`:
+## DCC builds
 
 ```bash
 uv run python scripts/build_distribution.py \
-  --component docker --docker-target complete
+  --component blender --blender /path/to/blender --output-dir dist/blender
+uv run python scripts/build_distribution.py \
+  --component unreal --unreal-engine /path/to/UnrealEngine --output-dir dist/unreal
 ```
 
-Docker can also produce the portable Linux artifacts on a Windows or macOS
-build host. This exports the Linux Python wheel/source archive,
-self-contained server, and C++ SDK; Blender and Unreal remain native host
-builds because they must match the selected DCC Python ABI or Unreal Engine:
+Blender packages target the executable's platform and embedded Python ABI.
+The builder provisions a matching Python development runtime; use
+`--blender-python-sdk PATH` for an explicit matching SDK.
+Install the add-on ZIP in the matching Blender version. Unreal packages target
+the selected engine/platform; extract the plugin into `<Project>/Plugins/OpenUSDConnect`.
+
+## Docker and Linux artifacts
+
+Docker runtime targets are `server` (default TCP service), `live-open` (adds
+WebDAV), `complete` (adds dashboard and MCP dependencies), and `mcp` (stdio MCP).
+For Docker, use the `USD_PROFILE` build argument (default `full`).
 
 ```bash
-docker build --target release-packages \
-  --build-arg OPENUSDCONNECT_BUILD_COMMIT=$(git rev-parse HEAD) \
-  --output type=local,dest=dist/linux .
-
+docker build --build-arg USD_PROFILE=full -t openusdconnect-server .
+docker build --target mcp --build-arg USD_PROFILE=core -t openusdconnect-mcp .
 uv run python scripts/build_distribution.py \
-  --component linux-packages --clean-output
+  --component docker --docker-target complete --usd-profile full --output-dir dist/docker
+uv run python scripts/build_distribution.py \
+  --component linux-packages --usd-profile core --output-dir dist/linux
 ```
 
-Use `--docker-command` when the Docker CLI requires a command prefix, such as a
-specific WSL distribution or a remote Docker context.
+`linux-packages` exports Linux Python, server, and C++ SDK artifacts via Docker.
+Blender and Unreal remain native host builds.
+`--docker-command` accepts a Docker CLI command or prefix.
+For an external Linux runtime, the distribution script accepts the same
+`--usd-root` and repeatable `--usd-plugin-path` options. With Docker directly:
+
+```bash
+docker build --build-arg USD_PROFILE=external \
+  --build-context usd_runtime=/path/to/linux/openusd \
+  --build-context usd_plugins=/path/to/plugin-installations \
+  -t openusdconnect-server .
+```
+
+The optional `usd_plugins` context contains one installation per child directory.
+Use `--build-arg ALLOW_UNPINNED_USD=1` to permit a non-pinned external USD version.

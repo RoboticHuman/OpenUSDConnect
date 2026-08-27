@@ -1,3 +1,12 @@
+x-build-common: &build-common
+  context: .
+  args:
+    USD_PROFILE: "${USD_PROFILE:-full}"
+    ALLOW_UNPINNED_USD: "${ALLOW_UNPINNED_USD:-0}"
+  # External builds also need build.additional_contexts in a Compose override:
+  # usd_runtime: /path/to/linux/openusd-prefix
+  # usd_plugins: /path/to/plugin-roots (optional, one root per child directory)
+
 x-server-common: &server-common
   init: true
   stop_grace_period: 20s
@@ -16,7 +25,7 @@ services:
     <<: *server-common
     image: openusdconnect-server:local
     build:
-      context: .
+      <<: *build-common
       target: server
     ports:
       - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"
@@ -34,7 +43,7 @@ services:
     <<: *server-common
     image: openusdconnect-server:live-open
     build:
-      context: .
+      <<: *build-common
       target: live-open
     ports:
       - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"
@@ -61,7 +70,7 @@ services:
     <<: *server-common
     image: openusdconnect-server:complete
     build:
-      context: .
+      <<: *build-common
       target: complete
     ports:
       - "${OPENUSDCONNECT_PORT:-7200}:${OPENUSDCONNECT_PORT:-7200}"

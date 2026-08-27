@@ -7,13 +7,15 @@ permissions:
   contents: read
 
 jobs:
-  core-packages:
-    name: Core packages (${{ matrix.target }})
+  runtime-packages:
+    name: Packages (${{ matrix.target }}, ${{ matrix.usd-profile }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+        usd-profile: [core, full]
         include:
           - os: windows-latest
             target: windows-x64
@@ -34,16 +36,23 @@ jobs:
       - name: Install Python
         run: uv python install
 
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake git ninja-build
+
       - name: Build and smoke-test packages
         run: >-
           uv run --frozen python scripts/build_distribution.py
           --component python --component server --component cpp-sdk
+          --usd-profile ${{ matrix.usd-profile }}
           --output-dir dist/package-output --clean-output
 
       - name: Upload packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: openusdconnect-${{ matrix.target }}
+          name: openusdconnect-${{ matrix.target }}-${{ matrix.usd-profile }}
           path: dist/package-output/
           if-no-files-found: error
 
@@ -88,13 +97,14 @@ jobs:
           if-no-files-found: error
 
   docker-image:
-    name: Docker image (${{ matrix.target }})
+    name: Docker image (${{ matrix.target }}, ${{ matrix.usd-profile }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         target: [server, live-open, complete, mcp]
+        usd-profile: [core, full]
 
     steps:
       - name: Check out repository
@@ -112,13 +122,18 @@ jobs:
         run: >-
           uv run --frozen python scripts/build_distribution.py
           --component docker --docker-target ${{ matrix.target }}
-          --docker-tag openusdconnect-${{ matrix.target }}:ci
+          --usd-profile ${{ matrix.usd-profile }}
+          --docker-tag openusdconnect-${{ matrix.target }}:${{ matrix.usd-profile }}-ci
           --output-dir dist/package-output --clean-output
 
   docker-linux-packages:
-    name: Linux packages through Docker
+    name: Linux packages through Docker (${{ matrix.usd-profile }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        usd-profile: [core, full]
 
     steps:
       - name: Check out repository
@@ -129,12 +144,13 @@ jobs:
       - name: Build and export Linux packages
         run: >-
           docker build --target release-packages
+          --build-arg USD_PROFILE=${{ matrix.usd-profile }}
           --build-arg OPENUSDCONNECT_BUILD_COMMIT=${{ github.sha }}
           --output type=local,dest=dist/package-output .
 
       - name: Upload packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: openusdconnect-linux-docker
+          name: openusdconnect-linux-docker-${{ matrix.usd-profile }}
           path: dist/package-output/
           if-no-files-found: error

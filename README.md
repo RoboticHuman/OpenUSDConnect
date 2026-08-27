@@ -272,26 +272,13 @@ plugins. The [testing guide](docs/testing-setup.md) lists every tier.
 
 ## Docker
 
-The default image is the plain TCP sync server and uses the renderer-neutral
-`usd-core` runtime:
+The default TCP server image uses pinned OpenUSD with MaterialX. Set
+`--build-arg USD_PROFILE=core` for the smaller `usd-core` runtime:
 
 ```bash
 docker build -t openusdconnect-server .
 docker compose up --build server
 ```
-
-Additional image targets add only the services they need:
-
-```bash
-docker compose --profile live-open up --build server-live-open
-docker compose --profile complete up --build server-complete
-docker build --target mcp -t openusdconnect-mcp .
-```
-
-The live-open profile exposes WebDAV on `7280`; the complete profile also
-exposes the dashboard on `8080`. See
-[Packaging and distribution](docs/distribution.md) for image targets and the
-optional Docker-based Linux artifact build.
 
 ## Acknowledgments
 

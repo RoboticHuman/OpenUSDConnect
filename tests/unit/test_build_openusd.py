@@ -69,9 +69,33 @@ def test_default_parallelism_is_conservatively_capped(tmp_path):
     assert 1 <= plan.jobs <= 8
 
 
-def test_default_build_root_is_platform_specific_without_usable_legacy(
-    tmp_path, monkeypatch
-):
+def test_materialx_runtime_does_not_require_imaging_or_viewer(tmp_path):
+    pin, args = _args(tmp_path, "--materialx", "--no-tools", "--no-register-runtime")
+    plan = build_openusd.create_plan(args, pin)
+    command = build_openusd.upstream_command(plan)
+
+    assert plan.features.materialx
+    assert "--materialx" in command
+    assert "--no-imaging" in command
+    assert "--no-usdview" in command
+    assert "--no-tools" in command
+    assert not args.register_runtime
+
+
+def test_packaging_build_does_not_change_active_runtime(tmp_path, monkeypatch):
+    for name in ("preflight", "ensure_checkout", "_run", "verify_install"):
+        monkeypatch.setattr(build_openusd, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(build_openusd, "build_environment", lambda: {})
+    monkeypatch.setattr(build_openusd, "write_manifest", lambda _plan: tmp_path / "build.json")
+
+    def unexpected_registration(_plan):
+        pytest.fail("packaging build replaced the developer's active USD runtime")
+
+    monkeypatch.setattr(build_openusd, "write_runtime_config", unexpected_registration)
+    assert build_openusd.main(["--root", str(tmp_path), "--no-register-runtime"]) == 0
+
+
+def test_default_build_root_is_platform_specific_without_usable_legacy(tmp_path, monkeypatch):
     pin = build_openusd.load_pin()
     monkeypatch.setattr(build_openusd, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -83,10 +107,7 @@ def test_default_build_root_is_platform_specific_without_usable_legacy(
     root = build_openusd._default_root(pin)
 
     assert root == (
-        tmp_path
-        / ".openusd"
-        / pin.version.removeprefix("0.")
-        / build_openusd._platform_key()
+        tmp_path / ".openusd" / pin.version.removeprefix("0.") / build_openusd._platform_key()
     )
 
 

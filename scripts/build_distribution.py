@@ -47,6 +47,7 @@ from scripts.build_blender_addon import (  # noqa: E402
 from scripts.build_blender_addon import (
     smoke_test as smoke_test_blender,
 )
+from scripts.package_usd_runtime import PROFILES, prepare_runtime, validate_options
 
 DEFAULT_COMPONENTS = ("python", "server", "blender", "unreal", "cpp-sdk", "docker")
 OPTIONAL_COMPONENTS = ("linux-packages",)
@@ -230,11 +231,11 @@ def _bundled_python_executable(root: Path, source: Path) -> Path:
 def _write_server_launchers(bundle: Path) -> None:
     if os.name == "nt":
         (bundle / "openusdconnect-server.cmd").write_text(
-            '@echo off\r\n"%~dp0python\\python.exe" -m openusdconnect.server %*\r\n',
+            '@echo off\r\n"%~dp0python\\python.exe" -I "%~dp0_launch.py" openusdconnect.server %*\r\n',
             encoding="utf-8",
         )
         (bundle / "openusdconnect-mcp.cmd").write_text(
-            '@echo off\r\n"%~dp0python\\python.exe" -m integrations.mcp %*\r\n',
+            '@echo off\r\n"%~dp0python\\python.exe" -I "%~dp0_launch.py" integrations.mcp %*\r\n',
             encoding="utf-8",
         )
     else:
@@ -245,7 +246,7 @@ def _write_server_launchers(bundle: Path) -> None:
             path = bundle / name
             path.write_text(
                 '#!/bin/sh\nROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
-                f'exec "$ROOT/python/bin/python3" -m {module} "$@"\n',
+                f'exec "$ROOT/python/bin/python3" -I "$ROOT/_launch.py" {module} "$@"\n',
                 encoding="utf-8",
                 newline="\n",
             )
@@ -386,10 +387,10 @@ def _smoke_test_server_bundle(bundle: Path, bundled_python: Path) -> None:
                     [
                         str(bundled_python),
                         "-I",
-                        "-c",
-                        "from pxr import Usd; import sys; "
-                        "s=Usd.Stage.Open(sys.argv[1]); assert s; "
-                        "assert s.GetRootLayer().customLayerData.get('openusdconnect')",
+                        str(bundle / "_launch.py"),
+                        "--run-script",
+                        str(REPO_ROOT / "packaging" / "smoke_usd_runtime.py"),
+                        "--snapshot",
                         str(snapshot_path),
                     ],
                     cwd=bundle,
@@ -406,10 +407,14 @@ def build_server_bundle(
     *,
     python_version: str,
     smoke_test: bool,
+    usd_profile: str = "full",
+    usd_root: Path | None = None,
+    usd_plugin_paths: list[Path] | None = None,
+    allow_unpinned_usd: bool = False,
 ) -> Artifact:
     executable = _managed_python(python_version)
     target = query_python(executable)
-    root_name = f"openusdconnect-server-{_version()}-{target.platform_tag}"
+    root_name = f"openusdconnect-server-{_version()}-{target.platform_tag}-usd-{usd_profile}"
     bundle = staging / "server" / root_name
     python_destination = bundle / "python"
     if bundle.exists():
@@ -422,7 +427,22 @@ def build_server_bundle(
     )
     bundled_python = _bundled_python_executable(python_destination, executable)
     bundled_python_relative = bundled_python.relative_to(bundle)
-    requirement = f"openusdconnect[complete] @ {wheel.resolve().as_uri()}"
+    requirements = staging / "server-requirements.txt"
+    _checked_run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--no-dev",
+            "--extra",
+            "complete",
+            "--no-emit-project",
+            "--no-hashes",
+            "--output-file",
+            str(requirements),
+            *(["--no-emit-package", "usd-core"] if usd_profile != "core" else []),
+        ]
+    )
     _checked_run(
         [
             "uv",
@@ -432,8 +452,19 @@ def build_server_bundle(
             str(bundled_python),
             "--no-cache",
             "--break-system-packages",
-            requirement,
+            "--no-deps",
+            "--requirement",
+            str(requirements),
+            str(wheel.resolve()),
         ]
+    )
+    usd = prepare_runtime(
+        bundle,
+        bundled_python,
+        profile=usd_profile,
+        usd_root=usd_root,
+        plugin_paths=usd_plugin_paths,
+        allow_unpinned=allow_unpinned_usd,
     )
     _write_server_launchers(bundle)
     shutil.copy2(REPO_ROOT / "LICENSE", bundle / "LICENSE")
@@ -453,6 +484,7 @@ def build_server_bundle(
         "python_version": target.version_short,
         "python_abi": target.abi_tag,
         "profile": "complete",
+        "openusd": usd,
     }
     (bundle / "openusdconnect-build.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -462,18 +494,24 @@ def build_server_bundle(
             [
                 str(bundled_python),
                 "-I",
-                "-c",
-                "import openusdconnect._native_client; from pxr import Usd; print(Usd.GetVersion())",
+                str(bundle / "_launch.py"),
+                "--runtime-info",
             ],
             cwd=bundle,
             timeout=30.0,
         )
         _checked_run(
-            [str(bundled_python), "-I", "-m", "openusdconnect.server", "--help"],
+            [
+                str(bundled_python),
+                "-I",
+                str(bundle / "_launch.py"),
+                "openusdconnect.server",
+                "--help",
+            ],
             timeout=30.0,
         )
         _checked_run(
-            [str(bundled_python), "-I", "-m", "integrations.mcp", "--help"],
+            [str(bundled_python), "-I", str(bundle / "_launch.py"), "integrations.mcp", "--help"],
             timeout=30.0,
         )
     archive = _archive_server_bundle(bundle, output_dir, root_name)
@@ -481,6 +519,18 @@ def build_server_bundle(
         with _temporary_directory(prefix="openusdconnect-extracted-server-package-") as temporary:
             _extract_server_bundle(archive, temporary)
             extracted_bundle = temporary / root_name
+            _checked_run(
+                [
+                    str(extracted_bundle / bundled_python_relative),
+                    "-I",
+                    str(extracted_bundle / "_launch.py"),
+                    "--run-script",
+                    str(REPO_ROOT / "packaging" / "smoke_usd_runtime.py"),
+                    *(["--materialx"] if usd["materialx"] else []),
+                ],
+                cwd=temporary,
+                timeout=60.0,
+            )
             _smoke_test_server_bundle(
                 extracted_bundle,
                 extracted_bundle / bundled_python_relative,
@@ -679,12 +729,69 @@ def _docker_command_prefix(command: str) -> list[str]:
     prefix = shlex.split(command, posix=os.name != "nt")
     if not prefix:
         raise RuntimeError("Docker command cannot be empty")
+    if os.name == "nt":
+        prefix = [
+            part[1:-1] if part.startswith('"') and part.endswith('"') else part for part in prefix
+        ]
     return prefix
 
 
-def build_docker(*, tag: str, target: str, smoke_test: bool, command: str) -> Artifact:
+def _docker_usd_options(
+    profile: str, root: Path | None, plugins: list[Path], allow_unpinned: bool
+) -> list[str]:
+    validate_options(profile, root, plugins, allow_unpinned)
+    options = ["--build-arg", f"USD_PROFILE={profile}"]
+    if profile == "external":
+        # Relative contexts also work with a Docker CLI invoked through WSL.
+        inputs = REPO_ROOT / "build" / "distribution" / "docker-inputs"
+        if inputs.exists():
+            shutil.rmtree(inputs)
+        shutil.copytree(root, inputs / "runtime")
+        (inputs / "plugins").mkdir(parents=True)
+        for index, plugin in enumerate(plugins):
+            shutil.copytree(plugin, inputs / "plugins" / str(index))
+        options.extend(
+            [
+                "--build-context",
+                f"usd_runtime={(inputs / 'runtime').relative_to(REPO_ROOT).as_posix()}",
+                "--build-context",
+                f"usd_plugins={(inputs / 'plugins').relative_to(REPO_ROOT).as_posix()}",
+                "--build-arg",
+                f"ALLOW_UNPINNED_USD={int(allow_unpinned)}",
+            ]
+        )
+    return options
+
+
+def build_docker(
+    *,
+    tag: str,
+    target: str,
+    smoke_test: bool,
+    command: str,
+    usd_profile: str = "full",
+    usd_root: Path | None = None,
+    usd_plugin_paths: list[Path] | None = None,
+    allow_unpinned_usd: bool = False,
+) -> Artifact:
     prefix = _docker_command_prefix(command)
-    _checked_run([*prefix, "build", "--target", target, "--tag", tag, "."])
+    options = _docker_usd_options(usd_profile, usd_root, usd_plugin_paths or [], allow_unpinned_usd)
+    _checked_run([*prefix, "build", "--target", target, "--tag", tag, *options, "."])
+    probe = _checked_run(
+        [
+            *prefix,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "python",
+            tag,
+            "-I",
+            "/opt/ouc/_launch.py",
+            "--runtime-info",
+        ]
+    )
+    usd = json.loads(probe.stdout.strip().splitlines()[-1])
+    usd.pop("pxr_path", None)
     image = _checked_run(
         [
             *prefix,
@@ -712,6 +819,7 @@ def build_docker(*, tag: str, target: str, smoke_test: bool, command: str) -> Ar
                     "docker_target": target,
                     "image_id": image_id_value,
                     "image_size": int(image_size),
+                    "openusd": usd,
                 },
             )
         container = f"openusdconnect-release-smoke-{os.getpid()}"
@@ -798,6 +906,7 @@ def build_docker(*, tag: str, target: str, smoke_test: bool, command: str) -> Ar
             "docker_target": target,
             "image_id": image_id_value,
             "image_size": int(image_size),
+            "openusd": usd,
         },
     )
 
@@ -821,8 +930,13 @@ def build_linux_packages_with_docker(
     staging: Path,
     *,
     command: str,
+    usd_profile: str = "full",
+    usd_root: Path | None = None,
+    usd_plugin_paths: list[Path] | None = None,
+    allow_unpinned_usd: bool = False,
 ) -> list[Artifact]:
     prefix = _docker_command_prefix(command)
+    options = _docker_usd_options(usd_profile, usd_root, usd_plugin_paths or [], allow_unpinned_usd)
     exported = staging / "docker-linux-packages"
     if exported.exists():
         shutil.rmtree(exported)
@@ -836,6 +950,7 @@ def build_linux_packages_with_docker(
             "release-packages",
             "--build-arg",
             f"OPENUSDCONNECT_BUILD_COMMIT={_build_commit()}",
+            *options,
             "--output",
             f"type=local,dest={relative_export}",
             ".",
@@ -868,7 +983,7 @@ def build_linux_packages_with_docker(
                 destination,
                 record["kind"],
                 target=record.get("target") or "linux-x64",
-                metadata={"built_with": "docker"},
+                metadata={**(record.get("metadata") or {}), "built_with": "docker"},
             )
         )
     if not artifacts:
@@ -906,6 +1021,25 @@ def _parser() -> argparse.ArgumentParser:
         help="Remove an existing output directory before building",
     )
     parser.add_argument("--server-python", default="3.13")
+    parser.add_argument(
+        "--usd-profile",
+        choices=PROFILES,
+        default="full",
+        help="Server OpenUSD runtime: full includes MaterialX; core uses usd-core",
+    )
+    parser.add_argument("--usd-root", type=Path, help="External OpenUSD installation to bundle")
+    parser.add_argument(
+        "--usd-plugin-path",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional relocatable plugin installation (external profile; repeatable)",
+    )
+    parser.add_argument(
+        "--allow-unpinned-usd",
+        action="store_true",
+        help="Allow an external OpenUSD version different from openusd.lock.json",
+    )
     parser.add_argument("--blender", type=Path)
     parser.add_argument("--blender-python-sdk", type=Path)
     parser.add_argument("--unreal-engine", type=Path)
@@ -960,6 +1094,22 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     components = _components(args.component)
     output_dir = args.output_dir.expanduser().resolve()
+    try:
+        validate_options(
+            args.usd_profile, args.usd_root, args.usd_plugin_path, args.allow_unpinned_usd
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    protected = [REPO_ROOT, Path.home().resolve(), *args.usd_plugin_path]
+    if args.usd_root:
+        protected.append(args.usd_root.resolve())
+    if any(path.resolve().is_relative_to(output_dir) for path in protected):
+        print(
+            f"error: output directory contains a protected source path: {output_dir}",
+            file=sys.stderr,
+        )
+        return 1
     staging = REPO_ROOT / "build" / "distribution"
     if staging.exists():
         shutil.rmtree(staging)
@@ -997,6 +1147,10 @@ def main(argv: list[str] | None = None) -> int:
                     wheel,
                     python_version=args.server_python,
                     smoke_test=args.smoke_test,
+                    usd_profile=args.usd_profile,
+                    usd_root=args.usd_root,
+                    usd_plugin_paths=args.usd_plugin_path,
+                    allow_unpinned_usd=args.allow_unpinned_usd,
                 )
             )
         if "blender" in components:
@@ -1040,6 +1194,10 @@ def main(argv: list[str] | None = None) -> int:
                     target=args.docker_target,
                     smoke_test=args.smoke_test,
                     command=args.docker_command,
+                    usd_profile=args.usd_profile,
+                    usd_root=args.usd_root,
+                    usd_plugin_paths=args.usd_plugin_path,
+                    allow_unpinned_usd=args.allow_unpinned_usd,
                 )
             )
         if "linux-packages" in components:
@@ -1048,6 +1206,10 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir,
                     staging,
                     command=args.docker_command,
+                    usd_profile=args.usd_profile,
+                    usd_root=args.usd_root,
+                    usd_plugin_paths=args.usd_plugin_path,
+                    allow_unpinned_usd=args.allow_unpinned_usd,
                 )
             )
         _write_release_manifest(output_dir, artifacts)

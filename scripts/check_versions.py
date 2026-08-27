@@ -158,12 +158,16 @@ def collect_errors() -> list[str]:
     if pyproject["tool"]["ruff"]["target-version"] != f"py{python_minor.replace('.', '')}":
         errors.append(".python-version and Ruff target-version must match")
     docker = _read("Dockerfile")
-    if f"python:{python_minor}-slim" not in _docker_base_images(docker):
+    python_images = [image for image in _docker_base_images(docker) if image.startswith("python:")]
+    if not python_images or any(
+        not re.fullmatch(rf"python:{re.escape(python_minor)}-slim(?:-[a-z]+)?", image)
+        for image in python_images
+    ):
         errors.append("Docker Python image must match .python-version")
 
     profiles = pyproject["project"]["optional-dependencies"]
     for profile in ("runtime", "vfs", "complete", "mcp"):
-        if f'"openusdconnect[{profile}]"' not in docker:
+        if f"--requirement /requirements/{profile}.txt" not in docker:
             errors.append(f"Docker must install its {profile} package profile")
     complete = profiles.get("complete", [])
     for group, package in (

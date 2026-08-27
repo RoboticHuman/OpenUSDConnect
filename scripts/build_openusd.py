@@ -82,7 +82,7 @@ class BuildFeatures:
 
     @property
     def imaging(self) -> bool:
-        return self.usdview or self.materialx or self.embree or self.renderman is not None
+        return self.usdview or self.embree or self.renderman is not None
 
 
 @dataclass(frozen=True)
@@ -240,6 +240,12 @@ def _parser(pin: OpenUSDPin) -> argparse.ArgumentParser:
         "--force-all", action="store_true", help="Force every component to rebuild."
     )
     parser.add_argument("-v", "--verbose", action="count", default=0)
+    parser.add_argument(
+        "--register-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Select the completed build for this checkout (disable for release packaging).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -672,17 +678,13 @@ def write_runtime_config(plan: BuildPlan, path: Path | None = None) -> Path | No
     path = ACTIVE_RUNTIME_FILE if path is None else path
     python_path = _python_package(plan.layout.install)
     if python_path is None:
-        raise RuntimeError(
-            f"OpenUSD Python bindings were not found under {plan.layout.install}"
-        )
+        raise RuntimeError(f"OpenUSD Python bindings were not found under {plan.layout.install}")
     data = {
         "schema": 1,
         "usd_root": str(plan.layout.install),
         "python_path": str(python_path),
         "python_executable": str(Path(sys.executable).resolve()),
-        "renderman_root": (
-            str(plan.features.renderman) if plan.features.renderman else None
-        ),
+        "renderman_root": (str(plan.features.renderman) if plan.features.renderman else None),
         "version": plan.pin.version,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -726,7 +728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _run(upstream_command(plan), env=env)
         verify_install(plan, env)
         manifest = write_manifest(plan)
-        runtime_config = write_runtime_config(plan)
+        runtime_config = write_runtime_config(plan) if args.register_runtime else None
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -736,7 +738,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if runtime_config is not None:
         print(f"Managed runtime: {runtime_config}")
         print("OpenUSDConnect will select this build automatically.")
-    else:
+    elif not plan.features.python:
         print("This build has no Python bindings and was not registered as the project runtime.")
     return 0
 
