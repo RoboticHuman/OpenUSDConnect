@@ -129,7 +129,8 @@ def test_docker_runtime_is_multistage_non_root_and_health_checked():
     assert "HEALTHCHECK" in runtime
     assert "uv export --frozen" in dockerfile
     assert "--mount=type=bind,from=wheel-builder" in dockerfile
-    assert "FROM build-base AS release-builder" in dockerfile
+    assert "FROM usd-builder AS release-builder" in dockerfile
+    assert "COPY --from=build-base /src/ /src/" in dockerfile
     assert "FROM scratch AS release-packages" in dockerfile
     assert "FROM usd-${USD_PROFILE} AS usd-builder" in dockerfile
     assert '"-I", "/opt/ouc/_launch.py"' in runtime

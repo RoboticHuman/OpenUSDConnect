@@ -216,7 +216,10 @@ ENTRYPOINT ["python", "-I", "/opt/ouc/_launch.py", "integrations.mcp"]
 
 # Optional reproducible Linux artifact builder. Export with:
 # docker build --target release-packages --output type=local,dest=dist/linux .
-FROM build-base AS release-builder
+FROM usd-builder AS release-builder
+
+# Reuse the selected USD installation and build prerequisites for archive builds.
+COPY --from=build-base /src/ /src/
 
 ARG USD_PROFILE
 ARG ALLOW_UNPINNED_USD=0
