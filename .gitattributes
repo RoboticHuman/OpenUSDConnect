@@ -7,3 +7,4 @@ tests/visual/references/**/*.exr filter=lfs diff=lfs merge=lfs -text
 
 # Shell scripts must remain executable from WSL and Unix checkouts.
 *.sh text eol=lf
+Dockerfile text eol=lf

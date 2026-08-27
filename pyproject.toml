@@ -17,6 +17,12 @@ sdist.include = [
     "openusdconnect/**/*.py",
     "openusdconnect/schema/*.fbs",
     "native/**",
+    "integrations/__init__.py",
+    "integrations/dashboard/**",
+    "integrations/mcp/**",
+    "integrations/openpbr_translate.py",
+    "integrations/renderman.py",
+    "integrations/usdview/**",
     "openusd.lock.json",
     "scripts/build_openusd.py",
     "LICENSE",
@@ -24,8 +30,22 @@ sdist.include = [
     "README.md",
     "pyproject.toml",
 ]
+sdist.exclude = [
+    ".blender/**",
+    ".openusd/**",
+    ".tmp/**",
+    "assets/**",
+    "build/**",
+    "dist/**",
+]
 [tool.scikit-build.wheel.force-include]
 "native/sdf_notice_bridge" = "openusdconnect/native/sdf_notice_bridge"
+"integrations/__init__.py" = "integrations/__init__.py"
+"integrations/dashboard" = "integrations/dashboard"
+"integrations/mcp" = "integrations/mcp"
+"integrations/openpbr_translate.py" = "integrations/openpbr_translate.py"
+"integrations/renderman.py" = "integrations/renderman.py"
+"integrations/usdview" = "integrations/usdview"
 
 [[tool.dynamic-metadata]]
 provider = "scikit_build_core.metadata.regex"
@@ -44,6 +64,35 @@ dependencies = [
     "cachetools==7.0.5",
     "flatbuffers==25.12.19",
     "numpy==2.4.4",
+]
+
+[project.optional-dependencies]
+# Customer-facing installation profiles. Dependency groups below remain the
+# contributor environments used by uv sync.
+runtime = [
+    "usd-core==26.8",
+]
+vfs = [
+    "cheroot==10.0.1",
+    "usd-core==26.8",
+    "wsgidav==4.3.3",
+]
+server = [
+    "cheroot==10.0.1",
+    "nicegui==3.9.0",
+    "usd-core==26.8",
+    "wsgidav==4.3.3",
+]
+mcp = [
+    "mcp>=1.2,<2",
+    "usd-core==26.8",
+]
+complete = [
+    "cheroot==10.0.1",
+    "mcp>=1.2,<2",
+    "nicegui==3.9.0",
+    "usd-core==26.8",
+    "wsgidav==4.3.3",
 ]
 
 [tool.hatch.version]
@@ -99,6 +148,8 @@ openusdconnect-server = "openusdconnect.server:main"
 openusdconnect-mount-vfs = "openusdconnect.vfs_mount:main"
 openusdconnect-send = "openusdconnect.send:main"
 openusdconnect-build-sdf-notice-bridge = "openusdconnect.build_sdf_notice_bridge:main"
+openusdconnect-mcp = "integrations.mcp.cli:main"
+openusdconnect-usdview = "integrations.usdview.launcher:main"
 
 # --- Ruff (linter + formatter) ---
 # Docs: https://docs.astral.sh/ruff/

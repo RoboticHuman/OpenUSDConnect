@@ -1,0 +1,159 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-packages:
+    name: Packages (${{ matrix.target }}, ${{ matrix.usd-profile }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+        usd-profile: [core, full]
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: macos-14
+            target: macos
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake git ninja-build
+          if [ "${{ matrix.usd-profile }}" = full ]; then
+            sudo apt-get install --yes --no-install-recommends libxt-dev
+          fi
+
+      - name: Build and smoke-test packages
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component python --component server --component cpp-sdk
+          --usd-profile ${{ matrix.usd-profile }}
+          --output-dir dist/package-output --clean-output
+
+      - name: Upload packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-${{ matrix.target }}-${{ matrix.usd-profile }}
+          path: dist/package-output/
+          if-no-files-found: error
+
+  blender-packages:
+    name: Blender package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: blender-windows-x64
+          - os: ubuntu-latest
+            target: blender-linux-x64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Download portable Blender LTS
+        run: uv run --frozen python scripts/setup_blender_test.py --lts
+
+      - name: Build and smoke-test Blender package
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component blender --output-dir dist/package-output --clean-output
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-${{ matrix.target }}
+          path: dist/package-output/
+          if-no-files-found: error
+
+  docker-image:
+    name: Docker image (${{ matrix.target }}, ${{ matrix.usd-profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [server, live-open, complete, mcp]
+        usd-profile: [core, full]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Build and smoke-test image
+        run: >-
+          uv run --frozen python scripts/build_distribution.py
+          --component docker --docker-target ${{ matrix.target }}
+          --usd-profile ${{ matrix.usd-profile }}
+          --docker-tag openusdconnect-${{ matrix.target }}:${{ matrix.usd-profile }}-ci
+          --output-dir dist/package-output --clean-output
+
+  docker-linux-packages:
+    name: Linux packages through Docker (${{ matrix.usd-profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        usd-profile: [core, full]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and export Linux packages
+        run: >-
+          docker build --target release-packages
+          --build-arg USD_PROFILE=${{ matrix.usd-profile }}
+          --build-arg OPENUSDCONNECT_BUILD_COMMIT=${{ github.sha }}
+          --output type=local,dest=dist/package-output .
+
+      - name: Upload packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openusdconnect-linux-docker-${{ matrix.usd-profile }}
+          path: dist/package-output/
+          if-no-files-found: error

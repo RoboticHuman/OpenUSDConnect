@@ -124,9 +124,8 @@ def _commit_and_broadcast(
 def _wait_for_receiver_queue(client: SharedStageClient, timeout: float = 2.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with client._receiver._incoming_lock:
-            if client._receiver._incoming:
-                return True
+        if client._receiver.queued_message_count:
+            return True
         time.sleep(0.01)
     return False
 

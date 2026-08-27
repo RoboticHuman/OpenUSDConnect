@@ -82,7 +82,7 @@ class BuildFeatures:
 
     @property
     def imaging(self) -> bool:
-        return self.usdview or self.materialx or self.embree or self.renderman is not None
+        return self.usdview or self.embree or self.renderman is not None
 
 
 @dataclass(frozen=True)
@@ -241,6 +241,12 @@ def _parser(pin: OpenUSDPin) -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument(
+        "--register-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Select the completed build for this checkout (disable for release packaging).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the pinned checkout and upstream build commands without changing anything.",
@@ -309,6 +315,7 @@ def clone_command(plan: BuildPlan) -> list[str]:
     return [
         "git",
         "clone",
+        *(["--config", "core.longpaths=true"] if os.name == "nt" else []),
         "--branch",
         plan.pin.tag,
         "--depth",
@@ -321,6 +328,17 @@ def clone_command(plan: BuildPlan) -> list[str]:
 
 def upstream_command(plan: BuildPlan) -> list[str]:
     features = plan.features
+    materialx_args = []
+    if features.materialx and not features.imaging:
+        # MaterialX installs its standard definitions only with a generator enabled.
+        # GLSL code generation is headless; the Render targets require a display SDK.
+        materialx_args = [
+            "MaterialX,-DMATERIALX_BUILD_GEN_GLSL=ON",
+            *[
+                f"MaterialX,-DMATERIALX_BUILD_{feature}=OFF"
+                for feature in ("RENDER", "GEN_OSL", "GEN_MDL", "GEN_MSL", "GEN_SLANG")
+            ],
+        ]
     command = [
         sys.executable,
         str(plan.layout.checkout / "build_scripts" / "build_usd.py"),
@@ -328,6 +346,7 @@ def upstream_command(plan: BuildPlan) -> list[str]:
         str(plan.layout.build),
         "--src",
         str(plan.layout.dependency_sources),
+        *(["--build-args", *materialx_args] if materialx_args else []),
         "--build-variant",
         plan.variant,
         "--jobs",
@@ -672,17 +691,13 @@ def write_runtime_config(plan: BuildPlan, path: Path | None = None) -> Path | No
     path = ACTIVE_RUNTIME_FILE if path is None else path
     python_path = _python_package(plan.layout.install)
     if python_path is None:
-        raise RuntimeError(
-            f"OpenUSD Python bindings were not found under {plan.layout.install}"
-        )
+        raise RuntimeError(f"OpenUSD Python bindings were not found under {plan.layout.install}")
     data = {
         "schema": 1,
         "usd_root": str(plan.layout.install),
         "python_path": str(python_path),
         "python_executable": str(Path(sys.executable).resolve()),
-        "renderman_root": (
-            str(plan.features.renderman) if plan.features.renderman else None
-        ),
+        "renderman_root": (str(plan.features.renderman) if plan.features.renderman else None),
         "version": plan.pin.version,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -726,7 +741,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _run(upstream_command(plan), env=env)
         verify_install(plan, env)
         manifest = write_manifest(plan)
-        runtime_config = write_runtime_config(plan)
+        runtime_config = write_runtime_config(plan) if args.register_runtime else None
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -736,7 +751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if runtime_config is not None:
         print(f"Managed runtime: {runtime_config}")
         print("OpenUSDConnect will select this build automatically.")
-    else:
+    elif not plan.features.python:
         print("This build has no Python bindings and was not registered as the project runtime.")
     return 0
 
