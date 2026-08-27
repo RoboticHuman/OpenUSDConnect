@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -159,7 +160,7 @@ def _send(events, client_id):
 
 def _max_sequence():
     try:
-        with sqlite3.connect(CONFIG["database_path"], timeout=0.1) as connection:
+        with closing(sqlite3.connect(CONFIG["database_path"], timeout=0.1)) as connection:
             row = connection.execute("SELECT max(seq) FROM events").fetchone()
         return int(row[0] or 0)
     except sqlite3.Error:
