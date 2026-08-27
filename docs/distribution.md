@@ -112,6 +112,8 @@ uv run python scripts/build_distribution.py \
 
 `linux-packages` exports Linux Python, server, and C++ SDK artifacts via Docker.
 Blender and Unreal remain native host builds.
+Linux archives require system libraries compatible with the build environment;
+Docker images include their own userspace runtime.
 `--docker-command` accepts a Docker CLI command or prefix.
 For an external Linux runtime, the distribution script accepts the same
 `--usd-root` and repeatable `--usd-plugin-path` options. With Docker directly:

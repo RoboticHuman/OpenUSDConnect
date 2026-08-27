@@ -108,6 +108,8 @@ def test_customer_install_profiles_match_packaged_entrypoints():
 
 def test_docker_runtime_is_multistage_non_root_and_health_checked():
     dockerfile = (distribution.REPO_ROOT / "Dockerfile").read_text()
+    attributes = (distribution.REPO_ROOT / ".gitattributes").read_text()
+    assert "Dockerfile text eol=lf" in attributes.splitlines()
     runtime = dockerfile.split("FROM python:3.13-slim-trixie AS runtime-base", maxsplit=1)[1]
 
     assert "build-essential" not in runtime
