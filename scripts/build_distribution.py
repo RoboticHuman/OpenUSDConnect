@@ -879,6 +879,28 @@ def build_docker(
                 raise RuntimeError(
                     f"Docker smoke container did not become healthy ({status}):\n{logs}"
                 )
+            _checked_run(
+                [
+                    *prefix,
+                    "cp",
+                    "packaging/smoke_usd_runtime.py",
+                    f"{container}:/tmp/smoke_usd_runtime.py",
+                ]
+            )
+            _checked_run(
+                [
+                    *prefix,
+                    "exec",
+                    container,
+                    "python",
+                    "-I",
+                    "/opt/ouc/_launch.py",
+                    "--run-script",
+                    "/tmp/smoke_usd_runtime.py",
+                    *(["--materialx"] if usd["materialx"] else []),
+                ],
+                timeout=60.0,
+            )
             if target in {"live-open", "complete"}:
                 _checked_run(
                     [
