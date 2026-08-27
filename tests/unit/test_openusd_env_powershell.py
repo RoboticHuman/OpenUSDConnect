@@ -26,7 +26,13 @@ def _pxr_package(path: Path) -> Path:
     return path
 
 
-def _run_script(root: Path, *, python_path: Path | None = None, rman: Path | None = None):
+def _run_script(
+    root: Path,
+    *,
+    python_path: Path | None = None,
+    python_executable: Path | None = None,
+    rman: Path | None = None,
+):
     if POWERSHELL is None:
         pytest.skip("PowerShell is unavailable")
 
@@ -37,6 +43,9 @@ def _run_script(root: Path, *, python_path: Path | None = None, rman: Path | Non
     if python_path is not None:
         env["TEST_PYTHON_PATH"] = str(python_path)
         arguments = " -PythonPath $env:TEST_PYTHON_PATH"
+    if python_executable is not None:
+        env["TEST_PYTHON_EXECUTABLE"] = str(python_executable)
+        arguments += " -PythonExecutable $env:TEST_PYTHON_EXECUTABLE"
     command = (
         f". $env:TEST_SCRIPT $env:TEST_USD_ROOT{arguments}; "
         "[PSCustomObject]@{PythonPath=$env:PYTHONPATH; Path=$env:PATH; "
@@ -62,6 +71,19 @@ def test_discovers_current_windows_python_layout(tmp_path):
     result = _run_script(root)
 
     assert result["PythonPath"].split(os.pathsep)[0] == str(python_path)
+    repo_python = SCRIPT.parents[1] / ".venv" / "Scripts" / "python.exe"
+    expected = (
+        repo_python if repo_python.is_file() else shutil.which("python") or shutil.which("python3")
+    )
+    assert Path(result["LoaderPython"]).resolve() == Path(expected).resolve()
+
+
+def test_accepts_explicit_python_executable(tmp_path):
+    root = tmp_path / "OpenUSD"
+    _pxr_package(root / "Lib" / "site-packages")
+
+    result = _run_script(root, python_executable=Path(sys.executable))
+
     assert Path(result["LoaderPython"]).resolve() == Path(sys.executable).resolve()
 
 
