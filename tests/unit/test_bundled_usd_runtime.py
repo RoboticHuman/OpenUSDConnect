@@ -144,8 +144,12 @@ def test_docker_uses_bundled_usd_pin():
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
     bundled_dependencies = project["dependency-groups"]["bundled-usd"]
+    complete = project["project"]["optional-dependencies"]["complete"]
 
     assert bundled_dependencies == [f"usd-core=={OPENUSD_CORE_VERSION}"]
-    assert f"pip install --no-cache-dir {bundled_dependencies[0]}" in dockerfile
-    assert "COPY pyproject.toml README.md LICENSE NOTICE ./" in dockerfile
-    assert "COPY native/sdf_notice_bridge/ native/sdf_notice_bridge/" in dockerfile
+    assert bundled_dependencies[0] in complete
+    assert "--requirement /requirements/complete.txt" in dockerfile
+    assert "--only-group bundled-usd" in dockerfile
+    assert "--no-emit-package usd-core" in dockerfile
+    assert "--requirement /requirements/runtime.txt" in dockerfile
+    assert "FROM usd-builder AS release-builder" in dockerfile

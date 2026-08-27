@@ -1006,6 +1006,33 @@ dependencies = [
     { name = "numpy" },
 ]
 
+[package.optional-dependencies]
+complete = [
+    { name = "cheroot" },
+    { name = "mcp" },
+    { name = "nicegui" },
+    { name = "usd-core" },
+    { name = "wsgidav" },
+]
+mcp = [
+    { name = "mcp" },
+    { name = "usd-core" },
+]
+runtime = [
+    { name = "usd-core" },
+]
+server = [
+    { name = "cheroot" },
+    { name = "nicegui" },
+    { name = "usd-core" },
+    { name = "wsgidav" },
+]
+vfs = [
+    { name = "cheroot" },
+    { name = "usd-core" },
+    { name = "wsgidav" },
+]
+
 [package.dev-dependencies]
 bundled-usd = [
     { name = "usd-core" },
@@ -1039,9 +1066,25 @@ visual = [
 [package.metadata]
 requires-dist = [
     { name = "cachetools", specifier = "==7.0.5" },
+    { name = "cheroot", marker = "extra == 'complete'", specifier = "==10.0.1" },
+    { name = "cheroot", marker = "extra == 'server'", specifier = "==10.0.1" },
+    { name = "cheroot", marker = "extra == 'vfs'", specifier = "==10.0.1" },
     { name = "flatbuffers", specifier = "==25.12.19" },
+    { name = "mcp", marker = "extra == 'complete'", specifier = ">=1.2,<2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2,<2" },
+    { name = "nicegui", marker = "extra == 'complete'", specifier = "==3.9.0" },
+    { name = "nicegui", marker = "extra == 'server'", specifier = "==3.9.0" },
     { name = "numpy", specifier = "==2.4.4" },
+    { name = "usd-core", marker = "extra == 'complete'", specifier = "==26.8" },
+    { name = "usd-core", marker = "extra == 'mcp'", specifier = "==26.8" },
+    { name = "usd-core", marker = "extra == 'runtime'", specifier = "==26.8" },
+    { name = "usd-core", marker = "extra == 'server'", specifier = "==26.8" },
+    { name = "usd-core", marker = "extra == 'vfs'", specifier = "==26.8" },
+    { name = "wsgidav", marker = "extra == 'complete'", specifier = "==4.3.3" },
+    { name = "wsgidav", marker = "extra == 'server'", specifier = "==4.3.3" },
+    { name = "wsgidav", marker = "extra == 'vfs'", specifier = "==4.3.3" },
 ]
+provides-extras = ["runtime", "vfs", "server", "mcp", "complete"]
 
 [package.metadata.requires-dev]
 bundled-usd = [{ name = "usd-core", specifier = "==26.8" }]

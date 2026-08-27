@@ -124,9 +124,12 @@ Do not add `bundled-usd` when using the project runtime path above.
 | MCP server | Author and inspect | `uv run --group mcp python -m integrations.mcp`; [MCP guide](docs/mcp-server-usage.md) |
 | Dashboard | Observe and administer | `uv run --group dashboard python scripts/demo_layer_dashboard.py` |
 
-Build the Blender add-on with `uv run python scripts/build_blender_addon.py`, or
+Build the Blender add-on with
+`uv run python scripts/build_blender_addon.py --blender /path/to/blender`, or
 start a connected usdview session with
 `uv run python scripts/start_usdview.py test_scene.usda`.
+For self-contained server, DCC, Python, C++, and container artifacts, see
+[Packaging and distribution](docs/distribution.md).
 
 ### Run the cross-application Material Zoo
 
@@ -270,13 +273,15 @@ plugins. The [testing guide](docs/testing-setup.md) lists every tier.
 
 ## Docker
 
-The included image uses the renderer-neutral `usd-core` runtime:
+The default TCP server image uses pinned OpenUSD with MaterialX:
 
 ```bash
-docker build -t openusdconnect-server .
-docker run -p 7200:7200 -v ./scenes:/scenes \
-  openusdconnect-server --base /scenes/scene.usda
+docker compose up --build server
 ```
+
+For the smaller `usd-core` runtime, set `USD_PROFILE=core` in the environment
+before running Compose. For a standalone image build, use
+`docker build --build-arg USD_PROFILE=core -t openusdconnect-server .`.
 
 ## Acknowledgments
 
