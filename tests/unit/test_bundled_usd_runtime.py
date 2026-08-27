@@ -152,4 +152,4 @@ def test_docker_uses_bundled_usd_pin():
     assert "--only-group bundled-usd" in dockerfile
     assert "--no-emit-package usd-core" in dockerfile
     assert "--requirement /requirements/runtime.txt" in dockerfile
-    assert "FROM build-base AS release-builder" in dockerfile
+    assert "FROM usd-builder AS release-builder" in dockerfile
