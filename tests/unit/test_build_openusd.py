@@ -88,7 +88,7 @@ def test_materialx_runtime_does_not_require_imaging_or_viewer(tmp_path):
     assert "--no-usdview" in command
     assert "--no-tools" in command
     assert "MaterialX,-DMATERIALX_BUILD_RENDER=OFF" in command
-    assert "MaterialX,-DMATERIALX_BUILD_GEN_GLSL=OFF" in command
+    assert "MaterialX,-DMATERIALX_BUILD_GEN_GLSL=ON" in command
     assert not args.register_runtime
 
 

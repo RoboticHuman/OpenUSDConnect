@@ -330,9 +330,14 @@ def upstream_command(plan: BuildPlan) -> list[str]:
     features = plan.features
     materialx_args = []
     if features.materialx and not features.imaging:
+        # MaterialX installs its standard definitions only with a generator enabled.
+        # GLSL code generation is headless; the Render targets require a display SDK.
         materialx_args = [
-            f"MaterialX,-DMATERIALX_BUILD_{feature}=OFF"
-            for feature in ("RENDER", "GEN_GLSL", "GEN_OSL", "GEN_MDL", "GEN_MSL", "GEN_SLANG")
+            "MaterialX,-DMATERIALX_BUILD_GEN_GLSL=ON",
+            *[
+                f"MaterialX,-DMATERIALX_BUILD_{feature}=OFF"
+                for feature in ("RENDER", "GEN_OSL", "GEN_MDL", "GEN_MSL", "GEN_SLANG")
+            ],
         ]
     command = [
         sys.executable,
