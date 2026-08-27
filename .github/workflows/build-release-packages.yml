@@ -41,6 +41,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends build-essential cmake git ninja-build
+          if [ "${{ matrix.usd-profile }}" = full ]; then
+            sudo apt-get install --yes --no-install-recommends libxt-dev
+          fi
 
       - name: Build and smoke-test packages
         run: >-

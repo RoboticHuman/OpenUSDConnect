@@ -2,6 +2,8 @@
 
 `scripts/build_distribution.py` builds Python, standalone server/MCP, Blender,
 Unreal, C++ SDK, Docker, and Linux artifacts. Use the target platform's toolchain.
+Source-built USD requires Git, CMake 3.27+, and a C++ compiler. On Debian/Ubuntu,
+the `full` profile also needs `libxt-dev` at build time; Docker provisions it.
 
 ## Build
 
