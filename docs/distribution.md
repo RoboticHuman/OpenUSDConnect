@@ -31,8 +31,11 @@ server/MCP, Docker, and Linux artifacts, not Blender or Unreal's bundled USD.
 | Profile | Runtime |
 | --- | --- |
 | `full` | Pinned OpenUSD plus MaterialX, built from source without renderers, usdview, or Qt. |
-| `core` | Pinned `usd-core`, without MaterialX or custom plugins. |
+| `core` | Pinned `usd-core`, without a raw `.mtlx` reader or extra plugins. |
 | `external` | Provided installation, validated for version, ABI, and capabilities before bundling. |
+
+All profiles synchronize material networks already authored in USD.
+The `full` profile also composes references to external `.mtlx` files.
 
 `external` requires `--usd-root PATH`. Optional `--usd-plugin-path PATH` is
 repeatable; `--allow-unpinned-usd` permits a version outside the pin.
