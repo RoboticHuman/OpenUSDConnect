@@ -113,6 +113,10 @@ def test_docker_runtime_is_multistage_non_root_and_health_checked():
     runtime = dockerfile.split("FROM python:3.13-slim-trixie AS runtime-base", maxsplit=1)[1]
 
     assert "build-essential" not in runtime
+    assert "libxt-dev" not in runtime
+    assert "libxt-dev" in dockerfile.split("FROM usd-build-base AS usd-full", 1)[1].split(
+        "FROM usd-build-base AS usd-external", 1
+    )[0]
     for target, profile in (
         ("server", "runtime"),
         ("live-open", "vfs"),

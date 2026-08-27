@@ -23,7 +23,7 @@ RUN apt-get update \
     && python -m pip install "uv==${UV_VERSION}"
 
 # This Python image includes its matching headers and libpython. Trixie provides
-# CMake >= 3.27; headless MaterialX needs no Qt, X11, or OpenGL packages.
+# CMake >= 3.27.
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE .python-version openusd.lock.json ./
 COPY scripts/build_openusd.py scripts/package_usd_runtime.py scripts/
@@ -76,6 +76,12 @@ RUN uv export --frozen --only-group bundled-usd --no-emit-project \
 
 
 FROM usd-build-base AS usd-full
+
+# MaterialX's CMake config requires X11 even with rendering disabled. These
+# development files stay in this build stage, not the exported runtime.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libxt-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN python scripts/package_usd_runtime.py --usd-profile full --output-dir /opt/ouc \
     && python -I /opt/ouc/_launch.py --runtime-info
