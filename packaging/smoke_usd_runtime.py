@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+import urllib.request
 from pathlib import Path
 
 from pxr import Sdf, Usd, UsdShade
@@ -14,7 +15,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--materialx", action="store_true")
     parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--http-url", action="append", default=[])
     args = parser.parse_args()
+    if args.http_url:
+        for url in args.http_url:
+            with urllib.request.urlopen(url, timeout=3) as response:
+                assert response.status == 200
+                assert response.read(), f"Empty response from {url}"
+        print(json.dumps({"http": "PASS", "urls": args.http_url}))
+        return
     if args.snapshot:
         stage = Usd.Stage.Open(str(args.snapshot))
         assert stage and stage.GetRootLayer().customLayerData.get("openusdconnect")

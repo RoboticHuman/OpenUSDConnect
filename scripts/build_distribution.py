@@ -901,31 +901,23 @@ def build_docker(
                 ],
                 timeout=60.0,
             )
+            urls = []
             if target in {"live-open", "complete"}:
-                _checked_run(
-                    [
-                        *prefix,
-                        "exec",
-                        container,
-                        "python",
-                        "-c",
-                        "import urllib.request; "
-                        "urllib.request.urlopen('http://127.0.0.1:7280/usd/scene.usd', "
-                        "timeout=3).read()",
-                    ],
-                    timeout=30.0,
-                )
+                urls.append("http://127.0.0.1:7280/usd/scene.usd")
             if target == "complete":
+                urls.append("http://127.0.0.1:8080/api/status")
+            if urls:
                 _checked_run(
                     [
                         *prefix,
                         "exec",
                         container,
                         "python",
-                        "-c",
-                        "import urllib.request; "
-                        "urllib.request.urlopen('http://127.0.0.1:8080/api/status', "
-                        "timeout=3).read()",
+                        "-I",
+                        "/opt/ouc/_launch.py",
+                        "--run-script",
+                        "/tmp/smoke_usd_runtime.py",
+                        *[arg for url in urls for arg in ("--http-url", url)],
                     ],
                     timeout=30.0,
                 )

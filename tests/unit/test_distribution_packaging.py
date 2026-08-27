@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import build_blender_addon as blender_packaging
 from scripts import build_distribution as distribution
 
@@ -248,6 +250,45 @@ def test_external_docker_inputs_use_portable_relative_contexts(tmp_path, monkeyp
     inputs = distribution.REPO_ROOT / "build/distribution/docker-inputs"
     assert (inputs / "runtime/runtime-marker").exists()
     assert (inputs / "plugins/0/plugInfo.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "urls"),
+    [
+        ("server", []),
+        ("live-open", ["http://127.0.0.1:7280/usd/scene.usd"]),
+        (
+            "complete",
+            ["http://127.0.0.1:7280/usd/scene.usd", "http://127.0.0.1:8080/api/status"],
+        ),
+    ],
+)
+def test_docker_service_smoke_uses_portable_script_arguments(target, urls, monkeypatch):
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        if "--runtime-info" in command:
+            output = '{"materialx": true}'
+        elif "image" in command:
+            output = "sha256:test linux amd64 123"
+        elif "inspect" in command:
+            output = "running healthy"
+        else:
+            output = ""
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(distribution, "_checked_run", run)
+    monkeypatch.setattr(distribution.subprocess, "run", run)
+    distribution.build_docker(tag="test", target=target, smoke_test=True, command="docker")
+
+    probes = [command for command in calls if "--http-url" in command]
+    assert len(probes) == bool(urls)
+    if urls:
+        assert "--run-script" in probes[0]
+        assert probes[0][-2 * len(urls) :] == [arg for url in urls for arg in ("--http-url", url)]
+    assert not any("-c" in command for command in calls)
+    assert any("--materialx" in command for command in calls)
 
 
 def test_windows_bundle_smoke_terminates_launcher_process_tree(monkeypatch):
