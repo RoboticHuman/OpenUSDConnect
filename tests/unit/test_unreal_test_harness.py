@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ast
-from contextlib import closing
 import json
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 

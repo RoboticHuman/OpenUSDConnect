@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import difflib
-from contextlib import closing
 import json
 import os
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 
 import unreal
 from pxr import Gf, Sdf, UsdUtils
