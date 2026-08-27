@@ -77,6 +77,7 @@ def managed_install(python: Path) -> Path:
         / "openusd-runtime"
         / pin.version
         / build_openusd._platform_key()
+        / "full"
         / version
     )
     install = root / "install"

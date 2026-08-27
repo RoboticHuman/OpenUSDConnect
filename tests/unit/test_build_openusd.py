@@ -87,6 +87,8 @@ def test_materialx_runtime_does_not_require_imaging_or_viewer(tmp_path):
     assert "--no-imaging" in command
     assert "--no-usdview" in command
     assert "--no-tools" in command
+    assert "MaterialX,-DMATERIALX_BUILD_RENDER=OFF" in command
+    assert "MaterialX,-DMATERIALX_BUILD_GEN_GLSL=OFF" in command
     assert not args.register_runtime
 
 
@@ -132,6 +134,7 @@ def test_usdview_profile_enables_python_imaging_and_materialx(tmp_path):
     assert "--usdview" in command
     assert "--materialx" in command
     assert "--embree" in command
+    assert "MaterialX,-DMATERIALX_BUILD_RENDER=OFF" not in command
 
 
 def test_renderman_implies_usdview_and_forwards_install_path(tmp_path):

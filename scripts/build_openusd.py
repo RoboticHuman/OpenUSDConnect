@@ -328,6 +328,12 @@ def clone_command(plan: BuildPlan) -> list[str]:
 
 def upstream_command(plan: BuildPlan) -> list[str]:
     features = plan.features
+    materialx_args = []
+    if features.materialx and not features.imaging:
+        materialx_args = [
+            f"MaterialX,-DMATERIALX_BUILD_{feature}=OFF"
+            for feature in ("RENDER", "GEN_GLSL", "GEN_OSL", "GEN_MDL", "GEN_MSL", "GEN_SLANG")
+        ]
     command = [
         sys.executable,
         str(plan.layout.checkout / "build_scripts" / "build_usd.py"),
@@ -335,6 +341,7 @@ def upstream_command(plan: BuildPlan) -> list[str]:
         str(plan.layout.build),
         "--src",
         str(plan.layout.dependency_sources),
+        *(["--build-args", *materialx_args] if materialx_args else []),
         "--build-variant",
         plan.variant,
         "--jobs",
