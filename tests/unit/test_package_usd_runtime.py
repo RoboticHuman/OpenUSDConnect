@@ -764,6 +764,82 @@ def test_launcher_activates_only_package_configured_paths_and_clears_runtime_env
     module.os.execve.assert_not_called()
 
 
+def test_launcher_configures_host_dll_dirs_before_windows_application_dispatch(launcher):
+    module, root = launcher.module, launcher.root
+    env_dir = root.parent / "renderer env"
+    arg_dir = root.parent / "renderer arg"
+    equals_dir = root.parent / "renderer equals"
+    for directory in (env_dir, arg_dir, equals_dir):
+        directory.mkdir()
+    module.os.environ[module._PLUGIN_DLL_DIRS_ENV] = ";".join(
+        [str(env_dir), str(arg_dir), str(env_dir)]
+    )
+    module.sys.argv += [
+        "openusdconnect.server",
+        "--plugin-dll-dir",
+        str(arg_dir),
+        f"--plugin-dll-dir={equals_dir}",
+    ]
+
+    assert module.activate() == launcher.config
+
+    expected = [
+        *(root / path for path in launcher.config["library_dirs"]),
+        env_dir.resolve(),
+        arg_dir.resolve(),
+        equals_dir.resolve(),
+    ]
+    assert [call.args[0] for call in module.os.add_dll_directory.call_args_list] == list(
+        map(str, expected)
+    )
+    assert module.os.environ["PXR_USD_WINDOWS_DLL_PATH"] == ";".join(map(str, expected))
+    assert module.sys.argv[1:] == [
+        "openusdconnect.server",
+        "--plugin-dll-dir",
+        str(arg_dir),
+        f"--plugin-dll-dir={equals_dir}",
+    ]
+
+
+def test_launcher_ignores_missing_host_dll_dirs(launcher):
+    missing = launcher.root.parent / "missing renderer"
+    launcher.module.os.environ[launcher.module._PLUGIN_DLL_DIRS_ENV] = str(missing)
+
+    assert launcher.module.activate() == launcher.config
+
+    assert [call.args[0] for call in launcher.module.os.add_dll_directory.call_args_list] == [
+        str(launcher.root / path) for path in launcher.config["library_dirs"]
+    ]
+
+
+def test_launcher_posix_reexec_includes_host_plugin_library_dirs(launcher):
+    class Reexec(Exception):
+        pass
+
+    module, root = launcher.module, launcher.root
+    arg_dir = root.parent / "renderer arg"
+    arg_dir.mkdir()
+    module.os.name = "posix"
+    module.os.pathsep = ":"
+    module.sys.platform = "linux"
+    module.sys.argv += [
+        "openusdconnect.server",
+        "--plugin-dll-dir",
+        str(arg_dir),
+    ]
+    module.os.execve.side_effect = Reexec
+
+    with pytest.raises(Reexec):
+        module.activate()
+
+    _, _, env = module.os.execve.call_args.args
+    expected = [
+        *(root / path for path in launcher.config["library_dirs"]),
+        arg_dir.resolve(),
+    ]
+    assert env["LD_LIBRARY_PATH"] == ":".join(map(str, expected))
+
+
 def test_launcher_core_clears_custom_root_without_replacing_site_packages(launcher):
     config = {
         "schema": 1,
