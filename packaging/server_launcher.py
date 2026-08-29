@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 _DLL_HANDLES: list[object] = []
+_PLUGIN_DLL_DIRS_ENV = "OPENUSDCONNECT_DLL_DIRS"
 
 
 def _configure_windows_dll_search() -> None:
@@ -32,12 +33,40 @@ def _inside(root: Path, value: str) -> Path:
     return path
 
 
+def _requested_plugin_library_dirs() -> list[Path]:
+    """Return host plugin dependency directories before the application starts.
+
+    The server normally parses ``--plugin-dll-dir`` itself, but packaged
+    processes establish the native loader environment before dispatching to
+    that module. Read the configured environment variable and forwarded
+    arguments here so external plugin dependencies participate in the initial
+    Windows setup or POSIX re-exec. Keep the arguments intact for the server's
+    normal validation and logging.
+    """
+    values = [
+        value
+        for value in os.environ.get(_PLUGIN_DLL_DIRS_ENV, "").split(os.pathsep)
+        if value
+    ]
+    for index, argument in enumerate(sys.argv):
+        if argument == "--plugin-dll-dir" and index + 1 < len(sys.argv):
+            values.append(sys.argv[index + 1])
+        elif argument.startswith("--plugin-dll-dir="):
+            value = argument.partition("=")[2]
+            if value:
+                values.append(value)
+    return list(
+        dict.fromkeys(Path(value).expanduser().resolve() for value in values)
+    )
+
+
 def activate() -> dict:
     root = Path(__file__).resolve().parent
     config = json.loads((root / "usd-runtime.json").read_text(encoding="utf-8"))
     if config.get("schema") != 1:
         raise RuntimeError("Unsupported packaged OpenUSD runtime manifest")
     libraries = [_inside(root, p) for p in config.get("library_dirs", [])]
+    libraries.extend(path for path in _requested_plugin_library_dirs() if path.is_dir())
     loader = (
         "PATH"
         if os.name == "nt"
