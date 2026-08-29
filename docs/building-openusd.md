@@ -105,6 +105,22 @@ need no shell activation:
 uv run openusdconnect-server --base scene.usda
 ```
 
+To activate the managed build for several commands in the current shell, omit
+the path. The adapters select the active runtime record and find the
+repository's uv interpreter without requiring prior environment activation.
+
+PowerShell:
+
+```powershell
+.\scripts\openusd_env.ps1
+```
+
+Bash or Zsh:
+
+```bash
+source scripts/openusd_env.sh
+```
+
 OpenUSD executables need to be resolved before their process starts, so launch
 them through the child-command wrapper:
 
@@ -117,14 +133,14 @@ managed selection.
 
 ## External OpenUSD installations
 
-The shell adapters are for OpenUSD builds created outside the managed workflow.
-They configure the current shell without writing persistent user or system
-environment variables.
+Pass an installation prefix to the shell adapters only for OpenUSD builds
+created outside the managed workflow. They configure the current shell without
+writing persistent user or system environment variables.
 
 PowerShell:
 
 ```powershell
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+.\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
 ```
 
 Bash or Zsh:
@@ -149,7 +165,7 @@ The repository `.venv` is the default interpreter. If the external OpenUSD
 build targets another interpreter, select it explicitly:
 
 ```powershell
-. .\scripts\openusd_env.ps1 "E:\OpenUSDInstall" `
+.\scripts\openusd_env.ps1 "E:\OpenUSDInstall" `
     -PythonExecutable "E:\OpenUSD-venv\Scripts\python.exe"
 ```
 

@@ -16,10 +16,17 @@ asset, and visual tests are opt-in.
 
 The runtime created by `scripts/build_openusd.py` is selected automatically.
 For an OpenUSD installation built outside that workflow, configure it first.
-On PowerShell:
+
+PowerShell:
 
 ```powershell
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+.\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+```
+
+Bash or Zsh:
+
+```bash
+source scripts/openusd_env.sh /opt/OpenUSDInstall
 ```
 
 Current Windows and Unix OpenUSD Python layouts and the legacy `lib/python`

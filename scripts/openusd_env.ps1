@@ -3,7 +3,7 @@
 Activates an OpenUSD runtime in the current PowerShell process.
 
 .PARAMETER UsdRoot
-OpenUSD install prefix.
+OpenUSD install prefix. Omit this for the active project-managed build.
 
 .PARAMETER PythonPath
 Directory containing pxr when the bindings are outside UsdRoot.
@@ -13,15 +13,18 @@ Matching Python executable to place first on PATH. By default, the script uses
 the repository's .venv when present, then falls back to Python on PATH.
 
 .EXAMPLE
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+.\scripts\openusd_env.ps1
 
 .EXAMPLE
-. .\scripts\openusd_env.ps1 "E:\OpenUSDInstall" `
+.\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+
+.EXAMPLE
+.\scripts\openusd_env.ps1 "E:\OpenUSDInstall" `
     -PythonExecutable "E:\OpenUSD-venv\Scripts\python.exe"
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory, Position = 0)]
+    [Parameter(Position = 0)]
     [string] $UsdRoot,
 
     [string] $PythonPath,
@@ -36,6 +39,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+if ($UsdRoot) {
+    if (-not (Test-Path -LiteralPath $UsdRoot -PathType Container)) {
+        throw "OpenUSD install prefix does not exist: $UsdRoot"
+    }
+    $resolvedUsdRoot = (Resolve-Path -LiteralPath $UsdRoot).Path
+    $usdBin = Join-Path $resolvedUsdRoot "bin"
+    if (-not (Test-Path -LiteralPath $usdBin -PathType Container)) {
+        throw (
+            "OpenUSD install prefix has no bin directory: $resolvedUsdRoot`n" +
+            "For the project-managed build, omit UsdRoot: .\scripts\openusd_env.ps1"
+        )
+    }
+    $UsdRoot = $resolvedUsdRoot
+}
 
 if ($PythonExecutable) {
     if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
@@ -43,7 +62,6 @@ if ($PythonExecutable) {
     }
     $python = (Resolve-Path -LiteralPath $PythonExecutable).Path
 } else {
-    $repoRoot = Split-Path -Parent $PSScriptRoot
     $repoPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $repoPython -PathType Leaf) {
         $python = (Resolve-Path -LiteralPath $repoPython).Path
@@ -64,13 +82,16 @@ if ($PythonExecutable) {
 $resolver = Join-Path $PSScriptRoot "openusd_runtime.py"
 $arguments = @(
     $resolver
-    "--usd-root"
-    $UsdRoot
     "--python-executable"
     $python
     "--format"
     "json"
 )
+if ($UsdRoot) {
+    $arguments += @("--usd-root", $UsdRoot)
+} else {
+    $arguments += "--managed"
+}
 if ($PythonPath) {
     $arguments += @("--python-path", $PythonPath)
 }
@@ -105,7 +126,12 @@ foreach ($property in $configuration.environment.PSObject.Properties) {
 
 Write-Host "OpenUSD environment ready: $($configuration.usd_root)"
 Write-Host "Python bindings: $($configuration.python_path)"
-Write-Host "Python executable: $python"
+Write-Host "Python executable (uv environment): $python"
+$usdviewCommand = Get-Command usdview.cmd, usdview.exe, usdview `
+    -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($usdviewCommand) {
+    Write-Host "usdview executable: $($usdviewCommand.Source)"
+}
 if ($configuration.renderman_root) {
     Write-Host "RenderMan: $($configuration.renderman_root)"
 }

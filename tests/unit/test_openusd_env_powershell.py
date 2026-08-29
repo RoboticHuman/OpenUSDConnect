@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import openusd_runtime
+
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 SCRIPT = Path(__file__).parents[2] / "scripts" / "openusd_env.ps1"
 
@@ -26,19 +28,27 @@ def _pxr_package(path: Path) -> Path:
     return path
 
 
-def _run_script(root: Path, *, python_path: Path | None = None, rman: Path | None = None):
+def _run_script(
+    root: Path,
+    *,
+    python_path: Path | None = None,
+    rman: Path | None = None,
+    explicit_root: bool = True,
+):
     if POWERSHELL is None:
         pytest.skip("PowerShell is unavailable")
 
     env = dict(os.environ)
     env.update(TEST_SCRIPT=str(SCRIPT), TEST_USD_ROOT=str(root))
+    env["OPENUSDCONNECT_USD_ROOT"] = "" if explicit_root else str(root)
     env["RMANTREE"] = "" if rman is None else str(rman)
     arguments = ""
     if python_path is not None:
         env["TEST_PYTHON_PATH"] = str(python_path)
         arguments = " -PythonPath $env:TEST_PYTHON_PATH"
+    root_argument = " $env:TEST_USD_ROOT" if explicit_root else ""
     command = (
-        f". $env:TEST_SCRIPT $env:TEST_USD_ROOT{arguments}; "
+        f". $env:TEST_SCRIPT{root_argument}{arguments}; "
         "[PSCustomObject]@{PythonPath=$env:PYTHONPATH; Path=$env:PATH; "
         "LdLibraryPath=$env:LD_LIBRARY_PATH; DyldLibraryPath=$env:DYLD_LIBRARY_PATH; "
         "RenderMan=$env:RMANTREE; LoaderPython=$env:OPENUSDCONNECT_PYTHON_EXECUTABLE} "
@@ -57,6 +67,7 @@ def _run_script(root: Path, *, python_path: Path | None = None, rman: Path | Non
 def test_discovers_current_windows_python_layout(tmp_path):
     root = tmp_path / "OpenUSD"
     root.mkdir()
+    (root / "bin").mkdir()
     python_path = _pxr_package(root / "Lib" / "site-packages")
 
     result = _run_script(root)
@@ -68,6 +79,7 @@ def test_discovers_current_windows_python_layout(tmp_path):
 def test_accepts_python_bindings_outside_prefix(tmp_path):
     root = tmp_path / "OpenUSD"
     root.mkdir()
+    (root / "bin").mkdir()
     python_path = _pxr_package(tmp_path / "venv" / "Lib" / "site-packages")
 
     result = _run_script(root, python_path=python_path)
@@ -78,6 +90,7 @@ def test_accepts_python_bindings_outside_prefix(tmp_path):
 def test_configures_inherited_rmantree(tmp_path):
     root = tmp_path / "OpenUSD"
     root.mkdir()
+    (root / "bin").mkdir()
     _pxr_package(root / "Lib" / "site-packages")
     rman = tmp_path / "RenderMan"
     (rman / "bin").mkdir(parents=True)
@@ -96,3 +109,44 @@ def test_configures_inherited_rmantree(tmp_path):
     assert str(rman / "bin") in path
     assert str(rman / "bin") in loader_path
     assert str(rman / "lib") in loader_path
+
+
+def test_omitted_root_uses_automatic_runtime_selection(tmp_path):
+    managed = openusd_runtime.managed_runtime_config()
+    if managed is None:
+        pytest.skip("no project-managed OpenUSD runtime is registered")
+    external = tmp_path / "OpenUSD"
+    external.mkdir()
+    (external / "bin").mkdir()
+    _pxr_package(external / "Lib" / "site-packages")
+
+    result = _run_script(external, explicit_root=False)
+
+    assert (
+        Path(result["PythonPath"].split(os.pathsep)[0]).resolve()
+        == Path(managed["python_path"]).resolve()
+    )
+    assert Path(result["LoaderPython"]).resolve() == Path(sys.executable).resolve()
+
+
+def test_rejects_managed_storage_directory_as_install_prefix(tmp_path):
+    if POWERSHELL is None:
+        pytest.skip("PowerShell is unavailable")
+    storage = tmp_path / ".openusd"
+    storage.mkdir()
+    env = dict(os.environ, TEST_SCRIPT=str(SCRIPT), TEST_USD_ROOT=str(storage))
+
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoProfile",
+            "-Command",
+            ". $env:TEST_SCRIPT $env:TEST_USD_ROOT",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "omit UsdRoot" in result.stderr

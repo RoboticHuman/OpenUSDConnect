@@ -28,13 +28,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a command with a selected project OpenUSD runtime."
     )
-    parser.add_argument(
+    runtime = parser.add_mutually_exclusive_group()
+    runtime.add_argument(
         "--usd-root",
         default=usd_root,
         help=(
             "OpenUSD install prefix (defaults to the managed project build; "
             f"{USD_ROOT_ENV} overrides it)."
         ),
+    )
+    runtime.add_argument(
+        "--managed",
+        action="store_true",
+        help="Select the active project-managed build, ignoring environment overrides.",
     )
     parser.add_argument(
         "--python-path",
@@ -67,8 +73,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.usd_root:
         parser.error(
-            "no managed OpenUSD runtime is registered; pass --usd-root or set "
-            f"{USD_ROOT_ENV}"
+            f"no managed OpenUSD runtime is registered; pass --usd-root or set {USD_ROOT_ENV}"
         )
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]

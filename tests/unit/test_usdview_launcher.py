@@ -6,6 +6,21 @@ from types import SimpleNamespace
 from integrations.usdview import _bootstrap, launcher
 
 
+def test_find_usdview_prefers_selected_runtime_over_stale_path(tmp_path, monkeypatch):
+    selected = tmp_path / "managed" / "bin" / "usdview.cmd"
+    selected.parent.mkdir(parents=True)
+    selected.touch()
+    stale = tmp_path / "old-install" / "bin" / "usdview.cmd"
+    stale.parent.mkdir(parents=True)
+    stale.touch()
+
+    monkeypatch.delenv("USDVIEW_PATH", raising=False)
+    monkeypatch.setenv("OPENUSDCONNECT_USD_ROOT", str(selected.parents[1]))
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: str(stale))
+
+    assert launcher.find_usdview() == selected
+
+
 def test_resolve_command_bootstraps_shebang_interpreter(tmp_path):
     interpreter = tmp_path / "python.exe"
     interpreter.touch()

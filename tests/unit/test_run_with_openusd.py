@@ -73,9 +73,7 @@ def test_main_forwards_command_and_exit_code(tmp_path, monkeypatch):
     monkeypatch.setattr(run_with_openusd.subprocess, "run", fake_run)
     monkeypatch.setattr(run_with_openusd, "verify_bindings", lambda *a, **k: "0.0.0")
 
-    result = run_with_openusd.main(
-        ["--usd-root", str(root), "--", "python", "-c", "print('ok')"]
-    )
+    result = run_with_openusd.main(["--usd-root", str(root), "--", "python", "-c", "print('ok')"])
 
     assert result == 7
     assert captured["command"] == [
@@ -117,6 +115,36 @@ def test_managed_build_is_the_default_runtime(tmp_path, monkeypatch):
     assert args.python_executable == str(executable)
 
 
+def test_managed_option_ignores_external_environment(tmp_path, monkeypatch):
+    root = _usd_install(tmp_path)
+    python_path = root / "lib" / "python"
+    executable = tmp_path / "venv" / "python"
+    executable.parent.mkdir()
+    executable.touch()
+    config = tmp_path / "active.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "usd_root": str(root),
+                "python_path": str(python_path),
+                "python_executable": str(executable),
+                "renderman_root": None,
+                "version": OPENUSD_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(openusd_runtime.USD_ROOT_ENV, str(tmp_path / "external"))
+    monkeypatch.setattr(openusd_runtime, "ACTIVE_RUNTIME_FILE", config)
+
+    args = run_with_openusd._parse_args(["--managed", "--", "python", "-V"])
+
+    assert args.usd_root == str(root)
+    assert args.python_path == str(python_path)
+    assert args.python_executable == str(executable)
+
+
 def test_explicit_root_does_not_inherit_managed_build_options(tmp_path, monkeypatch):
     managed = _usd_install(tmp_path / "managed")
     external = _usd_install(tmp_path / "external")
@@ -138,9 +166,7 @@ def test_explicit_root_does_not_inherit_managed_build_options(tmp_path, monkeypa
     monkeypatch.delenv("RMANTREE", raising=False)
     monkeypatch.setattr(openusd_runtime, "ACTIVE_RUNTIME_FILE", config)
 
-    args = run_with_openusd._parse_args(
-        ["--usd-root", str(external), "--", "python", "-V"]
-    )
+    args = run_with_openusd._parse_args(["--usd-root", str(external), "--", "python", "-V"])
 
     assert args.usd_root == str(external)
     assert args.python_path is None
@@ -211,9 +237,7 @@ def test_build_environment_rejects_missing_plugin_path(tmp_path):
         ("lib64", PYTHON_SITE_DIRECTORY, "dist-packages"),
     ],
 )
-def test_build_environment_discovers_current_openusd_python_layouts(
-    tmp_path, relative_path
-):
+def test_build_environment_discovers_current_openusd_python_layouts(tmp_path, relative_path):
     root = tmp_path / "OpenUSD"
     root.mkdir()
     expected = _pxr_package(root.joinpath(*relative_path))
@@ -228,9 +252,7 @@ def test_build_environment_accepts_python_bindings_outside_prefix(tmp_path):
     root.mkdir()
     python_path = _pxr_package(tmp_path / "venv" / "Lib" / "site-packages")
 
-    env, selected = run_with_openusd.build_environment(
-        root, base={}, python_path=python_path
-    )
+    env, selected = run_with_openusd.build_environment(root, base={}, python_path=python_path)
 
     assert selected == python_path
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(python_path)
@@ -320,9 +342,7 @@ def test_build_environment_rejects_invalid_inherited_rmantree(tmp_path):
     root = _usd_install(tmp_path)
 
     with pytest.raises(RuntimeError, match="RenderMan root does not exist"):
-        run_with_openusd.build_environment(
-            root, base={"RMANTREE": str(tmp_path / "missing")}
-        )
+        run_with_openusd.build_environment(root, base={"RMANTREE": str(tmp_path / "missing")})
 
 
 def test_build_environment_selects_python_executable(tmp_path):
@@ -378,9 +398,7 @@ def test_verify_bindings_reports_actionable_error_on_import_failure(monkeypatch)
     monkeypatch.setattr(openusd_runtime.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError) as excinfo:
-        openusd_runtime.verify_bindings(
-            {}, "bindings", python_executable=sys.executable
-        )
+        openusd_runtime.verify_bindings({}, "bindings", python_executable=sys.executable)
 
     message = str(excinfo.value)
     assert "could not import OpenUSD" in message

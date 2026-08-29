@@ -99,6 +99,7 @@ def test_discovers_posix_prefix_with_spaces(tmp_path):
 def test_accepts_external_bindings_and_inherited_rmantree(tmp_path):
     root = tmp_path / "OpenUSDInstall"
     root.mkdir()
+    (root / "bin").mkdir()
     python_path = _pxr_package(
         tmp_path / "OpenUSD" / ".venv" / "lib" / PYTHON_SITE_DIRECTORY / "site-packages"
     )
@@ -133,7 +134,16 @@ def test_invalid_prefix_fails_without_applying_environment(tmp_path):
     )
 
     assert "status=2 root=" in result.stdout
-    assert "OpenUSD root does not exist" in result.stderr
+    assert "OpenUSD install prefix does not exist" in result.stderr
+
+
+def test_missing_prefix_requests_managed_runtime_instead_of_showing_usage():
+    result = _bash(
+        f"unset OPENUSDCONNECT_USD_ROOT; source {shlex.quote(_shell_path(SCRIPT))}",
+        check=False,
+    )
+
+    assert "usage: source scripts/openusd_env.sh" not in result.stderr
 
 
 def test_adapter_rejects_direct_execution(tmp_path):
@@ -153,11 +163,7 @@ def test_command_wrapper_runs_with_posix_environment(tmp_path):
     root = tmp_path / "OpenUSD"
     python_path = _pxr_package(root / "lib" / PYTHON_SITE_DIRECTORY / "site-packages")
     (root / "lib64").mkdir()
-    code = (
-        "import os; "
-        "print(os.environ['PYTHONPATH']); "
-        "print(os.environ['LD_LIBRARY_PATH'])"
-    )
+    code = "import os; print(os.environ['PYTHONPATH']); print(os.environ['LD_LIBRARY_PATH'])"
     command = (
         "unset PYTHONPATH LD_LIBRARY_PATH RMANTREE; "
         f"python3 {shlex.quote(_shell_path(RUNNER))} "

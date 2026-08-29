@@ -41,9 +41,7 @@ def managed_runtime_config(path: Path | None = None) -> dict[str, str | None] | 
                 f"could not read managed OpenUSD runtime config {candidate}: {exc}"
             ) from exc
         if data.get("schema") != 1:
-            raise RuntimeError(
-                f"unsupported managed OpenUSD runtime config schema in {candidate}"
-            )
+            raise RuntimeError(f"unsupported managed OpenUSD runtime config schema in {candidate}")
         required = ("usd_root", "python_path", "python_executable", "version")
         if any(not isinstance(data.get(key), str) or not data[key] for key in required):
             raise RuntimeError(f"invalid managed OpenUSD runtime config: {candidate}")
@@ -71,6 +69,16 @@ def runtime_defaults(
     argv: Sequence[str] | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Resolve explicit environment selection before the managed project build."""
+    if _option_is_present(argv, "--managed"):
+        managed = managed_runtime_config()
+        if managed is None:
+            return None, None, None, None
+        return (
+            managed["usd_root"],
+            managed["python_path"],
+            managed["python_executable"],
+            managed["renderman_root"],
+        )
     explicit_root = os.environ.get(USD_ROOT_ENV)
     if explicit_root:
         return explicit_root, None, None, os.environ.get("RMANTREE")
@@ -267,13 +275,19 @@ def verify_bindings(
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     usd_root, python_path, python_executable, renderman_root = runtime_defaults(argv)
     parser = argparse.ArgumentParser(description="Resolve an OpenUSD runtime environment.")
-    parser.add_argument(
+    runtime = parser.add_mutually_exclusive_group()
+    runtime.add_argument(
         "--usd-root",
         default=usd_root,
         help=(
             "OpenUSD install prefix (defaults to the managed project build; "
             f"{USD_ROOT_ENV} overrides it)."
         ),
+    )
+    runtime.add_argument(
+        "--managed",
+        action="store_true",
+        help="Select the active project-managed build, ignoring environment overrides.",
     )
     parser.add_argument(
         "--python-path", default=python_path, help="Directory containing the pxr package."
@@ -290,8 +304,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.usd_root:
         parser.error(
-            "no managed OpenUSD runtime is registered; pass --usd-root or set "
-            f"{USD_ROOT_ENV}"
+            f"no managed OpenUSD runtime is registered; pass --usd-root or set {USD_ROOT_ENV}"
         )
     return args
 
