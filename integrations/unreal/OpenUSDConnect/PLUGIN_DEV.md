@@ -16,7 +16,7 @@ the plugin's modules, threading model, protocol implementation, and known gaps.
 │         ─► fires deferred Connect()                                          │
 │         ─► finds AUsdStageActor → AttachToStageActor() subscribes to         │
 │            FUsdListener::OnObjectsChanged                                    │
-│         ─► drains EventQueue with bSuppressEmit=true while applying          │
+│         ─► pops validated frames with bSuppressEmit=true while applying      │
 │                                                                              │
 │  OnObjectsChanged() ─► queues exact changed Sdf paths                         │
 │  Tick()             ─► drains those paths unless bSuppressEmit is true       │
@@ -31,13 +31,13 @@ the plugin's modules, threading model, protocol implementation, and known gaps.
        │  role = "receiver"   │         │   role = "emitter"      │
        │                      │         │                         │
        │  TCP recv loop:      │         │  TCP loop:              │
-       │   – read framed FB   │         │   – drain SendQueue     │
-       │   – echo-suppress    │         │     (SPSC TQueue)       │
-       │     by SessionOrigin │         │   – peek with           │
-       │   – enqueue raw      │         │     HasPendingData      │
-       │     bytes for        │         │     for inbound         │
-       │     game-thread      │         │     (RateLimited, …)    │
-       │     drain            │         │                         │
+       │   – read framed FB   │         │   – claim shared frames │
+       │   – verify once      │         │     from native outbox  │
+       │   – enqueue bytes +  │         │   – wake on enqueue     │
+       │     trusted metadata │         │   – peek with           │
+       │   – direct TryPop    │         │     HasPendingData      │
+       │     on game thread   │         │     for inbound results │
+       │                      │         │     and rate limits     │
        └──────────────────────┘         └─────────────────────────┘
                   │                                  ▲
                   ▼                                  │
@@ -49,21 +49,23 @@ the plugin's modules, threading model, protocol implementation, and known gaps.
 Both threads share a stable project/machine `ClientId` and one endpoint-scoped
 producer session ID. The session ID is sent as diagnostic `origin` on both
 sockets and as `producer_session_id` by the emitter. The receiver uses it to
-recognize this plugin instance's own broadcasts; the server still publishes
-every committed record to every receiver.
+attribute this plugin instance's broadcasts; the server publishes every committed
+record to every receiver, and the subsystem suppresses notice emission while it
+applies received frames.
 
 ## Module map
 
 | File | Class / Symbol | Role |
 |------|----------------|------|
 | `Public/USDConnectSettings.h` | `UUSDConnectSettings` | UDeveloperSettings exposed at *Edit → Project Settings → Plugins → OpenUSD Connect*. |
-| `Public/USDConnectSubsystem.h` | `UUSDConnectSubsystem` | UTickableWorldSubsystem that owns both clients, the event queue, and the stage-actor attachment. |
+| `Public/USDConnectSubsystem.h` | `UUSDConnectSubsystem` | UTickableWorldSubsystem that owns both clients and the stage-actor attachment; it drains the receiver session on the game thread. |
 | `OpenUSDConnectPXR/Public/USDConnectProtocol.h` | `namespace OUC` | Wraps the generated FlatBuffers bindings with framing limits and small Unreal helpers. |
-| `Private/SyncClient.h/.cpp` | `FSyncClient` | Receiver TCP thread. Handles HELLO, complete commit-stream reads, ping/rate-limit/resync. |
-| `Private/EmitClient.h/.cpp` | `FEmitClient` | Emitter TCP thread. Drains a SPSC SendQueue, peeks for inbound corrections via `HasPendingData`. |
+| `Private/SyncClient.h/.cpp` | `FSyncClient` | Receiver TCP thread. Handles HELLO, verifies each frame once, and queues bytes with trusted sequence/event metadata. |
+| `Private/EmitClient.h/.cpp` | `FEmitClient` | Emitter TCP thread. Claims shared immutable frames, wakes immediately on enqueue, and peeks for inbound results via `HasPendingData`. |
+| `native/client_core` (repository root) | `OrderedProducerSession`, `OrderedReceiverSession`, `FrameDecoder` | Canonical C++ ordering, reconnect generation, recovery, replay, queue, and framing state shared by nanobind and the staged Unreal build. |
 | `Private/TxnBuilder.h/.cpp` | `BuildXformTxnFrame`, `BuildVisibilityTxnFrame`, `BuildConnectableInputTxnFrame` | FlatBuffers Txn frame builders for the supported emitter event kinds. |
 | `OpenUSDConnectPXR/Private/OpenUSDConnectPXR.cpp` | `IMPLEMENT_MODULE` | Registers the PXR dynamic module with Unreal's module manager. A successful link does not replace this runtime entry point. |
-| `OpenUSDConnectPXR/Public/USDEventApplier.h`, `Private/USDEventApplier.cpp` | `FUSDEventApplier::ApplyFrame` | Decodes a BroadcastEvent frame and runs the matching pxr USD operation inside a `pxr::SdfChangeBlock`. |
+| `OpenUSDConnectPXR/Public/USDEventApplier.h`, `Private/USDEventApplier.cpp` | `FUSDEventApplier::ApplyValidatedFrame` | Applies a boundary-verified BroadcastEvent without repeating FlatBuffers verification; the subsystem manages `pxr::SdfChangeBlock` runs from queued metadata. |
 | `OpenUSDConnectPXR/Public/USDStageBridge.h`, `Private/USDStageBridge.cpp` | `FUSDStageBridge` | Keeps direct pxr stage reads and writes out of the no-RTTI UObject module. |
 | `OpenUSDConnectPXR/Public/USDMaterialXMaterializer.h`, `Private/USDMaterialXMaterializer.cpp` | `FUSDMaterialXMaterializer` | Maintains Unreal-local MaterialX documents for inline networks. |
 | `OpenUSDConnect.uplugin`, `Source/*/*.Build.cs` | - | Registers the runtime and PXR modules and their engine dependencies. |
@@ -97,11 +99,12 @@ direction is summarized in [`README.md`](README.md#supported-events).
 
 ### Generated FlatBuffers bindings
 
-The plugin includes the flatc-generated C++ bindings under
-`OpenUSDConnectPXR/Public/Schema/`. `USDConnectProtocol.h` adds only framing,
-verification, version checks, and Unreal-friendly helpers. `TxnBuilder.cpp`
-uses the generated `Create*` functions; receive code uses the generated table
-accessors.
+The shared native core includes the flatc-generated C++ bindings under
+`include/openusdconnect/client/schema/`. `protocol_codec.h` provides transport-neutral,
+borrowed receive views and caller-owned builders. `USDConnectProtocol.h` adds only
+Unreal-friendly string and array helpers. `TxnBuilder.cpp` converts Unreal-native
+values into the shared stateless event builders; receive code classifies verified
+handshake and control messages through the shared views.
 
 Run `scripts/generate_flatbuffers.sh` after changing either schema and commit
 the regenerated Python and C++ bindings together. The generated C++ header pins
@@ -113,6 +116,10 @@ headers.
 
 - The frame-length prefix is big-endian (`struct.pack(">I", ...)` on the server),
   but the FlatBuffers payload itself is little-endian as always.
+- Emitter builders call `FinishSizePrefixed`, rewrite only that four-byte prefix
+  to big-endian, and detach FlatBuffers' allocation into `FWireFrame`. The outbox
+  shares that immutable allocation through reconnect and acknowledgement; do not
+  materialize a second `TArray<uint8>`.
 - The frame size limit is 16 MiB (`OUC::kMaxFrameSize`) and must match the
   server.
 - Emitter and receiver each open their own TCP socket. `client_id` is the stable
@@ -166,10 +173,27 @@ UnrealBuildTool.Rules.UnrealUSDWrapper.CheckAndSetupUsdSdk(Target, this);
 That call configures USD SDK availability and memory-overload definitions.
 `OpenUSDConnectPXR` owns the pxr-facing implementation and enables RTTI,
 matching Unreal Engine's pure C++ USD modules. `OpenUSDConnect` contains the
-UObject subsystem and settings and remains on Unreal's default no-RTTI build.
-Keeping that boundary is required on Clang platforms because Unreal's UObject
-base classes do not export C++ RTTI. Neither module enables C++ exceptions
-because the plugin code does not require them.
+UObject subsystem and settings and remains on Unreal's default no-RTTI,
+exceptions-disabled build. Keeping that boundary is required on Clang platforms
+because Unreal's UObject base classes do not export C++ RTTI. The portable core
+reports boundary failures through status values and uses assertions only for
+internal invariants.
+
+The canonical implementation lives at `native/client_core` in the repository.
+`producer_session.h` and `receiver_session.h` are payload-generic templates:
+Python instantiates them with owned references to immutable Python `bytes`, while
+Unreal instantiates them with `TSharedPtr<const FWireFrame>` and
+`FValidatedReceiverFrame`. This removes Python boundary copies, preserves
+Unreal's zero-copy producer frame and move-only receiver queue, and avoids
+maintaining a second connection-state implementation.
+`protocol_codec.h` also owns the shared handshake/control classification and
+transaction envelope construction. It borrows receive buffers and operates on a
+caller-supplied FlatBuffers builder, leaving transport, allocation, threading,
+and offset storage to the integration.
+The Unreal packaging harness copies it into the temporary plugin source tree
+before `BuildPlugin`; the staged copy is an artifact and is never maintained as
+a second source. Repository CMake compiles the canonical files directly into
+the nanobind extension.
 
 The PXR module's `PublicSystemIncludePaths` exposes the pinned, plugin-local
 FlatBuffers headers installed by `setup_flatbuffers.py` to both modules.

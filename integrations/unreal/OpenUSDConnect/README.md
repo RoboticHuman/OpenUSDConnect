@@ -13,13 +13,14 @@ edits made in Unreal. Other event types are receive-only; check
 | **`USDImporter` plugin enabled** | Provides `AUsdStageActor` and the pxr stage handle. |
 | **`USDCore` plugin available** | Provides `UnrealUSDWrapper` (pxr linkage + `USE_USD_SDK`). Enabling `USDImporter` enables this dependency transitively. |
 | **OpenUSDConnect server** | Run the Python server from the repository root. |
-| FlatBuffers headers | Run `python setup_flatbuffers.py` once from the plugin directory. It downloads the version pinned by the committed generated bindings. |
+| FlatBuffers headers | Included in release packages. For source builds, run `python setup_flatbuffers.py` or use the Unreal harness, which stages the pinned headers automatically. |
 
 Generated protocol bindings are committed under
-`Source/OpenUSDConnectPXR/Public/Schema/`; users do not need `flatc`. Schema
+`native/client_core/include/openusdconnect/client/schema/`; users do not need
+`flatc`. Schema
 changes require the compiler (`scoop install main/flatc` on Windows) and
 `bash scripts/generate_flatbuffers.sh` from the repository root. That script
-regenerates both Python and Unreal bindings. Keep
+regenerates both Python and native C++ bindings. Keep
 `setup_flatbuffers.py::DEFAULT_VERSION` aligned with the compiler version.
 
 ## Installation
@@ -28,15 +29,17 @@ Windows and macOS use the same plugin layout. The plugin contains two runtime
 modules, but the project only enables `OpenUSDConnect`. The Linux layout is the
 same but has not been validated.
 
-1. **Copy the plugin folder** into your project:
+1. **Install a packaged plugin** into your project:
    ```
    <YourProject>/Plugins/OpenUSDConnect/
    ```
 
-   Fetch the FlatBuffers headers:
-   ```
-   cd <YourProject>/Plugins/OpenUSDConnect
-   python setup_flatbuffers.py
+   Release packages are self-contained. From a repository checkout, build and
+   install the package with the Unreal harness; it stages the canonical native
+   client core and FlatBuffers headers before invoking `BuildPlugin`:
+
+   ```powershell
+   uv run python scripts/run_unreal_tests.py --project <path-to-project.uproject> --install-plugin
    ```
 
    For the repository's Unreal test harness, also initialize the asset

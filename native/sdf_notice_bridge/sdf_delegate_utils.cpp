@@ -4,32 +4,34 @@
 #include <pxr/pxr.h>
 #include <string>
 
-namespace {
+namespace
+{
 
 thread_local std::string lastError;
 
-void SetError(const char *msg) { lastError = msg; }
+void SetError(const char* msg)
+{
+	lastError = msg;
+}
 
 } // namespace
 
-extern "C" {
-
-const char *
-ouc_sdf_delegate_last_error(void)
+extern "C"
 {
-    return lastError.c_str();
-}
 
-uint32_t
-ouc_sdf_delegate_pxr_version(void)
-{
-    return PXR_VERSION;
-}
+	const char* ouc_sdf_delegate_last_error(void)
+	{
+		return lastError.c_str();
+	}
 
-uint32_t
-ouc_sdf_delegate_abi_version(void)
-{
-    return OUC_SDF_DELEGATE_ABI_VERSION;
-}
+	uint32_t ouc_sdf_delegate_pxr_version(void)
+	{
+		return PXR_VERSION;
+	}
+
+	uint32_t ouc_sdf_delegate_abi_version(void)
+	{
+		return OUC_SDF_DELEGATE_ABI_VERSION;
+	}
 
 } // extern "C"

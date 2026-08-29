@@ -1,5 +1,6 @@
 """Tests for the combined server + usdview launcher."""
 
+import subprocess
 from pathlib import Path
 
 from integrations import server_process
@@ -42,8 +43,9 @@ def test_server_command_forwards_project_environment_options(tmp_path):
     assert forwarded == ["--renderer", "Storm"]
 
 
-def test_windows_server_uses_base_interpreter_and_current_environment(monkeypatch):
+def test_windows_server_uses_active_interpreter_and_current_environment(monkeypatch):
     monkeypatch.setattr(server_process, "_is_windows", lambda: True)
+    monkeypatch.setattr(server_process.sys, "executable", "/venv/python.exe")
     monkeypatch.setattr(server_process.sys, "_base_executable", "/base/python.exe")
     monkeypatch.setattr(
         server_process.sysconfig,
@@ -51,11 +53,24 @@ def test_windows_server_uses_base_interpreter_and_current_environment(monkeypatc
         lambda: {"purelib": "/project/site-packages", "platlib": "/project/site-packages"},
     )
 
-    assert server_process.python_executable() == "/base/python.exe"
+    assert server_process.python_executable() == "/venv/python.exe"
     paths = server_process.server_environment(start_usdview.PROJECT_ROOT)["PYTHONPATH"].split(
         server_process.os.pathsep
     )
     assert paths[:2] == [str(start_usdview.PROJECT_ROOT), "/project/site-packages"]
+
+
+def test_server_interpreter_can_import_native_client():
+    result = subprocess.run(
+        [server_process.python_executable(), "-c", "import openusdconnect._native_client"],
+        cwd=start_usdview.PROJECT_ROOT,
+        env=server_process.server_environment(start_usdview.PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_main_stops_server_when_usdview_exits(monkeypatch, tmp_path):

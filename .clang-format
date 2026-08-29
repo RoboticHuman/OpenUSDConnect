@@ -1,0 +1,23 @@
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++17
+
+# Match the conventions used by the Unreal integration.
+UseTab: Always
+IndentWidth: 4
+TabWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBraces: Allman
+BreakConstructorInitializers: BeforeComma
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+SpaceBeforeParens: ControlStatements
+ColumnLimit: 100
+SortIncludes: Never

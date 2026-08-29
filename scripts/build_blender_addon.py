@@ -11,9 +11,11 @@ Output:
 """
 
 import ast
+import importlib.machinery
 import os
 import runpy
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -44,13 +46,32 @@ def _validate_version() -> None:
     try:
         expected = tuple(int(part) for part in version.split("."))
     except ValueError as exc:
-        raise RuntimeError(f"Blender packaging requires an X.Y.Z release version, got {version}") from exc
+        raise RuntimeError(
+            f"Blender packaging requires an X.Y.Z release version, got {version}"
+        ) from exc
     addon_path = REPO_ROOT / "integrations" / "blender" / "__init__.py"
     actual = _blender_version(addon_path)
     if actual != expected:
         raise RuntimeError(
             f"Blender addon version {actual} does not match OpenUSDConnect {version}"
         )
+
+
+def _native_client_path() -> Path:
+    """Locate the native client extension installed for the active interpreter."""
+
+    for entry in sys.path:
+        if not entry:
+            continue
+        package_dir = Path(entry) / "openusdconnect"
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            candidate = package_dir / f"_native_client{suffix}"
+            if candidate.is_file():
+                return candidate
+    raise RuntimeError(
+        "OpenUSDConnect's native client extension is not installed. "
+        "Run `uv sync` before building the Blender addon."
+    )
 
 
 def build():
@@ -79,16 +100,21 @@ def build():
     core_src = REPO_ROOT / "openusdconnect"
     core_dst = build_dir / "openusdconnect"
     shutil.copytree(
-        core_src, core_dst,
+        core_src,
+        core_dst,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "dashboard"),
     )
+    native_client = _native_client_path()
+    shutil.copy2(native_client, core_dst / native_client.name)
 
     # Vendor flatbuffers (pure Python, required by codec)
     import flatbuffers as _fb_mod
+
     fb_src = Path(_fb_mod.__path__[0])
     fb_dst = build_dir / "flatbuffers"
     shutil.copytree(
-        fb_src, fb_dst,
+        fb_src,
+        fb_dst,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
 
@@ -108,7 +134,7 @@ def build():
                 zf.write(full_path, arcname)
 
     # Clean build dir
-    shutil.rmtree(REPO_ROOT / "build")
+    shutil.rmtree(build_dir)
 
     print(f"Built: {zip_path}")
     print(f"Install in Blender: Preferences > Add-ons > Install from Disk > {zip_path}")

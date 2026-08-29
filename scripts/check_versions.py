@@ -43,10 +43,7 @@ def _dependency_pin(pyproject: dict, group: str, package: str) -> str | None:
 
 
 def _generated_flatbuffers_version() -> str | None:
-    header = _read(
-        "integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/Public/Schema/"
-        "messages_generated.h"
-    )
+    header = _read("native/client_core/include/openusdconnect/client/schema/messages_generated.h")
     parts = []
     for field in ("MAJOR", "MINOR", "REVISION"):
         match = re.search(rf"FLATBUFFERS_VERSION_{field}\s*==\s*(\d+)", header)
@@ -88,17 +85,16 @@ def _docker_pip_pins(dockerfile: str) -> dict[str, str]:
 def _docker_base_images(dockerfile: str) -> list[str]:
     images = []
     for instruction in _docker_instructions(dockerfile):
-        match = re.fullmatch(r"FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+\S+)?", instruction, re.I)
+        match = re.fullmatch(
+            r"FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+\S+)?", instruction, re.I
+        )
         if match:
             images.append(match.group(1))
     return images
 
 
 def _cpp_constant(name: str) -> int | None:
-    header = _read(
-        "integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/Public/"
-        "USDConnectProtocol.h"
-    )
+    header = _read("native/client_core/include/openusdconnect/client/protocol_codec.h")
     match = re.search(rf"{name}\s*=\s*(\d+)", header)
     return int(match.group(1)) if match else None
 
@@ -107,6 +103,7 @@ def collect_errors() -> list[str]:
     errors: list[str] = []
     pyproject = tomllib.loads(_read("pyproject.toml"))
     release = str(runpy.run_path(ROOT / "openusdconnect" / "_version.py")["__version__"])
+    openusd = json.loads(_read("openusd.lock.json"))
 
     if not SEMVER.fullmatch(release):
         errors.append(f"OpenUSDConnect release must use X.Y.Z SemVer, got {release!r}")
@@ -131,9 +128,9 @@ def collect_errors() -> list[str]:
     protocol = int(_assignment("openusdconnect/protocol_constants.py", "PROTOCOL_VERSION"))
     schema = int(_assignment("openusdconnect/codec.py", "SCHEMA_VERSION"))
     if _cpp_constant("kProtocolVersion") != protocol:
-        errors.append("Unreal kProtocolVersion does not match Python PROTOCOL_VERSION")
+        errors.append("Native kProtocolVersion does not match Python PROTOCOL_VERSION")
     if _cpp_constant("kSchemaVersion") != schema:
-        errors.append("Unreal kSchemaVersion does not match Python SCHEMA_VERSION")
+        errors.append("Native kSchemaVersion does not match Python SCHEMA_VERSION")
 
     flatbuffers = _dependency_pin(pyproject, "project", "flatbuffers")
     setup_flatbuffers = str(
@@ -141,14 +138,14 @@ def collect_errors() -> list[str]:
     )
     generated_flatbuffers = _generated_flatbuffers_version()
     if not flatbuffers or flatbuffers != setup_flatbuffers or flatbuffers != generated_flatbuffers:
-        errors.append(
-            "FlatBuffers Python, Unreal setup, and generated-header versions must match"
-        )
+        errors.append("FlatBuffers Python, Unreal setup, and generated-header versions must match")
     vendored_version = ROOT / (
-        "integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/ThirdParty/"
-        "flatbuffers/VERSION"
+        "integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/VERSION"
     )
-    if vendored_version.is_file() and vendored_version.read_text(encoding="utf-8").strip() != flatbuffers:
+    if (
+        vendored_version.is_file()
+        and vendored_version.read_text(encoding="utf-8").strip() != flatbuffers
+    ):
         errors.append("Vendored Unreal FlatBuffers headers do not match the configured version")
 
     python_minor = _read(".python-version").strip()
@@ -171,6 +168,13 @@ def collect_errors() -> list[str]:
         if not expected or docker_pins.get(package) != expected:
             errors.append(f"Docker {package} pin must match pyproject dependency group {group}")
 
+    bundled_openusd = _dependency_pin(pyproject, "bundled-usd", "usd-core")
+    if openusd.get("usd_core") != bundled_openusd:
+        errors.append("OpenUSD source lock and bundled usd-core version must match")
+    source_version = str(openusd.get("version", ""))
+    if source_version.removeprefix("0.") != bundled_openusd:
+        errors.append("OpenUSD source version and bundled usd-core version must match")
+
     return errors
 
 
@@ -178,6 +182,7 @@ def version_summary() -> list[str]:
     pyproject = tomllib.loads(_read("pyproject.toml"))
     release = str(runpy.run_path(ROOT / "openusdconnect" / "_version.py")["__version__"])
     unreal = json.loads(_read("integrations/unreal/OpenUSDConnect/OpenUSDConnect.uplugin"))
+    openusd = json.loads(_read("openusd.lock.json"))
     return [
         f"OpenUSDConnect / Blender: {release}",
         f"Unreal plugin: {unreal['VersionName']} (build {unreal['Version']})",
@@ -187,6 +192,7 @@ def version_summary() -> list[str]:
         f"Python: {pyproject['project']['requires-python']}",
         f"Blender: >={'.'.join(str(part) for part in _blender_info()['blender'])}",
         f"Unreal Engine: {unreal['EngineVersion']}",
+        f"OpenUSD: {openusd['version']} ({openusd['tag']})",
         f"Bundled OpenUSD: {_dependency_pin(pyproject, 'bundled-usd', 'usd-core')}",
     ]
 

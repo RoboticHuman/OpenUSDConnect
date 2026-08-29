@@ -1,22 +1,36 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = [
+    "scikit-build-core>=1.0,<2",
+    "nanobind>=2.11,<3",
+]
+build-backend = "scikit_build_core.build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["openusdconnect"]
-
-[tool.hatch.build.targets.wheel.force-include]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["openusdconnect"]
+wheel.py-api = "cp312"
+sdist.include = [
+    ".python-version",
+    "CMakeLists.txt",
+    "openusdconnect/*.py",
+    "openusdconnect/**/*.py",
+    "openusdconnect/schema/*.fbs",
+    "native/**",
+    "openusd.lock.json",
+    "scripts/build_openusd.py",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "pyproject.toml",
+]
+[tool.scikit-build.wheel.force-include]
 "native/sdf_notice_bridge" = "openusdconnect/native/sdf_notice_bridge"
 
-[tool.hatch.build.targets.sdist]
-include = [
-    "/openusdconnect",
-    "/native",
-    "/LICENSE",
-    "/NOTICE",
-    "/README.md",
-    "/pyproject.toml",
-]
+[[tool.dynamic-metadata]]
+provider = "scikit_build_core.metadata.regex"
+field = "version"
+input = "openusdconnect/_version.py"
 
 [project]
 name = "openusdconnect"
@@ -59,6 +73,10 @@ mcp = [
 ]
 profile = [
     "py-spy==0.4.2",
+]
+usdview = [
+    "PyOpenGL==3.1.10",
+    "PySide6==6.11.0",
 ]
 visual = [
     "flip-evaluator==1.7",

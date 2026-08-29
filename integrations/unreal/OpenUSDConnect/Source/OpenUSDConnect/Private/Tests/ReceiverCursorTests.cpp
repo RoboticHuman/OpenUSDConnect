@@ -5,34 +5,44 @@
 #include "SyncClient.h"
 #include "Misc/AutomationTest.h"
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FOpenUSDConnectReceiverAppliedCursorTest,
-	"OpenUSDConnect.Receiver.AppliedCursorIsMonotonicAndResettable",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOpenUSDConnectReceiverAppliedCursorTest,
+								 "OpenUSDConnect.Receiver.AppliedCursorIsMonotonicAndResettable",
+								 EAutomationTestFlags::EditorContext |
+									 EAutomationTestFlags::EngineFilter)
 
 bool FOpenUSDConnectReceiverAppliedCursorTest::RunTest(const FString& Parameters)
 {
-	FSyncClient Client(
-		nullptr,
-		TEXT("127.0.0.1"),
-		7200,
-		TEXT(""),
-		TEXT("client-a"),
-		TEXT("session-a"),
-		0.01f,
-		41);
+	FReceiverSession Session(42, 4);
 
 	TestEqual(TEXT("reconnect starts from the last successfully applied sequence"),
-		Client.GetLastAppliedSeq(), 41);
-	Client.MarkAppliedThrough(42);
+			  Session.LastAppliedSequence(), 41);
+	const openusdconnect::client::ConnectionStart Connection = Session.BeginConnection();
+	TestEqual(TEXT("invalid replay metadata is rejected without throwing"),
+			  Session.AcceptReplayComplete(Connection.Generation, -1, 0),
+			  openusdconnect::client::AcceptResult::InvalidSequence);
+	FValidatedReceiverFrame Frame;
+	Frame.Bytes = {1};
+	Frame.Sequence = 42;
+	TestEqual(TEXT("the receive thread accepts the next ordered frame"),
+			  Session.Accept(Connection.Generation,
+							 openusdconnect::client::ReceiverMessageKind::Event, 42,
+							 MoveTemp(Frame)),
+			  openusdconnect::client::AcceptResult::Accepted);
+	FValidatedReceiverFrame Drained;
+	TestTrue(TEXT("the game thread pops one frame without allocating a batch"),
+			 Session.TryPop(Drained));
+	TestEqual(TEXT("the popped frame retains its sequence metadata"), Drained.Sequence, 42);
+	TestTrue(TEXT("successful game-thread application advances the cursor"),
+			 Session.MarkAppliedThrough(Connection.Generation, 42));
 	TestEqual(TEXT("successful game-thread application advances the cursor"),
-		Client.GetLastAppliedSeq(), 42);
-	Client.MarkAppliedThrough(40);
+			  Session.LastAppliedSequence(), 42);
+	TestFalse(TEXT("an older observation is rejected"),
+			  Session.MarkAppliedThrough(Connection.Generation, 40));
 	TestEqual(TEXT("an older observation cannot move the cursor backward"),
-		Client.GetLastAppliedSeq(), 42);
-	Client.ResetAppliedProgress();
+			  Session.LastAppliedSequence(), 42);
+	Session.ResetAppliedProgress();
 	TestEqual(TEXT("an explicit server resync resets the applied cursor"),
-		Client.GetLastAppliedSeq(), 0);
+			  Session.LastAppliedSequence(), 0);
 	return true;
 }
 

@@ -19,6 +19,7 @@ from integrations.unreal.test_scenario import UnrealScenario, create_scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SOURCE = Path(__file__).resolve().parent / "OpenUSDConnect"
+CLIENT_CORE_SOURCE = REPO_ROOT / "native" / "client_core"
 EDITOR_DRIVER = REPO_ROOT / "tests" / "integration" / "scripts" / "unreal_e2e_driver.py"
 ENGINE_CONFIG = REPO_ROOT / "unreal.test.cfg"
 FLATBUFFERS_HEADER = Path(
@@ -371,21 +372,53 @@ def _cache_root() -> Path:
     return base / "openusdconnect" / "unreal"
 
 
-def _plugin_fingerprint(plugin_source: Path) -> str:
+def _plugin_fingerprint(
+    plugin_source: Path,
+    client_core_source: Path | None = None,
+) -> str:
     digest = hashlib.sha256()
-    paths = [plugin_source / "OpenUSDConnect.uplugin"]
+    paths = [(plugin_source / "OpenUSDConnect.uplugin", plugin_source)]
     for directory in ("Config", "Content", "Resources", "Shaders", "Source"):
         root = plugin_source / directory
         if root.is_dir():
-            paths.extend(path for path in root.rglob("*") if path.is_file())
-    for path in sorted(paths):
+            paths.extend((path, plugin_source) for path in root.rglob("*") if path.is_file())
+    if client_core_source is not None:
+        paths.extend(
+            (path, client_core_source)
+            for path in client_core_source.rglob("*")
+            if path.is_file()
+        )
+    for path, relative_root in sorted(paths):
         if any(part in {"Binaries", "Intermediate"} for part in path.parts):
             continue
-        digest.update(path.relative_to(plugin_source).as_posix().encode("utf-8"))
+        digest.update(path.relative_to(relative_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _stage_plugin_source(
+    plugin_source: Path,
+    destination: Path,
+    *,
+    client_core_source: Path = CLIENT_CORE_SOURCE,
+) -> Path:
+    """Stage the first-party native core into an Unreal source package."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(
+        plugin_source,
+        destination,
+        ignore=shutil.ignore_patterns("Binaries", "Intermediate"),
+    )
+    core_destination = (
+        destination / "Source" / "ThirdParty" / "OpenUSDConnectClientCore"
+    )
+    if core_destination.exists():
+        shutil.rmtree(core_destination)
+    shutil.copytree(client_core_source, core_destination)
+    return destination
 
 
 def _engine_fingerprint(engine: UnrealEngine) -> str:
@@ -437,8 +470,7 @@ def package_plugin(
     force: bool = False,
 ) -> Path:
     """Build and cache a project-installable plugin package."""
-    _ensure_flatbuffers_headers(plugin_source)
-    fingerprint = _plugin_fingerprint(plugin_source)
+    fingerprint = _plugin_fingerprint(plugin_source, CLIENT_CORE_SOURCE)
     engine_fingerprint = _engine_fingerprint(engine)
     cache_root = cache_root or _cache_root()
     package = cache_root / (
@@ -450,14 +482,17 @@ def package_plugin(
 
     cache_root.mkdir(parents=True, exist_ok=True)
     build_dir = cache_root / f".{package.name}.building-{os.getpid()}"
+    staged_source = cache_root / f".{package.name}.source-{os.getpid()}"
     if build_dir.exists():
         shutil.rmtree(build_dir)
     build_dir.mkdir()
+    _stage_plugin_source(plugin_source, staged_source)
+    _ensure_flatbuffers_headers(staged_source)
     log_path = cache_root / f".{package.name}.BuildPlugin.log"
     command = [
         str(engine.run_uat),
         "BuildPlugin",
-        f"-Plugin={plugin_source / 'OpenUSDConnect.uplugin'}",
+        f"-Plugin={staged_source / 'OpenUSDConnect.uplugin'}",
         f"-Package={build_dir}",
         f"-TargetPlatforms={engine.target_platform}",
         "-Rocket",
@@ -466,6 +501,7 @@ def package_plugin(
         command = ["cmd.exe", "/d", "/s", "/c", *command]
     with log_path.open("w", encoding="utf-8") as log:
         completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, text=True)
+    shutil.rmtree(staged_source)
     if completed.returncode:
         tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
         raise UnrealTestError(f"Unreal BuildPlugin failed ({log_path}):\n{tail}")

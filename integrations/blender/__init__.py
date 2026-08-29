@@ -7,7 +7,7 @@ The zip bundles the openusdconnect core library inside the addon directory.
 bl_info = {
     "name": "USD Connect",
     "author": "OpenUSDConnect",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > USD Connect",
     "description": "Real-time USD sync: capture and receive transform edits over the network",
@@ -18,10 +18,13 @@ import os
 import sys
 import uuid
 
+from ._module_loading import refresh_core_modules
+
 # Ensure the addon directory is on sys.path so vendored openusdconnect is importable.
-# Purge openusdconnect modules loaded from a different path (e.g. the uv dev
-# environment) so the bundled copy is used.  Keep modules already loaded from
-# this addon's directory (e.g. during hot-reload).
+# Purge replaceable openusdconnect modules loaded from a different path (e.g.
+# the uv dev environment) so the bundled copy is used. Keep the native client
+# loaded because nanobind extension types can only be registered once per
+# Blender process.
 _addon_dir = os.path.dirname(os.path.abspath(__file__))
 _bundled_prefix = os.path.join(_addon_dir, "openusdconnect")
 # On reload, also purge bundled openusdconnect modules so the freshly-extracted
@@ -29,11 +32,7 @@ _bundled_prefix = os.path.join(_addon_dir, "openusdconnect")
 # resolves against the stale cached submodule and misses newly-added symbols.
 _is_addon_reload = "capture" in dir()
 if os.path.isdir(_bundled_prefix):
-    for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
-        _mod = sys.modules[_k]
-        _mod_file = getattr(_mod, "__file__", "") or ""
-        if _is_addon_reload or not _mod_file.startswith(_bundled_prefix):
-            del sys.modules[_k]
+    refresh_core_modules(sys.modules, _bundled_prefix, addon_reload=_is_addon_reload)
     if _addon_dir not in sys.path:
         sys.path.insert(0, _addon_dir)
 

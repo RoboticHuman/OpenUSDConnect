@@ -8,6 +8,9 @@ public class OpenUSDConnectPXR : ModuleRules
 	public OpenUSDConnectPXR(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		PublicIncludePaths.Add(Path.GetFullPath(Path.Combine(
+			ModuleDirectory,
+			"../ThirdParty/OpenUSDConnectClientCore/include")));
 
 		// pxr headers use typeid. Keep RTTI confined to this pure C++ module;
 		// Unreal's UObject modules and base classes are built without it.

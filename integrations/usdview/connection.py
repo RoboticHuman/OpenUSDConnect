@@ -28,8 +28,36 @@ _receiver: UsdReceiver | None = None
 _qtimer = None
 _usdview_api = None
 _translate_openpbr: bool = False
+_shutdown_hook_installed = False
 
 _TICK_INTERVAL_MS = 16
+
+
+def _install_shutdown_hook() -> None:
+    """Stop networking while Qt and Python are both still fully alive."""
+    global _shutdown_hook_installed
+
+    if _shutdown_hook_installed:
+        return
+
+    from pxr.Usdviewq.qt import QtCore
+
+    app = QtCore.QCoreApplication.instance()
+    app.aboutToQuit.connect(_on_about_to_quit)
+    _shutdown_hook_installed = True
+
+
+def _on_about_to_quit() -> None:
+    """Release the receiver before Qt begins tearing down Python objects."""
+    global _shutdown_hook_installed
+
+    from pxr.Usdviewq.qt import QtCore
+
+    app = QtCore.QCoreApplication.instance()
+    if app is not None:
+        app.aboutToQuit.disconnect(_on_about_to_quit)
+    _shutdown_hook_installed = False
+    stop()
 
 
 def start(
@@ -55,6 +83,8 @@ def start(
         return False
 
     from pxr.Usdviewq.qt import QtCore
+
+    _install_shutdown_hook()
 
     # Receiver-side OpenPBR->standard_surface translation for RenderMan.
     try:

@@ -3,6 +3,15 @@
 Core library for replicating USD stage edits over a networked event protocol.
 """
 
+from pkgutil import extend_path as _extend_path
+
+# Editable native builds keep Python sources in the checkout and install the
+# compiled client beside the environment's site-packages. External DCC Python
+# interpreters do not run the editable-install import hook, so expose both
+# package locations before importing modules backed by the native client.
+__path__ = _extend_path(__path__, __name__)
+del _extend_path
+
 from ._runtime import select_runtime as _select_runtime
 from ._version import __version__
 

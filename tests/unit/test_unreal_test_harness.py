@@ -15,6 +15,7 @@ from integrations.unreal.test_harness import (
     _engine_fingerprint,
     _ensure_flatbuffers_headers,
     _plugin_fingerprint,
+    _stage_plugin_source,
     create_scenario,
     create_test_project,
     discover_engines,
@@ -26,8 +27,7 @@ MATERIALX_TEXTURE_DIR = (
     Path(__file__).parents[2] / "assets" / "test_assets" / "MaterialXTest" / "textures"
 )
 MATERIALX_TEXTURES_AVAILABLE = all(
-    (MATERIALX_TEXTURE_DIR / name).is_file()
-    for name in ("brass_color.jpg", "brass_roughness.jpg")
+    (MATERIALX_TEXTURE_DIR / name).is_file() for name in ("brass_color.jpg", "brass_roughness.jpg")
 )
 
 
@@ -291,6 +291,46 @@ def test_plugin_fingerprint_ignores_non_build_documentation(tmp_path):
 
     source.write_text("int value = 2;\n", encoding="utf-8")
     assert _plugin_fingerprint(plugin) != fingerprint
+
+
+def test_unreal_source_staging_vendors_canonical_client_core(tmp_path):
+    plugin = tmp_path / "plugin"
+    (plugin / "Source").mkdir(parents=True)
+    (plugin / "OpenUSDConnect.uplugin").write_text("{}\n", encoding="utf-8")
+    stale = (
+        plugin
+        / "Source"
+        / "ThirdParty"
+        / "OpenUSDConnectClientCore"
+        / "include"
+        / "openusdconnect"
+        / "client"
+        / "producer_session.h"
+    )
+    stale.parent.mkdir(parents=True)
+    stale.write_text("// stale staged core\n", encoding="utf-8")
+    core = tmp_path / "client_core"
+    header = core / "include" / "openusdconnect" / "client" / "producer_session.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("// canonical core\n", encoding="utf-8")
+
+    staged = _stage_plugin_source(
+        plugin,
+        tmp_path / "staged",
+        client_core_source=core,
+    )
+
+    staged_header = (
+        staged
+        / "Source"
+        / "ThirdParty"
+        / "OpenUSDConnectClientCore"
+        / "include"
+        / "openusdconnect"
+        / "client"
+        / "producer_session.h"
+    )
+    assert staged_header.read_text(encoding="utf-8") == "// canonical core\n"
 
 
 def test_engine_fingerprint_distinguishes_builds_and_installations(tmp_path):

@@ -14,10 +14,19 @@ asset, and visual tests are opt-in.
 | Unreal E2E | `tests/integration/test_unreal_integration.py` | requires `--unreal-tests` |
 | Visual regression | `tests/visual/` | requires `--visual-tests`, RenderMan, and FLIP |
 
-Configure the project OpenUSD runtime first. On PowerShell:
+The runtime created by `scripts/build_openusd.py` is selected automatically.
+For an OpenUSD installation built outside that workflow, configure it first.
+
+PowerShell:
 
 ```powershell
-. .\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+.\scripts\openusd_env.ps1 "D:\OpenUSDInstall"
+```
+
+Bash or Zsh:
+
+```bash
+source scripts/openusd_env.sh /opt/OpenUSDInstall
 ```
 
 Current Windows and Unix OpenUSD Python layouts and the legacy `lib/python`
@@ -44,7 +53,8 @@ uv run pytest tests/ -v
 uv run pytest tests/unit/ --slow-tests -v
 ```
 
-For automation or other shells, configure the test command through the wrapper:
+For automation or other shells using an external build, configure the test
+command through the wrapper:
 
 ```bash
 uv run python scripts/run_with_openusd.py --usd-root /path/to/OpenUSD -- \

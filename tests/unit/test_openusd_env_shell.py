@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.python_version import PYTHON_SITE_DIRECTORY
+
 SCRIPT = Path(__file__).parents[2] / "scripts" / "openusd_env.sh"
 RUNNER = Path(__file__).parents[2] / "scripts" / "run_with_openusd.py"
 WSL = shutil.which("wsl.exe")
@@ -79,7 +81,7 @@ def _read_environment(command: str) -> dict[str, str]:
 
 def test_discovers_posix_prefix_with_spaces(tmp_path):
     root = tmp_path / "OpenUSD install"
-    python_path = _pxr_package(root / "lib" / "python3.13" / "site-packages")
+    python_path = _pxr_package(root / "lib" / PYTHON_SITE_DIRECTORY / "site-packages")
     (root / "bin").mkdir(parents=True)
     (root / "lib64").mkdir()
     command = f"source {shlex.quote(_shell_path(SCRIPT))} {shlex.quote(_shell_path(root))}"
@@ -97,8 +99,9 @@ def test_discovers_posix_prefix_with_spaces(tmp_path):
 def test_accepts_external_bindings_and_inherited_rmantree(tmp_path):
     root = tmp_path / "OpenUSDInstall"
     root.mkdir()
+    (root / "bin").mkdir()
     python_path = _pxr_package(
-        tmp_path / "OpenUSD" / ".venv" / "lib" / "python3.13" / "site-packages"
+        tmp_path / "OpenUSD" / ".venv" / "lib" / PYTHON_SITE_DIRECTORY / "site-packages"
     )
     rman = tmp_path / "RenderMan Pro Server"
     (rman / "bin").mkdir(parents=True)
@@ -131,12 +134,21 @@ def test_invalid_prefix_fails_without_applying_environment(tmp_path):
     )
 
     assert "status=2 root=" in result.stdout
-    assert "OpenUSD root does not exist" in result.stderr
+    assert "OpenUSD install prefix does not exist" in result.stderr
+
+
+def test_missing_prefix_requests_managed_runtime_instead_of_showing_usage():
+    result = _bash(
+        f"unset OPENUSDCONNECT_USD_ROOT; source {shlex.quote(_shell_path(SCRIPT))}",
+        check=False,
+    )
+
+    assert "usage: source scripts/openusd_env.sh" not in result.stderr
 
 
 def test_adapter_rejects_direct_execution(tmp_path):
     root = tmp_path / "OpenUSD"
-    _pxr_package(root / "lib" / "python3.13" / "site-packages")
+    _pxr_package(root / "lib" / PYTHON_SITE_DIRECTORY / "site-packages")
 
     result = _bash(
         f"bash {shlex.quote(_shell_path(SCRIPT))} {shlex.quote(_shell_path(root))}",
@@ -149,13 +161,9 @@ def test_adapter_rejects_direct_execution(tmp_path):
 
 def test_command_wrapper_runs_with_posix_environment(tmp_path):
     root = tmp_path / "OpenUSD"
-    python_path = _pxr_package(root / "lib" / "python3.13" / "site-packages")
+    python_path = _pxr_package(root / "lib" / PYTHON_SITE_DIRECTORY / "site-packages")
     (root / "lib64").mkdir()
-    code = (
-        "import os; "
-        "print(os.environ['PYTHONPATH']); "
-        "print(os.environ['LD_LIBRARY_PATH'])"
-    )
+    code = "import os; print(os.environ['PYTHONPATH']); print(os.environ['LD_LIBRARY_PATH'])"
     command = (
         "unset PYTHONPATH LD_LIBRARY_PATH RMANTREE; "
         f"python3 {shlex.quote(_shell_path(RUNNER))} "

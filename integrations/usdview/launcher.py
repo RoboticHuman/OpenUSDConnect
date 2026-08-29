@@ -33,9 +33,7 @@ from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .install import usd_install_root
 
 
-def _prepend_env_paths(
-    env: dict[str, str], name: str, *paths: str | os.PathLike | None
-) -> None:
+def _prepend_env_paths(env: dict[str, str], name: str, *paths: str | os.PathLike | None) -> None:
     values = [str(path) for path in paths if path]
     current = env.get(name)
     if current:
@@ -47,16 +45,31 @@ def find_usdview() -> Path:
     """Locate the ``usdview`` executable shipped with the system OpenUSD install.
 
     Resolution order:
-        1. ``shutil.which`` against ``usdview[.cmd|.exe]`` (works when the
+        1. ``USDVIEW_PATH`` when explicitly configured.
+        2. The install selected by ``OPENUSDCONNECT_USD_ROOT``.
+        3. ``shutil.which`` against ``usdview[.cmd|.exe]`` (works when the
            OpenUSD ``bin`` dir is on PATH).
-        2. Walk up from ``pxr.__file__`` to the install root and probe
+        4. Walk up from ``pxr.__file__`` to the install root and probe
            ``bin/usdview*``. ``pxr`` itself imports without PySide6, only
            ``pxr.Usdviewq`` needs Qt, so this works in any env where pxr
            is importable.
-        3. ``USDVIEW_PATH`` environment variable as an explicit override.
 
     Raises ``RuntimeError`` if none of the strategies succeed.
     """
+    override = os.environ.get("USDVIEW_PATH")
+    if override:
+        path = Path(override)
+        if path.exists():
+            return path
+
+    selected_root = os.environ.get("OPENUSDCONNECT_USD_ROOT")
+    if selected_root:
+        root = Path(selected_root)
+        for rel in ("bin/usdview.cmd", "bin/usdview.exe", "bin/usdview"):
+            candidate = root / rel
+            if candidate.exists():
+                return candidate
+
     for name in ("usdview.cmd", "usdview.exe", "usdview"):
         found = shutil.which(name)
         if found:
@@ -73,15 +86,9 @@ def find_usdview() -> Path:
             if candidate.exists():
                 return candidate
 
-    override = os.environ.get("USDVIEW_PATH")
-    if override:
-        path = Path(override)
-        if path.exists():
-            return path
-
     raise RuntimeError(
-        "Could not locate the usdview executable. Tried PATH, the pxr "
-        "install walk-up, and the USDVIEW_PATH environment variable. "
+        "Could not locate the usdview executable. Tried USDVIEW_PATH, "
+        "OPENUSDCONNECT_USD_ROOT, PATH, and the pxr install walk-up. "
         "Install OpenUSD with usdview, add its bin/ to PATH, or set "
         "USDVIEW_PATH to the executable."
     )
@@ -113,9 +120,7 @@ def _resolve_command(exe: Path) -> list[str]:
         shebang = first_line[2:].strip()
         direct_interpreter = Path(shebang.strip('"'))
         interpreter = (
-            [str(direct_interpreter)]
-            if direct_interpreter.exists()
-            else shlex.split(shebang)
+            [str(direct_interpreter)] if direct_interpreter.exists() else shlex.split(shebang)
         )
         if interpreter and Path(interpreter[0]).exists():
             bootstrap = Path(__file__).with_name("_bootstrap.py")
@@ -158,7 +163,7 @@ def _normalize_prim_path(raw: str) -> str:
 
         slash_positions = [i for i, ch in enumerate(raw) if ch in ("/", "\\")]
         for i in reversed(slash_positions):
-            candidate = "/" + raw[i + 1:].replace("\\", "/")
+            candidate = "/" + raw[i + 1 :].replace("\\", "/")
             if "/" in candidate[1:] and Sdf.Path.IsValidPathString(candidate):
                 return candidate
     return "/" + raw
@@ -259,7 +264,7 @@ def launch_usdview(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m integrations.usdview.launcher",
-        description="Launch usdview pre-wired to an OpenUSDConnect server."
+        description="Launch usdview pre-wired to an OpenUSDConnect server.",
     )
     parser.add_argument("stage", help="USD file to open in usdview")
     endpoint = parser.add_argument_group("sync endpoint")

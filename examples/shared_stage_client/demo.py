@@ -8,13 +8,12 @@ import sys
 import time
 from pathlib import Path
 
-from pxr import Gf, Usd, UsdGeom
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect import ClientPhase, SharedStageClient  # noqa: E402
+from openusdconnect import ClientPhase, SharedStageClient  # noqa: E402, I001
+from pxr import Gf, Usd, UsdGeom  # noqa: E402
 
 DEFAULT_STAGE = Path(__file__).with_name("scene.usda")
 SPHERE_PATH = "/World/SharedSphere"

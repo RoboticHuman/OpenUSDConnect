@@ -3,10 +3,10 @@
 import logging
 import socket
 import time
-from collections import deque
 
 import pytest
 
+from openusdconnect import _client_backend
 from openusdconnect.codec import HelloRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.receiver import ReceiverThread
@@ -106,17 +106,21 @@ class TestReceiverThread:
     def test_bounded_drain_preserves_suffix_and_replay_watermark(self):
         rt = ReceiverThread(reconnect=False)
         rt.connected = True
-        rt._incoming = deque([b"one", b"two", b"three"])
-        rt._incoming_serial = 3
-        rt._received_replay_complete = (rt._replay_generation, 3, 7, 3)
+        connection = rt._inbox.begin_connection()
+        for sequence, frame in enumerate((b"one", b"two", b"three"), start=1):
+            rt._inbox.accept(
+                connection.generation,
+                _client_backend.ReceiverMessageKind.EVENT,
+                sequence,
+                frame,
+            )
+        rt._inbox.accept_replay_complete(connection.generation, 3, 7)
 
         assert list(rt.drain_queue(max_messages=2)) == [b"one", b"two"]
-        assert list(rt._incoming) == [b"three"]
-        assert rt._last_drained_serial == 2
+        assert rt._inbox.size == 1
         assert not rt.mark_replay_applied()
 
         assert list(rt.drain_queue(max_messages=2)) == [b"three"]
-        assert rt._last_drained_serial == 3
         assert rt.mark_replay_applied()
         assert rt.synchronized
         assert rt.replay_head_seq == 3
@@ -129,14 +133,23 @@ class TestReceiverThread:
 
     def test_replay_request_advances_past_discarded_queue_serials(self):
         rt = ReceiverThread(reconnect=False)
-        rt._incoming = deque([b"stale-one", b"stale-two"])
-        rt._incoming_serial = 5
-        rt._last_drained_serial = 3
+        connection = rt._inbox.begin_connection()
+        rt._inbox.accept(
+            connection.generation,
+            _client_backend.ReceiverMessageKind.EVENT,
+            1,
+            b"stale-one",
+        )
+        rt._inbox.accept(
+            connection.generation,
+            _client_backend.ReceiverMessageKind.EVENT,
+            2,
+            b"stale-two",
+        )
 
         rt.request_replay_from(4)
 
-        assert not rt._incoming
-        assert rt._last_drained_serial == 5
+        assert rt._inbox.size == 0
 
     def test_terminal_transport_failure_wakes_connection_waiter(self, monkeypatch):
         def _fail_connect(*_args, **_kwargs):

@@ -1,5 +1,6 @@
 // Copyright OpenUSDConnect Contributors. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class OpenUSDConnect : ModuleRules
@@ -7,6 +8,9 @@ public class OpenUSDConnect : ModuleRules
 	public OpenUSDConnect(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		PublicIncludePaths.Add(Path.GetFullPath(Path.Combine(
+			ModuleDirectory,
+			"../ThirdParty/OpenUSDConnectClientCore/include")));
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{

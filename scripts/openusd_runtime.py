@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -13,6 +14,85 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 USD_ROOT_ENV = "OPENUSDCONNECT_USD_ROOT"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _platform_key() -> str:
+    system = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return f"{system}-{machine}"
+
+
+ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / f"active-{_platform_key()}.json"
+LEGACY_ACTIVE_RUNTIME_FILE = REPO_ROOT / ".openusd" / "active.json"
+
+
+def managed_runtime_config(path: Path | None = None) -> dict[str, str | None] | None:
+    """Read the runtime registered by build_openusd.py, if one exists."""
+    candidates = (path,) if path is not None else (ACTIVE_RUNTIME_FILE, LEGACY_ACTIVE_RUNTIME_FILE)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"could not read managed OpenUSD runtime config {candidate}: {exc}"
+            ) from exc
+        if data.get("schema") != 1:
+            raise RuntimeError(f"unsupported managed OpenUSD runtime config schema in {candidate}")
+        required = ("usd_root", "python_path", "python_executable", "version")
+        if any(not isinstance(data.get(key), str) or not data[key] for key in required):
+            raise RuntimeError(f"invalid managed OpenUSD runtime config: {candidate}")
+        renderman = data.get("renderman_root")
+        if renderman is not None and not isinstance(renderman, str):
+            raise RuntimeError(f"invalid RenderMan path in managed runtime config: {candidate}")
+        root = Path(data["usd_root"]).expanduser().resolve()
+        python_path = Path(data["python_path"]).expanduser().resolve()
+        if not root.is_dir() or not (python_path / "pxr" / "__init__.py").is_file():
+            if path is not None:
+                return {key: data.get(key) for key in (*required, "renderman_root")}
+            continue
+        return {key: data.get(key) for key in (*required, "renderman_root")}
+    return None
+
+
+def _option_is_present(argv: Sequence[str] | None, option: str) -> bool:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--" in arguments:
+        arguments = arguments[: arguments.index("--")]
+    return option in arguments or any(value.startswith(option + "=") for value in arguments)
+
+
+def runtime_defaults(
+    argv: Sequence[str] | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Resolve explicit environment selection before the managed project build."""
+    if _option_is_present(argv, "--managed"):
+        managed = managed_runtime_config()
+        if managed is None:
+            return None, None, None, None
+        return (
+            managed["usd_root"],
+            managed["python_path"],
+            managed["python_executable"],
+            managed["renderman_root"],
+        )
+    explicit_root = os.environ.get(USD_ROOT_ENV)
+    if explicit_root:
+        return explicit_root, None, None, os.environ.get("RMANTREE")
+    if _option_is_present(argv, "--usd-root"):
+        return None, None, None, os.environ.get("RMANTREE")
+    managed = managed_runtime_config()
+    if managed is None:
+        return None, None, None, os.environ.get("RMANTREE")
+    return (
+        managed["usd_root"],
+        managed["python_path"],
+        managed["python_executable"],
+        managed["renderman_root"],
+    )
 
 
 def _active_venv_python_paths() -> list[Path]:
@@ -193,21 +273,39 @@ def verify_bindings(
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    usd_root, python_path, python_executable, renderman_root = runtime_defaults(argv)
     parser = argparse.ArgumentParser(description="Resolve an OpenUSD runtime environment.")
-    parser.add_argument(
+    runtime = parser.add_mutually_exclusive_group()
+    runtime.add_argument(
         "--usd-root",
-        default=os.environ.get(USD_ROOT_ENV),
-        help=f"OpenUSD install prefix (or set {USD_ROOT_ENV}).",
+        default=usd_root,
+        help=(
+            "OpenUSD install prefix (defaults to the managed project build; "
+            f"{USD_ROOT_ENV} overrides it)."
+        ),
     )
-    parser.add_argument("--python-path", help="Directory containing the pxr package.")
-    parser.add_argument("--python-executable", help="Python executable to place first on PATH.")
+    runtime.add_argument(
+        "--managed",
+        action="store_true",
+        help="Select the active project-managed build, ignoring environment overrides.",
+    )
+    parser.add_argument(
+        "--python-path", default=python_path, help="Directory containing the pxr package."
+    )
+    parser.add_argument(
+        "--python-executable",
+        default=python_executable,
+        help="Python executable to place first on PATH.",
+    )
     parser.add_argument("--plugin-path", action="append", default=[])
     parser.add_argument("--dll-dir", action="append", default=[])
-    parser.add_argument("--renderman-root")
+    parser.add_argument("--renderman-root", default=renderman_root)
     parser.add_argument("--format", choices=("json", "posix"), default="json")
     args = parser.parse_args(argv)
     if not args.usd_root:
-        parser.error(f"--usd-root is required unless {USD_ROOT_ENV} is set")
+        parser.error(
+            f"no managed OpenUSD runtime is registered; pass --usd-root or set {USD_ROOT_ENV}"
+        )
     return args
 
 
