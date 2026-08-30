@@ -160,7 +160,7 @@ def test_send_rejects_while_initial_replay_is_incomplete(server):
         author.disconnect()
 
     reader = ConnectionSession(
-        McpConfig(port=server, client_id="replay-reader", read_after_write_timeout_s=0.01)
+        McpConfig(port=server, client_id="replay-reader", read_after_write_timeout_s=1e-9)
     )
     try:
         status = reader.connect()

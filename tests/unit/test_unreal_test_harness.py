@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pxr import Gf, Sdf, Usd
 
 from integrations.unreal.test_harness import (
+    EDITOR_DRIVER,
     UnrealTestError,
     _editor_command,
     _engine_fingerprint,
@@ -503,3 +508,32 @@ def test_create_scenario_discards_previous_run_state(tmp_path):
     create_scenario(tmp_path, port=17421, python_executable=Path("/python"))
 
     assert all(not path.exists() for path in stale_paths)
+
+
+@pytest.mark.parametrize("has_events", [True, False])
+def test_editor_sequence_poll_closes_connection(tmp_path, has_events):
+    connection = sqlite3.connect(tmp_path / "events.db")
+    if has_events:
+        connection.execute("CREATE TABLE events (seq INTEGER)")
+        connection.execute("INSERT INTO events VALUES (7)")
+        connection.commit()
+    # The driver imports Unreal and starts an editor scenario at module scope.
+    # Compile only its stdlib polling helper so this contract needs no editor.
+    tree = ast.parse(EDITOR_DRIVER.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_max_sequence"
+    )
+    namespace = {
+        "CONFIG": {"database_path": str(tmp_path / "events.db")},
+        "closing": closing,
+        "sqlite3": SimpleNamespace(connect=lambda *args, **kwargs: connection, Error=sqlite3.Error),
+    }
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), str(EDITOR_DRIVER), "exec"), namespace
+    )
+
+    assert namespace["_max_sequence"]() == (7 if has_events else 0)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
