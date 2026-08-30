@@ -150,6 +150,7 @@ runtime.
 | Command | Purpose |
 | --- | --- |
 | `scripts/build_blender_addon.py` | Package the Blender addon zip. |
+| `scripts/build_distribution.py` | Build release artifacts; see [Packaging and distribution](distribution.md) for components and USD profiles. |
 | `openusdconnect-build-sdf-notice-bridge` | Build exact Sdf change tracking against the active OpenUSD install. |
 | `scripts/setup_blender_test.py` | Download/configure a portable Blender test runtime. |
 | `scripts/start_usdconnect_debug.py` | Start the server and one or two debug-enabled Blender sessions. |

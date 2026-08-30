@@ -32,6 +32,7 @@ def _run_script(
     root: Path,
     *,
     python_path: Path | None = None,
+    python_executable: Path | None = None,
     rman: Path | None = None,
     explicit_root: bool = True,
 ):
@@ -46,6 +47,9 @@ def _run_script(
     if python_path is not None:
         env["TEST_PYTHON_PATH"] = str(python_path)
         arguments = " -PythonPath $env:TEST_PYTHON_PATH"
+    if python_executable is not None:
+        env["TEST_PYTHON_EXECUTABLE"] = str(python_executable)
+        arguments += " -PythonExecutable $env:TEST_PYTHON_EXECUTABLE"
     root_argument = " $env:TEST_USD_ROOT" if explicit_root else ""
     command = (
         f". $env:TEST_SCRIPT{root_argument}{arguments}; "
@@ -73,6 +77,21 @@ def test_discovers_current_windows_python_layout(tmp_path):
     result = _run_script(root)
 
     assert result["PythonPath"].split(os.pathsep)[0] == str(python_path)
+    repo_python = SCRIPT.parents[1] / ".venv" / "Scripts" / "python.exe"
+    expected = (
+        repo_python if repo_python.is_file() else shutil.which("python") or shutil.which("python3")
+    )
+    assert Path(result["LoaderPython"]).resolve() == Path(expected).resolve()
+
+
+def test_accepts_explicit_python_executable(tmp_path):
+    root = tmp_path / "OpenUSD"
+    root.mkdir()
+    (root / "bin").mkdir()
+    _pxr_package(root / "Lib" / "site-packages")
+
+    result = _run_script(root, python_executable=Path(sys.executable))
+
     assert Path(result["LoaderPython"]).resolve() == Path(sys.executable).resolve()
 
 
@@ -126,7 +145,11 @@ def test_omitted_root_uses_automatic_runtime_selection(tmp_path):
         Path(result["PythonPath"].split(os.pathsep)[0]).resolve()
         == Path(managed["python_path"]).resolve()
     )
-    assert Path(result["LoaderPython"]).resolve() == Path(sys.executable).resolve()
+    repo_python = SCRIPT.parents[1] / ".venv" / "Scripts" / "python.exe"
+    expected = (
+        repo_python if repo_python.is_file() else shutil.which("python") or shutil.which("python3")
+    )
+    assert Path(result["LoaderPython"]).resolve() == Path(expected).resolve()
 
 
 def test_rejects_managed_storage_directory_as_install_prefix(tmp_path):

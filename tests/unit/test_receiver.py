@@ -117,6 +117,7 @@ class TestReceiverThread:
         rt._inbox.accept_replay_complete(connection.generation, 3, 7)
 
         assert list(rt.drain_queue(max_messages=2)) == [b"one", b"two"]
+        assert rt.queued_message_count == 1
         assert rt._inbox.size == 1
         assert not rt.mark_replay_applied()
 
