@@ -1,42 +1,45 @@
 """Tests for the Blender addon packager."""
 
 import zipfile
+from types import SimpleNamespace
+
+import pytest
 
 from scripts import build_blender_addon
 
 
-def test_build_vendors_native_client(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
-    blender = root / "integrations" / "blender"
-    blender.mkdir(parents=True)
-    (blender / "__init__.py").write_text("", encoding="utf-8")
-    (root / "integrations" / "openpbr_to_standard_surface.py").write_text("", encoding="utf-8")
-    core = root / "openusdconnect"
-    core.mkdir()
-    (core / "__init__.py").write_text("", encoding="utf-8")
-    native_client = tmp_path / "_native_client.pyd"
+def test_package_addon_vendors_exact_native_client(tmp_path):
+    target = build_blender_addon.HostPython(
+        executable=tmp_path / "python.exe",
+        version=(3, 11, 13),
+        cache_tag="cpython-311",
+        extension_suffix=".cp311-win_amd64.pyd",
+        platform_tag="windows-x64",
+    )
+    native_client = tmp_path / "_native_client.cp311-win_amd64.pyd"
     native_client.write_bytes(b"native-client")
-    dist = tmp_path / "dist"
 
-    monkeypatch.setattr(build_blender_addon, "REPO_ROOT", root)
-    monkeypatch.setattr(build_blender_addon, "DIST_DIR", dist)
-    monkeypatch.setattr(build_blender_addon, "_validate_version", lambda: None)
-    monkeypatch.setattr(build_blender_addon, "_native_client_path", lambda: native_client)
+    archive_path = build_blender_addon.package_addon(
+        target,
+        native_client,
+        output_dir=tmp_path,
+        compatibility_alias=False,
+    )
 
-    build_blender_addon.build()
-
-    with zipfile.ZipFile(dist / build_blender_addon.ZIP_NAME) as addon:
-        assert "usd_connect/openusdconnect/_native_client.pyd" in addon.namelist()
-        assert addon.read("usd_connect/openusdconnect/_native_client.pyd") == b"native-client"
-    assert not (root / "build" / "usd_connect").exists()
+    with zipfile.ZipFile(archive_path) as addon:
+        native_path = "usd_connect/openusdconnect/_native_client.cp311-win_amd64.pyd"
+        assert [name for name in addon.namelist() if "_native_client" in name] == [native_path]
+        assert addon.read(native_path) == b"native-client"
 
 
-def test_native_client_path_reports_missing_build(tmp_path, monkeypatch):
-    monkeypatch.setattr(build_blender_addon.sys, "path", [str(tmp_path)])
+def test_resolve_target_requires_host_abi_configuration(monkeypatch):
+    monkeypatch.setattr(build_blender_addon, "configured_blender", lambda: None)
+    args = SimpleNamespace(
+        blender=None,
+        python_executable=None,
+        python_sdk=None,
+        python_version=None,
+    )
 
-    try:
-        build_blender_addon._native_client_path()
-    except RuntimeError as error:
-        assert "Run `uv sync`" in str(error)
-    else:
-        raise AssertionError("missing native client extension should fail the addon build")
+    with pytest.raises(RuntimeError, match="Pass --blender, --python-version"):
+        build_blender_addon._resolve_target(args)
