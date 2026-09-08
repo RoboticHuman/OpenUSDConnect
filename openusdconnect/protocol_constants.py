@@ -158,8 +158,8 @@ class EventKindInfo:
     arc: re-applying identical state would still trigger recomposition
         (ClearReferences plus re-add, variant re-select), so receivers
         skip-detect it against the mirror's composed state.
-    imports: application brings new content into the consumer; fires the
-        dispatcher's on_imported callback.
+    imports: application may materialize or recompose consumer content; fires
+        the dispatcher's on_imported callback.
     native_projection: how a layered receiver maps the event into a non-USD
         adapter after applying it to the receiver-owned USD mirror.
     modes: protocol layer modes in which the event is valid. Some exact Sdf

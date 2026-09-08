@@ -13,6 +13,9 @@ from openusdconnect.protocol_constants import (
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_INSTANCEABLE,
+    K_SET_MATERIAL_BINDING,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
@@ -565,6 +568,266 @@ def test_session_layer_masks_root_transform_without_changing_emitted_opinion():
     assert changed_trs["t"] == pytest.approx([3.0, 0.0, 0.0])
     assert translate.Get() == Gf.Vec3d(2.0, 0.0, 0.0)
     emitter.cleanup()
+
+
+def test_emitter_rejects_different_edit_target_mappings_on_same_layer():
+    stage = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    variants = cube.GetPrim().GetVariantSets().AddVariantSet("look")
+    variants.AddVariant("A")
+    variants.SetVariantSelection("A")
+    root_target = stage.GetEditTarget()
+    emitter = NoticeEmitter(stage)
+
+    try:
+        emitter.snapshot_events()
+        stage.SetEditTarget(variants.GetVariantEditTarget())
+        cube.GetSizeAttr().Set(3.0)
+        stage.SetEditTarget(root_target)
+        cube.GetExtentAttr().Set([Gf.Vec3f(-2.0), Gf.Vec3f(2.0)])
+
+        with pytest.raises(RuntimeError, match="multiple USD edit targets"):
+            emitter.build_events_for_dirty()
+    finally:
+        emitter.cleanup()
+
+
+def test_masked_material_binding_emits_current_edit_target_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    geometry = UsdGeom.Mesh.Define(stage, "/Geom").GetPrim()
+    weak_material = UsdShade.Material.Define(stage, "/Weak")
+    strong_material = UsdShade.Material.Define(stage, "/Strong")
+    strong = Sdf.Layer.CreateAnonymous("strong-binding")
+    weak = Sdf.Layer.CreateAnonymous("weak-binding")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        UsdShade.MaterialBindingAPI.Apply(geometry)
+        UsdShade.MaterialBindingAPI(geometry).Bind(weak_material)
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        UsdShade.MaterialBindingAPI.Apply(geometry)
+        UsdShade.MaterialBindingAPI(geometry).Bind(strong_material)
+
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    binding = next(
+        event
+        for event in events
+        if event["k"] == K_SET_MATERIAL_BINDING and event["prim"] == "/Geom"
+    )
+    assert binding["material_path"] == "/Weak"
+    assert geometry.GetRelationship("material:binding").GetTargets() == [Sdf.Path("/Strong")]
+
+
+def test_variant_material_binding_ignores_same_layer_root_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    geometry = UsdGeom.Mesh.Define(stage, "/Geom").GetPrim()
+    root_material = UsdShade.Material.Define(stage, "/RootMaterial")
+    variant_material = UsdShade.Material.Define(stage, "/VariantMaterial")
+    UsdShade.MaterialBindingAPI.Apply(geometry)
+    UsdShade.MaterialBindingAPI(geometry).Bind(root_material)
+    variants = geometry.GetVariantSets().AddVariantSet("look")
+    variants.AddVariant("A")
+    variants.SetVariantSelection("A")
+    variant_target = variants.GetVariantEditTarget()
+    with Usd.EditContext(stage, variant_target):
+        UsdShade.MaterialBindingAPI(geometry).Bind(variant_material)
+
+    stage.SetEditTarget(variant_target)
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    binding = next(
+        event
+        for event in events
+        if event["k"] == K_SET_MATERIAL_BINDING and event["prim"] == "/Geom"
+    )
+    assert binding["material_path"] == "/VariantMaterial"
+    assert geometry.GetRelationship("material:binding").GetTargets() == [
+        Sdf.Path("/RootMaterial")
+    ]
+
+
+def test_masked_instanceable_emits_current_edit_target_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Model", "Xform")
+    strong = Sdf.Layer.CreateAnonymous("strong-instanceable")
+    weak = Sdf.Layer.CreateAnonymous("weak-instanceable")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        prim.SetInstanceable(False)
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        prim.SetInstanceable(True)
+
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    instanceable = next(
+        event
+        for event in events
+        if event["k"] == K_SET_INSTANCEABLE and event["prim"] == "/Model"
+    )
+    assert instanceable["instanceable"] is False
+    assert prim.IsInstanceable() is True
+
+
+def test_variant_instanceable_ignores_same_layer_root_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Model", "Xform")
+    prim.SetInstanceable(True)
+    variants = prim.GetVariantSets().AddVariantSet("look")
+    variants.AddVariant("A")
+    variants.SetVariantSelection("A")
+    variant_target = variants.GetVariantEditTarget()
+    with Usd.EditContext(stage, variant_target):
+        prim.SetInstanceable(False)
+
+    stage.SetEditTarget(variant_target)
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    instanceable = next(
+        event
+        for event in events
+        if event["k"] == K_SET_INSTANCEABLE and event["prim"] == "/Model"
+    )
+    assert instanceable["instanceable"] is False
+    assert prim.IsInstanceable() is True
+
+
+def test_identity_target_snapshot_reads_active_variant_instanceable():
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Model", "Xform")
+    variants = prim.GetVariantSets().AddVariantSet("look")
+    variants.AddVariant("A")
+    variants.SetVariantSelection("A")
+    with variants.GetVariantEditContext():
+        prim.SetInstanceable(False)
+
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    instanceable = next(
+        event
+        for event in events
+        if event["k"] == K_SET_INSTANCEABLE and event["prim"] == "/Model"
+    )
+    assert instanceable["instanceable"] is False
+
+
+def test_masked_camera_attr_emits_current_edit_target_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    camera = UsdGeom.Camera.Define(stage, "/Camera")
+    strong = Sdf.Layer.CreateAnonymous("strong-camera")
+    weak = Sdf.Layer.CreateAnonymous("weak-camera")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        camera.GetFocalLengthAttr().Set(35.0)
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        camera.GetFocalLengthAttr().Set(50.0)
+
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    camera_event = next(
+        event
+        for event in events
+        if event["k"] == K_SET_GPRIM_ATTRS
+        and event["prim"] == "/Camera"
+        and "focalLength" in event.get("attrs", {})
+    )
+    assert camera_event["attrs"]["focalLength"] == pytest.approx(35.0)
+    assert camera.GetFocalLengthAttr().Get() == pytest.approx(50.0)
+
+
+def test_masked_point_instancer_attr_emits_current_edit_target_opinion():
+    stage = Usd.Stage.CreateInMemory()
+    instancer = UsdGeom.PointInstancer.Define(stage, "/Instancer")
+    strong = Sdf.Layer.CreateAnonymous("strong-instancer")
+    weak = Sdf.Layer.CreateAnonymous("weak-instancer")
+    stage.GetSessionLayer().subLayerPaths = [strong.identifier, weak.identifier]
+
+    with Usd.EditContext(stage, Usd.EditTarget(weak)):
+        instancer.GetPositionsAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+    with Usd.EditContext(stage, Usd.EditTarget(strong)):
+        instancer.GetPositionsAttr().Set([Gf.Vec3f(2.0, 0.0, 0.0)])
+
+    stage.SetEditTarget(Usd.EditTarget(weak))
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    instancer_event = next(
+        event
+        for event in events
+        if event["k"] == K_SET_POINT_INSTANCER and event["prim"] == "/Instancer"
+    )
+    assert instancer_event["positions"].tolist() == [[1.0, 0.0, 0.0]]
+    assert list(instancer.GetPositionsAttr().Get()) == [Gf.Vec3f(2.0, 0.0, 0.0)]
+
+
+def test_identity_target_snapshot_reads_active_variant_camera_and_instancer():
+    stage = Usd.Stage.CreateInMemory()
+    camera = UsdGeom.Camera.Define(stage, "/Camera")
+    camera_variants = camera.GetPrim().GetVariantSets().AddVariantSet("look")
+    camera_variants.AddVariant("A")
+    camera_variants.SetVariantSelection("A")
+    with camera_variants.GetVariantEditContext():
+        camera.GetFocalLengthAttr().Set(35.0)
+
+    instancer = UsdGeom.PointInstancer.Define(stage, "/Instancer")
+    instancer_variants = instancer.GetPrim().GetVariantSets().AddVariantSet("look")
+    instancer_variants.AddVariant("A")
+    instancer_variants.SetVariantSelection("A")
+    with instancer_variants.GetVariantEditContext():
+        instancer.GetPositionsAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+
+    emitter = NoticeEmitter(stage)
+    try:
+        events = emitter.snapshot_events()
+    finally:
+        emitter.cleanup()
+
+    camera_event = next(
+        event
+        for event in events
+        if event["k"] == K_SET_GPRIM_ATTRS
+        and event["prim"] == "/Camera"
+        and "focalLength" in event.get("attrs", {})
+    )
+    instancer_event = next(
+        event
+        for event in events
+        if event["k"] == K_SET_POINT_INSTANCER and event["prim"] == "/Instancer"
+    )
+    assert camera_event["attrs"]["focalLength"] == pytest.approx(35.0)
+    assert instancer_event["positions"].tolist() == [[1.0, 0.0, 0.0]]
 
 
 def test_masked_connectable_default_emits_current_edit_target_opinion():

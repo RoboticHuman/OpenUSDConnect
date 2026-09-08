@@ -94,7 +94,7 @@ def usd_value_to_python(
 def read_variant_selections(stage: Usd.Stage, prim_path: str) -> dict[str, str]:
     """Return the composed selections on a prim, keyed by variant-set name."""
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         return {}
     variant_sets = prim.GetVariantSets()
     return {
@@ -118,12 +118,12 @@ def read_material_binding(stage: Usd.Stage, prim_path: str) -> dict[str, str]:
     compute an inherited bound material from an ancestor or collection.
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid() or prim.IsPseudoRoot():
+    if not prim or prim.IsPseudoRoot():
         return {}
     result: dict[str, str] = {}
     for purpose, relationship_name in _MATERIAL_BINDING_PURPOSE_RELS:
         relationship = prim.GetRelationship(relationship_name)
-        if not relationship or not relationship.IsValid() or not relationship.IsAuthored():
+        if not relationship or not relationship.IsAuthored():
             continue
         targets = relationship.GetTargets()
         result[purpose] = str(targets[0]) if targets else ""
@@ -150,7 +150,7 @@ def attribute_event_metadata(prim, attr_name: str, attr) -> tuple[dict, dict]:
 
 def connectable_kind(prim) -> str:
     """Return the protocol container kind for a supported connectable prim."""
-    if not prim or not prim.IsValid():
+    if not prim:
         return ""
     if prim.IsA(UsdShade.Shader):
         return "shader"
@@ -264,7 +264,7 @@ def read_point_instancer(
     remain copy-on-write values suitable for comparison.
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.PointInstancer):
+    if not prim or not prim.IsA(UsdGeom.PointInstancer):
         return None
     point_instancer = UsdGeom.PointInstancer(prim)
     state: dict = {}
@@ -291,7 +291,7 @@ def read_point_instancer(
         if only is not None and usd_name not in only:
             continue
         attr = prim.GetAttribute(usd_name)
-        if not attr or not attr.IsValid() or not attr.IsAuthored():
+        if not attr or not attr.IsAuthored():
             continue
         value = attr.Get(time_code)
         if value is None:

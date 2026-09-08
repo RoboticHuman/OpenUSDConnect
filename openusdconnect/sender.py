@@ -234,16 +234,8 @@ class EventSender:
                     self._session.disconnect(generation)
                     self._close_socket_object(sock)
                     return False
-            except (OSError, IncompleteRead, MessageTooLarge, ValueError):
-                LOG.exception("EventSender: handshake failed")
-                self._session.disconnect(generation)
-                self._close_socket_object(sock)
-                return False
             except Exception:
-                # Resolver/plugin callbacks and malformed FlatBuffer accessors
-                # are outside the narrow transport exception family above, but
-                # they must still leave this sender disconnected.
-                LOG.exception("EventSender: unexpected handshake failure")
+                LOG.exception("EventSender: handshake failed")
                 self._session.disconnect(generation)
                 self._close_socket_object(sock)
                 return False
@@ -309,6 +301,7 @@ class EventSender:
             self.rejection_reason = (
                 f"server negotiated {active_mode.value} instead of {self.layer_mode.value}"
             )
+            self.hello_rejected = True
             return False
         self.layer_mode_active = active_mode
 

@@ -1,20 +1,8 @@
-"""Receive-and-apply pipeline orchestrator.
+"""Receive-and-apply orchestration for integrations.
 
-``EventDispatcher`` composes the receive→apply cycle that any integration
-running an emitter alongside a receiver needs:
-
-  1. Drain the receiver queue (raw FlatBuffers frames)
-  2. Decode → event dicts; handle resync, sequence dedup, errors
-  3. Suppress the emitter (if provided) for the rest of the cycle
-  4. Skip-detect arc events whose composed state already matches
-  5. Commit stage-affecting events to the mirror stage atomically (if any)
-  6. Dispatch every non-skipped event to the adapter
-  7. Invalidate emitter diff caches against the mutated stage
-  8. Remember reference and payload dependencies
-  9. Notify ``on_imported`` for newly-imported prim paths
-
-Integrations call ``drain_and_apply()`` from their own tick / idle / event
-loop callback.
+``EventDispatcher`` decodes queued messages, commits mirror-stage changes
+before dispatching to the adapter, then updates emitter and dependency state.
+Integrations call ``drain_and_apply()`` from their tick or idle callback.
 """
 
 from __future__ import annotations
@@ -429,38 +417,15 @@ class EventDispatcher:
         on_applied: Callable[[list[str]], None] | None = None,
         on_applied_events: Callable[[list[dict]], None] | None = None,
     ):
-        """
-        Args:
-            receiver: Background thread holding the inbound message queue.
-            adapter: Where to dispatch events.  Use ``UsdStageAdapter``
-                when the integration's scene representation IS a
-                ``Usd.Stage``; subclass ``DCCAdapter`` otherwise.
-            mirror_stage: Optional separate USD stage that receives
-                stage-affecting events. Layered replay uses it to compose
-                authored layer opinions before projecting their result into
-                a non-USD adapter. Leave ``None`` when the adapter already
-                writes to the target stage.
-            emitter: Optional ``NoticeEmitter`` to suppress during apply
-                and invalidate after. Use it when the emitter observes the
-                stage mutated by this dispatcher.
-            on_imported: Called with the list of prim paths that just
-                imported new content (load_payload, set_reference).  Use
-                for post-import work (seed caches, refresh viewport).
-                Fires inside the suppress block, before ``drain_and_apply``
-                returns; defer any work that must observe post-tick
-                evaluation state to after the call returns.
-            on_resync: Called when the server requests a resync.  The
-                dispatcher already resets ``last_seq``; the callback is
-                where to reset adapter / scene state.
-            on_applied: Called with the prim paths of every applied
-                (non-skipped) event in the batch.  Use for post-apply
-                conditioning scoped to what changed (e.g. receiver-side
-                material rewrites).  Fires inside the suppress block.
-            on_applied_events: Like ``on_applied`` but receives the applied
-                event dicts themselves.  Use when the post-apply work needs
-                finer granularity than prim paths (e.g. which inputs an
-                event edited).  Fires inside the suppress block, before
-                ``on_applied``.
+        """Configure the receive target and optional apply hooks.
+
+        A mirror stage composes layered changes before projection into a
+        non-USD adapter. Apply callbacks run under emitter suppression in the
+        order ``on_imported``, ``on_applied_events``, then ``on_applied``.
+        ``on_imported`` identifies roots affected by references or payload
+        loading; ``on_resync`` resets integration-owned state. Callbacks are
+        part of delivery and must be retry-safe: raising requests replay from
+        the last committed consumer cursor.
         """
         self.receiver = receiver
         self.adapter = adapter
@@ -521,10 +486,8 @@ class EventDispatcher:
             return 0
         self._sync_layer_router()
 
-        # Decode geometry to numpy (zero-copy bulk) rather than per-element
-        # Python lists the list path is ~100x slower to decode+apply for
-        # heavy meshes. Adapters that need plain sequences normalize at their
-        # own boundary.
+        # Keep geometry as NumPy views; materializing Python lists is ~100x
+        # slower for heavy meshes. Adapters normalize at their own boundary.
         result = decode_messages(
             bufs,
             last_seq=self._last_seq,
@@ -686,6 +649,31 @@ class EventDispatcher:
             )
         return self._projection_state
 
+    def _run_post_apply_callbacks(
+        self,
+        events: list[dict],
+        *,
+        notify_empty_events: bool = False,
+        unique_paths: bool = False,
+    ) -> list[str]:
+        if self.on_imported is not None:
+            imported = [
+                event["prim"]
+                for event in events
+                if event.get("k") in IMPORT_KINDS and event.get("prim")
+            ]
+            if imported:
+                self.on_imported(imported)
+        if self.on_applied_events is not None and (events or notify_empty_events):
+            self.on_applied_events(events)
+        applied = [event["prim"] for event in events if event.get("prim")]
+        if unique_paths:
+            applied = sorted(set(applied))
+        if self.on_applied is not None:
+            if applied:
+                self.on_applied(applied)
+        return applied
+
     def _apply_layered(
         self,
         records: list[ReceivedEvent],
@@ -794,14 +782,10 @@ class EventDispatcher:
                     while end < len(routed) and routed[end][0] is layer:
                         end += 1
                     run = [event for _layer, event in routed[start:end]]
-                    if layer is None:
-                        edit_target = Usd.EditTarget(stage.GetSessionLayer())
-                        with Usd.EditContext(stage, edit_target):
-                            _apply_run(run, edit_target)
-                    else:
-                        edit_target = Usd.EditTarget(layer)
-                        with Usd.EditContext(stage, edit_target):
-                            _apply_run(run, edit_target)
+                    target_layer = stage.GetSessionLayer() if layer is None else layer
+                    edit_target = Usd.EditTarget(target_layer)
+                    with Usd.EditContext(stage, edit_target):
+                        _apply_run(run, edit_target)
                     start = end
 
             self._shared_stage.remember(shared_state_events)
@@ -815,52 +799,28 @@ class EventDispatcher:
             adapter_events = (
                 native_adapter_events if projection is not None else events
             )
-            if self.on_imported is not None:
-                imported = [
-                    event["prim"]
-                    for event in adapter_events
-                    if event.get("k") in IMPORT_KINDS and event.get("prim")
-                ]
-                if imported:
-                    self.on_imported(imported)
-            if self.on_applied_events is not None and adapter_events:
-                self.on_applied_events(adapter_events)
-            if self.on_applied is not None:
-                applied = [event["prim"] for event in adapter_events if event.get("prim")]
-                if applied:
-                    self.on_applied(applied)
+            self._run_post_apply_callbacks(adapter_events)
         return len(native_adapter_events) if projection is not None else len(events)
 
     def _apply(self, events: list[dict]) -> int:
-        """Run the apply pipeline on a pre-decoded batch.
+        """Apply a decoded batch with stage-first failure semantics.
 
-        Stage-first ordering: skip-detect → mirror commit → adapter
-        dispatch → invalidate → on_imported.  The stage commit happens
-        BEFORE the adapter dispatch so that if ``atomic_apply`` raises,
-        the adapter is never touched the consumer scene stays
-        untouched on a failed batch.  This is the "stage-first"
-        guarantee.
+        A failed mirror commit leaves the adapter untouched. Invalidation,
+        dependency tracking, and callbacks run only after both apply steps.
         """
         from .event_apply import apply_events, atomic_apply
 
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
-            # Skip decisions are computed against PRE-commit state so the
-            # comparison is meaningful.  Both the mirror commit and the
-            # adapter dispatch consume the skip sets see ARC_KINDS for
-            # why we bother.
+            # Arc skip decisions must inspect composition before this batch.
             stage_skip = self._compute_stage_skip(events)
             adapter_skip = self._compute_adapter_skip(events, stage_skip)
 
-            # Stage-backed adapters that share their Usd.Stage with the
-            # mirror don't need the separate commit apply_events on
-            # the adapter already covers the same stage.
+            # A stage-backed adapter already performs the mirror commit.
             adapter_handles_mirror = (
                 self.mirror_stage is not None and self.adapter.targets_stage() is self.mirror_stage
             )
 
-            # 1. Mirror commit atomic batch into the dispatcher's
-            #    separate USD stage.
             if self.mirror_stage is not None and not adapter_handles_mirror:
                 stage_events = [
                     ev
@@ -872,50 +832,21 @@ class EventDispatcher:
                     with atomic_apply(self.mirror_stage, prim_paths=scope):
                         apply_events(self.mirror_stage, stage_events)
 
-            # 2. Adapter dispatch every non-skipped event. Reached
-            #    after the mirror commit so adapters can rely on the
-            #    mirror reflecting the events about to apply.
             non_skipped = [ev for i, ev in enumerate(events) if i not in adapter_skip]
             if non_skipped:
                 self.adapter.apply_events(non_skipped)
 
-            # 3. Emitter cache invalidation re-syncs the per-prim diff
-            #    cache with the just-mutated stage.  Without this the
-            #    next emit cycle would compare current stage state to a
-            #    stale cache and re-emit a change the server already
-            #    knows about (a feedback loop).
+            # Stale diff entries would re-emit the remote change as local.
             if self.emitter is not None:
                 for i, ev in enumerate(events):
                     if i in adapter_skip:
                         continue
                     self.emitter.invalidate_for_event(ev)
 
-            # 4. Remember current composition dependencies. This runs after
-            #    both stage and adapter application succeed and retains only
-            #    the small reference/payload events needed for explicit
-            #    receiver-local refreshes.
+            # Track dependencies only after both apply steps succeed.
             self._observe_asset_dependencies(events)
 
-            # 5. Post-import callback: fires for events that brought
-            #    new content into the consumer (load_payload,
-            #    set_reference) so the integration can run post-import
-            #    work (cache warmup, viewport refresh, etc.).
-            if self.on_imported is not None:
-                imported = [
-                    ev["prim"]
-                    for i, ev in enumerate(events)
-                    if i not in adapter_skip and ev.get("k") in IMPORT_KINDS and ev.get("prim")
-                ]
-                if imported:
-                    self.on_imported(imported)
-
-            if self.on_applied_events is not None and non_skipped:
-                self.on_applied_events(non_skipped)
-
-            if self.on_applied is not None:
-                applied = [ev["prim"] for ev in non_skipped if ev.get("prim")]
-                if applied:
-                    self.on_applied(applied)
+            self._run_post_apply_callbacks(non_skipped)
 
         return len(events)
 
@@ -1334,18 +1265,11 @@ class EventDispatcher:
                         self.emitter.invalidate_for_event(event)
             tracked_event.dependencies = refreshed_dependencies[id(tracked_event)]
 
-        imported = [
-            event["prim"]
-            for event in adapter_events
-            if event.get("k") in IMPORT_KINDS and event.get("prim")
-        ]
-        if imported and self.on_imported is not None:
-            self.on_imported(imported)
-        if self.on_applied_events is not None:
-            self.on_applied_events(adapter_events)
-        affected = sorted({event["prim"] for event in adapter_events if event.get("prim")})
-        if affected and self.on_applied is not None:
-            self.on_applied(affected)
+        affected = self._run_post_apply_callbacks(
+            adapter_events,
+            notify_empty_events=True,
+            unique_paths=True,
+        )
 
         return {
             "status": "refreshed",

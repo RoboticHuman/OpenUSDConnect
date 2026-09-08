@@ -387,8 +387,6 @@ class SqliteEventStore(EventStore):
                 raise
 
     def _size_on_disk(self) -> int:
-        import os
-
         total = 0
         for suffix in ("", "-wal", "-shm"):
             try:

@@ -1,15 +1,6 @@
-"""Length-prefixed binary framing for FlatBuffers messages.
+"""Length-prefixed FlatBuffers framing for sockets and buffered streams.
 
-Wire format per message:
-    [4 bytes: uint32 big-endian payload length][N bytes: payload]
-
-Provides send/recv helpers for both raw sockets and buffered file objects
-(socketserver's StreamRequestHandler exposes self.rfile / self.wfile).
-
-Slow-loris mitigation: per-message deadlines are enforced by the server's
-socket timeout (``settimeout``).  A client that drip-feeds bytes will
-trigger ``TimeoutError`` in ``_recv_exact``, which the server read loop
-catches and handles (disconnect or retry).
+Each frame is a four-byte big-endian payload length followed by the payload.
 """
 
 from __future__ import annotations
@@ -18,7 +9,7 @@ import struct
 
 _HEADER = struct.Struct(">I")  # 4-byte big-endian unsigned int
 _HEADER_SIZE = _HEADER.size
-MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MiB same limit as the old _MAX_LINE_SIZE
+MAX_MESSAGE_SIZE = 16 * 1024 * 1024
 
 
 class MessageTooLarge(Exception):
@@ -29,14 +20,7 @@ class IncompleteRead(Exception):
     """Raised when the connection closes mid-message."""
 
 
-# ---------------------------------------------------------------------------
-# Socket-based send / recv
-# ---------------------------------------------------------------------------
-
-# Writing the header and payload separately is the write-write-read pattern
-# that triggers Nagle + delayed-ACK stalls (tens of ms) on small messages.
-# Coalescing into one sendall keeps a small message in a single segment;
-# above the limit the concat copy costs more than the second syscall.
+# Coalesce small frames to avoid delayed-ACK stalls without copying large payloads.
 _COALESCE_LIMIT = 64 * 1024
 
 
@@ -77,10 +61,6 @@ def _recv_exact(sock, n: int) -> bytes:
     return bytes(buf)
 
 
-# ---------------------------------------------------------------------------
-# File-object-based send / recv  (for socketserver StreamRequestHandler)
-# ---------------------------------------------------------------------------
-
 def send_framed_wfile(wfile, payload: bytes) -> None:
     """Write a length-prefixed message to a buffered wfile."""
     wfile.write(_HEADER.pack(len(payload)))
@@ -106,10 +86,6 @@ def recv_framed_rfile(rfile, *, max_size: int = MAX_MESSAGE_SIZE) -> bytes:
         raise IncompleteRead(f"payload short read: expected {length}, got {len(data)}")
     return bytes(data)
 
-
-# ---------------------------------------------------------------------------
-# Batch framing frame multiple payloads into a single bytes blob
-# ---------------------------------------------------------------------------
 
 def frame_batch(payloads: list[bytes]) -> bytes:
     """Frame multiple payloads into a single contiguous bytes object.

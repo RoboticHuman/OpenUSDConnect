@@ -21,6 +21,7 @@ from openusdconnect.protocol_constants import (
     K_SET_GPRIM_ATTRS,
     K_SET_MATERIAL_BINDING,
     K_SET_PAYLOAD,
+    K_SET_POINT_INSTANCER,
     K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_VARIANT_SELECTIONS,
@@ -658,6 +659,184 @@ class TestCleanup:
         )
 
         assert [event["k"] for event in emitter.build_events_for_dirty()] == [K_SET_VISIBILITY]
+
+    def test_remote_gprim_invalidation_preserves_local_target_baseline(self):
+        stage = Usd.Stage.CreateInMemory()
+        cube = UsdGeom.Cube.Define(stage, "/Cube")
+        remote = Sdf.Layer.CreateAnonymous("remote-gprim")
+        authoring = Sdf.Layer.CreateAnonymous("authoring-gprim")
+        stage.GetSessionLayer().subLayerPaths = [remote.identifier, authoring.identifier]
+        with Usd.EditContext(stage, Usd.EditTarget(authoring)):
+            cube.GetSizeAttr().Set(2.0)
+        with Usd.EditContext(stage, Usd.EditTarget(remote)):
+            cube.GetSizeAttr().Set(4.0)
+
+        stage.SetEditTarget(Usd.EditTarget(authoring))
+        emitter = NoticeEmitter(stage)
+        try:
+            initial = emitter.snapshot_events()
+            initial_size = next(
+                event
+                for event in initial
+                if event["k"] == K_SET_GPRIM_ATTRS and "size" in event.get("attrs", {})
+            )
+            assert initial_size["attrs"]["size"] == 2.0
+
+            remote_event = {
+                "k": K_SET_GPRIM_ATTRS,
+                "prim": "/Cube",
+                "attrs": {"size": 3.0},
+            }
+            with emitter.suppressed():
+                with Usd.EditContext(stage, Usd.EditTarget(remote)):
+                    apply_events(stage, [remote_event])
+                    emitter.invalidate_for_event(remote_event)
+
+            cube.GetSizeAttr().Set(3.0)
+            changed = emitter.build_events_for_dirty()
+        finally:
+            emitter.cleanup()
+
+        local_size = next(
+            event
+            for event in changed
+            if event["k"] == K_SET_GPRIM_ATTRS and "size" in event.get("attrs", {})
+        )
+        assert local_size["attrs"]["size"] == 3.0
+
+    def test_remote_gprim_invalidation_distinguishes_same_layer_mappings(self):
+        stage = Usd.Stage.CreateInMemory()
+        cube = UsdGeom.Cube.Define(stage, "/Cube")
+        variants = cube.GetPrim().GetVariantSets().AddVariantSet("look")
+        variants.AddVariant("A")
+        variants.SetVariantSelection("A")
+        root_target = stage.GetEditTarget()
+        variant_target = variants.GetVariantEditTarget()
+        with Usd.EditContext(stage, variant_target):
+            cube.GetSizeAttr().Set(2.0)
+        with Usd.EditContext(stage, root_target):
+            cube.GetSizeAttr().Set(4.0)
+
+        stage.SetEditTarget(variant_target)
+        emitter = NoticeEmitter(stage)
+        try:
+            emitter.snapshot_events()
+            remote_event = {
+                "k": K_SET_GPRIM_ATTRS,
+                "prim": "/Cube",
+                "attrs": {"size": 3.0},
+            }
+            with emitter.suppressed():
+                with Usd.EditContext(stage, root_target):
+                    apply_events(stage, [remote_event])
+                    emitter.invalidate_for_event(remote_event)
+
+            cube.GetSizeAttr().Set(3.0)
+            changed = emitter.build_events_for_dirty()
+        finally:
+            emitter.cleanup()
+
+        local_size = next(
+            event
+            for event in changed
+            if event["k"] == K_SET_GPRIM_ATTRS and "size" in event.get("attrs", {})
+        )
+        assert local_size["attrs"]["size"] == 3.0
+
+    def test_remote_camera_invalidation_distinguishes_same_layer_mappings(self):
+        stage = Usd.Stage.CreateInMemory()
+        camera = UsdGeom.Camera.Define(stage, "/Camera")
+        variants = camera.GetPrim().GetVariantSets().AddVariantSet("look")
+        variants.AddVariant("A")
+        variants.SetVariantSelection("A")
+        root_target = stage.GetEditTarget()
+        variant_target = variants.GetVariantEditTarget()
+        with Usd.EditContext(stage, variant_target):
+            camera.GetFocalLengthAttr().Set(35.0)
+        with Usd.EditContext(stage, root_target):
+            camera.GetFocalLengthAttr().Set(50.0)
+
+        stage.SetEditTarget(variant_target)
+        emitter = NoticeEmitter(stage)
+        try:
+            initial = emitter.snapshot_events()
+            local_initial = next(
+                event
+                for event in initial
+                if event["k"] == K_SET_GPRIM_ATTRS
+                and "focalLength" in event.get("attrs", {})
+            )
+            assert local_initial["attrs"]["focalLength"] == pytest.approx(35.0)
+            remote_event = {
+                "k": K_SET_GPRIM_ATTRS,
+                "prim": "/Camera",
+                "attrs": {"focalLength": 60.0},
+            }
+            with emitter.suppressed():
+                with Usd.EditContext(stage, root_target):
+                    apply_events(stage, [remote_event])
+                    emitter.invalidate_for_event(remote_event)
+
+            camera.GetFocalLengthAttr().Set(60.0)
+            changed = emitter.build_events_for_dirty()
+        finally:
+            emitter.cleanup()
+
+        local_camera = next(
+            event
+            for event in changed
+            if event["k"] == K_SET_GPRIM_ATTRS
+            and "focalLength" in event.get("attrs", {})
+        )
+        assert local_camera["attrs"]["focalLength"] == pytest.approx(60.0)
+
+    def test_remote_point_instancer_invalidation_distinguishes_same_layer_mappings(self):
+        stage = Usd.Stage.CreateInMemory()
+        instancer = UsdGeom.PointInstancer.Define(stage, "/Instancer")
+        variants = instancer.GetPrim().GetVariantSets().AddVariantSet("look")
+        variants.AddVariant("A")
+        variants.SetVariantSelection("A")
+        root_target = stage.GetEditTarget()
+        variant_target = variants.GetVariantEditTarget()
+        with Usd.EditContext(stage, variant_target):
+            instancer.GetPositionsAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+        with Usd.EditContext(stage, root_target):
+            instancer.GetPositionsAttr().Set([Gf.Vec3f(2.0, 0.0, 0.0)])
+
+        stage.SetEditTarget(variant_target)
+        emitter = NoticeEmitter(stage)
+        try:
+            initial = emitter.snapshot_events()
+            local_initial = next(
+                event
+                for event in initial
+                if event["k"] == K_SET_POINT_INSTANCER
+                and "positions" in event.get("fields", ())
+            )
+            assert local_initial["positions"].tolist() == [[1.0, 0.0, 0.0]]
+            remote_event = {
+                "k": K_SET_POINT_INSTANCER,
+                "prim": "/Instancer",
+                "fields": ["positions"],
+                "positions": [[3.0, 0.0, 0.0]],
+            }
+            with emitter.suppressed():
+                with Usd.EditContext(stage, root_target):
+                    apply_events(stage, [remote_event])
+                    emitter.invalidate_for_event(remote_event)
+
+            instancer.GetPositionsAttr().Set([Gf.Vec3f(3.0, 0.0, 0.0)])
+            changed = emitter.build_events_for_dirty()
+        finally:
+            emitter.cleanup()
+
+        local_instancer = next(
+            event
+            for event in changed
+            if event["k"] == K_SET_POINT_INSTANCER
+            and "positions" in event.get("fields", ())
+        )
+        assert local_instancer["positions"].tolist() == [[3.0, 0.0, 0.0]]
 
     def test_cleanup_idempotent(self):
         stage, emitter = _make_stage_and_emitter()

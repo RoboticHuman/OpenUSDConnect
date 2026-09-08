@@ -166,6 +166,10 @@ def test_send_rejects_while_initial_replay_is_incomplete(server):
         status = reader.connect()
         assert status["mirror_synchronized"] is False
 
+        # Keep send() from winning a race with the remaining replay. The
+        # behavior under test is the unsynchronized guard, not replay speed.
+        reader.config.read_after_write_timeout_s = 1e-9
+
         with pytest.raises(ToolError) as error:
             reader.send(
                 [{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}]

@@ -71,6 +71,7 @@ from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph, StaleLayer
 from ..usd_state import read_material_binding, read_variant_selections
 from ._txn_barrier import _TxnBarrier
 from .layer_stack import CollaborationLayerStack
+from .rate_limit import validate_rate_limit_config
 from .types import (
     AmbiguousVfsWriteError,
     ClientInfo,
@@ -377,6 +378,7 @@ class UsdSyncServer:
             raise ValueError("stage and base_usd_path are mutually exclusive")
         if stage is not None and resolver_context is not None:
             raise ValueError("a supplied stage already owns its resolver context")
+        validate_rate_limit_config(txn_rate, txn_burst)
 
         self.layer_mode = LayerMode(layer_mode)
         if self.layer_mode is LayerMode.SHARED_STAGE and department_priority:
@@ -624,11 +626,7 @@ class UsdSyncServer:
         return f"{label}-{digest}"
 
     def shutdown(self):
-        """Signal background threads to drain queued work and exit.
-
-        Compaction stops first (no rewrite mid-shutdown), then the persist
-        queue drains (durability), then broadcast.
-        """
+        """Stop background workers in dependency order."""
         self._transaction_stopping = True
         if self._transaction_queue is not None:
             self._transaction_queue.put(None)
@@ -3032,11 +3030,7 @@ class UsdSyncServer:
                 session_id,
                 txn_id,
             )
-        return TransactionCommit(
-            commit.status,
-            commit.txn_id,
-            commit.records,
-        )
+        return commit
 
     def _transaction_batch_loop(self) -> None:
         """Collect a bounded set of producer transactions for one DB commit."""

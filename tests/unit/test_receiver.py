@@ -235,16 +235,12 @@ class TestReceiverThread:
             _send_event(conn, 1)
             _send_replay_complete(conn, 1, epoch=4)
             _poll_until(lambda: rt.last_seq == 1)
-            assert _poll_until(
-                lambda: rt._received_replay_complete is not None
-                and rt._received_replay_complete[2] == 4
-            )
 
             assert not rt.synchronized
             queued = rt.drain_queue()
             assert len(queued) == 1
             assert message_to_dict(queued[0])["type"] == "event"
-            assert rt.mark_replay_applied()
+            assert _poll_until(rt.mark_replay_applied)
             assert rt.synchronized
             assert rt.replay_head_seq == 1
             assert rt.replay_epoch == 4
@@ -265,9 +261,7 @@ class TestReceiverThread:
         conn2 = None
         try:
             _send_replay_complete(conn1, 0, epoch=1)
-            _poll_until(lambda: rt._received_replay_complete is not None)
-            rt.drain_queue()
-            assert rt.mark_replay_applied()
+            assert _poll_until(rt.mark_replay_applied)
             assert rt.synchronized
 
             conn1.close()
@@ -278,9 +272,7 @@ class TestReceiverThread:
             _poll_until(lambda: rt.connected)
             assert not rt.synchronized
             _send_replay_complete(conn2, 0, epoch=1)
-            _poll_until(lambda: rt._received_replay_complete is not None)
-            rt.drain_queue()
-            assert rt.mark_replay_applied()
+            assert _poll_until(rt.mark_replay_applied)
             assert rt.synchronized
         finally:
             _teardown(rt, conn2 or conn1, srv)
@@ -398,6 +390,25 @@ class TestReceiverThread:
         finally:
             _teardown(rt, conn, srv)
 
+    def test_auth_rejection_stores_reason(self):
+        srv, port = _make_server()
+        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=True)
+        rt.start()
+        conn = _accept(srv)
+        try:
+            _recv_hello(conn)
+            send_framed(
+                conn,
+                encode_message({"type": "auth_rejected", "reason": "invalid token"}),
+            )
+            rt.join(timeout=1)
+            assert not rt.is_alive()
+            assert rt.auth_rejected
+            assert not rt.hello_rejected
+            assert rt.rejection_reason == "invalid token"
+        finally:
+            _teardown(rt, conn, srv)
+
     def test_receives_and_drains(self):
         """ReceiverThread queues incoming FB messages for drain_queue."""
         srv, port = _make_server()
@@ -459,6 +470,44 @@ class TestReceiverThread:
 
 class TestReconnection:
     """ReceiverThread reconnects automatically after connection loss."""
+
+    def test_backoff_resets_after_successful_handshake(self, monkeypatch):
+        class StopAfterThreeWaits:
+            def __init__(self):
+                self.waits = []
+                self.stopped = False
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, timeout):
+                self.waits.append(timeout)
+                if len(self.waits) == 3:
+                    self.stopped = True
+                    return True
+                return False
+
+        receiver = ReceiverThread(
+            reconnect=True,
+            reconnect_base_delay=1.0,
+            reconnect_max_delay=8.0,
+        )
+        stop_event = StopAfterThreeWaits()
+        receiver._stop_event = stop_event
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise OSError("injected connection failure")
+            receiver.connected = True
+
+        monkeypatch.setattr(receiver, "_connect_and_recv", connect)
+
+        receiver.run()
+
+        assert stop_event.waits == [1.0, 2.0, 1.0]
 
     def test_reconnects_after_server_close(self):
         """After server closes, receiver reconnects to a new server."""
@@ -554,19 +603,13 @@ class TestReconnection:
         conn = _accept_and_hello(srv)
         try:
             _send_replay_complete(conn, 0, epoch=1)
-            assert _poll_until(lambda: rt._received_replay_complete is not None)
-            rt.drain_queue()
-            assert rt.mark_replay_applied()
+            assert _poll_until(rt.mark_replay_applied)
             assert rt.synchronized
 
             send_framed(conn, encode_message({"type": "resync"}))
             _send_event(conn, 1)
             _send_replay_complete(conn, 1, epoch=2)
             assert _poll_until(lambda: rt.last_seq == 1)
-            assert _poll_until(
-                lambda: rt._received_replay_complete is not None
-                and rt._received_replay_complete[2] == 2
-            )
             assert not rt.synchronized
 
             queued = rt.drain_queue()
@@ -574,7 +617,7 @@ class TestReconnection:
                 "resync",
                 "event",
             ]
-            assert rt.mark_replay_applied()
+            assert _poll_until(rt.mark_replay_applied)
             assert rt.synchronized
             assert rt.replay_head_seq == 1
             assert rt.replay_epoch == 2

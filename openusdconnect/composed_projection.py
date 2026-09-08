@@ -161,18 +161,10 @@ def _path_is_at_or_below(path: str, root: str) -> bool:
 
 def _is_projectable_prim(prim: Usd.Prim) -> bool:
     """Return whether a composed prim belongs in an external native scene."""
-    if not (
-        prim
-        and prim.IsValid()
-        and not prim.IsPseudoRoot()
-        and not prim.IsAbstract()
-        and not prim.IsInPrototype()
-    ):
+    if not prim or prim.IsPseudoRoot() or prim.IsAbstract() or prim.IsInPrototype():
         return False
-    # Empty typeless ancestors created implicitly by DefinePrim only provide
-    # namespace. Native adapters create that hierarchy while ensuring the
-    # first representable descendant, so emitting a separate object would be
-    # both redundant and a behavior change from direct event projection.
+    # Typeless ancestors provide namespace only. Native adapters create them
+    # while ensuring the first representable descendant.
     return bool(prim.GetTypeName() or prim.GetAuthoredProperties() or not tuple(prim.GetChildren()))
 
 
@@ -834,7 +826,7 @@ def _gprim_values(
             time_code = _time_code(time)
             for name in names:
                 attr = prim.GetAttribute(name)
-                if not attr or not attr.IsValid():
+                if not attr:
                     continue
                 value = attr.Get(time_code)
                 if value is not None:
@@ -1466,7 +1458,7 @@ class ComposedChangeProjection:
                 if str(root) == "/"
                 else source_stage.GetPrimAtPath(root)
             )
-            if not prim or not prim.IsValid():
+            if not prim:
                 continue
             for descendant in Usd.PrimRange.AllPrims(prim):
                 self._add_prim_candidates(descendant, stage=source_stage)
@@ -1875,7 +1867,7 @@ class ComposedChangeProjection:
             attr_interp = {}
             for name in event["attrs"]:
                 attr = prim.GetAttribute(name)
-                if not attr or not attr.IsValid():
+                if not attr:
                     continue
                 primvar_entry, interp_entry = attribute_event_metadata(prim, name, attr)
                 primvar_meta.update(primvar_entry)

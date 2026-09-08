@@ -28,7 +28,11 @@ _venv_site_packages = [
 for _venv_sp in _venv_site_packages:
     if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
         sys.path.append(_venv_sp)
-for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
+for _k in [
+    k
+    for k in sys.modules
+    if k.startswith("openusdconnect") and k != "openusdconnect._native_client"
+]:
     del sys.modules[_k]
 
 

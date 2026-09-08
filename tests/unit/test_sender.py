@@ -10,6 +10,7 @@ from openusdconnect import _client_backend
 from openusdconnect.codec import TransactionRejectionCode, encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_transaction_result
+from openusdconnect.protocol_constants import LayerMode
 from openusdconnect.recovery import RejectionDisposition, TransactionFailure
 from openusdconnect.sender import EventSender, TransactionRejectedError
 
@@ -169,6 +170,37 @@ class TestEventSenderConnect:
         sender = EventSender("127.0.0.1", port, client_id="test-client", handshake_timeout=0.5)
         assert sender.connect() is False
         assert sender.sock is None
+
+    def test_layer_mode_mismatch_is_a_terminal_hello_rejection(self):
+        srv, port = _make_server()
+        sender = EventSender("127.0.0.1", port, client_id="mode-mismatch")
+
+        def _serve():
+            conn = srv.accept()[0]
+            try:
+                recv_framed(conn)
+                send_framed(
+                    conn,
+                    encode_message(
+                        {
+                            "type": "hello_ok",
+                            "layer_mode": LayerMode.SHARED_STAGE.value,
+                        }
+                    ),
+                )
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=_serve)
+        thread.start()
+        try:
+            assert sender.connect() is False
+            assert sender.hello_rejected is True
+            assert "shared_stage instead of managed" in sender.rejection_reason
+        finally:
+            sender.disconnect()
+            thread.join(timeout=2)
+            srv.close()
 
     def test_server_highwater_ahead_of_local_session_requires_recovery(self):
         srv, port = _make_server()

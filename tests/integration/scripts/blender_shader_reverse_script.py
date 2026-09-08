@@ -15,7 +15,11 @@ if PROJECT_ROOT not in sys.path:
 _VENV_SITE_PACKAGES = os.path.join(PROJECT_ROOT, ".venv", "Lib", "site-packages")
 if os.path.isdir(_VENV_SITE_PACKAGES) and _VENV_SITE_PACKAGES not in sys.path:
     sys.path.append(_VENV_SITE_PACKAGES)
-for _module_name in [name for name in sys.modules if name.startswith("openusdconnect")]:
+for _module_name in [
+    name
+    for name in sys.modules
+    if name.startswith("openusdconnect") and name != "openusdconnect._native_client"
+]:
     del sys.modules[_module_name]
 
 from integrations.blender import capture

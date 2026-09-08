@@ -1,15 +1,4 @@
-"""Background receiver thread connects to server, queues incoming events.
-
-ReceiverThread is DCC-agnostic. It connects to the server as a receiver,
-reads length-prefixed FlatBuffers messages in a background thread, and
-provides a thread-safe queue for the main thread to drain. DCC-specific
-timer/callback registration is the plugin's responsibility.
-
-Features:
-- Automatic reconnection with exponential backoff on connection loss
-- Socket timeout to detect hung connections
-- Bounded queue on overflow, disconnects, waits for drain, then reconnects for replay
-"""
+"""Background TCP receiver with replay-aware reconnection."""
 
 from __future__ import annotations
 
@@ -38,34 +27,32 @@ from .transport import send_msg
 
 LOG = logging.getLogger(__name__)
 
-# Reconnection defaults
-_RECONNECT_BASE_DELAY = 1.0  # seconds
-_RECONNECT_MAX_DELAY = 30.0  # seconds
-_SOCKET_TIMEOUT = 30.0  # seconds detect hung connections
-_MAX_QUEUE_DEPTH = 50_000  # max queued messages before overflow (disconnect + replay)
-_MAX_CONSECUTIVE_TIMEOUTS = 10  # 10 x 30s = 5 min max idle before reconnect
+_RECONNECT_BASE_DELAY = 1.0
+_RECONNECT_MAX_DELAY = 30.0
+_SOCKET_TIMEOUT = 30.0
+_MAX_QUEUE_DEPTH = 50_000
+_MAX_CONSECUTIVE_TIMEOUTS = 10
+
+_MESSAGE_KIND_BY_PAYLOAD = {
+    PayloadType.BroadcastEvent: _client_backend.ReceiverMessageKind.EVENT,
+    PayloadType.LayerGraphState: _client_backend.ReceiverMessageKind.LAYER_GRAPH_STATE,
+    PayloadType.Resync: _client_backend.ReceiverMessageKind.RESYNC,
+}
+_PLAYBACK_PAYLOAD_TYPES = frozenset(
+    {
+        PayloadType.PlaybackState,
+        PayloadType.PlaybackClaimed,
+        PayloadType.PlaybackRejected,
+    }
+)
 
 
 class ReceiverThread(threading.Thread):
-    """Background TCP client that connects to server and queues incoming events.
+    """Receive wire messages off-thread for a stage-owning consumer to drain.
 
-    Automatically reconnects on connection loss with exponential backoff.
-    Uses socket timeouts to detect hung servers. Queue depth is bounded
-    to prevent unbounded memory growth.
-
-    The queue stores raw FlatBuffers bytes.  Consumers use the codec to
-    decode them (zero-copy via ``decode_envelope`` / ``resolve_payload``).
-
-    Usage:
-        rt = ReceiverThread(host="127.0.0.1", port=7200)
-        rt.start()
-        # ... periodically on main thread:
-        for raw_buf in rt.drain_queue():
-            env = decode_envelope(raw_buf)
-            msg_type, obj = resolve_payload(env)
-            # process typed FB object
-        # ... when done:
-        rt.stop()
+    The queue stores raw FlatBuffers bytes so decoding and USD mutation stay on
+    the consumer thread. Overflow closes the connection and resumes by replay
+    after the queue drains or the drain wait expires.
     """
 
     def __init__(
@@ -82,7 +69,7 @@ class ReceiverThread(threading.Thread):
         origin: str | None = None,
         department: str | None = None,
         token: str | None = None,
-        on_token_issued: Callable | None = None,
+        on_token_issued: Callable[[str], None] | None = None,
         on_stage_metadata: Callable[[dict], None] | None = None,
         on_playback_state: Callable[[dict], None] | None = None,
         on_playback_claimed: Callable[[dict], None] | None = None,
@@ -119,7 +106,6 @@ class ReceiverThread(threading.Thread):
         self._connected_event = threading.Event()
         self._synchronized_event = threading.Event()
         self._handshake_event = threading.Event()
-        self._received_replay_complete: tuple[int, int, int, int] | None = None
         self.replay_head_seq = 0
         self.replay_epoch = 0
         self.auth_rejected = False
@@ -134,14 +120,13 @@ class ReceiverThread(threading.Thread):
         return self._connected_event.is_set()
 
     @connected.setter
-    def connected(self, value: bool):
+    def connected(self, value: bool) -> None:
         if value:
             self._connected_event.set()
         else:
             self._connected_event.clear()
             self._synchronized_event.clear()
             self._inbox.disconnect(self._inbox.generation)
-            self._received_replay_complete = None
 
     @property
     def synchronized(self) -> bool:
@@ -181,10 +166,11 @@ class ReceiverThread(threading.Thread):
         self._synchronized_event.set()
         return True
 
-    def run(self):
+    def run(self) -> None:
         delay = self._reconnect_base_delay
         while not self._stop_event.is_set():
             self.connection_error = None
+            was_connected = False
             try:
                 self._connect_and_recv()
             except Exception as exc:
@@ -192,48 +178,49 @@ class ReceiverThread(threading.Thread):
                 if not self._stop_event.is_set():
                     LOG.exception("ReceiverThread: connection error")
             finally:
+                was_connected = self.connected
                 self.connected = False
                 self._close_socket()
 
-            if (
-                not self.reconnect
-                or self._stop_event.is_set()
-                or self.auth_rejected
-                or self.hello_rejected
-            ):
-                # Authentication/negotiation paths signal this themselves.
-                # Transport and callback failures must do so here, otherwise
-                # wait_connected(None) can outlive a terminated thread.
+            if self._should_stop_reconnecting():
+                # Always release waiters when this thread terminates.
                 self._handshake_event.set()
                 break
 
             self._handshake_event.clear()
+            if was_connected:
+                delay = self._reconnect_base_delay
 
             if self._inbox.overflowed:
-                # Intentional disconnect wait for main thread to drain
-                # before reconnecting, otherwise we'll overflow again.
                 self._inbox.clear_overflow()
                 delay = self._reconnect_base_delay
-                LOG.info("ReceiverThread: waiting for queue to drain before reconnect")
-                drain_start = time.monotonic()
-                while not self._stop_event.is_set():
-                    if self._inbox.size == 0:
-                        break
-                    if time.monotonic() - drain_start > self._reconnect_max_delay:
-                        LOG.warning("ReceiverThread: drain wait timed out, reconnecting anyway")
-                        break
-                    if self._stop_event.wait(timeout=0.1):
-                        break
+                self._wait_for_queue_drain()
                 continue
 
             LOG.info("ReceiverThread: reconnecting in %.1fs", delay)
             if self._stop_event.wait(timeout=delay):
-                break  # stop requested during backoff
+                break
             delay = min(delay * 2, self._reconnect_max_delay)
 
         LOG.info("ReceiverThread stopped")
 
-    def _connect_and_recv(self):
+    def _should_stop_reconnecting(self) -> bool:
+        return (
+            not self.reconnect
+            or self._stop_event.is_set()
+            or self.auth_rejected
+            or self.hello_rejected
+        )
+
+    def _wait_for_queue_drain(self) -> None:
+        LOG.info("ReceiverThread: waiting for queue to drain before reconnect")
+        deadline = time.monotonic() + self._reconnect_max_delay
+        while self._inbox.size and not self._stop_event.wait(timeout=0.1):
+            if time.monotonic() >= deadline:
+                LOG.warning("ReceiverThread: drain wait timed out, reconnecting anyway")
+                return
+
+    def _connect_and_recv(self) -> None:
         """Single connection attempt: connect, handshake, read until EOF/error."""
         LOG.info("ReceiverThread connecting to %s:%s", self.host, self.port)
         sock = socket.create_connection(
@@ -243,8 +230,7 @@ class ReceiverThread(threading.Thread):
         with self._socket_lock:
             self.sock = sock
         sock.settimeout(self.socket_timeout)
-        # Hello/acks are small; Nagle would delay them. Matches the server's
-        # accepted-socket setting.
+        # Send small handshake messages promptly.
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         if self._stop_event.is_set():
@@ -255,11 +241,7 @@ class ReceiverThread(threading.Thread):
         connection_generation = connection.generation
         sync_from = connection.sync_from
         self._synchronized_event.clear()
-        self._received_replay_complete = None
 
-        # Send hello as receiver, normally resuming after the latest queued
-        # sequence. A decode failure can override this with the last sequence
-        # the consumer applied successfully.
         hello = make_hello(
             "receiver",
             sync_from=sync_from,
@@ -311,166 +293,163 @@ class ReceiverThread(threading.Thread):
             if connection_generation != self._inbox.generation:
                 return
 
-            # Pre-handshake: check for auth/hello_ok messages
             if not self.connected:
-                env = decode_envelope(buf)
-                pt = env.PayloadType()
-
-                if pt == PayloadType.AuthRejected:
-                    _, ar = resolve_payload(env)
-                    reason = ar.Reason()
-                    if isinstance(reason, bytes):
-                        reason = reason.decode("utf-8")
-                    LOG.error("ReceiverThread: auth rejected %s", reason)
-                    self.auth_rejected = True
-                    self._handshake_event.set()
+                if not self._handle_handshake_message(buf, sync_from):
                     return
-
-                if pt == PayloadType.HelloRejected:
-                    _, rejection = resolve_payload(env)
-                    code = int(rejection.Code())
-                    reason = rejection.Reason()
-                    if isinstance(reason, bytes):
-                        reason = reason.decode("utf-8")
-                    self.hello_rejected = True
-                    self.rejection_code = code
-                    self.rejection_reason = reason or ""
-                    LOG.error(
-                        "ReceiverThread: connection rejected (%s): %s",
-                        self.rejection_code,
-                        self.rejection_reason,
-                    )
-                    self._handshake_event.set()
-                    return
-
-                if pt == PayloadType.HelloOk:
-                    _, ho = resolve_payload(env)
-                    self.layer_mode_active = LayerMode(
-                        "shared_stage" if ho.LayerMode() else "managed"
-                    )
-                    if self.layer_mode_active is not self.layer_mode:
-                        self.hello_rejected = True
-                        self.rejection_code = HelloRejectionCode.LayerModeMismatch
-                        self.rejection_reason = "server did not negotiate requested layer mode"
-                        LOG.error("ReceiverThread: %s", self.rejection_reason)
-                        self._handshake_event.set()
-                        return
-                    self.layered_replay_active = bool(self.layered_replay and ho.LayeredReplay())
-                    if self.layered_replay and not self.layered_replay_active:
-                        self.hello_rejected = True
-                        self.rejection_code = HelloRejectionCode.LayeredReplayRequired
-                        self.rejection_reason = "server did not negotiate requested layered replay"
-                        LOG.error(
-                            "ReceiverThread: %s",
-                            self.rejection_reason,
-                        )
-                        self._handshake_event.set()
-                        return
-                    issued = ho.Token()
-                    if issued:
-                        if isinstance(issued, bytes):
-                            issued = issued.decode("utf-8")
-                        self.token = issued
-                        if self._on_token_issued:
-                            try:
-                                self._on_token_issued(issued)
-                            except Exception:
-                                LOG.exception(
-                                    "ReceiverThread: on_token_issued callback failed",
-                                )
-                        LOG.info("ReceiverThread: token issued by server")
-                    sm = ho.StageMetadata()
-                    if sm is not None:
-                        meta = _decode_stage_metadata_table(sm)
-                        if meta:
-                            self.stage_metadata = meta
-                            if self._on_stage_metadata:
-                                try:
-                                    self._on_stage_metadata(meta)
-                                except Exception:
-                                    LOG.exception(
-                                        "ReceiverThread: on_stage_metadata callback failed",
-                                    )
-                    self.connected = True
-                    self._handshake_event.set()
-                    LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
                 continue
 
-            # Post-handshake data messages only need their tag and sequence in
-            # this thread; full decoding stays on the stage-owning consumer.
-            pt, seq = payload_type_and_sequence(buf)
-            if pt == PayloadType.Ping:
-                continue
+            if not self._handle_data_message(buf, connection_generation):
+                return
 
-            # Playback messages are control-plane signals: fire callbacks and
-            # do not enqueue (the queue is reserved for stage-event bytes).
-            if pt == PayloadType.ReplayComplete:
-                complete = message_to_dict(buf)
-                result = self._inbox.accept_replay_complete(
-                    connection_generation,
-                    int(complete["head_seq"]),
-                    int(complete["epoch"]),
-                )
-                if result == _client_backend.AcceptResult.STALE_GENERATION:
-                    return
-                self._received_replay_complete = (
-                    connection_generation,
-                    int(complete["head_seq"]),
-                    int(complete["epoch"]),
-                    0,
-                )
-                continue
-            if pt in (
-                PayloadType.PlaybackState,
-                PayloadType.PlaybackClaimed,
-                PayloadType.PlaybackRejected,
-            ):
-                msg = message_to_dict(buf)
-                cb = None
-                if pt == PayloadType.PlaybackState:
-                    cb = self._on_playback_state
-                elif pt == PayloadType.PlaybackClaimed:
-                    cb = self._on_playback_claimed
-                else:
-                    cb = self._on_playback_rejected
-                if cb is not None:
-                    try:
-                        cb(msg)
-                    except Exception:
-                        LOG.exception("ReceiverThread: playback callback failed")
-                continue
+    @staticmethod
+    def _decode_text(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value or ""
 
-            if pt == PayloadType.BroadcastEvent:
-                kind = _client_backend.ReceiverMessageKind.EVENT
-            elif pt == PayloadType.LayerGraphState:
-                kind = _client_backend.ReceiverMessageKind.LAYER_GRAPH_STATE
-            elif pt == PayloadType.Resync:
-                kind = _client_backend.ReceiverMessageKind.RESYNC
-                self._synchronized_event.clear()
-                self._received_replay_complete = None
-            else:
-                kind = _client_backend.ReceiverMessageKind.OTHER
+    @staticmethod
+    def _invoke_callback(callback: Callable | None, value, name: str) -> None:
+        if callback is None:
+            return
+        try:
+            callback(value)
+        except Exception:
+            LOG.exception("ReceiverThread: %s callback failed", name)
 
-            result = self._inbox.accept(connection_generation, kind, seq, buf)
+    def _reject_hello(self, code: int, reason: str) -> None:
+        self.hello_rejected = True
+        self.rejection_code = code
+        self.rejection_reason = reason
+        LOG.error("ReceiverThread: connection rejected (%s): %s", code, reason)
+        self._handshake_event.set()
+
+    def _handle_handshake_message(self, buf: bytes, sync_from: int) -> bool:
+        env = decode_envelope(buf)
+        payload_type = env.PayloadType()
+
+        if payload_type == PayloadType.AuthRejected:
+            _, rejection = resolve_payload(env)
+            reason = self._decode_text(rejection.Reason())
+            LOG.error("ReceiverThread: auth rejected %s", reason)
+            self.auth_rejected = True
+            self.rejection_reason = reason
+            self._handshake_event.set()
+            return False
+
+        if payload_type == PayloadType.HelloRejected:
+            _, rejection = resolve_payload(env)
+            self._reject_hello(
+                int(rejection.Code()),
+                self._decode_text(rejection.Reason()),
+            )
+            return False
+
+        if payload_type != PayloadType.HelloOk:
+            return True
+
+        _, hello = resolve_payload(env)
+        self.layer_mode_active = LayerMode.SHARED_STAGE if hello.LayerMode() else LayerMode.MANAGED
+        if self.layer_mode_active is not self.layer_mode:
+            self._reject_hello(
+                HelloRejectionCode.LayerModeMismatch,
+                "server did not negotiate requested layer mode",
+            )
+            return False
+
+        self.layered_replay_active = bool(self.layered_replay and hello.LayeredReplay())
+        if self.layered_replay and not self.layered_replay_active:
+            self._reject_hello(
+                HelloRejectionCode.LayeredReplayRequired,
+                "server did not negotiate requested layered replay",
+            )
+            return False
+
+        issued_token = self._decode_text(hello.Token())
+        if issued_token:
+            self.token = issued_token
+            self._invoke_callback(self._on_token_issued, issued_token, "on_token_issued")
+            LOG.info("ReceiverThread: token issued by server")
+
+        metadata_table = hello.StageMetadata()
+        if metadata_table is not None:
+            metadata = _decode_stage_metadata_table(metadata_table)
+            if metadata:
+                self.stage_metadata = metadata
+                self._invoke_callback(self._on_stage_metadata, metadata, "on_stage_metadata")
+
+        self.connected = True
+        self._handshake_event.set()
+        LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
+        return True
+
+    def _handle_control_message(
+        self,
+        payload_type: int,
+        buf: bytes,
+        connection_generation: int,
+    ) -> bool | None:
+        if payload_type == PayloadType.Ping:
+            return True
+
+        if payload_type == PayloadType.ReplayComplete:
+            complete = message_to_dict(buf)
+            head_seq = int(complete["head_seq"])
+            epoch = int(complete["epoch"])
+            result = self._inbox.accept_replay_complete(
+                connection_generation,
+                head_seq,
+                epoch,
+            )
             if result == _client_backend.AcceptResult.STALE_GENERATION:
-                return
-            if result == _client_backend.AcceptResult.DUPLICATE:
-                continue
-            if result == _client_backend.AcceptResult.SEQUENCE_GAP:
-                replay_from = self._inbox.last_applied_sequence + 1
-                LOG.error(
-                    "ReceiverThread: sequence gap before %d; replaying from applied %d",
-                    seq,
-                    replay_from,
-                )
-                self._inbox.request_replay_from(replay_from)
-                return
-            if result == _client_backend.AcceptResult.QUEUE_FULL:
-                LOG.warning(
-                    "ReceiverThread: queue full (%d), disconnecting to replay from server",
-                    self.max_queue,
-                )
-                break
+                return False
+            return True
+
+        if payload_type not in _PLAYBACK_PAYLOAD_TYPES:
+            return None
+
+        if payload_type == PayloadType.PlaybackState:
+            callback = self._on_playback_state
+        elif payload_type == PayloadType.PlaybackClaimed:
+            callback = self._on_playback_claimed
+        else:
+            callback = self._on_playback_rejected
+        self._invoke_callback(callback, message_to_dict(buf), "playback")
+        return True
+
+    def _handle_data_message(self, buf: bytes, connection_generation: int) -> bool:
+        payload_type, sequence = payload_type_and_sequence(buf)
+        handled = self._handle_control_message(payload_type, buf, connection_generation)
+        if handled is not None:
+            return handled
+
+        kind = _MESSAGE_KIND_BY_PAYLOAD.get(
+            payload_type,
+            _client_backend.ReceiverMessageKind.OTHER,
+        )
+        if kind == _client_backend.ReceiverMessageKind.RESYNC:
+            self._synchronized_event.clear()
+
+        result = self._inbox.accept(connection_generation, kind, sequence, buf)
+        if result == _client_backend.AcceptResult.STALE_GENERATION:
+            return False
+        if result == _client_backend.AcceptResult.DUPLICATE:
+            return True
+        if result == _client_backend.AcceptResult.SEQUENCE_GAP:
+            replay_from = self._inbox.last_applied_sequence + 1
+            LOG.error(
+                "ReceiverThread: sequence gap before %d; replaying from applied %d",
+                sequence,
+                replay_from,
+            )
+            self._inbox.request_replay_from(replay_from)
+            return False
+        if result == _client_backend.AcceptResult.QUEUE_FULL:
+            LOG.warning(
+                "ReceiverThread: queue full (%d), disconnecting to replay from server",
+                self.max_queue,
+            )
+            return False
+        return True
 
     def request_replay_from(self, seq_start: int) -> None:
         """Reconnect and request replay beginning at ``seq_start``.
@@ -485,7 +464,6 @@ class ReceiverThread(threading.Thread):
 
         self._inbox.request_replay_from(seq_start)
         self._synchronized_event.clear()
-        self._received_replay_complete = None
         self._close_socket()
 
     def _close_socket(self, sock: socket.socket | None = None) -> None:
@@ -518,7 +496,7 @@ class ReceiverThread(threading.Thread):
             raise ValueError("max_messages must be a positive integer or None")
         return deque(self._inbox.drain(max_messages))
 
-    def stop(self):
+    def stop(self) -> None:
         """Request clean shutdown."""
         self._stop_event.set()
         self._handshake_event.set()

@@ -11,7 +11,7 @@ class ClientInfo:
     """Metadata for a connected client (emitter or receiver)."""
 
     role: str
-    address: tuple
+    address: tuple[str, int]
     client_id: str | None = None
     origin: str | None = None
     department: str | None = None
@@ -49,7 +49,7 @@ class TransactionCommit:
 
     status: str
     txn_id: int
-    records: tuple = ()
+    records: tuple[tuple[dict[str, object], bytes], ...] = ()
 
 
 class TransactionRejectedError(ValueError):

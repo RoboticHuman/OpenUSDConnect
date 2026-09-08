@@ -18,6 +18,7 @@ from openusdconnect.event_apply import (
     apply_event,
     apply_events,
     atomic_apply,
+    atomic_apply_layer,
     atomic_apply_prim_paths,
     ensure_canonical_ops,
     get_or_define_prim,
@@ -48,6 +49,27 @@ def stage():
     s = Usd.Stage.CreateInMemory()
     s.DefinePrim("/World", "Xform")
     return s
+
+
+def _reference_mapped_stage():
+    asset_layer = Sdf.Layer.CreateAnonymous("mapped-asset")
+    asset_stage = Usd.Stage.Open(asset_layer)
+    model = UsdGeom.Xform.Define(asset_stage, "/Model")
+    UsdGeom.Imageable(model.GetPrim()).CreateVisibilityAttr("invisible")
+
+    stage = Usd.Stage.CreateInMemory()
+    instance = stage.OverridePrim("/Instance")
+    instance.GetReferences().AddReference(asset_layer.identifier, "/Model")
+    reference_arc = next(
+        arc
+        for arc in Usd.PrimCompositionQuery.GetDirectRootLayerArcs(
+            instance,
+        ).GetCompositionArcs()
+        if arc.GetTargetLayer() == asset_layer
+    )
+    edit_target = Usd.EditTarget(asset_layer, reference_arc.GetTargetNode())
+    stage.SetEditTarget(edit_target)
+    return stage, asset_layer, edit_target
 
 
 def test_unknown_event_is_rejected(stage):
@@ -89,6 +111,93 @@ class TestEnsureCanonicalOps:
         _, xf, _, _, _ = ensure_canonical_ops(stage, "/World/Sphere")
         ops = xf.GetOrderedXformOps()
         assert len(ops) == 3  # no duplicates
+
+    def test_rewrites_noncanonical_local_op_order(self, stage):
+        prim = stage.DefinePrim("/World/Ordered", "Xform")
+        xformable = UsdGeom.Xformable(prim)
+        xformable.AddScaleOp()
+        xformable.AddTranslateOp()
+        xformable.AddOrientOp()
+
+        _prim, xformable, _translate, _orient, _scale = ensure_canonical_ops(
+            stage,
+            "/World/Ordered",
+        )
+
+        assert [op.GetAttr().GetName() for op in xformable.GetOrderedXformOps()] == [
+            "xformOp:translate",
+            "xformOp:orient",
+            "xformOp:scale",
+        ]
+
+    def test_weak_target_authors_values_when_stronger_order_masks_ops(self, stage):
+        prim = stage.DefinePrim("/World/Masked", "Xform")
+        UsdGeom.Xformable(prim).AddTransformOp().Set(Gf.Matrix4d(1.0))
+        weak = Sdf.Layer.CreateAnonymous("weak-xform")
+        stage.GetRootLayer().subLayerPaths.append(weak.identifier)
+        stage.SetEditTarget(Usd.EditTarget(weak))
+
+        apply_events(
+            stage,
+            [
+                {"k": K_ENSURE_XFORM_OPS, "prim": "/World/Masked"},
+                {
+                    "k": K_SET_XFORM_TRS,
+                    "prim": "/World/Masked",
+                    "fields": ["t"],
+                    "t": [1.0, 2.0, 3.0],
+                },
+            ],
+        )
+
+        assert weak.GetAttributeAtPath("/World/Masked.xformOp:translate").default == (
+            Gf.Vec3d(1.0, 2.0, 3.0)
+        )
+        assert [
+            op.GetAttr().GetName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+        ] == ["xformOp:transform"]
+
+    def test_authors_ops_at_variant_edit_target_path(self):
+        stage = Usd.Stage.CreateInMemory()
+        model = stage.DefinePrim("/Model", "Xform")
+        variants = model.GetVariantSets().AddVariantSet("look")
+        variants.AddVariant("A")
+        variants.SetVariantSelection("A")
+        edit_target = variants.GetVariantEditTarget()
+        stage.SetEditTarget(edit_target)
+
+        _prim, xformable, translate, orient, scale = ensure_canonical_ops(stage, "/Model")
+
+        spec_path = edit_target.MapToSpecPath(model.GetPath())
+        assert spec_path == Sdf.Path("/Model{look=A}")
+        assert all(
+            edit_target.GetLayer().GetAttributeAtPath(spec_path.AppendProperty(name))
+            for name in (
+                "xformOp:translate",
+                "xformOp:orient",
+                "xformOp:scale",
+                "xformOpOrder",
+            )
+        )
+        assert edit_target.GetLayer().GetAttributeAtPath("/Model.xformOp:translate") is None
+        assert all((translate, orient, scale))
+        assert [op.GetAttr().GetName() for op in xformable.GetOrderedXformOps()] == [
+            "xformOp:translate",
+            "xformOp:orient",
+            "xformOp:scale",
+        ]
+
+    def test_authors_ops_at_reference_edit_target_path(self):
+        stage, asset_layer, edit_target = _reference_mapped_stage()
+
+        _prim, xformable, translate, orient, scale = ensure_canonical_ops(stage, "/Instance")
+
+        spec_path = edit_target.MapToSpecPath(Sdf.Path("/Instance"))
+        assert spec_path == Sdf.Path("/Model")
+        assert asset_layer.GetAttributeAtPath("/Model.xformOp:translate")
+        assert asset_layer.GetPrimAtPath("/Instance") is None
+        assert all((translate, orient, scale))
+        assert len(xformable.GetOrderedXformOps()) == 3
 
 
 class TestApplyEvent:
@@ -1476,6 +1585,42 @@ def test_apply_events_orders_create_before_connect():
     assert str(mx.GetTypeName()) == "Shader"
 
 
+@pytest.mark.parametrize(
+    ("kind", "entries_key"),
+    [(K_SET_REFERENCE, "refs"), (K_SET_PAYLOAD, "payloads")],
+)
+def test_apply_events_orders_api_schema_over_after_composition_arc(kind, entries_key):
+    asset = Usd.Stage.CreateInMemory("api-over-asset.usda")
+    asset.DefinePrim("/Asset", "Xform")
+    stage = Usd.Stage.CreateInMemory()
+
+    apply_events(
+        stage,
+        [
+            {
+                "k": K_ENSURE_PRIM,
+                "prim": "/Model",
+                "typeName": "",
+                "api_schemas": ["MaterialBindingAPI"],
+            },
+            {
+                "k": kind,
+                "prim": "/Model",
+                entries_key: [
+                    {
+                        "asset_path": asset.GetRootLayer().identifier,
+                        "prim_path": "/Asset",
+                    }
+                ],
+            },
+        ],
+    )
+
+    spec = stage.GetRootLayer().GetPrimAtPath("/Model")
+    assert spec.specifier == Sdf.SpecifierOver
+    assert "MaterialBindingAPI" in (spec.GetInfo("apiSchemas").ApplyOperations([]) or ())
+
+
 class TestNamespaceEditsInBatch:
     """delete_prim / rename_prim apply outside the value ChangeBlock so each
     sees the composed result of every event before it in the batch."""
@@ -1615,6 +1760,48 @@ class TestScopedAtomicApply:
         prim = stage.GetPrimAtPath("/World/Keep")
         assert UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible"
         assert not stage.GetPrimAtPath("/World/Mat")
+
+    def test_mapped_edit_target_uses_full_layer_rollback(self):
+        stage, asset_layer, _edit_target = _reference_mapped_stage()
+
+        with pytest.raises(RuntimeError):
+            with atomic_apply(stage, prim_paths=["/Instance"]):
+                imageable = UsdGeom.Imageable(stage.GetPrimAtPath("/Instance"))
+                imageable.GetVisibilityAttr().Set("inherited")
+                raise RuntimeError("boom")
+
+        assert asset_layer.GetAttributeAtPath("/Model.visibility").default == "invisible"
+        imageable = UsdGeom.Imageable(stage.GetPrimAtPath("/Instance"))
+        assert imageable.GetVisibilityAttr().Get() == "invisible"
+
+    def test_layer_scope_accepts_a_generator(self):
+        stage = self._stage()
+        layer = stage.GetEditTarget().GetLayer()
+
+        with pytest.raises(RuntimeError):
+            paths = (path for path in ["/World/Keep"])
+            with atomic_apply_layer(layer, prim_paths=paths):
+                UsdGeom.Imageable(stage.GetPrimAtPath("/World/Keep")).GetVisibilityAttr().Set(
+                    "inherited"
+                )
+                raise RuntimeError("boom")
+
+        imageable = UsdGeom.Imageable(stage.GetPrimAtPath("/World/Keep"))
+        assert imageable.GetVisibilityAttr().Get() == "invisible"
+
+    def test_stage_scope_accepts_a_generator(self):
+        stage = self._stage()
+
+        with pytest.raises(RuntimeError):
+            paths = (path for path in ["/World/Keep"])
+            with atomic_apply(stage, prim_paths=paths):
+                UsdGeom.Imageable(stage.GetPrimAtPath("/World/Keep")).GetVisibilityAttr().Set(
+                    "inherited"
+                )
+                raise RuntimeError("boom")
+
+        imageable = UsdGeom.Imageable(stage.GetPrimAtPath("/World/Keep"))
+        assert imageable.GetVisibilityAttr().Get() == "invisible"
 
     def test_exact_sdf_property_scope_uses_owning_prim(self):
         events = [

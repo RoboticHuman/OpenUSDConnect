@@ -199,6 +199,13 @@ def file_name(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _option_stems(option_prefix: str) -> tuple[str, str]:
+    normalized = option_prefix.strip("-")
+    option_stem = f"{normalized}-" if normalized else ""
+    dest_stem = f"{normalized.replace('-', '_')}_" if normalized else ""
+    return option_stem, dest_stem
+
+
 def add_sync_endpoint_args(
     parser,
     *,
@@ -209,9 +216,7 @@ def add_sync_endpoint_args(
 ) -> None:
     """Add consistently named host/port options for a sync endpoint."""
 
-    normalized = option_prefix.strip("-")
-    option_stem = f"{normalized}-" if normalized else ""
-    dest_stem = f"{normalized.replace('-', '_')}_" if normalized else ""
+    option_stem, dest_stem = _option_stems(option_prefix)
     parser.add_argument(
         f"--{option_stem}host",
         dest=f"{dest_stem}host",
@@ -239,9 +244,7 @@ def add_vfs_resource_args(
 ) -> None:
     """Add host/port/share/name options for a virtual USD resource."""
 
-    normalized = option_prefix.strip("-")
-    option_stem = f"{normalized}-" if normalized else ""
-    dest_stem = f"{normalized.replace('-', '_')}_" if normalized else ""
+    option_stem, dest_stem = _option_stems(option_prefix)
     parser.add_argument(
         f"--{option_stem}host",
         dest=f"{dest_stem}host",

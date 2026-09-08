@@ -47,26 +47,11 @@ def make_hello(
     layer_mode: LayerMode | str = LayerMode.MANAGED,
     producer_session_id: str | None = None,
 ) -> dict:
-    """Build a hello message.
+    """Build a client handshake.
 
-    Args:
-        role: "emitter" or "receiver".
-        sync_from: Sequence number to replay from (receivers only).
-        client_id: Per-connection identifier.
-        origin: Session-level identifier shared by all connections from the
-            same DCC instance. Durable events still return to that origin as
-            part of the complete commit stream; integrations use the value for
-            attribution and local reconciliation.
-        department: Optional department name (e.g. "animation", "lighting").
-            When the server enables department policy, clients in the same
-            department share its ordered collaboration layer.
-        token: Authentication token from a previous session (TOFU).
-        layered_replay: Whether a receiver can reconstruct the logical
-            authored-layer stack instead of consuming only the composed view.
-            Defaults to true for receivers and false for other roles.
-        layer_mode: Managed collaboration layers or the shared root-layer graph.
-        producer_session_id: Ordered producer-session identity. Required for
-            emitter connections that submit ordinary transactions.
+    ``origin`` identifies a DCC session for attribution, not delivery filtering.
+    Receivers default to layered replay in managed mode. ``producer_session_id``
+    identifies an emitter's ordered durable transaction stream.
     """
     if role not in ("emitter", "receiver"):
         raise ValueError("role must be 'emitter' or 'receiver'")
