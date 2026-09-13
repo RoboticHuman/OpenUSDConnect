@@ -50,9 +50,10 @@ _PLAYBACK_PAYLOAD_TYPES = frozenset(
 class ReceiverThread(threading.Thread):
     """Receive wire messages off-thread for a stage-owning consumer to drain.
 
-    The queue stores raw FlatBuffers bytes so decoding and USD mutation stay on
-    the consumer thread. Overflow closes the connection and resumes by replay
-    after the queue drains or the drain wait expires.
+    Scene events are queued as raw FlatBuffers for consumer-thread decoding
+    and USD mutation. Handshake and control messages, including their callbacks,
+    are processed on the receiver thread. Overflow closes the connection and
+    resumes by replay after the queue drains or the drain wait expires.
     """
 
     def __init__(

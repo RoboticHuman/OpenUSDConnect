@@ -1,8 +1,4 @@
-"""Check replayed sample writes/deletions in the USD mirror and Blender pose.
-
-Incoming animation still does not create Blender F-curves; the adapter projects
-the last sampled pose. The USD mirror must retain the exact surviving keys.
-"""
+"""Verify surviving USD samples and Blender's static pose after replay."""
 
 import os
 import sys
@@ -51,30 +47,21 @@ def _observe_and_report():
     harness.log(f"  observed obj.location = {loc}")
 
     if loc == _EXPECTED_LOCATION:
-        harness._pass(
-            f"obj.location == {_EXPECTED_LOCATION} (latest time-sample's value, "
-            f"static-pose semantics confirms BlenderAdapter ignores `time`)",
-        )
+        harness._pass(f"obj.location == {_EXPECTED_LOCATION}")
     else:
         harness._fail(
             f"obj.location == {loc}, expected {_EXPECTED_LOCATION}",
         )
 
-    # Q1 gap: no F-curves should exist on this object incoming
-    # time-sampled events don't get translated into Blender keyframes.
+    # Replay updates the displayed pose without creating animation curves.
     has_fcurves = bool(
         obj.animation_data and obj.animation_data.action
         and len(obj.animation_data.action.fcurves) > 0
     )
     if has_fcurves:
-        harness._fail(
-            "Unexpectedly found F-curves on the receiver's sphere "
-            "Q1 (Blender keyframe insertion on receive) is not implemented yet, "
-            "so F-curves shouldn't be there. If this fails, either Q1 was "
-            "implemented or Blender is auto-keying.",
-        )
+        harness._fail("Sample replay created unexpected F-curves")
     else:
-        harness._pass("No F-curves on receiver's sphere (Q1 gap confirmed)")
+        harness._pass("Sample replay did not create F-curves")
 
     return True
 

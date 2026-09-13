@@ -486,8 +486,7 @@ class EventDispatcher:
             return 0
         self._sync_layer_router()
 
-        # Keep geometry as NumPy views; materializing Python lists is ~100x
-        # slower for heavy meshes. Adapters normalize at their own boundary.
+        # Keep geometry buffer-backed to avoid per-element Python allocations.
         result = decode_messages(
             bufs,
             last_seq=self._last_seq,

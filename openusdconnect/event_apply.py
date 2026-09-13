@@ -42,7 +42,6 @@ from .sdf_arc_state import apply_arc_state
 
 LOG = logging.getLogger(__name__)
 
-# Immutable sentinel used as a default argument without repeated construction.
 _TIME_DEFAULT = Usd.TimeCode.Default()
 
 

@@ -1,13 +1,4 @@
-"""Tests for time-sample replication on the four value-event kinds.
-
-Covers:
-  * Codec round-trip with ``time`` present vs absent.
-  * Wire-cost check: ``time`` absent ⇒ byte-identical to a baseline that
-    never sets the optional field (verifies "0 payload bytes when unset").
-  * Apply pipeline writes the sample at the right ``Usd.TimeCode``.
-  * Emitter detects time samples authored on the stage and emits one event
-    per (attr, time); a second cycle with no changes emits zero events.
-"""
+"""Time-sample replication, including deletion and replay."""
 
 from __future__ import annotations
 
