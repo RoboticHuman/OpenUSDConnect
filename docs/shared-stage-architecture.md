@@ -143,7 +143,7 @@ Per-parent revisions let edits to unrelated layer stacks commit independently
 without weakening conflict
 detection for two concurrent edits to the same parent.
 
-**Event kinds.** Three kinds carry shared-stage content:
+**Event kinds.** Four kinds carry shared-stage content:
 
 - `set_sdf_spec_fields`: an exact field delta for one Sdf spec (prim,
   attribute, relationship, variant set, variant, property, or the layer
@@ -151,6 +151,11 @@ detection for two concurrent edits to the same parent.
   USDA fragment with the new values, and a `removed` flag for spec deletion.
   Removals sort before creates, and creates before their children, so one
   transaction replays deterministically.
+- `erase_time_samples`: deletes the listed `times` at one exact attribute
+  `spec_path` using `Sdf.Layer.EraseTimeSample`. Defaults, metadata, and surviving
+  keys are untouched. The native delegate retains each mutation's timestamp, so
+  deletion-only edits need no sample-table scan or USDA serialization. Mixed
+  writes and bulk field edits still use `set_sdf_spec_fields`.
 - `replace_sdf_layer_content`: the complete authored content of one layer,
   excluding sublayer topology. Used when a clean full replacement beats a
   field-by-field diff, such as after resync or complex re-organization.
@@ -158,6 +163,11 @@ detection for two concurrent edits to the same parent.
   `generation` and a client-side `revision` of 0; the server canonicalizes it
   to the targeted parent's authoritative `revision + 1` with child keys
   assigned, and re-broadcasts the canonical event. At most one per transaction.
+
+`erase_time_samples` is also valid in managed mode. Protocol 13 requires peers
+to upgrade together; the native Sdf bridge must be rebuilt for bridge ABI 2.
+Sample erasures and exact table replacements preserve their order relative to
+partial sample writes during application and log compaction.
 
 **Baseline.** A new shared-stage database begins with one `layer_graph_state`
 message: a sequenced snapshot of the reachable graph's topology and routing,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 12
+PROTOCOL_VERSION = 13
 
 
 class LayerMode(StrEnum):
@@ -60,6 +60,7 @@ K_SET_POINT_INSTANCER = "set_point_instancer"
 K_SET_SDF_SPEC_FIELDS = "set_sdf_spec_fields"
 K_REPLACE_SDF_LAYER_CONTENT = "replace_sdf_layer_content"
 K_SET_SUBLAYERS = "set_sublayers"
+K_ERASE_TIME_SAMPLES = "erase_time_samples"
 
 SDF_SPEC_KIND_LAYER = "layer"
 SDF_SPEC_KIND_PRIM = "prim"
@@ -181,6 +182,12 @@ class EventKindInfo:
 
 
 EVENT_KIND_INFO: dict[str, EventKindInfo] = {
+    K_ERASE_TIME_SAMPLES: EventKindInfo(
+        native_projection=NativeProjectionMode.FIELD_ROUTED,
+        modes=frozenset({LayerMode.MANAGED, LayerMode.SHARED_STAGE}),
+        structural=True,
+        stage_sync=True,
+    ),
     K_ENSURE_PRIM: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
         create=True,

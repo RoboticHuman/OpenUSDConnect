@@ -21,13 +21,14 @@ extern "C"
 {
 #endif
 
-#define OUC_SDF_DELEGATE_ABI_VERSION UINT32_C(1)
+#define OUC_SDF_DELEGATE_ABI_VERSION UINT32_C(2)
 
 	// ---- Delegate-based tracker (SdfLayerStateDelegate) ----
 
 	typedef struct OucSdfDelegateTracker OucSdfDelegateTracker;
 
 #define OUC_SDF_DELEGATE_FLAG_HAS_OLD_VALUE UINT64_C(1)
+#define OUC_SDF_DELEGATE_FLAG_SAMPLE_ERASED UINT64_C(2)
 
 	typedef struct OucSdfDelegateRecord
 	{
@@ -42,6 +43,7 @@ extern "C"
 		size_t old_value_json_size;
 		const char* new_value_json;
 		size_t new_value_json_size;
+		double sample_time; // meaningful only for _setTimeSample records
 	} OucSdfDelegateRecord;
 
 	typedef struct OucSdfDelegateBatch

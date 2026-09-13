@@ -18,6 +18,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_CONNECTABLE_CONNECTION,
@@ -689,14 +690,14 @@ if _PROJECTOR_EVENT_KINDS != NATIVE_PROJECTED_KINDS:
     raise RuntimeError(
         f"native projection event registry is out of sync (missing={missing}, stale={stale})"
     )
-if NATIVE_FIELD_ROUTED_KINDS != {K_SET_SDF_SPEC_FIELDS}:
+if NATIVE_FIELD_ROUTED_KINDS != {K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES}:
     raise RuntimeError("native field-routed projection requires an explicit Sdf event router")
 if _COMPOSITION_DIRECT_KINDS | _TRAILING_DIRECT_KINDS != NATIVE_DIRECT_KINDS:
     raise RuntimeError("native direct event registry is incomplete")
 
 
 def _sdf_property_path(event: dict) -> Sdf.Path | None:
-    if event.get("k") != K_SET_SDF_SPEC_FIELDS:
+    if event.get("k") not in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
         return None
     value = event.get("spec_path")
     if not value:
@@ -725,7 +726,7 @@ def _is_gprim_property_name(name: str) -> bool:
 
 def _is_gprim_spec_event(event: dict) -> bool:
     path = _sdf_property_path(event)
-    if path is None or event.get("spec_kind") != "attribute":
+    if path is None or event.get("spec_kind", "attribute") != "attribute":
         return False
     name = str(path.name)
     return _is_gprim_property_name(name)
@@ -733,7 +734,7 @@ def _is_gprim_spec_event(event: dict) -> bool:
 
 def _is_connectable_spec_event(event: dict) -> bool:
     path = _sdf_property_path(event)
-    if path is None or event.get("spec_kind") != "attribute":
+    if path is None or event.get("spec_kind", "attribute") != "attribute":
         return False
     name = str(path.name)
     return name == "info:id" or name.startswith(("inputs:", "outputs:"))

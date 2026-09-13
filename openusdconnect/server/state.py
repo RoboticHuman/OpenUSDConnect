@@ -32,22 +32,18 @@ from ..protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_CONNECTABLE_CONNECTION,
     K_SET_CONNECTABLE_INPUT,
-    K_SET_GPRIM_ATTRS,
     K_SET_INSTANCEABLE,
     K_SET_MATERIAL_BINDING,
-    K_SET_POINT_INSTANCER,
     K_SET_SDF_SPEC_FIELDS,
-    K_SET_STAGE_METADATA,
     K_SET_SUBLAYERS,
-    K_SET_VARIANT_SELECTIONS,
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
-    K_UNLOAD_PAYLOAD,
     MSG_EVENT,
     MSG_LAYER_GRAPH_STATE,
     MSG_LAYER_STACK_STATE,
@@ -56,20 +52,16 @@ from ..protocol_constants import (
     MSG_REPLAY_COMPLETE,
     MSG_RESYNC,
     NON_COLLABORATION_KINDS,
-    SDF_SPEC_KIND_ATTRIBUTE,
-    SDF_SPEC_KIND_PROPERTY,
-    SDF_SPEC_KIND_RELATIONSHIP,
     SHARED_STAGE_EVENT_KINDS,
     SHARED_STAGE_ONLY_KINDS,
-    STAGE_METADATA_KEYS,
     LayerMode,
     event_apply_tier,
 )
 from ..protocol_validation import validate_events
-from ..sdf_spec_delta import merge_spec_events
 from ..shared_layer_graph import PreparedSublayers, SharedLayerGraph, StaleLayerGraphError
 from ..usd_state import read_material_binding, read_variant_selections
 from ._txn_barrier import _TxnBarrier
+from .compaction import LogCompaction
 from .layer_stack import CollaborationLayerStack
 from .rate_limit import validate_rate_limit_config
 from .types import (
@@ -167,13 +159,6 @@ def _label_for_layer_key(layer_key: str) -> str:
     if layer_key == _DEFAULT_LAYER_KEY:
         return "Default"
     return layer_key
-
-
-# Log compaction is scoped to the layer that receives an event. Department
-# policy maps clients onto portable collaboration layer keys. Shared session
-# metadata and stage runtime state are global and therefore have no layer scope.
-_CompactionKey = tuple[str, str, float | None, str]
-_CompactedEntry = tuple[dict, dict, int]
 
 
 def _prim_xform_trs(prim) -> dict | None:
@@ -1013,6 +998,7 @@ class UsdSyncServer:
                     continue
                 if event.get("k") not in (
                     K_SET_SDF_SPEC_FIELDS,
+                    K_ERASE_TIME_SAMPLES,
                     K_REPLACE_SDF_LAYER_CONTENT,
                 ):
                     raise ValueError(
@@ -1398,24 +1384,13 @@ class UsdSyncServer:
         ]
 
     def compact_log(self):
-        """Compact the event log, keeping only the latest state per prim.
-
-        For latest-wins events (TRS, visibility, etc.), only the final value
-        is kept.  Partial TRS fields are merged.  delete_prim tombstones all
-        prior events for that prim's subtree.  deactivate_prim is latest-wins
-        (TRS preserved for payload reload).  Surviving events keep their
-        original relative order so replay stays causally valid.
-
-        Two-phase design minimizes emitter blocking:
-          Phase 1 (no lock): snapshot the log and build the compacted dict.
-          Phase 2 (exclusive): merge any delta, rewrite store, resync.
-        """
+        """Build compacted history off-lock, then catch up and replace the log."""
         # Phase 1 snapshot + compute (no txn_barrier, emitters keep running)
         rows = self.store.get_all_asc()
         if not rows:
             return
         max_seq = rows[-1][0]
-        latest = self._build_compacted(rows)
+        compaction = self._build_compacted(rows)
         original_count = len(rows)
 
         # Phase 2 merge delta + commit (exclusive, emitters blocked)
@@ -1431,280 +1406,28 @@ class UsdSyncServer:
 
             # Catch any events that arrived during phase 1
             delta = self.store.get_from_seq_asc(max_seq + 1)
-            if delta:
-                for seq, record_bin in delta:
-                    self._merge_event(latest, seq, record_bin)
-                original_count += len(delta)
+            for seq, record_bin in delta:
+                compaction.add_record(seq, record_bin)
+            original_count += len(delta)
 
-            self._commit_compaction(latest, original_count)
+            self._commit_compaction(compaction, original_count)
         finally:
             self.txn_barrier.release_exclusive()
 
     @staticmethod
-    def _merge_event(
-        latest: dict[_CompactionKey, _CompactedEntry],
-        seq: int,
-        record_bin: bytes,
-    ):
-        """Merge a single event record into the compacted state.
-
-        Keys are ``(prim, kind, time, layer_scope)``. Opinions compact only
-        with other opinions authored into the same logical layer, and distinct
-        time samples remain independent.
-        ``set_material_binding`` keys additionally carry the binding
-        purpose so allPurpose/preview/full bindings survive independently.
-
-        Each entry carries a replay stamp the seq of the last record
-        merged into it, except creates, which keep their first-seen seq.
-        Rewriting in stamp order preserves the original log's causal
-        order: a prim's create replays before every event that references
-        it (connections, bindings), and a delete replays before the
-        events that recreate the prim.
-
-        Decodes with numpy arrays: the per-element list path is ~100x
-        slower and turns compaction of geometry-heavy logs (meshes,
-        instancer arrays) into minutes of decode.
-        """
-        rec = message_to_dict(record_bin, numpy_arrays=True)
-        if rec.get("type") == MSG_LAYER_GRAPH_STATE:
-            return
-        ev = rec.get("event", rec)
-        prim = ev.get("prim", "")
-        k = ev.get("k", "")
-        if k == K_SET_SUBLAYERS:
-            return
-        layer_scope = "" if k in NON_COLLABORATION_KINDS else rec.get("layer_key") or ""
-        key = (prim, k, ev.get("time"), layer_scope)
-        if k == K_SET_MATERIAL_BINDING:
-            key = (
-                prim,
-                f"{k}:{ev.get('material_purpose') or ''}",
-                ev.get("time"),
-                layer_scope,
-            )
-        elif k == K_SET_SDF_SPEC_FIELDS:
-            spec_kind = ev.get("spec_kind") or ""
-            if spec_kind in (
-                SDF_SPEC_KIND_ATTRIBUTE,
-                SDF_SPEC_KIND_PROPERTY,
-                SDF_SPEC_KIND_RELATIONSHIP,
-            ):
-                spec_kind = SDF_SPEC_KIND_PROPERTY
-            key = (
-                prim,
-                f"{k}:{spec_kind}:{ev.get('spec_path') or ''}",
-                None,
-                layer_scope,
-            )
-        meta = {}
-        for meta_key in ("origin", "client", "client_id", "layer_key"):
-            val = rec.get(meta_key)
-            if val:
-                meta[meta_key] = val
-
-        if k in (K_DELETE_PRIM, K_RENAME_PRIM):
-            # Tombstone the whole subtree: descendants of a deleted or
-            # renamed prim must not replay and recreate it as a typeless
-            # zombie. Events after the tombstone are kept they represent
-            # a recreation and replay after the delete via their stamps.
-            child_prefix = prim + "/"
-            to_remove = [
-                existing
-                for existing in latest
-                if existing[3] == layer_scope
-                and (existing[0] == prim or existing[0].startswith(child_prefix))
-            ]
-            for existing in to_remove:
-                del latest[existing]
-            latest[key] = (ev, meta, seq)
-            return
-
-        if k == K_REPLACE_SDF_LAYER_CONTENT:
-            to_remove = [
-                existing
-                for existing in latest
-                if existing[3] == layer_scope
-                and (
-                    existing[1] == K_REPLACE_SDF_LAYER_CONTENT
-                    or existing[1].startswith(f"{K_SET_SDF_SPEC_FIELDS}:")
-                )
-            ]
-            for existing in to_remove:
-                del latest[existing]
-            latest[key] = (ev, meta, seq)
-            return
-
-        # load/unload are mutually exclusive only the last one wins.
-        if k == K_LOAD_PAYLOAD:
-            latest.pop((prim, K_UNLOAD_PAYLOAD, None, layer_scope), None)
-            latest[key] = (ev, meta, seq)
-            return
-        if k == K_UNLOAD_PAYLOAD:
-            latest.pop((prim, K_LOAD_PAYLOAD, None, layer_scope), None)
-            latest[key] = (ev, meta, seq)
-            return
-
-        if k == K_SET_XFORM_TRS:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                for comp in ("t", "r", "s"):
-                    if comp in ev.get("fields", []):
-                        prev[comp] = ev[comp]
-                        if comp not in prev["fields"]:
-                            prev["fields"].append(comp)
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_GPRIM_ATTRS:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                prev.setdefault("attrs", {}).update(ev.get("attrs", {}))
-                new_meta = ev.get("primvar_meta", {})
-                if new_meta:
-                    prev.setdefault("primvar_meta", {}).update(new_meta)
-                new_interp = ev.get("attr_interp", {})
-                if new_interp:
-                    prev.setdefault("attr_interp", {}).update(new_interp)
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_CONNECTABLE_INPUT:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                prev.setdefault("inputs", {}).update(ev.get("inputs", {}))
-                prev.setdefault("input_types", {}).update(
-                    ev.get("input_types", {}),
-                )
-                if ev.get("info_id"):
-                    prev["info_id"] = ev["info_id"]
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_CONNECTABLE_CONNECTION:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                connections = prev.setdefault("connections", {})
-                disconnections = dict.fromkeys(prev.get("disconnections", ()))
-                for local_attr, connection in ev.get("connections", {}).items():
-                    connections[local_attr] = connection
-                    disconnections.pop(local_attr, None)
-                # Application processes connections before disconnections, so
-                # retain an earlier edge as declaration/type context while the
-                # disconnection remains the final authored state.
-                for local_attr in ev.get("disconnections", ()):
-                    disconnections[local_attr] = None
-                if disconnections:
-                    prev["disconnections"] = list(disconnections)
-                else:
-                    prev.pop("disconnections", None)
-                latest[key] = (prev, meta, seq)
-            else:
-                merged = dict(ev)
-                connections = dict(merged.get("connections", {}))
-                disconnections = dict.fromkeys(merged.get("disconnections", ()))
-                merged["connections"] = connections
-                if disconnections:
-                    merged["disconnections"] = list(disconnections)
-                else:
-                    merged.pop("disconnections", None)
-                latest[key] = (merged, meta, seq)
-        elif k == K_SET_VARIANT_SELECTIONS:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                prev.setdefault("selections", {}).update(
-                    ev.get("selections", {}),
-                )
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_POINT_INSTANCER:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                for f in ev.get("fields", []):
-                    prev[f] = ev[f]
-                    if f not in prev["fields"]:
-                        prev["fields"].append(f)
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_STAGE_METADATA:
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                prev.update({field: ev[field] for field in STAGE_METADATA_KEYS if field in ev})
-                latest[key] = (prev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_SET_SDF_SPEC_FIELDS:
-            existing = latest.get(key)
-            if existing:
-                previous = existing[0]
-                if previous.get("spec_kind") == ev.get("spec_kind"):
-                    ev = merge_spec_events(previous, ev)
-                latest[key] = (ev, meta, seq)
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_ENSURE_PRIM:
-            # Union api_schemas across subsequent ensure_prim events for the
-            # same prim (latest typeName wins; api_schemas accumulates) so
-            # ShapingAPI added later doesn't clobber a previously-merged
-            # ShadowAPI. Multi-apply names (e.g. "CollectionAPI:render") are
-            # unique strings so set-union is correct for them too.
-            # Keeps the first-seen stamp: later re-ensures must not push the
-            # create past events that reference the prim.
-            existing = latest.get(key)
-            if existing:
-                prev = existing[0]
-                if "typeName" in ev:
-                    prev["typeName"] = ev["typeName"]
-                merged = set(prev.get("api_schemas") or [])
-                merged.update(ev.get("api_schemas") or [])
-                if merged:
-                    prev["api_schemas"] = list(merged)
-                latest[key] = (prev, meta, existing[2])
-            else:
-                latest[key] = (ev, meta, seq)
-        elif k == K_ENSURE_XFORM_OPS:
-            if key not in latest:
-                latest[key] = (ev, meta, seq)
-        else:
-            latest[key] = (ev, meta, seq)
-
-    @staticmethod
-    def _build_compacted(
-        rows: list[tuple[int, bytes]],
-    ) -> dict[_CompactionKey, _CompactedEntry]:
-        """Build compacted event dict from raw log rows.
-
-        Returns ``{(prim, kind, time, layer_scope): (event, metadata, stamp)}``
-        where ``stamp`` is the replay-order sequence (see ``_merge_event``).
-        """
-        latest: dict[_CompactionKey, _CompactedEntry] = {}
+    def _build_compacted(rows: list[tuple[int, bytes]]) -> LogCompaction:
+        compaction = LogCompaction()
         for seq, record_bin in rows:
-            UsdSyncServer._merge_event(latest, seq, record_bin)
-        return latest
+            compaction.add_record(seq, record_bin)
+        return compaction
 
     def _commit_compaction(
         self,
-        latest: dict[_CompactionKey, _CompactedEntry],
+        compaction: LogCompaction,
         original_count: int,
     ):
-        """Commit compacted state: rewrite store, reset seqs, resync receivers.
-
-        Must be called under exclusive txn_barrier.
-
-        Surviving events are rewritten in stamp order, preserving causal
-        ordering within and across authored layers: creates precede the
-        connections and bindings that reference them, and deletes precede
-        recreates.
-        """
-        sorted_entries = sorted(latest.values(), key=lambda entry: entry[2])
+        """Replace the log and resync receivers; requires the exclusive txn barrier."""
+        sorted_entries = compaction.replay_entries()
         graph = None
         if self.layer_mode is LayerMode.SHARED_STAGE:
             graph = self.shared_layer_graph
@@ -1712,7 +1435,7 @@ class UsdSyncServer:
                 raise RuntimeError("shared-stage compaction requires a layer graph")
             reachable = set(graph.reachable_layer_keys())
             sorted_entries = [
-                entry for entry in sorted_entries if entry[1].get("layer_key") in reachable
+                entry for entry in sorted_entries if entry.metadata.get("layer_key") in reachable
             ]
 
         graph_transaction = graph.transaction() if graph is not None else nullcontext()
@@ -1720,9 +1443,7 @@ class UsdSyncServer:
             records = []
             first_event_seq = 1
             if graph is not None:
-                # Compaction is the clean revision-domain boundary: the log is
-                # replaced by one new baseline while durable logical keys stay
-                # unchanged.
+                # Start a new replay baseline without changing layer identities.
                 graph.start_new_generation()
                 graph_record = graph.state_message(seq=1)
                 records.append(
@@ -1730,19 +1451,19 @@ class UsdSyncServer:
                 )
                 first_event_seq = 2
 
-            for seq, (ev, meta, _stamp) in enumerate(
+            for seq, entry in enumerate(
                 sorted_entries,
                 start=first_event_seq,
             ):
-                rec = {"type": MSG_EVENT, "seq": seq, "event": ev}
-                rec.update(meta)
+                rec = {"type": MSG_EVENT, "seq": seq, "event": entry.event}
+                rec.update(entry.metadata)
                 records.append(
                     (
                         seq,
                         encode_message(rec),
-                        meta.get("client_id"),
-                        ev.get("k"),
-                        ev.get("prim"),
+                        entry.metadata.get("client_id"),
+                        entry.event.get("k"),
+                        entry.event.get("prim"),
                     )
                 )
             self.store.clear_and_rewrite(records)
@@ -1760,8 +1481,8 @@ class UsdSyncServer:
         self._prim_paths.clear()
         self._instanceable_paths.clear()
         self._point_instancer_paths.clear()
-        for ev, _meta, _stamp in sorted_entries:
-            self._track_prim_event(ev)
+        for entry in sorted_entries:
+            self._track_prim_event(entry.event)
 
         LOG.info("Compacted event log: %d -> %d records", original_count, len(records))
 

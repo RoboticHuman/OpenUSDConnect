@@ -442,10 +442,10 @@ class TestCompaction:
 
     def test_load_rules_compact_in_global_runtime_scope(self, srv):
         from openusdconnect.codec import encode_message
+        from openusdconnect.server.compaction import LogCompaction
 
-        latest = {}
-        srv._merge_event(
-            latest,
+        compaction = LogCompaction()
+        compaction.add_record(
             1,
             encode_message(
                 {
@@ -455,8 +455,7 @@ class TestCompaction:
                 }
             ),
         )
-        srv._merge_event(
-            latest,
+        compaction.add_record(
             2,
             encode_message(
                 {
@@ -467,7 +466,7 @@ class TestCompaction:
             ),
         )
 
-        assert [entry[0]["k"] for entry in latest.values()] == ["unload_payload"]
+        assert [entry.event["k"] for entry in compaction.replay_entries()] == ["unload_payload"]
 
     def test_stage_metadata_compaction_merges_sparse_fields(self, srv):
         self._insert_events(

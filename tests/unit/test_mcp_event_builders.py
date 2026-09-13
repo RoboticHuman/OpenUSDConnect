@@ -12,6 +12,7 @@ from openusdconnect.protocol_validation import validate_event
 
 # Representative args per kind, also the inputs the consistency loop validates.
 SAMPLE_ARGS: dict[str, dict] = {
+    "erase_time_samples": {"prim": "/World/A", "spec_path": "/World/A.size", "times": [1.0]},
     "ensure_prim": {"prim": "/World/Mesh", "type_name": "Mesh"},
     "ensure_xform_ops": {"prim": "/World/Mesh"},
     "set_xform_trs": {"prim": "/World/Mesh", "t": [1.0, 2.0, 3.0]},

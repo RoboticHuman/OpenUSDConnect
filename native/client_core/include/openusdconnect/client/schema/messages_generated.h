@@ -99,6 +99,9 @@ struct SetPointInstancerBuilder;
 struct SetSdfSpecFields;
 struct SetSdfSpecFieldsBuilder;
 
+struct EraseTimeSamples;
+struct EraseTimeSamplesBuilder;
+
 struct ReplaceSdfLayerContent;
 struct ReplaceSdfLayerContentBuilder;
 
@@ -390,11 +393,12 @@ enum class EventPayload : uint8_t {
   SetSdfSpecFields = 20,
   ReplaceSdfLayerContent = 21,
   SetSublayers = 22,
+  EraseTimeSamples = 23,
   MIN = NONE,
-  MAX = SetSublayers
+  MAX = EraseTimeSamples
 };
 
-inline const EventPayload (&EnumValuesEventPayload())[23] {
+inline const EventPayload (&EnumValuesEventPayload())[24] {
   static const EventPayload values[] = {
     EventPayload::NONE,
     EventPayload::EnsurePrim,
@@ -418,13 +422,14 @@ inline const EventPayload (&EnumValuesEventPayload())[23] {
     EventPayload::SetPointInstancer,
     EventPayload::SetSdfSpecFields,
     EventPayload::ReplaceSdfLayerContent,
-    EventPayload::SetSublayers
+    EventPayload::SetSublayers,
+    EventPayload::EraseTimeSamples
   };
   return values;
 }
 
 inline const char * const *EnumNamesEventPayload() {
-  static const char * const names[24] = {
+  static const char * const names[25] = {
     "NONE",
     "EnsurePrim",
     "EnsureXformOps",
@@ -448,13 +453,14 @@ inline const char * const *EnumNamesEventPayload() {
     "SetSdfSpecFields",
     "ReplaceSdfLayerContent",
     "SetSublayers",
+    "EraseTimeSamples",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameEventPayload(EventPayload e) {
-  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::SetSublayers)) return "";
+  if (::flatbuffers::IsOutRange(e, EventPayload::NONE, EventPayload::EraseTimeSamples)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesEventPayload()[index];
 }
@@ -549,6 +555,10 @@ template<> struct EventPayloadTraits<OpenUSDConnect::ReplaceSdfLayerContent> {
 
 template<> struct EventPayloadTraits<OpenUSDConnect::SetSublayers> {
   static const EventPayload enum_value = EventPayload::SetSublayers;
+};
+
+template<> struct EventPayloadTraits<OpenUSDConnect::EraseTimeSamples> {
+  static const EventPayload enum_value = EventPayload::EraseTimeSamples;
 };
 
 template <bool B = false>
@@ -3560,6 +3570,92 @@ inline ::flatbuffers::Offset<SetSdfSpecFields> CreateSetSdfSpecFieldsDirect(
       removed);
 }
 
+struct EraseTimeSamples FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef EraseTimeSamplesBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PRIM = 4,
+    VT_SPEC_PATH = 6,
+    VT_TIMES = 8
+  };
+  const ::flatbuffers::String *prim() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PRIM);
+  }
+  const ::flatbuffers::String *spec_path() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SPEC_PATH);
+  }
+  const ::flatbuffers::Vector<double> *times() const {
+    return GetPointer<const ::flatbuffers::Vector<double> *>(VT_TIMES);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PRIM) &&
+           verifier.VerifyString(prim()) &&
+           VerifyOffset(verifier, VT_SPEC_PATH) &&
+           verifier.VerifyString(spec_path()) &&
+           VerifyOffset(verifier, VT_TIMES) &&
+           verifier.VerifyVector(times()) &&
+           verifier.EndTable();
+  }
+};
+
+struct EraseTimeSamplesBuilder {
+  typedef EraseTimeSamples Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_prim(::flatbuffers::Offset<::flatbuffers::String> prim) {
+    fbb_.AddOffset(EraseTimeSamples::VT_PRIM, prim);
+  }
+  void add_spec_path(::flatbuffers::Offset<::flatbuffers::String> spec_path) {
+    fbb_.AddOffset(EraseTimeSamples::VT_SPEC_PATH, spec_path);
+  }
+  void add_times(::flatbuffers::Offset<::flatbuffers::Vector<double>> times) {
+    fbb_.AddOffset(EraseTimeSamples::VT_TIMES, times);
+  }
+  explicit EraseTimeSamplesBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<EraseTimeSamples> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<EraseTimeSamples>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<EraseTimeSamples> CreateEraseTimeSamples(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> prim = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> spec_path = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<double>> times = 0) {
+  EraseTimeSamplesBuilder builder_(_fbb);
+  builder_.add_times(times);
+  builder_.add_spec_path(spec_path);
+  builder_.add_prim(prim);
+  return builder_.Finish();
+}
+
+struct EraseTimeSamples::Traits {
+  using type = EraseTimeSamples;
+  static auto constexpr Create = CreateEraseTimeSamples;
+};
+
+inline ::flatbuffers::Offset<EraseTimeSamples> CreateEraseTimeSamplesDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *prim = nullptr,
+    const char *spec_path = nullptr,
+    const std::vector<double> *times = nullptr) {
+  auto prim__ = prim ? _fbb.CreateString(prim) : 0;
+  auto spec_path__ = spec_path ? _fbb.CreateString(spec_path) : 0;
+  auto times__ = times ? _fbb.CreateVector<double>(*times) : 0;
+  return OpenUSDConnect::CreateEraseTimeSamples(
+      _fbb,
+      prim__,
+      spec_path__,
+      times__);
+}
+
 struct ReplaceSdfLayerContent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef ReplaceSdfLayerContentBuilder Builder;
   struct Traits;
@@ -3929,6 +4025,9 @@ struct EventWrapper FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const OpenUSDConnect::SetSublayers *event_as_SetSublayers() const {
     return event_type() == OpenUSDConnect::EventPayload::SetSublayers ? static_cast<const OpenUSDConnect::SetSublayers *>(event()) : nullptr;
   }
+  const OpenUSDConnect::EraseTimeSamples *event_as_EraseTimeSamples() const {
+    return event_type() == OpenUSDConnect::EventPayload::EraseTimeSamples ? static_cast<const OpenUSDConnect::EraseTimeSamples *>(event()) : nullptr;
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -4025,6 +4124,10 @@ template<> inline const OpenUSDConnect::ReplaceSdfLayerContent *EventWrapper::ev
 
 template<> inline const OpenUSDConnect::SetSublayers *EventWrapper::event_as<OpenUSDConnect::SetSublayers>() const {
   return event_as_SetSublayers();
+}
+
+template<> inline const OpenUSDConnect::EraseTimeSamples *EventWrapper::event_as<OpenUSDConnect::EraseTimeSamples>() const {
+  return event_as_EraseTimeSamples();
 }
 
 struct EventWrapperBuilder {
@@ -6083,6 +6186,10 @@ inline bool VerifyEventPayload(::flatbuffers::VerifierTemplate<B> &verifier, con
     }
     case EventPayload::SetSublayers: {
       auto ptr = reinterpret_cast<const OpenUSDConnect::SetSublayers *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case EventPayload::EraseTimeSamples: {
+      auto ptr = reinterpret_cast<const OpenUSDConnect::EraseTimeSamples *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

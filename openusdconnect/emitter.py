@@ -21,6 +21,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_CONNECTABLE_CONNECTION,
@@ -55,6 +56,7 @@ from .sdf_spec_delta import (
     serialize_spec_fields,
     spec_kind_for_object,
 )
+from .time_sample_delta import erase_time_samples_event
 from .usd_state import (
     POINT_INSTANCER_QUAT_ATTRS,
     POINT_INSTANCER_USD_TO_WIRE,
@@ -92,6 +94,7 @@ _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING = frozenset(
         K_SET_POINT_INSTANCER,
         K_SET_REFERENCE,
         K_SET_SDF_SPEC_FIELDS,
+        K_ERASE_TIME_SAMPLES,
         K_SET_VARIANT_SELECTIONS,
         K_SET_VISIBILITY,
         K_SET_XFORM_TRS,
@@ -499,24 +502,18 @@ def _diff_time_samples(
     edit_target=None,
     convert=None,
 ):
-    """Return ``(new_cache, dirty)`` for an attribute's time-sample table.
+    """Return ``(new_cache, dirty, removed)`` for an attribute's sample table.
 
-    ``cached`` is a previous ``{time: value_hash}`` snapshot, or ``None``
-    on first encounter (every authored sample is reported dirty).
-    ``dirty`` lists ``(time, python_value)`` pairs that were added or
-    whose hashed value changed. ``convert`` overrides the value converter
-    (default ``usd_value_to_python``).
+    Cache entries are ``time: value_hash``; ``None`` means a first snapshot.
+    ``dirty`` contains changed ``(time, value)`` pairs, ``removed`` deleted times.
+    ``convert`` defaults to ``usd_value_to_python``.
 
-    When ``edit_target`` is given, the times and values come from its layer
-    directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
-    at the target-mapped spec path only samples this target authored,
-    ignoring opinions on other layers.
-    Required for per-client-layer setups where the composed view shadows
-    weaker clients' samples and would otherwise leak the stronger
-    client's keyframes back to its peers' emitters.
+    Read the edit target's mapped spec directly when supplied. Composed reads
+    can hide this client's samples or leak a stronger client's keys into its
+    outgoing events.
     """
     if not attr:
-        return {}, []
+        return {}, [], sorted(cached or ())
     if edit_target is not None:
         layer = edit_target.GetLayer()
         path = _edit_target_spec_path(edit_target, attr)
@@ -524,12 +521,12 @@ def _diff_time_samples(
     else:
         times = attr.GetTimeSamples()
     if not times:
-        return {}, []
+        return {}, [], sorted(cached or ())
     if convert is None:
         convert = usd_value_to_python
     new_cache: dict[float, int] = {}
     dirty: list[tuple[float, object]] = []
-    is_first = cached is None
+    removed = sorted(cached.keys() - times) if cached else []
     cached = cached or {}
     for t in times:
         if edit_target is not None:
@@ -540,9 +537,13 @@ def _diff_time_samples(
             continue
         h = _value_hash(val)
         new_cache[t] = h
-        if is_first or cached.get(t) != h:
+        if cached.get(t) != h:
             dirty.append((t, val))
-    return new_cache, dirty
+    return new_cache, dirty, removed
+
+
+def _erase_time_samples_event(edit_target, scene_path: Sdf.Path, times) -> dict:
+    return erase_time_samples_event(edit_target.MapToSpecPath(scene_path), times)
 
 
 def _has_edit_target_samples(edit_target, attr) -> bool:
@@ -553,6 +554,36 @@ def _has_edit_target_samples(edit_target, attr) -> bool:
         )
         > 0
     )
+
+
+def _collect_sample_changes(
+    attr,
+    ts_cache,
+    edit_target,
+    events: list[dict],
+    *,
+    convert=None,
+    target_name: str | None = None,
+) -> list[tuple[float, object]]:
+    """Update the sample cache, append erasures, and return changed values.
+
+    ``target_name`` overrides the output attribute when the receiver uses a
+    different representation, such as PointInstancer's float orientations.
+    """
+    if not attr:
+        return []
+    name = attr.GetName()
+    cached = ts_cache.get(name)
+    if not cached and not _has_edit_target_samples(edit_target, attr):
+        return []
+    new_cache, dirty, removed = _diff_time_samples(attr, cached, edit_target, convert=convert)
+    if removed:
+        path = attr.GetPath()
+        if target_name is not None:
+            path = path.GetPrimPath().AppendProperty(target_name)
+        events.append(_erase_time_samples_event(edit_target, path, removed))
+    ts_cache[name] = new_cache
+    return dirty
 
 
 def read_stage_metadata(stage: Usd.Stage) -> dict:
@@ -1858,7 +1889,16 @@ def _invalidate_set_stage_metadata(emitter, _prim_path, _ev):
     emitter._stage_metadata_cache = read_stage_metadata(emitter.stage)
 
 
-def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
+def _invalidate_erase_time_samples(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+    name = Sdf.Path(ev["spec_path"]).name
+    samples = emitter._prim_cache.get(prim_path, {}).get(_C_TIME_SAMPLES, {}).get(name, {})
+    for time in ev["times"]:
+        samples.pop(time, None)
+
+
+def _invalidate_set_sdf_spec_fields(emitter, prim_path, ev):
     spec_path = ev.get("spec_path", "")
     spec_kind = ev.get("spec_kind", "")
     if not spec_path or not spec_kind:
@@ -1868,6 +1908,11 @@ def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
     emitter._dirty_sdf_specs.pop(key, None)
     if not _invalidation_targets_authoring_target(emitter):
         return
+    if spec_kind in _SDF_PROPERTY_KINDS and (
+        ev.get("removed", False) or "timeSamples" in ev.get("fields", ())
+    ):
+        samples = emitter._prim_cache.get(prim_path, {}).get(_C_TIME_SAMPLES, {})
+        samples.pop(path.name, None)
     if ev.get("removed", False):
         emitter._sdf_spec_fields.pop(key, None)
         if spec_kind in _SDF_PROPERTY_KINDS:
@@ -1919,6 +1964,7 @@ _INVALIDATE_DISPATCH = {
     K_SET_INSTANCEABLE: _invalidate_set_instanceable,
     K_SET_POINT_INSTANCER: _invalidate_set_point_instancer,
     K_SET_SDF_SPEC_FIELDS: _invalidate_set_sdf_spec_fields,
+    K_ERASE_TIME_SAMPLES: _invalidate_erase_time_samples,
 }
 
 
@@ -2186,13 +2232,16 @@ class NoticeEmitter:
             return result
 
         for name, fields in properties.items():
-            if (
-                name in ("xformOp:translate", "xformOp:orient", "xformOp:scale")
-                or not name.startswith("xformOp:")
-                or value_field not in fields
-            ):
+            if name in (
+                "xformOp:translate",
+                "xformOp:orient",
+                "xformOp:scale",
+            ) or not name.startswith("xformOp:"):
                 continue
-            if value_field in blocked_values.get(name, ()):
+            source_field = (
+                "default" if time is not None and "timeSamples" not in fields else value_field
+            )
+            if source_field not in fields or source_field in blocked_values.get(name, ()):
                 continue
             # Pivots, Euler ops, and matrix ops are transported through the
             # decomposed TRS representation, so any local value can affect all
@@ -2238,7 +2287,7 @@ class NoticeEmitter:
             kind = event["k"]
             time = event.get("time")
 
-            if kind == K_SET_SDF_SPEC_FIELDS:
+            if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
                 filtered.append(event)
                 continue
 
@@ -4008,37 +4057,24 @@ class NoticeEmitter:
             return []
         ops = list(xf.GetOrderedXformOps())
         fields = [_canonical_trs_field(op) for op in ops]
-        # A sampled non-canonical op (matrix transform, euler, pivot,
-        # inverse) cannot ride a per-op TRS field; the whole stack folds
-        # through the matrix decompose the default-time path uses.
-        # Canonical-only stacks short-circuit before any layer query.
-        for op, field in zip(ops, fields, strict=True):
-            if field is None and _has_edit_target_samples(edit_target, op.GetAttr()):
-                return self._decomposed_xform_sample_events(
-                    prim_path,
-                    xf,
-                    ops,
-                    ts_cache,
-                    dirty_attr_names,
-                    full_scan,
-                    edit_target,
-                )
+        # Even a static matrix/pivot affects sampled ops elsewhere in the stack.
+        if None in fields:
+            return self._decomposed_xform_sample_events(
+                prim_path,
+                xf,
+                ops,
+                ts_cache,
+                dirty_attr_names,
+                full_scan,
+                edit_target,
+            )
 
         events: list[dict] = []
         for op, field in zip(ops, fields, strict=True):
-            if field is None:
-                continue
             attr = op.GetAttr()
-            op_name = attr.GetName()
-            if not full_scan and op_name not in dirty_attr_names:
+            if not full_scan and attr.GetName() not in dirty_attr_names:
                 continue
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(op_name),
-                edit_target,
-            )
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events)
             for t, val in dirty:
                 events.append(
                     {
@@ -4049,7 +4085,6 @@ class NoticeEmitter:
                         "time": float(t),
                     }
                 )
-            ts_cache[op_name] = new_cache
         return events
 
     def _decomposed_xform_sample_events(
@@ -4074,26 +4109,46 @@ class NoticeEmitter:
         dirty_times: set[float] = set()
         sampled_indices: list[int] = []
         matrix_dirty: dict[str, dict[float, object]] = {}
+        removed_samples = False
+        previous_times = {time for op in ops for time in ts_cache.get(op.GetAttr().GetName(), ())}
         for i, op in enumerate(ops):
             attr = op.GetAttr()
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
-            sampled_indices.append(i)
             name = attr.GetName()
+            has_samples = _has_edit_target_samples(edit_target, attr)
+            if not has_samples and not ts_cache.get(name):
+                continue
+            if has_samples:
+                sampled_indices.append(i)
             if not full_scan and name not in dirty_attr_names:
                 continue
-            new_cache, dirty = _diff_time_samples(
+            new_cache, dirty, removed = _diff_time_samples(
                 attr,
                 ts_cache.get(name),
                 edit_target,
                 convert=xform_sample_value,
             )
+            removed_samples |= bool(removed)
             dirty_times.update(float(t) for t, _val in dirty)
             if op.GetOpType() == UsdGeom.XformOp.TypeTransform:
                 matrix_dirty[name] = {float(t): val for t, val in dirty}
             ts_cache[name] = new_cache
+        events: list[dict] = []
+        if removed_samples:
+            # Every output component uses the union of the stack's sample times.
+            # Rebuild that union: deleting one op's key can change interpolation
+            # at surviving keys belonging to another op.
+            dirty_times = {time for op in ops for time in ts_cache.get(op.GetAttr().GetName(), ())}
+            matrix_dirty.clear()
+            removed_times = previous_times - dirty_times
+            if removed_times:
+                for name in ("xformOp:translate", "xformOp:orient", "xformOp:scale"):
+                    events.append(
+                        _erase_time_samples_event(
+                            edit_target, Sdf.Path(prim_path).AppendProperty(name), removed_times
+                        )
+                    )
         if not dirty_times:
-            return []
+            return events
 
         times = sorted(dirty_times)
         single = sampled_indices[0] if len(sampled_indices) == 1 else None
@@ -4127,7 +4182,7 @@ class NoticeEmitter:
             )
 
         translates, rotates, scales = decompose_trs_batch(locals_np)
-        return [
+        events.extend(
             {
                 "k": K_SET_XFORM_TRS,
                 "prim": prim_path,
@@ -4138,7 +4193,8 @@ class NoticeEmitter:
                 "time": t,
             }
             for i, t in enumerate(times)
-        ]
+        )
+        return events
 
     def _visibility_sample_events(
         self,
@@ -4153,14 +4209,9 @@ class NoticeEmitter:
             return []
         imageable = UsdGeom.Imageable(prim)
         vis_attr = imageable.GetVisibilityAttr() if imageable else None
-        if not vis_attr or not _has_edit_target_samples(edit_target, vis_attr):
-            return []
-        new_cache, dirty = _diff_time_samples(
-            vis_attr,
-            ts_cache.get("visibility"),
-            edit_target,
-        )
-        events = [
+        events = []
+        dirty = _collect_sample_changes(vis_attr, ts_cache, edit_target, events)
+        events.extend(
             {
                 "k": K_SET_VISIBILITY,
                 "prim": prim_path,
@@ -4168,8 +4219,7 @@ class NoticeEmitter:
                 "time": float(t),
             }
             for t, val in dirty
-        ]
-        ts_cache["visibility"] = new_cache
+        )
         return events
 
     def _gprim_attr_sample_events(
@@ -4210,14 +4260,7 @@ class NoticeEmitter:
 
         for name in attr_names:
             attr = prim.GetAttribute(name)
-            if not attr or not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(name),
-                edit_target,
-                convert=_convert,
-            )
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events, convert=_convert)
             if dirty:
                 primvar_meta, attr_interp = attribute_event_metadata(prim, name, attr)
                 for t, val in dirty:
@@ -4232,7 +4275,6 @@ class NoticeEmitter:
                     if attr_interp:
                         ev_out["attr_interp"] = attr_interp
                     events.append(ev_out)
-            ts_cache[name] = new_cache
         return events
 
     def _connectable_input_sample_events(
@@ -4261,19 +4303,13 @@ class NoticeEmitter:
             attr = inp.GetAttr()
             if not attr.IsAuthored() or inp.HasConnectedSource():
                 continue
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
             name = inp.GetBaseName()
-            cache_key = "inputs:" + name
-            if not full_scan and cache_key not in dirty_attr_names:
+            if not full_scan and attr.GetName() not in dirty_attr_names:
+                continue
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events, convert=_convert)
+            if not dirty:
                 continue
             type_name = str(attr.GetTypeName())
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(cache_key),
-                edit_target,
-                convert=_convert,
-            )
             for t, val in dirty:
                 events.append(
                     {
@@ -4285,7 +4321,6 @@ class NoticeEmitter:
                         "time": float(t),
                     }
                 )
-            ts_cache[cache_key] = new_cache
         return events
 
     def _point_instancer_sample_events(
@@ -4300,16 +4335,17 @@ class NoticeEmitter:
         if not prim.IsA(UsdGeom.PointInstancer):
             return []
         by_time: dict[float, dict] = {}
+        events: list[dict] = []
         for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
             if not full_scan and usd_name not in dirty_attr_names:
                 continue
             attr = prim.GetAttribute(usd_name)
-            if not attr or not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
+            dirty = _collect_sample_changes(
                 attr,
-                ts_cache.get(usd_name),
+                ts_cache,
                 edit_target,
+                events,
+                target_name=_PI_WIRE_TO_USD[wire_name],
             )
             for t, val in dirty:
                 if usd_name in POINT_INSTANCER_QUAT_ATTRS:
@@ -4317,9 +4353,8 @@ class NoticeEmitter:
                     if val is None:
                         continue
                 by_time.setdefault(float(t), {})[wire_name] = val
-            ts_cache[usd_name] = new_cache
         # The prototypes rel is uniform and never rides timed events.
-        return [
+        events.extend(
             {
                 "k": K_SET_POINT_INSTANCER,
                 "prim": prim_path,
@@ -4328,7 +4363,8 @@ class NoticeEmitter:
                 "time": t,
             }
             for t, fields in sorted(by_time.items())
-        ]
+        )
+        return events
 
     def _build_stage_metadata_events(self) -> list[dict]:
         """Emit a SetStageMetadata event when the stage's units/timeline change."""

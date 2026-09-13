@@ -22,6 +22,7 @@ from openusdconnect.protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -304,6 +305,10 @@ def _set_point_instancer(
     return ev
 
 
+def _erase_time_samples(prim: str, spec_path: str, times: list[float]) -> dict:
+    return {"k": K_ERASE_TIME_SAMPLES, "prim": prim, "spec_path": spec_path, "times": list(times)}
+
+
 def _set_sdf_spec_fields(
     prim: str,
     spec_path: str,
@@ -459,6 +464,12 @@ TOOL_TABLE: dict[str, ToolRow] = {
         "scales, velocities, ids, etc. Only provided arrays are authored. "
         "Optional time selects a time sample.",
         _set_point_instancer,
+    ),
+    K_ERASE_TIME_SAMPLES: ToolRow(
+        K_ERASE_TIME_SAMPLES,
+        "Erase selected time samples at an exact authored attribute path.",
+        _erase_time_samples,
+        expose=False,
     ),
     K_SET_SDF_SPEC_FIELDS: ToolRow(
         K_SET_SDF_SPEC_FIELDS,

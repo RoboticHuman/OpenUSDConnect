@@ -124,6 +124,102 @@ def test_bridge_reports_dictionary_key_mutations(bridge_path):
         bridge.close()
 
 
+def test_bridge_preserves_sample_times_and_distinguishes_blocks_from_erasure(bridge_path):
+    layer = Sdf.Layer.CreateAnonymous("samples")
+    prim = Sdf.CreatePrimInLayer(layer, "/Model")
+    attr = Sdf.AttributeSpec(prim, "sampled", Sdf.ValueTypeNames.Double)
+    with NativeDelegateTracker(bridge_path, [layer.identifier]) as bridge:
+        layer.SetTimeSample(attr.path, 1.25, 3.0)
+        layer.SetTimeSample(attr.path, 2.5, Sdf.ValueBlock())
+        layer.EraseTimeSample(attr.path, 1.25)
+        records = [record for record in bridge.drain() if record.fields == ("_setTimeSample",)]
+        assert [(record.sample_time, record.sample_erased) for record in records] == [
+            (1.25, False),
+            (2.5, False),
+            (1.25, True),
+        ]
+
+
+def test_native_tracker_erases_without_serializing_surviving_samples(bridge_path, monkeypatch):
+    stage = Usd.Stage.CreateInMemory()
+    attr = stage.DefinePrim("/Model").CreateAttribute("sampled", Sdf.ValueTypeNames.Double)
+    for time in range(1000):
+        attr.Set(float(time), float(time))
+    graph = SharedLayerGraph(stage, authoritative=True)
+    tracker = NativeSdfLayerChangeTracker(stage, graph, bridge_path)
+    try:
+
+        def unexpected_serialization(*args, **kwargs):
+            pytest.fail("pure sample erasure must not serialize a spec or scan surviving values")
+
+        monkeypatch.setattr(sdf_delegate_bridge, "serialize_spec_fields", unexpected_serialization)
+        attr.ClearAtTime(500.0)
+        attr.ClearAtTime(501.0)
+        tracker.prepare_local_changes()
+        batch, _, events = tracker.next_routed_batch()
+        assert events == [
+            {
+                "k": "erase_time_samples",
+                "prim": "/Model",
+                "spec_path": "/Model.sampled",
+                "times": [500.0, 501.0],
+            }
+        ]
+        tracker.mark_prepared_sent(batch)
+        assert not tracker.has_local_changes
+    finally:
+        tracker.close()
+
+
+@pytest.mark.parametrize("restore", [False, True])
+def test_native_tracker_coalesces_sample_edits_to_the_final_state(bridge_path, restore):
+    stage = Usd.Stage.CreateInMemory()
+    attr = stage.DefinePrim("/Model").CreateAttribute("sampled", Sdf.ValueTypeNames.Double)
+    attr.Set(1.0, 1.0)
+    target_layer = Sdf.Layer.CreateAnonymous("sample-target")
+    target_layer.TransferContent(stage.GetRootLayer())
+    target = Usd.Stage.Open(target_layer)
+    tracker = NativeSdfLayerChangeTracker(
+        stage, SharedLayerGraph(stage, authoritative=True), bridge_path
+    )
+    try:
+        attr.Set(2.0, 1.0)
+        attr.ClearAtTime(1.0)
+        if restore:
+            attr.Set(1.0, 1.0)
+        tracker.prepare_local_changes()
+        _, _, events = tracker.next_routed_batch()
+        apply_events(target, events)
+        assert target_layer.ExportToString() == stage.GetRootLayer().ExportToString()
+        assert events[0]["k"] == ("set_sdf_spec_fields" if restore else "erase_time_samples")
+    finally:
+        tracker.close()
+
+
+def test_native_tracker_keeps_writes_and_erasures_at_different_times(bridge_path):
+    stage = Usd.Stage.CreateInMemory()
+    attr = stage.DefinePrim("/Model").CreateAttribute("sampled", Sdf.ValueTypeNames.Double)
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    target_layer = Sdf.Layer.CreateAnonymous("sample-target")
+    target_layer.TransferContent(stage.GetRootLayer())
+    target = Usd.Stage.Open(target_layer)
+    tracker = NativeSdfLayerChangeTracker(
+        stage, SharedLayerGraph(stage, authoritative=True), bridge_path
+    )
+    try:
+        attr.ClearAtTime(1.0)
+        attr.Set(3.0, 3.0)
+        tracker.prepare_local_changes()
+        _, _, events = tracker.next_routed_batch()
+        assert len(events) == 1
+        assert events[0]["k"] == "set_sdf_spec_fields"
+        apply_events(target, events)
+        assert target_layer.ExportToString() == stage.GetRootLayer().ExportToString()
+    finally:
+        tracker.close()
+
+
 def test_native_tracker_replays_dictionary_and_time_sample_changes(
     bridge_path,
     tmp_path,

@@ -63,6 +63,7 @@ def test_derived_kind_sets_pin():
     was flipped in the declaration table; update deliberately."""
     assert CREATE_KINDS == {"ensure_prim", "set_stage_metadata"}
     assert STRUCTURAL_EVENT_KINDS == {
+        "erase_time_samples",
         "ensure_prim",
         "ensure_xform_ops",
         "load_payload",
@@ -80,6 +81,7 @@ def test_derived_kind_sets_pin():
         "unload_payload",
     }
     assert STAGE_SYNC_KINDS == {
+        "erase_time_samples",
         "load_payload",
         "replace_sdf_layer_content",
         "set_connectable_connection",
@@ -103,9 +105,10 @@ def test_derived_kind_sets_pin():
         "set_sublayers",
         "unload_payload",
     }
-    assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields"}
+    assert NATIVE_FIELD_ROUTED_KINDS == {"set_sdf_spec_fields", "erase_time_samples"}
     assert (NATIVE_PROJECTED_KINDS | NATIVE_DIRECT_KINDS | NATIVE_FIELD_ROUTED_KINDS) == EVENT_KEYS
     assert MANAGED_KINDS == {
+        "erase_time_samples",
         "deactivate_prim",
         "delete_prim",
         "ensure_prim",
@@ -128,6 +131,7 @@ def test_derived_kind_sets_pin():
         "unload_payload",
     }
     assert SHARED_STAGE_EVENT_KINDS == {
+        "erase_time_samples",
         "replace_sdf_layer_content",
         "set_sdf_spec_fields",
         "set_sublayers",

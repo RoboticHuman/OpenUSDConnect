@@ -25,6 +25,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -107,6 +108,7 @@ SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
 SetSdfSpecFields = _fb.SetSdfSpecFields
+EraseTimeSamples = _fb.EraseTimeSamples
 ReplaceSdfLayerContent = _fb.ReplaceSdfLayerContent
 SetSublayers = _fb.SetSublayers
 ClaimPlayback = _fb.ClaimPlayback
@@ -1548,6 +1550,25 @@ def _encode_set_point_instancer(b, ev):
 
 
 @register_encoder(
+    K_ERASE_TIME_SAMPLES,
+    fb_tag=EventPayloadType.EraseTimeSamples,
+    fb_class=EraseTimeSamples,
+)
+def _encode_erase_time_samples(b, ev):
+    prim = b.CreateString(ev["prim"])
+    spec_path = b.CreateString(ev["spec_path"])
+    _fb.EraseTimeSamplesStartTimesVector(b, len(ev["times"]))
+    for time in reversed(ev["times"]):
+        b.PrependFloat64(time)
+    times = b.EndVector()
+    _fb.EraseTimeSamplesStart(b)
+    _fb.EraseTimeSamplesAddPrim(b, prim)
+    _fb.EraseTimeSamplesAddSpecPath(b, spec_path)
+    _fb.EraseTimeSamplesAddTimes(b, times)
+    return _fb.EraseTimeSamplesEnd(b)
+
+
+@register_encoder(
     K_SET_SDF_SPEC_FIELDS,
     fb_tag=EventPayloadType.SetSdfSpecFields,
     fb_class=SetSdfSpecFields,
@@ -2527,6 +2548,16 @@ def _dict_set_connectable_connection(scc, kind):
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
+
+
+@register_decoder(K_ERASE_TIME_SAMPLES)
+def _dict_erase_time_samples(erase, kind):
+    return {
+        "k": kind,
+        "prim": _str(erase.Prim()),
+        "spec_path": _str(erase.SpecPath()),
+        "times": [erase.Times(i) for i in range(erase.TimesLength())],
+    }
 
 
 @register_decoder(K_SET_SDF_SPEC_FIELDS)

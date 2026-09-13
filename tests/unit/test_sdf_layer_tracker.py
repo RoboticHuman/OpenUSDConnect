@@ -79,6 +79,29 @@ def test_one_metadata_change_does_not_republish_other_fields():
         tracker.close()
 
 
+def test_remote_sample_erasure_advances_a_dirty_snapshot_baseline():
+    stage = Usd.Stage.CreateInMemory()
+    attr = stage.DefinePrim("/Thing").CreateAttribute("value", Sdf.ValueTypeNames.Double)
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    _, tracker = _root_tracker(stage)
+    try:
+        attr.SetDocumentation("local edit")
+        tracker.prepare_local_changes()
+        event = {
+            "k": "erase_time_samples", "prim": "/Thing",
+            "spec_path": "/Thing.value", "times": [1.0, 2.0],
+        }
+        with tracker.suppressed():
+            apply_events(stage, [event])
+            tracker.accept_authoritative_event(stage.GetRootLayer(), event)
+        batch = tracker.prepare_local_changes()[0]
+        assert [event["fields"] for event in batch.events] == [["documentation"]]
+        assert attr.GetTimeSamples() == []
+    finally:
+        tracker.close()
+
+
 def test_layer_metadata_is_an_exact_pseudo_root_delta():
     stage = Usd.Stage.CreateInMemory()
     _graph, tracker = _root_tracker(stage)

@@ -16,6 +16,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -436,6 +437,14 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
             "inactiveIds",
             Sdf.Int64ListOp.CreateExplicit([int(i) for i in ev["inactive_ids"]]),
         )
+
+
+@register_applier(K_ERASE_TIME_SAMPLES)
+def _apply_erase_time_samples(stage, ev):
+    from .time_sample_delta import erase_time_samples
+
+    _events.get(K_ERASE_TIME_SAMPLES).validate(ev)
+    erase_time_samples(stage.GetEditTarget().GetLayer(), ev)
 
 
 @register_applier(K_SET_SDF_SPEC_FIELDS)
@@ -882,6 +891,8 @@ def _validate_spec_events(events: list[Event]) -> None:
     for event in events:
         if event.get("k") == K_SET_SDF_SPEC_FIELDS:
             validate_spec_delta(event)
+        elif event.get("k") == K_ERASE_TIME_SAMPLES:
+            _events.get(K_ERASE_TIME_SAMPLES).validate(event)
 
 
 def _is_api_schema_over(event: Event) -> bool:
@@ -942,15 +953,18 @@ def apply_events(
     *,
     prevalidated: bool = False,
 ) -> None:
-    """Apply events in dependency order while preserving namespace barriers.
+    """Apply events in dependency order while preserving replacement barriers.
 
-    Creates precede other structural events and values within each segment;
-    delete and rename events keep their input position. Appliers remain outside
-    ``Sdf.ChangeBlock`` because they query the composed stage through ``Usd``.
+    Creates precede other structural events and values within each segment.
+    Deletes, renames, and exact sample edits keep their input position.
+    Appliers remain outside ``Sdf.ChangeBlock`` because they query the composed
+    stage through ``Usd``.
     ``op_cache`` may persist canonical op handles across calls on one stage; it
     must not be shared across stages. Set ``prevalidated`` only when exact Sdf
     events were already validated together.
     """
+    from .time_sample_delta import is_sample_history_barrier
+
     if op_cache is None:
         op_cache = {}
 
@@ -959,7 +973,8 @@ def apply_events(
 
     segment: list[Event] = []
     for event in events:
-        if event.get("k") in (K_DELETE_PRIM, K_RENAME_PRIM):
+        kind = event.get("k")
+        if kind in (K_DELETE_PRIM, K_RENAME_PRIM) or is_sample_history_barrier(event):
             if segment:
                 _apply_segment(stage, segment, op_cache)
                 segment = []
@@ -1069,7 +1084,7 @@ def atomic_apply_prim_paths(events) -> list[str] | None:
         kind = event.get("k")
         if kind in (K_SET_STAGE_METADATA, K_REPLACE_SDF_LAYER_CONTENT, K_SET_SUBLAYERS):
             return None
-        if kind == K_SET_SDF_SPEC_FIELDS:
+        if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
             if event.get("spec_kind") == "layer":
                 return None
             spec_path = Sdf.Path(event.get("spec_path", ""))

@@ -11,7 +11,7 @@ namespace openusdconnect::client
 {
 
 inline constexpr std::uint16_t kSchemaVersion = 10;
-inline constexpr std::int32_t kProtocolVersion = 12;
+inline constexpr std::int32_t kProtocolVersion = 13;
 
 enum class ProtocolResult : std::uint8_t
 {

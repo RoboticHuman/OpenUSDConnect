@@ -38,8 +38,10 @@ from .sdf_spec_delta import (
     spec_kind_for_object,
 )
 from .shared_layer_graph import SharedLayerGraph, read_sublayer_entries
+from .time_sample_delta import erase_time_samples_event
 
-_BRIDGE_ABI_VERSION = 1
+_BRIDGE_ABI_VERSION = 2
+_SAMPLE_ERASED = 2
 _DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 * 1024
 _SDF_CHILDREN_FIELDS = frozenset(
     {
@@ -111,6 +113,7 @@ class _DelegateRecord(ctypes.Structure):
         ("old_value_json_size", ctypes.c_size_t),
         ("new_value_json", ctypes.c_void_p),
         ("new_value_json_size", ctypes.c_size_t),
+        ("sample_time", ctypes.c_double),
     ]
 
 
@@ -132,6 +135,8 @@ class DelegateMutation:
     old_path: str
     old_identifier: str
     fields: tuple[str, ...]
+    sample_time: float | None = None
+    sample_erased: bool = False
 
 
 def _encoded_identifiers(
@@ -363,6 +368,8 @@ class NativeDelegateTracker:
                             old_path="",
                             old_identifier="",
                             fields=(field_name,) if field_name else (),
+                            sample_time=rec.sample_time if field_name == "_setTimeSample" else None,
+                            sample_erased=bool(rec.flags & _SAMPLE_ERASED),
                         )
                     )
             finally:
@@ -386,6 +393,17 @@ class NativeDelegateTracker:
 class _PathChanges:
     flags: _ChangeFlag = _ChangeFlag(0)
     fields: set[str] = field(default_factory=set)
+    written_times: set[float] = field(default_factory=set)
+    erased_times: set[float] = field(default_factory=set)
+
+    @property
+    def erases_samples_only(self) -> bool:
+        return (
+            bool(self.erased_times)
+            and not self.written_times
+            and "timeSamples" not in self.fields
+            and not self.flags & (_ADDED_SPEC_FLAGS | _ChangeFlag.RENAMED)
+        )
 
 
 @dataclass(slots=True)
@@ -438,7 +456,12 @@ def _removal_event(path: Sdf.Path) -> dict:
 
 def _expanded_path_changes(changes: _LayerChanges) -> dict[str, _PathChanges]:
     expanded = {
-        path: _PathChanges(path_changes.flags, set(path_changes.fields))
+        path: _PathChanges(
+            flags=path_changes.flags,
+            fields=set(path_changes.fields),
+            written_times=set(path_changes.written_times),
+            erased_times=set(path_changes.erased_times),
+        )
         for path, path_changes in changes.paths.items()
     }
     for path_string, path_changes in tuple(expanded.items()):
@@ -474,6 +497,7 @@ def _materialize_changes(changes: _LayerChanges) -> tuple[dict, ...]:
         return tuple(events)
 
     spec_events = []
+    sample_events = []
     for path_string, path_changes in _expanded_path_changes(changes).items():
         path = Sdf.Path(path_string)
         if path.IsTargetPath():
@@ -489,7 +513,10 @@ def _materialize_changes(changes: _LayerChanges) -> tuple[dict, ...]:
         kind = spec_kind_for_object(spec)
         fields = set(path_changes.fields)
         if path_changes.flags & _ChangeFlag.TIME_SAMPLES:
-            fields.add("timeSamples")
+            if path_changes.erases_samples_only:
+                sample_events.append(erase_time_samples_event(path, path_changes.erased_times))
+            else:
+                fields.add("timeSamples")
         if path_changes.flags & (_ADDED_SPEC_FLAGS | _ChangeFlag.RENAMED):
             fields.update(str(field_name) for field_name in spec.ListInfoKeys())
         if kind == "layer":
@@ -518,6 +545,7 @@ def _materialize_changes(changes: _LayerChanges) -> tuple[dict, ...]:
     spec_events.sort(key=sdf_event_sort_key)
     events = [_topology_event(layer)] if changes.topology else []
     events.extend(spec_events)
+    events.extend(sample_events)
     return tuple(events)
 
 
@@ -623,6 +651,15 @@ class NativeSdfLayerChangeTracker:
                     delete_layers.add(layer_id)
             elif field == "_setTimeSample":
                 changes.add(record.path, _ChangeFlag.TIME_SAMPLES, ())
+                path_changes = changes.paths[record.path]
+                if record.sample_time is None:
+                    path_changes.fields.add("timeSamples")
+                elif record.sample_erased:
+                    path_changes.written_times.discard(record.sample_time)
+                    path_changes.erased_times.add(record.sample_time)
+                else:
+                    path_changes.erased_times.discard(record.sample_time)
+                    path_changes.written_times.add(record.sample_time)
             elif field in ("subLayers", "subLayerOffsets"):
                 changes.topology = True
                 changes.add(record.path, _ChangeFlag.SUBLAYERS, (field,))

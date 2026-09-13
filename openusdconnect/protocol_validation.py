@@ -24,6 +24,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -465,6 +466,20 @@ def _validate_point_instancer(event: dict) -> None:
         if field in present:
             _require_bulk_array(event[field], field, width=width, integer=False)
     _require_optional_time(event)
+
+
+@register_validator(K_ERASE_TIME_SAMPLES)
+def _validate_erase_time_samples(event: dict) -> None:
+    path = _sdf_path(event.get("spec_path"), "spec_path")
+    if not path.IsAbsolutePath() or not path.IsPrimPropertyPath():
+        _fail("spec_path must be an absolute attribute path")
+    if event.get("prim") != str(path.GetPrimPath().StripAllVariantSelections()):
+        _fail("prim must match the spec_path owner")
+    times = event.get("times")
+    if not isinstance(times, list) or not times:
+        _fail("times must be a non-empty list")
+    for time in times:
+        _require_finite(time, "times entry")
 
 
 @register_validator(K_SET_SDF_SPEC_FIELDS)

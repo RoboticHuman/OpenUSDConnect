@@ -19,6 +19,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -100,6 +101,11 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "fields": ev.get("fields", []),
         "fragment": ev.get("fragment", ""),
         "removed": bool(ev.get("removed", False)),
+    },
+    K_ERASE_TIME_SAMPLES: lambda ev: {
+        "prim_path": ev["prim"],
+        "spec_path": ev["spec_path"],
+        "times": ev["times"],
     },
     K_REPLACE_SDF_LAYER_CONTENT: lambda ev: {
         "fragment": ev["fragment"],
@@ -274,6 +280,10 @@ class DCCAdapter(ABC):
         time: float | None = None,
     ) -> bool:
         raise NotImplementedError
+
+    def erase_time_samples(self, prim_path: str, spec_path: str, times: list[float]) -> bool:
+        """Accept deletions already applied to an external adapter's USD mirror."""
+        return True
 
     def set_sdf_spec_fields(
         self,
@@ -694,6 +704,11 @@ class UsdStageAdapter(DCCAdapter):
                 "generation": generation,
                 "revision": revision,
             }
+        )
+
+    def erase_time_samples(self, prim_path: str, spec_path: str, times: list[float]) -> bool:
+        return self.apply_event(
+            {"k": K_ERASE_TIME_SAMPLES, "prim": prim_path, "spec_path": spec_path, "times": times}
         )
 
     def replace_sdf_layer_content(self, fragment: str) -> bool:

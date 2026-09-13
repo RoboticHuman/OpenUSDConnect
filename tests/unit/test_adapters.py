@@ -277,6 +277,7 @@ class TestUsdStageAdapterDirectMethods:
             lambda: adapter.rename_prim("/A", "B"),
             lambda: adapter.set_visibility("/A", visible=False, time=1.0),
             lambda: adapter.set_gprim_attrs("/A", {"radius": 2.0}, time=1.0),
+            lambda: adapter.erase_time_samples("/A", "/A.radius", [1.0]),
             lambda: adapter.set_sdf_spec_fields(
                 "/A", "/A.value", "attribute", ["default"], "#usda 1.0\n"
             ),

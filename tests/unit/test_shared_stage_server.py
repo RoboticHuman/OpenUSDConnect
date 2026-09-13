@@ -110,6 +110,36 @@ def test_restart_and_compaction_restore_exact_target_layer(tmp_path):
         assert restored.store.get_count() == 2
 
 
+@pytest.mark.parametrize("compact", [False, True])
+def test_sample_erasure_survives_shared_stage_restart(tmp_path, compact):
+    base = _create_stage(tmp_path)
+    authored = Sdf.Layer.FindOrOpen(str(tmp_path / "asset.usda"))
+    authored.SetTimeSample("/World.value", 1.0, 10.0)
+    authored.SetTimeSample("/World.value", 2.0, 20.0)
+    authored.Save()
+    db = tmp_path / "sample-erasure.db"
+    with _shared_server(base, db) as server:
+        key = _child_key(server)
+        server._commit_events(
+            [
+                {
+                    "k": "erase_time_samples",
+                    "prim": "/World",
+                    "spec_path": "/World.value",
+                    "times": [1.0],
+                }
+            ],
+            layer_key=key,
+        )
+        if compact:
+            server.compact_log()
+    with _shared_server(base, db) as restored:
+        child = restored.shared_layer_graph.layer_for(_child_key(restored))
+        assert child.ListTimeSamplesForPath("/World.value") == [2.0]
+        assert child.QueryTimeSample("/World.value", 2.0) == 20.0
+        assert child.GetAttributeAtPath("/World.value").default == 1.0
+
+
 def test_detached_layer_recovers_its_key_after_compaction_and_restart(tmp_path):
     base = _create_stage(tmp_path)
     db = tmp_path / "detached-identity.db"

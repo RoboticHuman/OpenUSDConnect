@@ -287,6 +287,13 @@ table SetSdfSpecFields {
     removed:bool = false;
 }
 
+// Erase selected keys without replacing surviving samples, defaults, or metadata.
+table EraseTimeSamples {
+    prim:string;
+    spec_path:string;       // exact authored attribute path, including variants
+    times:[double];
+}
+
 // Replace all non-topology opinions in one authored layer. Sublayer paths and
 // offsets remain governed by SetSublayers. The fragment is portable USDA
 // syntax regardless of the source layer's file format.
@@ -344,6 +351,7 @@ union EventPayload {
     SetSdfSpecFields,
     ReplaceSdfLayerContent,
     SetSublayers,
+    EraseTimeSamples,
 }
 
 table EventWrapper {

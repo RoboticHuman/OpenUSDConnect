@@ -1,39 +1,7 @@
-"""Observer-side Blender script for the headless-emit time-samples test.
+"""Check replayed sample writes/deletions in the USD mirror and Blender pose.
 
-Counterpart to ``test_assets.py::test_headless_time_samples_to_blender``.
-The pytest wrapper sends a sequence of time-sampled ``set_xform_trs``
-events to the server BEFORE this Blender starts the events live in
-the event log. When this script connects via the addon's receiver, the
-server replays them; the addon applies them; this script then dumps
-the observed state.
-
-What this is verifying:
-
-  * Protocol layer end-to-end: time-sampled events survive encode →
-    server log → replay → decode → apply.
-  * The "Q1 gap": ``BlenderAdapter.set_xform_trs`` currently ignores
-    the ``time`` argument and just sets ``obj.location`` at default
-    time, so each time-sampled event overwrites the previous and the
-    sphere ends at the LAST received position with no F-curves.
-
-What this is intentionally NOT verifying:
-
-  * Time samples on the receiver-side mirror USD stage. For a
-    Blender (DCC-backed) receiver, ``BlenderAdapter`` writes to Blender
-    objects, not USD. The mirror stage is fed by capture's depsgraph
-    roundtrip, which authors only default-time opinions. Time samples
-    don't land on the Blender receiver's mirror by design animation
-    data for Blender comes from local USD import (Blender Action
-    F-curves), not from the wire. For stage-backed receivers
-    (Unreal via UsdStageAdapter, headless scripts), time samples DO
-    land on the consumer's stage via the adapter's apply path
-    (``event_apply`` honors ``time``); those would be tested
-    separately if/when wired up.
-
-Outputs PASS / FAIL based on whether observed state matches the
-documented current behavior. If/when Q1 is implemented (incoming
-time-sampled events insert Blender keyframes), this test will need
-to be updated.
+Incoming animation still does not create Blender F-curves; the adapter projects
+the last sampled pose. The USD mirror must retain the exact surviving keys.
 """
 
 import os
@@ -50,7 +18,8 @@ _MAX_POLLS = 30
 
 # Must match what the pytest wrapper sends.
 _PRIM_PATH = "/World/AnimSphere"
-_EXPECTED_LOCATION = (20.0, 0.0, 0.0)  # latest time-sample's position
+_ERASE_LATEST = "--erase-latest" in sys.argv
+_EXPECTED_LOCATION = (10.0 if _ERASE_LATEST else 20.0, 0.0, 0.0)
 
 
 def _find_blender_object(prim_path: str):
@@ -61,6 +30,16 @@ def _find_blender_object(prim_path: str):
 
 
 def _observe_and_report():
+    from usd_connect import receiver_addon
+
+    stage = receiver_addon._DISPATCHER.mirror_stage
+    attr = stage.GetAttributeAtPath(_PRIM_PATH + ".xformOp:translate")
+    expected_times = [1.0, 12.0] if _ERASE_LATEST else [1.0, 12.0, 24.0]
+    if attr and attr.GetTimeSamples() == expected_times:
+        harness._pass(f"Mirror sample times == {expected_times}")
+    else:
+        harness._fail(f"Mirror sample times != {expected_times}")
+
     obj = _find_blender_object(_PRIM_PATH)
     if obj is None:
         harness._fail(f"No Blender object found at usd_prim_path={_PRIM_PATH!r}")
