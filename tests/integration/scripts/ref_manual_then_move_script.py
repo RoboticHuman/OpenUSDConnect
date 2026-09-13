@@ -24,7 +24,11 @@ if project_root not in sys.path:
 _venv_sp = os.path.join(project_root, ".venv", "Lib", "site-packages")
 if os.path.isdir(_venv_sp) and _venv_sp not in sys.path:
     sys.path.append(_venv_sp)
-for _k in [k for k in sys.modules if k.startswith("openusdconnect")]:
+for _k in [
+    k
+    for k in sys.modules
+    if k.startswith("openusdconnect") and k != "openusdconnect._native_client"
+]:
     del sys.modules[_k]
 
 

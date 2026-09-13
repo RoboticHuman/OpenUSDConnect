@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-PROTOCOL_VERSION = 12
+PROTOCOL_VERSION = 13
 
 
 class LayerMode(StrEnum):
@@ -60,6 +60,7 @@ K_SET_POINT_INSTANCER = "set_point_instancer"
 K_SET_SDF_SPEC_FIELDS = "set_sdf_spec_fields"
 K_REPLACE_SDF_LAYER_CONTENT = "replace_sdf_layer_content"
 K_SET_SUBLAYERS = "set_sublayers"
+K_ERASE_TIME_SAMPLES = "erase_time_samples"
 
 SDF_SPEC_KIND_LAYER = "layer"
 SDF_SPEC_KIND_PRIM = "prim"
@@ -158,8 +159,8 @@ class EventKindInfo:
     arc: re-applying identical state would still trigger recomposition
         (ClearReferences plus re-add, variant re-select), so receivers
         skip-detect it against the mirror's composed state.
-    imports: application brings new content into the consumer; fires the
-        dispatcher's on_imported callback.
+    imports: application may materialize or recompose consumer content; fires
+        the dispatcher's on_imported callback.
     native_projection: how a layered receiver maps the event into a non-USD
         adapter after applying it to the receiver-owned USD mirror.
     modes: protocol layer modes in which the event is valid. Some exact Sdf
@@ -181,6 +182,12 @@ class EventKindInfo:
 
 
 EVENT_KIND_INFO: dict[str, EventKindInfo] = {
+    K_ERASE_TIME_SAMPLES: EventKindInfo(
+        native_projection=NativeProjectionMode.FIELD_ROUTED,
+        modes=frozenset({LayerMode.MANAGED, LayerMode.SHARED_STAGE}),
+        structural=True,
+        stage_sync=True,
+    ),
     K_ENSURE_PRIM: EventKindInfo(
         native_projection=NativeProjectionMode.PROJECT,
         create=True,

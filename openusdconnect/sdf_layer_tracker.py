@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pxr import Sdf, Tf, Usd
 
 from .protocol_constants import (
+    K_ERASE_TIME_SAMPLES,
     K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_SUBLAYERS,
@@ -284,6 +285,15 @@ def _apply_snapshot_events(
         elif event["k"] == K_REPLACE_SDF_LAYER_CONTENT:
             apply_layer_content_replacement(working, event)
             requires_reindex = True
+        elif event["k"] == K_ERASE_TIME_SAMPLES:
+            from .time_sample_delta import erase_time_samples
+
+            erase_time_samples(working, event)
+            spec = working.GetAttributeAtPath(event["spec_path"])
+            if spec:
+                specs[(SDF_SPEC_KIND_ATTRIBUTE, event["spec_path"])] = _SpecSnapshot(
+                    tuple(sorted(str(field) for field in spec.ListInfoKeys()))
+                )
         elif event["k"] == K_SET_SDF_SPEC_FIELDS:
             key = (event["spec_kind"], event["spec_path"])
             existed = key in specs

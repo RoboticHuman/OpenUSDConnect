@@ -1,13 +1,4 @@
-"""Tests for time-sample replication on the four value-event kinds.
-
-Covers:
-  * Codec round-trip with ``time`` present vs absent.
-  * Wire-cost check: ``time`` absent ⇒ byte-identical to a baseline that
-    never sets the optional field (verifies "0 payload bytes when unset").
-  * Apply pipeline writes the sample at the right ``Usd.TimeCode``.
-  * Emitter detects time samples authored on the stage and emits one event
-    per (attr, time); a second cycle with no changes emits zero events.
-"""
+"""Time-sample replication, including deletion and replay."""
 
 from __future__ import annotations
 
@@ -259,6 +250,301 @@ def test_emitter_emits_one_event_per_authored_sample():
     sampled = [e for e in out if e.get("time") == 48.0]
     assert len(sampled) == 1
     assert sampled[0]["t"] == pytest.approx([30.0, 0.0, 0.0])
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "size",
+        "translate",
+        "visibility",
+        "input",
+        "positions",
+        "orientations",
+        "orientationsf",
+        "custom",
+    ],
+)
+@pytest.mark.parametrize("with_default", [False, True])
+def test_emitter_clears_samples_and_can_restore_identical_values(kind, with_default):
+    source = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(source, "/Cube")
+    if kind == "size":
+        attr = cube.GetSizeAttr()
+        values = (1.0, 2.0)
+    elif kind == "translate":
+        attr = cube.AddTranslateOp().GetAttr()
+        values = (Gf.Vec3d(1, 0, 0), Gf.Vec3d(2, 0, 0))
+    elif kind == "visibility":
+        attr = cube.GetVisibilityAttr()
+        values = ("invisible", "inherited")
+    elif kind == "input":
+        shader = UsdShade.Shader.Define(source, "/Surface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        attr = shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).GetAttr()
+        values = (0.25, 0.75)
+    elif kind == "positions":
+        attr = UsdGeom.PointInstancer.Define(source, "/Instances").GetPositionsAttr()
+        values = ([Gf.Vec3f(1, 0, 0)], [Gf.Vec3f(2, 0, 0)])
+    elif kind == "orientations":
+        attr = UsdGeom.PointInstancer.Define(source, "/Instances").GetOrientationsAttr()
+        values = ([Gf.Quath(1)], [Gf.Quath(0, Gf.Vec3h(1, 0, 0))])
+    elif kind == "orientationsf":
+        attr = UsdGeom.PointInstancer.Define(source, "/Instances").GetOrientationsfAttr()
+        values = ([Gf.Quatf(1)], [Gf.Quatf(0, Gf.Vec3f(1, 0, 0))])
+    else:
+        attr = cube.GetPrim().CreateAttribute("custom:value", Sdf.ValueTypeNames.Double)
+        values = (1.0, 2.0)
+
+    if with_default:
+        attr.Set(values[0])
+    attr.SetDocumentation("Keep this metadata when clearing samples.")
+    attr.Set(values[0], 1.0)
+    attr.Set(values[1], 2.0)
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        apply_events(target, emitter.snapshot_events())
+        target_path = str(attr.GetPath())
+        if kind == "orientations":
+            target_path = "/Instances.orientationsf"
+        target_attr = target.GetAttributeAtPath(target_path)
+        assert target_attr.GetTimeSamples() == [1.0, 2.0]
+        default = target_attr.Get()
+        documentation = target_attr.GetDocumentation()
+
+        for time in (1.0, 2.0):
+            attr.ClearAtTime(time)
+            events = emitter.build_events_for_dirty()
+            assert events
+            if kind != "custom":
+                assert not any(event.get("time") is not None for event in events)
+                assert {
+                    "k": "erase_time_samples",
+                    "prim": str(Sdf.Path(target_path).GetPrimPath()),
+                    "spec_path": target_path,
+                    "times": [time],
+                } in events
+            apply_events(target, [_round_trip(event) for event in events])
+            assert target_attr.GetTimeSamples() == attr.GetTimeSamples()
+            assert target_attr.Get() == default
+            assert target_attr.GetDocumentation() == documentation
+            assert emitter.build_events_for_dirty() == []
+
+        for time, value in zip((1.0, 2.0), values, strict=True):
+            attr.Set(value, time)
+            events = emitter.build_events_for_dirty()
+            assert events
+            apply_events(target, [_round_trip(event) for event in events])
+            assert target_attr.GetTimeSamples() == attr.GetTimeSamples()
+        assert target_attr.Get(2.0) == values[1]
+    finally:
+        emitter.cleanup()
+
+
+def test_emitter_mixed_sample_edits_leave_unchanged_keys_alone():
+    source = Usd.Stage.CreateInMemory()
+    attr = UsdGeom.Cube.Define(source, "/Cube").GetSizeAttr()
+    for time in (1.0, 2.0, 3.0):
+        attr.Set(time, time)
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        apply_events(target, emitter.snapshot_events())
+        attr.ClearAtTime(1.0)
+        attr.Set(20.0, 2.0)
+        events = emitter.build_events_for_dirty()
+        sample_events = [
+            event
+            for event in events
+            if event["k"] == "erase_time_samples" or event.get("time") is not None
+        ]
+        assert [event["k"] for event in sample_events] == [
+            "erase_time_samples",
+            K_SET_GPRIM_ATTRS,
+        ]
+        assert sample_events[0]["times"] == [1.0]
+        assert sample_events[1]["time"] == 2.0
+        assert sample_events[1]["attrs"] == {"size": 20.0}
+        apply_events(target, [_round_trip(event) for event in events])
+        target_attr = target.GetAttributeAtPath("/Cube.size")
+        assert target_attr.GetTimeSamples() == [2.0, 3.0]
+        assert target_attr.Get(2.0) == 20.0
+        assert target_attr.Get(3.0) == 3.0
+        assert emitter.build_events_for_dirty() == []
+    finally:
+        emitter.cleanup()
+
+
+@pytest.mark.parametrize("name", ["size", "missing"])
+def test_sample_collection_skips_attributes_without_samples(name, monkeypatch):
+    from openusdconnect import emitter as emitter_mod
+
+    source = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(source, "/Cube")
+    cube.GetSizeAttr().Set(2.0)
+
+    def unexpected_diff(*args, **kwargs):
+        pytest.fail("An unsampled attribute should not need a sample-table diff")
+
+    monkeypatch.setattr(emitter_mod, "_diff_time_samples", unexpected_diff)
+    cache, events = {}, []
+    dirty = emitter_mod._collect_sample_changes(
+        cube.GetPrim().GetAttribute(name), cache, source.GetEditTarget(), events
+    )
+    assert dirty == []
+    assert events == []
+    assert cache == {}
+
+
+def test_emitter_restores_sample_after_remote_clear():
+    source = Usd.Stage.CreateInMemory()
+    attr = UsdGeom.Cube.Define(source, "/Cube").GetSizeAttr()
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    sender = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    apply_events(target, sender.snapshot_events())
+    receiver = NoticeEmitter(target)
+    receiver.snapshot_events()
+    try:
+        attr.ClearAtTime(1.0)
+        events = sender.build_events_for_dirty()
+        with receiver.suppressed():
+            apply_events(target, events)
+            for event in events:
+                receiver.invalidate_for_event(event)
+        assert receiver.build_events_for_dirty() == []
+
+        target.GetAttributeAtPath("/Cube.size").Set(1.0, 1.0)
+        reply = receiver.build_events_for_dirty()
+        assert reply
+        apply_events(source, reply)
+        assert attr.GetTimeSamples() == [1.0, 2.0]
+        assert attr.Get(1.0) == 1.0
+    finally:
+        sender.cleanup()
+        receiver.cleanup()
+
+
+def test_sample_clear_is_scoped_to_the_edit_layer():
+    base = Sdf.Layer.CreateAnonymous("sample-base")
+    base_stage = Usd.Stage.Open(base)
+    base_attr = UsdGeom.Cube.Define(base_stage, "/Cube").GetSizeAttr()
+    base_attr.Set(100.0, 10.0)
+    base_attr.Set(200.0, 20.0)
+    source_layer = Sdf.Layer.CreateAnonymous("sample-source")
+    source = Usd.Stage.Open(base, source_layer)
+    source.SetEditTarget(source_layer)
+    attr = source.GetAttributeAtPath("/Cube.size")
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    emitter = NoticeEmitter(source)
+    target_layer = Sdf.Layer.CreateAnonymous("sample-target")
+    target = Usd.Stage.Open(base, target_layer)
+    target.SetEditTarget(target_layer)
+    base_content = base.ExportToString()
+    try:
+        apply_events(target, emitter.snapshot_events())
+        for time in (1.0, 2.0):
+            attr.ClearAtTime(time)
+            apply_events(target, emitter.build_events_for_dirty())
+            assert target.GetAttributeAtPath("/Cube.size").GetTimeSamples() == attr.GetTimeSamples()
+        assert attr.GetTimeSamples() == [10.0, 20.0]
+        assert target_layer.ListTimeSamplesForPath(attr.GetPath()) == []
+        assert base.ExportToString() == base_content
+    finally:
+        emitter.cleanup()
+
+
+def test_emitter_clearing_matrix_sample_rebuilds_remaining_transform_samples():
+    source = Usd.Stage.CreateInMemory()
+    xform = UsdGeom.Xform.Define(source, "/Rig")
+    translate = xform.AddTranslateOp()
+    translate.Set(Gf.Vec3d(10, 0, 0), 2.0)
+    matrix = xform.AddTransformOp()
+    matrix.Set(Gf.Matrix4d().SetTranslate(Gf.Vec3d(0, 1, 0)))
+    matrix.Set(Gf.Matrix4d().SetTranslate(Gf.Vec3d(0, 2, 0)), 1.0)
+    matrix.Set(Gf.Matrix4d().SetTranslate(Gf.Vec3d(0, 3, 0)), 2.0)
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        apply_events(target, emitter.snapshot_events())
+        for time in (1.0, 2.0):
+            matrix.GetAttr().ClearAtTime(time)
+            apply_events(target, emitter.build_events_for_dirty())
+            for name in ("translate", "orient", "scale"):
+                assert target.GetAttributeAtPath(f"/Rig.xformOp:{name}").GetTimeSamples() == [2.0]
+            _assert_local_transform_parity(source, target, "/Rig", (1.0, 2.0, 3.0))
+        translate.Set(Gf.Vec3d(20, 0, 0), 2.0)
+        apply_events(target, emitter.build_events_for_dirty())
+        _assert_local_transform_parity(source, target, "/Rig", (1.0, 2.0, 3.0))
+    finally:
+        emitter.cleanup()
+
+
+def test_sample_clear_uses_variant_spec_path():
+    source = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(source, "/Cube")
+    variants = cube.GetPrim().GetVariantSets().AddVariantSet("animation")
+    variants.AddVariant("keyed")
+    variants.SetVariantSelection("keyed")
+    source.SetEditTarget(variants.GetVariantEditTarget())
+    attr = cube.GetSizeAttr()
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    target_layer = Sdf.Layer.CreateAnonymous("variant-target")
+    target_layer.TransferContent(source.GetRootLayer())
+    target = Usd.Stage.Open(target_layer)
+    target_variants = target.GetPrimAtPath("/Cube").GetVariantSets().GetVariantSet("animation")
+    target.SetEditTarget(target_variants.GetVariantEditTarget())
+    emitter = NoticeEmitter(source)
+    try:
+        emitter.snapshot_events()
+        attr.ClearAtTime(1.0)
+        apply_events(target, emitter.build_events_for_dirty())
+        path = source.GetEditTarget().MapToSpecPath(attr.GetPath())
+        assert target_layer.ListTimeSamplesForPath(path) == [2.0]
+        assert target_layer.GetAttributeAtPath("/Cube.size") is None
+        assert target.GetAttributeAtPath("/Cube.size").Get(2.0) == 2.0
+    finally:
+        emitter.cleanup()
+
+
+def test_sample_deletion_survives_log_compaction(tmp_path):
+    from openusdconnect.server import UsdSyncServer
+
+    source = Usd.Stage.CreateInMemory()
+    attr = UsdGeom.Cube.Define(source, "/Cube").GetSizeAttr()
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    emitter = NoticeEmitter(source)
+    server = UsdSyncServer(log_path=str(tmp_path / "sample-deletion.db"))
+    try:
+        extent = UsdGeom.Cube(source.GetPrimAtPath("/Cube")).GetExtentAttr()
+        extent.Set([Gf.Vec3f(-1), Gf.Vec3f(1)], 1.0)
+        server._commit_events(emitter.snapshot_events())
+        attr.ClearAtTime(1.0)
+        attr.Set(3.0, 3.0)
+        server._commit_events(emitter.build_events_for_dirty())
+        attr.ClearAtTime(2.0)
+        server._commit_events(emitter.build_events_for_dirty())
+        extent.Set([Gf.Vec3f(-2), Gf.Vec3f(2)], 1.0)
+        server._commit_events(emitter.build_events_for_dirty())
+        server.compact_log()
+        replay = [
+            codec.message_to_dict(record)["event"] for _seq, record in server.store.get_all_asc()
+        ]
+        target = Usd.Stage.CreateInMemory()
+        apply_events(target, replay)
+        target_attr = target.GetAttributeAtPath("/Cube.size")
+        assert target_attr.GetTimeSamples() == [3.0]
+        assert target_attr.Get(3.0) == 3.0
+        assert target.GetAttributeAtPath("/Cube.extent").Get(1.0) == extent.Get(1.0)
+    finally:
+        emitter.cleanup()
+        server.shutdown()
+        server.store.close()
 
 
 def test_emitter_reads_samples_from_variant_edit_target_spec_path():
@@ -756,9 +1042,9 @@ def test_default_edit_does_not_reread_sample_tables(monkeypatch):
     calls: list[str] = []
     real = emitter_mod._diff_time_samples
 
-    def _spy(attr, cached, layer=None):
+    def _spy(attr, cached, layer=None, convert=None):
         calls.append(attr.GetName())
-        return real(attr, cached, layer)
+        return real(attr, cached, layer, convert=convert)
 
     monkeypatch.setattr(emitter_mod, "_diff_time_samples", _spy)
 

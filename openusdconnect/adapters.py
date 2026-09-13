@@ -1,9 +1,4 @@
-"""DCCAdapter ABC and implementations.
-
-DCCAdapter defines the contract any DCC integration must implement.
-UsdStageAdapter applies events to a Usd.Stage (for headless/server consumers).
-MockAdapter is a pure-Python dict-based mock for testing without pxr.
-"""
+"""Receiving-scene adapter interfaces and implementations."""
 
 from __future__ import annotations
 
@@ -24,6 +19,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -49,10 +45,8 @@ from .protocol_constants import (
 LOG = logging.getLogger(__name__)
 
 
-# Per-kind kwargs extractor. The dispatch key (a K_* constant) is also the
-# adapter method name, so apply_event uses ``getattr(self, event["k"])``.
-# Each lambda returns the kwargs to splat into the adapter method, so
-# signatures stay semantic and raw event dicts don't leak into adapters.
+# Event kinds match adapter method names. Extractors keep wire dictionaries out
+# of the semantic method signatures.
 def _trs_kwargs(ev: dict) -> dict:
     """Extract t/r/s kwargs from a SetXformTRS event (only fields present)."""
     fields = ev.get("fields", [])
@@ -60,12 +54,7 @@ def _trs_kwargs(ev: dict) -> dict:
 
 
 def _time_kwarg(ev: dict) -> dict:
-    """``{"time": v}`` when ``ev`` has a non-None ``time``, ``{}`` otherwise.
-
-    Lets adapters that don't model time samples omit the ``time=`` parameter
-    entirely they receive the kwarg only when there's an actual sample
-    to write, never a spurious ``time=None``.
-    """
+    """Return a time kwarg only for an authored sample."""
     t = ev.get("time")
     return {"time": t} if t is not None else {}
 
@@ -112,6 +101,11 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
         "fields": ev.get("fields", []),
         "fragment": ev.get("fragment", ""),
         "removed": bool(ev.get("removed", False)),
+    },
+    K_ERASE_TIME_SAMPLES: lambda ev: {
+        "prim_path": ev["prim"],
+        "spec_path": ev["spec_path"],
+        "times": ev["times"],
     },
     K_REPLACE_SDF_LAYER_CONTENT: lambda ev: {
         "fragment": ev["fragment"],
@@ -168,27 +162,18 @@ _DISPATCH: dict[str, Callable[[dict], dict]] = {
 
 
 class DCCAdapter(ABC):
-    """Abstract interface a receiving scene integration must implement.
+    """Interface implemented by receiving scene integrations.
 
-    Semantic methods return ``True`` when they performed or accepted an
-    operation and ``False`` for an intentional no-op. These booleans are
-    diagnostic; batch delivery fails only when an implementation raises. An
-    adapter that cannot leave its destination in the requested state must
-    raise an exception instead of returning ``False``.
+    Methods return ``False`` only for intentional no-ops and raise when an
+    operation fails. The booleans are diagnostic; only exceptions abort a batch.
 
-    Subclasses that write directly into a ``Usd.Stage`` must override
-    :meth:`targets_stage`. Adapters for an external scene, such as native DCC
-    objects, inherit its default ``None`` result. That distinction controls
-    whether layered dispatch applies authored events directly to the mirror
-    stage or projects the mirror's composed result into a separate scene.
+    Stage-backed subclasses override :meth:`targets_stage`. Exact mirror-stage
+    identity lets layered replay rely on USD composition; other destinations
+    receive the projected composed result.
     """
 
     def apply_event(self, event: dict) -> bool:
-        """Route one known protocol event to the matching adapter method.
-
-        The boolean is the semantic method's diagnostic result. Unknown event
-        kinds are programmer/protocol errors and are never silently ignored.
-        """
+        """Route a known protocol event to its adapter method."""
         k = event["k"]
         extract = _DISPATCH.get(k)
         if extract is None:
@@ -196,33 +181,16 @@ class DCCAdapter(ABC):
         return getattr(self, k)(**extract(event))
 
     def apply_events(self, events: list[dict]) -> int:
-        """Dispatch a batch, returning the number of events attempted.
-
-        Per-event ``False`` results remain intentional no-ops. Implementations
-        must raise to abort delivery; exceptions propagate to the dispatcher,
-        which retains/replays the unapplied sequence suffix.
-        """
+        """Dispatch a batch and return the number of events attempted."""
         for event in events:
             self.apply_event(event)
         return len(events)
 
     def targets_stage(self) -> Usd.Stage | None:
-        """Declare whether this adapter writes directly into a ``Usd.Stage``.
+        """Return the exact stage mutated, or ``None`` for an external scene.
 
-        Return the exact stage instance mutated by :meth:`apply_events`, or
-        ``None`` when the adapter writes to an external/native scene. This is
-        an architectural capability declaration, not descriptive metadata.
-
-        During layered replay, returning the same object as the dispatcher's
-        mirror stage means OpenUSD itself provides composition, so events are
-        applied directly and composed projection is skipped. Returning
-        ``None`` or a different stage enables before/after composed projection
-        into the adapter's separate destination. Stage identity is tested with
-        ``is``; an equivalent stage opened from the same layers is still a
-        separate destination.
-
-        Stage-backed adapters must override this method. External-scene
-        adapters should inherit the default ``None`` result.
+        Layered dispatch compares object identity: only its mirror stage skips
+        composed projection. Stage-backed adapters must override this method.
         """
         return None
 
@@ -243,24 +211,11 @@ class DCCAdapter(ABC):
 
     @abstractmethod
     def ensure_xform_ops(self, prim_path: str) -> bool:
-        """Prepare the object/prim for TRS application.
+        """Prepare canonical local TRS without changing the composed transform.
 
-        DCC implementations should normalize any parent-child transform
-        offset so that setting local TRS values produces the expected
-        local-to-parent transform.  **The reset must be world-preserving**:
-        the object's world-space position/orientation must not change as a
-        result of this call.  Implementations should compensate the local
-        transform (e.g. matrix_basis) when clearing the offset.
-
-        This ensures consistent behavior when objects switch between
-        emitter and receiver roles and prevents axis-flip artefacts in
-        Y-up ↔ Z-up coordinate conversion hierarchies.
-
-        DCCs that hold a secondary pre-transform alongside the canonical
-        local transform (basis matrix, offset parent matrix, pre-xform)
-        must fold that pre-transform into the local transform and clear
-        the secondary slot, so the composed result is unchanged but the
-        canonical TRS stack carries the full opinion.
+        A DCC with a secondary pre-transform must fold it into the local
+        transform before clearing it. This reset must preserve world space,
+        including through coordinate-conversion hierarchies.
         """
         raise NotImplementedError
 
@@ -284,38 +239,20 @@ class DCCAdapter(ABC):
         raise NotImplementedError
 
     def has_imported_children(self, prim_path: str) -> bool:
-        """Return True when this adapter has already imported the children
-        composed under ``prim_path`` (a reference or payload root).
+        """Return whether native children are already imported below a root.
 
-        Used by ``EventDispatcher`` to skip a redundant adapter dispatch
-        when the composed stage already matches the incoming arc event
-        AND the consumer side has materialised the children.  Adapters
-        that import composition arcs (references, payloads) should
-        override this; the default returns ``False``, meaning "always
-        dispatch".
+        The dispatcher can then skip a redundant matching arc event. The
+        default forces dispatch.
         """
         return False
 
     def native_composition_subtree_roots(self, events: list[dict]) -> set[str]:
         """Return composition roots this batch materializes natively.
 
-        Some external-scene adapters implement references, loaded payloads,
-        or variants by asking the DCC's USD importer to build the complete
-        composed subtree. For those roots, composed projection must not also
-        synthesize notice-discovered descendant lifecycle, geometry, material,
-        and shader events: replaying them would overwrite the higher-fidelity
-        native import.
-
-        The declaration affects only candidates discovered indirectly from
-        USD composition notices. Explicit descendant edits in ``events`` are
-        still projected and delivered after the root composition operation.
-        Adapters that construct descendants solely from projected events must
-        keep the default empty result.
-
-        Implementations must return a root only when applying the batch's
-        composition event will import, re-import, or remove that subtree. As
-        with :meth:`apply_events`, failure to realize a declared operation must
-        raise rather than silently returning ``False``.
+        Projection excludes notice-discovered descendants beneath these roots
+        to avoid overwriting a native import. Explicit descendant edits are
+        still delivered after the root operation. Declare a root only when the
+        batch will import, re-import, or remove its subtree; failures must raise.
         """
         return set()
 
@@ -344,6 +281,10 @@ class DCCAdapter(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    def erase_time_samples(self, prim_path: str, spec_path: str, times: list[float]) -> bool:
+        """Accept deletions already applied to an external adapter's USD mirror."""
+        return True
+
     def set_sdf_spec_fields(
         self,
         prim_path: str,
@@ -353,12 +294,7 @@ class DCCAdapter(ABC):
         fragment: str,
         removed: bool = False,
     ) -> bool:
-        """Accept an Sdf-only mirror update.
-
-        DCC-backed adapters keep this as a no-op because the dispatcher
-        applies the event to their mirror stage. Stage-backed adapters
-        override it and apply the spec delta directly.
-        """
+        """Accept an Sdf delta already applied to an external adapter's mirror."""
         return True
 
     def set_sublayers(
@@ -470,12 +406,7 @@ class DCCAdapter(ABC):
         metersPerUnit: float | None = None,
         upAxis: str | None = None,
     ) -> bool:
-        """Apply stage-level metadata (units + timeline).
-
-        Only fields the caller passes as non-``None`` are applied the
-        emitter ships partial updates to keep wire cost down. DCCs map
-        these to their own scene units / fps / timeline settings.
-        """
+        """Apply provided unit and timeline fields to native scene settings."""
         raise NotImplementedError
 
     @abstractmethod
@@ -521,16 +452,19 @@ class DCCAdapter(ABC):
 class ShaderMapper(ABC):
     """Maps a USD shader type to a DCC-native node.
 
-    Subclass per DCC integration and per shader behavior (PBR surface,
-    texture, UV reader). The ``node`` parameter in apply_value/post_apply
-    is DCC-specific (untyped); each implementation knows its own node
-    object type.
+    ``node`` arguments are deliberately untyped because integrations supply
+    their own node classes.
     """
 
     def __init__(self, shader_id: str, node_type: str, input_map: dict):
         self.shader_id = shader_id
         self.node_type = node_type
         self._input_map = input_map
+        self._reverse_map = {
+            native: usd
+            for usd, native in input_map.items()
+            if not native.startswith("_")
+        }
 
     def get_native_input(self, usd_name: str) -> str | None:
         """Return the DCC-native input name for a USD input, or None."""
@@ -538,8 +472,6 @@ class ShaderMapper(ABC):
 
     def get_usd_input(self, native_name: str) -> str | None:
         """Return the USD input name for a DCC-native input (reverse lookup)."""
-        if not hasattr(self, "_reverse_map"):
-            self._reverse_map = {v: k for k, v in self._input_map.items() if not v.startswith("_")}
         return self._reverse_map.get(native_name)
 
     @abstractmethod
@@ -559,10 +491,8 @@ class ShaderMapper(ABC):
 class MultiNodeShaderMapper(ShaderMapper):
     """Mapper that creates multiple DCC nodes for one USD shader.
 
-    Used for complex shaders like MaterialX Standard Surface that need
-    preprocessing nodes (Hue/Sat, Mix, Math) before the main BSDF.
-    The ``create_network`` method replaces the per-input ``apply_value``
-    pattern it receives all inputs at once and builds the full graph.
+    ``create_network`` receives all inputs and replaces per-input
+    ``apply_value`` calls.
     """
 
     @property
@@ -571,12 +501,10 @@ class MultiNodeShaderMapper(ShaderMapper):
 
     @property
     def is_surface_shader(self) -> bool:
-        """True when this mapper's `out` socket is a Shader output that
-        belongs on Material Output.Surface.  Helper mappers (normal-map,
-        displacement pre-processing, etc.) override to False so they
-        don't misroute their Vector/Color outputs into the Shader-typed
-        Surface input and don't clear an already-authored surface BSDF
-        when the receiver adapter prepares the node tree.
+        """Whether ``out`` belongs on the material's Surface input.
+
+        Helper mappers override this to avoid routing non-shader outputs there
+        or clearing an existing surface shader.
         """
         return True
 
@@ -586,10 +514,8 @@ class MultiNodeShaderMapper(ShaderMapper):
     def read_all_inputs(self, node=None, *, input_map=None) -> dict:
         """Read all mapped input values from a multi-node network.
 
-        Unlike single-node mappers which read from one node, multi-node
-        mappers read from the socket map returned by ``create_network``.
-        Each socket is a generic object with ``.default_value`` and
-        ``.is_linked`` attributes no DCC-specific imports needed.
+        ``input_map`` is the socket map returned by ``create_network``; sockets
+        expose ``default_value`` and ``is_linked``.
         """
         if not input_map:
             return {}
@@ -644,12 +570,9 @@ class ShaderMapperRegistry:
 
 
 class UsdStageAdapter(DCCAdapter):
-    """Applies events to a Usd.Stage via event_apply functions.
+    """Apply events to a ``Usd.Stage`` through the registered appliers.
 
-    Suitable for headless receivers and server-side USD consumers. Direct
-    semantic methods construct protocol events and use the same registered
-    appliers as network delivery; batches retain event_apply's optimized
-    ordering path.
+    Direct method calls construct the same events used by network delivery.
     """
 
     def __init__(self, stage):
@@ -781,6 +704,11 @@ class UsdStageAdapter(DCCAdapter):
                 "generation": generation,
                 "revision": revision,
             }
+        )
+
+    def erase_time_samples(self, prim_path: str, spec_path: str, times: list[float]) -> bool:
+        return self.apply_event(
+            {"k": K_ERASE_TIME_SAMPLES, "prim": prim_path, "spec_path": spec_path, "times": times}
         )
 
     def replace_sdf_layer_content(self, fragment: str) -> bool:
@@ -956,10 +884,7 @@ class UsdStageAdapter(DCCAdapter):
 
 
 class MockAdapter(DCCAdapter):
-    """Pure-Python mock adapter for testing without pxr.
-
-    Stores prim state in a dict. No external dependencies.
-    """
+    """Dict-backed adapter test double with simplified scene state."""
 
     def __init__(self):
         self._prims: dict[str, dict] = {}

@@ -40,7 +40,8 @@ class PrimRegistry:
         a prim path.  Signature: ``scan_fn(prim_path) -> object | None``.
     alive_fn : callable, optional
         Liveness check for cached objects.  Signature: ``alive_fn(obj) -> bool``.
-        Defaults to probing ``obj.name`` (raises on freed references).
+        By default, cached objects are assumed alive. DCC adapters should supply
+        a host-specific check for freed references.
     """
 
     def __init__(

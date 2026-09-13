@@ -250,6 +250,22 @@ def test_bidirectional_file_layer_sync_preserves_concurrent_fields(tmp_path):
             ),
         )
 
+        sampled = first_stage.GetAttributeAtPath("/World.value")
+        sampled.Set(10, 1.0)
+        sampled.Set(20, 2.0)
+        assert first.update().submitted_events == 1
+        remote_sampled = second_stage.GetAttributeAtPath("/World.value")
+        assert _pump_until([first, second], lambda: remote_sampled.GetTimeSamples() == [1.0, 2.0])
+        sampled.ClearAtTime(1.0)
+        assert first.update().submitted_events == 1
+        assert _pump_until([first, second], lambda: remote_sampled.GetTimeSamples() == [2.0])
+        sampled.ClearAtTime(2.0)
+        assert first.update().submitted_events == 1
+        assert _pump_until([first, second], lambda: remote_sampled.GetTimeSamples() == [])
+        sampled.Set(10, 1.0)
+        assert first.update().submitted_events == 1
+        assert _pump_until([first, second], lambda: remote_sampled.Get(1.0) == 10)
+
         for directory in (tmp_path / "server", tmp_path / "first", tmp_path / "second"):
             extra = _create_layer(directory / "extra.usda")
             prim = Sdf.CreatePrimInLayer(extra, "/Extra")

@@ -109,13 +109,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     def handle(self):
         sync_server = self.server.sync_server
 
-        # Socket hardening: disable Nagle (small JSON messages benefit from
-        # immediate sends), enable aggressive keepalive (silent-disconnect
-        # detection capped at ~60 s see _set_keepalive), and set a
-        # handshake timeout so misbehaving clients don't block handler threads.
-        # The timeout is cleared before _read_loop since receivers legitimately
-        # sit idle (only consuming broadcasts); keepalive surfaces dead peers
-        # as a socket error on the next recv.
+        # Bound the handshake and disable Nagle for small frames. The timeout is
+        # cleared after admission because receivers may legitimately sit idle.
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         _set_keepalive(self.request)
         self.request.settimeout(60.0)
@@ -129,7 +124,6 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             else None
         )
 
-        # Read hello (length-prefixed FlatBuffers)
         try:
             hello_buf = recv_framed_rfile(self.rfile)
         except (TimeoutError, IncompleteRead, MessageTooLarge):

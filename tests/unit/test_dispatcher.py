@@ -8,6 +8,7 @@ from openusdconnect.codec import encode_message
 from openusdconnect.dispatcher import EventDispatcher, _stage_sync_scope
 from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
+    K_SET_REFERENCE,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_VISIBILITY,
 )
@@ -80,6 +81,61 @@ def test_on_applied_optional():
     """A dispatcher without on_applied applies cleanly (no callback)."""
     dispatcher = EventDispatcher(receiver=_NullReceiver(), adapter=MockAdapter())
     assert dispatcher._apply([{"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"}]) == 1
+
+
+def test_post_apply_callbacks_run_in_documented_order():
+    calls = []
+    event = {
+        "k": K_SET_REFERENCE,
+        "prim": "/World/A",
+        "refs": [{"asset_path": "asset.usda"}],
+    }
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=MockAdapter(),
+        on_imported=lambda paths: calls.append(("imported", paths)),
+        on_applied_events=lambda events: calls.append(("events", events)),
+        on_applied=lambda paths: calls.append(("applied", paths)),
+    )
+
+    dispatcher._apply([event])
+
+    assert calls == [
+        ("imported", ["/World/A"]),
+        ("events", [event]),
+        ("applied", ["/World/A"]),
+    ]
+
+
+def test_refresh_callback_policy_preserves_empty_events_and_unique_paths():
+    event_batches = []
+    applied_paths = []
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(),
+        adapter=MockAdapter(),
+        on_applied_events=lambda events: event_batches.append(events),
+        on_applied=applied_paths.append,
+    )
+    events = [
+        {"k": K_ENSURE_PRIM, "prim": "/World/B", "typeName": "Xform"},
+        {"k": K_SET_VISIBILITY, "prim": "/World/B", "visible": True},
+        {"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"},
+    ]
+
+    affected = dispatcher._run_post_apply_callbacks(
+        events,
+        notify_empty_events=True,
+        unique_paths=True,
+    )
+    dispatcher._run_post_apply_callbacks(
+        [],
+        notify_empty_events=True,
+        unique_paths=True,
+    )
+
+    assert affected == ["/World/A", "/World/B"]
+    assert event_batches == [events, []]
+    assert applied_paths == [["/World/A", "/World/B"]]
 
 
 def test_decode_failure_applies_prefix_and_requests_replay():

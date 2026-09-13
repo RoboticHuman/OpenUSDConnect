@@ -215,6 +215,20 @@ def test_main_maps_group_commit_configuration(monkeypatch):
     assert captured[0].txn_batch_delay_ms == 0.25
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--txn-rate", "10"],
+        ["--txn-burst", "10"],
+    ],
+)
+def test_main_rejects_unpaired_rate_limit_configuration(args):
+    with pytest.raises(SystemExit) as error:
+        server_cli.main(args)
+
+    assert error.value.code == 2
+
+
 def test_main_maps_shared_stage_mode(monkeypatch):
     captured = []
     monkeypatch.setattr(server_cli, "run_server", captured.append)

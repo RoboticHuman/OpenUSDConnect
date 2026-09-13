@@ -117,14 +117,9 @@ def test_camera_scene(blender_exe, tmp_path):
     _run_asset_test(blender_exe, tmp_path, "test_camera_scene.py", 7214)
 
 
-def test_headless_time_samples_to_blender(blender_exe, tmp_path):
-    """Headless EventSender emits time-sampled SetXformTrs events; Blender
-    receives them via the addon. Verifies the protocol layer is animation-
-    aware end-to-end (events round-trip via the server's event log, the
-    receiver-side mirror USD stage gets the time samples) and documents
-    the Q1 gap (BlenderAdapter ignores the ``time`` field and the sphere
-    ends at the latest-sample's static pose with no F-curves).
-    """
+@pytest.mark.parametrize("erase_latest", [False, True])
+def test_headless_time_samples_to_blender(blender_exe, tmp_path, erase_latest):
+    """Replay sample writes/deletion into the USD mirror and Blender's static pose."""
     port = 7216
     observer_script = os.path.join(
         SCRIPTS_DIR, "test_headless_time_samples_to_blender.py",
@@ -164,6 +159,11 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
                 {"k": K_SET_XFORM_TRS, "prim": "/World/AnimSphere",
                  "fields": ["t"], "t": [20.0, 0.0, 0.0], "time": 24.0},
             ]
+            if erase_latest:
+                events.append({
+                    "k": "erase_time_samples", "prim": "/World/AnimSphere",
+                    "spec_path": "/World/AnimSphere.xformOp:translate", "times": [24.0],
+                })
             ok = sender.send_events(events)
             assert ok, "send_events returned False"
         finally:
@@ -172,6 +172,7 @@ def test_headless_time_samples_to_blender(blender_exe, tmp_path):
         # 2) Now start Blender it replays the log on receiver connect.
         r = run_blender(
             blender_exe, observer_script, port, timeout=120, background=False,
+            extra_args=["--erase-latest"] if erase_latest else None,
         )
         print("\n=== Observer Blender stdout ===")
         print(r.stdout[-3000:] if len(r.stdout) > 3000 else r.stdout)

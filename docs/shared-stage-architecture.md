@@ -64,11 +64,10 @@ layer stack. Edits are authored directly into the application's existing file
 layers, and the protocol carries Sdf-spec deltas: which spec changed, which
 fields, and the new field values as a USDA fragment. The server validates,
 canonicalizes topology, assigns sequence numbers, and broadcasts, but it does
-not reinterpret content. `set_sdf_spec_fields` is shared with managed mode as
-the fallback channel for authored fields with no high-level event kind; the
-other two shared-stage kinds (`replace_sdf_layer_content`, `set_sublayers`) are
-exclusive to this mode, and shared-stage clients must not request layered replay
-or departments.
+not reinterpret content. `set_sdf_spec_fields` and `erase_time_samples` are
+accepted in both modes. `replace_sdf_layer_content` and `set_sublayers` are
+shared-stage-only; shared-stage clients must not request layered replay or
+departments.
 
 ## When to use each
 
@@ -111,11 +110,10 @@ Each `update()` runs four phases:
    with that `layer_key`; a successful send advances the baseline
    (`mark_prepared_sent`) so the batch is not re-emitted.
 
-On the server, a commit lock serializes each shared transaction. The server
-validates it with `validate_spec_delta` or
-`validate_layer_content_replacement`, then applies it to the mirror stage under
-`atomic_apply` plus a graph transaction that rolls back
-routing state on failure. Topology events are canonicalized first: the server
+On the server, a commit lock serializes shared transactions. Events are
+validated for their kind and layer mode before application. Changes to the
+mirror stage and layer graph are rolled back together on failure.
+Topology events are canonicalized first: the server
 assigns authoritative child layer keys, advances the edited parent layer's
 topology revision, and discovers routing state for newly reachable descendant
 layers. Every canonical event is then seq-assigned, persisted, and broadcast to
@@ -143,7 +141,7 @@ Per-parent revisions let edits to unrelated layer stacks commit independently
 without weakening conflict
 detection for two concurrent edits to the same parent.
 
-**Event kinds.** Three kinds carry shared-stage content:
+**Event kinds.** Shared-stage content events:
 
 - `set_sdf_spec_fields`: an exact field delta for one Sdf spec (prim,
   attribute, relationship, variant set, variant, property, or the layer
@@ -151,6 +149,9 @@ detection for two concurrent edits to the same parent.
   USDA fragment with the new values, and a `removed` flag for spec deletion.
   Removals sort before creates, and creates before their children, so one
   transaction replays deterministically.
+- `erase_time_samples`: deletes the listed `times` at one exact attribute
+  `spec_path` using `Sdf.Layer.EraseTimeSample`. Defaults, metadata, and surviving
+  keys are untouched.
 - `replace_sdf_layer_content`: the complete authored content of one layer,
   excluding sublayer topology. Used when a clean full replacement beats a
   field-by-field diff, such as after resync or complex re-organization.
@@ -158,6 +159,9 @@ detection for two concurrent edits to the same parent.
   `generation` and a client-side `revision` of 0; the server canonicalizes it
   to the targeted parent's authoritative `revision + 1` with child keys
   assigned, and re-broadcasts the canonical event. At most one per transaction.
+
+Application and compaction preserve sample-erasure and table-replacement order
+relative to partial writes, which could otherwise restore deleted samples.
 
 **Baseline.** A new shared-stage database begins with one `layer_graph_state`
 message: a sequenced snapshot of the reachable graph's topology and routing,

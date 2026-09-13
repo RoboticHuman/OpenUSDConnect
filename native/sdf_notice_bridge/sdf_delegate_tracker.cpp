@@ -56,6 +56,8 @@ struct Record
 {
 	std::string layerId, path, field, oldJson, newJson;
 	bool hasOld = false;
+	double sampleTime = 0;
+	bool sampleErased = false;
 };
 
 class Batch
@@ -97,11 +99,13 @@ public:
 				r.path.size(),
 				r.field.data(),
 				r.field.size(),
-				r.hasOld ? OUC_SDF_DELEGATE_FLAG_HAS_OLD_VALUE : UINT64_C(0),
+				(r.hasOld ? OUC_SDF_DELEGATE_FLAG_HAS_OLD_VALUE : UINT64_C(0)) |
+					(r.sampleErased ? OUC_SDF_DELEGATE_FLAG_SAMPLE_ERASED : UINT64_C(0)),
 				r.oldJson.empty() ? nullptr : r.oldJson.data(),
 				r.oldJson.size(),
 				r.newJson.empty() ? nullptr : r.newJson.data(),
 				r.newJson.size(),
+				r.sampleTime,
 			});
 		}
 	}
@@ -402,7 +406,7 @@ void LayerDelegate::_OnDeleteSpec(const SdfPath& path, bool)
 	owner_->enqueue({layerId(), path.GetString(), "_deleteSpec", {}, "null", /*hasOld=*/true});
 }
 
-void LayerDelegate::_OnSetTimeSample(const SdfPath& path, double, const VtValue& newVal)
+void LayerDelegate::_OnSetTimeSample(const SdfPath& path, double time, const VtValue& newVal)
 {
 	if (owner_->suppressed())
 		return;
@@ -411,7 +415,9 @@ void LayerDelegate::_OnSetTimeSample(const SdfPath& path, double, const VtValue&
 					 "_setTimeSample",
 					 {},
 					 ValueToString(newVal),
-					 /*hasOld=*/true});
+					 /*hasOld=*/true,
+					 time,
+					 newVal.IsEmpty()});
 }
 
 void LayerDelegate::_OnSetTimeSample(const SdfPath& path, double time,

@@ -360,6 +360,15 @@ class SetSdfSpecFields(TypedDict):
     removed: bool
 
 
+class EraseTimeSamples(TypedDict):
+    """Erase selected samples at an exact authored attribute path."""
+
+    k: Literal["erase_time_samples"]
+    prim: str
+    spec_path: str
+    times: list[float]
+
+
 class ReplaceSdfLayerContent(TypedDict):
     """Replace all non-topology opinions in the targeted authored layer."""
 
@@ -405,6 +414,7 @@ Event = (
     | SetSdfSpecFields
     | ReplaceSdfLayerContent
     | SetSublayers
+    | EraseTimeSamples
 )
 
 
@@ -546,6 +556,7 @@ __all__ = [
     "SetSdfSpecFields",
     "ReplaceSdfLayerContent",
     "SetSublayers",
+    "EraseTimeSamples",
     "Event",
     "EventSpec",
     "register_encoder",

@@ -57,6 +57,7 @@ from ..plugin_environment import (
 )
 from ..protocol_constants import PROTOCOL_VERSION, LayerMode
 from .connection import ConnectionHandler, ThreadedTCPServer
+from .rate_limit import validate_rate_limit_config
 from .state import UsdSyncServer
 
 LOG = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ def run_server(config: ServerConfig | None = None):
     _log_openusdconnect_version()
     _log_usd_runtime()
     layer_mode = LayerMode(config.layer_mode)
+    validate_rate_limit_config(config.txn_rate, config.txn_burst)
     if layer_mode is LayerMode.SHARED_STAGE and config.vfs is not None:
         raise ValueError("the managed VFS composition is unavailable in shared-stage mode")
     if layer_mode is LayerMode.SHARED_STAGE and config.export_diff:
@@ -434,14 +436,15 @@ def main(argv: list[str] | None = None) -> int:
         type=nonnegative_float,
         default=0,
         metavar="N",
-        help="Max transactions per second per client (0 = unlimited, default: 0)",
+        help="Max transactions per second per client; requires --txn-burst "
+        "(0 = unlimited, default)",
     )
     limits.add_argument(
         "--txn-burst",
         type=nonnegative_int,
         default=0,
         metavar="N",
-        help="Max burst size for transaction rate limiter (default: 0 = disabled)",
+        help="Max burst size; requires --txn-rate (0 = disabled, default)",
     )
     limits.add_argument(
         "--txn-batch-size",
@@ -535,6 +538,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Host embedded in live metadata (default: bind host, or 127.0.0.1 for all interfaces)",
     )
     args = ap.parse_args(argv)
+    try:
+        validate_rate_limit_config(args.txn_rate, args.txn_burst)
+    except ValueError as exc:
+        ap.error(str(exc))
     vfs = (
         VfsConfig(
             port=args.vfs_port,

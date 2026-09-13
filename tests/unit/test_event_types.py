@@ -14,6 +14,7 @@ from openusdconnect.events import (
     DeletePrim,
     EnsurePrim,
     EnsureXformOps,
+    EraseTimeSamples,
     Event,
     LoadPayload,
     RenamePrim,
@@ -39,6 +40,15 @@ from openusdconnect.protocol_constants import EVENT_KEYS
 # One representative example per kind. The (kind, value) tuples drive both
 # the round-trip test and the coverage assertion below.
 _CASES: list[tuple[str, Event]] = [
+    (
+        "erase_time_samples",
+        EraseTimeSamples(
+            k="erase_time_samples",
+            prim="/World/Thing",
+            spec_path="/World/Thing.userProperties:value",
+            times=[1.0, 2.5],
+        ),
+    ),
     (
         "ensure_prim",
         EnsurePrim(k="ensure_prim", prim="/World/Sphere", typeName="Sphere"),

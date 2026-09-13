@@ -554,11 +554,15 @@ def test_refresh_reapplies_to_mirror_and_dcc_adapter(tmp_path):
     stage = _stage_with_search_context(asset_directory)
     adapter = _RecordingAdapter()
     imported = []
+    applied_events = []
+    applied_paths = []
     dispatcher = EventDispatcher(
         receiver=_NullReceiver(),
         adapter=adapter,
         mirror_stage=stage,
         on_imported=imported.append,
+        on_applied_events=lambda events: applied_events.append(list(events)),
+        on_applied=lambda paths: applied_paths.append(list(paths)),
     )
 
     event = _arc_event(K_SET_REFERENCE, "/World/Asset", "dcc.usda")
@@ -572,6 +576,12 @@ def test_refresh_reapplies_to_mirror_and_dcc_adapter(tmp_path):
     assert result["status"] == "refreshed"
     assert adapter.reference_calls == 2
     assert imported == [["/World/Asset"], ["/World/Asset"]]
+    assert len(applied_events) == 2
+    assert all(applied_events)
+    assert applied_paths == [
+        sorted({event["prim"] for event in batch if event.get("prim")})
+        for batch in applied_events
+    ]
     assert stage.GetPrimAtPath("/World/Asset").GetAttribute("user:assetVersion").Get() == "1"
 
     explicit = dispatcher.refresh_asset_dependency("dcc.usda")

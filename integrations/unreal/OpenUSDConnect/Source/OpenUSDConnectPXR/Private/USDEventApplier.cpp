@@ -1351,6 +1351,22 @@ void ApplySetPointInstancer(pxr::UsdStageRefPtr& Stage, const Wire::SetPointInst
 	}
 }
 
+void ApplyEraseTimeSamples(pxr::UsdStageRefPtr& Stage, const Wire::EraseTimeSamples* Ev)
+{
+	if (!Ev || !Ev->prim() || !Ev->spec_path() || !Ev->times())
+		return;
+	const pxr::SdfPath Path(Ev->spec_path()->str());
+	if (!Path.IsAbsolutePath() || !Path.IsPrimPropertyPath() ||
+		Ev->prim()->str() != Path.GetPrimPath().StripAllVariantSelections().GetString())
+		return;
+	const pxr::SdfLayerHandle Layer = Stage->GetEditTarget().GetLayer();
+	if (!Layer->GetAttributeAtPath(Path))
+		return;
+	pxr::SdfChangeBlock ChangeBlock;
+	for (double Time : *Ev->times())
+		Layer->EraseTimeSample(Path, Time);
+}
+
 // ---- SetSdfSpecFields -------------------------------------------------------------
 
 void ApplySetSdfSpecFields(pxr::UsdStageRefPtr& Stage, const Wire::SetSdfSpecFields* Ev)
@@ -1661,6 +1677,9 @@ void DispatchEvent(pxr::UsdStageRefPtr& Stage, const Wire::EventWrapper* Wrapper
 	case Wire::EventPayload::SetSdfSpecFields:
 		ApplySetSdfSpecFields(Stage, Wrapper->event_as_SetSdfSpecFields());
 		break;
+	case Wire::EventPayload::EraseTimeSamples:
+		ApplyEraseTimeSamples(Stage, Wrapper->event_as_EraseTimeSamples());
+		break;
 	case Wire::EventPayload::SetReference:
 		ApplySetReference(Stage, Wrapper->event_as_SetReference());
 		break;
@@ -1722,6 +1741,8 @@ FString GetEventPrim(const Wire::EventWrapper* Wrapper)
 		return ToFString(Wrapper->event_as_SetPointInstancer()->prim());
 	case Wire::EventPayload::SetSdfSpecFields:
 		return ToFString(Wrapper->event_as_SetSdfSpecFields()->prim());
+	case Wire::EventPayload::EraseTimeSamples:
+		return ToFString(Wrapper->event_as_EraseTimeSamples()->prim());
 	case Wire::EventPayload::SetReference:
 		return ToFString(Wrapper->event_as_SetReference()->prim());
 	case Wire::EventPayload::SetPayload:

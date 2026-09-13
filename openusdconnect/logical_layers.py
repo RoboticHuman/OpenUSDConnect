@@ -50,7 +50,7 @@ class LogicalLayerRouter(LayerKeyRouter):
 
         for layer_key in source._layer_keys:
             if layer_key not in self._layers:
-                layer = self._create_layer(layer_key, layer_key)
+                layer = self._create_layer(layer_key)
                 self._layers[layer_key] = layer
                 self._keys_by_identifier[layer.identifier] = layer_key
             self._layers[layer_key].TransferContent(source._layers[layer_key])
@@ -93,10 +93,7 @@ class LogicalLayerRouter(LayerKeyRouter):
         for layer_key in layer_keys:
             label = labels[layer_key]
             if layer_key not in self._layers:
-                layer = self._create_layer(
-                    layer_key,
-                    label,
-                )
+                layer = self._create_layer(label)
                 self._layers[layer_key] = layer
                 self._keys_by_identifier[layer.identifier] = layer_key
 
@@ -179,7 +176,7 @@ class LogicalLayerRouter(LayerKeyRouter):
             if identifiers:
                 self._stage.MuteAndUnmuteLayers(sorted(identifiers), [])
 
-    def _create_layer(self, layer_key: str, label: str) -> Sdf.Layer:
+    def _create_layer(self, label: str) -> Sdf.Layer:
         return Sdf.Layer.CreateAnonymous(f"receiver-layer-{label}")
 
     def _managed_identifiers(self) -> set[str]:

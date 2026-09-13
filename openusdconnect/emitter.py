@@ -1,11 +1,4 @@
-"""Stage change detection and event building.
-
-NoticeEmitter watches a Usd.Stage via Usd.Notice.ObjectsChanged,
-tracks dirty prims, snapshots TRS transforms, and builds partial-diff
-events ready to send over the network.
-
-DCC-agnostic works on any Usd.Stage regardless of what's authoring to it.
-"""
+"""Detect ``Usd.Stage`` changes and build network events."""
 
 from __future__ import annotations
 
@@ -28,6 +21,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_SET_CONNECTABLE_CONNECTION,
@@ -62,6 +56,7 @@ from .sdf_spec_delta import (
     serialize_spec_fields,
     spec_kind_for_object,
 )
+from .time_sample_delta import erase_time_samples_event
 from .usd_state import (
     POINT_INSTANCER_QUAT_ATTRS,
     POINT_INSTANCER_USD_TO_WIRE,
@@ -81,16 +76,11 @@ from .xform_decompose import (
     xform_sample_value,
 )
 
-# Notice field tokens the stage-metadata watcher cares about. Anything outside
-# this set on the pseudo-root (comments, customLayerData, etc.) is ignored
-# without triggering a snapshot diff.
+# Pseudo-root fields handled by the specialized stage-metadata event.
 _WATCHED_STAGE_METADATA_FIELDS = frozenset(STAGE_METADATA_KEYS)
 
-# Every managed event built by NoticeEmitter must declare how edit-target
-# ownership affects it. The first group is handled field-by-field in
-# ``_filter_events_to_local_opinions``. The second is derived directly from
-# current-edit-target state or represents namespace/stage operations that do
-# not promote a weaker composed property value.
+# Events handled field-by-field by ``_filter_events_to_local_opinions``.
+# Kept explicit so the registry drift test catches a missing policy.
 _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING = frozenset(
     {
         K_ENSURE_XFORM_OPS,
@@ -104,12 +94,15 @@ _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING = frozenset(
         K_SET_POINT_INSTANCER,
         K_SET_REFERENCE,
         K_SET_SDF_SPEC_FIELDS,
+        K_ERASE_TIME_SAMPLES,
         K_SET_VARIANT_SELECTIONS,
         K_SET_VISIBILITY,
         K_SET_XFORM_TRS,
         K_UNLOAD_PAYLOAD,
     }
 )
+
+# Events whose builders already prove current-edit-target ownership.
 _EVENTS_ALREADY_PROVEN_LOCAL = frozenset(
     {
         K_DEACTIVATE_PRIM,
@@ -217,6 +210,10 @@ _SDF_SPECIALIZED_PRIM_FIELDS = frozenset(
     }
 )
 _SDF_STRUCTURAL_NOTICE_FIELDS = frozenset({"primChildren", "propertyChildren", "variantChildren"})
+_SAFE_VARIANT_STRUCTURAL_FIELDS = _SDF_STRUCTURAL_NOTICE_FIELDS | {
+    "specifier",
+    "typeName",
+}
 _SDF_SPEC_TYPES = (
     Sdf.PseudoRootSpec,
     Sdf.PrimSpec,
@@ -505,24 +502,18 @@ def _diff_time_samples(
     edit_target=None,
     convert=None,
 ):
-    """Return ``(new_cache, dirty)`` for an attribute's time-sample table.
+    """Return ``(new_cache, dirty, removed)`` for an attribute's sample table.
 
-    ``cached`` is a previous ``{time: value_hash}`` snapshot, or ``None``
-    on first encounter (every authored sample is reported dirty).
-    ``dirty`` lists ``(time, python_value)`` pairs that were added or
-    whose hashed value changed. ``convert`` overrides the value converter
-    (default ``usd_value_to_python``).
+    Cache entries are ``time: value_hash``; ``None`` means a first snapshot.
+    ``dirty`` contains changed ``(time, value)`` pairs, ``removed`` deleted times.
+    ``convert`` defaults to ``usd_value_to_python``.
 
-    When ``edit_target`` is given, the times and values come from its layer
-    directly via ``Sdf.Layer.ListTimeSamplesForPath`` / ``QueryTimeSample``
-    at the target-mapped spec path only samples this target authored,
-    ignoring opinions on other layers.
-    Required for per-client-layer setups where the composed view shadows
-    weaker clients' samples and would otherwise leak the stronger
-    client's keyframes back to its peers' emitters.
+    Read the edit target's mapped spec directly when supplied. Composed reads
+    can hide this client's samples or leak a stronger client's keys into its
+    outgoing events.
     """
-    if not attr or not attr.IsValid():
-        return {}, []
+    if not attr:
+        return {}, [], sorted(cached or ())
     if edit_target is not None:
         layer = edit_target.GetLayer()
         path = _edit_target_spec_path(edit_target, attr)
@@ -530,12 +521,12 @@ def _diff_time_samples(
     else:
         times = attr.GetTimeSamples()
     if not times:
-        return {}, []
+        return {}, [], sorted(cached or ())
     if convert is None:
         convert = usd_value_to_python
     new_cache: dict[float, int] = {}
     dirty: list[tuple[float, object]] = []
-    is_first = cached is None
+    removed = sorted(cached.keys() - times) if cached else []
     cached = cached or {}
     for t in times:
         if edit_target is not None:
@@ -546,27 +537,53 @@ def _diff_time_samples(
             continue
         h = _value_hash(val)
         new_cache[t] = h
-        if is_first or cached.get(t) != h:
+        if cached.get(t) != h:
             dirty.append((t, val))
-    return new_cache, dirty
+    return new_cache, dirty, removed
+
+
+def _erase_time_samples_event(edit_target, scene_path: Sdf.Path, times) -> dict:
+    return erase_time_samples_event(edit_target.MapToSpecPath(scene_path), times)
 
 
 def _has_edit_target_samples(edit_target, attr) -> bool:
-    """True if *attr* has time samples authored in *edit_target*.
-
-    Exact check, deliberately not ``Usd.Attribute.ValueMightBeTimeVarying``:
-    that is certain-False for a single-sample attr (one sample cannot
-    "vary"), yet such an attr has no default opinion and resolves to the
-    held sample at every numeric time it must still emit. The layer
-    query is also ~6x cheaper and edit-target-scoped, matching what
-    ``_diff_time_samples`` reads.
-    """
+    """Whether the edit target owns samples, including a single held sample."""
     return (
         edit_target.GetLayer().GetNumTimeSamplesForPath(
             _edit_target_spec_path(edit_target, attr),
         )
         > 0
     )
+
+
+def _collect_sample_changes(
+    attr,
+    ts_cache,
+    edit_target,
+    events: list[dict],
+    *,
+    convert=None,
+    target_name: str | None = None,
+) -> list[tuple[float, object]]:
+    """Update the sample cache, append erasures, and return changed values.
+
+    ``target_name`` overrides the output attribute when the receiver uses a
+    different representation, such as PointInstancer's float orientations.
+    """
+    if not attr:
+        return []
+    name = attr.GetName()
+    cached = ts_cache.get(name)
+    if not cached and not _has_edit_target_samples(edit_target, attr):
+        return []
+    new_cache, dirty, removed = _diff_time_samples(attr, cached, edit_target, convert=convert)
+    if removed:
+        path = attr.GetPath()
+        if target_name is not None:
+            path = path.GetPrimPath().AppendProperty(target_name)
+        events.append(_erase_time_samples_event(edit_target, path, removed))
+    ts_cache[name] = new_cache
+    return dirty
 
 
 def read_stage_metadata(stage: Usd.Stage) -> dict:
@@ -599,7 +616,7 @@ def _read_composition_arcs(stage, prim_path, arc_attr):
         arc_attr: Spec attribute name "referenceList" or "payloadList".
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         return []
     own_layers = {stage.GetRootLayer().identifier, stage.GetSessionLayer().identifier}
     result = []
@@ -641,7 +658,7 @@ def _edit_target_prim_specs(stage: Usd.Stage, prim_path: str) -> list[Sdf.PrimSp
     namespace_path = spec_path.StripAllVariantSelections()
     layer = edit_target.GetLayer()
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         return []
     return [
         spec
@@ -671,6 +688,32 @@ def _sdf_path_is_under(path: Sdf.Path, root: Sdf.Path) -> bool:
     if root == Sdf.Path.absoluteRootPath:
         return True
     return path.HasPrefix(root)
+
+
+def _is_safe_variant_structural_notice(
+    notice,
+    edit_target: Usd.EditTarget,
+    resynced_paths,
+    changed_paths,
+) -> bool:
+    """Whether a notice is fully represented by variant-qualified Sdf specs."""
+    if edit_target.GetMapFunction().isIdentity:
+        return False
+    paths = (*resynced_paths, *changed_paths)
+    if not paths:
+        return False
+    for path in paths:
+        source_path = edit_target.MapToSpecPath(path)
+        if (
+            path.IsPropertyPath()
+            or source_path.isEmpty
+            or not source_path.ContainsPrimVariantSelection()
+        ):
+            return False
+        fields = {str(field) for field in notice.GetChangedFields(path)}
+        if fields - _SAFE_VARIANT_STRUCTURAL_FIELDS:
+            return False
+    return True
 
 
 def _sdf_event_sort_key(event: dict) -> tuple[int, int, int, str]:
@@ -892,7 +935,7 @@ class PrimChannel:
 
     def applies_to(self, prim) -> bool:
         """Does this channel apply to this prim at all? Cheap predicate."""
-        return bool(prim and prim.IsValid())
+        return bool(prim)
 
     def needs_read(self, dirty_attrs: set[str] | None) -> bool:
         """Should this channel actually read on this cycle?
@@ -1029,21 +1072,51 @@ class PayloadsChannel(PrimChannel):
         }
 
 
-class MaterialBindingChannel(PrimChannel):
-    """``material:binding`` is a relationship property, not a composition arc.
+def _read_edit_target_material_bindings(
+    stage,
+    prim_path: str,
+    property_sources,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    edit_target = stage.GetEditTarget()
+    map_function = edit_target.GetMapFunction()
+    prim_path_obj = Sdf.Path(prim_path)
+    for purpose, relationship_name in _MATERIAL_BINDING_REL_BY_PURPOSE.items():
+        if map_function.isIdentity:
+            source = property_sources.get(relationship_name, {}).get("targetPaths")
+        else:
+            source = edit_target.GetPropertySpecForScenePath(
+                prim_path_obj.AppendProperty(relationship_name)
+            )
+        if not isinstance(source, Sdf.RelationshipSpec):
+            continue
+        list_op = source.GetInfo("targetPaths")
+        targets = list(list_op.ApplyOperations([]) or ())
+        if not targets:
+            result[purpose] = ""
+            continue
+        target = targets[0]
+        if not target.IsAbsolutePath():
+            target = target.MakeAbsolutePath(source.path.GetPrimPath())
+        target = map_function.MapSourceToTarget(target)
+        if not target.isEmpty:
+            result[purpose] = str(target.StripAllVariantSelections())
+    return result
 
-    Rebinds and clears arrive as info-only notices on the relationship name,
-    so this channel watches the property directly. The cache holds a
-    ``{purpose: target_path}`` dict; the diff emits one event per purpose
-    whose target changed (added, removed, or rebound).
-    """
+
+class MaterialBindingChannel(PrimChannel):
+    """Direct material bindings authored in the current edit target."""
 
     cache_key = _C_MATERIAL_BINDING
     cache_default: dict[str, str] = {}
     watched_prefixes = ("material:binding",)
+    uses_local_property_sources = True
 
     def read(self, stage, prim_path):
         return read_material_binding(stage, prim_path)
+
+    def read_local(self, stage, prim_path, property_sources):
+        return _read_edit_target_material_bindings(stage, prim_path, property_sources)
 
     def diff(self, current, cached):
         if cached is None:
@@ -1174,10 +1247,10 @@ class VisibilityChannel(PrimChannel):
 
     def read(self, stage, prim_path):
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
+        if not prim:
             return None
         vis_attr = UsdGeom.Imageable(prim).GetVisibilityAttr()
-        if not vis_attr or not vis_attr.IsValid() or not vis_attr.IsAuthored():
+        if not vis_attr or not vis_attr.IsAuthored():
             return None
         return vis_attr.Get() or "inherited"
 
@@ -1204,7 +1277,7 @@ class PayloadLoadStateChannel(PrimChannel):
 
     def read(self, stage, prim_path):
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid() or not prim.HasAuthoredPayloads():
+        if not prim or not prim.HasAuthoredPayloads():
             return None
         return prim.IsLoaded()
 
@@ -1260,12 +1333,12 @@ def read_camera_attrs(stage, prim_path):
     ``None`` if the prim is not a ``UsdGeom.Camera``.
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
+    if not prim or not prim.IsA(UsdGeom.Camera):
         return None
     attrs = {}
     for name in _CAMERA_ATTR_NAMES:
         attr = prim.GetAttribute(name)
-        if attr and attr.IsValid() and attr.IsAuthored():
+        if attr and attr.IsAuthored():
             val = usd_value_to_python(attr.Get())
             if val is not None:
                 attrs[name] = val
@@ -1281,12 +1354,33 @@ class CameraAttrsChannel(PrimChannel):
 
     cache_key = _C_CAMERA_ATTRS
     watched_attrs = tuple(_CAMERA_ATTR_NAMES)
+    uses_local_property_sources = True
 
     def applies_to(self, prim):
-        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.Camera))
+        return bool(prim and prim.IsA(UsdGeom.Camera))
 
     def read(self, stage, prim_path):
         return read_camera_attrs(stage, prim_path) or {}
+
+    def read_local(self, stage, prim_path, property_sources):
+        attrs = {}
+        edit_target = stage.GetEditTarget()
+        identity_target = edit_target.GetMapFunction().isIdentity
+        prim_path_obj = Sdf.Path(prim_path)
+        for name in _CAMERA_ATTR_NAMES:
+            if identity_target:
+                source = property_sources.get(name, {}).get("default")
+            else:
+                source = edit_target.GetPropertySpecForScenePath(prim_path_obj.AppendProperty(name))
+            if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
+                continue
+            value = source.default
+            if isinstance(value, Sdf.ValueBlock):
+                continue
+            converted = _usd_value_to_transport_python(stage, source.layer, value)
+            if converted is not None:
+                attrs[name] = converted
+        return attrs
 
     def diff(self, current, cached):
         cached = cached or {}
@@ -1298,25 +1392,105 @@ class CameraAttrsChannel(PrimChannel):
 
 
 class InstanceableChannel(PrimChannel):
-    """Native scenegraph-instancing flag replication.
-
-    Emits the authored ``instanceable`` bit only; prototype paths are
-    implementation-defined and never cross the wire. Flag edits arrive
-    as resync notices on the instance prim.
-    """
+    """Authored scenegraph-instancing flag; prototype paths stay local."""
 
     cache_key = _C_INSTANCEABLE
-    cache_default = False
+    cache_default = {}
     reads_on_resync_only = True
 
     def read(self, stage, prim_path):
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid() or not prim.HasAuthoredInstanceable():
-            return None
-        return prim.IsInstanceable()
+        edit_target = stage.GetEditTarget()
+        if edit_target.GetMapFunction().isIdentity:
+            specs = _edit_target_prim_specs(stage, prim_path)
+        else:
+            specs = (edit_target.GetPrimSpecForScenePath(Sdf.Path(prim_path)),)
+        for spec in specs:
+            if spec is not None and spec.HasInfo("instanceable"):
+                return {"instanceable": bool(spec.GetInfo("instanceable"))}
+        # Cache absence too; the Sdf path emits the field removal.
+        return {}
 
     def to_event(self, prim_path, diff):
-        return {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": diff}
+        if diff:
+            return {"k": K_SET_INSTANCEABLE, "prim": prim_path, **diff}
+        return None
+
+
+def _read_edit_target_point_instancer(
+    stage,
+    prim_path: str,
+    *,
+    only=None,
+    property_sources=None,
+) -> dict:
+    """Read PointInstancer state owned by the current edit target."""
+    edit_target = stage.GetEditTarget()
+    map_function = edit_target.GetMapFunction()
+    prim_path_obj = Sdf.Path(prim_path)
+    only = set(only) if only is not None else None
+
+    def _property_spec(name: str, field: str | None = None):
+        if property_sources is not None and map_function.isIdentity:
+            sources = property_sources.get(name, {})
+            if field is not None:
+                return sources.get(field)
+            return next(iter(sources.values()), None)
+        return edit_target.GetPropertySpecForScenePath(prim_path_obj.AppendProperty(name))
+
+    state: dict = {}
+    if only is None or "prototypes" in only:
+        source = _property_spec("prototypes", "targetPaths")
+        if isinstance(source, Sdf.RelationshipSpec) and source.HasInfo("targetPaths"):
+            targets = []
+            for target in source.GetInfo("targetPaths").ApplyOperations([]) or ():
+                if not target.IsAbsolutePath():
+                    target = target.MakeAbsolutePath(source.path.GetPrimPath())
+                target = map_function.MapSourceToTarget(target)
+                if not target.isEmpty:
+                    targets.append(str(target.StripAllVariantSelections()))
+            if targets:
+                state["prototypes"] = targets
+
+    if only is None or "inactiveIds" in only:
+        if property_sources is not None and map_function.isIdentity:
+            prim_specs = _edit_target_prim_specs(stage, prim_path)
+        else:
+            prim_specs = (edit_target.GetPrimSpecForScenePath(prim_path_obj),)
+        source = next(
+            (spec for spec in prim_specs if spec is not None and spec.HasInfo("inactiveIds")),
+            None,
+        )
+        if source is not None:
+            list_op = source.GetInfo("inactiveIds")
+            state["inactive_ids"] = [int(value) for value in list_op.ApplyOperations([]) or ()]
+
+    float_orientation = _property_spec("orientationsf")
+    orientation_name = (
+        "orientationsf"
+        if isinstance(
+            float_orientation,
+            Sdf.AttributeSpec,
+        )
+        else "orientations"
+    )
+    if only is not None and only & POINT_INSTANCER_QUAT_ATTRS:
+        only.update(POINT_INSTANCER_QUAT_ATTRS)
+
+    for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
+        if usd_name in POINT_INSTANCER_QUAT_ATTRS and usd_name != orientation_name:
+            continue
+        if only is not None and usd_name not in only:
+            continue
+        source = _property_spec(usd_name, "default")
+        if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
+            continue
+        value = source.default
+        if isinstance(value, Sdf.ValueBlock):
+            continue
+        converted = point_instancer_value_to_wire(wire_name, value)
+        if converted is not None:
+            state[wire_name] = converted
+    return state
 
 
 class PointInstancerChannel(PrimChannel):
@@ -1327,15 +1501,27 @@ class PointInstancerChannel(PrimChannel):
     # velocities/accelerations/ids also exist on UsdGeomPoints; per-prim
     # exclusion keeps them flowing generically for non-PointInstancer prims.
     filter_attrs = ()
+    uses_local_property_sources = True
 
     def applies_to(self, prim):
-        return bool(prim and prim.IsValid() and prim.IsA(UsdGeom.PointInstancer))
+        return bool(prim and prim.IsA(UsdGeom.PointInstancer))
 
     def read(self, stage, prim_path):
         return read_point_instancer(stage, prim_path) or {}
 
     def read_scoped(self, stage, prim_path, dirty_attrs):
-        return read_point_instancer(stage, prim_path, only=dirty_attrs) or {}
+        return _read_edit_target_point_instancer(
+            stage,
+            prim_path,
+            only=dirty_attrs,
+        )
+
+    def read_local(self, stage, prim_path, property_sources):
+        return _read_edit_target_point_instancer(
+            stage,
+            prim_path,
+            property_sources=property_sources,
+        )
 
     def diff(self, current, cached):
         cached = cached or {}
@@ -1349,9 +1535,7 @@ class PointInstancerChannel(PrimChannel):
         cached = cached or {}
         snapshot = self.cache_snapshot(current)
         changed = {
-            name: value
-            for name, value in current.items()
-            if snapshot[name] != cached.get(name)
+            name: value for name, value in current.items() if snapshot[name] != cached.get(name)
         }
         return (changed if changed else None), snapshot
 
@@ -1418,14 +1602,14 @@ def _emit_channel_events(channel, prim_path, current, pc, events_out, partial=Fa
 # starts from the applied state instead of echoing it back to the server.
 
 
-def _invalidation_targets_authoring_layer(emitter) -> bool:
+def _invalidation_targets_authoring_target(emitter) -> bool:
     target = emitter._suppressed_edit_target
-    return target is None or target.GetLayer() == emitter.stage.GetEditTarget().GetLayer()
+    return target is None or target == emitter.stage.GetEditTarget()
 
 
 def _invalidate_ensure_prim(emitter, prim_path, _ev):
     emitter._know_prim(prim_path)
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     specs = emitter._local_prim_specs(prim_path)
     ownership_spec = emitter._local_definition_spec(specs) or (specs[0] if specs else None)
@@ -1455,7 +1639,7 @@ def _invalidate_rename_prim(emitter, prim_path, ev):
 
 
 def _invalidate_set_reference(emitter, prim_path, _ev):
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     pc = emitter._prim_cache.setdefault(prim_path, {})
     pc[_C_REFERENCES] = _read_edit_target_arc_state(
@@ -1470,7 +1654,7 @@ def _invalidate_set_reference(emitter, prim_path, _ev):
     # Composed children may carry their own variant selections capture
     # them so subsequent diffs don't fire on imported state.
     prim = emitter.stage.GetPrimAtPath(prim_path)
-    if prim and prim.IsValid():
+    if prim:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             if cp == prim_path:
@@ -1481,7 +1665,7 @@ def _invalidate_set_reference(emitter, prim_path, _ev):
 
 
 def _invalidate_set_payload(emitter, prim_path, _ev):
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOADS] = _read_edit_target_arc_state(
         emitter.stage,
@@ -1492,7 +1676,7 @@ def _invalidate_set_payload(emitter, prim_path, _ev):
 
 def _invalidate_load_payload(emitter, prim_path, _ev):
     prim = emitter.stage.GetPrimAtPath(prim_path)
-    if prim and prim.IsValid():
+    if prim:
         emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOAD_LOADED] = prim.IsLoaded()
 
 
@@ -1501,12 +1685,12 @@ def _invalidate_unload_payload(emitter, prim_path, _ev):
     # rediscovered on the next load_payload.
     emitter._purge_subtree(prim_path, include_root=False)
     prim = emitter.stage.GetPrimAtPath(prim_path)
-    if prim and prim.IsValid():
+    if prim:
         emitter._prim_cache.setdefault(prim_path, {})[_C_PAYLOAD_LOADED] = prim.IsLoaded()
 
 
 def _invalidate_set_variant_selections(emitter, prim_path, _ev):
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     emitter._prim_cache.setdefault(prim_path, {})[_C_VARIANT_SELECTIONS] = (
         _read_edit_target_variant_selections(emitter.stage, prim_path)
@@ -1517,9 +1701,15 @@ def _invalidate_set_variant_selections(emitter, prim_path, _ev):
 
 
 def _invalidate_set_material_binding(emitter, prim_path, _ev):
-    emitter._prim_cache.setdefault(prim_path, {})[_C_MATERIAL_BINDING] = read_material_binding(
-        emitter.stage,
-        prim_path,
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+    _fields, property_sources = emitter._local_property_state(prim_path)
+    emitter._prim_cache.setdefault(prim_path, {})[_C_MATERIAL_BINDING] = (
+        _read_edit_target_material_bindings(
+            emitter.stage,
+            prim_path,
+            property_sources,
+        )
     )
 
 
@@ -1528,7 +1718,7 @@ def _resync_connectable_cache(emitter, prim_path):
     Used by both connectable input and connection invalidators since they
     share one read and one cache entry now.
     """
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     _fields, property_sources = emitter._local_property_state(prim_path)
     kind, info_id, inputs, types, connections = _read_edit_target_usdshade_connectable(
@@ -1567,9 +1757,19 @@ def _invalidate_set_connectable_input(emitter, prim_path, ev):
 
 
 def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
-    cam_attrs = read_camera_attrs(emitter.stage, prim_path)
-    if cam_attrs is not None:
-        emitter._prim_cache.setdefault(prim_path, {})[_C_CAMERA_ATTRS] = cam_attrs
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+
+    if ev.get("time") is None:
+        camera_updates = {
+            name: value for name, value in ev.get("attrs", {}).items() if name in _CAMERA_ATTR_NAMES
+        }
+        if camera_updates:
+            camera_cache = emitter._prim_cache.setdefault(prim_path, {}).setdefault(
+                _C_CAMERA_ATTRS,
+                {},
+            )
+            camera_cache.update(camera_updates)
 
     if ev.get("time") is not None:
         time = float(ev["time"])
@@ -1589,7 +1789,7 @@ def _invalidate_set_connectable_connection(emitter, prim_path, _ev):
 
 
 def _invalidate_set_xform_trs(emitter, prim_path, ev):
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     if ev.get("time") is not None:
         time = float(ev["time"])
@@ -1606,7 +1806,7 @@ def _invalidate_set_xform_trs(emitter, prim_path, ev):
 
 
 def _invalidate_set_visibility(emitter, prim_path, ev):
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
     if ev.get("time") is not None:
         # Cache stores the USD string form ("inherited"/"invisible") via the
@@ -1622,16 +1822,20 @@ def _invalidate_set_visibility(emitter, prim_path, ev):
         return
 
     prim = emitter.stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         return
     vis_attr = UsdGeom.Imageable(prim).GetVisibilityAttr()
-    if vis_attr and vis_attr.IsValid() and vis_attr.IsAuthored():
+    if vis_attr and vis_attr.IsAuthored():
         value = vis_attr.Get() or "inherited"
         emitter._prim_cache.setdefault(prim_path, {})[_C_VISIBILITY] = value
 
 
 def _invalidate_set_instanceable(emitter, prim_path, ev):
-    emitter._prim_cache.setdefault(prim_path, {})[_C_INSTANCEABLE] = bool(ev["instanceable"])
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+    emitter._prim_cache.setdefault(prim_path, {})[_C_INSTANCEABLE] = {
+        "instanceable": bool(ev["instanceable"])
+    }
 
 
 # Wire field -> USD attr name the applier authors. The sample cache is keyed
@@ -1656,6 +1860,9 @@ def _invalidate_set_point_instancer(emitter, prim_path, ev):
     correct new baseline. Retaining decoded arrays here can otherwise keep an
     entire FlatBuffer frame alive for the emitter's lifetime.
     """
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+
     import numpy as np
 
     fields = ev.get("fields", [])
@@ -1682,7 +1889,16 @@ def _invalidate_set_stage_metadata(emitter, _prim_path, _ev):
     emitter._stage_metadata_cache = read_stage_metadata(emitter.stage)
 
 
-def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
+def _invalidate_erase_time_samples(emitter, prim_path, ev):
+    if not _invalidation_targets_authoring_target(emitter):
+        return
+    name = Sdf.Path(ev["spec_path"]).name
+    samples = emitter._prim_cache.get(prim_path, {}).get(_C_TIME_SAMPLES, {}).get(name, {})
+    for time in ev["times"]:
+        samples.pop(time, None)
+
+
+def _invalidate_set_sdf_spec_fields(emitter, prim_path, ev):
     spec_path = ev.get("spec_path", "")
     spec_kind = ev.get("spec_kind", "")
     if not spec_path or not spec_kind:
@@ -1690,8 +1906,13 @@ def _invalidate_set_sdf_spec_fields(emitter, _prim_path, ev):
     path = Sdf.Path(spec_path)
     key = (spec_kind, spec_path)
     emitter._dirty_sdf_specs.pop(key, None)
-    if not _invalidation_targets_authoring_layer(emitter):
+    if not _invalidation_targets_authoring_target(emitter):
         return
+    if spec_kind in _SDF_PROPERTY_KINDS and (
+        ev.get("removed", False) or "timeSamples" in ev.get("fields", ())
+    ):
+        samples = emitter._prim_cache.get(prim_path, {}).get(_C_TIME_SAMPLES, {})
+        samples.pop(path.name, None)
     if ev.get("removed", False):
         emitter._sdf_spec_fields.pop(key, None)
         if spec_kind in _SDF_PROPERTY_KINDS:
@@ -1743,15 +1964,12 @@ _INVALIDATE_DISPATCH = {
     K_SET_INSTANCEABLE: _invalidate_set_instanceable,
     K_SET_POINT_INSTANCER: _invalidate_set_point_instancer,
     K_SET_SDF_SPEC_FIELDS: _invalidate_set_sdf_spec_fields,
+    K_ERASE_TIME_SAMPLES: _invalidate_erase_time_samples,
 }
 
 
 class _SuppressScope:
-    """Context manager for NoticeEmitter.suppressed().
-
-    Calls suppress() on enter and unsuppress() on exit.
-    __exit__ returns False -- exceptions propagate, never swallowed.
-    """
+    """Reentrant notice-suppression scope."""
 
     __slots__ = ("_emitter",)
 
@@ -1764,22 +1982,10 @@ class _SuppressScope:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._emitter.unsuppress()
-        return False
 
 
 class NoticeEmitter:
-    """Watches a Usd.Stage for changes and builds idempotent transform events.
-
-    Detects creation, deletion, deactivation, and renames via
-    ``notice.GetPrimResyncType()`` on resync paths. Supports a reentrant
-    suppress counter for feedback-loop prevention.
-
-    Usage:
-        emitter = NoticeEmitter(stage)
-        # ... something authors to stage ...
-        events = emitter.build_events_for_dirty()
-        # events is a list of event dicts ready to wrap in a txn
-    """
+    """Watch a stage and build idempotent events from its USD notices."""
 
     def __init__(
         self,
@@ -1789,29 +1995,10 @@ class NoticeEmitter:
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
     ):
-        """
-        Args:
-            stage: The Usd.Stage to watch.
-            attr_filter: Optional callable(attr_name: str) -> bool.
-                Controls which attributes are tracked for gprim attr diffing.
-                Return True to track, False to skip. By default, attrs owned
-                by specialized paths or channels are excluded; primvars and
-                other generic attrs are tracked.
-            replicated_api_schemas: Optional explicit override of the API
-                schema names to replicate via the ensure_prim ``api_schemas``
-                field. Each name must be a bare schema name (no
-                ``":instance"``). If None, snapshots the module-level
-                ``_REPLICATED_API_SCHEMAS`` at construction (default behavior
-                DCC integrations register their schemas at import time,
-                then any later-constructed emitter picks them up).
-            extra_channels: Optional additional ``PrimChannel`` instances to
-                run alongside the built-in set. The framework-owned channels
-                (variants, refs, payloads, material binding, connectable
-                inputs/connections, visibility, camera attrs) are always
-                active and run first; ``extra_channels`` are appended in
-                order. Use this to replicate custom typed schemas without
-                losing core USD coverage. Each channel's ``cache_key`` must
-                be unique across the full set.
+        """Create an emitter with optional generic-attribute and channel extensions.
+
+        API schema names must be bare names. Extra channels run after the built-ins
+        and must own unique cache keys.
         """
         self.stage = stage
         if replicated_api_schemas is not None:
@@ -1849,22 +2036,13 @@ class NoticeEmitter:
         self._sdf_spec_fields: dict[tuple[str, str], set[str]] = {}
         self._full_sdf_spec_scan = False
         self._pending_edit_target: Usd.EditTarget | None = None
+        self._pending_target_requires_exact_reads = False
         self._edit_target_conflict = False
         # Building advances the diff caches, so retain one unsent batch.
         # Later notices stay dirty until the retained batch is released.
         self._prepared_events: list[dict] | None = None
-        # Specialized channels transport their own values, but their local
-        # field ownership can still change when an opinion is set or cleared.
-        # Keep those field deltas separate from fragment serialization so a
-        # transform drag does not enter the fragment serializer.
-        self._dirty_local_property_fields: dict[
-            str,
-            dict[str, set[str] | None],
-        ] = {}
-        # All fields authored on the current edit target, including fields
-        # transported by specialized events. This is separate from the Sdf
-        # fragment cache so clearing a fast-path value can remove the local
-        # opinion instead of replaying the newly exposed weaker value.
+        # Field presence includes channel-owned values so their removal can
+        # emit an Sdf clear without serializing fragments on ordinary edits.
         self._local_property_spec_fields: dict[str, set[str]] = {}
         # Last observed edit-target ownership. Namespace resyncs use it to
         # distinguish a removed local definition from a composed descendant
@@ -2044,13 +2222,16 @@ class NoticeEmitter:
             return result
 
         for name, fields in properties.items():
-            if (
-                name in ("xformOp:translate", "xformOp:orient", "xformOp:scale")
-                or not name.startswith("xformOp:")
-                or value_field not in fields
-            ):
+            if name in (
+                "xformOp:translate",
+                "xformOp:orient",
+                "xformOp:scale",
+            ) or not name.startswith("xformOp:"):
                 continue
-            if value_field in blocked_values.get(name, ()):
+            source_field = (
+                "default" if time is not None and "timeSamples" not in fields else value_field
+            )
+            if source_field not in fields or source_field in blocked_values.get(name, ()):
                 continue
             # Pivots, Euler ops, and matrix ops are transported through the
             # decomposed TRS representation, so any local value can affect all
@@ -2096,7 +2277,7 @@ class NoticeEmitter:
             kind = event["k"]
             time = event.get("time")
 
-            if kind == K_SET_SDF_SPEC_FIELDS:
+            if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
                 filtered.append(event)
                 continue
 
@@ -2294,7 +2475,6 @@ class NoticeEmitter:
         self._dirty_sdf_specs.clear()
         self._dirty_sdf_subtrees.clear()
         self._sdf_spec_fields.clear()
-        self._dirty_local_property_fields.clear()
         self._local_property_spec_fields.clear()
         self._local_prim_states.clear()
         self.dirty.clear()
@@ -2304,6 +2484,7 @@ class NoticeEmitter:
         self._renamed_prims.clear()
         self._full_sdf_spec_scan = False
         self._pending_edit_target = None
+        self._pending_target_requires_exact_reads = False
         self._edit_target_conflict = False
         self._prepared_events = None
         self._suppress_depth = 0
@@ -2337,12 +2518,15 @@ class NoticeEmitter:
         encounter so the server can create xform ops on payload prims.
         """
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
+        if not prim:
             return
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            _fields, property_sources = self._local_property_state(cp)
+            property_fields, property_sources = self._local_property_state(cp)
+            for name, fields in property_fields.items():
+                event_path = str(child.GetPath().AppendProperty(name))
+                self._local_property_spec_fields[event_path] = set(fields)
             for channel in self._channels:
                 if not channel.applies_to(child):
                     continue
@@ -2402,38 +2586,20 @@ class NoticeEmitter:
                 pc[_C_TIME_SAMPLES] = ts_seed
 
     def suppress(self):
-        """Suppress notice collection (feedback guard).
-
-        Reentrant: each call increments the suppress depth.
-        Must be paired with a matching unsuppress() call.
-        """
+        """Enter reentrant notice suppression."""
         if self._suppress_depth == 0:
             self._suppressed_edit_target = self.stage.GetEditTarget()
         self._suppress_depth += 1
 
     def unsuppress(self):
-        """Resume notice collection.
-
-        Decrements the suppress depth. Notices are only collected
-        again when depth reaches zero.
-        """
+        """Leave one level of notice suppression."""
         assert self._suppress_depth > 0, "unsuppress() called without matching suppress()"
         self._suppress_depth -= 1
         if self._suppress_depth == 0:
             self._suppressed_edit_target = None
 
     def suppressed(self):
-        """Return a context manager that suppresses notices for the block.
-
-        Usage::
-
-            with emitter.suppressed():
-                apply_events(stage, events)
-            # notices automatically resume here
-
-        Reentrant -- nests correctly with other suppress/unsuppress calls.
-        Exceptions are NOT swallowed: __exit__ returns False.
-        """
+        """Return a reentrant notice-suppression context manager."""
         return _SuppressScope(self)
 
     def clear_all(self):
@@ -2450,18 +2616,24 @@ class NoticeEmitter:
         self._dirty_sdf_subtrees.clear()
         self._full_sdf_spec_scan = False
         self._pending_edit_target = None
+        self._pending_target_requires_exact_reads = False
         self._edit_target_conflict = False
-        self._dirty_local_property_fields.clear()
 
-    def _record_edit_target(self) -> Usd.EditTarget:
+    def _record_edit_target(self, *, requires_exact_reads: bool = True) -> Usd.EditTarget:
+        """Capture the target needed for reads while permitting exact variant specs."""
         edit_target = self.stage.GetEditTarget()
         if self._pending_edit_target is None:
             self._pending_edit_target = edit_target
-        elif self._pending_edit_target != edit_target:
-            if self._pending_edit_target.GetLayer() == edit_target.GetLayer():
-                self._pending_edit_target = Usd.EditTarget(edit_target.GetLayer())
-            else:
-                self._edit_target_conflict = True
+            self._pending_target_requires_exact_reads = requires_exact_reads
+        elif self._pending_edit_target == edit_target:
+            self._pending_target_requires_exact_reads |= requires_exact_reads
+        elif self._pending_edit_target.GetLayer() != edit_target.GetLayer():
+            self._edit_target_conflict = True
+        elif requires_exact_reads and self._pending_target_requires_exact_reads:
+            self._edit_target_conflict = True
+        elif requires_exact_reads:
+            self._pending_edit_target = edit_target
+            self._pending_target_requires_exact_reads = True
         return edit_target
 
     def _mark_exact_sdf_spec(
@@ -2527,7 +2699,7 @@ class NoticeEmitter:
                 return
 
         prop = self.stage.GetPropertyAtPath(event_path)
-        if not prop or not prop.IsValid() or source_path.isEmpty:
+        if not prop or source_path.isEmpty:
             return
         if isinstance(prop, Usd.Attribute):
             kind = SDF_SPEC_KIND_ATTRIBUTE
@@ -2539,25 +2711,6 @@ class NoticeEmitter:
         if removed_fields is None:
             removed_fields = set(self._local_property_spec_fields.get(str(namespace_path), ()))
         self._mark_exact_sdf_spec(source_path, kind, removed_fields)
-
-    def _mark_local_property_fields(
-        self,
-        spec_path: str,
-        fields: set[str] | None,
-    ) -> None:
-        """Record specialized field-presence changes for ownership filtering."""
-        path = Sdf.Path(spec_path)
-        prim_path = str(path.GetPrimPath())
-        name = str(path.name)
-        by_name = self._dirty_local_property_fields.setdefault(prim_path, {})
-        if name in by_name:
-            current = by_name[name]
-            if current is None or fields is None:
-                by_name[name] = None
-            else:
-                current.update(fields)
-            return
-        by_name[name] = None if fields is None else set(fields)
 
     def _channel_owns_property(self, prim: Usd.Prim, name: str) -> bool:
         for channel in self._channels:
@@ -2575,10 +2728,8 @@ class NoticeEmitter:
             return False
         attr = prim.GetAttribute(name)
         definition = prim.GetPrimDefinition()
-        needs_sdf_value = (
-            attr
-            and attr.IsValid()
-            and (attr.IsCustom() or not definition or not definition.GetSchemaPropertySpec(name))
+        needs_sdf_value = attr and (
+            attr.IsCustom() or not definition or not definition.GetSchemaPropertySpec(name)
         )
         if not needs_sdf_value:
             return False
@@ -2719,7 +2870,6 @@ class NoticeEmitter:
         prop = self.stage.GetPropertyAtPath(scene_path)
         active = bool(
             prop
-            and prop.IsValid()
             and any(
                 item.layer == spec.layer and item.path == spec.path
                 for item in prop.GetPropertyStack()
@@ -2728,7 +2878,7 @@ class NoticeEmitter:
         if not active:
             return fields
         prim = self.stage.GetPrimAtPath(scene_path.GetPrimPath())
-        if not prim or not prim.IsValid():
+        if not prim:
             return fields
         sources = {field: spec for field in fields}
         return self._sdf_fields_for_spec(prim, spec, fields, sources)
@@ -2829,9 +2979,11 @@ class NoticeEmitter:
             elif changed_fields is None:
                 selected_fields = available_fields ^ previous_fields
             else:
-                changed_fields = set(changed_fields)
-                authored_fields = {str(field) for field in spec.ListInfoKeys()}
                 selected_fields = changed_fields & (available_fields | previous_fields)
+
+            # Resync scans must retain explicit clears of channel-owned fields.
+            if changed_fields:
+                authored_fields = {str(field) for field in spec.ListInfoKeys()}
                 selected_fields.update(changed_fields - authored_fields)
 
             requires_identity = self._sdf_spec_requires_identity(
@@ -2895,7 +3047,7 @@ class NoticeEmitter:
 
         # Fallback (or "Other" resync type with PrimResyncType available)
         prim = self.stage.GetPrimAtPath(prim_path)
-        if prim and prim.IsValid():
+        if prim:
             previous = self._local_prim_states.get(prim_path)
             current_definition = self._local_definition_spec(self._local_prim_specs(prim_path))
             if previous and previous.specifier != Sdf.SpecifierOver and current_definition is None:
@@ -2919,7 +3071,14 @@ class NoticeEmitter:
         changed_paths = list(notice.GetChangedInfoOnlyPaths())
         if not resynced_paths and not changed_paths:
             return
-        edit_target = self._record_edit_target()
+        edit_target = self._record_edit_target(
+            requires_exact_reads=not _is_safe_variant_structural_notice(
+                notice,
+                self.stage.GetEditTarget(),
+                resynced_paths,
+                changed_paths,
+            )
+        )
         edit_layer = edit_target.GetLayer()
 
         for p in resynced_paths:
@@ -3015,11 +3174,8 @@ class NoticeEmitter:
                     if not sdf_fields:
                         sdf_fields.add("timeSamples")
                     if sdf_fields <= _SDF_SPECIALIZED_FIELDS and not self._attr_filter(attr_name):
-                        # Record only the notice detail.  The build step reads
-                        # current ownership from the captured edit target;
-                        # retaining live Sdf specs here made correctness
-                        # depend on keeping a shadow property stack in sync.
-                        self._mark_local_property_fields(path_str, sdf_fields)
+                        # Channel values use the dirty-attr path; blocks need
+                        # exact Sdf fields because they mask weaker opinions.
                         spec = (
                             edit_layer.GetObjectAtPath(source_path)
                             if not source_path.isEmpty
@@ -3157,7 +3313,7 @@ class NoticeEmitter:
     def snapshot_prim(self, prim_path: str) -> dict | None:
         """Snapshot the current local transform of a prim as TRS."""
         prim = self.stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
+        if not prim:
             return None
 
         xf = UsdGeom.Xformable(prim)
@@ -3215,11 +3371,6 @@ class NoticeEmitter:
                 include_descendants and owner.startswith(prefix)
             ):
                 self._local_property_spec_fields.pop(spec_path, None)
-        for owner in tuple(self._dirty_local_property_fields):
-            if (include_root and owner == prim_path) or (
-                include_descendants and owner.startswith(prefix)
-            ):
-                self._dirty_local_property_fields.pop(owner, None)
 
     def _purge_subtree(
         self,
@@ -3297,15 +3448,6 @@ class NoticeEmitter:
                 moved.append((spec_path, new_path + suffix))
         for source, target in moved:
             self._local_property_spec_fields[target] = self._local_property_spec_fields.pop(source)
-        moved_local_fields = []
-        for owner in tuple(self._dirty_local_property_fields):
-            if owner == old_path or owner.startswith(old_prefix):
-                suffix = owner[len(old_path) :]
-                moved_local_fields.append((owner, new_path + suffix))
-        for source, target in moved_local_fields:
-            self._dirty_local_property_fields[target] = self._dirty_local_property_fields.pop(
-                source
-            )
         if old_path in self._local_prim_states:
             self._local_prim_states.pop(old_path)
             specs = self._local_prim_specs(new_path)
@@ -3566,7 +3708,7 @@ class NoticeEmitter:
             if self._sdf_owns_attribute_value(prim, attribute_name):
                 continue
             attribute = prim.GetAttribute(attribute_name)
-            if not attribute or not attribute.IsValid():
+            if not attribute:
                 continue
 
             value_source = local_property_sources.get(attribute_name, {}).get("default")
@@ -3626,8 +3768,8 @@ class NoticeEmitter:
         pc = self._prim_cache.setdefault(prim_path, {})
         first_encounter = prim_path not in self._known_prims
         is_resync = prim_path in self._notice_resynced_prims
-        local_field_changes = self._dirty_local_property_fields.pop(prim_path, None)
         dirty_attrs = self._dirty_attrs.get(prim_path)
+        property_names = set(dirty_attrs or ())
         property_notice_only = (
             not first_encounter
             and not is_resync
@@ -3641,8 +3783,6 @@ class NoticeEmitter:
         # stack transiently; neither path retains Sdf wrappers in the cache.
         if property_notice_only:
             local_specs = []
-            property_names = set(dirty_attrs or ())
-            property_names.update(local_field_changes or ())
             property_state = self._local_property_state_for_names(
                 prim_path,
                 property_names,
@@ -3660,21 +3800,20 @@ class NoticeEmitter:
         local_definition_spec = self._local_definition_spec(local_specs)
         previous_prim_state = self._local_prim_states.get(prim_path)
         local_properties, local_property_sources = property_state
-        if local_field_changes:
-            for name, changed_fields in local_field_changes.items():
-                event_path = str(Sdf.Path(prim_path).AppendProperty(name))
-                previous_fields = self._local_property_spec_fields.get(
-                    event_path,
-                    _EMPTY_FIELDS,
-                )
-                current_fields = local_properties.get(name, _EMPTY_FIELDS)
-                candidates = previous_fields if changed_fields is None else changed_fields
-                cleared_fields = (set(candidates) & previous_fields) - current_fields
-                if cleared_fields:
-                    # Fast-path events carry present values. A removed opinion
-                    # needs the generic Sdf clear so the receiver exposes its
-                    # weaker composed value instead of retaining stale data.
-                    self._mark_sdf_property_spec(event_path, cleared_fields)
+        if not property_notice_only:
+            property_names.update(local_properties)
+        for name in property_names:
+            event_path = str(Sdf.Path(prim_path).AppendProperty(name))
+            previous_fields = self._local_property_spec_fields.get(event_path, _EMPTY_FIELDS)
+            current_fields = local_properties.get(name, _EMPTY_FIELDS)
+            cleared_fields = previous_fields - current_fields
+            if cleared_fields:
+                # Value events cannot remove opinions or expose weaker values.
+                self._mark_sdf_property_spec(event_path, cleared_fields)
+            if current_fields:
+                self._local_property_spec_fields[event_path] = set(current_fields)
+            else:
+                self._local_property_spec_fields.pop(event_path, None)
         if not property_notice_only:
             events.extend(
                 self._build_prim_structure_events(
@@ -3703,14 +3842,6 @@ class NoticeEmitter:
         )
         events.extend(channel_events)
 
-        if local_field_changes:
-            for name in local_field_changes:
-                event_path = str(Sdf.Path(prim_path).AppendProperty(name))
-                current_fields = local_properties.get(name)
-                if current_fields:
-                    self._local_property_spec_fields[event_path] = set(current_fields)
-                else:
-                    self._local_property_spec_fields.pop(event_path, None)
         xform_event = self._build_default_xform_event(
             prim_path,
             prim,
@@ -3788,7 +3919,7 @@ class NoticeEmitter:
         ``None`` means full-scan (first encounter, resync, or no per-attr
         notice detail); an empty set skips sample diffing entirely.
         """
-        if not prim or not prim.IsValid():
+        if not prim:
             return []
         full_scan = sample_attrs is None
         if not full_scan and not sample_attrs:
@@ -3871,37 +4002,24 @@ class NoticeEmitter:
             return []
         ops = list(xf.GetOrderedXformOps())
         fields = [_canonical_trs_field(op) for op in ops]
-        # A sampled non-canonical op (matrix transform, euler, pivot,
-        # inverse) cannot ride a per-op TRS field; the whole stack folds
-        # through the matrix decompose the default-time path uses.
-        # Canonical-only stacks short-circuit before any layer query.
-        for op, field in zip(ops, fields, strict=True):
-            if field is None and _has_edit_target_samples(edit_target, op.GetAttr()):
-                return self._decomposed_xform_sample_events(
-                    prim_path,
-                    xf,
-                    ops,
-                    ts_cache,
-                    dirty_attr_names,
-                    full_scan,
-                    edit_target,
-                )
+        # Even a static matrix/pivot affects sampled ops elsewhere in the stack.
+        if None in fields:
+            return self._decomposed_xform_sample_events(
+                prim_path,
+                xf,
+                ops,
+                ts_cache,
+                dirty_attr_names,
+                full_scan,
+                edit_target,
+            )
 
         events: list[dict] = []
         for op, field in zip(ops, fields, strict=True):
-            if field is None:
-                continue
             attr = op.GetAttr()
-            op_name = attr.GetName()
-            if not full_scan and op_name not in dirty_attr_names:
+            if not full_scan and attr.GetName() not in dirty_attr_names:
                 continue
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(op_name),
-                edit_target,
-            )
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events)
             for t, val in dirty:
                 events.append(
                     {
@@ -3912,7 +4030,6 @@ class NoticeEmitter:
                         "time": float(t),
                     }
                 )
-            ts_cache[op_name] = new_cache
         return events
 
     def _decomposed_xform_sample_events(
@@ -3937,26 +4054,46 @@ class NoticeEmitter:
         dirty_times: set[float] = set()
         sampled_indices: list[int] = []
         matrix_dirty: dict[str, dict[float, object]] = {}
+        removed_samples = False
+        previous_times = {time for op in ops for time in ts_cache.get(op.GetAttr().GetName(), ())}
         for i, op in enumerate(ops):
             attr = op.GetAttr()
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
-            sampled_indices.append(i)
             name = attr.GetName()
+            has_samples = _has_edit_target_samples(edit_target, attr)
+            if not has_samples and not ts_cache.get(name):
+                continue
+            if has_samples:
+                sampled_indices.append(i)
             if not full_scan and name not in dirty_attr_names:
                 continue
-            new_cache, dirty = _diff_time_samples(
+            new_cache, dirty, removed = _diff_time_samples(
                 attr,
                 ts_cache.get(name),
                 edit_target,
                 convert=xform_sample_value,
             )
+            removed_samples |= bool(removed)
             dirty_times.update(float(t) for t, _val in dirty)
             if op.GetOpType() == UsdGeom.XformOp.TypeTransform:
                 matrix_dirty[name] = {float(t): val for t, val in dirty}
             ts_cache[name] = new_cache
+        events: list[dict] = []
+        if removed_samples:
+            # Every output component uses the union of the stack's sample times.
+            # Rebuild that union: deleting one op's key can change interpolation
+            # at surviving keys belonging to another op.
+            dirty_times = {time for op in ops for time in ts_cache.get(op.GetAttr().GetName(), ())}
+            matrix_dirty.clear()
+            removed_times = previous_times - dirty_times
+            if removed_times:
+                for name in ("xformOp:translate", "xformOp:orient", "xformOp:scale"):
+                    events.append(
+                        _erase_time_samples_event(
+                            edit_target, Sdf.Path(prim_path).AppendProperty(name), removed_times
+                        )
+                    )
         if not dirty_times:
-            return []
+            return events
 
         times = sorted(dirty_times)
         single = sampled_indices[0] if len(sampled_indices) == 1 else None
@@ -3990,7 +4127,7 @@ class NoticeEmitter:
             )
 
         translates, rotates, scales = decompose_trs_batch(locals_np)
-        return [
+        events.extend(
             {
                 "k": K_SET_XFORM_TRS,
                 "prim": prim_path,
@@ -4001,7 +4138,8 @@ class NoticeEmitter:
                 "time": t,
             }
             for i, t in enumerate(times)
-        ]
+        )
+        return events
 
     def _visibility_sample_events(
         self,
@@ -4016,18 +4154,9 @@ class NoticeEmitter:
             return []
         imageable = UsdGeom.Imageable(prim)
         vis_attr = imageable.GetVisibilityAttr() if imageable else None
-        if (
-            not vis_attr
-            or not vis_attr.IsValid()
-            or not _has_edit_target_samples(edit_target, vis_attr)
-        ):
-            return []
-        new_cache, dirty = _diff_time_samples(
-            vis_attr,
-            ts_cache.get("visibility"),
-            edit_target,
-        )
-        events = [
+        events = []
+        dirty = _collect_sample_changes(vis_attr, ts_cache, edit_target, events)
+        events.extend(
             {
                 "k": K_SET_VISIBILITY,
                 "prim": prim_path,
@@ -4035,8 +4164,7 @@ class NoticeEmitter:
                 "time": float(t),
             }
             for t, val in dirty
-        ]
-        ts_cache["visibility"] = new_cache
+        )
         return events
 
     def _gprim_attr_sample_events(
@@ -4077,14 +4205,7 @@ class NoticeEmitter:
 
         for name in attr_names:
             attr = prim.GetAttribute(name)
-            if not attr or not attr.IsValid() or not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(name),
-                edit_target,
-                convert=_convert,
-            )
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events, convert=_convert)
             if dirty:
                 primvar_meta, attr_interp = attribute_event_metadata(prim, name, attr)
                 for t, val in dirty:
@@ -4099,7 +4220,6 @@ class NoticeEmitter:
                     if attr_interp:
                         ev_out["attr_interp"] = attr_interp
                     events.append(ev_out)
-            ts_cache[name] = new_cache
         return events
 
     def _connectable_input_sample_events(
@@ -4128,19 +4248,13 @@ class NoticeEmitter:
             attr = inp.GetAttr()
             if not attr.IsAuthored() or inp.HasConnectedSource():
                 continue
-            if not _has_edit_target_samples(edit_target, attr):
-                continue
             name = inp.GetBaseName()
-            cache_key = "inputs:" + name
-            if not full_scan and cache_key not in dirty_attr_names:
+            if not full_scan and attr.GetName() not in dirty_attr_names:
+                continue
+            dirty = _collect_sample_changes(attr, ts_cache, edit_target, events, convert=_convert)
+            if not dirty:
                 continue
             type_name = str(attr.GetTypeName())
-            new_cache, dirty = _diff_time_samples(
-                attr,
-                ts_cache.get(cache_key),
-                edit_target,
-                convert=_convert,
-            )
             for t, val in dirty:
                 events.append(
                     {
@@ -4152,7 +4266,6 @@ class NoticeEmitter:
                         "time": float(t),
                     }
                 )
-            ts_cache[cache_key] = new_cache
         return events
 
     def _point_instancer_sample_events(
@@ -4167,16 +4280,17 @@ class NoticeEmitter:
         if not prim.IsA(UsdGeom.PointInstancer):
             return []
         by_time: dict[float, dict] = {}
+        events: list[dict] = []
         for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
             if not full_scan and usd_name not in dirty_attr_names:
                 continue
             attr = prim.GetAttribute(usd_name)
-            if not attr or not attr.IsValid() or not _has_edit_target_samples(edit_target, attr):
-                continue
-            new_cache, dirty = _diff_time_samples(
+            dirty = _collect_sample_changes(
                 attr,
-                ts_cache.get(usd_name),
+                ts_cache,
                 edit_target,
+                events,
+                target_name=_PI_WIRE_TO_USD[wire_name],
             )
             for t, val in dirty:
                 if usd_name in POINT_INSTANCER_QUAT_ATTRS:
@@ -4184,9 +4298,8 @@ class NoticeEmitter:
                     if val is None:
                         continue
                 by_time.setdefault(float(t), {})[wire_name] = val
-            ts_cache[usd_name] = new_cache
         # The prototypes rel is uniform and never rides timed events.
-        return [
+        events.extend(
             {
                 "k": K_SET_POINT_INSTANCER,
                 "prim": prim_path,
@@ -4195,7 +4308,8 @@ class NoticeEmitter:
                 "time": t,
             }
             for t, fields in sorted(by_time.items())
-        ]
+        )
+        return events
 
     def _build_stage_metadata_events(self) -> list[dict]:
         """Emit a SetStageMetadata event when the stage's units/timeline change."""
@@ -4237,7 +4351,7 @@ class NoticeEmitter:
         # was hidden by the prior variant selection).
         for prim_path in list(self._notice_resynced_prims):
             prim = self.stage.GetPrimAtPath(prim_path)
-            if not (prim and prim.IsValid()):
+            if not prim:
                 continue
             for desc in Usd.PrimRange(prim):
                 if desc.GetPath() == prim.GetPath() or desc.IsInPrototype():
@@ -4255,12 +4369,12 @@ class NoticeEmitter:
 
         for prim_path in dirty_now:
             prim = self.stage.GetPrimAtPath(prim_path)
-            if prim and prim.IsValid() and prim.IsInPrototype():
+            if prim and prim.IsInPrototype():
                 self._dirty_attrs.pop(prim_path, None)
                 self._sample_dirty_attrs.pop(prim_path, None)
                 self._notice_resynced_prims.discard(prim_path)
                 continue
-            if not prim or not prim.IsValid():
+            if not prim:
                 # Prim vanished between notice and build; drop its pending
                 # per-attr state so the dicts don't accumulate dead paths.
                 self._dirty_attrs.pop(prim_path, None)
@@ -4283,10 +4397,12 @@ class NoticeEmitter:
 
         USD notices are synchronous, so the edit target active during each
         change is captured before callers can switch the stage elsewhere.
-        A transaction containing edits from more than one layer is rejected.
+        A transaction containing edits from more than one edit target is rejected.
         """
         if self._edit_target_conflict:
-            raise RuntimeError("one emitter batch contains edits from multiple USD layers")
+            raise RuntimeError(
+                "one emitter batch contains multiple USD layers or multiple USD edit targets"
+            )
 
         source_target = self._pending_edit_target or self.stage.GetEditTarget()
         original_target = self.stage.GetEditTarget()
@@ -4304,6 +4420,7 @@ class NoticeEmitter:
                 self.stage.SetEditTarget(original_target)
             if succeeded:
                 self._pending_edit_target = None
+                self._pending_target_requires_exact_reads = False
                 self._edit_target_conflict = False
                 self._full_sdf_spec_scan = False
 

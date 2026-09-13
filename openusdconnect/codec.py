@@ -1,36 +1,15 @@
-"""FlatBuffers codec for the OpenUSDConnect wire protocol.
+"""FlatBuffers codec for the OpenUSDConnect wire and storage format.
 
-FlatBuffers is the canonical wire and storage format.  Zero-copy access
-is used wherever possible:
-
-  * **Receiver queue** stores raw bytes; decode on drain.
-  * **Broadcast relay** pre-framed binary sent to all receivers.
-  * **Event store** binary blobs written/read without re-serialization.
-
-The server's event-processing path (apply_txn) still operates on Python
-dicts events are decoded once on ingestion and the dict is passed to
-event_apply.  This is the primary conversion boundary.
-
-Primary API (zero-copy path):
-    encode_message(msg_dict)     -> bytes          # dict  → FB binary
-    decode_envelope(buf)         -> Envelope        # FB binary → typed FB object
-    resolve_payload(envelope)    -> (msg_type, obj) # Envelope → (str, typed FB table)
-    resolve_event(event_wrapper) -> (kind, obj)     # EventWrapper → (str, typed FB table)
-
-Debug / compaction API (copies):
-    message_to_dict(buf)  -> dict    # FB binary → Python dict
-    event_to_dict(ew)     -> dict    # EventWrapper → Python dict
-
-Fast checks:
-    is_ping(buf)          -> bool    # single-byte read, no alloc
-    payload_type(buf)     -> int     # raw union tag
+Receiver queues, broadcast relays, and event storage keep encoded bytes
+intact. Typed FlatBuffers accessors read those buffers directly; ingestion
+converts messages to dictionaries once for validation and application.
 """
 
 from __future__ import annotations
 
 import json
 import struct
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -46,6 +25,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -89,8 +69,7 @@ from .protocol_constants import (
     LayerMode,
 )
 
-# Re-export generated classes so consumers import from codec, not generated path.
-# These are the typed FB table classes the rest of the codebase works with.
+# Re-export the generated table classes used by the rest of the codebase.
 Envelope = _fb.Envelope
 Hello = _fb.Hello
 HelloOk = _fb.HelloOk
@@ -129,6 +108,7 @@ SetStageMetadata = _fb.SetStageMetadata
 SetInstanceable = _fb.SetInstanceable
 SetPointInstancer = _fb.SetPointInstancer
 SetSdfSpecFields = _fb.SetSdfSpecFields
+EraseTimeSamples = _fb.EraseTimeSamples
 ReplaceSdfLayerContent = _fb.ReplaceSdfLayerContent
 SetSublayers = _fb.SetSublayers
 ClaimPlayback = _fb.ClaimPlayback
@@ -921,12 +901,10 @@ def _encode_event_wrapper(b, ev: dict) -> int:
 
 
 def _create_float_vector(b, values):
-    """Create a FlatBuffers float32 vector via numpy bulk copy."""
     return b.CreateNumpyVector(np.asarray(values, dtype=np.float32))
 
 
 def _create_int_vector(b, values):
-    """Create a FlatBuffers int32 vector via numpy bulk copy."""
     return b.CreateNumpyVector(np.asarray(values, dtype=np.int32))
 
 
@@ -1031,7 +1009,6 @@ def _encode_set_visibility(b, ev):
 
 
 def _encode_attr_value(b, name: str, value) -> int:
-    """Encode a single named attribute value into a NamedAttr table."""
     name_off = b.CreateString(name)
     av_off = _encode_attr_value_inner(b, value)
     _fb.NamedAttrStart(b)
@@ -1041,7 +1018,6 @@ def _encode_attr_value(b, name: str, value) -> int:
 
 
 def _encode_attr_value_inner(b, value) -> int:
-    """Encode a Python value into an AttrValue table offset."""
     if isinstance(value, bool):
         _fb.AttrValueStart(b)
         _fb.AttrValueAddValueType(b, AttrValueType.ScalarBool)
@@ -1063,7 +1039,6 @@ def _encode_attr_value_inner(b, value) -> int:
         _fb.AttrValueAddValueType(b, AttrValueType.ScalarString)
         _fb.AttrValueAddScalarString(b, str_off)
         return _fb.AttrValueEnd(b)
-    # numpy arrays bulk encode via CreateNumpyVector (zero-copy path)
     if isinstance(value, np.ndarray):
         return _encode_attr_value_numpy(b, value)
     if isinstance(value, list):
@@ -1077,7 +1052,6 @@ def _encode_attr_value_inner(b, value) -> int:
 
 
 def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
-    """Encode a numpy array into an AttrValue direct bulk copy."""
     if arr.size == 0:
         json_off = b.CreateString("[]")
         _fb.AttrValueStart(b)
@@ -1409,9 +1383,7 @@ def _encode_set_connectable_input(b, ev):
         # Coerce numeric sequences (incl. numpy arrays) into a flat float
         # vector; numpy arrays are not list-typed, but iterate fine.
         as_seq = None
-        if isinstance(value, np.ndarray) or (
-            isinstance(value, list) and not isinstance(value, str)
-        ):
+        if isinstance(value, (np.ndarray, list)):
             as_seq = list(value) if isinstance(value, np.ndarray) else value
 
         str_off = None
@@ -1578,6 +1550,25 @@ def _encode_set_point_instancer(b, ev):
 
 
 @register_encoder(
+    K_ERASE_TIME_SAMPLES,
+    fb_tag=EventPayloadType.EraseTimeSamples,
+    fb_class=EraseTimeSamples,
+)
+def _encode_erase_time_samples(b, ev):
+    prim = b.CreateString(ev["prim"])
+    spec_path = b.CreateString(ev["spec_path"])
+    _fb.EraseTimeSamplesStartTimesVector(b, len(ev["times"]))
+    for time in reversed(ev["times"]):
+        b.PrependFloat64(time)
+    times = b.EndVector()
+    _fb.EraseTimeSamplesStart(b)
+    _fb.EraseTimeSamplesAddPrim(b, prim)
+    _fb.EraseTimeSamplesAddSpecPath(b, spec_path)
+    _fb.EraseTimeSamplesAddTimes(b, times)
+    return _fb.EraseTimeSamplesEnd(b)
+
+
+@register_encoder(
     K_SET_SDF_SPEC_FIELDS,
     fb_tag=EventPayloadType.SetSdfSpecFields,
     fb_class=SetSdfSpecFields,
@@ -1640,18 +1631,14 @@ def _encode_set_sublayers(b, ev):
     return _fb.SetSublayersEnd(b)
 
 
-# ===================================================================
-# DEBUG / COMPACTION API  (FlatBuffers -> dict, copies everything)
-# ===================================================================
+# Dict conversion API
 
 
 def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> dict:
     """Decode FlatBuffers wire bytes to a Python dict.
 
-    When *numpy_arrays* is True, geometry array attributes are returned as
-    numpy arrays (zero-copy views into the FlatBuffer) for efficient
-    Vt.*Array.FromNumpy() conversion in event_apply.  Default (False) returns
-    plain Python lists for JSON-safe compatibility.
+    With *numpy_arrays*, geometry arrays remain zero-copy views into the
+    FlatBuffer. Otherwise they become lists for JSON-safe compatibility.
     """
     envelope = decode_envelope(buf)
     msg_type, obj = resolve_payload(envelope)
@@ -2298,14 +2285,7 @@ def _dict_set_visibility(sv, kind):
 
 
 def _attr_value_to_python(av, numpy_arrays: bool = False):
-    """Convert an AttrValue FB object to a Python value.
-
-    When *numpy_arrays* is True, array types return numpy arrays (zero-copy
-    view into the FlatBuffer) so downstream consumers like event_apply can
-    pass them directly to Vt.*Array.FromNumpy() without intermediate lists.
-    When False (default), arrays are returned as plain Python lists for
-    JSON-safe compatibility (dashboard, tests, compaction).
-    """
+    """Decode an attribute value, optionally retaining arrays as NumPy views."""
     vt = av.ValueType()
     if vt == AttrValueType.ScalarFloat:
         return av.ScalarFloat()
@@ -2377,12 +2357,16 @@ def _dict_set_gprim_attrs(sg, kind, numpy_arrays=False):
     return ev
 
 
-@register_decoder(K_SET_REFERENCE)
-def _dict_set_reference(sr, kind):
-    explicit = sr.ListOpExplicit()
-    refs = []
-    for i in range(sr.RefsLength()):
-        arc = sr.Refs(i)
+def _dict_arc_entries(
+    length: int,
+    get_arc: Callable[[int], ArcEntry],
+    *,
+    explicit: bool,
+) -> list[dict]:
+    entries = []
+    default_position = "explicit" if explicit else "prepended"
+    for i in range(length):
+        arc = get_arc(i)
         entry = {}
         ap = _str(arc.AssetPath())
         if ap:
@@ -2391,7 +2375,6 @@ def _dict_set_reference(sr, kind):
         if pp:
             entry["prim_path"] = pp
         position = _FB_TO_ARC_POSITION[arc.ListPosition()]
-        default_position = "explicit" if explicit else "prepended"
         if position != default_position:
             entry["list_position"] = position
         if arc.LayerOffset() != 0.0:
@@ -2401,11 +2384,17 @@ def _dict_set_reference(sr, kind):
         custom_data = _str(arc.CustomDataFragment())
         if custom_data:
             entry["custom_data_fragment"] = custom_data
-        refs.append(entry)
+        entries.append(entry)
+    return entries
+
+
+@register_decoder(K_SET_REFERENCE)
+def _dict_set_reference(sr, kind):
+    explicit = sr.ListOpExplicit()
     return {
         "k": kind,
         "prim": _str(sr.Prim()),
-        "refs": refs,
+        "refs": _dict_arc_entries(sr.RefsLength(), sr.Refs, explicit=explicit),
         "list_op_authored": sr.ListOpAuthored(),
         "list_op_explicit": explicit,
     }
@@ -2414,32 +2403,14 @@ def _dict_set_reference(sr, kind):
 @register_decoder(K_SET_PAYLOAD)
 def _dict_set_payload(sp, kind):
     explicit = sp.ListOpExplicit()
-    payloads = []
-    for i in range(sp.PayloadsLength()):
-        arc = sp.Payloads(i)
-        entry = {}
-        ap = _str(arc.AssetPath())
-        if ap:
-            entry["asset_path"] = ap
-        pp = _str(arc.PrimPath())
-        if pp:
-            entry["prim_path"] = pp
-        position = _FB_TO_ARC_POSITION[arc.ListPosition()]
-        default_position = "explicit" if explicit else "prepended"
-        if position != default_position:
-            entry["list_position"] = position
-        if arc.LayerOffset() != 0.0:
-            entry["layer_offset"] = arc.LayerOffset()
-        if arc.LayerScale() != 1.0:
-            entry["layer_scale"] = arc.LayerScale()
-        custom_data = _str(arc.CustomDataFragment())
-        if custom_data:
-            entry["custom_data_fragment"] = custom_data
-        payloads.append(entry)
     return {
         "k": kind,
         "prim": _str(sp.Prim()),
-        "payloads": payloads,
+        "payloads": _dict_arc_entries(
+            sp.PayloadsLength(),
+            sp.Payloads,
+            explicit=explicit,
+        ),
         "list_op_authored": sp.ListOpAuthored(),
         "list_op_explicit": explicit,
     }
@@ -2577,6 +2548,16 @@ def _dict_set_connectable_connection(scc, kind):
     if disconnections:
         ev["disconnections"] = disconnections
     return ev
+
+
+@register_decoder(K_ERASE_TIME_SAMPLES)
+def _dict_erase_time_samples(erase, kind):
+    return {
+        "k": kind,
+        "prim": _str(erase.Prim()),
+        "spec_path": _str(erase.SpecPath()),
+        "times": [erase.Times(i) for i in range(erase.TimesLength())],
+    }
 
 
 @register_decoder(K_SET_SDF_SPEC_FIELDS)

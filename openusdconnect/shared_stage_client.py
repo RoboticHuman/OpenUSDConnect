@@ -23,6 +23,7 @@ from .client_id import make_stable_client_id
 from .codec import ReceivedEvent, decode_messages
 from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
 from .protocol_constants import (
+    K_ERASE_TIME_SAMPLES,
     K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_SUBLAYERS,
@@ -746,7 +747,7 @@ class SharedStageClient:
                     )
             self._tracker.sync_graph(force=True)
             return True
-        if kind not in (K_REPLACE_SDF_LAYER_CONTENT, K_SET_SDF_SPEC_FIELDS):
+        if kind not in (K_REPLACE_SDF_LAYER_CONTENT, K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
             raise ValueError(f"unsupported shared-stage event {kind!r}")
 
         layer = self._graph.layer_for(layer_key)

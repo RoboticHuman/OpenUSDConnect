@@ -28,5 +28,5 @@ def recv_msg(sock: socket.socket) -> bytes:
     return recv_framed(sock)
 
 
-# Backward-compatible alias will be removed once all callers migrate.
+# Legacy compatibility alias.
 send_line = send_msg

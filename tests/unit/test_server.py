@@ -442,10 +442,10 @@ class TestCompaction:
 
     def test_load_rules_compact_in_global_runtime_scope(self, srv):
         from openusdconnect.codec import encode_message
+        from openusdconnect.server.compaction import LogCompaction
 
-        latest = {}
-        srv._merge_event(
-            latest,
+        compaction = LogCompaction()
+        compaction.add_record(
             1,
             encode_message(
                 {
@@ -455,8 +455,7 @@ class TestCompaction:
                 }
             ),
         )
-        srv._merge_event(
-            latest,
+        compaction.add_record(
             2,
             encode_message(
                 {
@@ -467,7 +466,7 @@ class TestCompaction:
             ),
         )
 
-        assert [entry[0]["k"] for entry in latest.values()] == ["unload_payload"]
+        assert [entry.event["k"] for entry in compaction.replay_entries()] == ["unload_payload"]
 
     def test_stage_metadata_compaction_merges_sparse_fields(self, srv):
         self._insert_events(
@@ -2088,6 +2087,22 @@ class TestCompactionWithEditLayer:
 
 
 class TestTokenBucket:
+    @pytest.mark.parametrize(
+        ("rate", "burst"),
+        [
+            (0.0, 0),
+            (10.0, 0),
+            (0.0, 5),
+            (-1.0, 5),
+            (10.0, -1),
+            (float("inf"), 5),
+            (float("nan"), 5),
+        ],
+    )
+    def test_rejects_invalid_configuration(self, rate, burst):
+        with pytest.raises(ValueError):
+            TokenBucket(rate=rate, burst=burst)
+
     def test_burst_allows_immediate(self):
         """Burst tokens are available immediately."""
         tb = TokenBucket(rate=10.0, burst=5)
@@ -2125,6 +2140,23 @@ class TestTokenBucket:
 
 
 class TestRateLimitedServer:
+    @pytest.mark.parametrize(
+        ("txn_rate", "txn_burst"),
+        [(10.0, 0), (0.0, 10)],
+    )
+    def test_rate_and_burst_must_be_enabled_together(
+        self,
+        tmp_path,
+        txn_rate,
+        txn_burst,
+    ):
+        with pytest.raises(ValueError, match="both be zero or both be positive"):
+            UsdSyncServer(
+                log_path=str(tmp_path / "invalid-rate-limit.db"),
+                txn_rate=txn_rate,
+                txn_burst=txn_burst,
+            )
+
     def test_rate_limit_params_stored(self, tmp_path):
         """txn_rate and txn_burst are stored on the server."""
         db = str(tmp_path / "rl.db")

@@ -1,12 +1,4 @@
-"""Apply events to a Usd.Stage the core of the framework.
-
-Defines how protocol events map to USD mutations. Used by:
-- Server (authoritative stage)
-- Headless receivers
-- Any USD-based consumer
-
-All functions require pxr (OpenUSD Python bindings).
-"""
+"""Apply protocol events to a ``Usd.Stage``."""
 
 from __future__ import annotations
 
@@ -24,6 +16,7 @@ from .protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_ENSURE_XFORM_OPS,
+    K_ERASE_TIME_SAMPLES,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
     K_REPLACE_SDF_LAYER_CONTENT,
@@ -49,9 +42,6 @@ from .sdf_arc_state import apply_arc_state
 
 LOG = logging.getLogger(__name__)
 
-# Module-level singleton `Usd.TimeCode.Default()` is immutable, so the
-# usual mutable-default-arg footgun doesn't apply, but ruff's B008 still
-# flags the call. One shared instance keeps signatures clean.
 _TIME_DEFAULT = Usd.TimeCode.Default()
 
 
@@ -70,15 +60,9 @@ def get_or_define_prim(
     *,
     ensure_local_definition: bool = False,
 ) -> Usd.Prim:
-    """Get existing prim or define a new one. Idempotent.
-
-    Existing composed prims are returned without changing their ownership.
-    ``ensure_local_definition`` is reserved for ``ensure_prim`` events, which
-    represent an authored local definition and therefore create or update its
-    def spec.
-    """
+    """Return a prim, optionally ensuring a local ``def`` in the edit target."""
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         return stage.DefinePrim(prim_path, type_name)
     if not ensure_local_definition:
         return prim
@@ -104,37 +88,30 @@ def get_or_define_prim(
 
 
 def find_op(xf: UsdGeom.Xformable, op_base: str) -> UsdGeom.XformOp | None:
-    """Return the named xform op via direct attribute lookup.
-
-    Canonical ops always live at ``xformOp:translate``,
-    ``xformOp:orient``, ``xformOp:scale`` no scan needed.
-    """
+    """Return a canonical xform op by its base name."""
     attr = xf.GetPrim().GetAttribute(f"xformOp:{op_base}")
-    if attr and attr.IsValid():
+    if attr:
         return UsdGeom.XformOp(attr)
     return None
 
 
-_xform_path_cache: dict[str, tuple] = {}
+_xform_path_cache: dict[str, tuple[Sdf.Path, Sdf.Path, Sdf.Path, Sdf.Path]] = {}
 
 
-def _get_xform_paths(prim_path: str):
-    """Return cached (translate, orient, scale, order) Sdf.Path objects.
-
-    Sdf.Path construction from strings is ~17 µs per call.  Caching the
-    parsed paths eliminates repeated string→path parsing on the hot path.
-    The cache is safe to share: Sdf.Path is immutable and stateless.
-    """
-    paths = _xform_path_cache.get(prim_path)
+def _get_xform_paths(
+    prim_path: Sdf.Path,
+) -> tuple[Sdf.Path, Sdf.Path, Sdf.Path, Sdf.Path]:
+    """Return cached translate, orient, scale, and order property paths."""
+    cache_key = str(prim_path)
+    paths = _xform_path_cache.get(cache_key)
     if paths is None:
-        pp = Sdf.Path(prim_path)
         paths = (
-            pp.AppendProperty("xformOp:translate"),
-            pp.AppendProperty("xformOp:orient"),
-            pp.AppendProperty("xformOp:scale"),
-            pp.AppendProperty("xformOpOrder"),
+            prim_path.AppendProperty("xformOp:translate"),
+            prim_path.AppendProperty("xformOp:orient"),
+            prim_path.AppendProperty("xformOp:scale"),
+            prim_path.AppendProperty("xformOpOrder"),
         )
-        _xform_path_cache[prim_path] = paths
+        _xform_path_cache[cache_key] = paths
     return paths
 
 
@@ -143,83 +120,77 @@ _XFORM_OP_SPECS = [
     ("xformOp:orient", Sdf.ValueTypeNames.Quatf),
     ("xformOp:scale", Sdf.ValueTypeNames.Float3),
 ]
+_CANONICAL_XFORM_OP_ORDER = [name for name, _type_name in _XFORM_OP_SPECS]
+
+
+def _author_canonical_ops(
+    layer: Sdf.Layer,
+    prim_path: Sdf.Path,
+    property_paths: tuple[Sdf.Path, Sdf.Path, Sdf.Path, Sdf.Path],
+) -> None:
+    """Author missing canonical op specs and their order in ``layer``."""
+    prim_spec = layer.GetPrimAtPath(prim_path)
+    *op_paths, order_path = property_paths
+    with Sdf.ChangeBlock():
+        if prim_spec is None:
+            # A composed prim still needs a local over to hold these opinions.
+            prim_spec = Sdf.CreatePrimInLayer(layer, prim_path)
+        for property_path, (name, type_name) in zip(
+            op_paths,
+            _XFORM_OP_SPECS,
+            strict=True,
+        ):
+            if layer.GetAttributeAtPath(property_path) is None:
+                Sdf.AttributeSpec(prim_spec, name, type_name)
+
+        order_attr = layer.GetAttributeAtPath(order_path)
+        if order_attr is None:
+            order_attr = Sdf.AttributeSpec(
+                prim_spec,
+                "xformOpOrder",
+                Sdf.ValueTypeNames.TokenArray,
+            )
+            order_attr.SetInfo("variability", Sdf.VariabilityUniform)
+        order_attr.default = _CANONICAL_XFORM_OP_ORDER
 
 
 def ensure_canonical_ops(stage: Usd.Stage, prim_path: str, op_cache=None):
-    """Ensure canonical xform ops exist on prim: translate, orient (quatf), scale.
+    """Ensure a local translate/orient/scale stack and return its op handles.
 
-    Returns (prim, xformable, translate_op, orient_op, scale_op).
-    Enforces xformOpOrder = [translate, orient, scale].
-
-    When per-client layers are in use, ops may already exist on the
-    composed stage (from another client's layer) but not in the current
-    edit target. This function re-authors the op specs locally while
-    preserving the prim's ownership: an existing composed prim receives
-    an ``over`` unless an earlier ensure_prim deliberately authored a
-    local ``def``.
-
-    If *op_cache* has a hit and the edit target already has the ops,
-    returns cached op handles directly (avoids 3x find_op per txn).
-    Op handles are composed-stage references valid for any edit target.
+    Existing composed ops are re-authored in the current edit target. A cache
+    hit is valid only when that target already owns the complete stack.
     """
     prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
+    if not prim:
         prim = stage.DefinePrim(prim_path, "Xform")
     xf = UsdGeom.Xformable(prim)
 
-    # Pre-built Sdf.Path objects avoids ~70 µs of string→path parsing.
-    path_t, path_o, path_s, path_order = _get_xform_paths(prim_path)
-
-    # Check whether the edit target layer already has the ops.
-    layer = stage.GetEditTarget().GetLayer()
-    has_local_ops = (
-        layer.GetAttributeAtPath(path_t) is not None
-        and layer.GetAttributeAtPath(path_o) is not None
-        and layer.GetAttributeAtPath(path_s) is not None
+    edit_target = stage.GetEditTarget()
+    spec_path = edit_target.MapToSpecPath(Sdf.Path(prim_path))
+    if spec_path.isEmpty:
+        raise ValueError(f"Edit target cannot map prim path {prim_path!r}")
+    property_paths = _get_xform_paths(spec_path)
+    layer = edit_target.GetLayer()
+    *op_paths, order_path = property_paths
+    order_spec = layer.GetAttributeAtPath(order_path)
+    has_local_ops = all(layer.GetAttributeAtPath(path) is not None for path in op_paths)
+    has_canonical_order = (
+        order_spec is not None and order_spec.default == _CANONICAL_XFORM_OP_ORDER
     )
+    has_local_stack = has_local_ops and has_canonical_order
 
-    if has_local_ops:
+    if has_local_stack:
         cached = op_cache.get(prim_path) if op_cache is not None else None
-        if cached and cached[0] is not None:
+        if cached and all(op is not None for op in cached):
             return prim, xf, cached[0], cached[1], cached[2]
     else:
-        # Ops missing from edit target author attribute specs and
-        # xformOpOrder directly via Sdf so each layer is self-contained.
-        # The ChangeBlock batches the spec authoring into one
-        # change-processing round; authored individually, every spec
-        # creation and field write pays its own stage recomposition.
-        layer_spec = layer.GetPrimAtPath(prim_path)
-        with Sdf.ChangeBlock():
-            if layer_spec is None:
-                # OverridePrim is a no-op when the prim already exists only
-                # through composition. CreatePrimInLayer explicitly authors
-                # the local over needed to hold these xform opinions.
-                layer_spec = Sdf.CreatePrimInLayer(layer, prim_path)
-            for attr_name, type_name in _XFORM_OP_SPECS:
-                if not layer_spec.GetAttributeAtPath(Sdf.Path(prim_path).AppendProperty(attr_name)):
-                    Sdf.AttributeSpec(layer_spec, attr_name, type_name)
+        _author_canonical_ops(layer, spec_path, property_paths)
 
-            if not layer_spec.GetAttributeAtPath(path_order):
-                order_attr = Sdf.AttributeSpec(
-                    layer_spec,
-                    "xformOpOrder",
-                    Sdf.ValueTypeNames.TokenArray,
-                )
-                order_attr.SetInfo("variability", Sdf.VariabilityUniform)
-            else:
-                order_attr = layer_spec.GetAttributeAtPath(path_order)
-            order_attr.default = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
-
-    # Single iteration over ops instead of 3× find_op.
-    t = o = s = None
-    for op in xf.GetOrderedXformOps():
-        name = op.GetAttr().GetName()
-        if name == "xformOp:translate":
-            t = op
-        elif name == "xformOp:orient":
-            o = op
-        elif name == "xformOp:scale":
-            s = op
+    # Resolve by property name: a stronger layer may mask this target's
+    # xformOpOrder while its local values still need to be authored.
+    t = find_op(xf, "translate")
+    o = find_op(xf, "orient")
+    s = find_op(xf, "scale")
 
     return prim, xf, t, o, s
 
@@ -231,7 +202,7 @@ def quatf_from_wxyz(q) -> Gf.Quatf:
 
 
 def _ensure_primvar_attr(
-    prim: Usd.Prim, name: str, meta: dict, pvapi: UsdGeom.PrimvarsAPI
+    name: str, meta: dict, pvapi: UsdGeom.PrimvarsAPI
 ) -> Usd.Attribute | None:
     """Create a primvar attribute from metadata if it doesn't exist yet.
 
@@ -246,75 +217,67 @@ def _ensure_primvar_attr(
     return pv.GetAttr()
 
 
+_VEC3F_ARRAY_TYPES = frozenset(
+    {"float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"}
+)
+_VEC2F_ARRAY_TYPES = frozenset({"float2[]", "texCoord2f[]"})
+_VEC3F_TYPES = frozenset({"float3", "vector3f", "normal3f", "point3f", "color3f"})
+_VEC2F_TYPES = frozenset({"float2", "texCoord2f"})
+
+
+def _coerce_numpy_gprim_value(type_name: str, value: np.ndarray):
+    if type_name in _VEC3F_ARRAY_TYPES:
+        array = value.reshape(-1, 3).astype(np.float32, copy=False)
+        return Vt.Vec3fArray.FromNumpy(array)
+    if type_name in _VEC2F_ARRAY_TYPES:
+        array = value.reshape(-1, 2).astype(np.float32, copy=False)
+        return Vt.Vec2fArray.FromNumpy(array)
+    if type_name == "int[]":
+        return Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False))
+    if type_name == "float[]":
+        return Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False))
+    if type_name in _VEC3F_TYPES and value.size == 3:
+        # Boost.Python vector constructors do not accept numpy scalar types.
+        x, y, z = value.flat
+        return Gf.Vec3f(float(x), float(y), float(z))
+    if type_name in _VEC2F_TYPES and value.size == 2:
+        x, y = value.flat
+        return Gf.Vec2f(float(x), float(y))
+    if type_name == "double3" and value.size == 3:
+        x, y, z = value.flat
+        return Gf.Vec3d(float(x), float(y), float(z))
+    return value.tolist()
+
+
+def _coerce_list_gprim_value(type_name: str, value: list):
+    if type_name in _VEC3F_ARRAY_TYPES:
+        return Vt.Vec3fArray([Gf.Vec3f(*item) for item in value])
+    if type_name in _VEC2F_ARRAY_TYPES:
+        return Vt.Vec2fArray([Gf.Vec2f(*item) for item in value])
+    if type_name == "int[]":
+        return Vt.IntArray(value)
+    if type_name == "float[]":
+        return Vt.FloatArray(value)
+    if type_name in _VEC3F_TYPES and len(value) == 3:
+        return Gf.Vec3f(*value)
+    if type_name in _VEC2F_TYPES and len(value) == 2:
+        return Gf.Vec2f(*value)
+    if type_name == "double3" and len(value) == 3:
+        return Gf.Vec3d(*value)
+    return value
+
+
 def _set_gprim_attr(prim: Usd.Prim, name: str, value, time: Usd.TimeCode = _TIME_DEFAULT) -> None:
-    """Set a single attribute on a typed gprim, coercing to the schema-defined type.
-
-    Numpy arrays take a zero-copy ``Vt.*Array.FromNumpy`` path; Python lists are
-    converted via ``Gf``/``Vt`` constructors. ``time`` selects the time sample.
-    """
-    import numpy as np
-
+    """Set an existing gprim attribute using its declared USD type."""
     attr = prim.GetAttribute(name)
-    if not attr or not attr.IsValid():
+    if not attr:
         return
     type_name = str(attr.GetTypeName())
-
-    # numpy array fast path bulk conversion via FromNumpy
     if isinstance(value, np.ndarray):
-        if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
-            arr = value.reshape(-1, 3).astype(np.float32, copy=False)
-            attr.Set(Vt.Vec3fArray.FromNumpy(arr), time)
-        elif type_name in ("float2[]", "texCoord2f[]"):
-            arr = value.reshape(-1, 2).astype(np.float32, copy=False)
-            attr.Set(Vt.Vec2fArray.FromNumpy(arr), time)
-        elif type_name == "int[]":
-            attr.Set(Vt.IntArray.FromNumpy(value.ravel().astype(np.int32, copy=False)), time)
-        elif type_name == "float[]":
-            attr.Set(Vt.FloatArray.FromNumpy(value.ravel().astype(np.float32, copy=False)), time)
-        # Gf vector constructors reject numpy scalar dtypes through their
-        # Boost.Python bindings even though `value.flat` would otherwise be
-        # a lazy iterator destructure and cast to Python float, same
-        # shape as _apply_set_xform_trs.
-        elif (
-            type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
-            and value.size == 3
-        ):
-            x, y, z = value.flat
-            attr.Set(Gf.Vec3f(float(x), float(y), float(z)), time)
-        elif type_name in ("float2", "texCoord2f") and value.size == 2:
-            x, y = value.flat
-            attr.Set(Gf.Vec2f(float(x), float(y)), time)
-        elif type_name == "double3" and value.size == 3:
-            x, y, z = value.flat
-            attr.Set(Gf.Vec3d(float(x), float(y), float(z)), time)
-        else:
-            attr.Set(value.tolist(), time)
-        return
-
-    if isinstance(value, list):
-        if type_name in ("float3[]", "vector3f[]", "normal3f[]", "point3f[]", "color3f[]"):
-            arr = Vt.Vec3fArray([Gf.Vec3f(*v) for v in value])
-            attr.Set(arr, time)
-        elif type_name in ("float2[]", "texCoord2f[]"):
-            arr = Vt.Vec2fArray([Gf.Vec2f(*v) for v in value])
-            attr.Set(arr, time)
-        elif type_name == "int[]":
-            attr.Set(Vt.IntArray(value), time)
-        elif type_name == "float[]":
-            attr.Set(Vt.FloatArray(value), time)
-        elif (
-            type_name in ("float3", "vector3f", "normal3f", "point3f", "color3f")
-            and len(value) == 3
-        ):
-            attr.Set(Gf.Vec3f(*value), time)
-        elif type_name in ("float2", "texCoord2f") and len(value) == 2:
-            attr.Set(Gf.Vec2f(*value), time)
-        elif type_name == "double3" and len(value) == 3:
-            attr.Set(Gf.Vec3d(*value), time)
-        else:
-            attr.Set(value, time)
-    else:
-        attr.Set(value, time)
+        value = _coerce_numpy_gprim_value(type_name, value)
+    elif isinstance(value, list):
+        value = _coerce_list_gprim_value(type_name, value)
+    attr.Set(value, time)
 
 
 @register_applier(K_SET_XFORM_TRS)
@@ -325,7 +288,7 @@ def _apply_set_xform_trs(stage: Usd.Stage, ev: dict, op_cache=None) -> None:
         t_op, o_op, s_op = cached
     else:
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
+        if not prim:
             return
         xf = UsdGeom.Xformable(prim)
         t_op = find_op(xf, "translate")
@@ -367,7 +330,7 @@ def _apply_rename_prim(stage: Usd.Stage, ev: dict) -> None:
 @register_applier(K_SET_VISIBILITY)
 def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
-    if prim and prim.IsValid():
+    if prim:
         imageable = UsdGeom.Imageable(prim)
         vis_value = "inherited" if ev.get("visible", True) else "invisible"
         imageable.GetVisibilityAttr().Set(vis_value, _timecode(ev))
@@ -376,7 +339,7 @@ def _apply_set_visibility(stage: Usd.Stage, ev: dict) -> None:
 @register_applier(K_SET_GPRIM_ATTRS)
 def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
-    if not prim or not prim.IsValid():
+    if not prim:
         return
     primvar_meta = ev.get("primvar_meta", {})
     pvapi = UsdGeom.PrimvarsAPI(prim) if primvar_meta else None
@@ -385,8 +348,8 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
     for attr_name, attr_value in ev.get("attrs", {}).items():
         meta = primvar_meta.get(attr_name)
         # Create non-schema primvar attributes that don't exist yet
-        if meta and not prim.GetAttribute(attr_name).IsValid():
-            _ensure_primvar_attr(prim, attr_name, meta, pvapi)
+        if meta and not prim.GetAttribute(attr_name):
+            _ensure_primvar_attr(attr_name, meta, pvapi)
         _set_gprim_attr(prim, attr_name, attr_value, tc)
 
     # Set interpolation on primvars needed for schema-defined primvars
@@ -405,7 +368,7 @@ def _apply_set_gprim_attrs(stage: Usd.Stage, ev: dict) -> None:
     attr_interp = ev.get("attr_interp", {})
     for attr_name, interp in attr_interp.items():
         attr = prim.GetAttribute(attr_name)
-        if attr and attr.IsValid():
+        if attr:
             attr.SetMetadata("interpolation", interp)
 
 
@@ -432,7 +395,7 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
     over quath orientations).
     """
     prim = stage.GetPrimAtPath(ev["prim"])
-    if not prim or not prim.IsValid():
+    if not prim:
         return
     pi = UsdGeom.PointInstancer(prim)
     if not pi:
@@ -473,6 +436,14 @@ def _apply_set_point_instancer(stage: Usd.Stage, ev: dict) -> None:
             "inactiveIds",
             Sdf.Int64ListOp.CreateExplicit([int(i) for i in ev["inactive_ids"]]),
         )
+
+
+@register_applier(K_ERASE_TIME_SAMPLES)
+def _apply_erase_time_samples(stage, ev):
+    from .time_sample_delta import erase_time_samples
+
+    _events.get(K_ERASE_TIME_SAMPLES).validate(ev)
+    erase_time_samples(stage.GetEditTarget().GetLayer(), ev)
 
 
 @register_applier(K_SET_SDF_SPEC_FIELDS)
@@ -582,7 +553,7 @@ def _apply_set_material_binding(stage: Usd.Stage, ev: dict) -> None:
     UsdShade.MaterialBindingAPI.Apply(prim)
     rel_name = REL_MATERIAL_BINDING + (f":{purpose}" if purpose else "")
     binding_rel = prim.GetRelationship(rel_name)
-    if not binding_rel or not binding_rel.IsValid():
+    if not binding_rel:
         binding_rel = prim.CreateRelationship(rel_name)
     binding_rel.ClearTargets(removeSpec=False)
     if material_path:
@@ -663,7 +634,7 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
     info_id = ev.get("info_id", "")
     if info_id:
         prim = stage.GetPrimAtPath(ev["prim"])
-        if not prim or not prim.IsValid():
+        if not prim:
             prim = get_or_define_prim(stage, ev["prim"], "Shader")
         if prim.IsA(UsdShade.Shader):
             shader = UsdShade.Shader(prim)
@@ -672,7 +643,7 @@ def _apply_set_connectable_input(stage: Usd.Stage, ev: dict) -> None:
                 shader.CreateIdAttr(info_id)
     else:
         prim = stage.GetPrimAtPath(ev["prim"])
-        if not prim or not prim.IsValid():
+        if not prim:
             if not ev.get("inputs"):
                 return
             prim = stage.OverridePrim(ev["prim"])
@@ -692,10 +663,10 @@ def _resolve_shader_port_type(prim: Usd.Prim, attr: ConnectableAttr):
     Untyped overrides may carry ``info:id`` without redundantly authoring a
     Shader type opinion. Returns None when no registered node can be resolved.
     """
-    if not prim or not prim.IsValid():
+    if not prim:
         return None
     id_attr = prim.GetAttribute("info:id")
-    shader_id = id_attr.Get() if id_attr and id_attr.IsValid() else ""
+    shader_id = id_attr.Get() if id_attr else ""
     if not shader_id:
         return None
     node = Sdr.Registry().GetShaderNodeByIdentifier(shader_id)
@@ -776,7 +747,7 @@ def _apply_set_connectable_connection(stage: Usd.Stage, ev: dict) -> None:
     record lives on the local attribute and points upstream.
     """
     prim = stage.GetPrimAtPath(ev["prim"])
-    if not prim or not prim.IsValid():
+    if not prim:
         return
     local_connectable = UsdShade.ConnectableAPI(prim)
 
@@ -790,7 +761,7 @@ def _apply_set_connectable_connection(stage: Usd.Stage, ev: dict) -> None:
         # subsequent one).
         source_prim_path = conn["source_prim"]
         source_prim = stage.GetPrimAtPath(source_prim_path)
-        if not source_prim or not source_prim.IsValid():
+        if not source_prim:
             source_prim = get_or_define_prim(stage, source_prim_path, "Shader")
         source_connectable = UsdShade.ConnectableAPI(source_prim)
 
@@ -841,7 +812,7 @@ def _apply_ensure_prim(stage: Usd.Stage, ev: dict) -> None:
     type_name = ev["typeName"]
     ensure_definition = bool(type_name) or not ev.get("api_schemas")
     prim = stage.GetPrimAtPath(ev["prim"])
-    if ensure_definition or not prim or not prim.IsValid():
+    if ensure_definition or not prim:
         prim = get_or_define_prim(
             stage,
             ev["prim"],
@@ -864,7 +835,7 @@ def _apply_delete_prim(stage: Usd.Stage, ev: dict) -> None:
 @register_applier(K_DEACTIVATE_PRIM)
 def _apply_deactivate_prim(stage: Usd.Stage, ev: dict) -> None:
     prim = stage.GetPrimAtPath(ev["prim"])
-    if prim and prim.IsValid():
+    if prim:
         prim.SetActive(ev.get("active", False))
 
 
@@ -884,7 +855,7 @@ def _is_instance_proxy_target(stage: Usd.Stage, ev: dict) -> bool:
     if not stage.GetPrototypes():
         return False
     prim = stage.GetPrimAtPath(path)
-    if prim and prim.IsValid():
+    if prim:
         if prim.IsInstanceProxy():
             LOG.debug("dropping %s for instance proxy %s", ev.get("k"), path)
             return True
@@ -894,7 +865,7 @@ def _is_instance_proxy_target(stage: Usd.Stage, ev: dict) -> bool:
     parent = Sdf.Path(path).GetParentPath()
     while parent and parent != Sdf.Path.absoluteRootPath:
         p = stage.GetPrimAtPath(parent)
-        if p and p.IsValid():
+        if p:
             if p.IsInstance() or p.IsInstanceProxy():
                 LOG.debug("dropping %s under instance %s", ev.get("k"), parent)
                 return True
@@ -913,6 +884,67 @@ def apply_event(stage: Usd.Stage, ev: Event) -> None:
     spec.apply(stage, ev)
 
 
+def _validate_spec_events(events: list[Event]) -> None:
+    from .sdf_spec_delta import validate_spec_delta
+
+    for event in events:
+        if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+            validate_spec_delta(event)
+        elif event.get("k") == K_ERASE_TIME_SAMPLES:
+            _events.get(K_ERASE_TIME_SAMPLES).validate(event)
+
+
+def _is_api_schema_over(event: Event) -> bool:
+    return (
+        event.get("k") == K_ENSURE_PRIM
+        and not event.get("typeName")
+        and bool(event.get("api_schemas"))
+    )
+
+
+def _creates_prim(event: Event) -> bool:
+    return event.get("k") in CREATE_KINDS and not _is_api_schema_over(event)
+
+
+def _apply_segment(stage: Usd.Stage, events: list[Event], op_cache) -> None:
+    """Apply one barrier-free segment in dependency order."""
+    structural = [event for event in events if event.get("k") in STRUCTURAL_EVENT_KINDS]
+    create = [
+        event
+        for event in structural
+        if _creates_prim(event)
+    ]
+    create.sort(key=lambda event: event.get("prim", "").count("/"))
+    modify = [
+        event
+        for event in structural
+        if not _creates_prim(event) and not _is_api_schema_over(event)
+    ]
+    api_schema_overs = [event for event in structural if _is_api_schema_over(event)]
+
+    for event in (*create, *modify, *api_schema_overs):
+        if event.get("k") != K_ENSURE_XFORM_OPS:
+            apply_event(stage, event)
+            continue
+        if _is_instance_proxy_target(stage, event):
+            continue
+        _prim, _xformable, translate, orient, scale = ensure_canonical_ops(
+            stage,
+            event["prim"],
+            op_cache=op_cache,
+        )
+        op_cache[event["prim"]] = (translate, orient, scale)
+
+    for event in events:
+        if event.get("k") in STRUCTURAL_EVENT_KINDS:
+            continue
+        if event.get("k") == K_SET_XFORM_TRS:
+            if not _is_instance_proxy_target(stage, event):
+                _apply_set_xform_trs(stage, event, op_cache)
+        else:
+            apply_event(stage, event)
+
+
 def apply_events(
     stage: Usd.Stage,
     events: list[Event],
@@ -920,114 +952,41 @@ def apply_events(
     *,
     prevalidated: bool = False,
 ) -> None:
-    """Apply a list of events to a USD stage.
+    """Apply events in dependency order while preserving replacement barriers.
 
-    Ordering: within a segment, callers may pass events in any order. delete_prim
-    and rename_prim are sequencing barriers; the events between two barriers form
-    a segment applied prim-creating-kinds first (ancestors before descendants via
-    path depth), then the remaining structural kinds, then value-setting ops, so
-    the dependency that matters (a prim exists before anything authors on it)
-    holds regardless of shuffled input. Barriers are never reordered, so a
-    delete-then-recreate of the same path survives even when a whole replay
-    backlog is applied in one batch.
-
-    Events apply outside ``Sdf.ChangeBlock`` because the appliers resolve and
-    mutate through ``Usd`` APIs. ``SdfChangeBlock`` permits direct ``Sdf``
-    authoring only; downstream ``Usd`` queries while a block is open are unsafe.
-    delete_prim/rename_prim remain sequencing barriers so later events see the
-    composed result of every event before them.
-
-    *op_cache* is an optional dict-like mapping prim_path to
-    (translate_op, orient_op, scale_op).  Pass a persistent cache
-    (e.g. ``cachetools.LRUCache``) to avoid repeated ``find_op`` lookups
-    across calls.
-
-    *prevalidated* is for callers that already validated every exact Sdf
-    event in the larger transaction before splitting it into apply runs.
+    Creates precede other structural events and values within each segment.
+    Deletes, renames, and exact sample edits keep their input position.
+    Appliers remain outside ``Sdf.ChangeBlock`` because they query the composed
+    stage through ``Usd``.
+    ``op_cache`` may persist canonical op handles across calls on one stage; it
+    must not be shared across stages. Set ``prevalidated`` only when exact Sdf
+    events were already validated together.
     """
+    from .time_sample_delta import is_sample_history_barrier
+
     if op_cache is None:
         op_cache = {}
 
     if not prevalidated:
-        from .sdf_spec_delta import validate_spec_delta
+        _validate_spec_events(events)
 
-        for event in events:
-            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
-                validate_spec_delta(event)
-
-    def _apply_segment(segment: list) -> None:
-        # A prim must exist before anything authors on it: prim-creating kinds
-        # first (ancestors before descendants via path depth), then the other
-        # structural kinds, then value-setting ops.  Structural events each
-        # pay their own stage recomposition (they are create / delete / rename /
-        # arc operations that modify the prim index).  Value events only write
-        # typed values on already-established prims and attributes, so they
-        # do not benefit from a ChangeBlock (attr.Set uses a fast incremental
-        # Sdf path); an explicit ChangeBlock here would also be unsafe per the
-        # SdfChangeBlock contract which forbids Usd queries inside the block.
-        structural = [ev for ev in segment if ev.get("k") in STRUCTURAL_EVENT_KINDS]
-
-        # An empty-type ensure carrying only API schemas represents metadata
-        # on an already composed prim. Apply it after reference/payload arcs
-        # so it creates an over instead of a standalone typeless def.
-        def _is_api_over(ev):
-            return (
-                ev.get("k") == K_ENSURE_PRIM
-                and not ev.get("typeName")
-                and bool(ev.get("api_schemas"))
-            )
-
-        create = [ev for ev in structural if ev.get("k") in CREATE_KINDS and not _is_api_over(ev)]
-        create.sort(key=lambda ev: ev.get("prim", "").count("/"))
-        modify = [ev for ev in structural if ev.get("k") not in CREATE_KINDS or _is_api_over(ev)]
-        for ev in create + modify:
-            if ev.get("k") == K_ENSURE_XFORM_OPS:
-                if _is_instance_proxy_target(stage, ev):
-                    continue
-                _prim, _xf, t, o, s = ensure_canonical_ops(
-                    stage,
-                    ev["prim"],
-                    op_cache=op_cache,
-                )
-                op_cache[ev["prim"]] = (t, o, s)
-            else:
-                apply_event(stage, ev)
-        value = [ev for ev in segment if ev.get("k") not in STRUCTURAL_EVENT_KINDS]
-        for run_ev in value:
-            if run_ev.get("k") == K_SET_XFORM_TRS:
-                if not _is_instance_proxy_target(stage, run_ev):
-                    _apply_set_xform_trs(stage, run_ev, op_cache)
-            else:
-                apply_event(stage, run_ev)
-
-    # Split the batch at namespace edits so structural ops are never hoisted
-    # across a delete/rename. Without this, a delete received before a same-path
-    # recreate would let the recreate's structural ops run first and the delete
-    # would then clobber the recreated prim. That silently breaks a fresh client
-    # replaying the whole backlog in one batch (live clients escape it only
-    # because each transaction arrives as its own batch).
-    segment: list = []
-    for ev in events:
-        k = ev.get("k")
-        if k in (K_DELETE_PRIM, K_RENAME_PRIM):
+    segment: list[Event] = []
+    for event in events:
+        kind = event.get("k")
+        if kind in (K_DELETE_PRIM, K_RENAME_PRIM) or is_sample_history_barrier(event):
             if segment:
-                _apply_segment(segment)
+                _apply_segment(stage, segment, op_cache)
                 segment = []
-            op_cache.pop(ev.get("prim"), None)
-            apply_event(stage, ev)
+            op_cache.pop(event.get("prim"), None)
+            apply_event(stage, event)
         else:
-            segment.append(ev)
+            segment.append(event)
     if segment:
-        _apply_segment(segment)
+        _apply_segment(stage, segment, op_cache)
 
 
 class _AtomicApply:
-    """Context manager for atomic event application with rollback.
-
-    Snapshots the edit target layer on enter. If the block raises,
-    restores the snapshot so the stage returns to its pre-apply state.
-    Exceptions propagate __exit__ returns False.
-    """
+    """Roll back the full edit-target layer when a block raises."""
 
     __slots__ = ("_layer", "_backup")
 
@@ -1052,15 +1011,7 @@ class _AtomicApply:
 
 
 class _ScopedAtomicApply:
-    """Rollback scoped to the prim specs a batch may author on.
-
-    TransferContent copies the whole edit layer, which costs O(layer)
-    per batch; this variant copies only the touched prim subtrees, so
-    the snapshot stays O(touched prims). The caller must pass every
-    prim path the events can author on. Specs that did not exist before
-    the block are removed on rollback (tracked by their highest
-    pre-block-missing ancestor, so created ancestor chains go too).
-    """
+    """Roll back only the identity-mapped prim subtrees touched by a block."""
 
     __slots__ = ("_layer", "_paths", "_backup", "_saved", "_created_roots")
 
@@ -1132,7 +1083,7 @@ def atomic_apply_prim_paths(events) -> list[str] | None:
         kind = event.get("k")
         if kind in (K_SET_STAGE_METADATA, K_REPLACE_SDF_LAYER_CONTENT, K_SET_SUBLAYERS):
             return None
-        if kind == K_SET_SDF_SPEC_FIELDS:
+        if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
             if event.get("spec_kind") == "layer":
                 return None
             spec_path = Sdf.Path(event.get("spec_path", ""))
@@ -1170,33 +1121,37 @@ def atomic_apply_prim_paths(events) -> list[str] | None:
     return paths
 
 
+def _has_mapped_prim_scope(stage: Usd.Stage, prim_paths) -> bool:
+    edit_target = stage.GetEditTarget()
+    for raw_path in prim_paths:
+        scene_path = Sdf.Path(raw_path)
+        if edit_target.MapToSpecPath(scene_path) != scene_path:
+            return True
+    return False
+
+
 def atomic_apply(stage: Usd.Stage, prim_paths=None):
-    """Return a context manager for atomic event application.
+    """Return a rollback context for the current edit target.
 
-    Usage::
-
-        with atomic_apply(stage):
-            apply_events(stage, events)
-
-    On success, changes persist. On failure, the edit target layer
-    is restored to its state before the block partial applies
-    are rolled back.
-
-    With *prim_paths* (an iterable of every prim path the events can
-    author on), only those prim specs are backed up O(touched prims)
-    instead of an O(layer) ``TransferContent`` snapshot. Pass ``None``
-    when the batch can write outside prim scopes (stage metadata) or
-    the touched set is unknown.
+    Identity-mapped prim scopes use a focused snapshot. The caller must include
+    every prim subtree the block may write; omitted paths cannot be restored.
+    Layer-wide writes, unknown scopes, and composition-mapped edit targets
+    snapshot the full layer.
     """
-    if prim_paths is not None:
-        return _ScopedAtomicApply(stage, prim_paths)
-    return _AtomicApply(stage)
+    if prim_paths is None:
+        return _AtomicApply(stage)
+
+    paths = tuple(prim_paths)
+    if _has_mapped_prim_scope(stage, paths):
+        return _AtomicApply(stage)
+    return _ScopedAtomicApply(stage, paths)
 
 
 def atomic_apply_layer(layer: Sdf.Layer, prim_paths=None):
     """Atomic apply snapshot for a layer even while it is muted from a stage."""
-    if prim_paths is not None:
-        if any(Sdf.Path(path) == Sdf.Path.absoluteRootPath for path in prim_paths):
-            return _AtomicApply(layer)
-        return _ScopedAtomicApply(layer, prim_paths)
-    return _AtomicApply(layer)
+    if prim_paths is None:
+        return _AtomicApply(layer)
+    paths = tuple(prim_paths)
+    if any(Sdf.Path(path) == Sdf.Path.absoluteRootPath for path in paths):
+        return _AtomicApply(layer)
+    return _ScopedAtomicApply(layer, paths)

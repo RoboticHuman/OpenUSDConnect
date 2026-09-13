@@ -167,14 +167,12 @@ def _reload_addon(addon_zip: str, role: str) -> None:
     except Exception as exc:
         print(f"[USD Connect Bootstrap:{role}] addon_disable warning: {exc}")
 
-    # Purge cached modules so re-enable picks up new code from disk.
-    # Without this, Python's import cache returns stale module objects
-    # and new symbols (e.g. PRIMVAR_PREFIX) are not visible.
-    # Must clear both the addon modules AND the vendored core library.
+    # Refresh Python code but retain the process-lifetime native extension.
     prefixes = (ADDON_MODULE + ".", "openusdconnect.")
     stale = [
         k for k in sys.modules
-        if k in (ADDON_MODULE, "openusdconnect") or k.startswith(prefixes)
+        if k != "openusdconnect._native_client"
+        and (k in (ADDON_MODULE, "openusdconnect") or k.startswith(prefixes))
     ]
     for k in stale:
         del sys.modules[k]
