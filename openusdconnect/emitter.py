@@ -1371,9 +1371,7 @@ class CameraAttrsChannel(PrimChannel):
             if identity_target:
                 source = property_sources.get(name, {}).get("default")
             else:
-                source = edit_target.GetPropertySpecForScenePath(
-                    prim_path_obj.AppendProperty(name)
-                )
+                source = edit_target.GetPropertySpecForScenePath(prim_path_obj.AppendProperty(name))
             if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
                 continue
             value = source.default
@@ -1397,6 +1395,7 @@ class InstanceableChannel(PrimChannel):
     """Authored scenegraph-instancing flag; prototype paths stay local."""
 
     cache_key = _C_INSTANCEABLE
+    cache_default = {}
     reads_on_resync_only = True
 
     def read(self, stage, prim_path):
@@ -1407,11 +1406,14 @@ class InstanceableChannel(PrimChannel):
             specs = (edit_target.GetPrimSpecForScenePath(Sdf.Path(prim_path)),)
         for spec in specs:
             if spec is not None and spec.HasInfo("instanceable"):
-                return bool(spec.GetInfo("instanceable"))
-        return None
+                return {"instanceable": bool(spec.GetInfo("instanceable"))}
+        # Cache absence too; the Sdf path emits the field removal.
+        return {}
 
     def to_event(self, prim_path, diff):
-        return {"k": K_SET_INSTANCEABLE, "prim": prim_path, "instanceable": diff}
+        if diff:
+            return {"k": K_SET_INSTANCEABLE, "prim": prim_path, **diff}
+        return None
 
 
 def _read_edit_target_point_instancer(
@@ -1433,9 +1435,7 @@ def _read_edit_target_point_instancer(
             if field is not None:
                 return sources.get(field)
             return next(iter(sources.values()), None)
-        return edit_target.GetPropertySpecForScenePath(
-            prim_path_obj.AppendProperty(name)
-        )
+        return edit_target.GetPropertySpecForScenePath(prim_path_obj.AppendProperty(name))
 
     state: dict = {}
     if only is None or "prototypes" in only:
@@ -1462,15 +1462,17 @@ def _read_edit_target_point_instancer(
         )
         if source is not None:
             list_op = source.GetInfo("inactiveIds")
-            state["inactive_ids"] = [
-                int(value) for value in list_op.ApplyOperations([]) or ()
-            ]
+            state["inactive_ids"] = [int(value) for value in list_op.ApplyOperations([]) or ()]
 
     float_orientation = _property_spec("orientationsf")
-    orientation_name = "orientationsf" if isinstance(
-        float_orientation,
-        Sdf.AttributeSpec,
-    ) else "orientations"
+    orientation_name = (
+        "orientationsf"
+        if isinstance(
+            float_orientation,
+            Sdf.AttributeSpec,
+        )
+        else "orientations"
+    )
     if only is not None and only & POINT_INSTANCER_QUAT_ATTRS:
         only.update(POINT_INSTANCER_QUAT_ATTRS)
 
@@ -1533,9 +1535,7 @@ class PointInstancerChannel(PrimChannel):
         cached = cached or {}
         snapshot = self.cache_snapshot(current)
         changed = {
-            name: value
-            for name, value in current.items()
-            if snapshot[name] != cached.get(name)
+            name: value for name, value in current.items() if snapshot[name] != cached.get(name)
         }
         return (changed if changed else None), snapshot
 
@@ -1762,9 +1762,7 @@ def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
 
     if ev.get("time") is None:
         camera_updates = {
-            name: value
-            for name, value in ev.get("attrs", {}).items()
-            if name in _CAMERA_ATTR_NAMES
+            name: value for name, value in ev.get("attrs", {}).items() if name in _CAMERA_ATTR_NAMES
         }
         if camera_updates:
             camera_cache = emitter._prim_cache.setdefault(prim_path, {}).setdefault(
@@ -1835,7 +1833,9 @@ def _invalidate_set_visibility(emitter, prim_path, ev):
 def _invalidate_set_instanceable(emitter, prim_path, ev):
     if not _invalidation_targets_authoring_target(emitter):
         return
-    emitter._prim_cache.setdefault(prim_path, {})[_C_INSTANCEABLE] = bool(ev["instanceable"])
+    emitter._prim_cache.setdefault(prim_path, {})[_C_INSTANCEABLE] = {
+        "instanceable": bool(ev["instanceable"])
+    }
 
 
 # Wire field -> USD attr name the applier authors. The sample cache is keyed
@@ -2041,18 +2041,8 @@ class NoticeEmitter:
         # Building advances the diff caches, so retain one unsent batch.
         # Later notices stay dirty until the retained batch is released.
         self._prepared_events: list[dict] | None = None
-        # Specialized channels transport their own values, but their local
-        # field ownership can still change when an opinion is set or cleared.
-        # Keep those field deltas separate from fragment serialization so a
-        # transform drag does not enter the fragment serializer.
-        self._dirty_local_property_fields: dict[
-            str,
-            dict[str, set[str] | None],
-        ] = {}
-        # All fields authored on the current edit target, including fields
-        # transported by specialized events. This is separate from the Sdf
-        # fragment cache so clearing a fast-path value can remove the local
-        # opinion instead of replaying the newly exposed weaker value.
+        # Field presence includes channel-owned values so their removal can
+        # emit an Sdf clear without serializing fragments on ordinary edits.
         self._local_property_spec_fields: dict[str, set[str]] = {}
         # Last observed edit-target ownership. Namespace resyncs use it to
         # distinguish a removed local definition from a composed descendant
@@ -2485,7 +2475,6 @@ class NoticeEmitter:
         self._dirty_sdf_specs.clear()
         self._dirty_sdf_subtrees.clear()
         self._sdf_spec_fields.clear()
-        self._dirty_local_property_fields.clear()
         self._local_property_spec_fields.clear()
         self._local_prim_states.clear()
         self.dirty.clear()
@@ -2534,7 +2523,10 @@ class NoticeEmitter:
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            _fields, property_sources = self._local_property_state(cp)
+            property_fields, property_sources = self._local_property_state(cp)
+            for name, fields in property_fields.items():
+                event_path = str(child.GetPath().AppendProperty(name))
+                self._local_property_spec_fields[event_path] = set(fields)
             for channel in self._channels:
                 if not channel.applies_to(child):
                     continue
@@ -2626,7 +2618,6 @@ class NoticeEmitter:
         self._pending_edit_target = None
         self._pending_target_requires_exact_reads = False
         self._edit_target_conflict = False
-        self._dirty_local_property_fields.clear()
 
     def _record_edit_target(self, *, requires_exact_reads: bool = True) -> Usd.EditTarget:
         """Capture the target needed for reads while permitting exact variant specs."""
@@ -2721,25 +2712,6 @@ class NoticeEmitter:
             removed_fields = set(self._local_property_spec_fields.get(str(namespace_path), ()))
         self._mark_exact_sdf_spec(source_path, kind, removed_fields)
 
-    def _mark_local_property_fields(
-        self,
-        spec_path: str,
-        fields: set[str] | None,
-    ) -> None:
-        """Record specialized field-presence changes for ownership filtering."""
-        path = Sdf.Path(spec_path)
-        prim_path = str(path.GetPrimPath())
-        name = str(path.name)
-        by_name = self._dirty_local_property_fields.setdefault(prim_path, {})
-        if name in by_name:
-            current = by_name[name]
-            if current is None or fields is None:
-                by_name[name] = None
-            else:
-                current.update(fields)
-            return
-        by_name[name] = None if fields is None else set(fields)
-
     def _channel_owns_property(self, prim: Usd.Prim, name: str) -> bool:
         for channel in self._channels:
             if not channel.applies_to(prim):
@@ -2756,9 +2728,8 @@ class NoticeEmitter:
             return False
         attr = prim.GetAttribute(name)
         definition = prim.GetPrimDefinition()
-        needs_sdf_value = (
-            attr
-            and (attr.IsCustom() or not definition or not definition.GetSchemaPropertySpec(name))
+        needs_sdf_value = attr and (
+            attr.IsCustom() or not definition or not definition.GetSchemaPropertySpec(name)
         )
         if not needs_sdf_value:
             return False
@@ -3008,9 +2979,11 @@ class NoticeEmitter:
             elif changed_fields is None:
                 selected_fields = available_fields ^ previous_fields
             else:
-                changed_fields = set(changed_fields)
-                authored_fields = {str(field) for field in spec.ListInfoKeys()}
                 selected_fields = changed_fields & (available_fields | previous_fields)
+
+            # Resync scans must retain explicit clears of channel-owned fields.
+            if changed_fields:
+                authored_fields = {str(field) for field in spec.ListInfoKeys()}
                 selected_fields.update(changed_fields - authored_fields)
 
             requires_identity = self._sdf_spec_requires_identity(
@@ -3201,11 +3174,8 @@ class NoticeEmitter:
                     if not sdf_fields:
                         sdf_fields.add("timeSamples")
                     if sdf_fields <= _SDF_SPECIALIZED_FIELDS and not self._attr_filter(attr_name):
-                        # Record only the notice detail.  The build step reads
-                        # current ownership from the captured edit target;
-                        # retaining live Sdf specs here made correctness
-                        # depend on keeping a shadow property stack in sync.
-                        self._mark_local_property_fields(path_str, sdf_fields)
+                        # Channel values use the dirty-attr path; blocks need
+                        # exact Sdf fields because they mask weaker opinions.
                         spec = (
                             edit_layer.GetObjectAtPath(source_path)
                             if not source_path.isEmpty
@@ -3401,11 +3371,6 @@ class NoticeEmitter:
                 include_descendants and owner.startswith(prefix)
             ):
                 self._local_property_spec_fields.pop(spec_path, None)
-        for owner in tuple(self._dirty_local_property_fields):
-            if (include_root and owner == prim_path) or (
-                include_descendants and owner.startswith(prefix)
-            ):
-                self._dirty_local_property_fields.pop(owner, None)
 
     def _purge_subtree(
         self,
@@ -3483,15 +3448,6 @@ class NoticeEmitter:
                 moved.append((spec_path, new_path + suffix))
         for source, target in moved:
             self._local_property_spec_fields[target] = self._local_property_spec_fields.pop(source)
-        moved_local_fields = []
-        for owner in tuple(self._dirty_local_property_fields):
-            if owner == old_path or owner.startswith(old_prefix):
-                suffix = owner[len(old_path) :]
-                moved_local_fields.append((owner, new_path + suffix))
-        for source, target in moved_local_fields:
-            self._dirty_local_property_fields[target] = self._dirty_local_property_fields.pop(
-                source
-            )
         if old_path in self._local_prim_states:
             self._local_prim_states.pop(old_path)
             specs = self._local_prim_specs(new_path)
@@ -3812,8 +3768,8 @@ class NoticeEmitter:
         pc = self._prim_cache.setdefault(prim_path, {})
         first_encounter = prim_path not in self._known_prims
         is_resync = prim_path in self._notice_resynced_prims
-        local_field_changes = self._dirty_local_property_fields.pop(prim_path, None)
         dirty_attrs = self._dirty_attrs.get(prim_path)
+        property_names = set(dirty_attrs or ())
         property_notice_only = (
             not first_encounter
             and not is_resync
@@ -3827,8 +3783,6 @@ class NoticeEmitter:
         # stack transiently; neither path retains Sdf wrappers in the cache.
         if property_notice_only:
             local_specs = []
-            property_names = set(dirty_attrs or ())
-            property_names.update(local_field_changes or ())
             property_state = self._local_property_state_for_names(
                 prim_path,
                 property_names,
@@ -3846,21 +3800,20 @@ class NoticeEmitter:
         local_definition_spec = self._local_definition_spec(local_specs)
         previous_prim_state = self._local_prim_states.get(prim_path)
         local_properties, local_property_sources = property_state
-        if local_field_changes:
-            for name, changed_fields in local_field_changes.items():
-                event_path = str(Sdf.Path(prim_path).AppendProperty(name))
-                previous_fields = self._local_property_spec_fields.get(
-                    event_path,
-                    _EMPTY_FIELDS,
-                )
-                current_fields = local_properties.get(name, _EMPTY_FIELDS)
-                candidates = previous_fields if changed_fields is None else changed_fields
-                cleared_fields = (set(candidates) & previous_fields) - current_fields
-                if cleared_fields:
-                    # Fast-path events carry present values. A removed opinion
-                    # needs the generic Sdf clear so the receiver exposes its
-                    # weaker composed value instead of retaining stale data.
-                    self._mark_sdf_property_spec(event_path, cleared_fields)
+        if not property_notice_only:
+            property_names.update(local_properties)
+        for name in property_names:
+            event_path = str(Sdf.Path(prim_path).AppendProperty(name))
+            previous_fields = self._local_property_spec_fields.get(event_path, _EMPTY_FIELDS)
+            current_fields = local_properties.get(name, _EMPTY_FIELDS)
+            cleared_fields = previous_fields - current_fields
+            if cleared_fields:
+                # Value events cannot remove opinions or expose weaker values.
+                self._mark_sdf_property_spec(event_path, cleared_fields)
+            if current_fields:
+                self._local_property_spec_fields[event_path] = set(current_fields)
+            else:
+                self._local_property_spec_fields.pop(event_path, None)
         if not property_notice_only:
             events.extend(
                 self._build_prim_structure_events(
@@ -3889,14 +3842,6 @@ class NoticeEmitter:
         )
         events.extend(channel_events)
 
-        if local_field_changes:
-            for name in local_field_changes:
-                event_path = str(Sdf.Path(prim_path).AppendProperty(name))
-                current_fields = local_properties.get(name)
-                if current_fields:
-                    self._local_property_spec_fields[event_path] = set(current_fields)
-                else:
-                    self._local_property_spec_fields.pop(event_path, None)
         xform_event = self._build_default_xform_event(
             prim_path,
             prim,
