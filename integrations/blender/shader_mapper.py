@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 
-from openusdconnect.adapters import MultiNodeShaderMapper, ShaderMapper, ShaderMapperRegistry
+from openusdconnect.shader_mapping import MultiNodeShaderMapper, ShaderMapper, ShaderMapperRegistry
 
 LOG = logging.getLogger(__name__)
 

@@ -13,6 +13,8 @@ from openusdconnect.protocol_constants import EVENT_KEYS
 from openusdconnect.server.types import ReplayModeConflictError
 
 if TYPE_CHECKING:
+    from nicegui.client import Client
+
     from openusdconnect.server import UsdSyncServer
 
 DASHBOARD_STYLE = """
@@ -94,11 +96,13 @@ DASHBOARD_STYLE = """
 """
 
 
-def setup_pages(srv: UsdSyncServer):
+def setup_pages(srv: UsdSyncServer, *, on_client: Callable[[Client], None] | None = None):
     """Register all dashboard pages and API routes."""
 
     @ui.page("/")
     def index():
+        if on_client is not None:
+            on_client(ui.context.client)
         ui.add_css(DASHBOARD_STYLE)
         dark = ui.dark_mode(True)
 
@@ -1207,9 +1211,8 @@ def _build_event_feed(srv: UsdSyncServer, register_refresh=None, feed_api=None):
         register_refresh(_check_live)
     srv.add_event_listener(_on_live)
 
-    # Clean up listener when browser tab disconnects
-    from nicegui import app
-    app.on_disconnect(lambda: srv.remove_event_listener(_on_live))
+    # Keep the listener across reconnects, but release it with this page's client.
+    ui.context.client.on_delete(lambda: srv.remove_event_listener(_on_live))
 
 
 def _register_api_routes(srv: UsdSyncServer):

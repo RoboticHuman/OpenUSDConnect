@@ -64,6 +64,24 @@ def _drain_other(disp, target_seq, timeout=5.0):
             time.sleep(0.02)
 
 
+def test_reconnect_and_disconnect_join_mirror_threads(server):
+    session = _connect(server)
+    first = session.receiver.receiver
+    try:
+        assert first.is_alive()
+        session.sender.disconnect()
+        session.connect()
+        second = session.receiver.receiver
+        assert second is not first
+        assert not first.is_alive()
+        assert second.is_alive()
+        session.disconnect()
+        assert not second.is_alive()
+        session.disconnect()
+    finally:
+        session.disconnect()
+
+
 def test_mesh_roundtrip_and_fanout(server):
     session = _connect(server)
     other = None
@@ -171,9 +189,7 @@ def test_send_rejects_while_initial_replay_is_incomplete(server):
         reader.config.read_after_write_timeout_s = 1e-9
 
         with pytest.raises(ToolError) as error:
-            reader.send(
-                [{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}]
-            )
+            reader.send([{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}])
 
         assert error.value.code == "mirror_not_ready"
     finally:
