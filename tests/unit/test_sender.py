@@ -284,7 +284,9 @@ class TestEventSenderConnect:
         assert sender.connect(timeout=0.1) is False
         assert sender.connect(timeout=2.0) is False
         assert sender.connect(timeout=0.0) is False
-        assert observed == [0.1, 0.5]
+        assert len(observed) == 2
+        assert 0 < observed[0] <= 0.1
+        assert 0 < observed[1] <= 0.5
 
     def test_reconnect_replays_identical_bytes_until_duplicate_ack(self):
         srv, port = _make_server()

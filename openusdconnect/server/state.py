@@ -359,6 +359,56 @@ class UsdSyncServer:
         resolver_context: Ar.ResolverContext | None = None,
         layer_mode: LayerMode | str = LayerMode.MANAGED,
     ):
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
+        self._transaction_queue = None
+        self._transaction_thread = None
+        self._compact_thread = None
+        self._compact_wake = threading.Event()
+        self._persist_queue = None
+        self._persist_thread = None
+        self._broadcast_thread = None
+        self._owns_store = event_store is None
+        try:
+            self._initialize(
+                base_usd_path=base_usd_path, log_path=log_path, event_store=event_store,
+                op_cache_size=op_cache_size, department_priority=department_priority,
+                require_token=require_token, token_db_path=token_db_path,
+                durability=durability, txn_rate=txn_rate, txn_burst=txn_burst,
+                txn_batch_size=txn_batch_size, txn_batch_delay=txn_batch_delay,
+                compact_interval=compact_interval, reclaim_interval=reclaim_interval,
+                wire_metrics=wire_metrics, stage=stage, resolver_context=resolver_context,
+                layer_mode=layer_mode,
+            )
+        except BaseException:
+            try:
+                self.shutdown()
+            finally:
+                if self._owns_store and hasattr(self, "store"):
+                    self.store.close()
+            raise
+
+    def _initialize(
+        self,
+        base_usd_path: str | None = None,
+        log_path: str = "usd_events.db",
+        event_store: EventStore | None = None,
+        op_cache_size: int | None = None,
+        department_priority: list[str] | None = None,
+        require_token: bool = False,
+        token_db_path: str | None = None,
+        durability: str = "strict",
+        txn_rate: float = 0,
+        txn_burst: int = 0,
+        txn_batch_size: int = 256,
+        txn_batch_delay: float = 0.0005,
+        wire_metrics: bool = False,
+        compact_interval: float = 0,
+        reclaim_interval: float = 0,
+        stage: Usd.Stage | None = None,
+        resolver_context: Ar.ResolverContext | None = None,
+        layer_mode: LayerMode | str = LayerMode.MANAGED,
+    ):
         if stage is not None and base_usd_path:
             raise ValueError("stage and base_usd_path are mutually exclusive")
         if stage is not None and resolver_context is not None:
@@ -496,7 +546,6 @@ class UsdSyncServer:
             target=self._broadcast_loop,
             daemon=True,
         )
-        self._broadcast_thread.start()
 
         # Durability mode for writes without producer progress. Idempotent
         # producer transactions always persist their event and cumulative
@@ -519,8 +568,6 @@ class UsdSyncServer:
         self._compact_stop = False
         self._compact_wake = threading.Event()
         self._compact_thread: threading.Thread | None = None
-        if self._compact_interval > 0:
-            self._start_compaction_thread()
 
         # Storage reclaim (--reclaim-interval; 0 = disabled). Evaluated at
         # compaction and purge commits, where the log was just rewritten and
@@ -534,7 +581,6 @@ class UsdSyncServer:
                 target=self._persist_loop,
                 daemon=True,
             )
-            self._persist_thread.start()
 
         # prim_path → (translate_op, orient_op, scale_op). A cached XformOp is
         # only valid while the stage edit target is unchanged: any SetEditTarget
@@ -596,6 +642,14 @@ class UsdSyncServer:
                 name="ouc-transaction-commit",
                 daemon=True,
             )
+
+        # No worker sees partially initialized state or replay in progress.
+        self._broadcast_thread.start()
+        if self._persist_thread is not None:
+            self._persist_thread.start()
+        if self._compact_interval > 0:
+            self._start_compaction_thread()
+        if self._transaction_thread is not None:
             self._transaction_thread.start()
 
     @staticmethod
@@ -611,20 +665,26 @@ class UsdSyncServer:
         return f"{label}-{digest}"
 
     def shutdown(self):
-        """Stop background workers in dependency order."""
-        self._transaction_stopping = True
-        if self._transaction_queue is not None:
-            self._transaction_queue.put(None)
-            self._transaction_thread.join(timeout=10.0)
-        self._compact_stop = True
-        self._compact_wake.set()
-        if self._compact_thread is not None:
-            self._compact_thread.join(timeout=10.0)
-        if self._persist_queue is not None:
-            self._persist_queue.put(None)
-            self._persist_thread.join(timeout=10.0)
-        self._broadcast_queue.put(None)
-        self._broadcast_thread.join(timeout=10.0)
+        """Idempotently drain workers, including after incomplete initialization.
+
+        Successful construction leaves store ownership with the caller, as before.
+        Failed construction closes only the store created by this state object.
+        """
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+            self._transaction_stopping = True
+            self._compact_stop = True
+            self._compact_wake.set()
+            for prefix in ("transaction", "compact", "persist", "broadcast"):
+                thread = getattr(self, f"_{prefix}_thread")
+                if thread is None or thread.ident is None:
+                    continue
+                queue = getattr(self, f"_{prefix}_queue", None)
+                if queue is not None:
+                    queue.put(None)
+                thread.join()
 
     # ------------------------------------------------------------------
     # Periodic compaction

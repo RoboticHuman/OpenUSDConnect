@@ -8,17 +8,20 @@ counterpart of ``SharedStageClient`` with the same lifecycle shape
 
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from pxr import Sdf, Usd
 
+from ._client_lifecycle import (
+    deadline_after,
+    prepare_sender_token,
+    raise_if_rejected,
+    remaining_time,
+    stop_receiver,
+)
 from ._client_utils import (
-    ClientPhase,
-    ClientStatus,
-    SyncUpdate,
     client_origin,
     client_token_handlers,
     require_app_name,
@@ -27,7 +30,9 @@ from ._client_utils import (
 )
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
+from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .coalescing import TransformCoalescingWindow
+from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
@@ -39,11 +44,6 @@ from .recovery import (
     TransactionFailure,
 )
 from .sender import EventSender
-
-LOG = logging.getLogger(__name__)
-
-_DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 7200
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +67,8 @@ class ManagedClient:
         stage: Usd.Stage,
         *,
         app_name: str,
-        host: str = _DEFAULT_HOST,
-        port: int = _DEFAULT_PORT,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_SYNC_PORT,
         client_id: str | None = None,
         origin: str | None = None,
         department: str | None = None,
@@ -154,6 +154,11 @@ class ManagedClient:
     def stage(self) -> Usd.Stage | None:
         """Application-owned stage, or ``None`` while parked."""
         return self._stage
+
+    @property
+    def client_id(self) -> str:
+        """Stable identity used by both connection roles."""
+        return self._receiver.client_id
 
     @property
     def status(self) -> ClientStatus:
@@ -393,9 +398,11 @@ class ManagedClient:
         """Submit any coalesced transform, then wait for durable acknowledgement."""
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
+        deadline = deadline_after(timeout)
         if self._transform_coalescing.buffering:
             try:
-                self._connect_sender()
+                if not self._connect_sender(timeout=remaining_time(deadline)):
+                    return False
             except (PermissionError, ConnectionError):
                 return False
             if not self.synchronized:
@@ -403,7 +410,7 @@ class ManagedClient:
             events = self._transform_coalescing.force(self._emitter)
             if events and not self._send(events):
                 return False
-        return self._sender.flush(timeout)
+        return self._sender.flush(remaining_time(deadline))
 
     @property
     def auth_rejected(self) -> bool:
@@ -467,18 +474,17 @@ class ManagedClient:
     def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
             return True
-        if self._sender.token is None:
-            if self._receiver.token is not None:
-                self._sender.token = self._receiver.token
-            elif self._persist_token:
-                self._sender.token = resolve_client_token(self._host, self._port, None, True)
+        self._prepare_sender_token()
         if not self._sender.connect(timeout=timeout):
-            if self._sender.auth_rejected:
-                raise PermissionError("sender authentication rejected")
-            if self._sender.hello_rejected:
-                raise ConnectionError(self._sender.rejection_reason or "sender connection rejected")
+            raise_if_rejected(self._sender, "sender")
             return False
         return True
+
+    def _prepare_sender_token(self) -> None:
+        prepare_sender_token(
+            self._sender, self._receiver,
+            host=self._host, port=self._port, persist_token=self._persist_token,
+        )
 
     def _send(self, events: list[dict]) -> int:
         if not events:
@@ -536,10 +542,9 @@ class ManagedClient:
         received = self._dispatcher.drain_and_apply()
 
         sent = 0
-        try:
-            self._connect_sender()
-        except (PermissionError, ConnectionError):
-            pass  # sender connection is best-effort during update
+        if self._receiver.connected and not self._sender.connected:
+            self._prepare_sender_token()
+            self._sender.request_connect()
         if self._sender.connected and self.synchronized:
             sent = self._send(outgoing)
 
@@ -637,11 +642,7 @@ class ManagedClient:
         if self._closed:
             return
         self._sender.disconnect()
-        self._receiver.stop()
-        if self._receiver.is_alive():
-            self._receiver.join(timeout=2.0)
-            if self._receiver.is_alive():
-                LOG.warning("ManagedClient receiver thread did not stop within 2 seconds")
+        stop_receiver(self._receiver)
         self._dispatcher.close()
         self._emitter.cleanup()
         self._closed = True
