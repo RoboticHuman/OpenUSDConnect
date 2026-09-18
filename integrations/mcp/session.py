@@ -19,7 +19,7 @@ from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import K_SET_STAGE_METADATA, STAGE_METADATA_KEYS
 from openusdconnect.receiver import ReceiverThread
-from openusdconnect.sender import EventSender
+from openusdconnect.sender import EventSender, TransactionRejectedError
 
 from .config import McpConfig
 from .errors import ToolError
@@ -188,11 +188,10 @@ class ConnectionSession:
                     code="mirror_not_ready",
                     hint="Retry after usd_status reports mirror_synchronized=true.",
                 )
-        pre_seq = self.dispatcher.last_seq if self.dispatcher else 0
         if not self.sender.send_events(events):
             self.sender = None
             raise ToolError("send failed, connection lost", code="disconnected")
-        synced = self._drain_until(pre_seq + len(events))
+        synced = self._drain_after_write()
         return {
             "sent": True,
             "event_count": len(events),
@@ -200,15 +199,34 @@ class ConnectionSession:
             "mirror_synced": synced,
         }
 
-    def _drain_until(self, target_seq: int) -> bool:
-        """Bounded drain until last_seq reaches target (best-effort RAW sync)."""
-        if self.dispatcher is None:
+    def _drain_after_write(self) -> bool:
+        """Wait for durable acknowledgement and application in the same server epoch."""
+        if self.dispatcher is None or self.receiver is None:
             return False
         deadline = time.monotonic() + self.config.read_after_write_timeout_s
-        while self.dispatcher.last_seq < target_seq and time.monotonic() < deadline:
-            if self.dispatcher.drain_and_apply() == 0:
-                time.sleep(0.005)
-        return self.dispatcher.last_seq >= target_seq
+        while True:
+            # A nonblocking poll avoids a reconnect handshake extending the read budget.
+            try:
+                acknowledged = self.sender.flush(timeout=0)
+            except TransactionRejectedError as exc:
+                raise ToolError(str(exc), code="transaction_rejected") from exc
+            self.dispatcher.drain_and_apply()
+            checkpoint = self.sender.acknowledged_checkpoint if acknowledged else None
+            if acknowledged and checkpoint is None:
+                # Older peers (or Hello-only recovery) cannot prove mirror visibility.
+                return False
+            if checkpoint is not None:
+                instance, epoch, head_seq = checkpoint
+                if (
+                    self.receiver.synchronized
+                    and self.receiver.server_instance == instance
+                    and self.receiver.replay_epoch == epoch
+                    and self.dispatcher.last_seq >= head_seq
+                ):
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
 
     def _drain_initial_replay(self) -> bool:
         """Apply the initial replay before returning when it fits the read timeout."""

@@ -1,5 +1,7 @@
 """Tests for ConnectionSession reconnect/teardown lifecycle."""
 
+import pytest
+
 from integrations.mcp import session as session_mod
 from integrations.mcp.config import McpConfig
 
@@ -10,6 +12,10 @@ class _FakeSender:
         self.auth_rejected = False
         self.stage_metadata = {}
         self.token = None
+        self.acknowledged_checkpoint = None
+
+    def flush(self, timeout=None):
+        return True
 
     def connect(self):
         return True
@@ -21,6 +27,8 @@ class _FakeSender:
 def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
         synchronized = True
+        server_instance = "test-server"
+        replay_epoch = 0
 
         def start(self):
             started.append(self)
@@ -117,7 +125,7 @@ def test_status_reports_mirror_synchronization(monkeypatch):
 
 def test_concurrent_foreign_write_cannot_confirm_own_transaction(monkeypatch):
     _patch_net(monkeypatch, [], [])
-    session = session_mod.ConnectionSession(McpConfig())
+    session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.02))
     session.connect()
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
 
@@ -132,5 +140,111 @@ def test_concurrent_foreign_write_cannot_confirm_own_transaction(monkeypatch):
         assert session.mirror_stage.GetPrimAtPath("/Foreign")
         assert not session.mirror_stage.GetPrimAtPath("/Own")
         assert result["mirror_synced"] is False
+    finally:
+        session.disconnect()
+
+
+@pytest.mark.parametrize("instance,epoch,head,ready,expected", [
+    ("test-server", 0, 1, True, True),
+    ("test-server", 0, 8, True, False),
+    ("other-server", 0, 1, True, False),
+    ("test-server", 1, 1, True, False),
+    ("test-server", 0, 1, False, False),
+])
+def test_confirmation_requires_matching_applied_checkpoint(
+    monkeypatch, instance, epoch, head, ready, expected,
+):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.02))
+    session.connect()
+    session.sender.acknowledged_checkpoint = (instance, epoch, head)
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+
+    def apply():
+        session.dispatcher.last_seq = 1
+        session.receiver.synchronized = ready
+        return 0
+
+    monkeypatch.setattr(session.dispatcher, "drain_and_apply", apply)
+    try:
+        # Input count is deliberately unrelated to the server's committed head.
+        assert session.send([{}] * 10)["mirror_synced"] is expected
+    finally:
+        session.disconnect()
+
+
+def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.2))
+    session.connect()
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    polls = []
+
+    def flush(timeout):
+        assert timeout == 0
+        polls.append(timeout)
+        if len(polls) >= 2:
+            session.sender.acknowledged_checkpoint = ("test-server", 0, 50)
+            return True
+        return False
+
+    def apply():
+        session.dispatcher.last_seq = 50 if len(polls) >= 3 else 1
+        return 1
+
+    monkeypatch.setattr(session.sender, "flush", flush)
+    monkeypatch.setattr(session.dispatcher, "drain_and_apply", apply)
+    try:
+        assert session.send([{}])["mirror_synced"]
+        assert len(polls) == 3
+    finally:
+        session.disconnect()
+
+
+def test_no_mirror_does_not_wait_for_confirmation(monkeypatch):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig(mirror_enabled=False))
+    session.connect()
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    monkeypatch.setattr(session.sender, "flush", lambda **kwargs: pytest.fail("unexpected wait"))
+    try:
+        assert not session.send([{}])["mirror_synced"]
+    finally:
+        session.disconnect()
+
+
+def test_pending_ack_times_out_without_false_confirmation(monkeypatch):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.02))
+    session.connect()
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    monkeypatch.setattr(session.sender, "flush", lambda timeout: False)
+    session.sender.acknowledged_checkpoint = ("test-server", 0, 1)
+    monkeypatch.setattr(session.dispatcher, "drain_and_apply", lambda: 0)
+    session.dispatcher.last_seq = 100
+    try:
+        assert not session.send([{}])["mirror_synced"]
+    finally:
+        session.disconnect()
+
+
+def test_rejected_transaction_is_reported_as_tool_error(monkeypatch):
+    from integrations.mcp.errors import ToolError
+    from openusdconnect.recovery import TransactionFailure
+    from openusdconnect.sender import TransactionRejectedError
+
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig())
+    session.connect()
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+
+    def reject(timeout):
+        raise TransactionRejectedError(TransactionFailure(txn_id=1, code=4, reason="invalid"))
+
+    monkeypatch.setattr(session.sender, "flush", reject)
+    try:
+        with pytest.raises(ToolError) as error:
+            session.send([{}])
+        assert error.value.code == "transaction_rejected"
     finally:
         session.disconnect()

@@ -2999,8 +2999,22 @@ class Hello(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # Hello
+    def ReplayServerInstance(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(24))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # Hello
+    def ReplayEpoch(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(26))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return None
+
 def HelloStart(builder):
-    builder.StartObject(10)
+    builder.StartObject(12)
 
 def HelloAddRole(builder, role):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(role), 0)
@@ -3031,6 +3045,12 @@ def HelloAddLayerMode(builder, layerMode):
 
 def HelloAddProducerSessionId(builder, producerSessionId):
     builder.PrependUOffsetTRelativeSlot(9, flatbuffers.number_types.UOffsetTFlags.py_type(producerSessionId), 0)
+
+def HelloAddReplayServerInstance(builder, replayServerInstance):
+    builder.PrependUOffsetTRelativeSlot(10, flatbuffers.number_types.UOffsetTFlags.py_type(replayServerInstance), 0)
+
+def HelloAddReplayEpoch(builder, replayEpoch):
+    builder.PrependUint64Slot(11, replayEpoch, None)
 
 def HelloEnd(builder):
     return builder.EndObject()
@@ -3093,8 +3113,29 @@ class HelloOk(object):
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
+    # HelloOk
+    def ServerInstance(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # HelloOk
+    def ReplayIdentity(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+    # HelloOk
+    def ReplayEpoch(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return None
+
 def HelloOkStart(builder):
-    builder.StartObject(5)
+    builder.StartObject(8)
 
 def HelloOkAddToken(builder, token):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(token), 0)
@@ -3110,6 +3151,15 @@ def HelloOkAddLayerMode(builder, layerMode):
 
 def HelloOkAddCommittedThrough(builder, committedThrough):
     builder.PrependUint64Slot(4, committedThrough, 0)
+
+def HelloOkAddServerInstance(builder, serverInstance):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(serverInstance), 0)
+
+def HelloOkAddReplayIdentity(builder, replayIdentity):
+    builder.PrependBoolSlot(6, replayIdentity, 0)
+
+def HelloOkAddReplayEpoch(builder, replayEpoch):
+    builder.PrependUint64Slot(7, replayEpoch, None)
 
 def HelloOkEnd(builder):
     return builder.EndObject()
@@ -3327,8 +3377,22 @@ class TransactionResult(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # TransactionResult
+    def HeadSeq(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int32Flags, o + self._tab.Pos)
+        return -1
+
+    # TransactionResult
+    def Epoch(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def TransactionResultStart(builder):
-    builder.StartObject(5)
+    builder.StartObject(7)
 
 def TransactionResultAddTxnId(builder, txnId):
     builder.PrependUint64Slot(0, txnId, 0)
@@ -3344,6 +3408,12 @@ def TransactionResultAddRejectionCode(builder, rejectionCode):
 
 def TransactionResultAddReason(builder, reason):
     builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
+
+def TransactionResultAddHeadSeq(builder, headSeq):
+    builder.PrependInt32Slot(5, headSeq, -1)
+
+def TransactionResultAddEpoch(builder, epoch):
+    builder.PrependUint64Slot(6, epoch, 0)
 
 def TransactionResultEnd(builder):
     return builder.EndObject()

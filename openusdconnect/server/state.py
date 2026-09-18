@@ -13,8 +13,10 @@ import os
 import queue
 import threading
 import time
+import uuid
+from collections.abc import Iterable
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pxr import Ar, Sdf, Usd, UsdGeom
 
@@ -90,6 +92,15 @@ _AUDIENCE_LAYERED = "layered"
 _AUDIENCES = frozenset({_AUDIENCE_ALL, _AUDIENCE_FLAT, _AUDIENCE_LAYERED})
 _DEFAULT_LAYER_KEY = "default"
 _DEPARTMENT_LAYER_KEY_PREFIX = "department:"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReceiverReplay:
+    head_seq: int
+    epoch: int
+    records: tuple[bytes, ...]
+    layer_stack_state: bytes | None
+    resync_reason: str | None
 
 
 @dataclass(slots=True)
@@ -457,6 +468,8 @@ class UsdSyncServer:
         # Virtual-file snapshots are keyed by an epoch plus the latest assigned
         # sequence. Epoch disambiguates compaction/purge resetting sequence IDs.
         self._snapshot_epoch = 0
+        self._replay_epoch = 0
+        self.server_instance = uuid.uuid4().hex
         self.scene_id = self._make_scene_id(base_usd_path)
         self.last_vfs_write_analysis: dict | None = None
 
@@ -1472,6 +1485,7 @@ class UsdSyncServer:
             self._next_seq = len(records) + 1
             self._seq_at_last_compact = self._next_seq
             self._snapshot_epoch += 1
+            self._replay_epoch += 1
         self._maybe_reclaim_storage()
 
         self.op_cache.clear()
@@ -1500,7 +1514,7 @@ class UsdSyncServer:
                         controls.append(encode_message(self.get_layer_stack_state()))
                     handler.request.sendall(frame_batch(controls))
                     self.replay_from(handler, 1)
-                    replay_epoch, replay_head = self.get_snapshot_token()
+                    replay_epoch, replay_head = self.get_replay_token()
                     handler.request.sendall(
                         frame_batch(
                             [
@@ -1549,6 +1563,7 @@ class UsdSyncServer:
             self._next_seq = 1
             self._seq_at_last_compact = 1
             self._snapshot_epoch += 1
+            self._replay_epoch += 1
         with self.stage_lock:
             self.layer_stack.clear()
         self.op_cache.clear()
@@ -1557,7 +1572,7 @@ class UsdSyncServer:
         self._instanceable_paths.clear()
         self._point_instancer_paths.clear()
         LOG.info("Purged event log and reset authored collaboration layers")
-        replay_epoch, replay_head = self.get_snapshot_token()
+        replay_epoch, replay_head = self.get_replay_token()
         with self.clients_lock:
             targets = list(self.receivers)
         disconnected = []
@@ -1595,6 +1610,11 @@ class UsdSyncServer:
         """Return ``(epoch, latest_seq)`` for virtual-file cache keys."""
         with self._seq_lock:
             return self._snapshot_epoch, max(0, self._next_seq - 1)
+
+    def get_replay_token(self) -> tuple[int, int]:
+        """Return the sequence domain and head, independent of VFS cache invalidation."""
+        with self._seq_lock:
+            return self._replay_epoch, max(0, self._next_seq - 1)
 
     def replace_from_stage_snapshot(
         self,
@@ -1890,6 +1910,7 @@ class UsdSyncServer:
                 self._next_seq = len(records) + 1
                 self._seq_at_last_compact = self._next_seq
                 self._snapshot_epoch += 1
+                self._replay_epoch += 1
 
             self.last_vfs_write_analysis = analysis.to_dict()
             self._maybe_reclaim_storage()
@@ -1898,7 +1919,7 @@ class UsdSyncServer:
             # together so the same receivers observe them in order without
             # another broadcast interleaving. ReplayComplete marks the new
             # durable head and restores readiness, even with no records.
-            replay_epoch, replay_head = self.get_snapshot_token()
+            replay_epoch, replay_head = self.get_replay_token()
             resync_bin = encode_message({"type": MSG_RESYNC, "reason": "vfs-write"})
             complete_bin = encode_message(
                 {
@@ -2106,13 +2127,21 @@ class UsdSyncServer:
             self._event_listeners.remove(callback)
 
     @contextmanager
-    def receiver_replay_window(self, handler):
+    def receiver_replay_window(
+        self,
+        handler,
+        sync_from: int = 1,
+        *,
+        replay_server_instance: str | None = None,
+        replay_epoch: int | None = None,
+    ):
         """Register a receiver at a stable replay-to-live boundary.
 
         The exclusive barrier is held only long enough to make prior realtime
-        writes durable, capture the replay watermark, and join the live
-        receiver set. The handler's send lock remains held while the caller
-        sends bounded replay, so newer captured broadcasts follow it.
+        writes durable, capture immutable records and routing with their
+        watermark, and join the live receiver set. Only the handler's send
+        lock remains held during delivery, so newer broadcasts follow replay
+        without network I/O holding the maintenance barrier.
         """
         self.txn_barrier.acquire_exclusive()
         send_lock_acquired = False
@@ -2126,7 +2155,27 @@ class UsdSyncServer:
                 self.receivers.add(handler)
                 receiver_registered = True
             replay_end = self.store.get_max_seq()
-            replay_epoch, _latest_seq = self.get_snapshot_token()
+            epoch, _latest_seq = self.get_replay_token()
+            # Absent identity fields preserve legacy explicit snapshot cursors.
+            prefix_mismatch = sync_from > 1 and replay_server_instance is not None and (
+                replay_server_instance != self.server_instance or replay_epoch != epoch
+            )
+            resync_reason = None
+            if prefix_mismatch or sync_from > replay_end + 1:
+                resync_reason = "replay_identity_changed" if prefix_mismatch else "seq_overflow"
+                sync_from = 1
+            with self.stage_lock:
+                layer_stack_state = (
+                    encode_message(self.get_layer_stack_state())
+                    if self.layer_mode is LayerMode.MANAGED
+                    and getattr(handler, "_layered_replay", False) else None
+                )
+                # Freeze only the selected suffix. Bytes are retained as-is;
+                # framing stays chunked and happens after the barrier releases.
+                records = tuple(self.store.get_from_seq_bin(sync_from, replay_end))
+            replay = _ReceiverReplay(
+                replay_end, epoch, records, layer_stack_state, resync_reason,
+            )
         except Exception:
             if receiver_registered:
                 with self.clients_lock:
@@ -2138,7 +2187,7 @@ class UsdSyncServer:
             self.txn_barrier.release_exclusive()
 
         try:
-            yield replay_end, replay_epoch
+            yield replay
         finally:
             handler.send_lock.release()
 
@@ -2654,8 +2703,7 @@ class UsdSyncServer:
             try:
                 self._commit_one_transaction_request(request)
             finally:
-                self.txn_barrier.release_shared()
-                request.done.set()
+                self._complete_transaction_request(request)
             return request
         try:
             self._transaction_queue.put(request)
@@ -2663,6 +2711,22 @@ class UsdSyncServer:
             self.txn_barrier.release_shared()
             raise
         return request
+
+    def _complete_transaction_request(self, request: _TransactionRequest) -> None:
+        """Bind visibility proof to the commit before releasing its maintenance barrier."""
+        try:
+            commit = request.commit
+            if request.error is None and commit is not None and commit.status == "committed":
+                # Reservations may roll back. A duplicate has durable producer
+                # progress, but no retained proof of its original sequence epoch.
+                request.commit = replace(
+                    commit, checkpoint=(self._replay_epoch, self.store.get_max_seq()),
+                )
+        except Exception:
+            LOG.exception("Could not capture transaction visibility checkpoint")
+        finally:
+            self.txn_barrier.release_shared()
+            request.done.set()
 
     @staticmethod
     def wait_for_transaction(request: _TransactionRequest) -> TransactionCommit:
@@ -2806,8 +2870,7 @@ class UsdSyncServer:
                         self._commit_one_transaction_request(request)
         finally:
             for request in requests:
-                self.txn_barrier.release_shared()
-                request.done.set()
+                self._complete_transaction_request(request)
 
     def _commit_one_transaction_request(self, request: _TransactionRequest) -> None:
         request.commit = None
@@ -3675,11 +3738,15 @@ class UsdSyncServer:
         layer target. Flat receivers are admitted only for a single unmuted
         collaboration layer, so both modes replay stored records directly.
         """
-        _REPLAY_CHUNK = 65536
         blobs = self.store.get_from_seq_bin(seq_start, seq_end)
+        self.replay_records(handler, blobs)
+
+    def replay_records(self, handler, records: Iterable[bytes]) -> None:
+        """Send already captured records without rereading mutable history."""
+        _REPLAY_CHUNK = 65536
         buf_parts: list[bytes] = []
         buf_size = 0
-        for blob in blobs:
+        for blob in records:
             framed = frame_batch([blob])
             buf_parts.append(framed)
             buf_size += len(framed)

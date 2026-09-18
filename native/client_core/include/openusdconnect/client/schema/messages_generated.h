@@ -4179,7 +4179,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TOKEN = 16,
     VT_LAYERED_REPLAY = 18,
     VT_LAYER_MODE = 20,
-    VT_PRODUCER_SESSION_ID = 22
+    VT_PRODUCER_SESSION_ID = 22,
+    VT_REPLAY_SERVER_INSTANCE = 24,
+    VT_REPLAY_EPOCH = 26
   };
   const ::flatbuffers::String *role() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ROLE);
@@ -4211,6 +4213,12 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *producer_session_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_PRODUCER_SESSION_ID);
   }
+  const ::flatbuffers::String *replay_server_instance() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_REPLAY_SERVER_INSTANCE);
+  }
+  ::flatbuffers::Optional<uint64_t> replay_epoch() const {
+    return GetOptional<uint64_t, uint64_t>(VT_REPLAY_EPOCH);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -4230,6 +4238,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_LAYER_MODE, 1) &&
            VerifyOffset(verifier, VT_PRODUCER_SESSION_ID) &&
            verifier.VerifyString(producer_session_id()) &&
+           VerifyOffset(verifier, VT_REPLAY_SERVER_INSTANCE) &&
+           verifier.VerifyString(replay_server_instance()) &&
+           VerifyField<uint64_t>(verifier, VT_REPLAY_EPOCH, 8) &&
            verifier.EndTable();
   }
 };
@@ -4268,6 +4279,12 @@ struct HelloBuilder {
   void add_producer_session_id(::flatbuffers::Offset<::flatbuffers::String> producer_session_id) {
     fbb_.AddOffset(Hello::VT_PRODUCER_SESSION_ID, producer_session_id);
   }
+  void add_replay_server_instance(::flatbuffers::Offset<::flatbuffers::String> replay_server_instance) {
+    fbb_.AddOffset(Hello::VT_REPLAY_SERVER_INSTANCE, replay_server_instance);
+  }
+  void add_replay_epoch(uint64_t replay_epoch) {
+    fbb_.AddElement<uint64_t>(Hello::VT_REPLAY_EPOCH, replay_epoch);
+  }
   explicit HelloBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -4290,8 +4307,12 @@ inline ::flatbuffers::Offset<Hello> CreateHello(
     ::flatbuffers::Offset<::flatbuffers::String> token = 0,
     bool layered_replay = false,
     OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed,
-    ::flatbuffers::Offset<::flatbuffers::String> producer_session_id = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> producer_session_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> replay_server_instance = 0,
+    ::flatbuffers::Optional<uint64_t> replay_epoch = ::flatbuffers::nullopt) {
   HelloBuilder builder_(_fbb);
+  if(replay_epoch) { builder_.add_replay_epoch(*replay_epoch); }
+  builder_.add_replay_server_instance(replay_server_instance);
   builder_.add_producer_session_id(producer_session_id);
   builder_.add_token(token);
   builder_.add_department(department);
@@ -4321,13 +4342,16 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
     const char *token = nullptr,
     bool layered_replay = false,
     OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed,
-    const char *producer_session_id = nullptr) {
+    const char *producer_session_id = nullptr,
+    const char *replay_server_instance = nullptr,
+    ::flatbuffers::Optional<uint64_t> replay_epoch = ::flatbuffers::nullopt) {
   auto role__ = role ? _fbb.CreateString(role) : 0;
   auto client_id__ = client_id ? _fbb.CreateString(client_id) : 0;
   auto origin__ = origin ? _fbb.CreateString(origin) : 0;
   auto department__ = department ? _fbb.CreateString(department) : 0;
   auto token__ = token ? _fbb.CreateString(token) : 0;
   auto producer_session_id__ = producer_session_id ? _fbb.CreateString(producer_session_id) : 0;
+  auto replay_server_instance__ = replay_server_instance ? _fbb.CreateString(replay_server_instance) : 0;
   return OpenUSDConnect::CreateHello(
       _fbb,
       role__,
@@ -4339,7 +4363,9 @@ inline ::flatbuffers::Offset<Hello> CreateHelloDirect(
       token__,
       layered_replay,
       layer_mode,
-      producer_session_id__);
+      producer_session_id__,
+      replay_server_instance__,
+      replay_epoch);
 }
 
 struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -4350,7 +4376,10 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_STAGE_METADATA = 6,
     VT_LAYERED_REPLAY = 8,
     VT_LAYER_MODE = 10,
-    VT_COMMITTED_THROUGH = 12
+    VT_COMMITTED_THROUGH = 12,
+    VT_SERVER_INSTANCE = 14,
+    VT_REPLAY_IDENTITY = 16,
+    VT_REPLAY_EPOCH = 18
   };
   const ::flatbuffers::String *token() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TOKEN);
@@ -4367,6 +4396,15 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint64_t committed_through() const {
     return GetField<uint64_t>(VT_COMMITTED_THROUGH, 0);
   }
+  const ::flatbuffers::String *server_instance() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SERVER_INSTANCE);
+  }
+  bool replay_identity() const {
+    return GetField<uint8_t>(VT_REPLAY_IDENTITY, 0) != 0;
+  }
+  ::flatbuffers::Optional<uint64_t> replay_epoch() const {
+    return GetOptional<uint64_t, uint64_t>(VT_REPLAY_EPOCH);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -4377,6 +4415,10 @@ struct HelloOk FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_LAYERED_REPLAY, 1) &&
            VerifyField<uint8_t>(verifier, VT_LAYER_MODE, 1) &&
            VerifyField<uint64_t>(verifier, VT_COMMITTED_THROUGH, 8) &&
+           VerifyOffset(verifier, VT_SERVER_INSTANCE) &&
+           verifier.VerifyString(server_instance()) &&
+           VerifyField<uint8_t>(verifier, VT_REPLAY_IDENTITY, 1) &&
+           VerifyField<uint64_t>(verifier, VT_REPLAY_EPOCH, 8) &&
            verifier.EndTable();
   }
 };
@@ -4400,6 +4442,15 @@ struct HelloOkBuilder {
   void add_committed_through(uint64_t committed_through) {
     fbb_.AddElement<uint64_t>(HelloOk::VT_COMMITTED_THROUGH, committed_through, 0);
   }
+  void add_server_instance(::flatbuffers::Offset<::flatbuffers::String> server_instance) {
+    fbb_.AddOffset(HelloOk::VT_SERVER_INSTANCE, server_instance);
+  }
+  void add_replay_identity(bool replay_identity) {
+    fbb_.AddElement<uint8_t>(HelloOk::VT_REPLAY_IDENTITY, static_cast<uint8_t>(replay_identity), 0);
+  }
+  void add_replay_epoch(uint64_t replay_epoch) {
+    fbb_.AddElement<uint64_t>(HelloOk::VT_REPLAY_EPOCH, replay_epoch);
+  }
   explicit HelloOkBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -4417,11 +4468,17 @@ inline ::flatbuffers::Offset<HelloOk> CreateHelloOk(
     ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
     bool layered_replay = false,
     OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed,
-    uint64_t committed_through = 0) {
+    uint64_t committed_through = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> server_instance = 0,
+    bool replay_identity = false,
+    ::flatbuffers::Optional<uint64_t> replay_epoch = ::flatbuffers::nullopt) {
   HelloOkBuilder builder_(_fbb);
+  if(replay_epoch) { builder_.add_replay_epoch(*replay_epoch); }
   builder_.add_committed_through(committed_through);
+  builder_.add_server_instance(server_instance);
   builder_.add_stage_metadata(stage_metadata);
   builder_.add_token(token);
+  builder_.add_replay_identity(replay_identity);
   builder_.add_layer_mode(layer_mode);
   builder_.add_layered_replay(layered_replay);
   return builder_.Finish();
@@ -4438,15 +4495,22 @@ inline ::flatbuffers::Offset<HelloOk> CreateHelloOkDirect(
     ::flatbuffers::Offset<OpenUSDConnect::SetStageMetadata> stage_metadata = 0,
     bool layered_replay = false,
     OpenUSDConnect::LayerMode layer_mode = OpenUSDConnect::LayerMode::Managed,
-    uint64_t committed_through = 0) {
+    uint64_t committed_through = 0,
+    const char *server_instance = nullptr,
+    bool replay_identity = false,
+    ::flatbuffers::Optional<uint64_t> replay_epoch = ::flatbuffers::nullopt) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
+  auto server_instance__ = server_instance ? _fbb.CreateString(server_instance) : 0;
   return OpenUSDConnect::CreateHelloOk(
       _fbb,
       token__,
       stage_metadata,
       layered_replay,
       layer_mode,
-      committed_through);
+      committed_through,
+      server_instance__,
+      replay_identity,
+      replay_epoch);
 }
 
 struct AuthRejected FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -4670,7 +4734,9 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
     VT_STATUS = 6,
     VT_EXPECTED_TXN_ID = 8,
     VT_REJECTION_CODE = 10,
-    VT_REASON = 12
+    VT_REASON = 12,
+    VT_HEAD_SEQ = 14,
+    VT_EPOCH = 16
   };
   uint64_t txn_id() const {
     return GetField<uint64_t>(VT_TXN_ID, 0);
@@ -4687,6 +4753,12 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
   const ::flatbuffers::String *reason() const {
     return GetPointer<const ::flatbuffers::String *>(VT_REASON);
   }
+  int32_t head_seq() const {
+    return GetField<int32_t>(VT_HEAD_SEQ, -1);
+  }
+  uint64_t epoch() const {
+    return GetField<uint64_t>(VT_EPOCH, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -4696,6 +4768,8 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
            VerifyField<uint8_t>(verifier, VT_REJECTION_CODE, 1) &&
            VerifyOffset(verifier, VT_REASON) &&
            verifier.VerifyString(reason()) &&
+           VerifyField<int32_t>(verifier, VT_HEAD_SEQ, 4) &&
+           VerifyField<uint64_t>(verifier, VT_EPOCH, 8) &&
            verifier.EndTable();
   }
 };
@@ -4719,6 +4793,12 @@ struct TransactionResultBuilder {
   void add_reason(::flatbuffers::Offset<::flatbuffers::String> reason) {
     fbb_.AddOffset(TransactionResult::VT_REASON, reason);
   }
+  void add_head_seq(int32_t head_seq) {
+    fbb_.AddElement<int32_t>(TransactionResult::VT_HEAD_SEQ, head_seq, -1);
+  }
+  void add_epoch(uint64_t epoch) {
+    fbb_.AddElement<uint64_t>(TransactionResult::VT_EPOCH, epoch, 0);
+  }
   explicit TransactionResultBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -4736,10 +4816,14 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResult(
     OpenUSDConnect::TransactionStatus status = OpenUSDConnect::TransactionStatus::Acknowledged,
     uint64_t expected_txn_id = 0,
     OpenUSDConnect::TransactionRejectionCode rejection_code = OpenUSDConnect::TransactionRejectionCode::None,
-    ::flatbuffers::Offset<::flatbuffers::String> reason = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> reason = 0,
+    int32_t head_seq = -1,
+    uint64_t epoch = 0) {
   TransactionResultBuilder builder_(_fbb);
+  builder_.add_epoch(epoch);
   builder_.add_expected_txn_id(expected_txn_id);
   builder_.add_txn_id(txn_id);
+  builder_.add_head_seq(head_seq);
   builder_.add_reason(reason);
   builder_.add_rejection_code(rejection_code);
   builder_.add_status(status);
@@ -4757,7 +4841,9 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResultDirect(
     OpenUSDConnect::TransactionStatus status = OpenUSDConnect::TransactionStatus::Acknowledged,
     uint64_t expected_txn_id = 0,
     OpenUSDConnect::TransactionRejectionCode rejection_code = OpenUSDConnect::TransactionRejectionCode::None,
-    const char *reason = nullptr) {
+    const char *reason = nullptr,
+    int32_t head_seq = -1,
+    uint64_t epoch = 0) {
   auto reason__ = reason ? _fbb.CreateString(reason) : 0;
   return OpenUSDConnect::CreateTransactionResult(
       _fbb,
@@ -4765,7 +4851,9 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResultDirect(
       status,
       expected_txn_id,
       rejection_code,
-      reason__);
+      reason__,
+      head_seq,
+      epoch);
 }
 
 struct ReplayComplete FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

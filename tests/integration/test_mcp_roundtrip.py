@@ -6,6 +6,7 @@ fan-out to an independent client. Headless, no DCC.
 """
 
 import socket
+import threading
 import time
 
 import pytest
@@ -21,6 +22,84 @@ from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from tests.helpers import start_server, stop_server
+
+
+def test_foreign_commit_cannot_confirm_blocked_own_commit(tmp_path, monkeypatch):
+    from openusdconnect.server import UsdSyncServer
+    from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
+
+    state = UsdSyncServer(log_path=str(tmp_path / "checkpoint.db"))
+    tcp = ThreadedTCPServer(("127.0.0.1", 0), ConnectionHandler, state, max_workers=8)
+    serving = threading.Thread(target=tcp.serve_forever, daemon=True)
+    serving.start()
+    session = ConnectionSession(McpConfig(port=tcp.server_address[1], client_id="owner"))
+    foreign = EventSender("127.0.0.1", tcp.server_address[1], client_id="foreign")
+    observed_foreign = threading.Event()
+    release_own = threading.Event()
+    apply = state._apply_validated_txn
+
+    def gated_apply(events, *args, **kwargs):
+        if any(event.get("prim") == "/Own" for event in events):
+            assert release_own.wait(5)
+        return apply(events, *args, **kwargs)
+
+    monkeypatch.setattr(state, "_apply_validated_txn", gated_apply)
+
+    def release_after_foreign():
+        if observed_foreign.wait(5):
+            time.sleep(0.05)
+        release_own.set()
+
+    release_thread = threading.Thread(target=release_after_foreign, daemon=True)
+    try:
+        session.connect()
+        assert foreign.connect()
+        send = session.sender.send_events
+
+        def send_after_foreign(events):
+            assert foreign.send_events([
+                {"k": "ensure_prim", "prim": "/Foreign", "typeName": "Xform"},
+            ])
+            assert foreign.flush(5)
+            return send(events)
+
+        drain = session.dispatcher.drain_and_apply
+
+        def observe():
+            result = drain()
+            if session.mirror_stage.GetPrimAtPath("/Foreign"):
+                observed_foreign.set()
+            return result
+
+        monkeypatch.setattr(session.sender, "send_events", send_after_foreign)
+        monkeypatch.setattr(session.dispatcher, "drain_and_apply", observe)
+        release_thread.start()
+        result = session.send([{"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}])
+        assert result["mirror_synced"]
+        assert observed_foreign.is_set()
+        assert session.mirror_stage.GetPrimAtPath("/Own")
+        # Cache-only invalidation must not strand the receiver in an old sequence domain.
+        state.bump_snapshot_epoch("test-cache-invalidation")
+        assert session.send([
+            {"k": "ensure_prim", "prim": "/AfterCache", "typeName": "Xform"},
+        ])["mirror_synced"]
+        for reset, path in [(state.compact_log, "/AfterCompact"), (state.purge, "/AfterPurge")]:
+            reset()
+            assert session.send([
+                {"k": "ensure_prim", "prim": path, "typeName": "Xform"},
+            ])["mirror_synced"]
+            assert session.mirror_stage.GetPrimAtPath(path)
+    finally:
+        release_own.set()
+        if release_thread.ident is not None:
+            release_thread.join(6)
+        session.disconnect()
+        foreign.disconnect()
+        tcp.shutdown()
+        tcp.server_close()
+        serving.join(5)
+        state.shutdown()
+        state.store.close()
 
 
 def _free_port():

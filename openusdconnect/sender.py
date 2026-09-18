@@ -117,6 +117,20 @@ class EventSender:
         self._recovery_artifact: RecoveryArtifact | None = None
         self._recovery_incident: RecoveryIncident | None = None
         self._retry_after_until = 0.0
+        self._server_instance = ""
+        self._acknowledged_checkpoint: tuple[str, int, int] | None = None
+
+    @property
+    def acknowledged_checkpoint(self) -> tuple[str, int, int] | None:
+        """Post-commit ``(server_instance, epoch, head_seq)`` when all sends are acknowledged.
+
+        None means pending/rejected work or a peer without checkpoint support.
+        A Hello highwater alone does not establish a mirror checkpoint.
+        """
+        with self._condition:
+            if self._failure is not None or not self._session.empty:
+                return None
+            return self._acknowledged_checkpoint
 
     @property
     def is_connected(self) -> bool:
@@ -296,6 +310,9 @@ class EventSender:
             return False
 
         _, hello_ok = resolve_payload(env)
+        with self._condition:
+            self._server_instance = self._decode_string(hello_ok.ServerInstance()) or ""
+            self._acknowledged_checkpoint = None
         active_mode = LayerMode("shared_stage" if hello_ok.LayerMode() else "managed")
         if active_mode is not self.layer_mode:
             self.rejection_reason = (
@@ -582,6 +599,12 @@ class EventSender:
                 accepted = self._session.acknowledge_through(generation, txn_id)
                 if accepted == _client_backend.ProducerResult.STALE_GENERATION:
                     return
+                if accepted == _client_backend.ProducerResult.ACCEPTED:
+                    head_seq = int(result.HeadSeq())
+                    self._acknowledged_checkpoint = (
+                        (self._server_instance, int(result.Epoch()), head_seq)
+                        if self._server_instance and head_seq >= 0 else None
+                    )
                 if accepted != _client_backend.ProducerResult.ACCEPTED:
                     failure = TransactionFailure(
                         txn_id=txn_id,

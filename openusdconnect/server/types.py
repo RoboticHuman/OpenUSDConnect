@@ -50,6 +50,7 @@ class TransactionCommit:
     status: str
     txn_id: int
     records: tuple[tuple[dict[str, object], bytes], ...] = ()
+    checkpoint: tuple[int, int] | None = None
 
 
 class TransactionRejectedError(ValueError):

@@ -71,8 +71,9 @@ public:
 		std::lock_guard lock(Mutex);
 		++GenerationValue;
 		ResetSynchronization();
-		const std::int32_t SyncFrom = RequestedReplayFrom.value_or(
-			LastReceivedSequence > 0 ? LastReceivedSequence + 1 : InitialSyncFrom);
+		// The constructor seeds the snapshot prefix; zero after a reset means
+		// replay from one, even if no new event arrived before disconnecting.
+		const std::int32_t SyncFrom = RequestedReplayFrom.value_or(LastReceivedSequence + 1);
 		RequestedReplayFrom.reset();
 		return {GenerationValue, SyncFrom};
 	}

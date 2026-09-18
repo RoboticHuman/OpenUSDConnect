@@ -542,6 +542,10 @@ class BroadcastEventEncoder:
 
 def _encode_hello(b, msg):
     role = b.CreateString(msg["role"])
+    replay_instance = (
+        b.CreateString(msg["replay_server_instance"])
+        if msg.get("replay_server_instance") is not None else None
+    )
     client_id = b.CreateString(msg["client_id"]) if msg.get("client_id") else None
     origin = b.CreateString(msg["origin"]) if msg.get("origin") else None
     department = b.CreateString(msg["department"]) if msg.get("department") else None
@@ -553,6 +557,10 @@ def _encode_hello(b, msg):
     )
 
     _fb.HelloStart(b)
+    if replay_instance is not None:
+        _fb.HelloAddReplayServerInstance(b, replay_instance)
+    if msg.get("replay_epoch") is not None:
+        _fb.HelloAddReplayEpoch(b, int(msg["replay_epoch"]))
     _fb.HelloAddRole(b, role)
     _fb.HelloAddProtocolVersion(b, msg.get("protocol_version", 0))
     if msg.get("sync_from") is not None:
@@ -610,9 +618,16 @@ def _decode_stage_metadata_table(sm) -> dict:
 
 
 def _encode_hello_ok(b, msg):
+    instance = b.CreateString(msg["server_instance"]) if msg.get("server_instance") else None
     token = b.CreateString(msg["token"]) if msg.get("token") else None
     sm_off = _encode_stage_metadata_table(b, msg.get("stage_metadata"))
     _fb.HelloOkStart(b)
+    if msg.get("replay_epoch") is not None:
+        _fb.HelloOkAddReplayEpoch(b, int(msg["replay_epoch"]))
+    if msg.get("replay_identity"):
+        _fb.HelloOkAddReplayIdentity(b, True)
+    if instance:
+        _fb.HelloOkAddServerInstance(b, instance)
     if token:
         _fb.HelloOkAddToken(b, token)
     if sm_off is not None:
@@ -664,6 +679,8 @@ def _encode_transaction_result(b, msg):
     reason = b.CreateString(msg["reason"]) if msg.get("reason") else None
     _fb.TransactionResultStart(b)
     _fb.TransactionResultAddTxnId(b, int(msg["txn_id"]))
+    _fb.TransactionResultAddHeadSeq(b, int(msg.get("head_seq", -1)))
+    _fb.TransactionResultAddEpoch(b, int(msg.get("epoch", 0)))
     status = msg["status"]
     if isinstance(status, str):
         status = _TRANSACTION_STATUS_TO_FB[status]
@@ -1995,6 +2012,10 @@ def _str(val) -> str | None:
 
 def _dict_hello(h, msg_type):
     msg = {"type": msg_type, "role": _str(h.Role()), "protocol_version": h.ProtocolVersion()}
+    if h.ReplayServerInstance() is not None:
+        msg["replay_server_instance"] = _str(h.ReplayServerInstance())
+    if h.ReplayEpoch() is not None:
+        msg["replay_epoch"] = int(h.ReplayEpoch())
     sf = h.SyncFrom()
     if sf:
         msg["sync_from"] = sf
@@ -2018,6 +2039,12 @@ def _dict_hello(h, msg_type):
 
 def _dict_hello_ok(h, msg_type):
     msg = {"type": msg_type}
+    if h.ReplayEpoch() is not None:
+        msg["replay_epoch"] = int(h.ReplayEpoch())
+    if h.ReplayIdentity():
+        msg["replay_identity"] = True
+    if h.ServerInstance():
+        msg["server_instance"] = _str(h.ServerInstance())
     token = _str(h.Token())
     if token:
         msg["token"] = token
@@ -2156,6 +2183,9 @@ def _dict_transaction_result(result, msg_type):
         "rejection_code": int(result.RejectionCode()),
     }
     reason = _str(result.Reason())
+    if result.HeadSeq() >= 0:
+        msg["head_seq"] = int(result.HeadSeq())
+        msg["epoch"] = int(result.Epoch())
     if reason:
         msg["reason"] = reason
     return msg
