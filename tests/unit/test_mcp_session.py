@@ -113,3 +113,24 @@ def test_status_reports_mirror_synchronization(monkeypatch):
 
     assert status["mirror_synchronized"] is True
     session.disconnect()
+
+
+def test_concurrent_foreign_write_cannot_confirm_own_transaction(monkeypatch):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig())
+    session.connect()
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+
+    def apply_foreign_write():
+        session.mirror_stage.DefinePrim("/Foreign", "Xform")
+        session.dispatcher.last_seq += 1
+        return 1
+
+    monkeypatch.setattr(session.dispatcher, "drain_and_apply", apply_foreign_write)
+    try:
+        result = session.send([{"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}])
+        assert session.mirror_stage.GetPrimAtPath("/Foreign")
+        assert not session.mirror_stage.GetPrimAtPath("/Own")
+        assert result["mirror_synced"] is False
+    finally:
+        session.disconnect()
