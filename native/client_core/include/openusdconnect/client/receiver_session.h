@@ -251,7 +251,9 @@ public:
 	{
 		std::lock_guard lock(Mutex);
 		LastAppliedSequenceValue = 0;
-		ResetSynchronization();
+		// The consumer is applying a queued Resync. Its ReplayComplete may
+		// already have arrived, so retain that marker until its frames apply.
+		SynchronizedValue = false;
 	}
 
 	void ClearOverflow() noexcept
