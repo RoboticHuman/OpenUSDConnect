@@ -9,6 +9,7 @@ from pxr import Usd
 from integrations.mcp.config import McpConfig
 from integrations.mcp.session import ConnectionSession
 from openusdconnect.adapters import UsdStageAdapter
+from openusdconnect.checkpoints import MirrorCheckpoint
 from openusdconnect.codec import PayloadType, encode_message, message_to_dict
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.framing import recv_framed, send_framed
@@ -32,7 +33,9 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
             assert session.sender.connect()
             assert session.sender.send_events([_event("/Own")])
             assert session.sender.flush(5)
-            assert session.sender.acknowledged_checkpoint == (state.server_instance, 0, 1)
+            assert session.sender.acknowledged_checkpoint == MirrorCheckpoint(
+                state.server_instance, 0, 1
+            )
             state._broadcast_queue.join()
             session.mirror_stage = Usd.Stage.CreateInMemory()
             session.receiver = ReceiverThread(host="127.0.0.1", port=port)

@@ -24,6 +24,7 @@ from .adapters import (
     MockAdapter,
     UsdStageAdapter,
 )
+from .checkpoints import MirrorCheckpoint, TransactionCheckpoint
 from .codec import (
     DecodeResult,
     HelloRejectionCode,
@@ -78,6 +79,7 @@ __all__ = [
     "LayerMode",
     "ManagedClient",
     "ManagedRecoveryResult",
+    "MirrorCheckpoint",
     "MockAdapter",
     "NoticeEmitter",
     "PluginEnvironmentError",
@@ -97,6 +99,7 @@ __all__ = [
     "SyncUpdate",
     "TransactionRejectedError",
     "TransactionFailure",
+    "TransactionCheckpoint",
     "UsdPublisher",
     "UsdReceiver",
     "UsdStageAdapter",

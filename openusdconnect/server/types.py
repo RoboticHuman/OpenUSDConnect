@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from ..checkpoints import TransactionCheckpoint
+
 
 @dataclass
 class ClientInfo:
@@ -50,7 +52,7 @@ class TransactionCommit:
     status: str
     txn_id: int
     records: tuple[tuple[dict[str, object], bytes], ...] = ()
-    checkpoint: tuple[int, int] | None = None
+    checkpoint: TransactionCheckpoint | None = None
 
 
 class TransactionRejectedError(ValueError):

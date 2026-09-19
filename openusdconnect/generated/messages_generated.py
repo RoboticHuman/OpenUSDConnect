@@ -3324,6 +3324,52 @@ def TxnEnd(builder):
 
 
 
+class TransactionCheckpoint(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = TransactionCheckpoint()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsTransactionCheckpoint(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # TransactionCheckpoint
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # TransactionCheckpoint
+    def Epoch(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+    # TransactionCheckpoint
+    def HeadSeq(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int32Flags, o + self._tab.Pos)
+        return 0
+
+def TransactionCheckpointStart(builder):
+    builder.StartObject(2)
+
+def TransactionCheckpointAddEpoch(builder, epoch):
+    builder.PrependUint64Slot(0, epoch, 0)
+
+def TransactionCheckpointAddHeadSeq(builder, headSeq):
+    builder.PrependInt32Slot(1, headSeq, 0)
+
+def TransactionCheckpointEnd(builder):
+    return builder.EndObject()
+
+
+
 class TransactionResult(object):
     __slots__ = ['_tab']
 
@@ -3378,21 +3424,17 @@ class TransactionResult(object):
         return None
 
     # TransactionResult
-    def HeadSeq(self):
+    def Checkpoint(self):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         if o != 0:
-            return self._tab.Get(flatbuffers.number_types.Int32Flags, o + self._tab.Pos)
-        return -1
-
-    # TransactionResult
-    def Epoch(self):
-        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
-        if o != 0:
-            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
-        return 0
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = TransactionCheckpoint()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
 
 def TransactionResultStart(builder):
-    builder.StartObject(7)
+    builder.StartObject(6)
 
 def TransactionResultAddTxnId(builder, txnId):
     builder.PrependUint64Slot(0, txnId, 0)
@@ -3409,11 +3451,8 @@ def TransactionResultAddRejectionCode(builder, rejectionCode):
 def TransactionResultAddReason(builder, reason):
     builder.PrependUOffsetTRelativeSlot(4, flatbuffers.number_types.UOffsetTFlags.py_type(reason), 0)
 
-def TransactionResultAddHeadSeq(builder, headSeq):
-    builder.PrependInt32Slot(5, headSeq, -1)
-
-def TransactionResultAddEpoch(builder, epoch):
-    builder.PrependUint64Slot(6, epoch, 0)
+def TransactionResultAddCheckpoint(builder, checkpoint):
+    builder.PrependUOffsetTRelativeSlot(5, flatbuffers.number_types.UOffsetTFlags.py_type(checkpoint), 0)
 
 def TransactionResultEnd(builder):
     return builder.EndObject()

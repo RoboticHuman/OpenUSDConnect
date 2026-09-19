@@ -12,6 +12,7 @@ dict <-> FlatBuffers conversion.
 
 from __future__ import annotations
 
+from .checkpoints import TransactionCheckpoint
 from .events import Event
 from .protocol_constants import (
     MSG_CLAIM_PLAYBACK,
@@ -105,6 +106,7 @@ def make_transaction_result(
     expected_txn_id: int = 0,
     rejection_code: str = "none",
     reason: str = "",
+    checkpoint: TransactionCheckpoint | None = None,
 ) -> dict:
     """Build a cumulative durable producer result."""
     msg = {
@@ -118,6 +120,11 @@ def make_transaction_result(
         msg["rejection_code"] = rejection_code
     if reason:
         msg["reason"] = reason
+    if checkpoint is not None:
+        msg["checkpoint"] = {
+            "epoch": checkpoint.epoch,
+            "head_seq": checkpoint.head_seq,
+        }
     return msg
 
 

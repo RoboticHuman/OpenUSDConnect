@@ -557,10 +557,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         result = make_transaction_result(
                             commit.txn_id,
                             status="acknowledged",
+                            checkpoint=commit.checkpoint,
                         )
-                        if commit.checkpoint is not None:
-                            epoch, head_seq = commit.checkpoint
-                            result.update(epoch=epoch, head_seq=head_seq)
                     except TransactionRejectedError as exc:
                         result = make_transaction_result(
                             pending.txn_id,

@@ -38,6 +38,9 @@ def test_native_unreal_reliability_architecture_stays_explicit():
     framing = (plugin / "OpenUSDConnect" / "Private" / "USDWireFraming.h").read_text(
         encoding="utf-8"
     )
+    receiver_source = (plugin / "OpenUSDConnect" / "Private" / "SyncClient.cpp").read_text(
+        encoding="utf-8"
+    )
     transaction_builder = (plugin / "OpenUSDConnect" / "Private" / "TxnBuilder.cpp").read_text(
         encoding="utf-8"
     )
@@ -88,6 +91,8 @@ def test_native_unreal_reliability_architecture_stays_explicit():
     assert core.is_file()
     assert protocol.is_file()
     assert "BuildHelloFrame(Builder, Parameters)" in framing
+    assert "ReplayPrefixClaim ReplayPrefix" in framing
+    assert "ReplayPrefixClaim ReplayPrefix" in protocol_source
     assert "FinishTransactionFrame(" in transaction_builder
     assert "BuildXformTrsEvent(" in transaction_builder
     assert "BuildVisibilityEvent(" in transaction_builder
@@ -100,6 +105,12 @@ def test_native_unreal_reliability_architecture_stays_explicit():
     assert "struct FValidatedReceiverFrame" in receiver
     assert "OrderedReceiverSession<FValidatedReceiverFrame>" in receiver
     assert "FReceiverSession ReceiverSession" in receiver
+    assert "ReceiverReplayIdentity ReplayIdentityState" in receiver
+    assert "ReplayIdentityState.BeginConnection()" in receiver_source
+    assert "ReplayIdentityState.AcceptHello(" in receiver_source
+    assert "ReplayIdentityState.AcceptResync()" in receiver_source
+    assert "ReplayIdentityState.AcceptReplayComplete(" in receiver_source
+    assert "ReplayIdentityState.MarkReplayApplied()" in receiver_source
     assert "FQueuedReceiverFrame" not in subsystem_header
     assert "OnReceiverReplayGenerationChanged" in subsystem
     assert "RequestReceiverReplay(" in subsystem

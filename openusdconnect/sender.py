@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 
 from . import _client_backend
+from .checkpoints import MirrorCheckpoint
 from .codec import (
     PayloadType,
     TransactionRejectionCode,
@@ -118,11 +119,11 @@ class EventSender:
         self._recovery_incident: RecoveryIncident | None = None
         self._retry_after_until = 0.0
         self._server_instance = ""
-        self._acknowledged_checkpoint: tuple[str, int, int] | None = None
+        self._acknowledged_checkpoint: MirrorCheckpoint | None = None
 
     @property
-    def acknowledged_checkpoint(self) -> tuple[str, int, int] | None:
-        """Post-commit ``(server_instance, epoch, head_seq)`` when all sends are acknowledged.
+    def acknowledged_checkpoint(self) -> MirrorCheckpoint | None:
+        """Post-commit mirror position when all sends are acknowledged.
 
         None means pending/rejected work or a peer without checkpoint support.
         A Hello highwater alone does not establish a mirror checkpoint.
@@ -600,10 +601,15 @@ class EventSender:
                 if accepted == _client_backend.ProducerResult.STALE_GENERATION:
                     return
                 if accepted == _client_backend.ProducerResult.ACCEPTED:
-                    head_seq = int(result.HeadSeq())
+                    checkpoint = result.Checkpoint()
                     self._acknowledged_checkpoint = (
-                        (self._server_instance, int(result.Epoch()), head_seq)
-                        if self._server_instance and head_seq >= 0 else None
+                        MirrorCheckpoint(
+                            server_instance=self._server_instance,
+                            epoch=int(checkpoint.Epoch()),
+                            head_seq=int(checkpoint.HeadSeq()),
+                        )
+                        if self._server_instance and checkpoint is not None
+                        else None
                     )
                 if accepted != _client_backend.ProducerResult.ACCEPTED:
                     failure = TransactionFailure(

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 
 from pxr import Ar, Sdf, Usd, UsdGeom
 
+from ..checkpoints import TransactionCheckpoint
 from ..codec import BroadcastEventEncoder, encode_message, message_to_dict
 from ..emitter import (
     NoticeEmitter,
@@ -2720,7 +2721,11 @@ class UsdSyncServer:
                 # Reservations may roll back. A duplicate has durable producer
                 # progress, but no retained proof of its original sequence epoch.
                 request.commit = replace(
-                    commit, checkpoint=(self._replay_epoch, self.store.get_max_seq()),
+                    commit,
+                    checkpoint=TransactionCheckpoint(
+                        epoch=self._replay_epoch,
+                        head_seq=self.store.get_max_seq(),
+                    ),
                 )
         except Exception:
             LOG.exception("Could not capture transaction visibility checkpoint")

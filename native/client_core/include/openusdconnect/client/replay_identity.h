@@ -1,0 +1,157 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace openusdconnect::client
+{
+
+struct ReplayIdentity final
+{
+	std::string ServerInstance;
+	std::uint64_t Epoch = 0;
+
+	[[nodiscard]] bool operator==(const ReplayIdentity& other) const noexcept
+	{
+		return ServerInstance == other.ServerInstance && Epoch == other.Epoch;
+	}
+};
+
+// Presence of this value means the Hello explicitly carries replay-prefix
+// information. Empty fields represent an unknown prefix and force a safe reset.
+class ReplayPrefixIdentity final
+{
+public:
+	[[nodiscard]] static ReplayPrefixIdentity Unknown()
+	{
+		return ReplayPrefixIdentity();
+	}
+
+	[[nodiscard]] static ReplayPrefixIdentity Known(std::string server_instance,
+													std::uint64_t epoch)
+	{
+		if (server_instance.empty())
+		{
+			return Unknown();
+		}
+		ReplayPrefixIdentity identity;
+		identity.ServerInstanceValue = std::move(server_instance);
+		identity.EpochValue = epoch;
+		identity.KnownValue = true;
+		return identity;
+	}
+
+	[[nodiscard]] bool IsKnown() const noexcept
+	{
+		return KnownValue;
+	}
+
+	[[nodiscard]] std::string_view ServerInstance() const noexcept
+	{
+		return ServerInstanceValue;
+	}
+
+	[[nodiscard]] std::optional<std::uint64_t> Epoch() const noexcept
+	{
+		return KnownValue ? std::optional<std::uint64_t>(EpochValue) : std::nullopt;
+	}
+
+private:
+	std::string ServerInstanceValue;
+	std::uint64_t EpochValue = 0;
+	bool KnownValue = false;
+};
+
+using ReplayPrefixClaim = std::optional<ReplayPrefixIdentity>;
+
+// Tracks which replay sequence domain has actually been applied by a receiver.
+// Callers provide synchronization when connection and consumer threads overlap.
+class ReceiverReplayIdentity final
+{
+public:
+	[[nodiscard]] ReplayPrefixClaim BeginConnection()
+	{
+		PendingIdentity.reset();
+		ClaimedIdentity = AppliedIdentity;
+		const bool IncludeClaim = HelloSent;
+		HelloSent = true;
+		ClaimIncluded = IncludeClaim;
+		if (!IncludeClaim)
+		{
+			return std::nullopt;
+		}
+
+		if (AppliedIdentity)
+		{
+			return ReplayPrefixIdentity::Known(AppliedIdentity->ServerInstance,
+											   AppliedIdentity->Epoch);
+		}
+		return ReplayPrefixIdentity::Unknown();
+	}
+
+	void AcceptHello(std::int32_t sync_from, bool replay_identity_supported,
+					 std::string_view server_instance, std::optional<std::uint64_t> epoch)
+	{
+		ConnectionIdentity.reset();
+		if (replay_identity_supported && !server_instance.empty() && epoch)
+		{
+			ConnectionIdentity = ReplayIdentity{std::string(server_instance), *epoch};
+		}
+		ConnectionPrefixProven =
+			sync_from == 1 || (ClaimIncluded && ClaimedIdentity && ConnectionIdentity &&
+							   *ClaimedIdentity == *ConnectionIdentity);
+	}
+
+	void AcceptResync() noexcept
+	{
+		ConnectionPrefixProven = true;
+		PendingIdentity.reset();
+	}
+
+	void AcceptReplayComplete(std::uint64_t epoch)
+	{
+		if (ConnectionPrefixProven && ConnectionIdentity)
+		{
+			PendingIdentity = ReplayIdentity{ConnectionIdentity->ServerInstance, epoch};
+		}
+		else
+		{
+			PendingIdentity.reset();
+		}
+	}
+
+	void MarkReplayApplied()
+	{
+		AppliedIdentity = PendingIdentity;
+		PendingIdentity.reset();
+	}
+
+	[[nodiscard]] const std::optional<ReplayIdentity>& Applied() const noexcept
+	{
+		return AppliedIdentity;
+	}
+
+	[[nodiscard]] const std::optional<ReplayIdentity>& Pending() const noexcept
+	{
+		return PendingIdentity;
+	}
+
+	[[nodiscard]] bool IsConnectionPrefixProven() const noexcept
+	{
+		return ConnectionPrefixProven;
+	}
+
+private:
+	bool HelloSent = false;
+	bool ClaimIncluded = false;
+	bool ConnectionPrefixProven = false;
+	std::optional<ReplayIdentity> ClaimedIdentity;
+	std::optional<ReplayIdentity> ConnectionIdentity;
+	std::optional<ReplayIdentity> PendingIdentity;
+	std::optional<ReplayIdentity> AppliedIdentity;
+};
+
+} // namespace openusdconnect::client

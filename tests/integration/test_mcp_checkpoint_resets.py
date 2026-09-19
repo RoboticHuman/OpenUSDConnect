@@ -4,6 +4,7 @@ import threading
 
 from integrations.mcp.config import McpConfig
 from integrations.mcp.session import ConnectionSession
+from openusdconnect.checkpoints import MirrorCheckpoint, TransactionCheckpoint
 from tests.integration.test_receiver_replay_identity import _event, _server
 
 
@@ -31,7 +32,9 @@ def test_ack_retains_commit_checkpoint_when_purged_before_delivery(monkeypatch):
 
             monkeypatch.setattr(session.sender, "send_events", hold_drain_until_purged)
             result = session.send([_event("/Own")])
-            assert session.sender.acknowledged_checkpoint == (state.server_instance, 0, 1)
+            assert session.sender.acknowledged_checkpoint == MirrorCheckpoint(
+                state.server_instance, 0, 1
+            )
             assert not session.mirror_stage.GetPrimAtPath("/Own")
             assert result["mirror_synced"] is False
         finally:
@@ -42,7 +45,7 @@ def test_duplicate_after_purge_has_no_original_visibility_proof():
     with _server() as (state, _port):
         transaction = dict(session_id="producer", txn_id=1, client_id="producer")
         committed = state.process_idempotent_txn([_event("/Own")], **transaction)
-        assert committed.checkpoint == (0, 1)
+        assert committed.checkpoint == TransactionCheckpoint(0, 1)
         state.purge()
         duplicate = state.process_idempotent_txn([_event("/Own")], **transaction)
         assert duplicate.status == "duplicate"

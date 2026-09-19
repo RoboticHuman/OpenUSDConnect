@@ -216,12 +216,11 @@ class ConnectionSession:
                 # Older peers (or Hello-only recovery) cannot prove mirror visibility.
                 return False
             if checkpoint is not None:
-                instance, epoch, head_seq = checkpoint
                 if (
                     self.receiver.synchronized
-                    and self.receiver.server_instance == instance
-                    and self.receiver.replay_epoch == epoch
-                    and self.dispatcher.last_seq >= head_seq
+                    and self.receiver.server_instance == checkpoint.server_instance
+                    and self.receiver.replay_epoch == checkpoint.epoch
+                    and self.dispatcher.last_seq >= checkpoint.head_seq
                 ):
                     return True
             if time.monotonic() >= deadline:

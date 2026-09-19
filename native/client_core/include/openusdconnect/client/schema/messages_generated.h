@@ -129,6 +129,9 @@ struct HelloRejectedBuilder;
 struct Txn;
 struct TxnBuilder;
 
+struct TransactionCheckpoint;
+struct TransactionCheckpointBuilder;
+
 struct TransactionResult;
 struct TransactionResultBuilder;
 
@@ -4726,6 +4729,64 @@ inline ::flatbuffers::Offset<Txn> CreateTxnDirect(
       txn_id);
 }
 
+struct TransactionCheckpoint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef TransactionCheckpointBuilder Builder;
+  struct Traits;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_EPOCH = 4,
+    VT_HEAD_SEQ = 6
+  };
+  uint64_t epoch() const {
+    return GetField<uint64_t>(VT_EPOCH, 0);
+  }
+  int32_t head_seq() const {
+    return GetField<int32_t>(VT_HEAD_SEQ, 0);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint64_t>(verifier, VT_EPOCH, 8) &&
+           VerifyField<int32_t>(verifier, VT_HEAD_SEQ, 4) &&
+           verifier.EndTable();
+  }
+};
+
+struct TransactionCheckpointBuilder {
+  typedef TransactionCheckpoint Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_epoch(uint64_t epoch) {
+    fbb_.AddElement<uint64_t>(TransactionCheckpoint::VT_EPOCH, epoch, 0);
+  }
+  void add_head_seq(int32_t head_seq) {
+    fbb_.AddElement<int32_t>(TransactionCheckpoint::VT_HEAD_SEQ, head_seq, 0);
+  }
+  explicit TransactionCheckpointBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<TransactionCheckpoint> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<TransactionCheckpoint>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<TransactionCheckpoint> CreateTransactionCheckpoint(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint64_t epoch = 0,
+    int32_t head_seq = 0) {
+  TransactionCheckpointBuilder builder_(_fbb);
+  builder_.add_epoch(epoch);
+  builder_.add_head_seq(head_seq);
+  return builder_.Finish();
+}
+
+struct TransactionCheckpoint::Traits {
+  using type = TransactionCheckpoint;
+  static auto constexpr Create = CreateTransactionCheckpoint;
+};
+
 struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef TransactionResultBuilder Builder;
   struct Traits;
@@ -4735,8 +4796,7 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
     VT_EXPECTED_TXN_ID = 8,
     VT_REJECTION_CODE = 10,
     VT_REASON = 12,
-    VT_HEAD_SEQ = 14,
-    VT_EPOCH = 16
+    VT_CHECKPOINT = 14
   };
   uint64_t txn_id() const {
     return GetField<uint64_t>(VT_TXN_ID, 0);
@@ -4753,11 +4813,8 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
   const ::flatbuffers::String *reason() const {
     return GetPointer<const ::flatbuffers::String *>(VT_REASON);
   }
-  int32_t head_seq() const {
-    return GetField<int32_t>(VT_HEAD_SEQ, -1);
-  }
-  uint64_t epoch() const {
-    return GetField<uint64_t>(VT_EPOCH, 0);
+  const OpenUSDConnect::TransactionCheckpoint *checkpoint() const {
+    return GetPointer<const OpenUSDConnect::TransactionCheckpoint *>(VT_CHECKPOINT);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -4768,8 +4825,8 @@ struct TransactionResult FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
            VerifyField<uint8_t>(verifier, VT_REJECTION_CODE, 1) &&
            VerifyOffset(verifier, VT_REASON) &&
            verifier.VerifyString(reason()) &&
-           VerifyField<int32_t>(verifier, VT_HEAD_SEQ, 4) &&
-           VerifyField<uint64_t>(verifier, VT_EPOCH, 8) &&
+           VerifyOffset(verifier, VT_CHECKPOINT) &&
+           verifier.VerifyTable(checkpoint()) &&
            verifier.EndTable();
   }
 };
@@ -4793,11 +4850,8 @@ struct TransactionResultBuilder {
   void add_reason(::flatbuffers::Offset<::flatbuffers::String> reason) {
     fbb_.AddOffset(TransactionResult::VT_REASON, reason);
   }
-  void add_head_seq(int32_t head_seq) {
-    fbb_.AddElement<int32_t>(TransactionResult::VT_HEAD_SEQ, head_seq, -1);
-  }
-  void add_epoch(uint64_t epoch) {
-    fbb_.AddElement<uint64_t>(TransactionResult::VT_EPOCH, epoch, 0);
+  void add_checkpoint(::flatbuffers::Offset<OpenUSDConnect::TransactionCheckpoint> checkpoint) {
+    fbb_.AddOffset(TransactionResult::VT_CHECKPOINT, checkpoint);
   }
   explicit TransactionResultBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -4817,13 +4871,11 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResult(
     uint64_t expected_txn_id = 0,
     OpenUSDConnect::TransactionRejectionCode rejection_code = OpenUSDConnect::TransactionRejectionCode::None,
     ::flatbuffers::Offset<::flatbuffers::String> reason = 0,
-    int32_t head_seq = -1,
-    uint64_t epoch = 0) {
+    ::flatbuffers::Offset<OpenUSDConnect::TransactionCheckpoint> checkpoint = 0) {
   TransactionResultBuilder builder_(_fbb);
-  builder_.add_epoch(epoch);
   builder_.add_expected_txn_id(expected_txn_id);
   builder_.add_txn_id(txn_id);
-  builder_.add_head_seq(head_seq);
+  builder_.add_checkpoint(checkpoint);
   builder_.add_reason(reason);
   builder_.add_rejection_code(rejection_code);
   builder_.add_status(status);
@@ -4842,8 +4894,7 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResultDirect(
     uint64_t expected_txn_id = 0,
     OpenUSDConnect::TransactionRejectionCode rejection_code = OpenUSDConnect::TransactionRejectionCode::None,
     const char *reason = nullptr,
-    int32_t head_seq = -1,
-    uint64_t epoch = 0) {
+    ::flatbuffers::Offset<OpenUSDConnect::TransactionCheckpoint> checkpoint = 0) {
   auto reason__ = reason ? _fbb.CreateString(reason) : 0;
   return OpenUSDConnect::CreateTransactionResult(
       _fbb,
@@ -4852,8 +4903,7 @@ inline ::flatbuffers::Offset<TransactionResult> CreateTransactionResultDirect(
       expected_txn_id,
       rejection_code,
       reason__,
-      head_seq,
-      epoch);
+      checkpoint);
 }
 
 struct ReplayComplete FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

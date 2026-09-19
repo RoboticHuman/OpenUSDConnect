@@ -39,3 +39,9 @@ jobs:
 
       - name: Run unit tests
         run: uv run --frozen pytest tests/unit -q
+
+      - name: Build native client tests
+        run: cmake -S tests/native -B build/native-tests
+
+      - name: Run native client tests
+        run: cmake --build build/native-tests && ctest --test-dir build/native-tests --output-on-failure

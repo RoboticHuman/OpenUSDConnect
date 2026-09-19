@@ -677,10 +677,21 @@ def _encode_txn(b, msg):
 
 def _encode_transaction_result(b, msg):
     reason = b.CreateString(msg["reason"]) if msg.get("reason") else None
+    checkpoint = msg.get("checkpoint")
+    checkpoint_offset = None
+    if checkpoint is not None:
+        epoch = checkpoint["epoch"] if isinstance(checkpoint, dict) else checkpoint.epoch
+        head_seq = (
+            checkpoint["head_seq"] if isinstance(checkpoint, dict) else checkpoint.head_seq
+        )
+        _fb.TransactionCheckpointStart(b)
+        _fb.TransactionCheckpointAddEpoch(b, int(epoch))
+        _fb.TransactionCheckpointAddHeadSeq(b, int(head_seq))
+        checkpoint_offset = _fb.TransactionCheckpointEnd(b)
     _fb.TransactionResultStart(b)
     _fb.TransactionResultAddTxnId(b, int(msg["txn_id"]))
-    _fb.TransactionResultAddHeadSeq(b, int(msg.get("head_seq", -1)))
-    _fb.TransactionResultAddEpoch(b, int(msg.get("epoch", 0)))
+    if checkpoint_offset is not None:
+        _fb.TransactionResultAddCheckpoint(b, checkpoint_offset)
     status = msg["status"]
     if isinstance(status, str):
         status = _TRANSACTION_STATUS_TO_FB[status]
@@ -2183,9 +2194,12 @@ def _dict_transaction_result(result, msg_type):
         "rejection_code": int(result.RejectionCode()),
     }
     reason = _str(result.Reason())
-    if result.HeadSeq() >= 0:
-        msg["head_seq"] = int(result.HeadSeq())
-        msg["epoch"] = int(result.Epoch())
+    checkpoint = result.Checkpoint()
+    if checkpoint is not None:
+        msg["checkpoint"] = {
+            "epoch": int(checkpoint.Epoch()),
+            "head_seq": int(checkpoint.HeadSeq()),
+        }
     if reason:
         msg["reason"] = reason
     return msg

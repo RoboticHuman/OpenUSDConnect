@@ -7,6 +7,7 @@
 #include "Sockets.h"
 #include "USDConnectProtocol.h"
 #include "openusdconnect/client/receiver_session.h"
+#include "openusdconnect/client/replay_identity.h"
 #include <atomic>
 
 class UUSDConnectSubsystem;
@@ -105,10 +106,12 @@ private:
 	FString AuthToken;
 	float ReconnectDelaySecs;
 	FReceiverSession ReceiverSession;
+	openusdconnect::client::ReceiverReplayIdentity ReplayIdentityState;
 	std::atomic<uint64> ActiveGeneration;
 
 	FSocket* Socket;
 	FCriticalSection SocketCS;
+	FCriticalSection ReplayIdentityCS;
 	FRunnableThread* Thread;
 	std::atomic<bool> bShouldStop;
 	std::atomic<bool> bConnected;

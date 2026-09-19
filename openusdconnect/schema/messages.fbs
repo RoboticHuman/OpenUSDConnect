@@ -74,6 +74,11 @@ enum TransactionRejectionCode : ubyte {
     InvalidTransaction = 4,
 }
 
+table TransactionCheckpoint {
+    epoch:ulong;
+    head_seq:int;
+}
+
 // Server → producer cumulative result. Acknowledged means every transaction
 // through txn_id is durable for the session bound during Hello.
 table TransactionResult {
@@ -82,9 +87,9 @@ table TransactionResult {
     expected_txn_id:ulong;
     rejection_code:TransactionRejectionCode = None;
     reason:string;
-    // Optional post-commit mirror checkpoint. -1 means unavailable (older server).
-    head_seq:int = -1;
-    epoch:ulong;
+    // Optional post-commit mirror checkpoint. Absent on older servers and
+    // recovered duplicates whose original sequence domain is unavailable.
+    checkpoint:TransactionCheckpoint;
 }
 
 // Marks the exact replay-to-live boundary for one receiver connection. Every

@@ -4,6 +4,7 @@ import pytest
 
 from integrations.mcp import session as session_mod
 from integrations.mcp.config import McpConfig
+from openusdconnect.checkpoints import MirrorCheckpoint
 
 
 class _FakeSender:
@@ -157,7 +158,7 @@ def test_confirmation_requires_matching_applied_checkpoint(
     _patch_net(monkeypatch, [], [])
     session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.02))
     session.connect()
-    session.sender.acknowledged_checkpoint = (instance, epoch, head)
+    session.sender.acknowledged_checkpoint = MirrorCheckpoint(instance, epoch, head)
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
 
     def apply():
@@ -184,7 +185,7 @@ def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
         assert timeout == 0
         polls.append(timeout)
         if len(polls) >= 2:
-            session.sender.acknowledged_checkpoint = ("test-server", 0, 50)
+            session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 50)
             return True
         return False
 
@@ -219,7 +220,7 @@ def test_pending_ack_times_out_without_false_confirmation(monkeypatch):
     session.connect()
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     monkeypatch.setattr(session.sender, "flush", lambda timeout: False)
-    session.sender.acknowledged_checkpoint = ("test-server", 0, 1)
+    session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
     monkeypatch.setattr(session.dispatcher, "drain_and_apply", lambda: 0)
     session.dispatcher.last_seq = 100
     try:
