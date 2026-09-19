@@ -232,12 +232,19 @@ FinishEnvelopeFrame(flatbuffers::FlatBufferBuilder& builder,
 		return ProtocolResult::InvalidMaxFrameSize;
 	}
 
-	OpenUSDConnect::FinishSizePrefixedEnvelopeBuffer(builder, envelope);
-	const std::size_t payload_size = builder.GetSize() - kFrameHeaderSize;
-	const FrameResult result =
-		WriteFrameHeader(payload_size, builder.GetBufferPointer(), max_frame_size);
-	return result == FrameResult::Success ? ProtocolResult::Success
-										  : ProtocolResult::PayloadTooLarge;
+	OpenUSDConnect::FinishEnvelopeBuffer(builder, envelope);
+	const std::size_t payload_size = builder.GetSize();
+	std::uint8_t header[kFrameHeaderSize]{};
+	const FrameResult result = WriteFrameHeader(payload_size, header, max_frame_size);
+	if (result != FrameResult::Success)
+	{
+		return ProtocolResult::PayloadTooLarge;
+	}
+	// The transport header is not a FlatBuffers size prefix. Prepending it only
+	// after Finish keeps scalar alignment relative to the FlatBuffer payload,
+	// which is required when the verifier checks 64-bit fields.
+	builder.PushBytes(header, kFrameHeaderSize);
+	return ProtocolResult::Success;
 }
 
 [[nodiscard]] inline ProtocolResult

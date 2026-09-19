@@ -1,3 +1,7 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include "openusdconnect/client/replay_identity.h"
 
 #include <cassert>

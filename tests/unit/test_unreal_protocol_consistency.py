@@ -85,8 +85,10 @@ def test_native_unreal_reliability_architecture_stays_explicit():
     assert "MakeShared<FWireFrame, ESPMode::ThreadSafe>(MoveTemp(Frame))" in emitter_source
     assert "FinishEnvelopeFrame(Builder, RootOffset)" in framing
     assert "Builder.Release()" in framing
-    assert "FinishSizePrefixedEnvelopeBuffer(builder, envelope)" in protocol_source
-    assert "WriteFrameHeader(payload_size, builder.GetBufferPointer()" in protocol_source
+    assert "FinishEnvelopeBuffer(builder, envelope)" in protocol_source
+    assert "FinishSizePrefixedEnvelopeBuffer(builder, envelope)" not in protocol_source
+    assert "builder.PushBytes(header, kFrameHeaderSize)" in protocol_source
+    assert "WriteFrameHeader(payload_size, header, max_frame_size)" in protocol_source
     assert "EncodeFrameInto" not in framing
     assert core.is_file()
     assert protocol.is_file()

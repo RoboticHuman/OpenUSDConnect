@@ -1,3 +1,7 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include "openusdconnect/client/protocol_codec.h"
 
 #include <cassert>
