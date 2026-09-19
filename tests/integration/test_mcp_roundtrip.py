@@ -63,7 +63,7 @@ def test_foreign_commit_cannot_confirm_blocked_own_commit(tmp_path, monkeypatch)
             assert foreign.flush(5)
             return send(events)
 
-        drain = session.dispatcher.drain_and_apply
+        drain = session.receiver.update
 
         def observe():
             result = drain()
@@ -72,7 +72,7 @@ def test_foreign_commit_cannot_confirm_blocked_own_commit(tmp_path, monkeypatch)
             return result
 
         monkeypatch.setattr(session.sender, "send_events", send_after_foreign)
-        monkeypatch.setattr(session.dispatcher, "drain_and_apply", observe)
+        monkeypatch.setattr(session.receiver, "update", observe)
         release_thread.start()
         result = session.send([{"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}])
         assert result["mirror_synced"]
@@ -141,6 +141,24 @@ def _drain_other(disp, target_seq, timeout=5.0):
     while disp.last_seq < target_seq and time.monotonic() < deadline:
         if disp.drain_and_apply() == 0:
             time.sleep(0.02)
+
+
+def test_reconnect_and_disconnect_join_mirror_threads(server):
+    session = _connect(server)
+    first = session.receiver.receiver
+    try:
+        assert first.is_alive()
+        session.sender.disconnect()
+        session.connect()
+        second = session.receiver.receiver
+        assert second is not first
+        assert not first.is_alive()
+        assert second.is_alive()
+        session.disconnect()
+        assert not second.is_alive()
+        session.disconnect()
+    finally:
+        session.disconnect()
 
 
 def test_mesh_roundtrip_and_fanout(server):
@@ -250,9 +268,7 @@ def test_send_rejects_while_initial_replay_is_incomplete(server):
         reader.config.read_after_write_timeout_s = 1e-9
 
         with pytest.raises(ToolError) as error:
-            reader.send(
-                [{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}]
-            )
+            reader.send([{"k": "ensure_prim", "prim": "/World/TooSoon", "typeName": "Xform"}])
 
         assert error.value.code == "mirror_not_ready"
     finally:

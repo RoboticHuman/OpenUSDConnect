@@ -19,7 +19,7 @@ from openusdconnect.protocol_constants import LayerMode
 from openusdconnect.recovery import RejectionDisposition
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.sender import EventSender, TransactionRejectedError
-from openusdconnect.server import UsdSyncServer
+from openusdconnect.server import ServerConfig, ServerRuntime, UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.shared_stage_client import SharedStageClient
 
@@ -69,6 +69,45 @@ def _pump_until(clients, predicate, timeout: float = 5.0) -> bool:
     for client in clients:
         client.update()
     return bool(predicate())
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_shared_client_reconnect_uses_reissued_receiver_token(tmp_path, background):
+    stage = _create_stage(tmp_path / "token-scene")
+    with ServerRuntime(ServerConfig(
+        port=0,
+        base_usd_path=stage.GetRootLayer().identifier,
+        layer_mode=LayerMode.SHARED_STAGE,
+        log_path=str(tmp_path / "tokens.db"),
+        require_token=True,
+        preflight_plugins=False,
+    )) as runtime:
+        client = SharedStageClient(
+            stage, app_name="token-refresh", client_id="token-refresh",
+            port=runtime.server_address[1], persist_token=False,
+        )
+        try:
+            assert client.connect(timeout=5)
+            old_token = client._sender.token
+            client._sender.disconnect()
+            assert runtime.sync_server.revoke_token(client.client_id)
+            client._receiver.request_replay_from(1)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client._receiver.connected and client._receiver.token != old_token:
+                    break
+                time.sleep(0.01)
+            assert client._receiver.connected
+            assert client._receiver.token != old_token
+            if background:
+                assert _pump_until([client], lambda: client.connected)
+            else:
+                assert client._connect_sender(timeout=3)
+            assert client._sender.token == client._receiver.token
+            assert not client._sender.auth_rejected
+        finally:
+            client.close()
+            runtime.sync_server.token_store.close()
 
 
 def _value_at(stage: Usd.Stage, path: str) -> int | None:
@@ -845,8 +884,8 @@ def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, reb
         assert client._sender.session_id == "detached-recovery-replacement"
         assert client._sender.connected is rebind
 
-        client.update()
-        assert client._sender.connected
+        # update schedules a background handshake; readiness arrives on a later tick.
+        assert _pump_until([client], lambda: client.connected)
     finally:
         client.close()
         tcp_server.shutdown()

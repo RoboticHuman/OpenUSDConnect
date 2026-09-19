@@ -10,17 +10,17 @@ from pathlib import Path
 
 from pxr import Sdf, Usd
 
+from ._client_lifecycle import prepare_sender_token, raise_if_rejected, stop_receiver
 from ._client_utils import (
-    ClientPhase,
-    ClientStatus,
-    SyncUpdate,
     client_origin,
     client_token_handlers,
     require_app_name,
     resolve_client_token,
 )
 from .client_id import make_stable_client_id
+from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .codec import ReceivedEvent, decode_messages
+from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
 from .protocol_constants import (
     K_ERASE_TIME_SAMPLES,
@@ -41,10 +41,6 @@ from .shared_layer_graph import SharedLayerGraph
 from .token_client import load_token
 
 LOG = logging.getLogger(__name__)
-
-_DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 7200
-
 
 @dataclass(frozen=True, slots=True)
 class SharedRecoveryLayer:
@@ -129,8 +125,8 @@ class SharedStageClient:
         stage: Usd.Stage,
         *,
         app_name: str,
-        host: str = _DEFAULT_HOST,
-        port: int = _DEFAULT_PORT,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_SYNC_PORT,
         client_id: str | None = None,
         origin: str | None = None,
         token: str | None = None,
@@ -210,6 +206,11 @@ class SharedStageClient:
     @property
     def stage(self) -> Usd.Stage:
         return self._stage
+
+    @property
+    def client_id(self) -> str:
+        """Stable identity used by both connection roles."""
+        return self._receiver.client_id
 
     @property
     def status(self) -> ClientStatus:
@@ -628,16 +629,20 @@ class SharedStageClient:
     def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
             return True
-        self._sender.token = self._receiver.token
+        self._prepare_sender_token()
         if not self._sender.connect(timeout=timeout):
-            if self._sender.auth_rejected:
-                raise PermissionError("shared-stage sender authentication rejected")
-            if self._sender.hello_rejected:
-                raise ConnectionError(
-                    self._sender.rejection_reason or "shared-stage sender rejected"
-                )
+            raise_if_rejected(self._sender, "shared-stage sender")
             return False
         return True
+
+    def _prepare_sender_token(self) -> None:
+        # A receiver reconnect can obtain a replacement TOFU token.
+        if self._receiver.token is not None:
+            self._sender.token = self._receiver.token
+        prepare_sender_token(
+            self._sender, self._receiver,
+            host=self._host, port=self._port, persist_token=self._persist_token,
+        )
 
     def update(self) -> SyncUpdate:
         """Apply queued authoritative records, then publish local layer edits."""
@@ -652,11 +657,9 @@ class SharedStageClient:
         finally:
             self._tracker.restore_prepared()
         sent = 0
-        if self._graph.ready:
-            try:
-                self._connect_sender()
-            except (PermissionError, ConnectionError):
-                pass  # best-effort during update
+        if self._graph.ready and self._receiver.connected and not self._sender.connected:
+            self._prepare_sender_token()
+            self._sender.request_connect()
         if self._sender.connected and self._graph.ready and self.synchronized:
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
@@ -858,11 +861,7 @@ class SharedStageClient:
         if self._closed:
             return
         self._sender.disconnect()
-        self._receiver.stop()
-        if self._receiver.is_alive():
-            self._receiver.join(timeout=2.0)
-            if self._receiver.is_alive():
-                LOG.warning("SharedStageClient receiver did not stop within 2 seconds")
+        stop_receiver(self._receiver)
         self._tracker.close()
         self._last_recovery_assessment = None
         self._closed = True

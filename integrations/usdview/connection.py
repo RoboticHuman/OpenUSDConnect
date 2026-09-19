@@ -131,7 +131,7 @@ def start(
         "OpenUSDConnect receiver started -> %s:%d (client=%s)",
         host,
         port,
-        _receiver.receiver.client_id,
+        _receiver.client_id,
     )
     return True
 

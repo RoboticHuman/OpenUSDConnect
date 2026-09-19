@@ -110,6 +110,12 @@ class EventSender:
 
         self._condition = threading.Condition(threading.RLock())
         self._connect_lock = threading.Lock()
+        self._connect_epoch = 0
+        self._connect_thread: threading.Thread | None = None
+        self._connecting_socket: socket.socket | None = None
+        self._connect_active = 0
+        self._connect_retry_at = 0.0
+        self._connect_retry_delay = 1.0
         self._send_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
         self._socket_generation = 0
@@ -198,95 +204,223 @@ class EventSender:
         with self._condition:
             return self._session.recovery_required
 
+    def request_connect(self, timeout: float | None = 2.0) -> bool:
+        """Start one background attempt, returning whether it was scheduled.
+
+        Call again from an update loop to retry transient failures. Attempts
+        back off from one to eight seconds; rejection requires explicit connect.
+        Callbacks run on the handshake thread, just as for synchronous connect.
+        """
+        with self._condition:
+            if (
+                self.sock is not None
+                or self._connect_active
+                or self._connect_thread is not None
+                or self.auth_rejected
+                or self.hello_rejected
+                or self._session.recovery_required
+                or time.monotonic() < max(self._connect_retry_at, self._retry_after_until)
+            ):
+                return False
+            epoch = self._connect_epoch
+            thread = threading.Thread(
+                target=self._connect_worker,
+                args=(timeout, epoch),
+                name=f"openusdconnect-reconnect-{self.client_id}",
+                daemon=True,
+            )
+            self._connect_thread = thread
+            try:
+                thread.start()
+            except Exception:
+                self._connect_thread = None
+                raise
+            return True
+
+    def _connect_worker(self, timeout: float | None, epoch: int) -> None:
+        connected = False
+        try:
+            connected = self._connect_attempt(timeout, epoch)
+        except Exception:
+            LOG.exception("EventSender: background connect failed")
+        finally:
+            with self._condition:
+                if epoch == self._connect_epoch:
+                    if connected:
+                        self._connect_retry_at = 0.0
+                        self._connect_retry_delay = 1.0
+                    else:
+                        self._connect_retry_at = time.monotonic() + self._connect_retry_delay
+                        self._connect_retry_delay = min(8.0, self._connect_retry_delay * 2)
+                self._connect_thread = None
+                self._condition.notify_all()
+
+    def cancel_connect(self) -> bool:
+        """Invalidate pending handshakes without waiting; report completion.
+
+        An already published connection is left intact. Use disconnect to close
+        it as well. A blocked connection creation may finish later, but cannot
+        publish its socket after cancellation.
+        """
+        with self._condition:
+            self._connect_epoch += 1
+            self._connect_retry_at = 0.0
+            self._connect_retry_delay = 1.0
+            sock = self._connecting_socket
+            finished = not self._connect_active and self._connect_thread is None
+        self._close_socket_object(sock)
+        return finished
+
     def connect(self, timeout: float | None = None) -> bool:
         """Handshake, start the result reader, and replay the exact outbox.
 
         ``timeout`` bounds this attempt and never extends the configured
         handshake timeout.
         """
-        with self._connect_lock:
-            with self._condition:
-                if self.sock is not None:
-                    return True
-                if self._session.recovery_required or time.monotonic() < self._retry_after_until:
-                    return False
+        with self._condition:
+            epoch = self._connect_epoch
+        return self._connect_attempt(timeout, epoch)
 
-            connect_timeout = self.handshake_timeout
-            if timeout is not None:
-                connect_timeout = min(connect_timeout, max(timeout, 0.0))
-                if connect_timeout <= 0.0:
-                    return False
-
-            connection = self._session.begin_connection()
-            if connection is None:
+    def _connect_attempt(self, timeout: float | None, epoch: int) -> bool:
+        budget = self.handshake_timeout
+        if timeout is not None:
+            budget = min(budget, max(timeout, 0.0))
+        deadline = time.monotonic() + budget
+        with self._condition:
+            if epoch != self._connect_epoch:
                 return False
-            generation = connection.generation
-            self._socket_generation = generation
+            self._connect_active += 1
+        acquired = False
+        try:
+            acquired = self._connect_lock.acquire(timeout=max(0.0, budget))
+            if not acquired:
+                return False
+            return self._connect_locked(deadline, epoch)
+        finally:
+            with self._condition:
+                self._connect_active -= 1
+                if acquired:
+                    self._connecting_socket = None
+                self._condition.notify_all()
+            if acquired:
+                self._connect_lock.release()
 
-            self.auth_rejected = False
-            self.hello_rejected = False
-            self.rejection_reason = ""
-            sock: socket.socket | None = None
-            try:
-                sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                send_msg(
-                    sock,
-                    make_hello(
-                        self.role,
-                        client_id=self.client_id,
-                        origin=self.origin,
-                        department=self.department,
-                        token=self.token,
-                        layer_mode=self.layer_mode,
-                        producer_session_id=self.session_id,
-                    ),
-                )
-                buf = recv_framed(sock)
-                env = decode_envelope(buf)
-                pt = env.PayloadType()
-                if not self._accept_handshake_response(sock, env, pt, generation):
+    def _connect_locked(self, deadline: float, epoch: int) -> bool:
+        # The connect lock is held throughout handshake and replay.
+        with self._condition:
+            if epoch != self._connect_epoch:
+                return False
+            if self.sock is not None:
+                return True
+            if self._session.recovery_required or time.monotonic() < self._retry_after_until:
+                return False
+
+        connect_timeout = deadline - time.monotonic()
+        if connect_timeout <= 0.0:
+            return False
+
+        connection = self._session.begin_connection()
+        if connection is None:
+            return False
+        generation = connection.generation
+        self._socket_generation = generation
+
+        self.auth_rejected = False
+        self.hello_rejected = False
+        self.rejection_reason = ""
+        sock: socket.socket | None = None
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
+            with self._condition:
+                if epoch != self._connect_epoch:
                     self._session.disconnect(generation)
                     self._close_socket_object(sock)
                     return False
-            except Exception:
-                LOG.exception("EventSender: handshake failed")
+                self._connecting_socket = sock
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            send_msg(
+                sock,
+                make_hello(
+                    self.role,
+                    client_id=self.client_id,
+                    origin=self.origin,
+                    department=self.department,
+                    token=self.token,
+                    layer_mode=self.layer_mode,
+                    producer_session_id=self.session_id,
+                ),
+            )
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            buf = recv_framed(sock)
+            with self._condition:
+                if epoch != self._connect_epoch:
+                    self._session.disconnect(generation)
+                    self._close_socket_object(sock)
+                    return False
+            env = decode_envelope(buf)
+            pt = env.PayloadType()
+            if not self._accept_handshake_response(sock, env, pt, generation):
                 self._session.disconnect(generation)
                 self._close_socket_object(sock)
                 return False
+        except Exception:
+            LOG.exception("EventSender: handshake failed")
+            self._session.disconnect(generation)
+            self._close_socket_object(sock)
+            return False
 
-            # Serialize publication of the socket with outbox replay. A new
-            # send cannot overtake an older pending transaction here.
-            try:
-                with self._send_lock:
-                    with self._condition:
-                        self.sock = sock
-                    replayed = 0
-                    while pending := self._session.claim_next_unsent(generation):
-                        send_raw(sock, pending[1])
-                        replayed += 1
-            except OSError:
-                LOG.info("EventSender: reconnect replay failed", exc_info=True)
-                self._close(expected=sock)
+        # Serialize publication of the socket with outbox replay. A new
+        # send cannot overtake an older pending transaction here.
+        acquired_send = False
+        try:
+            acquired_send = self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+            if not acquired_send:
+                self._session.disconnect(generation)
+                self._close_socket_object(sock)
                 return False
-
-            reader = threading.Thread(
-                target=self._read_results,
-                args=(sock, generation),
-                name=f"openusdconnect-ack-{self.client_id}",
-                daemon=True,
-            )
             with self._condition:
-                self._reader_thread = reader
-            reader.start()
-            LOG.info(
-                "EventSender connected to %s:%d (session=%s, pending=%d)",
-                self.host,
-                self.port,
-                self.session_id,
-                replayed,
-            )
-            return True
+                if epoch != self._connect_epoch or time.monotonic() >= deadline:
+                    self._session.disconnect(generation)
+                    self._close_socket_object(sock)
+                    return False
+                self.sock = sock
+                self._connecting_socket = None
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            replayed = 0
+            while pending := self._session.claim_next_unsent(generation):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("reconnect replay timed out")
+                sock.settimeout(remaining)
+                send_raw(sock, pending[1])
+                replayed += 1
+            sock.settimeout(None)
+        except OSError:
+            LOG.info("EventSender: reconnect replay failed", exc_info=True)
+            self._close(expected=sock)
+            return False
+        finally:
+            if acquired_send:
+                self._send_lock.release()
+
+        reader = threading.Thread(
+            target=self._read_results,
+            args=(sock, generation),
+            name=f"openusdconnect-ack-{self.client_id}",
+            daemon=True,
+        )
+        with self._condition:
+            self._reader_thread = reader
+        reader.start()
+        LOG.info(
+            "EventSender connected to %s:%d (session=%s, pending=%d)",
+            self.host,
+            self.port,
+            self.session_id,
+            replayed,
+        )
+        return True
 
     def _accept_handshake_response(
         self, sock: socket.socket, env, payload_type: int, generation: int
@@ -367,6 +501,10 @@ class EventSender:
 
     def disconnect(self) -> None:
         """Close the socket while retaining unacknowledged transactions."""
+        self.cancel_connect()
+        with self._condition:
+            if self.sock is None:
+                return
         with self._send_lock:
             with self._condition:
                 sock = self.sock
@@ -375,7 +513,8 @@ class EventSender:
                     send_msg(sock, make_quit())
                 except OSError:
                     pass
-        self._close(expected=sock)
+        if sock is not None:
+            self._close(expected=sock)
 
     def send_events(self, events: list, *, layer_key: str = "") -> bool:
         """Submit a transaction without waiting for its durable result.
@@ -548,7 +687,8 @@ class EventSender:
                     return False
                 time.sleep(min(delay, 0.25))
                 continue
-            if not self.connect():
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if not self.connect(timeout=remaining):
                 with self._condition:
                     remaining = None if deadline is None else deadline - time.monotonic()
                     if remaining is not None and remaining <= 0:
@@ -705,8 +845,8 @@ class EventSender:
                 return
             self.sock = None
             generation = self._socket_generation
+            self._session.disconnect(generation)
             self._condition.notify_all()
-        self._session.disconnect(generation)
         self._close_socket_object(sock)
 
     @staticmethod

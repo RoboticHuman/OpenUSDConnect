@@ -7,12 +7,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import atexit
 import logging
-import os
 import signal
 import threading
-from dataclasses import dataclass
 
 import pxr
 from pxr import Ar, Usd
@@ -36,28 +33,24 @@ from ..cli_common import (
 from ..codec import SCHEMA_VERSION
 from ..defaults import (
     DEFAULT_EVENT_LOG,
-    DEFAULT_HOST,
-    DEFAULT_SYNC_PORT,
     DEFAULT_VFS_LAYER_DIR,
     DEFAULT_VFS_MANIFEST_NAME,
-    DEFAULT_VFS_NAME,
-    DEFAULT_VFS_SHARE,
     VFS_WRITE_MODES,
 )
 from ..defaults import (
-    advertise_host_for_bind as _default_advertise_host,
+    advertise_host_for_bind as _default_advertise_host,  # noqa: F401
 )
 from ..defaults import (
-    host_for_url as _host_for_url,
+    host_for_url as _host_for_url,  # noqa: F401
 )
 from ..plugin_environment import (
-    DEFAULT_SDR_SHADER_IDS,
     PluginEnvironmentError,
-    prepare_usd_plugin_environment,
 )
 from ..protocol_constants import PROTOCOL_VERSION, LayerMode
-from .connection import ConnectionHandler, ThreadedTCPServer
+from .config import ServerConfig, VfsConfig
+from .connection import ThreadedTCPServer
 from .rate_limit import validate_rate_limit_config
+from .runtime import ServerRuntime
 from .state import UsdSyncServer
 
 LOG = logging.getLogger(__name__)
@@ -76,54 +69,6 @@ def _log_openusdconnect_version() -> None:
         PROTOCOL_VERSION,
         SCHEMA_VERSION,
     )
-
-
-@dataclass(slots=True)
-class VfsConfig:
-    """Configuration for the optional WebDAV live-open endpoint."""
-
-    port: int
-    host: str | None = None
-    share: str = DEFAULT_VFS_SHARE
-    name: str = DEFAULT_VFS_NAME
-    live_name: str | None = None
-    layer_dir: str = DEFAULT_VFS_LAYER_DIR
-    manifest_name: str = DEFAULT_VFS_MANIFEST_NAME
-    write_mode: str = "forbid"
-    validate_writes: bool = True
-    prewarm: bool = True
-    advertise_host: str | None = None
-
-
-@dataclass(slots=True)
-class ServerConfig:
-    """Runtime configuration for the sync server and optional services."""
-
-    host: str = DEFAULT_HOST
-    port: int = DEFAULT_SYNC_PORT
-    base_usd_path: str | None = None
-    layer_mode: LayerMode | str = LayerMode.MANAGED
-    resolver_context: Ar.ResolverContext | None = None
-    log_path: str = DEFAULT_EVENT_LOG
-    compact: bool = False
-    export_diff: str | None = None
-    dashboard_port: int | None = None
-    op_cache_size: int | None = None
-    department_priority: list[str] | None = None
-    require_token: bool = False
-    durability: str = "strict"
-    max_connections: int | None = None
-    txn_rate: float = 0
-    txn_burst: int = 0
-    txn_batch_size: int = 256
-    txn_batch_delay_ms: float = 0.5
-    wire_metrics: bool = False
-    compact_interval: float = 0
-    reclaim_interval: float = 0
-    vfs: VfsConfig | None = None
-    plugin_dll_dirs: list[str] | None = None
-    preflight_shader_ids: tuple[str, ...] = DEFAULT_SDR_SHADER_IDS
-    preflight_plugins: bool = True
 
 
 def _normalize_vfs_share(share: str) -> str:
@@ -156,174 +101,27 @@ def _create_resolver_context(values: list[str] | None) -> Ar.ResolverContext | N
     return Ar.GetResolver().CreateContextFromStrings(configurations)
 
 
-def run_server(config: ServerConfig | None = None):
-    """Start the server (blocking)."""
-    config = config or ServerConfig()
+def run_server(config: ServerConfig | None = None) -> None:
+    """Run until interrupted; process signal handling belongs only to this wrapper."""
     _log_openusdconnect_version()
     _log_usd_runtime()
-    layer_mode = LayerMode(config.layer_mode)
-    validate_rate_limit_config(config.txn_rate, config.txn_burst)
-    if layer_mode is LayerMode.SHARED_STAGE and config.vfs is not None:
-        raise ValueError("the managed VFS composition is unavailable in shared-stage mode")
-    if layer_mode is LayerMode.SHARED_STAGE and config.export_diff:
-        raise ValueError("--export-diff is unavailable in shared-stage mode")
-    if config.preflight_plugins:
-        plugin_result = prepare_usd_plugin_environment(
-            dll_dirs=config.plugin_dll_dirs or (),
-            shader_ids=config.preflight_shader_ids,
-        )
-        if plugin_result.added_dll_dirs:
-            LOG.info(
-                "Added USD plugin DLL directories: %s",
-                os.pathsep.join(plugin_result.added_dll_dirs),
-            )
-        if plugin_result.missing_dll_dirs:
-            LOG.warning(
-                "USD plugin DLL directories do not exist: %s",
-                os.pathsep.join(plugin_result.missing_dll_dirs),
-            )
-        if plugin_result.unresolved_shader_ids:
-            LOG.warning(
-                "Sdr preflight could not resolve shader identifiers: %s",
-                ", ".join(plugin_result.unresolved_shader_ids),
-            )
-        LOG.info("Sdr preflight completed in %.1f ms", plugin_result.elapsed_ms)
-
-    sync_server = UsdSyncServer(
-        base_usd_path=config.base_usd_path,
-        layer_mode=layer_mode,
-        resolver_context=config.resolver_context,
-        log_path=config.log_path,
-        op_cache_size=config.op_cache_size,
-        department_priority=config.department_priority,
-        require_token=config.require_token,
-        durability=config.durability,
-        txn_rate=config.txn_rate,
-        txn_burst=config.txn_burst,
-        txn_batch_size=config.txn_batch_size,
-        txn_batch_delay=config.txn_batch_delay_ms / 1000.0,
-        wire_metrics=config.wire_metrics,
-        compact_interval=config.compact_interval,
-        reclaim_interval=config.reclaim_interval,
-    )
-
-    if config.compact:
-        sync_server.compact_log()
-
-    if config.dashboard_port:
-        from integrations.dashboard import run_dashboard
-
-        run_dashboard(sync_server, config.dashboard_port)
-        LOG.info("Dashboard running on http://localhost:%d", config.dashboard_port)
-
-    server = ThreadedTCPServer(
-        (config.host, config.port),
-        ConnectionHandler,
-        sync_server,
-        max_workers=config.max_connections,
-    )
-    vfs_handle = None
-
-    if config.vfs is not None:
-        from .vfs import VirtualStageFileSet, WriteMode, run_vfs_server
-
-        vfs = config.vfs
-        share = _normalize_vfs_share(vfs.share)
-        file_name = _validate_vfs_name(vfs.name)
-        live_name = _validate_vfs_name(vfs.live_name) if vfs.live_name else None
-        layer_dir = _normalize_vfs_share(vfs.layer_dir)
-        manifest_name = _validate_vfs_name(vfs.manifest_name)
-        write_mode = WriteMode(vfs.write_mode)
-        bind_host = vfs.host or config.host
-        public_host = vfs.advertise_host or _default_advertise_host(bind_host)
-        vfs_base_url = f"http://{_host_for_url(public_host)}:{vfs.port}/{share}"
-        provider_file = VirtualStageFileSet(
-            sync_server,
-            flat_name=file_name,
-            advertise_host=public_host,
-            sync_port=config.port,
-            share=share,
-            vfs_base_url=vfs_base_url,
-            write_mode=write_mode,
-            live_name=live_name,
-            layer_dir=layer_dir,
-            manifest_name=manifest_name,
-            scene_id=sync_server.scene_id,
-            validate_writes=vfs.validate_writes,
-        )
-        vfs_handle = run_vfs_server(provider_file, bind_host, vfs.port, share=share)
-        if vfs.prewarm:
-            provider_file.prewarm(include_flattened=True)
-            LOG.info("VFS snapshot prewarm started")
-        LOG.info("VFS WebDAV running on %s/", vfs_base_url)
-        LOG.info("VFS flattened snapshot: %s/%s", vfs_base_url, file_name)
-        LOG.info("VFS live composition root: %s/%s", vfs_base_url, provider_file.live_name)
-        LOG.info("VFS manifest: %s/%s", vfs_base_url, manifest_name)
-
-    _cleaned_up = False
-
-    def _cleanup():
-        nonlocal _cleaned_up
-        if _cleaned_up:
-            return
-        _cleaned_up = True
-        if config.export_diff:
-            sync_server.export_edit_layer(config.export_diff)
-        try:
-            if vfs_handle is not None:
-                vfs_handle.stop()
-        except Exception:
-            LOG.exception("Failed to stop VFS WebDAV server")
-        try:
-            sync_server.shutdown()
-        except Exception:
-            LOG.exception("Failed to shut down background threads")
-        try:
-            sync_server.store.close()
-            LOG.info("Event store closed")
-        except Exception:
-            LOG.exception("Failed to close event store")
-
-    atexit.register(_cleanup)
-    if threading.current_thread() is threading.main_thread():
-        shutdown_requested = threading.Event()
-
-        def _request_shutdown(*_):
-            if shutdown_requested.is_set():
-                return
-            shutdown_requested.set()
-            # socketserver.BaseServer.shutdown() must run outside the thread
-            # executing serve_forever(), otherwise both wait on each other.
-            threading.Thread(
-                target=server.shutdown,
-                name="server-shutdown",
-                daemon=True,
-            ).start()
-
-        signal.signal(signal.SIGTERM, _request_shutdown)
-
-    LOG.info(
-        "Server listening on %s:%s (PID %d) durability=%s",
-        config.host,
-        config.port,
-        os.getpid(),
-        sync_server.durability,
-    )
-    LOG.info("Event log: %s", config.log_path)
-    if config.base_usd_path:
-        LOG.info("Base USD: %s", config.base_usd_path)
-    if config.resolver_context is not None:
-        LOG.info("Using an explicit asset resolver context")
-    if config.export_diff:
-        LOG.info("Will export diff to %s on shutdown", config.export_diff)
+    runtime = ServerRuntime(config)
+    shutdown_requested = threading.Event()
+    previous_sigterm = None
+    handles_signals = threading.current_thread() is threading.main_thread()
     try:
-        server.serve_forever()
+        if handles_signals:
+            previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: shutdown_requested.set())
+        with runtime:
+            while not shutdown_requested.wait(0.1):
+                if runtime.wait(timeout=0):
+                    break
     except KeyboardInterrupt:
         LOG.info("Server shutting down")
     finally:
-        server.shutdown()
-        server.server_close()
-        _cleanup()
+        runtime.stop()
+        if handles_signals and previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -459,8 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         type=nonnegative_float,
         default=0.5,
         metavar="MS",
-        help="Maximum time to collect a transaction group in milliseconds "
-        "(default: 0.5)",
+        help="Maximum time to collect a transaction group in milliseconds (default: 0.5)",
     )
     limits.add_argument(
         "--wire-metrics",

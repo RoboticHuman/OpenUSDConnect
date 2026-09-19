@@ -10,15 +10,14 @@ from pxr import Usd
 
 from integrations.mcp.config import McpConfig
 from integrations.mcp.session import ConnectionSession
-from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.codec import encode_message, message_to_dict
-from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
 from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.server.state import UsdSyncServer
+from openusdconnect.usd_client import UsdReceiver
 
 
 def _event(path):
@@ -66,25 +65,35 @@ def _connection(receiver):
 
 def _drain_ready(session):
     def ready():
-        session.dispatcher.drain_and_apply()
+        session.receiver.update()
         return session.receiver.synchronized
     _wait(ready)
+
+
+def _session_with_receiver(port):
+    session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
+    session.mirror_stage = Usd.Stage.CreateInMemory()
+    session.receiver = UsdReceiver(
+        session.mirror_stage,
+        app_name="replay-identity-test",
+        host="127.0.0.1",
+        port=port,
+        persist_token=False,
+    )
+    # These tests drive one connection attempt directly to control reconnect timing.
+    session.receiver._started = True
+    return session
 
 
 @pytest.mark.parametrize("reset", ["compact", "purge", "restart"])
 def test_colliding_reconnect_cannot_confirm_missing_own_write(reset):
     with _server() as (state, port), _server() as (replacement, replacement_port):
         state._commit_events([_event("/Before")] * 3)
-        session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
-        session.mirror_stage = Usd.Stage.CreateInMemory()
-        session.receiver = ReceiverThread(host="127.0.0.1", port=port)
-        session.dispatcher = EventDispatcher(
-            receiver=session.receiver, adapter=UsdStageAdapter(session.mirror_stage),
-        )
+        session = _session_with_receiver(port)
         try:
-            with _connection(session.receiver):
+            with _connection(session.receiver.receiver):
                 _drain_ready(session)
-                assert session.dispatcher.last_seq == 3
+                assert session.receiver.last_seq == 3
                 assert session.mirror_stage.GetPrimAtPath("/Before")
             _wait(lambda: not state.receivers)
 
@@ -95,7 +104,7 @@ def test_colliding_reconnect_cannot_confirm_missing_own_write(reset):
                 state.purge()
             else:
                 state, port = replacement, replacement_port
-                session.receiver.port = port
+                session.receiver.receiver.port = port
             session.sender = EventSender("127.0.0.1", port, client_id="own")
             assert session.sender.connect()
             assert session.sender.send_events([_event("/Own")])
@@ -104,10 +113,10 @@ def test_colliding_reconnect_cannot_confirm_missing_own_write(reset):
                 state._commit_events([_event("/Foreign")])
             assert not session.mirror_stage.GetPrimAtPath("/Own")
 
-            with _connection(session.receiver):
+            with _connection(session.receiver.receiver):
                 assert session._drain_after_write()
                 assert session.mirror_stage.GetPrimAtPath("/Own")
-                assert session.dispatcher.last_seq == 3
+                assert session.receiver.last_seq == 3
                 assert session.receiver.server_instance == state.server_instance
                 if reset != "compact":
                     assert not session.mirror_stage.GetPrimAtPath("/Before")
@@ -215,14 +224,9 @@ def test_initial_snapshot_cursor_is_preserved_without_claiming_prefix_proof():
 def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
     with _server() as (state, port):
         state._commit_events([_event("/Before")] * 3)
-        session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
-        session.mirror_stage = Usd.Stage.CreateInMemory()
-        session.receiver = ReceiverThread(host="127.0.0.1", port=port)
-        session.dispatcher = EventDispatcher(
-            receiver=session.receiver, adapter=UsdStageAdapter(session.mirror_stage),
-        )
+        session = _session_with_receiver(port)
         try:
-            with _connection(session.receiver):
+            with _connection(session.receiver.receiver):
                 _drain_ready(session)
                 session.sender = EventSender("127.0.0.1", port, client_id="own")
                 assert session.sender.connect()
@@ -230,7 +234,7 @@ def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
                     [_event("/ApplyFailure")], session_id="foreign", txn_id=1,
                     client_id="foreign",
                 )
-                _wait(lambda: session.receiver.last_seq == 4)
+                _wait(lambda: session.receiver.receiver.last_seq == 4)
 
                 def fail_while_reset_arrives(*args, **kwargs):
                     # The consumer owns an old-epoch batch while the receiver
@@ -243,25 +247,28 @@ def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
                         client_id="foreign",
                     )
                     _wait(lambda: (
-                        session.receiver._received_replay_identity == (state.server_instance, 1)
-                        and session.receiver.last_seq == 3
+                        session.receiver.receiver._received_replay_identity
+                        == (state.server_instance, 1)
+                        and session.receiver.receiver.last_seq == 3
                     ))
-                    assert session.receiver.replay_epoch == 0
+                    assert session.receiver.receiver.replay_epoch == 0
                     raise RuntimeError("injected apply failure")
 
                 with monkeypatch.context() as patch:
-                    patch.setattr(session.dispatcher, "_apply_layered", fail_while_reset_arrives)
+                    patch.setattr(
+                        session.receiver.dispatcher, "_apply_layered", fail_while_reset_arrives
+                    )
                     with pytest.raises(RuntimeError, match="injected apply failure"):
-                        session.dispatcher.drain_and_apply()
-                assert session.dispatcher.last_seq == 3
+                        session.receiver.update()
+                assert session.receiver.last_seq == 3
                 assert session.mirror_stage.GetPrimAtPath("/Before")
                 assert not session.mirror_stage.GetPrimAtPath("/Own")
 
-            with _connection(session.receiver):
+            with _connection(session.receiver.receiver):
                 assert session._drain_after_write()
                 assert session.mirror_stage.GetPrimAtPath("/Own")
                 assert not session.mirror_stage.GetPrimAtPath("/Before")
-                assert session.dispatcher.last_seq == 3
+                assert session.receiver.last_seq == 3
                 assert session.receiver.replay_epoch == 1
                 assert session.receiver.server_instance == state.server_instance
         finally:

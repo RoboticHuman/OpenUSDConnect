@@ -3,6 +3,7 @@
 import pytest
 
 import openusdconnect.server.cli as server_cli
+import openusdconnect.server.runtime as server_runtime
 from openusdconnect.server.cli import (
     ServerConfig,
     VfsConfig,
@@ -101,13 +102,9 @@ def test_log_usd_runtime_reports_version_and_bindings(monkeypatch):
 
 def test_shared_stage_mode_rejects_managed_outputs():
     with pytest.raises(ValueError, match="VFS"):
-        server_cli.run_server(
-            ServerConfig(layer_mode="shared_stage", vfs=VfsConfig(port=7280))
-        )
+        server_cli.run_server(ServerConfig(layer_mode="shared_stage", vfs=VfsConfig(port=7280)))
     with pytest.raises(ValueError, match="export-diff"):
-        server_cli.run_server(
-            ServerConfig(layer_mode="shared_stage", export_diff="changes.usda")
-        )
+        server_cli.run_server(ServerConfig(layer_mode="shared_stage", export_diff="changes.usda"))
 
 
 def test_plugin_preflight_runs_before_server_construction(monkeypatch):
@@ -120,8 +117,8 @@ def test_plugin_preflight_runs_before_server_construction(monkeypatch):
     def construct_server(**_kwargs):
         events.append("construct")
 
-    monkeypatch.setattr(server_cli, "prepare_usd_plugin_environment", preflight)
-    monkeypatch.setattr(server_cli, "UsdSyncServer", construct_server)
+    monkeypatch.setattr(server_runtime, "prepare_usd_plugin_environment", preflight)
+    monkeypatch.setattr(server_runtime, "UsdSyncServer", construct_server)
 
     with pytest.raises(RuntimeError, match="plugin initialization failed"):
         server_cli.run_server(ServerConfig())
@@ -188,9 +185,7 @@ def test_main_maps_plugin_dll_directories(monkeypatch):
     captured = []
     monkeypatch.setattr(server_cli, "run_server", captured.append)
 
-    server_cli.main(
-        ["--plugin-dll-dir", r"C:\Renderer\bin", "--plugin-dll-dir", r"D:\Plugin\lib"]
-    )
+    server_cli.main(["--plugin-dll-dir", r"C:\Renderer\bin", "--plugin-dll-dir", r"D:\Plugin\lib"])
 
     assert captured[0].plugin_dll_dirs == [r"C:\Renderer\bin", r"D:\Plugin\lib"]
 

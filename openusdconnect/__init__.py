@@ -18,13 +18,13 @@ from ._version import __version__
 _select_runtime()
 del _select_runtime
 
-from ._client_utils import ClientPhase, ClientStatus, SyncUpdate
 from .adapters import (
     DCCAdapter,
     MockAdapter,
     UsdStageAdapter,
 )
 from .checkpoints import MirrorCheckpoint, TransactionCheckpoint
+from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .codec import (
     DecodeResult,
     HelloRejectionCode,
@@ -59,7 +59,7 @@ from .recovery import (
     TransactionFailure,
 )
 from .sender import EventSender, TransactionRejectedError
-from .server import ServerConfig, UsdSyncServer, VfsConfig, run_server
+from .server import ServerConfig, ServerRuntime, UsdSyncServer, VfsConfig, run_server, start_server
 from .shared_stage_client import (
     SharedRecoveryAssessment,
     SharedRecoveryLayer,
@@ -93,6 +93,7 @@ __all__ = [
     "RejectionDisposition",
     "ReceivedEvent",
     "ServerConfig",
+    "ServerRuntime",
     "SharedRecoveryAssessment",
     "SharedRecoveryLayer",
     "SharedStageClient",
@@ -119,5 +120,6 @@ __all__ = [
     "resolve_event",
     "resolve_payload",
     "run_server",
+    "start_server",
     "__version__",
 ]

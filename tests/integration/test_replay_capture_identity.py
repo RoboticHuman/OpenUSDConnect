@@ -6,23 +6,24 @@ import threading
 import pytest
 from pxr import Usd
 
-from integrations.mcp.config import McpConfig
-from integrations.mcp.session import ConnectionSession
-from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.checkpoints import MirrorCheckpoint
 from openusdconnect.codec import PayloadType, encode_message, message_to_dict
-from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
-from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender
 from openusdconnect.server import connection as connection_mod
-from tests.integration.test_receiver_replay_identity import _connection, _event, _server
+from tests.integration.test_receiver_replay_identity import (
+    _connection,
+    _event,
+    _server,
+    _session_with_receiver,
+)
 
 
 def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monkeypatch):
     with _server() as (state, port):
-        session = ConnectionSession(McpConfig(read_after_write_timeout_s=0.1))
+        session = _session_with_receiver(port)
+        session.config.read_after_write_timeout_s = 0.1
         session.sender = EventSender("127.0.0.1", port, client_id="own")
         replay_complete = threading.Event()
         resume_receiver = threading.Event()
@@ -37,11 +38,6 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                 state.server_instance, 0, 1
             )
             state._broadcast_queue.join()
-            session.mirror_stage = Usd.Stage.CreateInMemory()
-            session.receiver = ReceiverThread(host="127.0.0.1", port=port)
-            session.dispatcher = EventDispatcher(
-                receiver=session.receiver, adapter=UsdStageAdapter(session.mirror_stage),
-            )
             replacement = Usd.Stage.CreateInMemory()
             replacement.DefinePrim("/Replacement", "Xform")
             epoch, head = state.get_snapshot_token()
@@ -51,7 +47,7 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                 },
             }
             send = connection_mod.send_msg
-            control = session.receiver._handle_control_message
+            control = session.receiver.receiver._handle_control_message
 
             def replace_snapshot():
                 try:
@@ -82,15 +78,17 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
 
             monkeypatch.setattr(connection_mod, "send_msg", replace_before_hello)
             monkeypatch.setattr(
-                session.receiver, "_handle_control_message", pause_after_initial_complete,
+                session.receiver.receiver,
+                "_handle_control_message",
+                pause_after_initial_complete,
             )
-            with _connection(session.receiver):
+            with _connection(session.receiver.receiver):
                 try:
                     assert replay_complete.wait(5)
                     assert session._drain_after_write()
                     assert session.mirror_stage.GetPrimAtPath("/Own")
                     assert not session.mirror_stage.GetPrimAtPath("/Replacement")
-                    assert session.dispatcher.last_seq == 1
+                    assert session.receiver.last_seq == 1
                     assert session.receiver.replay_epoch == 0
                 finally:
                     resume_receiver.set()

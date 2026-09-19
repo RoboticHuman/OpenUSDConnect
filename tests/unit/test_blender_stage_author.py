@@ -1176,78 +1176,43 @@ def test_blender_timer_schedules_emitter_reconnect(monkeypatch):
     reconnect.assert_called_once_with()
 
 
-def test_blender_reconnect_worker_preserves_current_sender(monkeypatch):
+def test_blender_reconnect_delegates_to_sender(monkeypatch):
     from integrations.blender import capture
 
     sender = MagicMock()
-    sender.connect.return_value = True
-    sender.host = "127.0.0.1"
-    sender.port = 7200
+    sender.request_connect.return_value = True
     monkeypatch.setattr(capture._state, "sender", sender)
-    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
-    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
-
-    capture._emitter_reconnect_worker(sender, 7)
-
-    sender.connect.assert_called_once_with(
+    assert capture._schedule_emitter_reconnect() is True
+    sender.request_connect.assert_called_once_with(
         timeout=capture.EMITTER_RECONNECT_TIMEOUT_SECONDS,
     )
-    sender.disconnect.assert_not_called()
-    assert capture._state._reconnect_interval == capture.EMITTER_RECONNECT_INTERVAL_SECONDS
-
-
-def test_blender_reconnect_worker_backs_off_after_failure(monkeypatch):
-    from integrations.blender import capture
-
-    sender = MagicMock()
-    sender.connect.return_value = False
-    sender.auth_rejected = False
-    sender.hello_rejected = False
-    monkeypatch.setattr(capture._state, "sender", sender)
-    monkeypatch.setattr(capture._state, "_reconnect_generation", 7)
-    monkeypatch.setattr(capture._state, "_reconnect_interval", 4.0)
-
-    capture._emitter_reconnect_worker(sender, 7)
-
-    assert capture._state._reconnect_interval == 8.0
-
-
-def test_blender_reconnect_worker_closes_stale_connection(monkeypatch):
-    from integrations.blender import capture
-
-    sender = MagicMock()
-    sender.connect.return_value = True
-    monkeypatch.setattr(capture._state, "sender", sender)
-    monkeypatch.setattr(capture._state, "_reconnect_generation", 8)
-
-    capture._emitter_reconnect_worker(sender, 7)
-
-    sender.disconnect.assert_called_once_with()
+    sender.connect.assert_not_called()
 
 
 def test_cancel_blender_reconnect_never_waits_for_worker(monkeypatch):
     from integrations.blender import capture
 
-    reconnect_thread = MagicMock()
-    reconnect_thread.is_alive.return_value = True
-    monkeypatch.setattr(capture._state, "_reconnect_thread", reconnect_thread)
-    generation = capture._state._reconnect_generation
-    monkeypatch.setattr(capture._state, "_reconnect_generation", generation)
-
+    sender = MagicMock()
+    sender.cancel_connect.return_value = False
+    monkeypatch.setattr(capture._state, "sender", sender)
     assert capture._cancel_emitter_reconnect() is False
+    sender.cancel_connect.assert_called_once_with()
+    sender.disconnect.assert_not_called()
 
-    reconnect_thread.join.assert_not_called()
-    assert capture._state._reconnect_thread is reconnect_thread
-    assert capture._state._reconnect_generation == generation + 1
+
+def test_blender_reconnect_without_sender(monkeypatch):
+    from integrations.blender import capture
+
+    monkeypatch.setattr(capture._state, "sender", None)
+    assert capture._schedule_emitter_reconnect() is False
+    assert capture._cancel_emitter_reconnect() is True
 
 
 def test_blender_unregister_detaches_sender_owned_by_reconnect_worker(monkeypatch):
     from integrations.blender import capture
 
-    reconnect_thread = MagicMock()
-    reconnect_thread.is_alive.return_value = True
     sender = MagicMock()
-    monkeypatch.setattr(capture._state, "_reconnect_thread", reconnect_thread)
+    sender.cancel_connect.return_value = False
     monkeypatch.setattr(capture._state, "sender", sender)
     monkeypatch.setattr(capture, "_remove_handler", MagicMock())
     monkeypatch.setattr(capture, "_reset_stage_author", MagicMock())
@@ -1257,24 +1222,9 @@ def test_blender_unregister_detaches_sender_owned_by_reconnect_worker(monkeypatc
 
     capture.unregister()
 
-    sender.disconnect.assert_not_called()
+    sender.cancel_connect.assert_called_once_with()
+    sender.disconnect.assert_called_once_with()
     assert capture._state.sender is None
-
-
-def test_blender_reconnect_worker_stops_after_handshake_rejection(monkeypatch):
-    from integrations.blender import capture
-
-    sender = MagicMock()
-    sender.connect.return_value = False
-    sender.auth_rejected = True
-    sender.hello_rejected = False
-    sender.rejection_reason = "token revoked"
-    monkeypatch.setattr(capture._state, "sender", sender)
-    monkeypatch.setattr(capture._state, "_reconnect_generation", 4)
-
-    capture._emitter_reconnect_worker(sender, 4)
-
-    assert capture._schedule_emitter_reconnect() is False
 
 
 def test_remote_apply_refreshes_only_matching_transform_baselines(monkeypatch):

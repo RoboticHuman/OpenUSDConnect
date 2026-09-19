@@ -8,16 +8,19 @@ stage or host scene.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Sequence
 
 from pxr import Usd
 
+from ._client_lifecycle import (
+    deadline_after,
+    prepare_sender_token,
+    raise_if_rejected,
+    remaining_time,
+    stop_receiver,
+)
 from ._client_utils import (
-    ClientPhase,
-    ClientStatus,
     client_origin,
-    client_token_callback,
     client_token_handlers,
     require_app_name,
     resolve_client_token,
@@ -25,7 +28,9 @@ from ._client_utils import (
 )
 from .adapters import DCCAdapter, UsdStageAdapter
 from .client_id import make_stable_client_id
+from .client_types import ClientPhase, ClientStatus
 from .coalescing import TransformCoalescingWindow
+from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
 from .receiver import ReceiverThread
@@ -38,11 +43,6 @@ from .recovery import (
 )
 from .sender import EventSender
 from .token_client import load_token
-
-LOG = logging.getLogger(__name__)
-
-_DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 7200
 
 
 class UsdReceiver:
@@ -60,8 +60,8 @@ class UsdReceiver:
         stage: Usd.Stage,
         *,
         app_name: str,
-        host: str = _DEFAULT_HOST,
-        port: int = _DEFAULT_PORT,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_SYNC_PORT,
         client_id: str | None = None,
         origin: str | None = None,
         token: str | None = None,
@@ -160,6 +160,16 @@ class UsdReceiver:
         return self._receiver
 
     @property
+    def client_id(self) -> str:
+        """Stable identity used by this receiver."""
+        return self._receiver.client_id
+
+    @property
+    def applying_seq(self) -> int:
+        """Sequence of the current delivery, available inside apply callbacks."""
+        return self._dispatcher.applying_seq
+
+    @property
     def dispatcher(self):
         """The underlying :class:`EventDispatcher`."""
         return self._dispatcher
@@ -179,6 +189,16 @@ class UsdReceiver:
     @property
     def last_seq(self) -> int:
         return self._dispatcher.last_seq
+
+    @property
+    def server_instance(self) -> str:
+        """Identity of the server whose replay has been fully applied."""
+        return self._receiver.server_instance
+
+    @property
+    def replay_epoch(self) -> int:
+        """Epoch of the replay that has been fully applied."""
+        return self._receiver.replay_epoch
 
     @property
     def auth_rejected(self) -> bool:
@@ -293,11 +313,7 @@ class UsdReceiver:
         """Stop networking and release receiver-owned collaboration layers."""
         if self._closed:
             return
-        self._receiver.stop()
-        if self._receiver.is_alive():
-            self._receiver.join(timeout=2.0)
-            if self._receiver.is_alive():
-                LOG.warning("UsdReceiver thread did not stop within 2 seconds")
+        stop_receiver(self._receiver)
         self._dispatcher.close()
         self._closed = True
 
@@ -317,13 +333,15 @@ class UsdPublisher:
         stage: Usd.Stage,
         *,
         app_name: str,
-        host: str = _DEFAULT_HOST,
-        port: int = _DEFAULT_PORT,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_SYNC_PORT,
         client_id: str | None = None,
         origin: str | None = None,
         department: str | None = None,
         token: str | None = None,
         persist_token: bool = True,
+        on_token_issued: Callable[[str], None] | None = None,
+        on_stage_metadata: Callable[[dict], None] | None = None,
         attr_filter: Callable[[str], bool] | None = None,
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
@@ -350,7 +368,8 @@ class UsdPublisher:
             origin=origin or client_origin(app_name, "emit"),
             department=department,
             token=resolve_client_token(host, port, token, persist_token),
-            on_token_issued=client_token_callback(host, port, persist_token),
+            on_token_issued=client_token_handlers(host, port, persist_token, on_token_issued),
+            on_stage_metadata=on_stage_metadata,
         )
         self._closed = False
         self._started = False
@@ -395,6 +414,11 @@ class UsdPublisher:
     def sender(self):
         """The underlying :class:`EventSender`."""
         return self._sender
+
+    @property
+    def client_id(self) -> str:
+        """Stable identity used by this publisher."""
+        return self._sender.client_id
 
     @property
     def emitter(self):
@@ -488,13 +512,14 @@ class UsdPublisher:
         """Submit any coalesced transform, then wait for durable acknowledgement."""
         if self._closed:
             raise RuntimeError("UsdPublisher is closed")
+        deadline = deadline_after(timeout)
         if self._transform_coalescing.buffering:
-            if not self.connected and not self.connect():
+            if not self.connected and not self.connect(timeout=remaining_time(deadline)):
                 return False
             events = self._transform_coalescing.force(self._emitter)
             if events and not self._send(events):
                 return False
-        return self._sender.flush(timeout)
+        return self._sender.flush(remaining_time(deadline))
 
     def start(self) -> UsdPublisher:
         """Enter the nonblocking lifecycle without opening a socket."""
@@ -506,8 +531,10 @@ class UsdPublisher:
     def connect(self, timeout: float | None = None) -> bool:
         """Start and complete the publisher handshake within ``timeout``."""
         self.start()
-        if self._sender.token is None and self._persist_token:
-            self._sender.token = load_token(self._host, self._port)
+        prepare_sender_token(
+            self._sender, None,
+            host=self._host, port=self._port, persist_token=self._persist_token,
+        )
         self._connecting = True
         try:
             connected = self._sender.connect(timeout=timeout)
@@ -515,10 +542,7 @@ class UsdPublisher:
             self._connecting = False
         if connected:
             return True
-        if self._sender.auth_rejected:
-            raise PermissionError("publisher authentication rejected")
-        if self._sender.hello_rejected:
-            raise ConnectionError(self._sender.rejection_reason or "publisher connection rejected")
+        raise_if_rejected(self._sender, "publisher")
         return False
 
     def disconnect(self) -> None:

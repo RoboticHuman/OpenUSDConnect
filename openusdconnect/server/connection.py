@@ -692,14 +692,30 @@ class ThreadedTCPServer(socketserver.TCPServer):
         max_workers: int | None = None,
     ):
         self.sync_server = sync_server
+        self._requests: set[socket.socket] = set()
+        self._requests_lock = threading.Lock()
+        self._closing = False
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers or self.MAX_WORKERS,
             thread_name_prefix="conn",
         )
-        super().__init__(server_address, handler_class)
+        try:
+            super().__init__(server_address, handler_class)
+        except BaseException:
+            self._pool.shutdown(wait=True)
+            raise
 
     def process_request(self, request, client_address):
-        self._pool.submit(self._handle_request, request, client_address)
+        with self._requests_lock:
+            if self._closing:
+                self.close_request(request)
+                return
+            self._requests.add(request)
+            try:
+                self._pool.submit(self._handle_request, request, client_address)
+            except BaseException:
+                self._requests.discard(request)
+                raise
 
     def _handle_request(self, request, client_address):
         try:
@@ -708,7 +724,21 @@ class ThreadedTCPServer(socketserver.TCPServer):
             self.handle_error(request, client_address)
         finally:
             self.shutdown_request(request)
+            with self._requests_lock:
+                self._requests.discard(request)
 
     def server_close(self):
         super().server_close()
-        self._pool.shutdown(wait=False)
+        with self._requests_lock:
+            self._closing = True
+            for request in self._requests:
+                try:
+                    request.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                # makefile() retains socket references; detach closes the OS
+                # handle now, waking Windows readers waiting in select().
+                descriptor = request.detach()
+                if descriptor != -1:
+                    socket.close(descriptor)
+        self._pool.shutdown(wait=True)

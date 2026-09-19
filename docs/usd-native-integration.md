@@ -1,8 +1,9 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Network I/O runs on background threads. Stage mutation does not: the
-application must call `update()` from the stage-owning thread.
+Call `update()` from the stage-owning thread. Socket readers and automatic
+reconnect attempts run on background threads; event submission still performs
+a socket write on the calling thread.
 
 ## Choose an API
 
@@ -36,7 +37,10 @@ All high-level clients use the same lifecycle:
 3. `connect(timeout)` waits for the applicable handshakes. For receiving
    clients, it does not apply queued replay.
 4. `update()` applies incoming work and, for bidirectional clients, submits
-   local work without waiting for a durable acknowledgement.
+   local work without waiting for a durable acknowledgement. If the sender
+   disconnects, it schedules a background handshake after the receiver has
+   connected. Repeated calls use a single attempt with retry backoff. Auth,
+   protocol, and recovery rejections stop automatic retries.
 5. `flush(timeout)` waits for already submitted work. Call `update()` first if
    the stage may still contain unsent edits.
 6. `close()` stops networking. It does not implicitly turn every pending edit
@@ -47,6 +51,18 @@ All high-level clients use the same lifecycle:
 or `CLOSED`. Bidirectional applications should enable editing only in `READY`.
 The directional connection fields distinguish partial connectivity from a
 role that is not present.
+
+`ClientPhase`, `ClientStatus`, and `SyncUpdate` are available from
+`openusdconnect.client_types` and the package root. `client.client_id` exposes
+the connection identity without accessing an underlying transport object.
+
+Keep lifecycle and stage operations on the host's owning thread. Apply callbacks
+(`on_imported`, `on_resync`, `on_applied`, `on_applied_events`) run during
+`update()` on that thread. Token, metadata, and playback callbacks run on the
+thread handling the handshake or incoming message, which may be a worker.
+Queue UI and USD work back to the owning thread from those callbacks.
+Inside a receiver's apply callback, `receiver.applying_seq` is the candidate
+batch tail; `last_seq` advances only after the complete apply succeeds.
 
 An adapter-backed `UsdReceiver` also enters `RECOVERY_REQUIRED` when resolver
 recomposition makes incremental projection unsafe. Rebuild the native scene,
@@ -247,6 +263,12 @@ happens next depends on `DCCAdapter.targets_stage()`:
 
 Custom stage-backed adapters must override `targets_stage()` explicitly.
 
+Shader mapping interfaces live in `openusdconnect.shader_mapping`; existing
+imports from `openusdconnect.adapters` remain supported. Integrations that
+author shader inputs directly can use `set_connectable_input_value` and
+`resolve_shader_port_type` from `openusdconnect.usd_authoring`. They operate
+under the stage's current edit target and do not send network events.
+
 Native projection can express only the adapter event vocabulary. Generic Sdf
 opinions remain correct in the mirror even when the native scene has no
 equivalent operation.
@@ -363,3 +385,30 @@ assembling these components.
 Construct low-level objects directly. Components exposed by a high-level
 client are diagnostic handles; mutating them bypasses the wrapper's lifecycle
 invariants.
+
+Low-level hosts can call `EventSender.request_connect(timeout=2.0)` from a
+timer to schedule a handshake without waiting. It returns whether an attempt
+was scheduled, not whether the connection succeeded; inspect `connected` and
+rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
+pending attempts and reports whether they have finished; `disconnect()` also
+closes an established connection. Neither discards the transaction outbox.
+
+## Embed a server
+
+Use `ServerRuntime` when the application owns startup and shutdown:
+
+```python
+from openusdconnect import ServerConfig, ServerRuntime
+
+with ServerRuntime(ServerConfig(port=7200, log_path="events.db")) as server:
+    print(server.server_address)
+    run_application()
+```
+
+The context starts the TCP service in the background and stops its services
+and workers on exit. Alternatively, `start_server(config)` returns an already
+started handle; call `stop()` when finished. A handle is single-use; repeated
+`start()` while running and repeated `stop()` are harmless. Use `port=0` for
+an OS-selected TCP port, available through `server_address` after startup.
+The embedded API installs no process signal handlers. `run_server(config)`
+remains the blocking runner used by the command line.

@@ -1,8 +1,8 @@
 """The single stateful object: connection + mirror stage + read-after-write.
 
 Emit side: an ``EventSender`` (origin ``...-emit``). Mirror side: a
-``ReceiverThread`` + ``EventDispatcher`` + ``UsdStageAdapter`` over an in-memory
-``Usd.Stage`` (origin ``...-recv``). The server returns the complete commit
+``UsdReceiver`` over an in-memory ``Usd.Stage`` (origin ``...-recv``).
+The server returns the complete commit
 stream to every receiver, so the mirror observes both MCP and foreign edits.
 The two roles share one stable ``client_id`` and use distinct origins for
 diagnostics.
@@ -14,12 +14,10 @@ import time
 import uuid
 
 from openusdconnect import token_client
-from openusdconnect.adapters import UsdStageAdapter
-from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import K_SET_STAGE_METADATA, STAGE_METADATA_KEYS
-from openusdconnect.receiver import ReceiverThread
 from openusdconnect.sender import EventSender, TransactionRejectedError
+from openusdconnect.usd_client import UsdReceiver
 
 from .config import McpConfig
 from .errors import ToolError
@@ -32,8 +30,7 @@ class ConnectionSession:
     def __init__(self, config: McpConfig):
         self.config = config
         self.sender: EventSender | None = None
-        self.receiver: ReceiverThread | None = None
-        self.dispatcher: EventDispatcher | None = None
+        self.receiver: UsdReceiver | None = None
         self.mirror_stage = None
         self.auth_rejected = False
         self._origin_base = f"mcp-{uuid.uuid4().hex[:8]}"
@@ -58,9 +55,7 @@ class ConnectionSession:
     ) -> dict:
         if self.connected:
             return self.status()
-        # A dropped connection leaves stale state: send() nulls only self.sender,
-        # so the previous ReceiverThread is still running. Stop it before rebuilding
-        # or each reconnect leaks the thread (and opens a duplicate mirror socket).
+        # Close and join the old mirror before opening a replacement socket.
         self._teardown()
         cfg = self.config
         if host is not None:
@@ -101,9 +96,13 @@ class ConnectionSession:
                 "`uv run python -m openusdconnect.server --port <port>`.",
             )
 
-        if cfg.mirror_enabled:
-            self._start_mirror()
-            self._drain_initial_replay()
+        try:
+            if cfg.mirror_enabled:
+                self._start_mirror()
+                self._drain_initial_replay()
+        except Exception:
+            self._teardown()
+            raise
         return self.status()
 
     def _start_mirror(self) -> None:
@@ -115,28 +114,25 @@ class ConnectionSession:
         self._playback_state = None
         self._seed_metadata(self.sender.stage_metadata)
         recv_token = token_client.load_token(cfg.host, cfg.port) or self.sender.token
-        self.receiver = ReceiverThread(
+        self.receiver = UsdReceiver(
+            self.mirror_stage,
+            app_name="mcp",
             host=cfg.host,
             port=cfg.port,
-            sync_from=1,
             client_id=cfg.client_id,
             origin=f"{self._origin_base}-recv",
             token=recv_token,
+            persist_token=False,
             on_playback_state=self._on_playback_state,
-            layered_replay=True,
-        )
-        self.receiver.start()
-        self.dispatcher = EventDispatcher(
-            receiver=self.receiver,
-            adapter=UsdStageAdapter(self.mirror_stage),
             on_applied=self._on_applied,
         )
+        self.receiver.start()
 
     def _on_applied(self, prim_paths: list) -> None:
         """Stamp each applied prim with the current sequence so changes_since can
         report it. Coarse at drain granularity (a whole drain shares its final
         seq), which is fine for 'what changed since N' polling."""
-        seq = self.dispatcher.applying_seq if self.dispatcher else 0
+        seq = self.receiver.applying_seq if self.receiver else 0
         for path in prim_paths:
             self._dirty[path] = seq
 
@@ -159,14 +155,11 @@ class ConnectionSession:
     def _teardown(self) -> None:
         """Stop the receiver thread and sender, clearing all connection state."""
         if self.receiver is not None:
-            self.receiver.stop()
+            self.receiver.close()
         if self.sender is not None:
             self.sender.disconnect()
-        if self.dispatcher is not None:
-            self.dispatcher.close()
         self.sender = None
         self.receiver = None
-        self.dispatcher = None
         self.mirror_stage = None
         self._dirty = {}
         self._playback_state = None
@@ -189,19 +182,19 @@ class ConnectionSession:
                     hint="Retry after usd_status reports mirror_synchronized=true.",
                 )
         if not self.sender.send_events(events):
-            self.sender = None
+            self._teardown()
             raise ToolError("send failed, connection lost", code="disconnected")
         synced = self._drain_after_write()
         return {
             "sent": True,
             "event_count": len(events),
-            "last_seq": self.dispatcher.last_seq if self.dispatcher else None,
+            "last_seq": self.receiver.last_seq if self.receiver else None,
             "mirror_synced": synced,
         }
 
     def _drain_after_write(self) -> bool:
         """Wait for durable acknowledgement and application in the same server epoch."""
-        if self.dispatcher is None or self.receiver is None:
+        if self.receiver is None:
             return False
         deadline = time.monotonic() + self.config.read_after_write_timeout_s
         while True:
@@ -210,7 +203,7 @@ class ConnectionSession:
                 acknowledged = self.sender.flush(timeout=0)
             except TransactionRejectedError as exc:
                 raise ToolError(str(exc), code="transaction_rejected") from exc
-            self.dispatcher.drain_and_apply()
+            self.receiver.update()
             checkpoint = self.sender.acknowledged_checkpoint if acknowledged else None
             if acknowledged and checkpoint is None:
                 # Older peers (or Hello-only recovery) cannot prove mirror visibility.
@@ -220,28 +213,27 @@ class ConnectionSession:
                     self.receiver.synchronized
                     and self.receiver.server_instance == checkpoint.server_instance
                     and self.receiver.replay_epoch == checkpoint.epoch
-                    and self.dispatcher.last_seq >= checkpoint.head_seq
+                    and self.receiver.last_seq >= checkpoint.head_seq
                 ):
                     return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
-
     def _drain_initial_replay(self) -> bool:
         """Apply the initial replay before returning when it fits the read timeout."""
-        if self.dispatcher is None or self.receiver is None:
+        if self.receiver is None:
             return False
         deadline = time.monotonic() + self.config.read_after_write_timeout_s
         while not self.receiver.synchronized and time.monotonic() < deadline:
-            if self.dispatcher.drain_and_apply() == 0:
+            if self.pump() == 0:
                 time.sleep(0.005)
         return self.receiver.synchronized
 
     def pump(self) -> int:
         """Non-blocking drain so introspection reflects recent foreign edits."""
-        if self.dispatcher is None:
+        if self.receiver is None:
             return 0
-        return self.dispatcher.drain_and_apply()
+        return self.receiver.update()
 
     def require_mirror(self):
         """Return the mirror stage or raise if introspection is unavailable."""
@@ -267,7 +259,7 @@ class ConnectionSession:
                 code="no_mirror",
             )
         self.pump()
-        last = self.dispatcher.last_seq if self.dispatcher else 0
+        last = self.receiver.last_seq if self.receiver else 0
         return select_changes(self._dirty, since_seq, max, last)
 
     # -- playback ----------------------------------------------------------
@@ -327,7 +319,7 @@ class ConnectionSession:
         )
 
     def status(self) -> dict:
-        if self.dispatcher is not None and self.receiver is not None:
+        if self.receiver is not None:
             if not self.receiver.synchronized:
                 self.pump()
         return {
@@ -340,7 +332,7 @@ class ConnectionSession:
             "mirror_enabled": self.config.mirror_enabled,
             "mirror_synchronized": bool(self.receiver and self.receiver.synchronized),
             "mirror_prim_count": self._mirror_prim_count(),
-            "last_seq": self.dispatcher.last_seq if self.dispatcher else 0,
+            "last_seq": self.receiver.last_seq if self.receiver else 0,
             "auth_rejected": self.auth_rejected,
             "stage_metadata": dict(self.sender.stage_metadata) if self.sender else {},
         }
