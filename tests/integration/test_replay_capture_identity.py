@@ -12,17 +12,17 @@ from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
 from openusdconnect.sender import EventSender
 from openusdconnect.server import connection as connection_mod
-from tests.integration.test_receiver_replay_identity import (
-    _connection,
-    _event,
-    _server,
-    _session_with_receiver,
+from tests.helpers import (
+    ensure_prim_event,
+    in_process_server,
+    mcp_session_with_receiver,
+    receiver_connection,
 )
 
 
 def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monkeypatch):
-    with _server() as (state, port):
-        session = _session_with_receiver(port)
+    with in_process_server() as (state, port):
+        session = mcp_session_with_receiver(port)
         session.config.read_after_write_timeout_s = 0.1
         session.sender = EventSender("127.0.0.1", port, client_id="own")
         replay_complete = threading.Event()
@@ -32,7 +32,7 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
         replacement_worker = None
         try:
             assert session.sender.connect()
-            assert session.sender.send_events([_event("/Own")])
+            assert session.sender.send_events([ensure_prim_event("/Own")])
             assert session.sender.flush(5)
             assert session.sender.acknowledged_checkpoint == MirrorCheckpoint(
                 state.server_instance, 0, 1
@@ -82,7 +82,7 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                 "_handle_control_message",
                 pause_after_initial_complete,
             )
-            with _connection(session.receiver.receiver):
+            with receiver_connection(session.receiver.receiver):
                 try:
                     assert replay_complete.wait(5)
                     assert session._drain_after_write()
@@ -101,8 +101,8 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
 
 
 def test_layer_stack_is_captured_before_replay_delivery(monkeypatch):
-    with _server() as (state, port):
-        state._commit_events([_event("/Own")])
+    with in_process_server() as (state, port):
+        state._commit_events([ensure_prim_event("/Own")])
         state._broadcast_queue.join()
         original_stack = state.get_layer_stack_state()
         send = connection_mod.send_msg
@@ -148,8 +148,8 @@ class _CaptureHandler:
 def test_capture_selects_only_required_records_without_copying_bytes(
     monkeypatch, cursor, instance, epoch, start, reason,
 ):
-    with _server() as (state, _port):
-        state._commit_events([_event(f"/P{i}") for i in range(3)])
+    with in_process_server() as (state, _port):
+        state._commit_events([ensure_prim_event(f"/P{i}") for i in range(3)])
         state._broadcast_queue.join()
         read = state.store.get_from_seq_bin
         queries = []
@@ -188,7 +188,7 @@ def test_capture_selects_only_required_records_without_copying_bytes(
 
 
 def test_failed_capture_releases_registration_and_locks(monkeypatch):
-    with _server() as (state, _port):
+    with in_process_server() as (state, _port):
         handler = _CaptureHandler()
 
         def fail_read(*_args):

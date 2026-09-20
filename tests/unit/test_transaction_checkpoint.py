@@ -132,3 +132,19 @@ def test_hello_highwater_recovery_does_not_confirm_mirror(monkeypatch):
         assert sender.acknowledged_checkpoint is None
     finally:
         sender.sock = None
+
+
+def test_duplicate_after_purge_has_no_original_visibility_proof(tmp_path):
+    state = UsdSyncServer(log_path=str(tmp_path / "checkpoint.db"))
+    try:
+        transaction = dict(session_id="producer", txn_id=1, client_id="producer")
+        events = [{"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}]
+        committed = state.process_idempotent_txn(events, **transaction)
+        assert committed.checkpoint == TransactionCheckpoint(0, 1)
+        state.purge()
+        duplicate = state.process_idempotent_txn(events, **transaction)
+        assert duplicate.status == "duplicate"
+        assert duplicate.checkpoint is None
+    finally:
+        state.shutdown()
+        state.store.close()

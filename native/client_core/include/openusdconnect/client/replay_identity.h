@@ -38,31 +38,27 @@ public:
 			return Unknown();
 		}
 		ReplayPrefixIdentity identity;
-		identity.ServerInstanceValue = std::move(server_instance);
-		identity.EpochValue = epoch;
-		identity.KnownValue = true;
+		identity.Identity = ReplayIdentity{std::move(server_instance), epoch};
 		return identity;
 	}
 
 	[[nodiscard]] bool IsKnown() const noexcept
 	{
-		return KnownValue;
+		return Identity.has_value();
 	}
 
 	[[nodiscard]] std::string_view ServerInstance() const noexcept
 	{
-		return ServerInstanceValue;
+		return Identity ? std::string_view(Identity->ServerInstance) : std::string_view();
 	}
 
 	[[nodiscard]] std::optional<std::uint64_t> Epoch() const noexcept
 	{
-		return KnownValue ? std::optional<std::uint64_t>(EpochValue) : std::nullopt;
+		return Identity ? std::optional<std::uint64_t>(Identity->Epoch) : std::nullopt;
 	}
 
 private:
-	std::string ServerInstanceValue;
-	std::uint64_t EpochValue = 0;
-	bool KnownValue = false;
+	std::optional<ReplayIdentity> Identity;
 };
 
 using ReplayPrefixClaim = std::optional<ReplayPrefixIdentity>;

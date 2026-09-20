@@ -23,6 +23,7 @@ from openusdconnect.codec import (
     resolve_payload,
 )
 from openusdconnect.generated import messages_generated as _fb
+from openusdconnect.protocol import make_hello
 
 # ===================================================================
 # Helper
@@ -1009,3 +1010,32 @@ class TestConnectableInputDeclaredTypeWire:
         assert isinstance(d["inputs"]["samples"], int)
         assert d["inputs"]["indices"] == [1, 2, 3]
         assert all(isinstance(v, int) for v in d["inputs"]["indices"])
+
+
+@pytest.mark.parametrize("identity", [None, ("", None), ("server", 0), ("server", 7)])
+def test_optional_hello_prefix_identity(identity):
+    hello = make_hello("receiver", sync_from=4)
+    if identity is not None:
+        hello["replay_server_instance"], epoch = identity
+        if epoch is not None:
+            hello["replay_epoch"] = epoch
+    decoded = message_to_dict(encode_message(hello))
+    assert decoded == hello
+    _, table = resolve_payload(decode_envelope(encode_message(hello)))
+    assert table.ReplayEpoch() == (identity[1] if identity else None)
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_optional_hello_ok_replay_identity(supported):
+    hello = {"type": "hello_ok"}
+    if supported:
+        hello["replay_identity"] = True
+    assert message_to_dict(encode_message(hello)) == hello
+
+
+@pytest.mark.parametrize("epoch", [None, 0, 7])
+def test_optional_hello_epoch_roundtrip(epoch):
+    hello = {"type": "hello_ok", "server_instance": "server", "replay_identity": True}
+    if epoch is not None:
+        hello["replay_epoch"] = epoch
+    assert message_to_dict(encode_message(hello)) == hello

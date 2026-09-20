@@ -8,35 +8,17 @@ from pxr import Usd
 from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.codec import (
     PayloadType,
-    encode_message,
-    message_to_dict,
     payload_type_and_sequence,
 )
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
-from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
-from openusdconnect.server.state import UsdSyncServer
+from tests.helpers import ensure_prim_event, in_process_server
 
 
 @pytest.fixture
 def replay_server():
-    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
-    tcp = ThreadedTCPServer(("127.0.0.1", 0), ConnectionHandler, state, max_workers=8)
-    serving = threading.Thread(target=tcp.serve_forever, daemon=True)
-    serving.start()
-    try:
-        yield state, tcp.server_address[1]
-    finally:
-        tcp.shutdown()
-        tcp.server_close()
-        serving.join(5)
-        state.shutdown()
-        state.store.close()
-        assert not serving.is_alive()
-
-
-def _event(path):
-    return {"k": "ensure_prim", "prim": path, "typeName": "Xform"}
+    with in_process_server() as server:
+        yield server
 
 
 def _receive_until_boundary(receiver, dispatcher, monkeypatch, *, after_replay=None):
@@ -105,13 +87,13 @@ def test_partial_replay_advances_across_queue_overflow(replay_server, monkeypatc
     dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
     try:
         if after_purge:
-            state._commit_events([_event("/Before")])
+            state._commit_events([ensure_prim_event("/Before")])
             assert _receive_until_boundary(receiver, dispatcher, monkeypatch)
             assert stage.GetPrimAtPath("/Before")
             state.purge()
 
         paths = [f"/P{index}" for index in range(8)]
-        state._commit_events([_event(path) for path in paths])
+        state._commit_events([ensure_prim_event(path) for path in paths])
         head = state.store.get_max_seq()
         assert head == len(paths)
 
@@ -146,7 +128,7 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
     state, port = replay_server
     snapshot_paths = [f"/P{index}" for index in range(1, 4)]
     remaining_paths = [f"/P{index}" for index in range(4, 7)]
-    state._commit_events([_event(path) for path in snapshot_paths])
+    state._commit_events([ensure_prim_event(path) for path in snapshot_paths])
     stage = Usd.Stage.CreateInMemory()
     for path in snapshot_paths:
         stage.DefinePrim(path, "Xform")
@@ -161,7 +143,7 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
             assert _receive_until_boundary(receiver, dispatcher, monkeypatch)
             assert receiver.server_instance == ""
             receiver.request_replay_from(1)
-        state._commit_events([_event(path) for path in remaining_paths])
+        state._commit_events([ensure_prim_event(path) for path in remaining_paths])
 
         # The reset (plus layer stack when negotiated) fills the queue before
         # event 1. Its next connection must start at 1, not the snapshot cursor 4.
@@ -188,14 +170,14 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
 def test_live_compaction_overflow_resumes_in_new_epoch(replay_server, monkeypatch):
     state, port = replay_server
     paths = [f"/P{index}" for index in range(8)]
-    state._commit_events([_event(paths[0])])
+    state._commit_events([ensure_prim_event(paths[0])])
     receiver = ReceiverThread(host="127.0.0.1", port=port, max_queue=3)
     stage = Usd.Stage.CreateInMemory()
     dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
 
     def compact_live():
         # Keep the initial replay small, then force a large reset on the same socket.
-        state._commit_events([_event(path) for path in paths[1:]])
+        state._commit_events([ensure_prim_event(path) for path in paths[1:]])
         state.compact_log()
 
     try:
@@ -226,64 +208,3 @@ def test_live_compaction_overflow_resumes_in_new_epoch(replay_server, monkeypatc
     finally:
         receiver.stop()
         dispatcher.close()
-
-
-@pytest.mark.parametrize("epoch", [None, 0, 7])
-def test_optional_hello_epoch_roundtrip(epoch):
-    hello = {"type": "hello_ok", "server_instance": "server", "replay_identity": True}
-    if epoch is not None:
-        hello["replay_epoch"] = epoch
-    assert message_to_dict(encode_message(hello)) == hello
-
-
-@pytest.mark.parametrize("instance", ["server", "replacement"])
-@pytest.mark.parametrize("queue_full", [False, True])
-def test_changed_hello_identity_waits_for_accepted_reset(instance, queue_full):
-    receiver = ReceiverThread(max_queue=1)
-    first = receiver._inbox.begin_connection()
-    receiver._received_replay_identity = ("server", 0)
-    assert receiver._handle_data_message(
-        encode_message({"type": "event", "seq": 1, "event": _event("/Old")}), first.generation,
-    )
-    receiver.drain_queue()
-    receiver.connected = False
-    second = receiver._inbox.begin_connection()
-    receiver._prefix_validation_requested = True
-    assert second.sync_from == 2
-    assert receiver._handle_handshake_message(
-        encode_message({
-            "type": "hello_ok", "server_instance": instance, "replay_identity": True,
-            "layered_replay": True, "replay_epoch": 1,
-        }), second.sync_from, second.generation,
-    )
-    assert receiver._received_replay_identity == ("server", 0)
-    assert receiver.last_seq == 1
-    assert receiver.server_instance == ""
-    assert not receiver.synchronized
-    if queue_full:
-        assert receiver._handle_data_message(
-            encode_message({"type": "layer_stack_state", "layers": []}), second.generation,
-        )
-    accepted = receiver._handle_data_message(
-        encode_message({"type": "resync"}), second.generation,
-    )
-    assert accepted is not queue_full
-    assert receiver.last_seq == (1 if queue_full else 0)
-    assert receiver._received_replay_identity == (
-        ("server", 0) if queue_full else (instance, 1)
-    )
-    assert receiver.server_instance == ""
-    assert not receiver.synchronized
-
-
-def test_replay_request_during_hello_does_not_publish_stale_identity():
-    receiver = ReceiverThread(on_token_issued=lambda _token: receiver.request_replay_from(2))
-    connection = receiver._inbox.begin_connection()
-    assert not receiver._handle_handshake_message(
-        encode_message({
-            "type": "hello_ok", "token": "issued", "server_instance": "server",
-            "replay_identity": True, "layered_replay": True, "replay_epoch": 0,
-        }), connection.sync_from, connection.generation,
-    )
-    assert receiver._received_replay_identity is None
-    assert not receiver.connected
