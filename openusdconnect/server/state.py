@@ -1536,23 +1536,9 @@ class UsdSyncServer:
                     )
                 )
             self.store.clear_and_rewrite(records)
-        with self._seq_lock:
-            self._event_count = len(records)
-            self._next_seq = len(records) + 1
-            self._seq_at_last_compact = self._next_seq
-            self._snapshot_epoch += 1
-            self._replay_epoch += 1
+        self._reset_replay_history(len(records))
         self._maybe_reclaim_storage()
-
-        self.op_cache.clear()
-        self._op_cache_layer = None
-
-        # Rebuild incremental prim tracking from compacted state.
-        self._prim_paths.clear()
-        self._instanceable_paths.clear()
-        self._point_instancer_paths.clear()
-        for entry in sorted_entries:
-            self._track_prim_event(entry.event)
+        self._rebuild_scene_caches(entry.event for entry in sorted_entries)
 
         LOG.info("Compacted event log: %d -> %d records", original_count, len(records))
 
@@ -1614,19 +1600,10 @@ class UsdSyncServer:
         # producers would be rejected for starting above transaction 1.
         self.store.clear_and_rewrite([])
         self._maybe_reclaim_storage()
-        with self._seq_lock:
-            self._event_count = 0
-            self._next_seq = 1
-            self._seq_at_last_compact = 1
-            self._snapshot_epoch += 1
-            self._replay_epoch += 1
+        self._reset_replay_history(0)
         with self.stage_lock:
             self.layer_stack.clear()
-        self.op_cache.clear()
-        self._op_cache_layer = None
-        self._prim_paths.clear()
-        self._instanceable_paths.clear()
-        self._point_instancer_paths.clear()
+            self._rebuild_scene_caches()
         LOG.info("Purged event log and reset authored collaboration layers")
         replay_epoch, replay_head = self.get_replay_token()
         with self.clients_lock:
@@ -1655,6 +1632,26 @@ class UsdSyncServer:
                 )
                 disconnected.append(handler)
         self._discard_unreachable_receivers(disconnected)
+
+    def _reset_replay_history(self, record_count: int) -> None:
+        """Publish a durable log replacement while holding the exclusive barrier."""
+        with self._seq_lock:
+            self._event_count = record_count
+            self._next_seq = record_count + 1
+            self._seq_at_last_compact = self._next_seq
+            self._snapshot_epoch += 1
+            self._replay_epoch += 1
+
+    def _rebuild_scene_caches(self, events: Iterable[dict] = ()) -> None:
+        """Discard cached USD handles and rebuild indexes from replacement history."""
+        self.op_cache.clear()
+        self._op_cache_layer = None
+        self._prim_paths.clear()
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
+        for event in events:
+            self._track_prim_event(event)
+        self._prim_count_dirty = True
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -1952,21 +1949,8 @@ class UsdSyncServer:
                     finally:
                         self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
 
-            self.op_cache.clear()
-            self._op_cache_layer = None
-            self._prim_paths.clear()
-            self._instanceable_paths.clear()
-            self._point_instancer_paths.clear()
-            for event in events:
-                self._track_prim_event(event)
-            self._prim_count_dirty = True
-
-            with self._seq_lock:
-                self._event_count = len(records)
-                self._next_seq = len(records) + 1
-                self._seq_at_last_compact = self._next_seq
-                self._snapshot_epoch += 1
-                self._replay_epoch += 1
+            self._rebuild_scene_caches(events)
+            self._reset_replay_history(len(records))
 
             self.last_vfs_write_analysis = analysis.to_dict()
             self._maybe_reclaim_storage()
