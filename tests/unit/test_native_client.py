@@ -139,6 +139,81 @@ def test_receiver_inbox_overflow_is_bounded_and_replayable():
     assert inbox.overflowed is False
 
 
+@pytest.mark.parametrize("require_contiguous", [False, True])
+@pytest.mark.parametrize("queued_prefix", [False, True])
+def test_receiver_reset_reconnects_from_one_without_discarding_queue(
+    require_contiguous, queued_prefix,
+):
+    inbox = native.ReceiverInbox(
+        initial_sync_from=4,
+        max_messages=2 if queued_prefix else 1,
+        require_contiguous=require_contiguous,
+    )
+    connection = inbox.begin_connection()
+    assert connection.sync_from == 4
+    expected = []
+    if queued_prefix:
+        assert (
+            inbox.accept(connection.generation, native.ReceiverMessageKind.EVENT, 4, b"old-4")
+            == native.AcceptResult.ACCEPTED
+        )
+        expected.append(b"old-4")
+    assert (
+        inbox.accept(connection.generation, native.ReceiverMessageKind.RESYNC, 0, b"reset")
+        == native.AcceptResult.ACCEPTED
+    )
+    expected.append(b"reset")
+    assert inbox.size == len(expected)
+    assert inbox.last_sequence == 0
+    assert (
+        inbox.accept(connection.generation, native.ReceiverMessageKind.EVENT, 1, b"new-1")
+        == native.AcceptResult.QUEUE_FULL
+    )
+    # Repeated disconnects before the first new event must retain both the
+    # reset cursor and every queued frame, even before the consumer drains.
+    for _ in range(2):
+        inbox.disconnect(connection.generation)
+        connection = inbox.begin_connection()
+        assert connection.sync_from == 1
+        assert inbox.size == len(expected)
+    assert inbox.drain() == expected
+    inbox.clear_overflow()
+    assert (
+        inbox.accept(connection.generation, native.ReceiverMessageKind.EVENT, 1, b"new-1")
+        == native.AcceptResult.ACCEPTED
+    )
+    inbox.disconnect(connection.generation)
+    assert inbox.begin_connection().sync_from == 2
+    assert inbox.drain() == [b"new-1"]
+
+
+def test_receiver_full_replay_cursor_survives_disconnect_before_any_frames():
+    inbox = native.ReceiverInbox(initial_sync_from=4, max_messages=1)
+    assert inbox.begin_connection().sync_from == 4
+    inbox.request_replay_from(1)
+    for _ in range(2):
+        connection = inbox.begin_connection()
+        assert connection.sync_from == 1
+        inbox.disconnect(connection.generation)
+
+
+def test_receiver_rejected_reset_preserves_snapshot_cursor_and_queue():
+    inbox = native.ReceiverInbox(initial_sync_from=4, max_messages=1)
+    connection = inbox.begin_connection()
+    assert (
+        inbox.accept(connection.generation, native.ReceiverMessageKind.EVENT, 4, b"old-4")
+        == native.AcceptResult.ACCEPTED
+    )
+    assert (
+        inbox.accept(connection.generation, native.ReceiverMessageKind.RESYNC, 0, b"reset")
+        == native.AcceptResult.QUEUE_FULL
+    )
+    assert inbox.last_sequence == 4
+    inbox.disconnect(connection.generation)
+    assert inbox.begin_connection().sync_from == 5
+    assert inbox.drain() == [b"old-4"]
+
+
 def test_receiver_session_can_enforce_contiguous_delivery():
     inbox = native.ReceiverInbox(
         initial_sync_from=1,

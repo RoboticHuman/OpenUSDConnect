@@ -219,10 +219,10 @@ def test_flat_receiver_blocks_enabling_department_policy(server_factory):
 def test_replay_failure_unregisters_layered_receiver(server_factory, monkeypatch):
     sync_server, port = server_factory(["animation"])
 
-    def _fail_replay(_handler, _seq_start, *, seq_end=None):
+    def _fail_replay(_handler, _records):
         raise OSError("injected replay failure")
 
-    monkeypatch.setattr(sync_server, "replay_from", _fail_replay)
+    monkeypatch.setattr(sync_server, "replay_records", _fail_replay)
     receiver = ReceiverThread(
         port=port,
         reconnect=False,

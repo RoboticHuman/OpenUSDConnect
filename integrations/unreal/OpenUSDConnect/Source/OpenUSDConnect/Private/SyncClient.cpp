@@ -159,8 +159,14 @@ uint32 FSyncClient::Run()
 			   TEXT("Connected to OpenUSDConnect server at %s:%d (receiver, sync_from=%d)"), *Host,
 			   Port, SyncFrom);
 		OUC::FWireFrame HelloFrame;
+		openusdconnect::client::ReplayPrefixClaim ReplayPrefix;
+		{
+			FScopeLock Lock(&ReplayIdentityCS);
+			ReplayPrefix = ReplayIdentityState.BeginConnection();
+		}
 		const openusdconnect::client::FrameResult HelloResult = OUC::BuildHelloFrame(
-			TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department, HelloFrame, AuthToken);
+			TEXT("receiver"), SyncFrom, ClientId, SessionOrigin, Department, HelloFrame, AuthToken,
+			FString(), std::move(ReplayPrefix));
 		if (HelloResult != openusdconnect::client::FrameResult::Success ||
 			!SendAll(HelloFrame.GetData(), HelloFrame.Num()))
 		{
@@ -238,6 +244,19 @@ uint32 FSyncClient::Run()
 			}
 			const OpenUSDConnect::HelloOk* HelloOk = Response.Accepted();
 			const FString IssuedToken = ToFString(HelloOk->token());
+			const flatbuffers::String* HelloServerInstance = HelloOk->server_instance();
+			const flatbuffers::Optional<uint64> HelloReplayEpoch = HelloOk->replay_epoch();
+			const std::string_view ServerInstance = HelloServerInstance
+				? std::string_view(HelloServerInstance->c_str(), HelloServerInstance->size())
+				: std::string_view();
+			const std::optional<uint64> ReplayEpoch = HelloReplayEpoch.has_value()
+				? std::optional<uint64>(*HelloReplayEpoch)
+				: std::nullopt;
+			{
+				FScopeLock Lock(&ReplayIdentityCS);
+				ReplayIdentityState.AcceptHello(
+					SyncFrom, HelloOk->replay_identity(), ServerInstance, ReplayEpoch);
+			}
 			ActiveGeneration.store(ConnectionGeneration, std::memory_order_release);
 			if (Owner)
 			{
@@ -310,7 +329,13 @@ bool FSyncClient::TryPopFrame(FValidatedReceiverFrame& OutFrame)
 
 bool FSyncClient::MarkReplayApplied()
 {
-	return ReceiverSession.TryMarkReplayApplied();
+	FScopeLock Lock(&ReplayIdentityCS);
+	if (!ReceiverSession.TryMarkReplayApplied())
+	{
+		return false;
+	}
+	ReplayIdentityState.MarkReplayApplied();
+	return true;
 }
 
 void FSyncClient::ResetAppliedProgress()
@@ -489,6 +514,11 @@ bool FSyncClient::HandleFrame(uint64 Generation, TArray<uint8>&& Frame)
 		const openusdconnect::client::AcceptResult Result =
 			ReceiverSession.Accept(Generation, openusdconnect::client::ReceiverMessageKind::Resync,
 								   0, MoveTemp(ValidatedFrame));
+		if (Result == openusdconnect::client::AcceptResult::Accepted)
+		{
+			FScopeLock Lock(&ReplayIdentityCS);
+			ReplayIdentityState.AcceptResync();
+		}
 		if (Owner)
 		{
 			Owner->OnReceiverReplayGenerationChanged(Generation);
@@ -498,8 +528,13 @@ bool FSyncClient::HandleFrame(uint64 Generation, TArray<uint8>&& Frame)
 	else if (Message.Kind() == openusdconnect::client::ControlMessageKind::ReplayComplete)
 	{
 		const OpenUSDConnect::ReplayComplete* Complete = Message.ReplayComplete();
-		const openusdconnect::client::AcceptResult Result = ReceiverSession.AcceptReplayComplete(
-			Generation, Complete->head_seq(), Complete->epoch());
+		FScopeLock Lock(&ReplayIdentityCS);
+		const openusdconnect::client::AcceptResult Result =
+			ReceiverSession.AcceptReplayComplete(Generation, Complete->head_seq(), Complete->epoch());
+		if (Result == openusdconnect::client::AcceptResult::Accepted)
+		{
+			ReplayIdentityState.AcceptReplayComplete(Complete->epoch());
+		}
 		if (Result == openusdconnect::client::AcceptResult::InvalidSequence)
 		{
 			UE_LOG(LogUSDConnect, Error, TEXT("Invalid replay head %d"), Complete->head_seq());

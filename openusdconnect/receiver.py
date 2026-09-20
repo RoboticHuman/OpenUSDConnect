@@ -15,6 +15,7 @@ from .codec import (
     PayloadType,
     _decode_stage_metadata_table,
     decode_envelope,
+    encode_message,
     message_to_dict,
     payload_type_and_sequence,
     resolve_payload,
@@ -107,8 +108,18 @@ class ReceiverThread(threading.Thread):
         self._connected_event = threading.Event()
         self._synchronized_event = threading.Event()
         self._handshake_event = threading.Event()
+        self._replay_lock = threading.RLock()
+        self._received_replay_identity: tuple[str, int] | None = None
+        self._initial_replay_identity: tuple[str, int] | None = None
+        self._connection_server_instance = ""
+        self._replay_identity_supported = False
+        self._hello_sent = False
+        self._prefix_validation_requested = False
+        self._connection_prefix_proven = False
+        self._reset_on_hello = False
         self.replay_head_seq = 0
         self.replay_epoch = 0
+        self.server_instance = ""
         self.auth_rejected = False
         self.hello_rejected = False
         self.rejection_code = HelloRejectionCode.Unspecified
@@ -122,12 +133,13 @@ class ReceiverThread(threading.Thread):
 
     @connected.setter
     def connected(self, value: bool) -> None:
-        if value:
-            self._connected_event.set()
-        else:
-            self._connected_event.clear()
-            self._synchronized_event.clear()
-            self._inbox.disconnect(self._inbox.generation)
+        with self._replay_lock:
+            if value:
+                self._connected_event.set()
+            else:
+                self._connected_event.clear()
+                self._synchronized_event.clear()
+                self._inbox.disconnect(self._inbox.generation)
 
     @property
     def synchronized(self) -> bool:
@@ -160,12 +172,17 @@ class ReceiverThread(threading.Thread):
 
     def mark_replay_applied(self) -> bool:
         """Publish READY after a successful drain applied the replay prefix."""
-        if not self._inbox.mark_replay_applied():
-            return False
-        self.replay_head_seq = self._inbox.replay_head_sequence
-        self.replay_epoch = self._inbox.replay_epoch
-        self._synchronized_event.set()
-        return True
+        with self._replay_lock:
+            if not self._inbox.mark_replay_applied():
+                return False
+            self.replay_head_seq = self._inbox.replay_head_sequence
+            self.replay_epoch = self._inbox.replay_epoch
+            # Publish the applied identity, not a new socket's un-applied Hello.
+            self.server_instance = (
+                self._received_replay_identity[0] if self._received_replay_identity else ""
+            )
+            self._synchronized_event.set()
+            return True
 
     def run(self) -> None:
         delay = self._reconnect_base_delay
@@ -238,10 +255,12 @@ class ReceiverThread(threading.Thread):
             self._close_socket(sock)
             return
 
-        connection = self._inbox.begin_connection()
-        connection_generation = connection.generation
-        sync_from = connection.sync_from
-        self._synchronized_event.clear()
+        with self._replay_lock:
+            connection = self._inbox.begin_connection()
+            connection_generation = connection.generation
+            sync_from = connection.sync_from
+            prefix_identity = self._received_replay_identity
+            self._synchronized_event.clear()
 
         hello = make_hello(
             "receiver",
@@ -253,6 +272,14 @@ class ReceiverThread(threading.Thread):
             layered_replay=self.layered_replay,
             layer_mode=self.layer_mode,
         )
+        # Initial explicit cursors may refer to an externally supplied snapshot.
+        # Preserve that contract, but do not claim its unvalidated prefix as proof.
+        self._prefix_validation_requested = self._hello_sent
+        if self._prefix_validation_requested:
+            hello["replay_server_instance"] = prefix_identity[0] if prefix_identity else ""
+            if prefix_identity is not None:
+                hello["replay_epoch"] = prefix_identity[1]
+        self._hello_sent = True
         send_msg(sock, hello)
         self._handshake_event.clear()
         self.auth_rejected = False
@@ -295,7 +322,7 @@ class ReceiverThread(threading.Thread):
                 return
 
             if not self.connected:
-                if not self._handle_handshake_message(buf, sync_from):
+                if not self._handle_handshake_message(buf, sync_from, connection_generation):
                     return
                 continue
 
@@ -324,7 +351,11 @@ class ReceiverThread(threading.Thread):
         LOG.error("ReceiverThread: connection rejected (%s): %s", code, reason)
         self._handshake_event.set()
 
-    def _handle_handshake_message(self, buf: bytes, sync_from: int) -> bool:
+    def _handle_handshake_message(
+        self, buf: bytes, sync_from: int, connection_generation: int | None = None,
+    ) -> bool:
+        if connection_generation is None:
+            connection_generation = self._inbox.generation
         env = decode_envelope(buf)
         payload_type = env.PayloadType()
 
@@ -349,6 +380,9 @@ class ReceiverThread(threading.Thread):
             return True
 
         _, hello = resolve_payload(env)
+        self._connection_server_instance = self._decode_text(hello.ServerInstance()) or ""
+        self._replay_identity_supported = bool(hello.ReplayIdentity())
+        self._connection_prefix_proven = sync_from == 1 or self._prefix_validation_requested
         self.layer_mode_active = LayerMode.SHARED_STAGE if hello.LayerMode() else LayerMode.MANAGED
         if self.layer_mode_active is not self.layer_mode:
             self._reject_hello(
@@ -378,7 +412,34 @@ class ReceiverThread(threading.Thread):
                 self.stage_metadata = metadata
                 self._invoke_callback(self._on_stage_metadata, metadata, "on_stage_metadata")
 
-        self.connected = True
+        with self._replay_lock:
+            if connection_generation != self._inbox.generation:
+                return False
+            epoch = hello.ReplayEpoch()
+            identity = (
+                (self._connection_server_instance, int(epoch))
+                if self._replay_identity_supported and self._connection_server_instance
+                and epoch is not None else None
+            )
+            # This proof belongs only to the handshake's replay, not later live resets.
+            self._initial_replay_identity = identity
+            if identity is None:
+                self._received_replay_identity = None
+            if self._reset_on_hello:
+                if not self._handle_data_message(
+                    encode_message({"type": "resync"}), connection_generation,
+                ):
+                    return False
+                self._reset_on_hello = False
+            if identity is not None and (
+                sync_from == 1 or (
+                    self._prefix_validation_requested
+                    and self._received_replay_identity == identity
+                )
+            ):
+                self._received_replay_identity = identity
+            # A changed/unknown prefix keeps its old identity until Resync is accepted.
+            self.connected = True
         self._handshake_event.set()
         LOG.info("ReceiverThread connected (sync_from=%d)", sync_from)
         return True
@@ -396,11 +457,25 @@ class ReceiverThread(threading.Thread):
             complete = message_to_dict(buf)
             head_seq = int(complete["head_seq"])
             epoch = int(complete["epoch"])
-            result = self._inbox.accept_replay_complete(
-                connection_generation,
-                head_seq,
-                epoch,
-            )
+            with self._replay_lock:
+                result = self._inbox.accept_replay_complete(
+                    connection_generation,
+                    head_seq,
+                    epoch,
+                )
+                if result == _client_backend.AcceptResult.ACCEPTED:
+                    self._initial_replay_identity = None
+                    # This covers received/queued frames, even before their consumer
+                    # drains them, including resets without a handshake epoch.
+                    self._received_replay_identity = (
+                        (self._connection_server_instance, epoch)
+                        if (
+                            self._replay_identity_supported
+                            and self._connection_prefix_proven
+                            and self._connection_server_instance
+                        )
+                        else None
+                    )
             if result == _client_backend.AcceptResult.STALE_GENERATION:
                 return False
             return True
@@ -427,10 +502,16 @@ class ReceiverThread(threading.Thread):
             payload_type,
             _client_backend.ReceiverMessageKind.OTHER,
         )
-        if kind == _client_backend.ReceiverMessageKind.RESYNC:
-            self._synchronized_event.clear()
-
-        result = self._inbox.accept(connection_generation, kind, sequence, buf)
+        with self._replay_lock:
+            result = self._inbox.accept(connection_generation, kind, sequence, buf)
+            if (
+                kind == _client_backend.ReceiverMessageKind.RESYNC
+                and result == _client_backend.AcceptResult.ACCEPTED
+            ):
+                self._synchronized_event.clear()
+                self._received_replay_identity = self._initial_replay_identity
+                self._initial_replay_identity = None
+                self._connection_prefix_proven = True
         if result == _client_backend.AcceptResult.STALE_GENERATION:
             return False
         if result == _client_backend.AcceptResult.DUPLICATE:
@@ -442,7 +523,7 @@ class ReceiverThread(threading.Thread):
                 sequence,
                 replay_from,
             )
-            self._inbox.request_replay_from(replay_from)
+            self.request_replay_from(replay_from)
             return False
         if result == _client_backend.AcceptResult.QUEUE_FULL:
             LOG.warning(
@@ -463,8 +544,15 @@ class ReceiverThread(threading.Thread):
         if seq_start < 1:
             raise ValueError("replay sequence must be at least 1")
 
-        self._inbox.request_replay_from(seq_start)
-        self._synchronized_event.clear()
+        with self._replay_lock:
+            self._inbox.request_replay_from(seq_start)
+            self._synchronized_event.clear()
+            # Discarded frames may include an unapplied reset. Their received
+            # identity cannot prove the consumer's retained prefix, at any cursor.
+            self._received_replay_identity = None
+            self._initial_replay_identity = None
+            if seq_start == 1:
+                self._reset_on_hello = True
         self._close_socket()
 
     def _close_socket(self, sock: socket.socket | None = None) -> None:

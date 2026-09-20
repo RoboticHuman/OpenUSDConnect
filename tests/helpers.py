@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
@@ -127,3 +129,74 @@ def read_results(results_path, label):
     for k, v in results.items():
         print(f"  {k}: {v}")
     return results
+
+
+def ensure_prim_event(path):
+    return {"k": "ensure_prim", "prim": path, "typeName": "Xform"}
+
+
+@contextmanager
+def in_process_server():
+    """Run an isolated TCP server on an ephemeral port."""
+    from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
+    from openusdconnect.server.state import UsdSyncServer
+
+    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
+    tcp = ThreadedTCPServer(("127.0.0.1", 0), ConnectionHandler, state, max_workers=8)
+    thread = threading.Thread(target=tcp.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state, tcp.server_address[1]
+    finally:
+        tcp.shutdown()
+        tcp.server_close()
+        thread.join(5)
+        state.shutdown()
+        state.store.close()
+        assert not thread.is_alive()
+
+
+def wait_until(predicate):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    assert predicate()
+
+
+@contextmanager
+def receiver_connection(receiver):
+    """Run one connection attempt and close its socket before returning."""
+    thread = threading.Thread(target=receiver._connect_and_recv, daemon=True)
+    thread.start()
+    try:
+        wait_until(lambda: receiver.connected)
+        yield
+    finally:
+        receiver._close_socket()
+        thread.join(5)
+        assert not thread.is_alive()
+        receiver.connected = False
+
+
+def mcp_session_with_receiver(port):
+    """Build an MCP mirror whose connection timing is controlled by the test."""
+    from pxr import Usd
+
+    from integrations.mcp.config import McpConfig
+    from integrations.mcp.session import ConnectionSession
+    from openusdconnect.usd_client import UsdReceiver
+
+    session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
+    session.mirror_stage = Usd.Stage.CreateInMemory()
+    session.receiver = UsdReceiver(
+        session.mirror_stage,
+        app_name="replay-identity-test",
+        host="127.0.0.1",
+        port=port,
+        persist_token=False,
+    )
+    # These tests drive one connection attempt directly to control reconnect timing.
+    session.receiver._started = True
+    return session

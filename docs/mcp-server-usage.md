@@ -238,9 +238,14 @@ Verify any network with
   configured department layer.
 - **Atomicity.** `usd_send_events` and every per-kind tool send exactly one
   transaction; the server applies it create → structural → value.
-- **Read-after-write.** After sending, the session drains the mirror (bounded by
-  `read_after_write_timeout_s`) so the next introspection call reflects the write
-  (`mirror_synced` in the result reports whether the wait completed).
+- **Read-after-write.** `mirror_synced: true` requires durable acknowledgement
+  and the mirror to have applied the server's post-commit checkpoint in the
+  same server instance and epoch. Waiting is bounded by
+  `read_after_write_timeout_s`. A timeout or unavailable checkpoint (for example,
+  an older server or recovered duplicate) returns `mirror_synced: false`.
+  `sent: true` alone means the sender
+  accepted the transaction, not that it is visible in the mirror. A rejected
+  transaction returns a `transaction_rejected` error.
 - **Validation.** Before sending, every event is checked for dict shape, path
   validity, schema `typeName`/`api_schemas`, Sdf type names (`input_types`,
   `primvar_meta`), and connection-source existence. Failures return a structured

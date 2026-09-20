@@ -95,7 +95,8 @@ FinishWireFrame(flatbuffers::FlatBufferBuilder& Builder,
 inline openusdconnect::client::FrameResult
 BuildHelloFrame(const FString& Role, int32 SyncFrom, const FString& ClientId,
 				const FString& SessionOrigin, const FString& Department, FWireFrame& OutFrame,
-				const FString& Token = FString(), const FString& ProducerSessionId = FString())
+				const FString& Token = FString(), const FString& ProducerSessionId = FString(),
+				openusdconnect::client::ReplayPrefixClaim ReplayPrefix = std::nullopt)
 {
 	flatbuffers::FlatBufferBuilder Builder(512);
 	const FTCHARToUTF8 RoleUtf8(*Role);
@@ -114,6 +115,7 @@ BuildHelloFrame(const FString& Role, int32 SyncFrom, const FString& ClientId,
 		false,
 		OpenUSDConnect::LayerMode::Managed,
 		ToStringView(ProducerSessionIdUtf8),
+		std::move(ReplayPrefix),
 	};
 	const openusdconnect::client::ProtocolResult Result =
 		openusdconnect::client::BuildHelloFrame(Builder, Parameters);

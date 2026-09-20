@@ -25,6 +25,8 @@ table Hello {
     layered_replay:bool;      // receiver can reconstruct the logical authored-layer stack
     layer_mode:LayerMode = Managed;
     producer_session_id:string; // emitter identity, bound to this connection
+    replay_server_instance:string; // retained receiver prefix; empty means identity unknown
+    replay_epoch:ulong = null; // sequence domain of that prefix
 }
 
 table HelloOk {
@@ -33,6 +35,9 @@ table HelloOk {
     layered_replay:bool;      // server accepted logical-layer replay for this receiver
     layer_mode:LayerMode = Managed;
     committed_through:ulong;  // highest durable txn for producer_session_id
+    server_instance:string;   // process identity; disambiguates sequence/epoch after restart
+    replay_identity:bool;     // server validates receiver prefix identity before replay
+    replay_epoch:ulong = null; // captured receiver replay domain; absent on older peers
 }
 
 table AuthRejected {
@@ -69,6 +74,11 @@ enum TransactionRejectionCode : ubyte {
     InvalidTransaction = 4,
 }
 
+table TransactionCheckpoint {
+    epoch:ulong;
+    head_seq:int;
+}
+
 // Server → producer cumulative result. Acknowledged means every transaction
 // through txn_id is durable for the session bound during Hello.
 table TransactionResult {
@@ -77,6 +87,9 @@ table TransactionResult {
     expected_txn_id:ulong;
     rejection_code:TransactionRejectionCode = None;
     reason:string;
+    // Optional post-commit mirror checkpoint. Absent on older servers and
+    // recovered duplicates whose original sequence domain is unavailable.
+    checkpoint:TransactionCheckpoint;
 }
 
 // Marks the exact replay-to-live boundary for one receiver connection. Every

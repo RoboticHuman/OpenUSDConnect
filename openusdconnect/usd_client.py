@@ -191,6 +191,16 @@ class UsdReceiver:
         return self._dispatcher.last_seq
 
     @property
+    def server_instance(self) -> str:
+        """Identity of the server whose replay has been fully applied."""
+        return self._receiver.server_instance
+
+    @property
+    def replay_epoch(self) -> int:
+        """Epoch of the replay that has been fully applied."""
+        return self._receiver.replay_epoch
+
+    @property
     def auth_rejected(self) -> bool:
         return self._receiver.auth_rejected
 

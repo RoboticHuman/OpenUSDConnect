@@ -40,7 +40,7 @@ from ..protocol_constants import (
     PROTOCOL_VERSION,
     LayerMode,
 )
-from ..transport import send_msg
+from ..transport import send_msg, send_raw
 from ._sock_utils import _set_keepalive, _set_send_timeout
 from .rate_limit import TokenBucket
 
@@ -280,7 +280,9 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             return
 
         # Send hello_ok with token (issued on first connect, None on reconnect)
-        hello_ok = {"type": MSG_HELLO_OK}
+        hello_ok = {"type": MSG_HELLO_OK, "server_instance": sync_server.server_instance}
+        if role == "receiver":
+            hello_ok["replay_identity"] = True
         if role == "emitter":
             hello_ok["committed_through"] = sync_server.producer_committed_through(
                 client_id,
@@ -299,7 +301,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         stage_meta = sync_server.get_stage_metadata_payload()
         if stage_meta:
             hello_ok["stage_metadata"] = stage_meta
-        send_msg(self.request, hello_ok)
+        if role != "receiver":
+            send_msg(self.request, hello_ok)
 
         LOG.info(
             "Client connected: role=%s origin=%s dept=%s from %s",
@@ -333,40 +336,38 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
             if role == "receiver":
                 sync_from = hello_fb.SyncFrom() or 1
+                prefix_instance = hello_fb.ReplayServerInstance()
+                if isinstance(prefix_instance, bytes):
+                    prefix_instance = prefix_instance.decode("utf-8")
                 try:
-                    with sync_server.receiver_replay_window(self) as replay_watermark:
-                        replay_end, replay_epoch = replay_watermark
-                        # A sequence beyond the captured tail indicates a stale
-                        # pre-compaction cursor. Tail + 1 remains a valid live join.
-                        if sync_from > replay_end + 1:
+                    with sync_server.receiver_replay_window(
+                        self,
+                        sync_from,
+                        replay_server_instance=prefix_instance,
+                        replay_epoch=hello_fb.ReplayEpoch(),
+                    ) as replay:
+                        hello_ok["replay_epoch"] = replay.epoch
+                        send_msg(self.request, hello_ok)
+                        if replay.resync_reason is not None:
                             send_msg(
                                 self.request,
-                                {"type": MSG_RESYNC, "reason": "seq_overflow"},
+                                {"type": MSG_RESYNC, "reason": replay.resync_reason},
                             )
-                            sync_from = 1
 
                         snapshot = sync_server.get_playback_state()
                         send_msg(
                             self.request,
                             {"type": MSG_PLAYBACK_STATE, **snapshot},
                         )
-                        if (
-                            sync_server.layer_mode is LayerMode.MANAGED
-                            and self._layered_replay
-                        ):
-                            send_msg(
-                                self.request,
-                                sync_server.get_layer_stack_state(),
-                            )
-                        sync_server.replay_from(
-                            self,
-                            sync_from,
-                            seq_end=replay_end,
-                        )
+                        if replay.layer_stack_state is not None:
+                            send_raw(self.request, replay.layer_stack_state)
+                        sync_server.replay_records(self, replay.records)
                         send_msg(
                             self.request,
-                            make_replay_complete(replay_end, replay_epoch),
+                            make_replay_complete(replay.head_seq, replay.epoch),
                         )
+                    # Do not retain the captured history for this socket's lifetime.
+                    del replay
                 except (OSError, TimeoutError):
                     LOG.info(
                         "Receiver disconnected during replay: %s",
@@ -556,6 +557,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         result = make_transaction_result(
                             commit.txn_id,
                             status="acknowledged",
+                            checkpoint=commit.checkpoint,
                         )
                     except TransactionRejectedError as exc:
                         result = make_transaction_result(

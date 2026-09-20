@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 
 from . import _client_backend
+from .checkpoints import MirrorCheckpoint
 from .codec import (
     PayloadType,
     TransactionRejectionCode,
@@ -123,6 +124,20 @@ class EventSender:
         self._recovery_artifact: RecoveryArtifact | None = None
         self._recovery_incident: RecoveryIncident | None = None
         self._retry_after_until = 0.0
+        self._server_instance = ""
+        self._acknowledged_checkpoint: MirrorCheckpoint | None = None
+
+    @property
+    def acknowledged_checkpoint(self) -> MirrorCheckpoint | None:
+        """Post-commit mirror position when all sends are acknowledged.
+
+        None means pending/rejected work or a peer without checkpoint support.
+        A Hello highwater alone does not establish a mirror checkpoint.
+        """
+        with self._condition:
+            if self._failure is not None or not self._session.empty:
+                return None
+            return self._acknowledged_checkpoint
 
     @property
     def is_connected(self) -> bool:
@@ -430,6 +445,9 @@ class EventSender:
             return False
 
         _, hello_ok = resolve_payload(env)
+        with self._condition:
+            self._server_instance = self._decode_string(hello_ok.ServerInstance()) or ""
+            self._acknowledged_checkpoint = None
         active_mode = LayerMode("shared_stage" if hello_ok.LayerMode() else "managed")
         if active_mode is not self.layer_mode:
             self.rejection_reason = (
@@ -722,6 +740,17 @@ class EventSender:
                 accepted = self._session.acknowledge_through(generation, txn_id)
                 if accepted == _client_backend.ProducerResult.STALE_GENERATION:
                     return
+                if accepted == _client_backend.ProducerResult.ACCEPTED:
+                    checkpoint = result.Checkpoint()
+                    self._acknowledged_checkpoint = (
+                        MirrorCheckpoint(
+                            server_instance=self._server_instance,
+                            epoch=int(checkpoint.Epoch()),
+                            head_seq=int(checkpoint.HeadSeq()),
+                        )
+                        if self._server_instance and checkpoint is not None
+                        else None
+                    )
                 if accepted != _client_backend.ProducerResult.ACCEPTED:
                     failure = TransactionFailure(
                         txn_id=txn_id,
