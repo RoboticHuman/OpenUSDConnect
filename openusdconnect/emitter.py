@@ -99,12 +99,7 @@ _EVENTS_REQUIRING_LOCAL_OPINION_FILTERING = frozenset(
         K_SET_GPRIM_ATTRS,
         K_SET_INSTANCEABLE,
         K_SET_MATERIAL_BINDING,
-        K_SET_PAYLOAD,
         K_SET_POINT_INSTANCER,
-        K_SET_REFERENCE,
-        K_SET_SDF_SPEC_FIELDS,
-        K_ERASE_TIME_SAMPLES,
-        K_SET_VARIANT_SELECTIONS,
         K_SET_VISIBILITY,
         K_SET_XFORM_TRS,
         K_UNLOAD_PAYLOAD,
@@ -117,8 +112,13 @@ _EVENTS_ALREADY_PROVEN_LOCAL = frozenset(
         K_DEACTIVATE_PRIM,
         K_DELETE_PRIM,
         K_ENSURE_PRIM,
+        K_ERASE_TIME_SAMPLES,
         K_RENAME_PRIM,
+        K_SET_PAYLOAD,
+        K_SET_REFERENCE,
+        K_SET_SDF_SPEC_FIELDS,
         K_SET_STAGE_METADATA,
+        K_SET_VARIANT_SELECTIONS,
     }
 )
 
@@ -2143,7 +2143,9 @@ class NoticeEmitter:
             kind = event["k"]
             time = event.get("time")
 
-            if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
+            if kind in _EVENTS_ALREADY_PROVEN_LOCAL:
+                # Exact Sdf events and edit-target arc readers also carry
+                # required clears, even after the local opinion is gone.
                 filtered.append(event)
                 continue
 
@@ -2296,30 +2298,15 @@ class NoticeEmitter:
                     filtered.append(kept)
                 continue
 
-            if kind == K_SET_REFERENCE:
-                # The channel itself reads only edit-target arcs. If it
-                # produced an empty event, that is a required clear after a
-                # previously authored local list was removed.
-                filtered.append(event)
-                continue
-            if kind == K_SET_PAYLOAD:
-                filtered.append(event)
-                continue
             if kind in (K_LOAD_PAYLOAD, K_UNLOAD_PAYLOAD):
                 if any(spec.HasInfo("payload") for spec in local_specs):
                     filtered.append(event)
-                continue
-            if kind == K_SET_VARIANT_SELECTIONS:
-                filtered.append(event)
                 continue
             if kind == K_SET_INSTANCEABLE:
                 if any(spec.HasInfo("instanceable") for spec in local_specs):
                     filtered.append(event)
                 continue
 
-            if kind in _EVENTS_ALREADY_PROVEN_LOCAL:
-                filtered.append(event)
-                continue
             raise ValueError(f"missing local-opinion policy for event kind {kind!r}")
         return filtered
 
@@ -3420,54 +3407,39 @@ class NoticeEmitter:
             # An over normally needs no structural event because its definition
             # composes through a weaker layer or arc. Applied API schemas are
             # prim metadata, so an over carrying one still needs ensure_prim.
-            if local_definition_exists or local_api_schemas:
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": type_name,
-                        "api_schemas": list(local_api_schemas),
-                    }
-                )
-            if "xformOpOrder" in local_property_sources or any(
-                name.startswith("xformOp:") for name in local_property_sources
-            ):
-                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
-            self._know_prim(prim_path)
+            needs_definition = local_definition_exists or bool(local_api_schemas)
         else:
             definition_type_changed = (
                 local_definition_exists
                 and previous_prim_state is not None
                 and type_name != previous_prim_state.type_name
             )
-            if definition_type_changed:
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": type_name,
-                        "api_schemas": list(local_api_schemas),
-                    }
-                )
-
             # Re-emit ensure_prim when applied schemas change. Empty schema
             # sets are represented by exact Sdf field removal, not this
             # additive handshake.
             previous_api_schemas = prim_cache.get(_C_API_SCHEMAS)
-            if (
-                not definition_type_changed
-                and previous_api_schemas is not None
+            schemas_changed = (
+                previous_api_schemas is not None
                 and local_api_schemas != previous_api_schemas
-                and local_api_schemas
+                and bool(local_api_schemas)
+            )
+            needs_definition = definition_type_changed or schemas_changed
+
+        if needs_definition:
+            events.append(
+                {
+                    "k": K_ENSURE_PRIM,
+                    "prim": prim_path,
+                    "typeName": type_name,
+                    "api_schemas": list(local_api_schemas),
+                }
+            )
+        if first_encounter:
+            if "xformOpOrder" in local_property_sources or any(
+                name.startswith("xformOp:") for name in local_property_sources
             ):
-                events.append(
-                    {
-                        "k": K_ENSURE_PRIM,
-                        "prim": prim_path,
-                        "typeName": type_name,
-                        "api_schemas": list(local_api_schemas),
-                    }
-                )
+                events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
+            self._know_prim(prim_path)
 
         prim_cache[_C_API_SCHEMAS] = local_api_schemas
         return events
