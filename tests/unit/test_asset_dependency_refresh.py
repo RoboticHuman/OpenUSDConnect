@@ -596,6 +596,63 @@ def test_refresh_reapplies_to_mirror_and_dcc_adapter(tmp_path):
     )
 
 
+def test_refresh_failure_restores_all_layers_and_retains_dependencies_for_retry(
+    tmp_path, monkeypatch,
+):
+    asset_directory = tmp_path / "resolver-root"
+    asset_directory.mkdir()
+    stage = _stage_with_search_context(asset_directory)
+    root = stage.GetRootLayer()
+    session = stage.GetSessionLayer()
+    adapter = UsdStageAdapter(stage)
+    imported = []
+    dispatcher = EventDispatcher(
+        receiver=_NullReceiver(), adapter=adapter, on_imported=imported.append,
+    )
+    for layer, name in ((root, "A"), (session, "B")):
+        with Usd.EditContext(stage, layer):
+            dispatcher._apply([_arc_event(K_SET_REFERENCE, f"/World/{name}", f"{name}.usda")])
+    imported.clear()
+    snapshots = [layer.ExportToString() for layer in (root, session)]
+    original_target = stage.GetEditTarget()
+    for name in ("A", "B"):
+        _create_variant_asset(asset_directory / f"{name}.usda")
+
+    original_apply = adapter.apply_events
+    applied_layers = []
+
+    def apply_then_fail_second_layer(events):
+        layer = stage.GetEditTarget().GetLayer()
+        original_apply(events)
+        # Represent adapter-authored state that must roll back with its layer.
+        Sdf.CreatePrimInLayer(layer, "/PartialRefresh")
+        applied_layers.append(layer)
+        if len(applied_layers) == 2:
+            raise RuntimeError("second layer failed")
+
+    monkeypatch.setattr(adapter, "apply_events", apply_then_fail_second_layer)
+    with pytest.raises(RuntimeError, match="second layer failed"):
+        dispatcher.refresh_asset_dependency()
+
+    assert applied_layers == [root, session]
+    assert [layer.ExportToString() for layer in (root, session)] == snapshots
+    assert stage.GetEditTarget() == original_target
+    assert dispatcher.pending_asset_dependencies == ("A.usda", "B.usda")
+    assert imported == []
+
+    monkeypatch.setattr(adapter, "apply_events", original_apply)
+    result = dispatcher.refresh_asset_dependency()
+    assert result == {
+        "status": "refreshed",
+        "reapplied": 2,
+        "affected_prims": ["/World/A", "/World/B"],
+        "pending": [],
+    }
+    assert imported == [["/World/A", "/World/B"]]
+    for name in ("A", "B"):
+        assert stage.GetPrimAtPath(f"/World/{name}").GetAttribute("user:assetVersion").Get() == "1"
+
+
 def test_context_refresh_recovers_other_dependencies_that_changed(tmp_path):
     asset_directory = tmp_path / "resolver-root"
     asset_directory.mkdir()
@@ -695,9 +752,9 @@ def test_resolver_refresh_runs_inside_emitter_suppression(tmp_path, monkeypatch)
 
     original = dispatcher._refresh_asset_dependency_suppressed
 
-    def assert_suppressed(refresh_stage, asset_path, tracked):
+    def assert_suppressed(refresh_stage, selected_dependencies):
         assert emitter.depth == 1
-        return original(refresh_stage, asset_path, tracked)
+        return original(refresh_stage, selected_dependencies)
 
     monkeypatch.setattr(
         dispatcher,

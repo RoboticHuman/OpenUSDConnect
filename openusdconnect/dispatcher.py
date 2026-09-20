@@ -1045,24 +1045,19 @@ class EventDispatcher:
         with suppress_ctx:
             self._refresh_resolver_context_suppressed(stage)
             self._discard_stale_asset_events(stage)
-            tracked = [
-                event
+            selected_dependencies = {
+                (authored_path, identifier, resolved_path)
                 for event in self._asset_events.values()
-                if any(
-                    (
-                        not resolved_path
-                        if asset_path is None
-                        else self._asset_path_matches(
-                            asset_path,
-                            authored_path,
-                            identifier,
-                            resolved_path,
-                        )
+                for authored_path, identifier, resolved_path in event.dependencies
+                if (
+                    not resolved_path
+                    if asset_path is None
+                    else self._asset_path_matches(
+                        asset_path, authored_path, identifier, resolved_path,
                     )
-                    for authored_path, identifier, resolved_path in event.dependencies
                 )
-            ]
-            if not tracked:
+            }
+            if not selected_dependencies:
                 return {
                     "status": "not_tracked",
                     "reapplied": 0,
@@ -1071,43 +1066,28 @@ class EventDispatcher:
                 }
             return self._refresh_asset_dependency_suppressed(
                 stage,
-                asset_path,
-                tracked,
+                selected_dependencies,
             )
 
     def _refresh_asset_dependency_suppressed(
         self,
         stage: Usd.Stage,
-        asset_path: str | None,
-        tracked: list[_TrackedAssetEvent],
+        selected_dependencies: set[tuple[str, str, str]],
     ) -> AssetDependencyRefreshResult:
         from pxr import Usd
 
         from .event_apply import apply_events, atomic_apply
 
-        ready: list[_TrackedAssetEvent] = []
-        explicitly_selected = {id(event) for event in tracked}
         resolved_in_refresh: dict[tuple[str, str], tuple[str, str]] = {}
-        refreshed_dependencies: dict[
-            int,
-            tuple[tuple[str, str, str], ...],
-        ] = {}
-        for event in self._asset_events.values():
+        # Keep each original event, its new dependencies, and any required replay
+        # together until application succeeds. Empty replay lists need no USD edit.
+        refreshes = []
+        for tracked in self._asset_events.values():
             event_ready = False
             dependencies: list[tuple[str, str, str]] = []
-            for authored_path, old_identifier, old_resolved_path in event.dependencies:
-                selected = id(event) in explicitly_selected and (
-                    not old_resolved_path
-                    if asset_path is None
-                    else self._asset_path_matches(
-                        asset_path,
-                        authored_path,
-                        old_identifier,
-                        old_resolved_path,
-                    )
-                )
-
-                anchor_layer = event.edit_target.GetLayer()
+            anchor_layer = tracked.edit_target.GetLayer()
+            for dependency in tracked.dependencies:
+                authored_path, _old_identifier, old_resolved_path = dependency
                 cache_key = (anchor_layer.identifier, authored_path)
                 resolved = resolved_in_refresh.get(cache_key)
                 if resolved is None:
@@ -1119,15 +1099,29 @@ class EventDispatcher:
                     resolved_in_refresh[cache_key] = resolved
                 identifier, resolved_path = resolved
                 dependencies.append((authored_path, identifier, resolved_path))
-                if (selected and resolved_path) or resolved_path != old_resolved_path:
+                if (
+                    dependency in selected_dependencies and resolved_path
+                ) or resolved_path != old_resolved_path:
                     event_ready = True
-            refreshed_dependencies[id(event)] = tuple(dependencies)
-            if event_ready:
-                ready.append(event)
 
-        if not ready:
-            for event in self._asset_events.values():
-                event.dependencies = refreshed_dependencies[id(event)]
+            local_events = []
+            if event_ready:
+                event = tracked.event
+                local_events.append(event)
+                if event.get("k") == K_SET_PAYLOAD:
+                    prim = stage.GetPrimAtPath(event.get("prim", ""))
+                    if prim and prim.IsLoaded():
+                        local_events.append({"k": K_LOAD_PAYLOAD, "prim": event["prim"]})
+            refreshes.append((tracked, tuple(dependencies), local_events))
+
+        replays = [
+            (tracked, dependencies, events)
+            for tracked, dependencies, events in refreshes
+            if events
+        ]
+        if not replays:
+            for tracked, dependencies, _events in refreshes:
+                tracked.dependencies = dependencies
             return {
                 "status": "still_missing",
                 "reapplied": 0,
@@ -1135,19 +1129,7 @@ class EventDispatcher:
                 "pending": list(self.pending_asset_dependencies),
             }
 
-        replays: list[tuple[_TrackedAssetEvent, list[dict]]] = []
-        adapter_events: list[dict] = []
-        for tracked_event in ready:
-            event = tracked_event.event
-            local_events = [event]
-            adapter_events.append(event)
-            if event.get("k") == K_SET_PAYLOAD:
-                prim = stage.GetPrimAtPath(event.get("prim", ""))
-                if prim and prim.IsLoaded():
-                    load_event = {"k": K_LOAD_PAYLOAD, "prim": event["prim"]}
-                    local_events.append(load_event)
-                    adapter_events.append(load_event)
-            replays.append((tracked_event, local_events))
+        adapter_events = [event for _tracked, _dependencies, events in replays for event in events]
 
         adapter_handles_stage = self.adapter.targets_stage() is stage
         projection = None
@@ -1169,7 +1151,7 @@ class EventDispatcher:
             if projection is not None:
                 transaction.enter_context(projection)
             snapshotted_layers: set[str] = set()
-            for tracked_event, _local_events in replays:
+            for tracked_event, _dependencies, _local_events in replays:
                 layer = tracked_event.edit_target.GetLayer()
                 if layer.identifier in snapshotted_layers:
                     continue
@@ -1177,7 +1159,7 @@ class EventDispatcher:
                     transaction.enter_context(atomic_apply(stage))
                 snapshotted_layers.add(layer.identifier)
 
-            for tracked_event, local_events in replays:
+            for tracked_event, _dependencies, local_events in replays:
                 with Usd.EditContext(stage, tracked_event.edit_target):
                     # Assigning the same SdfListOp is a no-op, so it cannot
                     # make Pcp retry an asset that was missing when the
@@ -1205,12 +1187,12 @@ class EventDispatcher:
                     self.adapter.apply_events(adapter_events)
                 projection.commit()
 
-        for tracked_event, local_events in replays:
+        for tracked_event, dependencies, local_events in replays:
             if self.emitter is not None:
                 with Usd.EditContext(stage, tracked_event.edit_target):
                     for event in local_events:
                         self.emitter.invalidate_for_event(event)
-            tracked_event.dependencies = refreshed_dependencies[id(tracked_event)]
+            tracked_event.dependencies = dependencies
 
         affected = self._run_post_apply_callbacks(
             adapter_events,
