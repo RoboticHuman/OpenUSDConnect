@@ -71,6 +71,31 @@ def test_event_rows_and_producer_progress_commit_atomically_and_survive_reopen(t
     reopened.close()
 
 
+def test_failed_single_append_does_not_poison_subsequent_writes(tmp_path):
+    db = str(tmp_path / "append-rollback.db")
+    store = SqliteEventStore(db)
+    try:
+        store.append(1, b"one", "client", "ensure_prim", "/A")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.append(1, b"duplicate", "client", "ensure_prim", "/B")
+
+        store.append_batch(
+            [(2, b"two", "client", "ensure_prim", "/B")],
+            producer_progress=(ProducerProgress("client", "session", 2),),
+        )
+        store.append(3, b"three", "client", "ensure_prim", "/C")
+    finally:
+        store.close()
+
+    reopened = SqliteEventStore(db)
+    try:
+        assert reopened.get_all_asc() == [(1, b"one"), (2, b"two"), (3, b"three")]
+        assert reopened.get_producer_progress("client", "session") == 2
+        assert reopened.query(kind="ensure_prim", prim_contains="/C") == ([b"three"], 1)
+    finally:
+        reopened.close()
+
+
 def test_grouped_records_and_multiple_producers_commit_atomically(tmp_path):
     store = SqliteEventStore(str(tmp_path / "group.db"))
     store.append_batch(
