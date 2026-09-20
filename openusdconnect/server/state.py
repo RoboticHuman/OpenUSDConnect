@@ -280,12 +280,20 @@ def _stage_prim_types(stage: Usd.Stage) -> dict[str, str]:
 
 
 def _stage_live_metadata(stage: Usd.Stage) -> dict | None:
+    """Read and validate the optional identity carried by a VFS snapshot."""
     layer_data = stage.GetRootLayer().customLayerData or {}
     if "openusdconnect" not in layer_data:
         return None
     metadata = layer_data["openusdconnect"]
     if not isinstance(metadata, dict):
         raise InvalidVfsWriteError("uploaded openusdconnect metadata must be a dictionary")
+    scene_id = metadata.get("scene_id")
+    if not isinstance(scene_id, str) or not scene_id:
+        raise InvalidVfsWriteError(
+            "uploaded openusdconnect metadata field 'scene_id' must be a non-empty string"
+        )
+    _metadata_int(metadata, "epoch")
+    _metadata_int(metadata, "snapshot_seq")
     return metadata
 
 
@@ -1688,219 +1696,35 @@ class UsdSyncServer:
 
         Returns the number of translated events persisted to the event log.
         """
-        uploaded_meta = _stage_live_metadata(uploaded_stage)
-        if uploaded_meta is None:
-            uploaded_scene_id = None
-            uploaded_epoch = None
-            uploaded_seq = None
-        else:
-            uploaded_scene_id = uploaded_meta.get("scene_id")
-            if not isinstance(uploaded_scene_id, str) or not uploaded_scene_id:
-                raise InvalidVfsWriteError(
-                    "uploaded openusdconnect metadata field 'scene_id' must be a non-empty string"
-                )
-            uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
-            uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
+        from ..event_apply import apply_events
 
+        uploaded_meta = _stage_live_metadata(uploaded_stage)
         self.txn_barrier.acquire_exclusive()
         try:
-            current_epoch, current_seq = self.get_snapshot_token()
-            with self.stage_lock:
-                department_layers = self._ordered_department_names()
-                additional_layers = [
-                    layer_key
-                    for layer_key in self.layer_stack.layer_keys
-                    if layer_key != _DEFAULT_LAYER_KEY
-                    and _department_for_layer_key(layer_key) is None
-                ]
-                before_types = _stage_prim_types(self.stage)
-            uploaded_types = _stage_prim_types(uploaded_stage)
-            before_paths = set(before_types)
-            uploaded_paths = set(uploaded_types)
-            created_paths = sorted(uploaded_paths - before_paths)
-            removed_paths = sorted(
-                before_paths - uploaded_paths,
-                key=lambda p: p.count("/"),
-                reverse=True,
+            analysis = self._validate_stage_snapshot(
+                uploaded_stage,
+                uploaded_meta,
+                reject_stale=reject_stale,
+                reject_ambiguous=reject_ambiguous,
             )
-            type_changed_paths = sorted(
-                p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
-            )
-
-            notes = []
-
-            def _analysis(status: str, status_notes: list[str], event_counts=None):
-                return VfsWriteAnalysis(
-                    status=status,
-                    current_epoch=current_epoch,
-                    current_seq=current_seq,
-                    uploaded_epoch=uploaded_epoch,
-                    uploaded_seq=uploaded_seq,
-                    before_prim_count=len(before_paths),
-                    uploaded_prim_count=len(uploaded_paths),
-                    created_prims=created_paths,
-                    removed_prims=removed_paths,
-                    type_changed_prims=type_changed_paths,
-                    event_counts=event_counts or {},
-                    notes=status_notes,
-                )
-
-            if department_layers or additional_layers:
-                details = []
-                if department_layers:
-                    details.append(f"department layers: {', '.join(department_layers)}")
-                if additional_layers:
-                    details.append(f"collaboration layers: {', '.join(additional_layers)}")
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "translate write fallback is disabled while non-default "
-                        f"collaboration layers are active ({'; '.join(details)})"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "VFS translate writes are disabled while non-default "
-                    "collaboration layers are active"
-                )
-
-            if uploaded_meta is None:
-                analysis = _analysis(
-                    "metadata_rejected",
-                    ["uploaded snapshot is missing openusdconnect metadata"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise InvalidVfsWriteError(
-                    "uploaded VFS snapshot is missing openusdconnect metadata"
-                )
-
-            if uploaded_scene_id != self.scene_id:
-                analysis = _analysis(
-                    "metadata_rejected",
-                    ["uploaded snapshot belongs to a different live scene"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise InvalidVfsWriteError(
-                    "uploaded VFS snapshot scene_id does not match this server: "
-                    f"file={uploaded_scene_id!r}, server={self.scene_id!r}"
-                )
-
-            uploaded_token = (uploaded_epoch, uploaded_seq)
-            current_token = (current_epoch, current_seq)
-            if uploaded_token != current_token:
-                if uploaded_token < current_token and not reject_stale:
-                    notes.append(
-                        "stale snapshot token accepted because stale-write rejection was disabled"
-                    )
-                else:
-                    relation = "older" if uploaded_token < current_token else "newer"
-                    analysis = _analysis(
-                        "stale_rejected" if relation == "older" else "future_rejected",
-                        [f"uploaded snapshot is {relation} than the current live server state"],
-                    )
-                    self.last_vfs_write_analysis = analysis.to_dict()
-                    raise StaleVfsWriteError(
-                        "uploaded VFS snapshot token does not match the current server: "
-                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
-                        f"server epoch/seq={current_epoch}/{current_seq}"
-                    )
-
-            if uploaded_stage.GetEditTarget().GetLayer().subLayerPaths:
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "uploaded snapshot contains sublayer topology, which cannot "
-                        "be mapped into the managed collaboration layer stack"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "uploaded VFS snapshot contains unsupported sublayer topology"
-                )
-
-            removed_fraction = len(removed_paths) / max(1, len(before_paths))
-            removes_rootish_prim = any(
-                path.count("/") <= 1 and path != "/Root" for path in removed_paths
-            )
-            ambiguous_destructive = bool(removed_paths) and (
-                not uploaded_paths
-                or removes_rootish_prim
-                or (len(before_paths) >= 10 and removed_fraction >= 0.8)
-            )
-            if reject_ambiguous and ambiguous_destructive:
-                analysis = _analysis(
-                    "ambiguous_rejected",
-                    [
-                        "uploaded snapshot removes a root-level prim or most of the scene; "
-                        "refusing automatic fallback translation"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise AmbiguousVfsWriteError(
-                    "uploaded VFS snapshot looks destructively incomplete; "
-                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
-                )
-
             if unchanged_snapshot:
-                analysis = _analysis(
-                    "unchanged",
-                    ["uploaded bytes match the current virtual snapshot"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
+                self.last_vfs_write_analysis = replace(
+                    analysis,
+                    status="unchanged",
+                    notes=["uploaded bytes match the current virtual snapshot"],
+                ).to_dict()
                 LOG.info("VFS snapshot write is unchanged; no events generated")
                 return 0
 
-            emitter = NoticeEmitter(uploaded_stage)
-            try:
-                events = emitter.snapshot_events()
-            finally:
-                emitter.cleanup()
-
-            # Hide prims that existed in the previous composed stage but are absent
-            # from the uploaded snapshot. This lets full-file saves express deletes
-            # even when the original prim lives in the immutable base layer.
-            for prim_path in removed_paths:
-                events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
-
+            events, replacement_layer, shared_events = self._prepare_stage_snapshot(
+                uploaded_stage, analysis.removed_prims,
+            )
             event_counts: dict[str, int] = {}
-            for ev in events:
-                kind = ev.get("k", "")
+            for event in events:
+                kind = event.get("k", "")
                 if kind:
                     event_counts[kind] = event_counts.get(kind, 0) + 1
-
-            analysis = _analysis("translated", notes, event_counts)
-
-            # Build the complete replacement off-stage first. This validates
-            # every generated event and gives us an authored layer that can be
-            # installed without incrementally mutating authoritative state.
-            from ..event_apply import apply_events
-            from ..sdf_spec_delta import validate_spec_delta
-
-            for event in events:
-                if event.get("k") == K_SET_SDF_SPEC_FIELDS:
-                    validate_spec_delta(event)
-
-            replacement_layer = Sdf.Layer.CreateAnonymous("vfs-replacement-edits")
-            replacement_session = Sdf.Layer.CreateAnonymous("vfs-replacement-session")
-            replacement_session.subLayerPaths = [replacement_layer.identifier]
-            with self.stage_lock:
-                replacement_stage = Usd.Stage.Open(
-                    self.stage.GetRootLayer(),
-                    replacement_session,
-                    self.stage.GetPathResolverContext(),
-                )
-            if replacement_stage is None:
-                raise RuntimeError("failed to create the VFS replacement stage")
-            replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
-            replacement_events = [
-                event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
-            ]
-            shared_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
-            if replacement_events:
-                apply_events(replacement_stage, replacement_events, prevalidated=True)
-            if shared_events:
-                replacement_stage.SetEditTarget(Usd.EditTarget(replacement_stage.GetSessionLayer()))
-                apply_events(replacement_stage, shared_events, prevalidated=True)
+            analysis = replace(analysis, event_counts=event_counts)
 
             records: list[tuple[dict, bytes]] = []
             persist_tuples = []
@@ -1983,13 +1807,207 @@ class UsdSyncServer:
                 "Translated VFS snapshot write into %d live events "
                 "(created=%d removed=%d type_changed=%d)",
                 len(events),
-                len(created_paths),
-                len(removed_paths),
-                len(type_changed_paths),
+                len(analysis.created_prims),
+                len(analysis.removed_prims),
+                len(analysis.type_changed_prims),
             )
             return len(events)
         finally:
             self.txn_barrier.release_exclusive()
+
+    def _validate_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        uploaded_meta: dict | None,
+        *,
+        reject_stale: bool,
+        reject_ambiguous: bool,
+    ) -> VfsWriteAnalysis:
+        """Compare an upload with live state while holding the exclusive barrier."""
+        metadata = uploaded_meta or {}
+        uploaded_scene_id = metadata.get("scene_id")
+        uploaded_epoch = metadata.get("epoch")
+        uploaded_seq = metadata.get("snapshot_seq")
+        current_epoch, current_seq = self.get_snapshot_token()
+        with self.stage_lock:
+            department_layers = self._ordered_department_names()
+            additional_layers = [
+                layer_key
+                for layer_key in self.layer_stack.layer_keys
+                if layer_key != _DEFAULT_LAYER_KEY
+                and _department_for_layer_key(layer_key) is None
+            ]
+            before_types = _stage_prim_types(self.stage)
+        uploaded_types = _stage_prim_types(uploaded_stage)
+        before_paths = set(before_types)
+        uploaded_paths = set(uploaded_types)
+        created_paths = sorted(uploaded_paths - before_paths)
+        removed_paths = sorted(
+            before_paths - uploaded_paths,
+            key=lambda p: p.count("/"),
+            reverse=True,
+        )
+        type_changed_paths = sorted(
+            p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
+        )
+
+        analysis = VfsWriteAnalysis(
+            status="translated",
+            current_epoch=current_epoch,
+            current_seq=current_seq,
+            uploaded_epoch=uploaded_epoch,
+            uploaded_seq=uploaded_seq,
+            before_prim_count=len(before_paths),
+            uploaded_prim_count=len(uploaded_paths),
+            created_prims=created_paths,
+            removed_prims=removed_paths,
+            type_changed_prims=type_changed_paths,
+        )
+
+        def reject(status: str, note: str, error: RuntimeError) -> None:
+            self.last_vfs_write_analysis = replace(
+                analysis, status=status, notes=[note],
+            ).to_dict()
+            raise error
+
+        if department_layers or additional_layers:
+            details = []
+            if department_layers:
+                details.append(f"department layers: {', '.join(department_layers)}")
+            if additional_layers:
+                details.append(f"collaboration layers: {', '.join(additional_layers)}")
+            reject(
+                "unsupported_rejected",
+                "translate write fallback is disabled while non-default "
+                f"collaboration layers are active ({'; '.join(details)})",
+                UnsupportedVfsWriteError(
+                    "VFS translate writes are disabled while non-default "
+                    "collaboration layers are active"
+                ),
+            )
+
+        if uploaded_meta is None:
+            reject(
+                "metadata_rejected",
+                "uploaded snapshot is missing openusdconnect metadata",
+                InvalidVfsWriteError("uploaded VFS snapshot is missing openusdconnect metadata"),
+            )
+
+        if uploaded_scene_id != self.scene_id:
+            reject(
+                "metadata_rejected",
+                "uploaded snapshot belongs to a different live scene",
+                InvalidVfsWriteError(
+                    "uploaded VFS snapshot scene_id does not match this server: "
+                    f"file={uploaded_scene_id!r}, server={self.scene_id!r}"
+                ),
+            )
+
+        uploaded_token = (uploaded_epoch, uploaded_seq)
+        current_token = (current_epoch, current_seq)
+        if uploaded_token != current_token:
+            if uploaded_token < current_token and not reject_stale:
+                analysis = replace(
+                    analysis,
+                    notes=[
+                        "stale snapshot token accepted because stale-write rejection was disabled"
+                    ],
+                )
+            else:
+                relation = "older" if uploaded_token < current_token else "newer"
+                reject(
+                    "stale_rejected" if relation == "older" else "future_rejected",
+                    f"uploaded snapshot is {relation} than the current live server state",
+                    StaleVfsWriteError(
+                        "uploaded VFS snapshot token does not match the current server: "
+                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
+                        f"server epoch/seq={current_epoch}/{current_seq}"
+                    ),
+                )
+
+        if uploaded_stage.GetEditTarget().GetLayer().subLayerPaths:
+            reject(
+                "unsupported_rejected",
+                "uploaded snapshot contains sublayer topology, which cannot "
+                "be mapped into the managed collaboration layer stack",
+                UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains unsupported sublayer topology"
+                ),
+            )
+
+        removed_fraction = len(removed_paths) / max(1, len(before_paths))
+        removes_rootish_prim = any(
+            path.count("/") <= 1 and path != "/Root" for path in removed_paths
+        )
+        ambiguous_destructive = bool(removed_paths) and (
+            not uploaded_paths
+            or removes_rootish_prim
+            or (len(before_paths) >= 10 and removed_fraction >= 0.8)
+        )
+        if reject_ambiguous and ambiguous_destructive:
+            reject(
+                "ambiguous_rejected",
+                "uploaded snapshot removes a root-level prim or most of the scene; "
+                "refusing automatic fallback translation",
+                AmbiguousVfsWriteError(
+                    "uploaded VFS snapshot looks destructively incomplete; "
+                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
+                ),
+            )
+
+        return analysis
+
+    def _prepare_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        removed_paths: list[str],
+    ) -> tuple[list[dict], Sdf.Layer, list[dict]]:
+        """Translate and validate a replacement without changing live USD state."""
+        emitter = NoticeEmitter(uploaded_stage)
+        try:
+            events = emitter.snapshot_events()
+        finally:
+            emitter.cleanup()
+
+        # Hide prims that existed in the previous composed stage but are absent
+        # from the uploaded snapshot. This lets full-file saves express deletes
+        # even when the original prim lives in the immutable base layer.
+        for prim_path in removed_paths:
+            events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+
+        # Build the complete replacement off-stage first. This validates
+        # every generated event and gives us an authored layer that can be
+        # installed without incrementally mutating authoritative state.
+        from ..event_apply import apply_events
+        from ..sdf_spec_delta import validate_spec_delta
+
+        for event in events:
+            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+                validate_spec_delta(event)
+
+        replacement_layer = Sdf.Layer.CreateAnonymous("vfs-replacement-edits")
+        replacement_session = Sdf.Layer.CreateAnonymous("vfs-replacement-session")
+        replacement_session.subLayerPaths = [replacement_layer.identifier]
+        with self.stage_lock:
+            replacement_stage = Usd.Stage.Open(
+                self.stage.GetRootLayer(),
+                replacement_session,
+                self.stage.GetPathResolverContext(),
+            )
+        if replacement_stage is None:
+            raise RuntimeError("failed to create the VFS replacement stage")
+        replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
+        replacement_events = [
+            event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
+        ]
+        shared_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
+        if replacement_events:
+            apply_events(replacement_stage, replacement_events, prevalidated=True)
+        if shared_events:
+            replacement_stage.SetEditTarget(Usd.EditTarget(replacement_stage.GetSessionLayer()))
+            apply_events(replacement_stage, shared_events, prevalidated=True)
+
+        return events, replacement_layer, shared_events
 
     def _shared_layer_identity_updates(
         self,
