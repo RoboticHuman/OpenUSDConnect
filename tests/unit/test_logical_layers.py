@@ -6,9 +6,9 @@ import pytest
 from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect.adapters import UsdStageAdapter
-from openusdconnect.codec import encode_message
+from openusdconnect.codec import ReceivedEvent, encode_message
 from openusdconnect.dispatcher import EventDispatcher
-from openusdconnect.logical_layers import LogicalLayerRouter
+from openusdconnect.logical_layers import LogicalLayerRouter, apply_routed_records
 from openusdconnect.protocol_constants import (
     K_LOAD_PAYLOAD,
     K_SET_STAGE_METADATA,
@@ -37,6 +37,64 @@ def _set_int(
             "userProperties:value",
             Sdf.ValueTypeNames.Int,
         ).Set(value)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_routed_apply_restores_edit_target_and_muting(fail):
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, "/P")
+    original_target = stage.GetEditTarget()
+    router = LogicalLayerRouter(stage)
+    router.apply_state(_state(1, [(_STRONG_LAYER, "Strong", True)]))
+    layer = router.layer_for(_STRONG_LAYER)
+    adapter = UsdStageAdapter(stage)
+    records = [
+        ReceivedEvent(
+            1, {"k": "set_visibility", "prim": "/P", "visible": False}, layer_key=_STRONG_LAYER
+        ),
+        ReceivedEvent(2, {"k": K_SET_STAGE_METADATA, "upAxis": "Z"}),
+        ReceivedEvent(
+            3, {"k": "set_visibility", "prim": "/P", "visible": True}, layer_key=_STRONG_LAYER
+        ),
+    ]
+    targets = []
+
+    def apply_run(events, target):
+        targets.append(target.GetLayer())
+        adapter.apply_events(events)
+        if fail:
+            raise RuntimeError("adapter failed")
+
+    try:
+        if fail:
+            with pytest.raises(RuntimeError, match="adapter failed"):
+                apply_routed_records(stage, router, records, apply_run)
+        else:
+            apply_routed_records(stage, router, records, apply_run)
+            assert targets == [layer, stage.GetSessionLayer(), layer]
+            assert layer.GetAttributeAtPath("/P.visibility").default == "inherited"
+            assert stage.GetSessionLayer().pseudoRoot.GetInfo("upAxis") == "Z"
+        assert stage.GetEditTarget() == original_target
+        assert stage.IsLayerMuted(layer.identifier)
+    finally:
+        router.close()
+
+
+def test_routed_apply_validates_all_routes_before_mutation():
+    stage = Usd.Stage.CreateInMemory()
+    router = LogicalLayerRouter(stage)
+    router.apply_state(_state(1, [(_BASE_LAYER, "Base", False)]))
+    adapter = UsdStageAdapter(stage)
+    event = {"k": "ensure_prim", "prim": "/P", "typeName": "Xform"}
+    records = [ReceivedEvent(1, event, layer_key=_BASE_LAYER), ReceivedEvent(2, event)]
+    try:
+        with pytest.raises(ValueError, match="collaboration layer key"):
+            apply_routed_records(
+                stage, router, records, lambda events, _: adapter.apply_events(events)
+            )
+        assert not stage.GetPrimAtPath("/P")
+    finally:
+        router.close()
 
 
 def test_router_preserves_unrelated_session_layers_and_composes_strength():

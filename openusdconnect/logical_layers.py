@@ -7,14 +7,54 @@ receiver and composes them in the advertised strong-to-weak order.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from pxr import Sdf, Usd
 
 from ._managed_sublayers import replace_managed_sublayers
 from .layer_key_router import LayerKeyRouter
-from .protocol_constants import K_SET_PAYLOAD, K_SET_REFERENCE
+from .protocol_constants import K_SET_PAYLOAD, K_SET_REFERENCE, NON_COLLABORATION_KINDS
+
+if TYPE_CHECKING:
+    from .codec import ReceivedEvent
+
+
+def apply_routed_records(
+    stage: Usd.Stage,
+    router: LogicalLayerRouter,
+    records: Iterable[ReceivedEvent],
+    apply_run: Callable[[list[dict], Usd.EditTarget], None],
+) -> None:
+    """Apply consecutive records at their logical layer or session edit target.
+
+    Resolve every route before applying anything. Temporarily unmute target
+    layers, and preserve record order even when a layer occurs in several runs.
+    """
+    routed = []
+    for record in records:
+        if record.event.get("k") in NON_COLLABORATION_KINDS:
+            layer = None
+        else:
+            if not record.layer_key:
+                raise ValueError("layered replay record is missing its collaboration layer key")
+            layer = router.layer_for(record.layer_key)
+        routed.append((layer, record.event))
+
+    layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
+    with router.writable(layers.values()):
+        start = 0
+        while start < len(routed):
+            layer = routed[start][0]
+            end = start + 1
+            while end < len(routed) and routed[end][0] is layer:
+                end += 1
+            run = [event for _layer, event in routed[start:end]]
+            edit_target = Usd.EditTarget(stage.GetSessionLayer() if layer is None else layer)
+            with Usd.EditContext(stage, edit_target):
+                apply_run(run, edit_target)
+            start = end
 
 
 class LogicalLayerRouter(LayerKeyRouter):

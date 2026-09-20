@@ -58,8 +58,8 @@ class _TrackedAssetEvent:
     dependencies: tuple[tuple[str, str, str], ...]
 
 
-class _SharedStageBinding:
-    """Move shared session metadata and runtime state between bound stages."""
+class _StageSessionState:
+    """Preserve synchronized session opinions and load rules across stage rebinds."""
 
     def __init__(self):
         self._stage: Usd.Stage | None = None
@@ -265,10 +265,8 @@ class _LayeredPreviousStage:
         records: Sequence[ReceivedEvent],
         layer_stack_states: Sequence[dict],
     ) -> None:
-        from pxr import Usd
-
         from .adapters import UsdStageAdapter
-        from .logical_layers import LogicalLayerRouter
+        from .logical_layers import LogicalLayerRouter, apply_routed_records
 
         live_stage = self._live_stage
         live_router = self._live_router
@@ -285,41 +283,17 @@ class _LayeredPreviousStage:
         for state in layer_stack_states:
             previous_router.apply_state(state)
 
-        routed = []
-        update_load_rules = False
-        for record in records:
-            event = record.event
-            kind = event.get("k")
-            layer = (
-                None
-                if kind in NON_COLLABORATION_KINDS
-                else previous_router.layer_for(record.layer_key)
-            )
-            routed.append((layer, event))
-            update_load_rules |= kind in {
-                K_LOAD_PAYLOAD,
-                K_RENAME_PRIM,
-                K_UNLOAD_PAYLOAD,
-            }
-
         stage_adapter = UsdStageAdapter(previous_stage)
-        layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
-        with previous_router.writable(layers.values()):
-            start = 0
-            while start < len(routed):
-                layer = routed[start][0]
-                end = start + 1
-                while end < len(routed) and routed[end][0] is layer:
-                    end += 1
-                run = [event for _layer, event in routed[start:end]]
-                edit_target = Usd.EditTarget(
-                    previous_stage.GetSessionLayer() if layer is None else layer
-                )
-                with Usd.EditContext(previous_stage, edit_target):
-                    stage_adapter.apply_events(run)
-                start = end
-
-        if update_load_rules:
+        apply_routed_records(
+            previous_stage,
+            previous_router,
+            records,
+            lambda run, _target: stage_adapter.apply_events(run),
+        )
+        if any(
+            record.event.get("k") in {K_LOAD_PAYLOAD, K_RENAME_PRIM, K_UNLOAD_PAYLOAD}
+            for record in records
+        ):
             previous_stage.SetLoadRules(live_stage.GetLoadRules())
 
     def _copy_full_live_state(self) -> None:
@@ -440,7 +414,7 @@ class EventDispatcher:
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LayerKeyRouter | None = None
-        self._shared_stage = _SharedStageBinding()
+        self._stage_session_state = _StageSessionState()
         self._projection_state = None
         self._layered_previous_stage: _LayeredPreviousStage | None = None
 
@@ -546,7 +520,7 @@ class EventDispatcher:
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
             self._layer_router.bind(stage)
-            self._shared_stage.bind(stage)
+            self._stage_session_state.bind(stage)
             if self._projection_state is not None:
                 self._native_projection_state(stage)
 
@@ -579,7 +553,7 @@ class EventDispatcher:
     def _release_layered_state(self) -> None:
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
-            self._shared_stage.close()
+            self._stage_session_state.close()
             if self._layer_router is not None:
                 self._layer_router.close()
             if self._projection_state is not None:
@@ -610,7 +584,7 @@ class EventDispatcher:
                 "layered replay requires a Usd.Stage mirror",
             )
         router.bind(stage)
-        self._shared_stage.bind(stage)
+        self._stage_session_state.bind(stage)
         return stage
 
     def _native_projection_state(self, stage: Usd.Stage):
@@ -681,10 +655,9 @@ class EventDispatcher:
         reset_layers: bool = False,
     ) -> int:
         """Apply authored records to their receiver-local logical layers."""
-        from pxr import Usd
-
         from .adapters import UsdStageAdapter
         from .composed_projection import ComposedChangeProjection
+        from .logical_layers import apply_routed_records
 
         router = self._layer_router
         if router is None:
@@ -750,44 +723,19 @@ class EventDispatcher:
         native_adapter_events: list[dict] = []
         with projection_ctx, suppress_ctx:
             if reset_layers:
-                self._shared_stage.reset()
+                self._stage_session_state.reset()
                 router.clear()
             for state in layer_stack_states:
                 router.apply_state(state)
 
-            routed = []
-            shared_state_events = []
-            for record in records:
-                event = record.event
-                kind = event.get("k")
-                if kind in NON_COLLABORATION_KINDS:
-                    layer = None
-                else:
-                    if not record.layer_key:
-                        raise ValueError(
-                            "layered replay record is missing its collaboration layer key"
-                        )
-                    layer = router.layer_for(record.layer_key)
-                if kind in NON_COLLABORATION_KINDS or kind == K_RENAME_PRIM:
-                    shared_state_events.append(event)
-                routed.append((layer, event))
-            layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
-
-            with router.writable(layers.values()):
-                start = 0
-                while start < len(routed):
-                    layer = routed[start][0]
-                    end = start + 1
-                    while end < len(routed) and routed[end][0] is layer:
-                        end += 1
-                    run = [event for _layer, event in routed[start:end]]
-                    target_layer = stage.GetSessionLayer() if layer is None else layer
-                    edit_target = Usd.EditTarget(target_layer)
-                    with Usd.EditContext(stage, edit_target):
-                        _apply_run(run, edit_target)
-                    start = end
-
-            self._shared_stage.remember(shared_state_events)
+            apply_routed_records(stage, router, records, _apply_run)
+            shared_state_events = [
+                record.event
+                for record in records
+                if record.event.get("k") in NON_COLLABORATION_KINDS
+                or record.event.get("k") == K_RENAME_PRIM
+            ]
+            self._stage_session_state.remember(shared_state_events)
 
             if projection is not None:
                 native_adapter_events = projection.build_events()
