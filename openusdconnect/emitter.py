@@ -3109,7 +3109,9 @@ class NoticeEmitter:
                 spec = edit_layer.GetObjectAtPath(source_path)
                 self._mark_sdf_subtree(
                     source_path,
-                    resync=not changed_fields and bool(spec),
+                    # A prim resync can absorb descendant property notices in
+                    # the same change block, even when prim fields are named.
+                    resync=bool(spec),
                 )
                 authored_fields = changed_fields - _SDF_STRUCTURAL_NOTICE_FIELDS
                 if authored_fields and isinstance(spec, (Sdf.PrimSpec, Sdf.VariantSpec)):
