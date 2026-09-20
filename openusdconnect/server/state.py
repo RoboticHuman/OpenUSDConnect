@@ -121,13 +121,13 @@ class _TransactionRequest:
 
 @dataclass(slots=True)
 class _PreparedTransaction:
-    request: _TransactionRequest
+    events: list[dict]
     target_layer: Sdf.Layer
     collaboration_paths: set[str]
     has_session_events: bool
     records: list[tuple[dict, bytes]]
     persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]]
-    progress: ProducerProgress
+    progress: ProducerProgress | None
 
 
 def _managed_rollback_paths(events: list[dict]) -> set[str]:
@@ -491,10 +491,6 @@ class UsdSyncServer:
         # same lock also covers live enqueue: a later durable sequence must
         # never become visible before an earlier one.
         self._transaction_commit_lock = threading.RLock()
-        # Shared topology commits participate in the same global persisted/live
-        # sequence order as managed transactions. Conflict detection itself is
-        # per parent layer inside SharedLayerGraph.
-        self._shared_stage_commit_lock = self._transaction_commit_lock
         self.txn_batch_size = max(1, int(txn_batch_size))
         self.txn_batch_delay = max(0.0, float(txn_batch_delay))
         self._transaction_queue: queue.Queue[_TransactionRequest | None] | None = None
@@ -594,13 +590,9 @@ class UsdSyncServer:
                 daemon=True,
             )
 
-        # prim_path → (translate_op, orient_op, scale_op). A cached XformOp is
-        # only valid while the stage edit target is unchanged: any SetEditTarget
-        # (e.g. switching to another department's layer) invalidates it, so a
-        # reused op authors against the wrong layer and the write is silently
-        # lost. _op_cache_for clears the cache whenever the edit target changes;
-        # consecutive edits to the same layer keep it (the single-client fast
-        # path).
+        # prim_path → (translate_op, orient_op, scale_op). Cache hits skip op
+        # setup, including authoring xformOpOrder in the current layer. Clear
+        # on layer changes so each department gets its own transform opinions.
         from cachetools import LRUCache
 
         self.op_cache: LRUCache = LRUCache(
@@ -896,12 +888,12 @@ class UsdSyncServer:
         return layer
 
     def _op_cache_for(self, layer: Sdf.Layer):
-        """Return the op cache for editing *layer*, clearing it when the edit
-        target changed since it was last populated. A cached XformOp is only
-        valid while the edit target is unchanged, so any switch to another layer
-        invalidates every entry; without the clear a reused op authors against
-        the wrong layer and the write is lost. Callers must SetEditTarget to
-        *layer* before authoring."""
+        """Reuse op setup only for consecutive edits to the same layer.
+
+        XformOp.Set uses the stage's current edit target; the op is not bound
+        to a layer. This cache also skips setup of that layer's xformOpOrder,
+        which must run again after switching layers.
+        """
         if self._op_cache_layer != layer.identifier:
             self.op_cache.clear()
             self._op_cache_layer = layer.identifier
@@ -2995,62 +2987,19 @@ class UsdSyncServer:
 
             first_reserved_seq = self._next_seq
             try:
-                prepared = [self._prepare_managed_transaction(request) for request in accepted]
-                paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
-                snapshot_session = False
-                for transaction in prepared:
-                    if transaction.collaboration_paths:
-                        entry = paths_by_layer.setdefault(
-                            transaction.target_layer.identifier,
-                            (transaction.target_layer, set()),
-                        )
-                        entry[1].update(transaction.collaboration_paths)
-                    snapshot_session = snapshot_session or transaction.has_session_events
-
-                from ..event_apply import atomic_apply_layer
-
-                with self.stage_lock:
-                    original_target = self.stage.GetEditTarget()
-                    try:
-                        with ExitStack() as rollback:
-                            for target_layer, paths in paths_by_layer.values():
-                                rollback.enter_context(atomic_apply_layer(target_layer, paths))
-                            if snapshot_session:
-                                rollback.enter_context(
-                                    atomic_apply_layer(self.stage.GetSessionLayer())
-                                )
-                            for transaction in prepared:
-                                self._apply_validated_txn(
-                                    transaction.request.events,
-                                    layer=transaction.target_layer,
-                                    update_tracking=False,
-                                )
-                            progress_by_producer = {
-                                (transaction.progress.client_id, transaction.progress.session_id):
-                                    transaction.progress
-                                for transaction in prepared
-                            }
-                            self.store.append_batch(
-                                [
-                                    record
-                                    for transaction in prepared
-                                    for record in transaction.persist_tuples
-                                ],
-                                producer_progress=tuple(progress_by_producer.values()),
-                            )
-                            for transaction in prepared:
-                                self._update_prim_tracking(transaction.request.events)
-                            for producer, progress in progress_by_producer.items():
-                                self._producer_progress_cache[producer] = (
-                                    progress.committed_through
-                                )
-                            with self._seq_lock:
-                                self._event_count += sum(
-                                    len(transaction.persist_tuples)
-                                    for transaction in prepared
-                                )
-                    finally:
-                        self.stage.SetEditTarget(original_target)
+                prepared = [
+                    self._prepare_managed_transaction(
+                        request.events,
+                        client_id=request.client_id,
+                        origin=request.origin,
+                        client_addr=request.client_addr,
+                        layer=request.layer,
+                        layer_key=request.layer_key,
+                        transaction_identity=(request.session_id, request.txn_id),
+                    )
+                    for request in accepted
+                ]
+                self._persist_managed_transactions(prepared)
             except Exception:
                 with self._seq_lock:
                     self._next_seq = first_reserved_seq
@@ -3058,14 +3007,15 @@ class UsdSyncServer:
                 self._op_cache_layer = None
                 raise
 
-            for transaction in prepared:
+            self._producer_progress_cache.update(next_by_session)
+            for request, transaction in zip(accepted, prepared, strict=True):
                 records = tuple(transaction.records)
                 commit = TransactionCommit(
                     "committed",
-                    transaction.request.txn_id,
+                    request.txn_id,
                     records,
                 )
-                transaction.request.commit = commit
+                request.commit = commit
             # Persistence and live enqueue are one ordering boundary. Keep
             # this inside _transaction_commit_lock so another transaction can
             # neither reserve a later sequence nor publish ahead of the group.
@@ -3087,44 +3037,52 @@ class UsdSyncServer:
 
     def _prepare_managed_transaction(
         self,
-        request: _TransactionRequest,
+        events: list[dict],
+        *,
+        client_id: str | None,
+        origin: str | None,
+        client_addr: str | None,
+        layer: Sdf.Layer | None,
+        layer_key: str,
+        transaction_identity: tuple[str, int] | None,
     ) -> _PreparedTransaction:
-        if request.layer_key:
+        if layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
         shared_only = {
             event.get("k")
-            for event in request.events
+            for event in events
             if event.get("k") in SHARED_STAGE_ONLY_KINDS
         }
         if shared_only:
             raise ValueError(
                 f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
             )
-        target_layer = request.layer or self.edit_layer
+        target_layer = layer or self.edit_layer
         layer_key = self.layer_stack.key_for_layer(target_layer)
         if layer_key is None and any(
-            event.get("k") not in NON_COLLABORATION_KINDS for event in request.events
+            event.get("k") not in NON_COLLABORATION_KINDS for event in events
         ):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        collaboration_paths = _managed_rollback_paths(request.events)
+        collaboration_paths = _managed_rollback_paths(events)
         has_session_events = any(
-            event.get("k") in NON_COLLABORATION_KINDS for event in request.events
+            event.get("k") in NON_COLLABORATION_KINDS for event in events
         )
         records, persist_tuples = self._encode_managed_txn_records(
-            request.events,
-            client_id=request.client_id,
-            origin=request.origin,
-            client_addr=request.client_addr,
+            events,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
             layer_key=layer_key or "",
         )
-        progress = ProducerProgress(
-            request.client_id,
-            request.session_id,
-            request.txn_id,
-        )
+        progress = None
+        if transaction_identity is not None:
+            if not client_id:
+                raise ValueError("idempotent transaction persistence requires client_id")
+            session_id, txn_id = transaction_identity
+            progress = ProducerProgress(client_id, session_id, txn_id)
         return _PreparedTransaction(
-            request,
+            events,
             target_layer,
             collaboration_paths,
             has_session_events,
@@ -3132,6 +3090,72 @@ class UsdSyncServer:
             persist_tuples,
             progress,
         )
+
+    def _persist_managed_transactions(self, prepared: list[_PreparedTransaction]) -> None:
+        """Apply and persist a group atomically while the commit lock is held.
+
+        Snapshot only touched collaboration prims, plus session state when
+        needed. Internal commits also persist synchronously: rollback must
+        cover a storage failure even without producer progress.
+        """
+        if len(prepared) == 1:
+            transaction = prepared[0]
+            layer_paths = (
+                ((transaction.target_layer, transaction.collaboration_paths),)
+                if transaction.collaboration_paths else ()
+            )
+            snapshot_session = transaction.has_session_events
+            records = transaction.persist_tuples
+            producer_progress = (transaction.progress,) if transaction.progress is not None else ()
+        else:
+            paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
+            snapshot_session = False
+            records = []
+            progress_by_producer = {}
+            for transaction in prepared:
+                if transaction.collaboration_paths:
+                    layer_id = transaction.target_layer.identifier
+                    if layer_id not in paths_by_layer:
+                        paths_by_layer[layer_id] = (
+                            transaction.target_layer, set(transaction.collaboration_paths)
+                        )
+                    else:
+                        paths_by_layer[layer_id][1].update(transaction.collaboration_paths)
+                snapshot_session |= transaction.has_session_events
+                records.extend(transaction.persist_tuples)
+                if (progress := transaction.progress) is not None:
+                    progress_by_producer[(progress.client_id, progress.session_id)] = progress
+            layer_paths = paths_by_layer.values()
+            producer_progress = tuple(progress_by_producer.values())
+
+        from ..event_apply import atomic_apply_layer
+
+        with self.stage_lock:
+            original_target = self.stage.GetEditTarget()
+            try:
+                with ExitStack() as rollback:
+                    for target_layer, paths in layer_paths:
+                        rollback.enter_context(atomic_apply_layer(target_layer, paths))
+                    if snapshot_session:
+                        rollback.enter_context(
+                            atomic_apply_layer(self.stage.GetSessionLayer())
+                        )
+                    for transaction in prepared:
+                        self._apply_validated_txn(
+                            transaction.events,
+                            layer=transaction.target_layer,
+                            update_tracking=False,
+                        )
+                    self.store.append_batch(
+                        records,
+                        producer_progress=producer_progress,
+                    )
+                    for transaction in prepared:
+                        self._update_prim_tracking(transaction.events)
+                    with self._seq_lock:
+                        self._event_count += len(records)
+            finally:
+                self.stage.SetEditTarget(original_target)
 
     def _broadcast_grouped_transactions(
         self,
@@ -3152,13 +3176,6 @@ class UsdSyncServer:
             except Exception:
                 LOG.exception(
                     "Committed transaction group could not be broadcast live"
-                )
-            for request in pending:
-                commit = request.commit
-                request.commit = TransactionCommit(
-                    commit.status,
-                    commit.txn_id,
-                    commit.records,
                 )
             pending.clear()
 
@@ -3186,11 +3203,6 @@ class UsdSyncServer:
                     request.session_id,
                     request.txn_id,
                 )
-            request.commit = TransactionCommit(
-                commit.status,
-                commit.txn_id,
-                commit.records,
-            )
         flush_pending()
 
     def _commit_events(
@@ -3258,89 +3270,25 @@ class UsdSyncServer:
                 client_addr=client_addr,
                 transaction_identity=transaction_identity,
             )
-        if layer_key:
-            raise ValueError("managed transactions cannot select an arbitrary layer key")
-        shared_only = {
-            event.get("k")
-            for event in events
-            if event.get("k") in SHARED_STAGE_ONLY_KINDS
-        }
-        if shared_only:
-            raise ValueError(
-                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
-            )
-
-        target_layer = layer or self.edit_layer
-        layer_key = self.layer_stack.key_for_layer(target_layer)
-        if layer_key is None and any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events):
-            raise ValueError("transaction target is not a managed collaboration layer")
-
-        # Keep the USD mutation inside the durable failure boundary. Scoped
-        # snapshots make rollback proportional to touched prims rather than to
-        # the full collaboration layer; session metadata uses a full snapshot.
-        from ..event_apply import atomic_apply_layer
-
-        collaboration_paths = _managed_rollback_paths(events)
-        has_session_events = any(
-            event.get("k") in NON_COLLABORATION_KINDS for event in events
-        )
-        with self._seq_lock:
-            first_reserved_seq = self._next_seq
+        first_reserved_seq = self._next_seq
         try:
-            records, persist_tuples = self._encode_managed_txn_records(
+            transaction = self._prepare_managed_transaction(
                 events,
                 client_id=client_id,
                 origin=origin,
                 client_addr=client_addr,
+                layer=layer,
                 layer_key=layer_key,
+                transaction_identity=transaction_identity,
             )
-            producer_progress: tuple[ProducerProgress, ...] = ()
-            if transaction_identity is not None:
-                if not client_id:
-                    raise ValueError(
-                        "idempotent transaction persistence requires client_id"
-                    )
-                session_id, txn_id = transaction_identity
-                producer_progress = (
-                    ProducerProgress(client_id, session_id, txn_id),
-                )
-
-            with self.stage_lock:
-                original_target = self.stage.GetEditTarget()
-                try:
-                    with ExitStack() as rollback:
-                        if collaboration_paths:
-                            rollback.enter_context(
-                                atomic_apply_layer(target_layer, collaboration_paths)
-                            )
-                        if has_session_events:
-                            rollback.enter_context(
-                                atomic_apply_layer(self.stage.GetSessionLayer())
-                            )
-                        self._apply_validated_txn(
-                            events,
-                            layer=target_layer,
-                            update_tracking=False,
-                        )
-                        # In-process commits have no producer progress to force
-                        # the synchronous EventStore path in realtime mode.
-                        # Persist them directly so rollback remains meaningful.
-                        self.store.append_batch(
-                            persist_tuples,
-                            producer_progress=producer_progress,
-                        )
-                        self._update_prim_tracking(events)
-                        with self._seq_lock:
-                            self._event_count += len(persist_tuples)
-                finally:
-                    self.stage.SetEditTarget(original_target)
+            self._persist_managed_transactions([transaction])
         except Exception:
             with self._seq_lock:
                 self._next_seq = first_reserved_seq
             self.op_cache.clear()
             self._op_cache_layer = None
             raise
-        return records
+        return transaction.records
 
     def _encode_managed_txn_records(
         self,
@@ -3552,7 +3500,7 @@ class UsdSyncServer:
 
         self.txn_barrier.acquire_shared()
         try:
-            with self._shared_stage_commit_lock:
+            with self._transaction_commit_lock:
                 before = set(graph.reachable_layer_keys())
                 with self.stage_lock, graph.transaction():
                     Ar.GetResolver().RefreshContext(self.stage.GetPathResolverContext())
