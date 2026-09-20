@@ -292,6 +292,72 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         client.close()
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_content_apply_failure_preserves_layer_and_tracker_until_retry(
+    tmp_path, monkeypatch, deferred,
+):
+    import openusdconnect.shared_stage_client as client_module
+
+    stage = _create_root(tmp_path / "root.usda")
+    root = stage.GetRootLayer()
+    Sdf.CreatePrimInLayer(root, "/Original")
+    client = SharedStageClient(stage, app_name="apply-retry", persist_token=False)
+    try:
+        client._graph.apply_state({
+            "type": "layer_graph_state", "seq": 1, "generation": "graph-1",
+            "revision": 1, "root_layer_key": "layer:root",
+            "layers": [{"layer_key": "layer:root", "revision": 1, "sublayers": []}],
+        })
+        source = Sdf.Layer.CreateAnonymous()
+        records = []
+        for index in range(2 if deferred else 1):
+            Sdf.CreatePrimInLayer(source, f"/Replacement{index}")
+            records.append(ReceivedEvent(
+                seq=index + 2, layer_key="layer:root",
+                event={"k": "replace_sdf_layer_content", "fragment": source.ExportToString()},
+            ))
+        if deferred:
+            client._pending_records.extend(records)
+        before = root.ExportToString()
+        stage.SetEditTarget(stage.GetSessionLayer())
+        original_apply = client_module.apply_events
+        applied_batches = []
+        accepted = []
+        original_accept = client._tracker.accept_authoritative_event
+
+        def record_accept(layer, event):
+            accepted.append(event)
+            original_accept(layer, event)
+
+        def apply_then_fail(target_stage, events):
+            applied_batches.append(list(events))
+            original_apply(target_stage, events)
+            raise RuntimeError("content apply failed")
+
+        monkeypatch.setattr(client._tracker, "accept_authoritative_event", record_accept)
+        monkeypatch.setattr(client_module, "apply_events", apply_then_fail)
+
+        def apply_records():
+            with client._tracker.suppressed():
+                return client._apply_pending() if deferred else client._apply_record(records[0])
+
+        with pytest.raises(RuntimeError, match="content apply failed"):
+            apply_records()
+        assert root.ExportToString() == before
+        assert stage.GetEditTarget().GetLayer() == stage.GetSessionLayer()
+        assert accepted == []
+        assert applied_batches == [[record.event for record in records]]
+        assert client.deferred_event_count == (len(records) if deferred else 0)
+
+        monkeypatch.setattr(client_module, "apply_events", original_apply)
+        assert apply_records() == len(records)
+        assert accepted == [record.event for record in records]
+        assert root.ExportToString() == source.ExportToString()
+        assert client.deferred_event_count == 0
+    finally:
+        client.close()
+
+
 def test_refresh_layer_graph_rejects_a_closed_client(tmp_path):
     client = SharedStageClient(
         _create_root(tmp_path / "root.usda"),

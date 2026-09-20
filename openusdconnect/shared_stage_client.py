@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -339,26 +339,7 @@ class SharedStageClient:
             captured.append((layer_key, layer, rejected_snapshot))
 
         self._refresh_recovery_checkpoint(timeout)
-        reachable = set(self._graph.reachable_layer_keys())
-        layers = []
-        for rejected_key, layer, rejected_snapshot in captured:
-            current_key = self._graph.key_for(layer) if layer is not None else None
-            layers.append(
-                SharedRecoveryLayer(
-                    rejected_layer_key=rejected_key,
-                    source_layer=layer,
-                    current_layer_key=current_key,
-                    reachable=current_key in reachable if current_key is not None else False,
-                    rejected_snapshot=rejected_snapshot,
-                )
-            )
-        assessment = SharedRecoveryAssessment(
-            recovery_artifact=artifact,
-            layers=tuple(layers),
-            checkpoint_seq=self._last_seq,
-            graph_generation=self._graph.generation,
-            graph_revision=self._graph.revision,
-        )
+        assessment = self._build_recovery_assessment(artifact, captured)
         self._last_recovery_assessment = assessment
         return assessment
 
@@ -386,7 +367,13 @@ class SharedStageClient:
         self._rebind_stage_for_recovery(clean_stage)
         remaining = remaining_time(deadline)
         self._refresh_recovery_checkpoint(remaining)
-        assessment = self._reclassify_recovery_assessment(assessment)
+        assessment = self._build_recovery_assessment(
+            assessment.recovery_artifact,
+            (
+                (layer.rejected_layer_key, layer.source_layer, layer.rejected_snapshot)
+                for layer in assessment.layers
+            ),
+        )
         self._last_recovery_assessment = assessment
         result = self.complete_recovery(
             assessment,
@@ -504,27 +491,27 @@ class SharedStageClient:
                 "recovery assessment is stale; refresh and reconcile the current graph",
             )
 
-    def _reclassify_recovery_assessment(
+    def _build_recovery_assessment(
         self,
-        assessment: SharedRecoveryAssessment,
+        artifact: RecoveryArtifact,
+        captured: Iterable[tuple[str, Sdf.Layer | None, Sdf.Layer | None]],
     ) -> SharedRecoveryAssessment:
         """Classify preserved source layers against the currently bound graph."""
         reachable = set(self._graph.reachable_layer_keys())
         layers = []
-        for prior in assessment.layers:
-            source = prior.source_layer
+        for rejected_key, source, snapshot in captured:
             current_key = self._graph.key_for(source) if source is not None else None
             layers.append(
                 SharedRecoveryLayer(
-                    rejected_layer_key=prior.rejected_layer_key,
+                    rejected_layer_key=rejected_key,
                     source_layer=source,
                     current_layer_key=current_key,
                     reachable=current_key in reachable if current_key is not None else False,
-                    rejected_snapshot=prior.rejected_snapshot,
+                    rejected_snapshot=snapshot,
                 )
             )
         return SharedRecoveryAssessment(
-            recovery_artifact=assessment.recovery_artifact,
+            recovery_artifact=artifact,
             layers=tuple(layers),
             checkpoint_seq=self._last_seq,
             graph_generation=self._graph.generation,
@@ -763,11 +750,16 @@ class SharedStageClient:
         if layer is None:
             self._pending_records.append(record)
             return False
-        with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-            with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths([event])):
-                apply_events(self._stage, [event])
-        self._tracker.accept_authoritative_event(layer, event)
+        self._apply_layer_events(layer, [event])
         return True
+
+    def _apply_layer_events(self, layer: Sdf.Layer, events: list[dict]) -> None:
+        """Commit layer content before advancing the tracker's authored baseline."""
+        with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
+            with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths(events)):
+                apply_events(self._stage, events)
+        for event in events:
+            self._tracker.accept_authoritative_event(layer, event)
 
     def _restore_edit_target(self, preferred: Usd.EditTarget) -> None:
         """Restore *preferred* when composed, otherwise select the root layer."""
@@ -797,11 +789,7 @@ class SharedStageClient:
                 groups.append((layer, [record]))
         for layer, records in groups:
             events = [record.event for record in records]
-            with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-                with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths(events)):
-                    apply_events(self._stage, events)
-            for record in records:
-                self._tracker.accept_authoritative_event(layer, record.event)
+            self._apply_layer_events(layer, events)
             applied += len(records)
         self._pending_records = retained
         return applied
