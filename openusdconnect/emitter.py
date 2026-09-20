@@ -502,12 +502,15 @@ def _diff_time_samples(
     cached: dict[float, int] | None,
     edit_target=None,
     convert=None,
+    *,
+    collect_changes: bool = True,
 ):
     """Return ``(new_cache, dirty, removed)`` for an attribute's sample table.
 
     Cache entries are ``time: value_hash``; ``None`` means a first snapshot.
     ``dirty`` contains changed ``(time, value)`` pairs, ``removed`` deleted times.
     ``convert`` defaults to ``usd_value_to_python``.
+    Cache seeding disables ``collect_changes`` to avoid retaining sample payloads.
 
     Read the edit target's mapped spec directly when supplied. Composed reads
     can hide this client's samples or leak a stronger client's keys into its
@@ -538,7 +541,7 @@ def _diff_time_samples(
             continue
         h = _value_hash(val)
         new_cache[t] = h
-        if cached.get(t) != h:
+        if collect_changes and cached.get(t) != h:
             dirty.append((t, val))
     return new_cache, dirty, removed
 
@@ -2375,6 +2378,10 @@ class NoticeEmitter:
             return
         edit_target = stage.GetEditTarget()
         identity_target = edit_target.GetMapFunction().isIdentity
+
+        def _sample_value(value):
+            return _usd_value_to_transport_python(stage, edit_target.GetLayer(), value)
+
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
@@ -2419,19 +2426,22 @@ class NoticeEmitter:
             # Seed the api_schemas snapshot so a later diff cycle doesn't
             # spuriously re-emit ensure_prim on first encounter.
             pc[_C_API_SCHEMAS] = self._local_api_schemas(self._local_prim_specs(cp))
-            # Seed time-sample hashes so first emit cycle doesn't replay every
-            # authored sample on an already-keyframed prim.
+            # Match later diffs: read authored samples from the mapped edit
+            # target, with matrix fingerprints only for transform ops.
             ts_seed: dict = {}
             for attr in child.GetAttributes():
                 if not attr.IsAuthored():
                     continue
                 name = attr.GetName()
-                times = attr.GetTimeSamples()
-                if not times:
-                    continue
-                ts_seed[name] = {
-                    t: _value_hash(xform_sample_value(attr.Get(Usd.TimeCode(t)))) for t in times
-                }
+                samples, _, _ = _diff_time_samples(
+                    attr,
+                    None,
+                    edit_target,
+                    convert=xform_sample_value if _is_transform_attr(name) else _sample_value,
+                    collect_changes=False,
+                )
+                if samples:
+                    ts_seed[name] = samples
             if ts_seed:
                 pc[_C_TIME_SAMPLES] = ts_seed
 
