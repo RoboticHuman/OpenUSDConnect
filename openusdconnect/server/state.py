@@ -2764,7 +2764,7 @@ class UsdSyncServer:
             try:
                 self._commit_one_transaction_request(request)
             finally:
-                self._complete_transaction_request(request)
+                self._complete_transaction_requests((request,))
             return request
         try:
             self._transaction_queue.put(request)
@@ -2773,25 +2773,30 @@ class UsdSyncServer:
             raise
         return request
 
-    def _complete_transaction_request(self, request: _TransactionRequest) -> None:
-        """Bind visibility proof to the commit before releasing its maintenance barrier."""
-        try:
-            commit = request.commit
-            if request.error is None and commit is not None and commit.status == "committed":
-                # Reservations may roll back. A duplicate has durable producer
-                # progress, but no retained proof of its original sequence epoch.
-                request.commit = replace(
-                    commit,
-                    checkpoint=TransactionCheckpoint(
-                        epoch=self._replay_epoch,
-                        head_seq=self.store.get_max_seq(),
-                    ),
-                )
-        except Exception:
-            LOG.exception("Could not capture transaction visibility checkpoint")
-        finally:
-            self.txn_barrier.release_shared()
-            request.done.set()
+    def _complete_transaction_requests(self, requests: Iterable[_TransactionRequest]) -> None:
+        """Share one durable checkpoint before releasing the batch's maintenance barrier."""
+        checkpoint = None
+        checkpoint_attempted = False
+        for request in requests:
+            try:
+                commit = request.commit
+                if request.error is None and commit is not None and commit.status == "committed":
+                    # Every commit in this batch is already durable. One head covers
+                    # them all; reservations may roll back, so query persisted history.
+                    if not checkpoint_attempted:
+                        checkpoint_attempted = True
+                        checkpoint = TransactionCheckpoint(
+                            epoch=self._replay_epoch,
+                            head_seq=self.store.get_max_seq(),
+                        )
+                    if checkpoint is not None:
+                        request.commit = replace(commit, checkpoint=checkpoint)
+                # Duplicates prove producer progress, not their original replay epoch.
+            except Exception:
+                LOG.exception("Could not capture transaction visibility checkpoint")
+            finally:
+                self.txn_barrier.release_shared()
+                request.done.set()
 
     @staticmethod
     def wait_for_transaction(request: _TransactionRequest) -> TransactionCommit:
@@ -2934,8 +2939,7 @@ class UsdSyncServer:
                     for request in requests:
                         self._commit_one_transaction_request(request)
         finally:
-            for request in requests:
-                self._complete_transaction_request(request)
+            self._complete_transaction_requests(requests)
 
     def _commit_one_transaction_request(self, request: _TransactionRequest) -> None:
         request.commit = None

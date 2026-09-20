@@ -201,9 +201,12 @@ class ConnectionSession:
             # A nonblocking poll avoids a reconnect handshake extending the read budget.
             try:
                 acknowledged = self.sender.flush(timeout=0)
+                applied = self.receiver.update()
+                if not acknowledged:
+                    # The acknowledgement may arrive while queued events are applied.
+                    acknowledged = self.sender.flush(timeout=0)
             except TransactionRejectedError as exc:
                 raise ToolError(str(exc), code="transaction_rejected") from exc
-            self.receiver.update()
             checkpoint = self.sender.acknowledged_checkpoint if acknowledged else None
             if acknowledged and checkpoint is None:
                 # Older peers (or Hello-only recovery) cannot prove mirror visibility.
@@ -216,9 +219,12 @@ class ConnectionSession:
                     and self.receiver.last_seq >= checkpoint.head_seq
                 ):
                     return True
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+            if applied == 0:
+                time.sleep(min(0.005, remaining))
+
     def _drain_initial_replay(self) -> bool:
         """Apply the initial replay before returning when it fits the read timeout."""
         if self.receiver is None:

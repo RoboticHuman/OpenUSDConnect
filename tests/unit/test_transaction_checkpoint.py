@@ -10,6 +10,7 @@ from openusdconnect.codec import decode_envelope, encode_message, message_to_dic
 from openusdconnect.protocol import make_transaction_result
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
+from openusdconnect.server.state import _TransactionRequest
 
 
 @pytest.mark.parametrize("batch_size", [1, 8])
@@ -60,6 +61,74 @@ def test_durable_checkpoint_excludes_uncommitted_sequence_reservations(tmp_path,
         assert observed and all(checkpoint == (epoch, head) for checkpoint in observed)
         assert server.get_replay_token() == (epoch, head)
         assert commit.checkpoint == TransactionCheckpoint(epoch=epoch, head_seq=head)
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_batch_shares_one_checkpoint_for_successful_commits(
+    tmp_path, monkeypatch, fallback, capture_fails,
+):
+    server = UsdSyncServer(log_path=str(tmp_path / "checkpoint.db"), txn_batch_size=1)
+    try:
+        server.process_idempotent_txn(
+            [{"k": "ensure_prim", "prim": "/Seed", "typeName": "Xform"}],
+            session_id="seed", txn_id=1, client_id="seed",
+        )
+        requests = [
+            _TransactionRequest(
+                events=[{"k": "ensure_prim", "prim": path, "typeName": "Xform"}],
+                session_id=client, txn_id=txn_id, client_id=client,
+                origin=None, client_addr=None, layer=None, layer_key="",
+            )
+            for client, txn_id, path in [
+                ("seed", 1, "/Seed"),
+                ("first", 1, "/First"),
+                ("gap", 3, "/Rejected"),
+                ("last", 1, "/Last"),
+            ]
+        ]
+        read_head = Mock(wraps=server.store.get_max_seq)
+        if capture_fails:
+            read_head.side_effect = RuntimeError("injected checkpoint failure")
+        if fallback:
+            append = server.store.append_batch
+            failed = False
+
+            def fail_group_once(*args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise RuntimeError("injected group failure")
+                return append(*args, **kwargs)
+
+            monkeypatch.setattr(server.store, "append_batch", fail_group_once)
+        with monkeypatch.context() as patch:
+            patch.setattr(server.store, "get_max_seq", read_head)
+            for _request in requests:
+                server.txn_barrier.acquire_shared()
+            server._execute_transaction_requests(requests)
+
+        read_head.assert_called_once_with()
+        assert all(request.done.is_set() for request in requests)
+        assert server.txn_barrier._readers == 0
+        duplicate, first, rejected, last = requests
+        assert duplicate.commit.status == "duplicate"
+        assert duplicate.commit.checkpoint is None
+        assert rejected.error is not None
+        assert rejected.commit is None
+        assert first.commit.status == last.commit.status == "committed"
+        assert first.commit.checkpoint is last.commit.checkpoint
+        expected = None if capture_fails else TransactionCheckpoint(0, 3)
+        assert first.commit.checkpoint == expected
+        assert server.store.get_max_seq() == 3
+        assert server.stage.GetPrimAtPath("/First")
+        assert server.stage.GetPrimAtPath("/Last")
+        assert not server.stage.GetPrimAtPath("/Rejected")
+        server.purge()
+        assert first.commit.checkpoint == last.commit.checkpoint == expected
     finally:
         server.shutdown()
         server.store.close()
@@ -134,7 +203,7 @@ def test_hello_highwater_recovery_does_not_confirm_mirror(monkeypatch):
         sender.sock = None
 
 
-def test_duplicate_after_purge_has_no_original_visibility_proof(tmp_path):
+def test_duplicate_after_purge_has_no_original_visibility_proof(tmp_path, monkeypatch):
     state = UsdSyncServer(log_path=str(tmp_path / "checkpoint.db"))
     try:
         transaction = dict(session_id="producer", txn_id=1, client_id="producer")
@@ -142,9 +211,12 @@ def test_duplicate_after_purge_has_no_original_visibility_proof(tmp_path):
         committed = state.process_idempotent_txn(events, **transaction)
         assert committed.checkpoint == TransactionCheckpoint(0, 1)
         state.purge()
+        read_head = Mock(wraps=state.store.get_max_seq)
+        monkeypatch.setattr(state.store, "get_max_seq", read_head)
         duplicate = state.process_idempotent_txn(events, **transaction)
         assert duplicate.status == "duplicate"
         assert duplicate.checkpoint is None
+        read_head.assert_not_called()
     finally:
         state.shutdown()
         state.store.close()

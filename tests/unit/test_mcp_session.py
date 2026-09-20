@@ -1,5 +1,7 @@
 """Tests for ConnectionSession reconnect/teardown lifecycle."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from integrations.mcp import session as session_mod
@@ -210,6 +212,7 @@ def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
     session.connect()
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     polls = []
+    updates = []
 
     def flush(timeout):
         assert timeout == 0
@@ -220,14 +223,85 @@ def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
         return False
 
     def apply():
-        session.receiver.dispatcher.last_seq = 50 if len(polls) >= 3 else 1
+        updates.append(True)
+        session.receiver.dispatcher.last_seq = 50 if len(updates) >= 2 else 1
         return 1
 
     monkeypatch.setattr(session.sender, "flush", flush)
     monkeypatch.setattr(session.receiver, "update", apply)
+    monkeypatch.setattr(session_mod, "time", SimpleNamespace(
+        monotonic=lambda: 0.0,
+        sleep=lambda seconds: pytest.fail("slept while mirror was making progress"),
+    ))
     try:
         assert session.send([{}])["mirror_synced"]
-        assert len(polls) == 3
+        assert len(updates) == 2
+    finally:
+        session.disconnect()
+
+
+@pytest.mark.parametrize("applied", [0, 1])
+def test_ack_arriving_during_apply_is_confirmed_without_sleep(monkeypatch, applied):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig())
+    session.connect()
+    acknowledged = False
+
+    def flush(timeout):
+        assert timeout == 0
+        return acknowledged
+
+    def apply():
+        nonlocal acknowledged
+        acknowledged = True
+        session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
+        session.receiver.dispatcher.last_seq = 1
+        return applied
+
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    monkeypatch.setattr(session.sender, "flush", flush)
+    monkeypatch.setattr(session.receiver, "update", apply)
+    monkeypatch.setattr(session_mod, "time", SimpleNamespace(
+        monotonic=lambda: 0.0,
+        sleep=lambda seconds: pytest.fail("slept after acknowledgement and mirror were ready"),
+    ))
+    try:
+        assert session.send([{}])["mirror_synced"]
+    finally:
+        session.disconnect()
+
+
+@pytest.mark.parametrize("applied", [0, 1])
+def test_confirmation_respects_budget_with_or_without_progress(monkeypatch, applied):
+    _patch_net(monkeypatch, [], [])
+    session = session_mod.ConnectionSession(McpConfig(read_after_write_timeout_s=0.01))
+    session.connect()
+    elapsed = 0.0
+    sleeps = []
+
+    def apply():
+        nonlocal elapsed
+        elapsed += 0.001
+        session.receiver.dispatcher.last_seq += applied
+        return applied
+
+    def sleep(seconds):
+        nonlocal elapsed
+        assert 0 < seconds <= min(0.005, 0.01 - elapsed)
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    monkeypatch.setattr(session.sender, "flush", lambda timeout: False)
+    monkeypatch.setattr(session.receiver, "update", apply)
+    monkeypatch.setattr(session_mod, "time", SimpleNamespace(
+        monotonic=lambda: elapsed, sleep=sleep,
+    ))
+    try:
+        assert not session.send([{}])["mirror_synced"]
+        # One update can straddle the deadline; progress must not extend the loop.
+        assert 0.01 <= elapsed <= 0.011 + 1e-9
+        assert bool(sleeps) is (applied == 0)
     finally:
         session.disconnect()
 
@@ -247,7 +321,8 @@ def test_pending_ack_times_out_without_false_confirmation(monkeypatch):
         session.disconnect()
 
 
-def test_rejected_transaction_is_reported_as_tool_error(monkeypatch):
+@pytest.mark.parametrize("after_apply", [False, True])
+def test_rejected_transaction_is_reported_as_tool_error(monkeypatch, after_apply):
     from openusdconnect.recovery import TransactionFailure
     from openusdconnect.sender import TransactionRejectedError
 
@@ -255,11 +330,20 @@ def test_rejected_transaction_is_reported_as_tool_error(monkeypatch):
     session = session_mod.ConnectionSession(McpConfig())
     session.connect()
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
+    applied = False
+
+    def apply():
+        nonlocal applied
+        applied = True
+        return 0
 
     def reject(timeout):
+        if after_apply and not applied:
+            return False
         raise TransactionRejectedError(TransactionFailure(txn_id=1, code=4, reason="invalid"))
 
     monkeypatch.setattr(session.sender, "flush", reject)
+    monkeypatch.setattr(session.receiver, "update", apply)
     try:
         with pytest.raises(ToolError) as error:
             session.send([{}])
