@@ -155,6 +155,14 @@ class SharedStageClient:
         resolved_token = resolve_client_token(host, port, token, persist_token)
         token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
 
+        def _on_token_issued(token: str) -> None:
+            # Both connections authenticate as one client. Share replacements
+            # before persistence or application callbacks can fail.
+            self._sender.token = token
+            self._receiver.token = token
+            if token_callback is not None:
+                token_callback(token)
+
         self._stage = stage
         self._host = host
         self._port = port
@@ -174,7 +182,7 @@ class SharedStageClient:
             client_id=stable_client_id,
             origin=connection_origin,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
             on_stage_metadata=on_stage_metadata,
             on_playback_state=on_playback_state,
             on_playback_claimed=on_playback_claimed,
@@ -188,7 +196,7 @@ class SharedStageClient:
             client_id=stable_client_id,
             origin=connection_origin,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
             layer_mode=LayerMode.SHARED_STAGE,
         )
         self._last_seq = 0

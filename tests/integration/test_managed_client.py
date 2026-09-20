@@ -385,7 +385,8 @@ def test_managed_client_rebinds_and_parks_the_emitter():
 
 
 @pytest.mark.parametrize("background", [False, True])
-def test_managed_client_reconnect_uses_reissued_receiver_token(tmp_path, background):
+@pytest.mark.parametrize("first_reconnect", ["receiver", "sender"])
+def test_managed_client_shares_reissued_tokens(tmp_path, background, first_reconnect):
     base = tmp_path / "server-base.usda"
     Sdf.Layer.CreateNew(str(base)).Save()
     stage = _client_stage(tmp_path)
@@ -400,31 +401,56 @@ def test_managed_client_reconnect_uses_reissued_receiver_token(tmp_path, backgro
             stage, app_name="token-refresh", client_id="token-refresh",
             port=runtime.server_address[1], persist_token=False,
         )
+        sender_readers = []
         try:
             assert client.connect(timeout=5)
+            sender_readers.append(client.sender._reader_thread)
+            assert _drain_until(client, lambda: client.synchronized)
             old_token = client.sender.token
-            client.sender.disconnect()
+            assert old_token == client.receiver.token
             assert runtime.sync_server.revoke_token(client.client_id)
+            if first_reconnect == "receiver":
+                client.receiver.request_replay_from(1)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if client.receiver.connected and client.receiver.token != old_token:
+                        break
+                    time.sleep(0.01)
+                assert client.receiver.connected
+                assert client.receiver.token != old_token
+
+            sender_tokens = []
+            for _ in range(2):
+                # Leave the receiver connected while the sender reconnects.
+                # Its old credential must not overwrite a token issued to the sender.
+                assert client.receiver.connected
+                client.sender.disconnect()
+                if background:
+                    assert _drain_until(
+                        client, lambda: client.connected or client.sender.auth_rejected,
+                    )
+                    assert client.connected
+                else:
+                    assert client.connect(timeout=3)
+                sender_readers.append(client.sender._reader_thread)
+                sender_tokens.append(client.sender.token)
+                assert not client.sender.auth_rejected
+            assert sender_tokens[0] != old_token
+            assert sender_tokens[1] == sender_tokens[0]
+            assert client.receiver.token == sender_tokens[0]
+
+            # The other connection must also authenticate with the replacement.
             client.receiver.request_replay_from(1)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                if client.receiver.connected and client.receiver.token != old_token:
-                    break
-                time.sleep(0.01)
-            assert client.receiver.connected
-            assert client.receiver.token != old_token
-            if background:
-                assert _drain_until(
-                    client, lambda: client.connected or client.sender.auth_rejected, timeout=5,
-                )
-                assert client.connected
-            else:
-                assert client._connect_sender(timeout=3)
-            assert client.sender.token == client.receiver.token
-            assert not client.sender.auth_rejected
+            assert not client.receiver.synchronized
+            assert _drain_until(
+                client, lambda: client.synchronized or client.receiver.auth_rejected,
+            )
+            assert client.synchronized
+            assert not client.receiver.auth_rejected
+            assert client.sender.token == client.receiver.token == sender_tokens[0]
         finally:
             client.close()
-            for worker in (client.sender._connect_thread, client.sender._reader_thread):
+            for worker in (*sender_readers, client.sender._connect_thread):
                 if worker is not None:
                     worker.join(timeout=3)
             runtime.sync_server.token_store.close()

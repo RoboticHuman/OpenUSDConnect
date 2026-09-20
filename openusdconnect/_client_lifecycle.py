@@ -39,13 +39,15 @@ def prepare_sender_token(
     port: int,
     persist_token: bool,
 ) -> None:
-    """Prefer the receiver's current token, then existing or persisted credentials."""
-    receiver_token = receiver.token if receiver is not None else None
-    if receiver_token is not None:
-        # Reconnecting receivers may receive a replacement after token revocation.
-        sender.token = receiver_token
-    elif sender.token is None:
-        sender.token = resolve_client_token(host, port, None, persist_token)
+    """Fill missing sender credentials; issued tokens are shared by callbacks."""
+    if sender.token is not None:
+        return
+    token = receiver.token if receiver is not None else None
+    if token is None:
+        token = resolve_client_token(host, port, None, persist_token)
+    # A handshake can supply a token while stored credentials are being read.
+    if sender.token is None:
+        sender.token = token
 
 
 def stop_receiver(receiver: ReceiverThread) -> None:

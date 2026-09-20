@@ -33,8 +33,8 @@ def test_public_status_types_keep_compatibility_identity():
 @pytest.mark.parametrize(
     ("sender_token", "receiver", "persist", "expected"),
     [
-        ("expired", SimpleNamespace(token="issued"), False, "issued"),
-        ("expired", SimpleNamespace(token="issued"), True, "issued"),
+        ("current", SimpleNamespace(token="stale"), False, "current"),
+        ("current", SimpleNamespace(token="stale"), True, "current"),
         (None, SimpleNamespace(token="issued"), True, "issued"),
         ("configured", SimpleNamespace(token=None), True, "configured"),
         ("configured", None, True, "configured"),
@@ -44,7 +44,7 @@ def test_public_status_types_keep_compatibility_identity():
         (None, None, False, None),
     ],
 )
-def test_sender_token_prefers_receiver_then_existing_token_then_persistence(
+def test_sender_token_preparation_only_fills_missing_credentials(
     monkeypatch, sender_token, receiver, persist, expected,
 ):
     reads = []
@@ -60,6 +60,56 @@ def test_sender_token_prefers_receiver_then_existing_token_then_persistence(
     )
     assert sender.token == expected
     assert reads == ([("test-host", 7200)] if expected == "stored" else [])
+
+
+@pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
+@pytest.mark.parametrize("issuer", ["_sender", "_receiver"])
+@pytest.mark.parametrize("failure", [None, "persistence", "observer"])
+def test_issued_token_updates_both_connections_before_callbacks(
+    kind, issuer, failure, tmp_path, monkeypatch,
+):
+    calls = []
+
+    def record(name, token):
+        calls.append((name, token, client._sender.token, client._receiver.token))
+        if failure == name:
+            raise RuntimeError(f"injected {name} failure")
+
+    monkeypatch.setattr(
+        _client_utils, "save_token", lambda host, port, token: record("persistence", token),
+    )
+    stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
+    client = kind(
+        stage, app_name="shared-credentials", token="configured", persist_token=True,
+        on_token_issued=lambda token: record("observer", token),
+    )
+    try:
+        callback = getattr(client, issuer)._on_token_issued
+        if failure is None:
+            callback("replacement")
+        else:
+            with pytest.raises(RuntimeError, match=f"injected {failure} failure"):
+                callback("replacement")
+
+        assert client._sender.token == client._receiver.token == "replacement"
+        expected = ["persistence"] if failure == "persistence" else ["persistence", "observer"]
+        assert calls == [(name, "replacement", "replacement", "replacement") for name in expected]
+    finally:
+        client.close()
+
+
+def test_token_issued_while_loading_credentials_is_not_overwritten(monkeypatch):
+    sender = SimpleNamespace(token=None)
+
+    def load_token(host, port):
+        sender.token = "issued-during-load"
+        return "old-stored-token"
+
+    monkeypatch.setattr(_client_utils, "load_token", load_token)
+    _client_lifecycle.prepare_sender_token(
+        sender, None, host="test-host", port=7200, persist_token=True,
+    )
+    assert sender.token == "issued-during-load"
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
