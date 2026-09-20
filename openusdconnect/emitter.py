@@ -1,4 +1,13 @@
-"""Detect ``Usd.Stage`` changes and build network events."""
+"""Detect ``Usd.Stage`` changes and build network events.
+
+Notices identify changed scene paths and capture the authoring edit target.
+Builds read that target's authored opinions, record clears, then emit structure
+and values. Exact Sdf events preserve opinions that value events cannot express,
+including blocks, removals and inactive variant specs.
+
+Property-source maps live only for a build. Field-presence and value-diff caches
+survive builds; pending notice state is consumed when a batch is built.
+"""
 
 from __future__ import annotations
 
@@ -163,7 +172,6 @@ _C_GPRIM_ATTRS = "gprim_attrs"
 _C_MATERIAL_BINDING = "material_binding"
 _C_CONNECTABLE = "connectable"
 _C_API_SCHEMAS = "api_schemas"
-_C_CAMERA_ATTRS = "camera_attrs"
 _C_INSTANCEABLE = "instanceable_flag"
 _C_POINT_INSTANCER = "point_instancer"
 # Per-attribute time-sample hashes: {attr_name: {time_float: hash}}
@@ -374,13 +382,6 @@ def _usd_value_to_transport_python(
             resolver_context=resolver_context,
         ),
     )
-
-
-def _attribute_default_source_layer(attr: Usd.Attribute) -> Sdf.Layer | None:
-    for spec in attr.GetPropertyStack():
-        if isinstance(spec, Sdf.AttributeSpec) and spec.HasDefaultValue():
-            return spec.layer
-    return None
 
 
 def _local_canonical_trs(
@@ -1288,109 +1289,6 @@ class PayloadLoadStateChannel(PrimChannel):
         }
 
 
-# ---------------------------------------------------------------------------
-# Typed-schema channels
-# ---------------------------------------------------------------------------
-#
-# Channels that adopt a typed USD schema emit every authored attr of that
-# schema through the generic set_gprim_attrs wire event. _typed_schema_attrs()
-# drops attrs already owned by a peer channel (visibility, info:id, inputs:*,
-# material:binding, ...) so the same property never emits twice from one prim.
-
-_TYPED_SCHEMA_PEER_CHANNELS: tuple[type[PrimChannel], ...] = (
-    VariantSelectionsChannel,
-    ReferencesChannel,
-    PayloadsChannel,
-    PayloadLoadStateChannel,
-    MaterialBindingChannel,
-    ConnectableChannel,
-    VisibilityChannel,
-)
-
-
-def _typed_schema_attrs(schema_cls) -> frozenset[str]:
-    """Return direct typed-schema attrs that no peer channel already handles."""
-    skip_attrs: set[str] = set()
-    skip_prefixes: list[str] = []
-    for cls in _TYPED_SCHEMA_PEER_CHANNELS:
-        skip_attrs.update(cls.watched_attrs)
-        skip_prefixes.extend(cls.watched_prefixes)
-    skip_prefixes_t = tuple(skip_prefixes)
-    return frozenset(
-        n
-        for n in schema_cls.GetSchemaAttributeNames(False)
-        if not _is_transform_attr(n) and n not in skip_attrs and not n.startswith(skip_prefixes_t)
-    )
-
-
-_CAMERA_ATTR_NAMES = _typed_schema_attrs(UsdGeom.Camera)
-
-
-def read_camera_attrs(stage, prim_path):
-    """Read authored UsdGeomCamera attributes from a prim.
-
-    Returns ``{name: python_value}`` for every authored camera attr, or
-    ``None`` if the prim is not a ``UsdGeom.Camera``.
-    """
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsA(UsdGeom.Camera):
-        return None
-    attrs = {}
-    for name in _CAMERA_ATTR_NAMES:
-        attr = prim.GetAttribute(name)
-        if attr and attr.IsAuthored():
-            val = usd_value_to_python(attr.Get())
-            if val is not None:
-                attrs[name] = val
-    return attrs
-
-
-class CameraAttrsChannel(PrimChannel):
-    """UsdGeomCamera typed-schema attribute replication.
-
-    Camera attrs use the generic ``set_gprim_attrs`` wire event so receivers
-    do not need a camera-specific event kind.
-    """
-
-    cache_key = _C_CAMERA_ATTRS
-    watched_attrs = tuple(_CAMERA_ATTR_NAMES)
-    uses_local_property_sources = True
-
-    def applies_to(self, prim):
-        return bool(prim and prim.IsA(UsdGeom.Camera))
-
-    def read(self, stage, prim_path):
-        return read_camera_attrs(stage, prim_path) or {}
-
-    def read_local(self, stage, prim_path, property_sources):
-        attrs = {}
-        edit_target = stage.GetEditTarget()
-        identity_target = edit_target.GetMapFunction().isIdentity
-        prim_path_obj = Sdf.Path(prim_path)
-        for name in _CAMERA_ATTR_NAMES:
-            if identity_target:
-                source = property_sources.get(name, {}).get("default")
-            else:
-                source = edit_target.GetPropertySpecForScenePath(prim_path_obj.AppendProperty(name))
-            if not isinstance(source, Sdf.AttributeSpec) or not source.HasDefaultValue():
-                continue
-            value = source.default
-            if isinstance(value, Sdf.ValueBlock):
-                continue
-            converted = _usd_value_to_transport_python(stage, source.layer, value)
-            if converted is not None:
-                attrs[name] = converted
-        return attrs
-
-    def diff(self, current, cached):
-        cached = cached or {}
-        changed = {n: v for n, v in current.items() if not values_equal(v, cached.get(n))}
-        return changed if changed else None
-
-    def to_event(self, prim_path, diff):
-        return {"k": K_SET_GPRIM_ATTRS, "prim": prim_path, "attrs": diff}
-
-
 class InstanceableChannel(PrimChannel):
     """Authored scenegraph-instancing flag; prototype paths stay local."""
 
@@ -1558,7 +1456,6 @@ _BUILTIN_PRIM_CHANNELS: tuple[PrimChannel, ...] = (
     MaterialBindingChannel(),
     ConnectableChannel(),
     VisibilityChannel(),
-    CameraAttrsChannel(),
     InstanceableChannel(),
     PointInstancerChannel(),
 )
@@ -1703,7 +1600,7 @@ def _invalidate_set_variant_selections(emitter, prim_path, _ev):
 def _invalidate_set_material_binding(emitter, prim_path, _ev):
     if not _invalidation_targets_authoring_target(emitter):
         return
-    _fields, property_sources = emitter._local_property_state(prim_path)
+    property_sources = emitter._local_property_sources(prim_path)
     emitter._prim_cache.setdefault(prim_path, {})[_C_MATERIAL_BINDING] = (
         _read_edit_target_material_bindings(
             emitter.stage,
@@ -1720,7 +1617,7 @@ def _resync_connectable_cache(emitter, prim_path):
     """
     if not _invalidation_targets_authoring_target(emitter):
         return
-    _fields, property_sources = emitter._local_property_state(prim_path)
+    property_sources = emitter._local_property_sources(prim_path)
     kind, info_id, inputs, types, connections = _read_edit_target_usdshade_connectable(
         emitter.stage,
         prim_path,
@@ -1759,17 +1656,6 @@ def _invalidate_set_connectable_input(emitter, prim_path, ev):
 def _invalidate_set_gprim_attrs(emitter, prim_path, ev):
     if not _invalidation_targets_authoring_target(emitter):
         return
-
-    if ev.get("time") is None:
-        camera_updates = {
-            name: value for name, value in ev.get("attrs", {}).items() if name in _CAMERA_ATTR_NAMES
-        }
-        if camera_updates:
-            camera_cache = emitter._prim_cache.setdefault(prim_path, {}).setdefault(
-                _C_CAMERA_ATTRS,
-                {},
-            )
-            camera_cache.update(camera_updates)
 
     if ev.get("time") is not None:
         time = float(ev["time"])
@@ -2030,8 +1916,10 @@ class NoticeEmitter:
         self._notice_resynced_prims: set[str] = set()
         # Exact authored Sdf specs pending transport. Keys retain variant
         # selections, so inactive variant definitions never collapse into
-        # the composed scene namespace.
+        # the composed scene namespace. None requests all fields after a
+        # resync; a set names changed fields (an empty set names none).
         self._dirty_sdf_specs: dict[tuple[str, str], set[str] | None] = {}
+        # True requests a full resync; False only discovers field/spec changes.
         self._dirty_sdf_subtrees: dict[str, bool] = {}
         self._sdf_spec_fields: dict[tuple[str, str], set[str]] = {}
         self._full_sdf_spec_scan = False
@@ -2044,7 +1932,7 @@ class NoticeEmitter:
         # Field presence includes channel-owned values so their removal can
         # emit an Sdf clear without serializing fragments on ordinary edits.
         self._local_property_spec_fields: dict[str, set[str]] = {}
-        # Last observed edit-target ownership. Namespace resyncs use it to
+        # Last observed authored prim state. Namespace resyncs use it to
         # distinguish a removed local definition from a composed descendant
         # that remains visible through a reference or weaker layer.
         self._local_prim_states: dict[str, _LocalPrimState] = {}
@@ -2106,33 +1994,31 @@ class NoticeEmitter:
                     result.add(name)
         return result
 
-    def _local_property_state(
+    def _local_property_sources(
         self,
         prim_path: str,
         specs=None,
-    ) -> tuple[dict[str, set[str]], dict[str, dict[str, Sdf.PropertySpec]]]:
+    ) -> dict[str, dict[str, Sdf.PropertySpec]]:
+        """Map property names and authored fields to their edit-layer specs."""
         specs = specs if specs is not None else self._local_prim_specs(prim_path)
-        fields_by_name: dict[str, set[str]] = {}
         sources_by_name: dict[str, dict[str, Sdf.PropertySpec]] = {}
         for spec in specs:
             for prop in spec.properties:
                 name = str(prop.name)
-                fields = fields_by_name.setdefault(name, set())
                 sources = sources_by_name.setdefault(name, {})
                 for key in prop.ListInfoKeys():
                     field = str(key)
-                    fields.add(field)
                     # GetPrimStack is strongest-to-weakest. Keep the first
                     # source for each field so direct and variant opinions
                     # retain USD's field-level precedence.
                     sources.setdefault(field, prop)
-        return fields_by_name, sources_by_name
+        return sources_by_name
 
-    def _local_property_state_for_names(
+    def _local_property_sources_for_names(
         self,
         prim_path: str,
         names,
-    ) -> tuple[dict[str, set[str]], dict[str, dict[str, Sdf.PropertySpec]]]:
+    ) -> dict[str, dict[str, Sdf.PropertySpec]]:
         """Read exact current-edit-target specs for named scene properties.
 
         Incremental property notices already identify every property that can
@@ -2141,7 +2027,6 @@ class NoticeEmitter:
         not retain the returned Sdf wrappers beyond the current build.
         """
         edit_target = self._pending_edit_target or self.stage.GetEditTarget()
-        fields_by_name: dict[str, set[str]] = {}
         sources_by_name: dict[str, dict[str, Sdf.PropertySpec]] = {}
         prim_path_obj = Sdf.Path(prim_path)
         for name in names:
@@ -2149,16 +2034,15 @@ class NoticeEmitter:
             spec = edit_target.GetPropertySpecForScenePath(scene_path)
             if not isinstance(spec, (Sdf.AttributeSpec, Sdf.RelationshipSpec)):
                 continue
-            fields = {str(field) for field in spec.ListInfoKeys()}
+            fields = spec.ListInfoKeys()
             if not fields:
                 continue
-            fields_by_name[name] = fields
-            sources_by_name[name] = {field: spec for field in fields}
-        return fields_by_name, sources_by_name
+            sources_by_name[name] = {str(field): spec for field in fields}
+        return sources_by_name
 
     @staticmethod
     def _property_authors_value(
-        properties: dict[str, set[str]],
+        properties: dict[str, dict[str, Sdf.PropertySpec]],
         blocked_values: dict[str, set[str]],
         name: str,
         time: float | None,
@@ -2172,15 +2056,14 @@ class NoticeEmitter:
     @staticmethod
     def _value_block_fields(
         field_sources: dict[str, Sdf.PropertySpec],
-        fields: set[str],
     ) -> set[str]:
         """Return value fields whose local opinion contains an Sdf block."""
         blocked = set()
-        if "default" in fields:
+        if "default" in field_sources:
             source = field_sources.get("default")
             if source and isinstance(source.GetInfo("default"), Sdf.ValueBlock):
                 blocked.add("default")
-        if "timeSamples" in fields:
+        if "timeSamples" in field_sources:
             source = field_sources.get("timeSamples")
             samples = source.GetInfo("timeSamples") if source else None
             if samples and any(isinstance(value, Sdf.ValueBlock) for value in samples.values()):
@@ -2188,25 +2071,8 @@ class NoticeEmitter:
         return blocked
 
     @staticmethod
-    def _refresh_blocked_value_fields(
-        blocked_by_name: dict[str, set[str]],
-        property_sources: dict[str, dict[str, Sdf.PropertySpec]],
-        names,
-    ) -> None:
-        for name in names:
-            sources = property_sources.get(name, {})
-            blocked = NoticeEmitter._value_block_fields(
-                sources,
-                set(sources) & _SDF_ATTRIBUTE_VALUE_FIELDS,
-            )
-            if blocked:
-                blocked_by_name[name] = blocked
-            else:
-                blocked_by_name.pop(name, None)
-
-    @staticmethod
     def _local_xform_event_fields(
-        properties: dict[str, set[str]],
+        properties: dict[str, dict[str, Sdf.PropertySpec]],
         blocked_values: dict[str, set[str]],
         event_fields: list[str],
         time: float | None,
@@ -2243,7 +2109,7 @@ class NoticeEmitter:
         self,
         events: list[dict],
         local_specs,
-        properties: dict[str, set[str]],
+        properties: dict[str, dict[str, Sdf.PropertySpec]],
         blocked_values: dict[str, set[str]],
     ) -> list[dict]:
         """Keep only fields authored by the current edit target.
@@ -2520,11 +2386,13 @@ class NoticeEmitter:
         prim = stage.GetPrimAtPath(prim_path)
         if not prim:
             return
+        edit_target = stage.GetEditTarget()
+        identity_target = edit_target.GetMapFunction().isIdentity
         for child in Usd.PrimRange(prim):
             cp = str(child.GetPath())
             pc = self._prim_cache.setdefault(cp, {})
-            property_fields, property_sources = self._local_property_state(cp)
-            for name, fields in property_fields.items():
+            property_sources = self._local_property_sources(cp)
+            for name, fields in property_sources.items():
                 event_path = str(child.GetPath().AppendProperty(name))
                 self._local_property_spec_fields[event_path] = set(fields)
             for channel in self._channels:
@@ -2543,24 +2411,19 @@ class NoticeEmitter:
             for attr in child.GetAttributes():
                 name = attr.GetName()
                 if attr.IsAuthored() and self._attr_filter(name):
-                    value_source = property_sources.get(name, {}).get("default")
-                    if (
-                        isinstance(value_source, Sdf.AttributeSpec)
-                        and value_source.HasDefaultValue()
-                    ):
-                        value = value_source.default
-                        source_layer = value_source.layer
+                    if identity_target:
+                        value_source = property_sources.get(name, {}).get("default")
                     else:
-                        value = attr.Get()
-                        source_layer = self.stage.GetEditTarget().GetLayer()
-                        if value_contains_asset_path(value):
-                            source_layer = _attribute_default_source_layer(attr)
-                            if source_layer is None:
-                                continue
+                        value_source = edit_target.GetPropertySpecForScenePath(attr.GetPath())
+                    if (
+                        not isinstance(value_source, Sdf.AttributeSpec)
+                        or not value_source.HasDefaultValue()
+                    ):
+                        continue
                     val = _usd_value_to_transport_python(
                         self.stage,
-                        source_layer,
-                        value,
+                        value_source.layer,
+                        value_source.default,
                     )
                     if val is not None:
                         gprim_snapshot[name] = _value_hash(val)
@@ -2712,21 +2575,22 @@ class NoticeEmitter:
             removed_fields = set(self._local_property_spec_fields.get(str(namespace_path), ()))
         self._mark_exact_sdf_spec(source_path, kind, removed_fields)
 
-    def _channel_owns_property(self, prim: Usd.Prim, name: str) -> bool:
+    def _channel_handles_property(self, prim: Usd.Prim, name: str) -> bool:
         for channel in self._channels:
-            if not channel.applies_to(prim):
-                continue
-            if name in channel.watched_attrs:
-                return True
-            if channel.watched_prefixes and name.startswith(channel.watched_prefixes):
+            matches = name in channel.watched_attrs or (
+                channel.watched_prefixes and name.startswith(channel.watched_prefixes)
+            )
+            if matches and channel.applies_to(prim):
                 return True
         return False
 
-    def _sdf_owns_attribute_value(self, prim: Usd.Prim, name: str) -> bool:
-        """Whether an attribute value lacks a faithful specialized path."""
+    def _attribute_value_needs_sdf(
+        self, prim: Usd.Prim, name: str, *, attribute: Usd.Attribute | None = None
+    ) -> bool:
+        """Whether a locally authored value needs an exact Sdf field event."""
         if name.startswith(PRIMVAR_PREFIX) or not self._attr_filter(name):
             return False
-        attr = prim.GetAttribute(name)
+        attr = prim.GetAttribute(name) if attribute is None else attribute
         definition = prim.GetPrimDefinition()
         needs_sdf_value = attr and (
             attr.IsCustom() or not definition or not definition.GetSchemaPropertySpec(name)
@@ -2754,11 +2618,11 @@ class NoticeEmitter:
         field_sources: dict[str, Sdf.PropertySpec],
     ) -> set[str]:
         name = str(spec.name)
-        blocked_values = self._value_block_fields(field_sources, fields)
+        blocked_values = self._value_block_fields(field_sources)
         if isinstance(spec, Sdf.AttributeSpec):
             if spec.custom:
                 return set(fields)
-            if self._channel_owns_property(prim, name):
+            if self._channel_handles_property(prim, name):
                 result = blocked_values | (
                     set(fields)
                     - _SDF_DECLARATION_FIELDS
@@ -2787,7 +2651,7 @@ class NoticeEmitter:
                 ):
                     result.add("connectionPaths")
                 return result
-            if self._sdf_owns_attribute_value(prim, name):
+            if self._attribute_value_needs_sdf(prim, name):
                 return set(fields)
             result = set(fields) - _SDF_DECLARATION_FIELDS - _SDF_ATTRIBUTE_VALUE_FIELDS
             result.update(blocked_values)
@@ -2795,7 +2659,7 @@ class NoticeEmitter:
         if isinstance(spec, Sdf.RelationshipSpec):
             if spec.custom:
                 return set(fields)
-            if self._channel_owns_property(prim, name):
+            if self._channel_handles_property(prim, name):
                 return set(fields) - _SDF_DECLARATION_FIELDS - {"targetPaths"}
             return set(fields)
         return set()
@@ -2905,26 +2769,25 @@ class NoticeEmitter:
         *,
         full_scan: bool,
     ) -> list[dict]:
-        root_modes = dict(self._dirty_sdf_subtrees)
-        roots = set(root_modes)
+        """Emit exact authored fields, retaining clears and removed specs."""
+        roots = set(self._dirty_sdf_subtrees)
+        subtree_roots = [Sdf.Path(value) for value in roots]
+        resync_roots = [
+            Sdf.Path(value) for value, resynced in self._dirty_sdf_subtrees.items() if resynced
+        ]
         specs = self._collect_sdf_specs(layer, roots, full_scan=full_scan)
-        dirty = dict(self._dirty_sdf_specs)
+        changed_specs = dict(self._dirty_sdf_specs)
         self._dirty_sdf_specs.clear()
         self._dirty_sdf_subtrees.clear()
 
-        root_paths = [(Sdf.Path(value), resync) for value, resync in root_modes.items()]
-
-        def _scan_mode(path: Sdf.Path) -> int:
-            if full_scan:
-                return 2
-            mode = 0
-            for root, resync in root_paths:
-                if _sdf_path_is_under(path, root):
-                    mode = max(mode, 2 if resync else 1)
-            return mode
-
-        candidates = set(dirty) | set(specs)
-        candidates.update(key for key in self._sdf_spec_fields if _scan_mode(Sdf.Path(key[1])))
+        candidates = set(changed_specs) | set(specs)
+        # Previously sent specs can have disappeared from the scanned subtree.
+        candidates.update(
+            key
+            for key in self._sdf_spec_fields
+            if full_scan
+            or any(_sdf_path_is_under(Sdf.Path(key[1]), root) for root in subtree_roots)
+        )
 
         events: list[dict] = []
         expression_variables = self.stage.GetMetadata("expressionVariables")
@@ -2947,12 +2810,13 @@ class NoticeEmitter:
 
             previous_exists = key in self._sdf_spec_fields
             previous_fields = set(self._sdf_spec_fields.get(key, ()))
+            spec_has_notice = key in changed_specs
+            changed_fields = changed_specs.get(key)
             if spec is None:
-                if previous_exists or (key in dirty and spec_kind in _SDF_PROPERTY_KINDS):
+                if previous_exists or (spec_has_notice and spec_kind in _SDF_PROPERTY_KINDS):
                     removed_fields = set(previous_fields)
-                    changed = dirty.get(key)
-                    if changed:
-                        removed_fields.update(changed)
+                    if changed_fields:
+                        removed_fields.update(changed_fields)
                     events.append(
                         {
                             "k": K_SET_SDF_SPEC_FIELDS,
@@ -2967,19 +2831,26 @@ class NoticeEmitter:
                     self._sdf_spec_fields.pop(key, None)
                 continue
 
-            available_fields = self._generic_sdf_fields(spec, path, spec_kind)
-            scan_mode = _scan_mode(path)
-            changed_fields = dirty.get(key)
+            sdf_fields = self._generic_sdf_fields(spec, path, spec_kind)
+            # A resync (None in changed_specs) needs every field. A new spec
+            # discovered by a subtree scan also needs its complete field set.
             if (
-                scan_mode == 2
-                or (key in dirty and changed_fields is None)
-                or (scan_mode and not previous_exists)
+                full_scan
+                or (spec_has_notice and changed_fields is None)
+                or any(_sdf_path_is_under(path, root) for root in resync_roots)
+                or (
+                    not previous_exists
+                    and any(_sdf_path_is_under(path, root) for root in subtree_roots)
+                )
             ):
-                selected_fields = available_fields | previous_fields
-            elif changed_fields is None:
-                selected_fields = available_fields ^ previous_fields
+                selected_fields = sdf_fields | previous_fields
+            elif spec_has_notice:
+                # An empty set means no named fields changed, not a resync.
+                selected_fields = changed_fields & (sdf_fields | previous_fields)
             else:
-                selected_fields = changed_fields & (available_fields | previous_fields)
+                # An existing spec found by a non-resync scan only needs field
+                # additions/removals. Explicit value edits have their own notice.
+                selected_fields = sdf_fields ^ previous_fields
 
             # Resync scans must retain explicit clears of channel-owned fields.
             if changed_fields:
@@ -3014,7 +2885,7 @@ class NoticeEmitter:
                     }
                 )
 
-            tracked = (previous_fields | selected_fields) & available_fields
+            tracked = (previous_fields | selected_fields) & sdf_fields
             if tracked or requires_identity:
                 self._sdf_spec_fields[key] = tracked
             else:
@@ -3175,22 +3046,38 @@ class NoticeEmitter:
                     sdf_fields = {str(field) for field in fields}
                     if not sdf_fields:
                         sdf_fields.add("timeSamples")
-                    if sdf_fields <= _SDF_SPECIALIZED_FIELDS and not self._attr_filter(attr_name):
-                        # Channel values use the dirty-attr path; blocks need
-                        # exact Sdf fields because they mask weaker opinions.
-                        spec = (
-                            edit_layer.GetObjectAtPath(source_path)
-                            if not source_path.isEmpty
-                            else None
+                    spec = (
+                        edit_layer.GetObjectAtPath(source_path)
+                        if not source_path.isEmpty
+                        else None
+                    )
+                    handled_value = (
+                        sdf_fields <= _SDF_SPECIALIZED_FIELDS
+                        and not self._attr_filter(attr_name)
+                    )
+                    if (
+                        not handled_value
+                        and sdf_fields <= _SDF_ATTRIBUTE_VALUE_FIELDS
+                        and isinstance(spec, Sdf.AttributeSpec)
+                        and not spec.custom
+                    ):
+                        # Schema defaults/samples use the generic attribute
+                        # reader. Avoid inspecting them again as Sdf fragments.
+                        prim = self.stage.GetPrimAtPath(p.GetPrimPath())
+                        definition = prim.GetPrimDefinition() if prim else None
+                        handled_value = bool(
+                            definition and definition.GetSchemaPropertySpec(attr_name)
                         )
+                    if handled_value:
+                        # Values use the dirty-attr path. Blocks and clears
+                        # need exact fields even before the first snapshot.
                         if isinstance(spec, Sdf.AttributeSpec):
                             present_sources = {
                                 field: spec for field in sdf_fields if spec.HasInfo(field)
                             }
-                            blocked = self._value_block_fields(
-                                present_sources,
-                                sdf_fields,
-                            )
+                            blocked = self._value_block_fields(present_sources)
+                            if len(present_sources) != len(sdf_fields):
+                                blocked.update(sdf_fields.difference(present_sources))
                             if blocked:
                                 self._mark_exact_sdf_spec(
                                     source_path,
@@ -3198,11 +3085,6 @@ class NoticeEmitter:
                                     blocked,
                                 )
                     else:
-                        spec = (
-                            edit_layer.GetObjectAtPath(source_path)
-                            if not source_path.isEmpty
-                            else None
-                        )
                         if isinstance(spec, Sdf.AttributeSpec):
                             kind = SDF_SPEC_KIND_ATTRIBUTE
                         elif isinstance(spec, Sdf.RelationshipSpec):
@@ -3527,7 +3409,7 @@ class NoticeEmitter:
         local_definition_spec,
         previous_prim_state: _LocalPrimState | None,
         local_api_schemas,
-        local_properties: dict[str, set[str]],
+        local_property_sources: dict[str, dict[str, Sdf.PropertySpec]],
     ) -> list[dict]:
         """Build definition, API-schema, and xform-stack events for one prim."""
         events: list[dict] = []
@@ -3547,8 +3429,8 @@ class NoticeEmitter:
                         "api_schemas": list(local_api_schemas),
                     }
                 )
-            if "xformOpOrder" in local_properties or any(
-                name.startswith("xformOp:") for name in local_properties
+            if "xformOpOrder" in local_property_sources or any(
+                name.startswith("xformOp:") for name in local_property_sources
             ):
                 events.append({"k": K_ENSURE_XFORM_OPS, "prim": prim_path})
             self._know_prim(prim_path)
@@ -3685,51 +3567,54 @@ class NoticeEmitter:
         owned_attributes: set[str],
         local_property_sources: dict,
         *,
-        is_resync: bool,
+        full_scan: bool,
     ) -> dict | None:
         """Build generic default-time attribute values not owned by channels."""
         previous_attributes = prim_cache.get(_C_GPRIM_ATTRS, {})
-        if not dirty_attribute_names and (not previous_attributes or is_resync):
-            for attribute in prim.GetAttributes():
-                attribute_name = attribute.GetName()
-                if (
-                    attribute.IsAuthored()
-                    and self._attr_filter(attribute_name)
-                    and attribute_name not in owned_attributes
-                    and not self._sdf_owns_attribute_value(prim, attribute_name)
-                ):
-                    dirty_attribute_names.add(attribute_name)
+        if full_scan or (not dirty_attribute_names and not previous_attributes):
+            # Ownership was already read for this prim. Schema fallback values
+            # and opinions from other layers are not authored changes to send.
+            dirty_attribute_names.update(
+                name for name, sources in local_property_sources.items() if "default" in sources
+            )
+            dirty_attribute_names.update(previous_attributes)
 
         changed_attributes = {}
         changed_attribute_hashes = {}
         primvar_metadata: dict = {}
         attribute_interpolation: dict = {}
+        edit_target = self.stage.GetEditTarget()
+        identity_target = edit_target.GetMapFunction().isIdentity
         for attribute_name in dirty_attribute_names:
             if not self._attr_filter(attribute_name) or attribute_name in owned_attributes:
-                continue
-            if self._sdf_owns_attribute_value(prim, attribute_name):
                 continue
             attribute = prim.GetAttribute(attribute_name)
             if not attribute:
                 continue
 
-            value_source = local_property_sources.get(attribute_name, {}).get("default")
-            if isinstance(value_source, Sdf.AttributeSpec) and value_source.HasDefaultValue():
-                value = value_source.default
-                source_layer = value_source.layer
+            if identity_target:
+                value_source = local_property_sources.get(attribute_name, {}).get("default")
             else:
-                value = attribute.Get()
-                source_layer = self.stage.GetEditTarget().GetLayer()
-                if value_contains_asset_path(value):
-                    source_layer = _attribute_default_source_layer(attribute)
-                    if source_layer is None:
-                        continue
+                # A mapped edit target selects one variant/reference spec,
+                # even when stronger opinions live in that same Sdf.Layer.
+                value_source = edit_target.GetPropertySpecForScenePath(attribute.GetPath())
+            if (
+                not isinstance(value_source, Sdf.AttributeSpec)
+                or not value_source.HasDefaultValue()
+            ):
+                # A clear exposes weaker composition but must forget the old
+                # local fingerprint so reauthoring that value emits it again.
+                previous_attributes.pop(attribute_name, None)
+                continue
+            if self._attribute_value_needs_sdf(prim, attribute_name, attribute=attribute):
+                continue
             transport_value = _usd_value_to_transport_python(
                 self.stage,
-                source_layer,
-                value,
+                value_source.layer,
+                value_source.default,
             )
             if transport_value is None:
+                previous_attributes.pop(attribute_name, None)
                 continue
             value_hash = _value_hash(transport_value)
             if value_hash == previous_attributes.get(attribute_name):
@@ -3765,140 +3650,150 @@ class NoticeEmitter:
         prim,
         eps_trs: float,
     ) -> list[dict]:
-        """Build events for a single dirty prim. ``prim`` must be valid."""
-        events: list[dict] = []
-        pc = self._prim_cache.setdefault(prim_path, {})
+        """Read authored opinions, record clears, then build one prim's events."""
+        prim_cache = self._prim_cache.setdefault(prim_path, {})
         first_encounter = prim_path not in self._known_prims
         is_resync = prim_path in self._notice_resynced_prims
-        dirty_attrs = self._dirty_attrs.get(prim_path)
-        property_names = set(dirty_attrs or ())
+        noticed_attributes = self._dirty_attrs.get(prim_path)
+        full_value_read = first_encounter or is_resync
+        has_attribute_notices = bool(noticed_attributes) and not full_value_read
+        property_names = set(noticed_attributes or ())
         property_notice_only = (
-            not first_encounter
-            and not is_resync
-            and bool(dirty_attrs)
+            has_attribute_notices
             and not self._dirty_sdf_subtrees
             and not any(kind not in _SDF_PROPERTY_KINDS for kind, _path in self._dirty_sdf_specs)
         )
-        # Ownership is a view of the current edit target, not emitter state.
+
+        # Read current authored opinions before changing the last-seen state.
         # Ordinary property notices query only their exact mapped specs. Full
         # snapshots, resyncs, and prim-level changes inspect the authored prim
         # stack transiently; neither path retains Sdf wrappers in the cache.
         if property_notice_only:
             local_specs = []
-            property_state = self._local_property_state_for_names(
+            property_sources = self._local_property_sources_for_names(
                 prim_path,
                 property_names,
             )
         else:
             local_specs = self._local_prim_specs(prim_path)
-            property_state = self._local_property_state(prim_path, local_specs)
-        blocked_values: dict[str, set[str]] = {}
-        self._refresh_blocked_value_fields(
-            blocked_values,
-            property_state[1],
-            property_state[0],
-        )
+            property_sources = self._local_property_sources(prim_path, local_specs)
+        blocked_values = {
+            name: blocked
+            for name, sources in property_sources.items()
+            if (blocked := self._value_block_fields(sources))
+        }
         local_spec = local_specs[0] if local_specs else None
         local_definition_spec = self._local_definition_spec(local_specs)
         previous_prim_state = self._local_prim_states.get(prim_path)
-        local_properties, local_property_sources = property_state
+
+        # Record clears as exact Sdf fields before remembering the new fields.
+        # A value event cannot remove an opinion to expose a weaker layer.
         if not property_notice_only:
-            property_names.update(local_properties)
+            property_names.update(property_sources)
+        scene_prim_path = Sdf.Path(prim_path)
         for name in property_names:
-            event_path = str(Sdf.Path(prim_path).AppendProperty(name))
-            previous_fields = self._local_property_spec_fields.get(event_path, _EMPTY_FIELDS)
-            current_fields = local_properties.get(name, _EMPTY_FIELDS)
+            scene_property_path = str(scene_prim_path.AppendProperty(name))
+            previous_fields = self._local_property_spec_fields.get(
+                scene_property_path, _EMPTY_FIELDS
+            )
+            current_fields = (
+                property_sources[name].keys() if name in property_sources else _EMPTY_FIELDS
+            )
             cleared_fields = previous_fields - current_fields
             if cleared_fields:
-                # Value events cannot remove opinions or expose weaker values.
-                self._mark_sdf_property_spec(event_path, cleared_fields)
+                self._mark_sdf_property_spec(scene_property_path, cleared_fields)
             if current_fields:
-                self._local_property_spec_fields[event_path] = set(current_fields)
+                self._local_property_spec_fields[scene_property_path] = set(current_fields)
             else:
-                self._local_property_spec_fields.pop(event_path, None)
+                self._local_property_spec_fields.pop(scene_property_path, None)
+
+        # Build structure before values so the receiver can apply them in order.
+        events: list[dict] = []
         if not property_notice_only:
             events.extend(
                 self._build_prim_structure_events(
                     prim_path,
-                    pc,
+                    prim_cache,
                     first_encounter=first_encounter,
                     local_definition_spec=local_definition_spec,
                     previous_prim_state=previous_prim_state,
                     local_api_schemas=self._local_api_schemas(local_specs),
-                    local_properties=local_properties,
+                    local_property_sources=property_sources,
                 )
             )
 
         # First encounter and resync both require a full channel read. The
         # dirty attr that woke the prim might be unrelated to already-authored
         # channel state, and resyncs do not provide reliable per-attr detail.
-        # The gprim attr block below consumes the resync marker.
-        if first_encounter or prim_path in self._notice_resynced_prims:
-            dirty_attrs = None
-        channel_events, owned_attrs = self._build_prim_channel_events(
+        channel_dirty_attributes = None if full_value_read else noticed_attributes
+        channel_events, channel_attributes = self._build_prim_channel_events(
             prim_path,
             prim,
-            pc,
-            dirty_attrs,
-            local_property_sources,
+            prim_cache,
+            channel_dirty_attributes,
+            property_sources,
         )
         events.extend(channel_events)
 
-        xform_event = self._build_default_xform_event(
-            prim_path,
-            prim,
-            pc,
-            local_property_sources,
-            dirty_attrs,
-            eps_trs,
-        )
-        if xform_event is not None:
-            events.append(xform_event)
+        # Property-only notices identify every changed attribute. The prefix
+        # conservatively covers xformOpOrder and every xformOp:* attribute;
+        # other edits and resyncs still need a full transform read.
+        if not property_notice_only or any(
+            name.startswith("xformOp") for name in noticed_attributes
+        ):
+            xform_event = self._build_default_xform_event(
+                prim_path,
+                prim,
+                prim_cache,
+                property_sources,
+                channel_dirty_attributes,
+                eps_trs,
+            )
+            if xform_event is not None:
+                events.append(xform_event)
 
-        # Gprim attribute diff + time-sample emission share the dirty-attr
-        # bookkeeping. had_notice_detail records whether the names came from
-        # real per-attr notices (reliable sample classification) or from the
-        # full-scan expansion below (no per-attr detail available).
-        dirty_attr_names = self._dirty_attrs.pop(prim_path, set())
-        sample_dirty = self._sample_dirty_attrs.pop(prim_path, set())
-        had_notice_detail = bool(dirty_attr_names)
+        # Consume notices before the default reader expands its candidate names.
+        default_attributes = self._dirty_attrs.pop(prim_path, set())
+        noticed_samples = self._sample_dirty_attrs.pop(prim_path, set())
         self._notice_resynced_prims.discard(prim_path)
         gprim_event = self._build_default_gprim_event(
             prim_path,
             prim,
-            pc,
-            dirty_attr_names,
-            owned_attrs,
-            local_property_sources,
-            is_resync=is_resync,
+            prim_cache,
+            default_attributes,
+            channel_attributes,
+            property_sources,
+            full_scan=full_value_read,
         )
         if gprim_event is not None:
             events.append(gprim_event)
 
-        # With per-attr notice detail, only attrs classified sample-dirty
-        # need their sample tables re-read; a default-time drag on a
-        # keyframed prim then skips sample diffing entirely. Without
-        # detail (first encounter, resync, manual dirty), scan everything:
-        # the gprim expansion above is filter-scoped and would hide
-        # transform ops and connectable inputs from the sample paths.
-        sample_attrs = sample_dirty if had_notice_detail else None
+        # Without notice detail, the authored field map already identifies
+        # sampled attributes across all schemas. Include cached names so a
+        # cleared sample table still emits erasures.
+        if has_attribute_notices:
+            sample_attributes = noticed_samples
+        else:
+            sample_attributes = {
+                name for name, sources in property_sources.items() if "timeSamples" in sources
+            } | set(prim_cache.get(_C_TIME_SAMPLES, ()))
         events.extend(
-            self._build_time_sample_events(prim_path, prim, pc, sample_attrs, owned_attrs),
+            self._build_time_sample_events(
+                prim_path, prim, prim_cache, sample_attributes, channel_attributes
+            ),
         )
 
-        ownership_spec = local_definition_spec or local_spec
-        if not property_notice_only and (
-            first_encounter or is_resync or previous_prim_state is None
-        ):
-            ownership_state = _local_prim_state(ownership_spec)
-            if ownership_state:
-                self._local_prim_states[prim_path] = ownership_state
+        # Remember the authored prim state for future definition/removal checks.
+        if not property_notice_only and (full_value_read or previous_prim_state is None):
+            current_prim_state = _local_prim_state(local_definition_spec or local_spec)
+            if current_prim_state:
+                self._local_prim_states[prim_path] = current_prim_state
             else:
                 self._local_prim_states.pop(prim_path, None)
         return self._filter_events_to_local_opinions(
             events,
             local_specs,
-            local_properties,
+            property_sources,
             blocked_values,
         )
 
@@ -4179,23 +4074,10 @@ class NoticeEmitter:
         edit_target,
         owned_attrs: set[str] = frozenset(),
     ) -> list[dict]:
-        if full_scan:
-            attr_names = [
-                a.GetName()
-                for a in prim.GetAttributes()
-                if a.IsAuthored()
-                and self._attr_filter(a.GetName())
-                and a.GetName() not in owned_attrs
-                and not self._sdf_owns_attribute_value(prim, a.GetName())
-            ]
-        else:
-            attr_names = [
-                n
-                for n in dirty_attr_names
-                if self._attr_filter(n)
-                and n not in owned_attrs
-                and not self._sdf_owns_attribute_value(prim, n)
-            ]
+        attributes = (
+            prim.GetAttributes() if full_scan
+            else (prim.GetAttribute(name) for name in dirty_attr_names)
+        )
         events: list[dict] = []
 
         def _convert(value):
@@ -4205,8 +4087,14 @@ class NoticeEmitter:
                 value,
             )
 
-        for name in attr_names:
-            attr = prim.GetAttribute(name)
+        for attr in attributes:
+            if not attr or (full_scan and not attr.IsAuthored()):
+                continue
+            name = attr.GetName()
+            if not self._attr_filter(name) or name in owned_attrs:
+                continue
+            if self._attribute_value_needs_sdf(prim, name, attribute=attr):
+                continue
             dirty = _collect_sample_changes(attr, ts_cache, edit_target, events, convert=_convert)
             if dirty:
                 primvar_meta, attr_interp = attribute_event_metadata(prim, name, attr)

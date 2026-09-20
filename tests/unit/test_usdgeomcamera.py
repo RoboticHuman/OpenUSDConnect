@@ -219,7 +219,7 @@ class TestCameraXform:
 
 
 class TestEmitterCameraDiff:
-    """Authoring camera attrs must produce set_gprim_attrs events via the camera channel."""
+    """Authoring camera attrs must produce set_gprim_attrs events via generic attribute capture."""
 
     def test_emits_focal_length_change(self, stage):
         em = NoticeEmitter(stage)
@@ -279,9 +279,122 @@ class TestEmitterCameraDiff:
         attrs = gprim[0]["attrs"]
         assert attrs == {"focalLength": pytest.approx(85.0)}
 
+    def test_transform_first_encounter_includes_authored_camera_values(self, stage):
+        cam = UsdGeom.Camera.Define(stage, "/Cam")
+        cam.CreateFocalLengthAttr(35.0)
+        cam.CreateHorizontalApertureAttr(36.0)
+        translate = cam.AddTranslateOp()
+        em = NoticeEmitter(stage)
+        try:
+            translate.Set((1, 2, 3))
+            events = em.build_events_for_dirty()
+            attrs = {
+                name: value
+                for event in events
+                if event["k"] == K_SET_GPRIM_ATTRS and event.get("time") is None
+                for name, value in event["attrs"].items()
+            }
+            assert attrs["focalLength"] == pytest.approx(35.0)
+            assert attrs["horizontalAperture"] == pytest.approx(36.0)
+            translate.Set((4, 5, 6))
+            assert not any(event["k"] == K_SET_GPRIM_ATTRS for event in em.build_events_for_dirty())
+        finally:
+            em.cleanup()
+
+    def test_camera_samples_roundtrip_and_clear(self, stage):
+        cam = UsdGeom.Camera.Define(stage, "/Cam")
+        focal = cam.CreateFocalLengthAttr(35.0)
+        focal.Set(50.0, 1.0)
+        focal.Set(85.0, 2.0)
+        destination = Usd.Stage.CreateInMemory()
+        em = NoticeEmitter(stage)
+        try:
+            apply_events(destination, em.snapshot_events())
+            received = UsdGeom.Camera(destination.GetPrimAtPath("/Cam")).GetFocalLengthAttr()
+            assert received.Get() == pytest.approx(35.0)
+            assert received.GetTimeSamples() == [1.0, 2.0]
+            assert received.Get(2.0) == pytest.approx(85.0)
+            focal.ClearAtTime(2.0)
+            apply_events(destination, em.build_events_for_dirty())
+            assert received.GetTimeSamples() == [1.0]
+            focal.ClearDefault()
+            apply_events(destination, em.build_events_for_dirty())
+            assert (
+                not destination.GetRootLayer()
+                .GetAttributeAtPath("/Cam.focalLength")
+                .HasDefaultValue()
+            )
+        finally:
+            em.cleanup()
+
+    @pytest.mark.parametrize("type_name,attribute", [("Camera", "focalLength"), ("Cube", "size")])
+    def test_schema_default_clear_before_first_snapshot(self, stage, type_name, attribute):
+        prim = stage.DefinePrim("/P", type_name)
+        attr = prim.GetAttribute(attribute)
+        attr.Set(35.0)
+        destination = Usd.Stage.CreateInMemory()
+        destination.GetRootLayer().TransferContent(stage.GetRootLayer())
+        em = NoticeEmitter(stage)
+        try:
+            attr.ClearDefault()
+            apply_events(destination, em.build_events_for_dirty())
+            spec = destination.GetRootLayer().GetAttributeAtPath(f"/P.{attribute}")
+            assert not spec.HasDefaultValue()
+        finally:
+            em.cleanup()
+
+    def test_seed_uses_variant_opinion_even_when_same_layer_masks_it(self, stage):
+        cam = UsdGeom.Camera.Define(stage, "/Cam")
+        cam.CreateFocalLengthAttr(50.0)
+        variants = cam.GetPrim().GetVariantSets().AddVariantSet("lens")
+        variants.AddVariant("wide")
+        variants.SetVariantSelection("wide")
+        stage.SetEditTarget(variants.GetVariantEditTarget())
+        cam.GetFocalLengthAttr().Set(35.0)
+        em = NoticeEmitter(stage)
+        try:
+            em.seed_prim_cache(stage, "/Cam")
+            cam.GetFocalLengthAttr().Set(50.0)
+            assert any(
+                event["k"] == K_SET_GPRIM_ATTRS and event["attrs"].get("focalLength") == 50.0
+                for event in em.build_events_for_dirty()
+            )
+        finally:
+            em.cleanup()
+
 
 class TestRoundtripEmitterToApplier:
     """End-to-end: source stage mutation → emitter event → fresh stage application."""
+
+    def test_lens_and_transform_edits_round_trip(self, stage):
+        camera = UsdGeom.Camera.Define(stage, "/Cam")
+        focal_length = camera.CreateFocalLengthAttr(35.0)
+        translate = camera.AddTranslateOp()
+        translate.Set((1, 2, 3))
+        emitter = NoticeEmitter(stage)
+        destination = Usd.Stage.CreateInMemory()
+        try:
+            # A lens edit on first encounter must still include the transform.
+            focal_length.Set(50.0)
+            apply_events(destination, emitter.build_events_for_dirty())
+            replica = UsdGeom.Camera(destination.GetPrimAtPath("/Cam"))
+            assert replica.GetLocalTransformation() == camera.GetLocalTransformation()
+
+            focal_length.Set(65.0)
+            events = emitter.build_events_for_dirty()
+            assert not any(event["k"] == "set_xform_trs" for event in events)
+            apply_events(destination, events)
+            assert replica.GetFocalLengthAttr().Get() == 65.0
+            assert replica.GetLocalTransformation() == camera.GetLocalTransformation()
+
+            # Mixed notices must retain both changes in the same build cycle.
+            focal_length.Set(85.0)
+            translate.Set((4, 5, 6))
+            apply_events(destination, emitter.build_events_for_dirty())
+            assert replica.GetFocalLengthAttr().Get() == 85.0
+            assert replica.GetLocalTransformation() == camera.GetLocalTransformation()
+        finally:
+            emitter.cleanup()
 
     def test_full_camera_round_trip(self, stage):
         em = NoticeEmitter(stage)
