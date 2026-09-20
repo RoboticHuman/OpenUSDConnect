@@ -460,9 +460,7 @@ class UsdSyncServer:
 
         # Department assignment is collaboration policy. The layer stack itself
         # is keyed generically so replay does not depend on department concepts.
-        self.client_layers: dict[str, Sdf.Layer] = {}
         self._client_layer_keys: dict[str, str] = {}
-        self._client_departments: dict[str, str] = {}
         self.department_priority: list[str] = list(department_priority or [])
         if any(not department for department in self.department_priority):
             raise ValueError("department names must be non-empty")
@@ -991,10 +989,6 @@ class UsdSyncServer:
                 )
                 if client_id:
                     self._client_layer_keys[client_id] = layer_key
-                    self.client_layers[client_id] = layer
-                    department = _department_for_layer_key(layer_key)
-                    if department:
-                        self._client_departments[client_id] = department
             routed.append((layer, ev))
 
         self._apply_department_order()
@@ -1145,7 +1139,15 @@ class UsdSyncServer:
             return []
         return self.token_store.get_all()
 
-    # -- Per-client layer management ------------------------------------
+    # -- Client assignments to collaboration layers ---------------------
+
+    @property
+    def client_layers(self) -> dict[str, Sdf.Layer]:
+        """Return a snapshot of client assignments to shared collaboration layers."""
+        return {
+            client_id: self.layer_stack.layer_for(layer_key)
+            for client_id, layer_key in self._client_layer_keys.items()
+        }
 
     def get_or_create_client_layer(
         self,
@@ -1161,11 +1163,9 @@ class UsdSyncServer:
         layer_key = _layer_key_for_department(department)
         if department:
             layer = self._get_or_create_department_layer(department)
-            self._client_departments[client_id] = department
         else:
             layer = self.edit_layer
         self._client_layer_keys[client_id] = layer_key
-        self.client_layers[client_id] = layer
         return layer
 
     def _flat_replay_rejection_reason_unlocked(self) -> str:
@@ -1312,13 +1312,15 @@ class UsdSyncServer:
         return True
 
     def merge_layer(self, client_id: str) -> bool:
-        """Merge a client's layer opinions into the root layer, then remove it.
+        """Merge the client's department opinions into the root layer.
 
-        Copies each leaf prim spec individually via Sdf.CopySpec so
+        Releases this client; the department layer remains while other clients
+        use it. Copies each leaf prim spec individually via Sdf.CopySpec so
         existing root opinions on sibling prims are preserved.
         Returns False for clients on the shared edit_layer (no-op).
         """
-        layer = self.client_layers.get(client_id)
+        layer_key = self._client_layer_keys.get(client_id)
+        layer = self.layer_stack.layer_for(layer_key) if layer_key else None
         if not layer or layer is self.edit_layer:
             return False
 
@@ -1357,11 +1359,14 @@ class UsdSyncServer:
         return True
 
     def delete_layer(self, client_id: str) -> bool:
-        """Delete a client's layer and discard all opinions.
+        """Release a client's department assignment.
+
+        The department layer is discarded only when its last client leaves.
 
         Returns False for clients on the shared edit_layer (no-op).
         """
-        layer = self.client_layers.get(client_id)
+        layer_key = self._client_layer_keys.get(client_id)
+        layer = self.layer_stack.layer_for(layer_key) if layer_key else None
         if not layer or layer is self.edit_layer:
             return False
         self._cleanup_client_refs(client_id)
@@ -1376,8 +1381,6 @@ class UsdSyncServer:
         orphaned department layer reference.
         """
         layer_key = self._client_layer_keys.pop(client_id, None)
-        self.client_layers.pop(client_id, None)
-        self._client_departments.pop(client_id, None)
         if not layer_key or layer_key == _DEFAULT_LAYER_KEY:
             return
         if layer_key in self._client_layer_keys.values():
