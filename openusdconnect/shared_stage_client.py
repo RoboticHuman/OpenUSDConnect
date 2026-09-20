@@ -10,7 +10,13 @@ from pathlib import Path
 
 from pxr import Sdf, Usd
 
-from ._client_lifecycle import prepare_sender_token, raise_if_rejected, stop_receiver
+from ._client_lifecycle import (
+    deadline_after,
+    prepare_sender_token,
+    raise_if_rejected,
+    remaining_time,
+    stop_receiver,
+)
 from ._client_utils import (
     client_origin,
     client_token_handlers,
@@ -374,11 +380,11 @@ class SharedStageClient:
         cannot complete, the normal update loop retries.
         """
         self._validate_clean_recovery_stage(clean_stage)
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         assessment = self.refresh_recovery_assessment(timeout=timeout)
         self._validate_clean_recovery_stage(clean_stage, assessment=assessment)
         self._rebind_stage_for_recovery(clean_stage)
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._refresh_recovery_checkpoint(remaining)
         assessment = self._reclassify_recovery_assessment(assessment)
         self._last_recovery_assessment = assessment
@@ -386,7 +392,7 @@ class SharedStageClient:
             assessment,
             session_id=session_id,
         )
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._resume_sender_after_recovery(remaining)
         return result
 
@@ -548,7 +554,7 @@ class SharedStageClient:
 
     def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
         """Apply through a fresh shared-stage replay watermark."""
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         reconnect = self._receiver.reconnect
         self._receiver.reconnect = True
         try:
@@ -612,7 +618,7 @@ class SharedStageClient:
     def connect(self, timeout: float | None = None) -> bool:
         """Start and complete both shared-stage handshakes within ``timeout``."""
         self.start()
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         if not self._receiver.wait_connected(timeout):
             if self._receiver.auth_rejected:
                 raise PermissionError("shared-stage receiver authentication rejected")
@@ -623,7 +629,7 @@ class SharedStageClient:
             return False
         if self._receiver.layer_mode_active is not LayerMode.SHARED_STAGE:
             raise RuntimeError("server did not negotiate shared-stage mode")
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         return self._connect_sender(timeout=remaining)
 
     def _connect_sender(self, timeout: float | None = None) -> bool:

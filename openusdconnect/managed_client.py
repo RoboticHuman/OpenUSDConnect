@@ -305,7 +305,7 @@ class ManagedClient:
                 "the active edit target changed during recovery",
             )
 
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         self._refresh_recovery_checkpoint(timeout)
 
         preserved = Sdf.Layer.CreateAnonymous("openusdconnect-recovery-authoring")
@@ -329,7 +329,7 @@ class ManagedClient:
         finally:
             self._emitter.rebind_stage(stage)
         self._transform_coalescing.mark_submitted()
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._resume_sender_after_recovery(remaining)
         return result
 
@@ -344,7 +344,7 @@ class ManagedClient:
 
     def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
         """Replay through a new server head before resolving optimistic state."""
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         reconnect = self._receiver.reconnect
         self._receiver.reconnect = True
         try:
@@ -454,11 +454,11 @@ class ManagedClient:
         Queued replay still requires :meth:`update` on the stage-owning thread.
         """
         self.start()
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         connected = self._receiver.wait_connected(timeout)
         if connected:
             self._require_layered_replay()
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            remaining = remaining_time(deadline)
             return self._connect_sender(timeout=remaining)
         elif self._receiver.auth_rejected:
             raise PermissionError("authentication rejected")
