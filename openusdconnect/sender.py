@@ -332,37 +332,33 @@ class EventSender:
         published = False
         acquired_send = False
         try:
-            try:
-                sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
-                with self._condition:
-                    if epoch != self._connect_epoch:
-                        return False
-                    self._connecting_socket = sock
-                sock.settimeout(max(0.001, deadline - time.monotonic()))
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                send_msg(
-                    sock,
-                    make_hello(
-                        self.role,
-                        client_id=self.client_id,
-                        origin=self.origin,
-                        department=self.department,
-                        token=self.token,
-                        layer_mode=self.layer_mode,
-                        producer_session_id=self.session_id,
-                    ),
-                )
-                sock.settimeout(max(0.001, deadline - time.monotonic()))
-                buf = recv_framed(sock)
-                with self._condition:
-                    if epoch != self._connect_epoch:
-                        return False
-                env = decode_envelope(buf)
-                pt = env.PayloadType()
-                if not self._accept_handshake_response(sock, env, pt, generation):
+            sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
+            with self._condition:
+                if epoch != self._connect_epoch:
                     return False
-            except Exception:
-                LOG.exception("EventSender: handshake failed")
+                self._connecting_socket = sock
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            send_msg(
+                sock,
+                make_hello(
+                    self.role,
+                    client_id=self.client_id,
+                    origin=self.origin,
+                    department=self.department,
+                    token=self.token,
+                    layer_mode=self.layer_mode,
+                    producer_session_id=self.session_id,
+                ),
+            )
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            buf = recv_framed(sock)
+            with self._condition:
+                if epoch != self._connect_epoch:
+                    return False
+            env = decode_envelope(buf)
+            pt = env.PayloadType()
+            if not self._accept_handshake_response(sock, env, pt, generation):
                 return False
 
             # Serialize publication of the socket with outbox replay. A new
@@ -376,21 +372,25 @@ class EventSender:
                 self.sock = sock
                 self._connecting_socket = None
                 published = True
-            try:
-                sock.settimeout(max(0.001, deadline - time.monotonic()))
-                replayed = 0
-                while pending := self._session.claim_next_unsent(generation):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("reconnect replay timed out")
-                    sock.settimeout(remaining)
-                    send_raw(sock, pending[1])
-                    replayed += 1
-                sock.settimeout(None)
-            except OSError:
-                LOG.info("EventSender: reconnect replay failed", exc_info=True)
-                self._close(expected=sock)
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            replayed = 0
+            while pending := self._session.claim_next_unsent(generation):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("reconnect replay timed out")
+                sock.settimeout(remaining)
+                send_raw(sock, pending[1])
+                replayed += 1
+            sock.settimeout(None)
+        except Exception as exc:
+            if not published:
+                LOG.exception("EventSender: handshake failed")
                 return False
+            self._close(expected=sock)
+            if not isinstance(exc, OSError):
+                raise
+            LOG.info("EventSender: reconnect replay failed", exc_info=True)
+            return False
         finally:
             if acquired_send:
                 self._send_lock.release()

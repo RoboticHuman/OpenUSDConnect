@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openusdconnect import _client_backend
 from openusdconnect.codec import encode_message
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.sender import EventSender
@@ -125,6 +126,62 @@ def test_background_success_and_reconnect_replays_outbox():
         finally:
             sender.disconnect()
             _finish(sender)
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+def test_failed_replay_closes_connection_and_retains_outbox(monkeypatch, error_type):
+    sender = EventSender("localhost", 1, client_id="failed-replay")
+    connection = sender._session.begin_connection()
+    assert (
+        sender._session.accept_hello(connection.generation, 0)
+        == _client_backend.ProducerResult.ACCEPTED
+    )
+    payload = encode_message(
+        {
+            "type": "txn",
+            "txn_id": 1,
+            "events": [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}],
+        }
+    )
+    assert (
+        sender._session.append(connection.generation, 1, payload, 1, "")
+        == _client_backend.ProducerResult.ACCEPTED
+    )
+    sender._session.disconnect(connection.generation)
+
+    failed_sock, retry_sock = MagicMock(), MagicMock()
+    monkeypatch.setattr(
+        socket, "create_connection", MagicMock(side_effect=[failed_sock, retry_sock])
+    )
+    monkeypatch.setattr(
+        "openusdconnect.sender.recv_framed",
+        MagicMock(return_value=encode_message({"type": "hello_ok"})),
+    )
+    send = MagicMock(side_effect=error_type("injected replay failure"))
+    monkeypatch.setattr("openusdconnect.sender.send_raw", send)
+    monkeypatch.setattr(sender, "_read_results", MagicMock())
+
+    if error_type is OSError:
+        assert not sender.connect()
+    else:
+        with pytest.raises(RuntimeError, match="injected replay failure"):
+            sender.connect()
+
+    assert not sender.connected
+    assert sender.pending_transaction_count == 1
+    assert sender._reader_thread is None
+    failed_sock.close.assert_called_once()
+    assert sender._send_lock.acquire(blocking=False)
+    sender._send_lock.release()
+
+    send.side_effect = None
+    try:
+        assert sender.connect()
+        assert [call.args[1] for call in send.call_args_list] == [payload, payload]
+    finally:
+        sender.disconnect()
+        if sender._reader_thread is not None:
+            sender._reader_thread.join(timeout=2)
 
 
 def test_retry_backoff_and_default_budget(monkeypatch):
