@@ -98,6 +98,30 @@ def test_lost_commit_ack_reconnects_as_duplicate_without_reapplying(
         sender.disconnect()
 
 
+def test_server_discards_non_hello_before_decoding_payload(transaction_server, monkeypatch):
+    state, port = transaction_server
+    resolved = []
+    resolve = connection_module.resolve_payload
+
+    def observe_resolve(envelope):
+        resolved.append(envelope)
+        return resolve(envelope)
+
+    monkeypatch.setattr(connection_module, "resolve_payload", observe_resolve)
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+        send_msg(
+            sock,
+            {
+                "type": "txn",
+                "events": [{"k": "ensure_prim", "prim": "/Unauthenticated", "typeName": "Xform"}],
+            },
+        )
+        assert sock.recv(1) == b""
+    assert resolved == []
+    assert not state.clients
+    assert state.store.get_count() == 0
+
+
 def test_server_rejects_unknown_hello_role(transaction_server):
     state, port = transaction_server
     sock = socket.create_connection(("127.0.0.1", port), timeout=2)

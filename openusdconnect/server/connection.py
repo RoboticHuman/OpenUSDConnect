@@ -16,6 +16,7 @@ from ..codec import (
     HelloRejectionCode,
     PayloadType,
     decode_envelope,
+    decode_hello,
     decode_transaction,
     encode_message,
     message_to_dict,
@@ -59,6 +60,24 @@ class _PendingTransactionResult:
     result: dict | None
     txn_id: int
     event_count: int
+
+
+def _transaction_rejection(txn_id: int, error: TypeError | ValueError) -> dict:
+    """Use the same public rejection for admission and deferred commit failures."""
+    if isinstance(error, TransactionRejectedError):
+        return make_transaction_result(
+            txn_id,
+            status="rejected",
+            expected_txn_id=error.expected_txn_id,
+            rejection_code=error.code,
+            reason=str(error),
+        )
+    return make_transaction_result(
+        txn_id,
+        status="rejected",
+        rejection_code="invalid_transaction",
+        reason=str(error),
+    )
 
 
 def _send_transaction_results(
@@ -106,6 +125,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         finally:
             super().finish()
 
+    def _reject_hello(self, code: int, reason: str) -> None:
+        send_msg(
+            self.request,
+            {"type": MSG_HELLO_REJECTED, "code": code, "reason": reason},
+        )
+
     def handle(self):
         sync_server = self.server.sync_server
 
@@ -138,12 +163,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             env = decode_envelope(hello_buf)
             if env.PayloadType() != PayloadType.Hello:
                 return
-            _, hello_fb = resolve_payload(env)
+            _, hello_table = resolve_payload(env)
+            hello = decode_hello(hello_table)
         except Exception as e:
             LOG.warning("Failed to parse hello message: %s", e)
             return
 
-        protocol_version = hello_fb.ProtocolVersion()
+        protocol_version = hello["protocol_version"]
         if protocol_version != PROTOCOL_VERSION:
             LOG.warning(
                 "Rejected client protocol version %s from %s; expected %s",
@@ -153,53 +179,29 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             )
             return
 
-        role_raw = hello_fb.Role()
-        role = role_raw.decode("utf-8") if isinstance(role_raw, bytes) else role_raw
+        role = hello["role"]
         if role not in ("emitter", "receiver"):
-            send_msg(
-                self.request,
-                {
-                    "type": MSG_HELLO_REJECTED,
-                    "code": HelloRejectionCode.Unspecified,
-                    "reason": "role must be 'emitter' or 'receiver'",
-                },
+            self._reject_hello(
+                HelloRejectionCode.Unspecified,
+                "role must be 'emitter' or 'receiver'",
             )
             LOG.warning("Rejected unknown role %r from %s", role, self.client_address)
             return
-        client_id_raw = hello_fb.ClientId()
-        client_id = (
-            client_id_raw.decode("utf-8") if isinstance(client_id_raw, bytes) else client_id_raw
-        )
-        origin_raw = hello_fb.Origin()
-        self._origin = origin_raw.decode("utf-8") if isinstance(origin_raw, bytes) else origin_raw
-        dept_raw = hello_fb.Department()
-        self._department = dept_raw.decode("utf-8") if isinstance(dept_raw, bytes) else dept_raw
-        self._layered_replay = bool(hello_fb.LayeredReplay())
-        self._layer_mode = (
-            LayerMode.SHARED_STAGE if hello_fb.LayerMode() else LayerMode.MANAGED
-        )
-        token_raw = hello_fb.Token()
-        hello_token = token_raw.decode("utf-8") if isinstance(token_raw, bytes) else token_raw
+        client_id = hello.get("client_id")
+        self._origin = hello.get("origin")
+        self._department = hello.get("department")
+        self._layered_replay = hello.get("layered_replay", False)
+        self._layer_mode = LayerMode(hello.get("layer_mode", LayerMode.MANAGED.value))
+        hello_token = hello.get("token")
         self._client_id = client_id
-        producer_session_raw = hello_fb.ProducerSessionId()
-        self._producer_session_id = (
-            producer_session_raw.decode("utf-8")
-            if isinstance(producer_session_raw, bytes)
-            else producer_session_raw
-        ) or ""
+        self._producer_session_id = hello.get("producer_session_id", "")
         self._addr_key = f"{self.client_address[0]}:{self.client_address[1]}"
 
         if self._layer_mode is not sync_server.layer_mode:
-            send_msg(
-                self.request,
-                {
-                    "type": MSG_HELLO_REJECTED,
-                    "code": HelloRejectionCode.LayerModeMismatch,
-                    "reason": (
-                        f"server uses {sync_server.layer_mode.value!r} layer mode, "
-                        f"client requested {self._layer_mode.value!r}"
-                    ),
-                },
+            self._reject_hello(
+                HelloRejectionCode.LayerModeMismatch,
+                f"server uses {sync_server.layer_mode.value!r} layer mode, "
+                f"client requested {self._layer_mode.value!r}",
             )
             LOG.warning(
                 "Rejected %s layer mode from %s; server uses %s",
@@ -214,29 +216,19 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             or not self._producer_session_id
             or len(self._producer_session_id) > 128
         ):
-            send_msg(
-                self.request,
-                {
-                    "type": MSG_HELLO_REJECTED,
-                    "code": HelloRejectionCode.Unspecified,
-                    "reason": "emitter hello requires client_id and producer_session_id",
-                },
+            self._reject_hello(
+                HelloRejectionCode.Unspecified,
+                "emitter hello requires client_id and producer_session_id",
             )
             return
 
         if self._layer_mode is LayerMode.SHARED_STAGE and (
             self._layered_replay or self._department
         ):
-            send_msg(
-                self.request,
-                {
-                    "type": MSG_HELLO_REJECTED,
-                    "code": HelloRejectionCode.LayerModeMismatch,
-                    "reason": (
-                        "shared-stage mode does not use managed layered replay "
-                        "or department routing"
-                    ),
-                },
+            self._reject_hello(
+                HelloRejectionCode.LayerModeMismatch,
+                "shared-stage mode does not use managed layered replay "
+                "or department routing",
             )
             return
 
@@ -245,14 +237,7 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 self._layered_replay,
             )
             if not accepted:
-                send_msg(
-                    self.request,
-                    {
-                        "type": MSG_HELLO_REJECTED,
-                        "code": HelloRejectionCode.LayeredReplayRequired,
-                        "reason": reason,
-                    },
-                )
+                self._reject_hello(HelloRejectionCode.LayeredReplayRequired, reason)
                 LOG.warning(
                     "Rejected flat receiver %s from %s: %s",
                     client_id,
@@ -335,16 +320,12 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 )
 
             if role == "receiver":
-                sync_from = hello_fb.SyncFrom() or 1
-                prefix_instance = hello_fb.ReplayServerInstance()
-                if isinstance(prefix_instance, bytes):
-                    prefix_instance = prefix_instance.decode("utf-8")
                 try:
                     with sync_server.receiver_replay_window(
                         self,
-                        sync_from,
-                        replay_server_instance=prefix_instance,
-                        replay_epoch=hello_fb.ReplayEpoch(),
+                        hello.get("sync_from") or 1,
+                        replay_server_instance=hello.get("replay_server_instance"),
+                        replay_epoch=hello.get("replay_epoch"),
                     ) as replay:
                         hello_ok["replay_epoch"] = replay.epoch
                         send_msg(self.request, hello_ok)
@@ -505,21 +486,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     layer=self._client_layer,
                     layer_key=txn_layer_key,
                 )
-            except TransactionRejectedError as exc:
-                result = make_transaction_result(
-                    txn_id,
-                    status="rejected",
-                    expected_txn_id=exc.expected_txn_id,
-                    rejection_code=exc.code,
-                    reason=str(exc),
-                )
             except (TypeError, ValueError) as exc:
-                result = make_transaction_result(
-                    txn_id,
-                    status="rejected",
-                    rejection_code="invalid_transaction",
-                    reason=str(exc),
-                )
+                result = _transaction_rejection(txn_id, exc)
             results.put(
                 _PendingTransactionResult(
                     request=request,
@@ -559,21 +527,8 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                             status="acknowledged",
                             checkpoint=commit.checkpoint,
                         )
-                    except TransactionRejectedError as exc:
-                        result = make_transaction_result(
-                            pending.txn_id,
-                            status="rejected",
-                            expected_txn_id=exc.expected_txn_id,
-                            rejection_code=exc.code,
-                            reason=str(exc),
-                        )
                     except (TypeError, ValueError) as exc:
-                        result = make_transaction_result(
-                            pending.txn_id,
-                            status="rejected",
-                            rejection_code="invalid_transaction",
-                            reason=str(exc),
-                        )
+                        result = _transaction_rejection(pending.txn_id, exc)
                     except Exception:
                         LOG.exception(
                             "Transaction %s/%d failed without a protocol result",

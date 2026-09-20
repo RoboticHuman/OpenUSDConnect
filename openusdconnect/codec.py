@@ -2021,28 +2021,35 @@ def _str(val) -> str | None:
 # --- Per-message dict decoders ---
 
 
-def _dict_hello(h, msg_type):
-    msg = {"type": msg_type, "role": _str(h.Role()), "protocol_version": h.ProtocolVersion()}
-    if h.ReplayServerInstance() is not None:
-        msg["replay_server_instance"] = _str(h.ReplayServerInstance())
-    if h.ReplayEpoch() is not None:
-        msg["replay_epoch"] = int(h.ReplayEpoch())
-    sf = h.SyncFrom()
+def decode_hello(hello: Hello) -> dict:
+    """Decode an already-resolved Hello table, preserving optional replay identity."""
+    msg = {
+        "type": MSG_HELLO,
+        "role": _str(hello.Role()),
+        "protocol_version": hello.ProtocolVersion(),
+    }
+    replay_instance = hello.ReplayServerInstance()
+    if replay_instance is not None:
+        msg["replay_server_instance"] = _str(replay_instance)
+    replay_epoch = hello.ReplayEpoch()
+    if replay_epoch is not None:
+        msg["replay_epoch"] = int(replay_epoch)
+    sf = hello.SyncFrom()
     if sf:
         msg["sync_from"] = sf
     for key, getter in [
-        ("client_id", h.ClientId),
-        ("origin", h.Origin),
-        ("department", h.Department),
-        ("token", h.Token),
-        ("producer_session_id", h.ProducerSessionId),
+        ("client_id", hello.ClientId),
+        ("origin", hello.Origin),
+        ("department", hello.Department),
+        ("token", hello.Token),
+        ("producer_session_id", hello.ProducerSessionId),
     ]:
         v = _str(getter())
         if v:
             msg[key] = v
-    if h.LayeredReplay():
+    if hello.LayeredReplay():
         msg["layered_replay"] = True
-    mode = _FB_TO_LAYER_MODE[h.LayerMode()]
+    mode = _FB_TO_LAYER_MODE[hello.LayerMode()]
     if mode != LayerMode.MANAGED.value:
         msg["layer_mode"] = mode
     return msg
@@ -2238,7 +2245,7 @@ def _dict_rate_limited(rl, msg_type):
 
 
 _DICT_DECODE_DISPATCH = {
-    MSG_HELLO: _dict_hello,
+    MSG_HELLO: lambda hello, _msg_type: decode_hello(hello),
     MSG_HELLO_OK: _dict_hello_ok,
     MSG_AUTH_REJECTED: _dict_auth_rejected,
     MSG_HELLO_REJECTED: _dict_hello_rejected,
