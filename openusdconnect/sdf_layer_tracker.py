@@ -108,6 +108,37 @@ def _copy_prepared_events(batch: PreparedLayerBatch) -> list[dict]:
     return events
 
 
+def _next_routed_batch(
+    prepared: list[PreparedLayerBatch], graph: SharedLayerGraph
+) -> tuple[PreparedLayerBatch, str, list[dict]] | None:
+    """Route a frozen batch, keeping its original topology revision on retries."""
+    if not graph.ready:
+        return None
+    reachable = set(graph.reachable_layer_keys())
+    for index, batch in enumerate(prepared):
+        layer_key = graph.key_for(batch.layer)
+        if layer_key and layer_key in reachable:
+            batch = _bind_topology_base(batch, graph)
+            prepared[index] = batch
+            return batch, layer_key, _copy_prepared_events(batch)
+    return None
+
+
+def _restore_prepared_batches(stage: Usd.Stage, prepared: list[PreparedLayerBatch]) -> None:
+    """Reapply frozen edits while the caller suppresses change tracking."""
+    from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
+
+    for batch in prepared:
+        # An earlier parent batch may have attached or detached this layer.
+        reachable = {layer.identifier for layer in stage.GetLayerStack(includeSessionLayers=False)}
+        if batch.layer.identifier not in reachable:
+            continue
+        events = _copy_prepared_events(batch)
+        with Usd.EditContext(stage, Usd.EditTarget(batch.layer)):
+            with atomic_apply(stage, prim_paths=atomic_apply_prim_paths(events)):
+                apply_events(stage, events)
+
+
 def _topology_snapshot(layer: Sdf.Layer) -> tuple[tuple[str, float, float], ...]:
     return tuple(
         (entry["authored_path"], entry["offset"], entry["scale"])
@@ -569,45 +600,16 @@ class SdfLayerChangeTracker:
         self._has_resync = False
         return tuple(self._prepared)
 
-    def _events_for(self, batch: PreparedLayerBatch) -> list[dict]:
-        return _copy_prepared_events(batch)
-
     def next_routed_batch(self) -> tuple[PreparedLayerBatch, str, list[dict]] | None:
         """Return the next prepared batch whose layer has an authoritative key."""
-        if not self.graph.ready:
-            return None
-        reachable = set(self.graph.reachable_layer_keys())
-        for index, batch in enumerate(self._prepared):
-            layer_key = self.graph.key_for(batch.layer)
-            if layer_key and layer_key in reachable:
-                bound = _bind_topology_base(batch, self.graph)
-                if bound is not batch:
-                    batch = bound
-                    self._prepared[index] = batch
-                return batch, layer_key, self._events_for(batch)
-        return None
+        return _next_routed_batch(self._prepared, self.graph)
 
     def restore_prepared(self) -> None:
         """Restore frozen local edits after older authoritative records apply."""
         if not self.graph.ready or not self._prepared:
             return
-        from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
-
         with self.suppressed():
-            for batch in self._prepared:
-                reachable = {
-                    layer.identifier
-                    for layer in self.stage.GetLayerStack(includeSessionLayers=False)
-                }
-                if batch.layer_identifier not in reachable:
-                    continue
-                events = self._events_for(batch)
-                with Usd.EditContext(self.stage, Usd.EditTarget(batch.layer)):
-                    with atomic_apply(
-                        self.stage,
-                        prim_paths=atomic_apply_prim_paths(events),
-                    ):
-                        apply_events(self.stage, events)
+            _restore_prepared_batches(self.stage, self._prepared)
             self.sync_graph()
 
     def accept_authoritative_event(self, layer: Sdf.Layer, event: dict) -> None:
@@ -649,7 +651,7 @@ class SdfLayerChangeTracker:
         identifier = batch.layer_identifier
         self._snapshots[identifier] = _apply_snapshot_events(
             self._snapshots[identifier],
-            self._events_for(batch),
+            _copy_prepared_events(batch),
             copy_layer=False,
         )
         if self._change_serials.get(identifier, 0) == batch.change_serial:

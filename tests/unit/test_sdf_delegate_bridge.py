@@ -14,6 +14,8 @@ from openusdconnect.sdf_delegate_bridge import (
     NativeDelegateTracker,
     NativeSdfLayerChangeTracker,
 )
+from openusdconnect.sdf_layer_tracker import PreparedLayerBatch, SdfLayerChangeTracker
+from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.shared_layer_graph import SharedLayerGraph
 
 
@@ -68,6 +70,108 @@ def test_native_tracker_binds_the_stage_context_while_registering_layers(
     try:
         assert len(observed_contexts) == 2
         assert all(item == stage.GetPathResolverContext() for item in observed_contexts)
+    finally:
+        tracker.close()
+
+
+def _prepared_tracker(stage, tracker_type, monkeypatch):
+    """Exercise batch handling independently of native mutation capture."""
+    graph = SharedLayerGraph(stage, authoritative=True)
+    if tracker_type is SdfLayerChangeTracker:
+        return tracker_type(stage, graph)
+
+    class _Bridge:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def set_layers(self, _identifiers):
+            pass
+
+        def set_suppressed(self, _suppressed):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdf_delegate_bridge, "NativeDelegateTracker", _Bridge)
+    return tracker_type(stage, graph, "unused")
+
+
+@pytest.mark.parametrize("tracker_type", [SdfLayerChangeTracker, NativeSdfLayerChangeTracker])
+@pytest.mark.parametrize("attach_child", [True, False], ids=["attach", "detach"])
+def test_restore_prepared_rechecks_reachability_after_parent_topology(
+    tracker_type, attach_child, monkeypatch, tmp_path
+):
+    child = Sdf.Layer.CreateNew(str(tmp_path / "child.usda"))
+    prim = Sdf.CreatePrimInLayer(child, "/Child")
+    value = Sdf.AttributeSpec(prim, "value", Sdf.ValueTypeNames.Int)
+    value.default = 2
+    child.Save()
+    child_event = {
+        "k": "set_sdf_spec_fields",
+        "prim": "/Child",
+        "spec_path": "/Child.value",
+        "spec_kind": "attribute",
+        "fields": ["default"],
+        "fragment": serialize_spec_fields(child, value.path, "attribute", ["default"]),
+        "removed": False,
+    }
+    root = Sdf.Layer.CreateNew(str(tmp_path / "root.usda"))
+    root.subLayerPaths = ["./child.usda"]
+    root.Save()
+    stage = Usd.Stage.Open(root)
+    tracker = _prepared_tracker(stage, tracker_type, monkeypatch)
+    try:
+        topology = {
+            "k": "set_sublayers",
+            "prim": "/",
+            "sublayers": [{"authored_path": "./child.usda"}] if attach_child else [],
+        }
+        with tracker.suppressed():
+            value.default = 1
+            if attach_child:
+                root.subLayerPaths.clear()
+        tracker._prepared = [
+            PreparedLayerBatch((topology,), root, root.identifier, 1),
+            PreparedLayerBatch((child_event,), child, child.identifier, 1),
+        ]
+
+        tracker.restore_prepared()
+
+        assert root.subLayerPaths == (["./child.usda"] if attach_child else [])
+        assert value.default == (2 if attach_child else 1)
+        assert stage.GetEditTarget().GetLayer() == root
+    finally:
+        tracker.close()
+
+
+@pytest.mark.parametrize("tracker_type", [SdfLayerChangeTracker, NativeSdfLayerChangeTracker])
+def test_routed_prepared_topology_keeps_revision_and_copies_entries(tracker_type, monkeypatch):
+    stage = Usd.Stage.CreateInMemory()
+    root = stage.GetRootLayer()
+    tracker = _prepared_tracker(stage, tracker_type, monkeypatch)
+    try:
+        event = {
+            "k": "set_sublayers",
+            "prim": "/",
+            "sublayers": [{"authored_path": "missing.usda"}],
+        }
+        tracker._prepared = [PreparedLayerBatch((event,), root, root.identifier, 7)]
+        batch, layer_key, events = tracker.next_routed_batch()
+        revision = events[0]["revision"]
+        events[0]["sublayers"][0]["authored_path"] = "modified.usda"
+        graph = tracker.graph
+        graph.accept_sublayers(
+            graph.canonicalize_sublayers(layer_key, graph.describe_sublayers(root))
+        )
+
+        retried, _, retry_events = tracker.next_routed_batch()
+
+        assert retried is batch
+        assert retried.change_serial == 7
+        assert retry_events[0]["revision"] == revision
+        assert retry_events[0]["generation"] == graph.generation
+        assert retry_events[0]["sublayers"][0]["authored_path"] == "missing.usda"
     finally:
         tracker.close()
 
