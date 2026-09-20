@@ -20,7 +20,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom
 
 from openusdconnect import ClientPhase
 from openusdconnect.managed_client import ManagedClient
-from openusdconnect.server import UsdSyncServer
+from openusdconnect.server import ServerConfig, ServerRuntime, UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 
 
@@ -382,6 +382,52 @@ def test_managed_client_rebinds_and_parks_the_emitter():
         assert client.emitter.build_events_for_dirty() == []
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_managed_client_reconnect_uses_reissued_receiver_token(tmp_path, background):
+    base = tmp_path / "server-base.usda"
+    Sdf.Layer.CreateNew(str(base)).Save()
+    stage = _client_stage(tmp_path)
+    with ServerRuntime(ServerConfig(
+        port=0,
+        base_usd_path=str(base),
+        log_path=str(tmp_path / "tokens.db"),
+        require_token=True,
+        preflight_plugins=False,
+    )) as runtime:
+        client = ManagedClient(
+            stage, app_name="token-refresh", client_id="token-refresh",
+            port=runtime.server_address[1], persist_token=False,
+        )
+        try:
+            assert client.connect(timeout=5)
+            old_token = client.sender.token
+            client.sender.disconnect()
+            assert runtime.sync_server.revoke_token(client.client_id)
+            client.receiver.request_replay_from(1)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client.receiver.connected and client.receiver.token != old_token:
+                    break
+                time.sleep(0.01)
+            assert client.receiver.connected
+            assert client.receiver.token != old_token
+            if background:
+                assert _drain_until(
+                    client, lambda: client.connected or client.sender.auth_rejected, timeout=5,
+                )
+                assert client.connected
+            else:
+                assert client._connect_sender(timeout=3)
+            assert client.sender.token == client.receiver.token
+            assert not client.sender.auth_rejected
+        finally:
+            client.close()
+            for worker in (client.sender._connect_thread, client.sender._reader_thread):
+                if worker is not None:
+                    worker.join(timeout=3)
+            runtime.sync_server.token_store.close()
 
 
 def test_managed_client_hands_ephemeral_tofu_token_to_sender(tmp_path):

@@ -30,6 +30,38 @@ def test_public_status_types_keep_compatibility_identity():
         assert value is getattr(_client_utils, name)
 
 
+@pytest.mark.parametrize(
+    ("sender_token", "receiver", "persist", "expected"),
+    [
+        ("expired", SimpleNamespace(token="issued"), False, "issued"),
+        ("expired", SimpleNamespace(token="issued"), True, "issued"),
+        (None, SimpleNamespace(token="issued"), True, "issued"),
+        ("configured", SimpleNamespace(token=None), True, "configured"),
+        ("configured", None, True, "configured"),
+        (None, SimpleNamespace(token=None), True, "stored"),
+        (None, None, True, "stored"),
+        (None, SimpleNamespace(token=None), False, None),
+        (None, None, False, None),
+    ],
+)
+def test_sender_token_prefers_receiver_then_existing_token_then_persistence(
+    monkeypatch, sender_token, receiver, persist, expected,
+):
+    reads = []
+
+    def load_token(host, port):
+        reads.append((host, port))
+        return "stored"
+
+    monkeypatch.setattr(_client_utils, "load_token", load_token)
+    sender = SimpleNamespace(token=sender_token)
+    _client_lifecycle.prepare_sender_token(
+        sender, receiver, host="test-host", port=7200, persist_token=persist,
+    )
+    assert sender.token == expected
+    assert reads == ([("test-host", 7200)] if expected == "stored" else [])
+
+
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
 def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
     kind, tmp_path, monkeypatch

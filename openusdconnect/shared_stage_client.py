@@ -629,9 +629,6 @@ class SharedStageClient:
         return True
 
     def _prepare_sender_token(self) -> None:
-        # A receiver reconnect can obtain a replacement TOFU token.
-        if self._receiver.token is not None:
-            self._sender.token = self._receiver.token
         prepare_sender_token(
             self._sender, self._receiver,
             host=self._host, port=self._port, persist_token=self._persist_token,
