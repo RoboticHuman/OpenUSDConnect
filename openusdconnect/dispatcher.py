@@ -155,13 +155,11 @@ class _StageSessionState:
             return
         moved = []
         for key, event in self._events.items():
-            if key[0] != "payload_load_state" or not _path_is_at_or_below(
-                key[1],
-                old_root,
-            ):
+            kind, prim_path = key
+            if kind != "payload_load_state" or not _path_is_at_or_below(prim_path, old_root):
                 continue
-            new_path = _renamed_path(key[1], old_root, new_name)
-            moved.append((key, (key[0], new_path), {**event, "prim": new_path}))
+            new_path = _renamed_path(prim_path, old_root, new_name)
+            moved.append((key, (kind, new_path), {**event, "prim": new_path}))
         for old_key, new_key, event in moved:
             del self._events[old_key]
             self._events[new_key] = event
@@ -1045,18 +1043,22 @@ class EventDispatcher:
         with suppress_ctx:
             self._refresh_resolver_context_suppressed(stage)
             self._discard_stale_asset_events(stage)
-            selected_dependencies = {
-                (authored_path, identifier, resolved_path)
-                for event in self._asset_events.values()
-                for authored_path, identifier, resolved_path in event.dependencies
-                if (
-                    not resolved_path
-                    if asset_path is None
-                    else self._asset_path_matches(
-                        asset_path, authored_path, identifier, resolved_path,
-                    )
-                )
+            dependencies = {
+                dependency
+                for tracked in self._asset_events.values()
+                for dependency in tracked.dependencies
             }
+            if asset_path is None:
+                selected_dependencies = {
+                    (authored_path, identifier, resolved_path)
+                    for authored_path, identifier, resolved_path in dependencies
+                    if not resolved_path
+                }
+            else:
+                selected_dependencies = {
+                    dependency for dependency in dependencies
+                    if self._asset_path_matches(asset_path, *dependency)
+                }
             if not selected_dependencies:
                 return {
                     "status": "not_tracked",
@@ -1099,9 +1101,9 @@ class EventDispatcher:
                     resolved_in_refresh[cache_key] = resolved
                 identifier, resolved_path = resolved
                 dependencies.append((authored_path, identifier, resolved_path))
-                if (
-                    dependency in selected_dependencies and resolved_path
-                ) or resolved_path != old_resolved_path:
+                selected_and_resolved = dependency in selected_dependencies and bool(resolved_path)
+                resolution_changed = resolved_path != old_resolved_path
+                if selected_and_resolved or resolution_changed:
                     event_ready = True
 
             local_events = []
@@ -1165,7 +1167,7 @@ class EventDispatcher:
                     # make Pcp retry an asset that was missing when the
                     # opinion was first authored. Clear the tracked opinion
                     # immediately before restoring its exact state.
-                    arc_event = local_events[0]
+                    arc_event = tracked_event.event
                     clear_arc_state(
                         stage,
                         arc_event["prim"],

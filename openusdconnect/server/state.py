@@ -3122,7 +3122,8 @@ class UsdSyncServer:
                             transaction.target_layer, set(transaction.collaboration_paths)
                         )
                     else:
-                        paths_by_layer[layer_id][1].update(transaction.collaboration_paths)
+                        _layer, paths = paths_by_layer[layer_id]
+                        paths.update(transaction.collaboration_paths)
                 snapshot_session |= transaction.has_session_events
                 records.extend(transaction.persist_tuples)
                 if (progress := transaction.progress) is not None:

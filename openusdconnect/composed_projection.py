@@ -2092,59 +2092,62 @@ class ComposedChangeProjection:
 
     def _project_active(self) -> list[dict]:
         after = _read_active(self._stage, self._candidates.active)
-        return [
-            {
+        result = []
+        for prim_path, active in after.items():
+            if active is None:
+                continue
+            previous_active = self._previous_prim_values(prim_path).active
+            # A newly observed default needs no explicit activation event.
+            if active is True and previous_active is None:
+                continue
+            if active == previous_active and not self._should_reapply_composed(prim_path):
+                continue
+            result.append({
                 "k": K_DEACTIVATE_PRIM,
                 "prim": prim_path,
                 "active": active,
-            }
-            for prim_path, active in after.items()
-            if active is not None
-            and (active is False or self._previous_prim_values(prim_path).active is not None)
-            and (
-                self._should_reapply_composed(prim_path)
-                or self._previous_prim_values(prim_path).active != active
-            )
-        ]
+            })
+        return result
 
     def _project_visibility(self) -> list[dict]:
         after = _read_visibility(self._stage, self._candidates.visibility)
         result = []
-        for key, visible in after.items():
-            if visible is None or (
-                not self._should_reapply_composed(key[0])
-                and (self._previous_prim_values(key[0]).visibility or {}).get(key[1]) == visible
-            ):
+        for (prim_path, sample_time), visible in after.items():
+            if visible is None:
+                continue
+            previous = self._previous_prim_values(prim_path).visibility or {}
+            unchanged = previous.get(sample_time) == visible
+            if unchanged and not self._should_reapply_composed(prim_path):
                 continue
             event = {
                 "k": K_SET_VISIBILITY,
-                "prim": key[0],
+                "prim": prim_path,
                 "visible": visible,
             }
-            if key[1] is not None:
-                event["time"] = key[1]
+            if sample_time is not None:
+                event["time"] = sample_time
             result.append(event)
         return result
 
     def _project_instanceable(self) -> list[dict]:
         after = _read_instanceable(self._stage, self._candidates.instanceable)
-        return [
-            {
+        result = []
+        for prim_path, instanceable in after.items():
+            if instanceable is None:
+                continue
+            previous_instanceable = self._previous_prim_values(prim_path).instanceable
+            # Ordinary prims need no event until instancing has been observed.
+            if instanceable is False and previous_instanceable is None:
+                continue
+            unchanged = instanceable == previous_instanceable
+            if unchanged and not self._should_reapply_composed(prim_path):
+                continue
+            result.append({
                 "k": K_SET_INSTANCEABLE,
                 "prim": prim_path,
                 "instanceable": instanceable,
-            }
-            for prim_path, instanceable in after.items()
-            if instanceable is not None
-            and (
-                instanceable is True
-                or self._previous_prim_values(prim_path).instanceable is not None
-            )
-            and (
-                self._should_reapply_composed(prim_path)
-                or self._previous_prim_values(prim_path).instanceable != instanceable
-            )
-        ]
+            })
+        return result
 
     def _project_xforms(self) -> list[dict]:
         after = _local_transforms(self._stage, self._candidates.xforms)

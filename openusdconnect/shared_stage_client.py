@@ -15,6 +15,7 @@ from ._client_lifecycle import (
     prepare_sender_token,
     raise_if_rejected,
     remaining_time,
+    share_client_token,
     stop_receiver,
 )
 from ._client_utils import (
@@ -156,12 +157,7 @@ class SharedStageClient:
         token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
 
         def _on_token_issued(token: str) -> None:
-            # Both connections authenticate as one client. Share replacements
-            # before persistence or application callbacks can fail.
-            self._sender.token = token
-            self._receiver.token = token
-            if token_callback is not None:
-                token_callback(token)
+            share_client_token(token, self._sender, self._receiver, token_callback)
 
         self._stage = stage
         self._host = host

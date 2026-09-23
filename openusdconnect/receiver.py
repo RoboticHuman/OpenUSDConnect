@@ -351,6 +351,14 @@ class ReceiverThread(threading.Thread):
         LOG.error("ReceiverThread: connection rejected (%s): %s", code, reason)
         self._handshake_event.set()
 
+    def _connection_replay_identity(self, epoch: int | None) -> tuple[str, int] | None:
+        """Return an identity only when the peer supplied all negotiated fields."""
+        if not self._replay_identity_supported or not self._connection_server_instance:
+            return None
+        if epoch is None:
+            return None
+        return self._connection_server_instance, int(epoch)
+
     def _handle_handshake_message(
         self, buf: bytes, sync_from: int, connection_generation: int | None = None,
     ) -> bool:
@@ -415,12 +423,7 @@ class ReceiverThread(threading.Thread):
         with self._replay_lock:
             if connection_generation != self._inbox.generation:
                 return False
-            epoch = hello.ReplayEpoch()
-            identity = (
-                (self._connection_server_instance, int(epoch))
-                if self._replay_identity_supported and self._connection_server_instance
-                and epoch is not None else None
-            )
+            identity = self._connection_replay_identity(hello.ReplayEpoch())
             # This proof belongs only to the handshake's replay, not later live resets.
             self._initial_replay_identity = identity
             if identity is None:
@@ -431,12 +434,10 @@ class ReceiverThread(threading.Thread):
                 ):
                     return False
                 self._reset_on_hello = False
-            if identity is not None and (
-                sync_from == 1 or (
-                    self._prefix_validation_requested
-                    and self._received_replay_identity == identity
-                )
-            ):
+            prefix_matches = (
+                self._prefix_validation_requested and self._received_replay_identity == identity
+            )
+            if identity is not None and (sync_from == 1 or prefix_matches):
                 self._received_replay_identity = identity
             # A changed/unknown prefix keeps its old identity until Resync is accepted.
             self.connected = True
@@ -454,9 +455,9 @@ class ReceiverThread(threading.Thread):
             return True
 
         if payload_type == PayloadType.ReplayComplete:
-            complete = message_to_dict(buf)
-            head_seq = int(complete["head_seq"])
-            epoch = int(complete["epoch"])
+            _, complete = resolve_payload(decode_envelope(buf))
+            head_seq = int(complete.HeadSeq())
+            epoch = int(complete.Epoch())
             with self._replay_lock:
                 result = self._inbox.accept_replay_complete(
                     connection_generation,
@@ -467,15 +468,9 @@ class ReceiverThread(threading.Thread):
                     self._initial_replay_identity = None
                     # This covers received/queued frames, even before their consumer
                     # drains them, including resets without a handshake epoch.
-                    self._received_replay_identity = (
-                        (self._connection_server_instance, epoch)
-                        if (
-                            self._replay_identity_supported
-                            and self._connection_prefix_proven
-                            and self._connection_server_instance
-                        )
-                        else None
-                    )
+                    self._received_replay_identity = None
+                    if self._connection_prefix_proven:
+                        self._received_replay_identity = self._connection_replay_identity(epoch)
             if result == _client_backend.AcceptResult.STALE_GENERATION:
                 return False
             return True

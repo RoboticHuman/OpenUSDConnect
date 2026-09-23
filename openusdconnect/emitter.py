@@ -384,6 +384,25 @@ def _usd_value_to_transport_python(
     )
 
 
+def _authored_default_source(
+    attribute: Usd.Attribute,
+    edit_target: Usd.EditTarget,
+    property_sources: dict[str, dict[str, Sdf.PropertySpec]],
+    *,
+    identity_target: bool,
+) -> Sdf.AttributeSpec | None:
+    """Select the local default used by both cache seeding and value diffs."""
+    if identity_target:
+        source = property_sources.get(attribute.GetName(), {}).get("default")
+    else:
+        # Mapped targets select one variant/reference spec, even when stronger
+        # opinions live in the same layer.
+        source = edit_target.GetPropertySpecForScenePath(attribute.GetPath())
+    if isinstance(source, Sdf.AttributeSpec) and source.HasDefaultValue():
+        return source
+    return None
+
+
 def _local_canonical_trs(
     composed: dict[str, list[float]],
     prim: Usd.Prim,
@@ -2405,14 +2424,10 @@ class NoticeEmitter:
             for attr in child.GetAttributes():
                 name = attr.GetName()
                 if attr.IsAuthored() and self._attr_filter(name):
-                    if identity_target:
-                        value_source = property_sources.get(name, {}).get("default")
-                    else:
-                        value_source = edit_target.GetPropertySpecForScenePath(attr.GetPath())
-                    if (
-                        not isinstance(value_source, Sdf.AttributeSpec)
-                        or not value_source.HasDefaultValue()
-                    ):
+                    value_source = _authored_default_source(
+                        attr, edit_target, property_sources, identity_target=identity_target,
+                    )
+                    if value_source is None:
                         continue
                     val = _usd_value_to_transport_python(
                         self.stage,
@@ -2831,15 +2846,12 @@ class NoticeEmitter:
             sdf_fields = self._generic_sdf_fields(spec, path, spec_kind)
             # A resync (None in changed_specs) needs every field. A new spec
             # discovered by a subtree scan also needs its complete field set.
-            if (
-                full_scan
-                or (spec_has_notice and changed_fields is None)
-                or any(_sdf_path_is_under(path, root) for root in resync_roots)
-                or (
-                    not previous_exists
-                    and any(_sdf_path_is_under(path, root) for root in subtree_roots)
-                )
-            ):
+            resynced = full_scan or (spec_has_notice and changed_fields is None)
+            resynced = resynced or any(_sdf_path_is_under(path, root) for root in resync_roots)
+            discovered_in_subtree = not resynced and not previous_exists and any(
+                _sdf_path_is_under(path, root) for root in subtree_roots
+            )
+            if resynced or discovered_in_subtree:
                 selected_fields = sdf_fields | previous_fields
             elif spec_has_notice:
                 # An empty set means no named fields changed, not a resync.
@@ -3574,16 +3586,10 @@ class NoticeEmitter:
             if not attribute:
                 continue
 
-            if identity_target:
-                value_source = local_property_sources.get(attribute_name, {}).get("default")
-            else:
-                # A mapped edit target selects one variant/reference spec,
-                # even when stronger opinions live in that same Sdf.Layer.
-                value_source = edit_target.GetPropertySpecForScenePath(attribute.GetPath())
-            if (
-                not isinstance(value_source, Sdf.AttributeSpec)
-                or not value_source.HasDefaultValue()
-            ):
+            value_source = _authored_default_source(
+                attribute, edit_target, local_property_sources, identity_target=identity_target,
+            )
+            if value_source is None:
                 # A clear exposes weaker composition but must forget the old
                 # local fingerprint so reauthoring that value emits it again.
                 previous_attributes.pop(attribute_name, None)

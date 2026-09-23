@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ._client_utils import resolve_client_token
@@ -48,6 +49,19 @@ def prepare_sender_token(
     # A handshake can supply a token while stored credentials are being read.
     if sender.token is None:
         sender.token = token
+
+
+def share_client_token(
+    token: str,
+    sender: EventSender,
+    receiver: ReceiverThread,
+    callback: Callable[[str], None] | None,
+) -> None:
+    """Update both connections before persistence or application callbacks can fail."""
+    sender.token = token
+    receiver.token = token
+    if callback is not None:
+        callback(token)
 
 
 def stop_receiver(receiver: ReceiverThread) -> None:

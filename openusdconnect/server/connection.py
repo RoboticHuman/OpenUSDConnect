@@ -13,13 +13,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..codec import (
+    ClaimPlayback,
     HelloRejectionCode,
     PayloadType,
+    PlaybackControl,
     decode_envelope,
     decode_hello,
     decode_transaction,
     encode_message,
-    message_to_dict,
     resolve_payload,
 )
 from ..framing import (
@@ -436,13 +437,13 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                 continue
 
             if pt == PayloadType.ClaimPlayback:
-                msg = message_to_dict(buf)
-                self._handle_claim_playback(sync_server, msg)
+                _, claim = resolve_payload(env)
+                self._handle_claim_playback(sync_server, claim)
                 continue
 
             if pt == PayloadType.PlaybackControl:
-                msg = message_to_dict(buf)
-                self._handle_playback_control(sync_server, msg)
+                _, control = resolve_payload(env)
+                self._handle_playback_control(sync_server, control)
                 continue
 
             if pt != PayloadType.Txn:
@@ -596,11 +597,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         except OSError:
             pass
 
-    def _handle_claim_playback(self, sync_server: UsdSyncServer, msg: dict):
-        initial_time = msg.get("time")
+    def _handle_claim_playback(self, sync_server: UsdSyncServer, claim: ClaimPlayback):
         granted, current_leader = sync_server.claim_playback(
             self._client_id or "",
-            initial_time=initial_time,
+            initial_time=claim.Time(),
         )
         if not granted:
             self._send_control_response(
@@ -616,12 +616,16 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
         )
         self._broadcast_playback_state(sync_server)
 
-    def _handle_playback_control(self, sync_server: UsdSyncServer, msg: dict):
+    def _handle_playback_control(self, sync_server: UsdSyncServer, control: PlaybackControl):
+        action = control.Action()
+        action = action.decode("utf-8") if action else ""
+        time_value = control.Time()
+        rate = control.Rate()
         ok, payload, current_leader = sync_server.apply_playback_control(
             self._client_id or "",
-            msg.get("action", ""),
-            float(msg.get("time", 0.0)),
-            float(msg.get("rate", 1.0)),
+            action,
+            0.0 if time_value is None else time_value,
+            1.0 if rate is None else rate,
         )
         if not ok:
             self._send_control_response(
