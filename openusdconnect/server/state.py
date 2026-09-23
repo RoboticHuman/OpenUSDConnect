@@ -55,8 +55,6 @@ from ..protocol_constants import (
     MSG_REPLAY_COMPLETE,
     MSG_RESYNC,
     NON_COLLABORATION_KINDS,
-    SHARED_STAGE_EVENT_KINDS,
-    SHARED_STAGE_ONLY_KINDS,
     LayerMode,
     event_apply_tier,
 )
@@ -2646,31 +2644,29 @@ class UsdSyncServer:
         with self.stage_lock:
             edit_target = Usd.EditTarget(target)
             session_target = Usd.EditTarget(self.stage.GetSessionLayer())
-            has_layer_opinions = any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events)
+            has_layer_opinions = any(ev["k"] not in NON_COLLABORATION_KINDS for ev in events)
             target_was_muted = self.stage.IsLayerMuted(target.identifier)
             was_muted = has_layer_opinions and target_was_muted
             if was_muted:
                 self.stage.UnmuteLayer(target.identifier)
             try:
                 for ev in events:
-                    if ev.get("k") != K_SET_SDF_SPEC_FIELDS or not ev.get("removed", False):
+                    if ev["k"] != K_SET_SDF_SPEC_FIELDS or not ev["removed"]:
                         continue
-                    event_path = Sdf.Path(ev.get("spec_path", ""))
-                    if not event_path.IsAbsolutePath():
-                        continue
+                    event_path = Sdf.Path(ev["spec_path"])
                     spec = target.GetObjectAtPath(event_path)
                     if spec:
                         ev["fields"] = sorted(
-                            set(ev.get("fields", ())) | {str(key) for key in spec.ListInfoKeys()}
+                            set(ev["fields"]) | {str(key) for key in spec.ListInfoKeys()}
                         )
 
                 start = 0
                 while start < len(events):
-                    non_collaboration = events[start].get("k") in NON_COLLABORATION_KINDS
+                    non_collaboration = events[start]["k"] in NON_COLLABORATION_KINDS
                     end = start + 1
                     while (
                         end < len(events)
-                        and (events[end].get("k") in NON_COLLABORATION_KINDS) == non_collaboration
+                        and (events[end]["k"] in NON_COLLABORATION_KINDS) == non_collaboration
                     ):
                         end += 1
                     run = events[start:end]
@@ -2832,21 +2828,15 @@ class UsdSyncServer:
                     expected_txn_id=expected,
                 )
 
-            first_reserved_seq = self._next_seq
-            try:
-                records = self._process_txn_locked(
-                    events,
-                    client_id=client_id,
-                    origin=origin,
-                    client_addr=client_addr,
-                    layer=layer,
-                    layer_key=layer_key,
-                    transaction_identity=(session_id, txn_id),
-                )
-            except Exception:
-                with self._seq_lock:
-                    self._next_seq = first_reserved_seq
-                raise
+            records = self._process_txn_locked(
+                events,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                layer=layer,
+                layer_key=layer_key,
+                transaction_identity=(session_id, txn_id),
+            )
             self._producer_progress_cache[(client_id, session_id)] = txn_id
             commit = TransactionCommit(
                 "committed",
@@ -2987,8 +2977,7 @@ class UsdSyncServer:
             if not accepted:
                 return
 
-            first_reserved_seq = self._next_seq
-            try:
+            with self._managed_sequence_reservation():
                 prepared = [
                     self._prepare_managed_transaction(
                         request.events,
@@ -3002,12 +2991,6 @@ class UsdSyncServer:
                     for request in accepted
                 ]
                 self._persist_managed_transactions(prepared)
-            except Exception:
-                with self._seq_lock:
-                    self._next_seq = first_reserved_seq
-                self.op_cache.clear()
-                self._op_cache_layer = None
-                raise
 
             self._producer_progress_cache.update(next_by_session)
             for request, transaction in zip(accepted, prepared, strict=True):
@@ -3037,6 +3020,23 @@ class UsdSyncServer:
         with self._transaction_commit_lock:
             return self._producer_progress_locked(client_id, session_id)
 
+    @contextmanager
+    def _managed_sequence_reservation(self):
+        """Roll back sequence reservations and op setup if a managed commit fails.
+
+        The caller holds the commit lock throughout preparation and persistence.
+        USD rollback is handled by _persist_managed_transactions.
+        """
+        first_reserved_seq = self._next_seq
+        try:
+            yield
+        except Exception:
+            with self._seq_lock:
+                self._next_seq = first_reserved_seq
+            self.op_cache.clear()
+            self._op_cache_layer = None
+            raise
+
     def _prepare_managed_transaction(
         self,
         events: list[dict],
@@ -3048,27 +3048,23 @@ class UsdSyncServer:
         layer_key: str,
         transaction_identity: tuple[str, int] | None,
     ) -> _PreparedTransaction:
+        """Check routing and encode previously validated managed events.
+
+        Requires the commit lock and _managed_sequence_reservation so failures
+        in this method or subsequent persistence release the reserved sequences.
+        """
         if layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
-        shared_only = {
-            event.get("k")
-            for event in events
-            if event.get("k") in SHARED_STAGE_ONLY_KINDS
-        }
-        if shared_only:
-            raise ValueError(
-                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
-            )
         target_layer = layer or self.edit_layer
         layer_key = self.layer_stack.key_for_layer(target_layer)
         if layer_key is None and any(
-            event.get("k") not in NON_COLLABORATION_KINDS for event in events
+            event["k"] not in NON_COLLABORATION_KINDS for event in events
         ):
             raise ValueError("transaction target is not a managed collaboration layer")
 
         collaboration_paths = _managed_rollback_paths(events)
         has_session_events = any(
-            event.get("k") in NON_COLLABORATION_KINDS for event in events
+            event["k"] in NON_COLLABORATION_KINDS for event in events
         )
         records, persist_tuples = self._encode_managed_txn_records(
             events,
@@ -3253,7 +3249,9 @@ class UsdSyncServer:
         layer_key: str = "",
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply and durably persist events inside the global commit lock.
+        """Apply validated events and durably persist them under the commit lock.
+
+        Each mode owns sequence rollback if preparation or persistence fails.
 
         Returns encoded broadcast records in input order. Callers that only
         need authoritative state plus a populated log may ignore the result.
@@ -3273,8 +3271,7 @@ class UsdSyncServer:
                 client_addr=client_addr,
                 transaction_identity=transaction_identity,
             )
-        first_reserved_seq = self._next_seq
-        try:
+        with self._managed_sequence_reservation():
             transaction = self._prepare_managed_transaction(
                 events,
                 client_id=client_id,
@@ -3285,12 +3282,6 @@ class UsdSyncServer:
                 transaction_identity=transaction_identity,
             )
             self._persist_managed_transactions([transaction])
-        except Exception:
-            with self._seq_lock:
-                self._next_seq = first_reserved_seq
-            self.op_cache.clear()
-            self._op_cache_layer = None
-            raise
         return transaction.records
 
     def _encode_managed_txn_records(
@@ -3318,18 +3309,18 @@ class UsdSyncServer:
             }
             if origin:
                 record["origin"] = origin
-            if event.get("k") not in NON_COLLABORATION_KINDS:
+            if event["k"] not in NON_COLLABORATION_KINDS:
                 record["layer_key"] = layer_key
             record_bin = self._broadcast_encoder.encode(record)
             if self.wire_metrics is not None:
-                self.wire_metrics.record(event.get("k", ""), len(record_bin))
+                self.wire_metrics.record(event["k"], len(record_bin))
             records.append((record, record_bin))
             persist_tuples.append(
                 (
                     record["seq"],
                     record_bin,
                     client_id,
-                    event.get("k"),
+                    event["k"],
                     event.get("prim"),
                 )
             )
@@ -3345,7 +3336,7 @@ class UsdSyncServer:
         client_addr: str | None,
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply one exact authored-layer transaction."""
+        """Apply one validated authored-layer transaction against the current graph."""
         from ..event_apply import apply_events, atomic_apply
 
         graph = self.shared_layer_graph
@@ -3359,23 +3350,12 @@ class UsdSyncServer:
                 "stale_layer_graph",
                 f"unknown or unresolved shared layer key {layer_key!r}",
             )
-        unsupported = {
-            event.get("k")
-            for event in events
-            if event.get("k") not in SHARED_STAGE_EVENT_KINDS
-        }
-        if unsupported:
-            raise ValueError(f"unsupported shared-stage events: {sorted(unsupported)!r}")
-        if sum(event.get("k") == K_SET_SUBLAYERS for event in events) > 1:
-            raise ValueError("one shared-stage transaction may replace a parent topology once")
-        if sum(event.get("k") == K_REPLACE_SDF_LAYER_CONTENT for event in events) > 1:
-            raise ValueError("one shared-stage transaction may replace layer content once")
 
         prepared: PreparedSublayers | None = None
         canonical_events = []
         try:
             for event in events:
-                if event.get("k") == K_SET_SUBLAYERS:
+                if event["k"] == K_SET_SUBLAYERS:
                     prepared = graph.canonicalize_sublayers(layer_key, event)
                     canonical = prepared.event
                 else:
@@ -3394,15 +3374,13 @@ class UsdSyncServer:
                 graph.transaction(),
             ):
                 for event in canonical_events:
-                    if event.get("k") != K_SET_SDF_SPEC_FIELDS or not event.get(
-                        "removed", False
-                    ):
+                    if event["k"] != K_SET_SDF_SPEC_FIELDS or not event["removed"]:
                         continue
                     path = Sdf.Path(event["spec_path"])
                     spec = target.GetObjectAtPath(path)
                     if spec:
                         event["fields"] = sorted(
-                            set(event.get("fields", ()))
+                            set(event["fields"])
                             | {str(key) for key in spec.ListInfoKeys()}
                         )
                 with atomic_apply(self.stage):

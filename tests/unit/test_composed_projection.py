@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pxr
 import pytest
-from pxr import Sdf, Usd, UsdGeom, UsdShade, UsdUtils
+from pxr import Sdf, Tf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.codec import encode_message
@@ -513,6 +513,41 @@ def test_owned_previous_stage_consolidates_package_and_preserves_assets(tmp_path
 
     assert state.previous_stage is previous_stage
     assert state.previous_stage.GetPrimAtPath("/World/Thing").GetAttribute("radius").Get() == 2.0
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, Tf.ErrorException])
+def test_consolidated_previous_stage_only_recovers_usd_errors(
+    tmp_path, monkeypatch, caplog, error_type
+):
+    source_path = tmp_path / "source.usda"
+    source = Usd.Stage.CreateNew(str(source_path))
+    source.DefinePrim("/Sphere", "Sphere").GetAttribute("radius").Set(1.0)
+    source.GetRootLayer().Save()
+    package_path = tmp_path / "scene.usdz"
+    assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source_path)), str(package_path))
+    stage = Usd.Stage.Open(str(package_path))
+    state = ComposedProjectionState(stage)
+    previous_stage = state.previous_stage
+    error = error_type("injected adapter-state failure")
+
+    def fail_apply(_adapter, _events):
+        raise error
+
+    with ComposedChangeProjection(stage, [], state=state) as projection:
+        stage.GetAttributeAtPath("/Sphere.radius").Set(2.0)
+        assert projection.build_events()
+        monkeypatch.setattr(UsdStageAdapter, "apply_events", fail_apply)
+        if error_type is Tf.ErrorException:
+            projection.commit()
+            assert state.previous_stage is not previous_stage
+            assert state.previous_stage.GetAttributeAtPath("/Sphere.radius").Get() == 2.0
+            assert "rebuilding from the live stage" in caplog.text
+        else:
+            with pytest.raises(error_type) as caught:
+                projection.commit()
+            assert caught.value is error
+            assert state.previous_stage is previous_stage
+            assert previous_stage.GetAttributeAtPath("/Sphere.radius").Get() == 1.0
 
 
 def test_owned_previous_stage_survives_context_dependent_resolver_refresh(tmp_path):

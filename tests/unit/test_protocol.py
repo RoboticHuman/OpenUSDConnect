@@ -1,6 +1,7 @@
 """Tests for openusdconnect.protocol validation helpers, message construction."""
 
 import pytest
+from pxr import Tf
 
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.connectable_attrs import (
@@ -11,6 +12,7 @@ from openusdconnect.connectable_attrs import (
     output_attr,
     split_qualified_attr,
 )
+from openusdconnect.events import get as get_event_spec
 from openusdconnect.protocol import (
     make_hello,
     make_quit,
@@ -25,6 +27,7 @@ from openusdconnect.protocol_constants import (
     K_ENSURE_PRIM,
     K_LOAD_PAYLOAD,
     K_RENAME_PRIM,
+    K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_GPRIM_ATTRS,
     K_SET_PAYLOAD,
     K_SET_REFERENCE,
@@ -239,6 +242,65 @@ class TestValidateEvent:
                     },
                 ]
             )
+
+    @pytest.mark.parametrize("error_type", [RuntimeError, KeyError, AttributeError])
+    def test_validator_bugs_are_not_reported_as_invalid_input(self, monkeypatch, error_type):
+        error = error_type("validator bug")
+
+        def broken_validator(_event):
+            raise error
+
+        monkeypatch.setattr(get_event_spec(K_ENSURE_PRIM), "validate", broken_validator)
+        with pytest.raises(error_type) as caught:
+            validate_events([{"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"}])
+        assert caught.value is error
+
+    def test_invalid_usd_fragment_is_reported_as_invalid_input(self):
+        event = {"k": K_REPLACE_SDF_LAYER_CONTENT, "prim": "/", "fragment": "not USDA"}
+        with pytest.raises(ValueError, match="invalid replace_sdf_layer_content payload") as caught:
+            validate_event_or_raise(event)
+        assert isinstance(caught.value.__cause__, Tf.ErrorException)
+        assert not validate_event(event)
+
+    @pytest.mark.parametrize("layer_mode", [None, LayerMode.SHARED_STAGE])
+    @pytest.mark.parametrize(
+        "event, message",
+        [
+            (
+                {
+                    "k": K_SET_SUBLAYERS,
+                    "prim": "/",
+                    "generation": "graph-1",
+                    "revision": 0,
+                    "sublayers": [],
+                },
+                "replace a parent topology once",
+            ),
+            (
+                {"k": K_REPLACE_SDF_LAYER_CONTENT, "prim": "/", "fragment": "#usda 1.0\n"},
+                "replace layer content once",
+            ),
+        ],
+    )
+    def test_transaction_rejects_repeated_replacements(self, layer_mode, event, message):
+        validate_events([event], layer_mode=layer_mode)
+        with pytest.raises(ValueError, match=message):
+            validate_events([event, event], layer_mode=layer_mode)
+
+    def test_transaction_can_replace_both_topology_and_layer_content(self):
+        validate_events(
+            [
+                {
+                    "k": K_SET_SUBLAYERS,
+                    "prim": "/",
+                    "generation": "graph-1",
+                    "revision": 0,
+                    "sublayers": [],
+                },
+                {"k": K_REPLACE_SDF_LAYER_CONTENT, "prim": "/", "fragment": "#usda 1.0\n"},
+            ],
+            layer_mode=LayerMode.SHARED_STAGE,
+        )
 
     def test_ensure_prim_valid(self):
         assert validate_event({"k": K_ENSURE_PRIM, "prim": "/World/Sphere", "typeName": "Xform"})

@@ -301,7 +301,11 @@ class _OwnedAdapterStateStage:
                 with Usd.EditContext(previous, previous.GetRootLayer()):
                     UsdStageAdapter(previous).apply_events(delivered_events)
                 self._sync_stage_controls()
-            except Exception:
+            except Tf.ErrorException:
+                LOG.warning(
+                    "Could not advance adapter-state stage; rebuilding from the live stage",
+                    exc_info=True,
+                )
                 self._rebuild_previous_stage()
             return
 
