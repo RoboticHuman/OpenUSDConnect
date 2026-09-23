@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from pxr import Sdf, Usd
 
-from ._client_lifecycle import prepare_sender_token, raise_if_rejected, stop_receiver
+from ._client_lifecycle import (
+    deadline_after,
+    prepare_sender_token,
+    raise_if_rejected,
+    remaining_time,
+    share_client_token,
+    stop_receiver,
+)
 from ._client_utils import (
     client_origin,
     client_token_handlers,
@@ -149,6 +156,9 @@ class SharedStageClient:
         resolved_token = resolve_client_token(host, port, token, persist_token)
         token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
 
+        def _on_token_issued(token: str) -> None:
+            share_client_token(token, self._sender, self._receiver, token_callback)
+
         self._stage = stage
         self._host = host
         self._port = port
@@ -168,7 +178,7 @@ class SharedStageClient:
             client_id=stable_client_id,
             origin=connection_origin,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
             on_stage_metadata=on_stage_metadata,
             on_playback_state=on_playback_state,
             on_playback_claimed=on_playback_claimed,
@@ -182,7 +192,7 @@ class SharedStageClient:
             client_id=stable_client_id,
             origin=connection_origin,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
             layer_mode=LayerMode.SHARED_STAGE,
         )
         self._last_seq = 0
@@ -333,26 +343,7 @@ class SharedStageClient:
             captured.append((layer_key, layer, rejected_snapshot))
 
         self._refresh_recovery_checkpoint(timeout)
-        reachable = set(self._graph.reachable_layer_keys())
-        layers = []
-        for rejected_key, layer, rejected_snapshot in captured:
-            current_key = self._graph.key_for(layer) if layer is not None else None
-            layers.append(
-                SharedRecoveryLayer(
-                    rejected_layer_key=rejected_key,
-                    source_layer=layer,
-                    current_layer_key=current_key,
-                    reachable=current_key in reachable if current_key is not None else False,
-                    rejected_snapshot=rejected_snapshot,
-                )
-            )
-        assessment = SharedRecoveryAssessment(
-            recovery_artifact=artifact,
-            layers=tuple(layers),
-            checkpoint_seq=self._last_seq,
-            graph_generation=self._graph.generation,
-            graph_revision=self._graph.revision,
-        )
+        assessment = self._build_recovery_assessment(artifact, captured)
         self._last_recovery_assessment = assessment
         return assessment
 
@@ -374,19 +365,25 @@ class SharedStageClient:
         cannot complete, the normal update loop retries.
         """
         self._validate_clean_recovery_stage(clean_stage)
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         assessment = self.refresh_recovery_assessment(timeout=timeout)
         self._validate_clean_recovery_stage(clean_stage, assessment=assessment)
         self._rebind_stage_for_recovery(clean_stage)
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._refresh_recovery_checkpoint(remaining)
-        assessment = self._reclassify_recovery_assessment(assessment)
+        assessment = self._build_recovery_assessment(
+            assessment.recovery_artifact,
+            (
+                (layer.rejected_layer_key, layer.source_layer, layer.rejected_snapshot)
+                for layer in assessment.layers
+            ),
+        )
         self._last_recovery_assessment = assessment
         result = self.complete_recovery(
             assessment,
             session_id=session_id,
         )
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._resume_sender_after_recovery(remaining)
         return result
 
@@ -498,27 +495,27 @@ class SharedStageClient:
                 "recovery assessment is stale; refresh and reconcile the current graph",
             )
 
-    def _reclassify_recovery_assessment(
+    def _build_recovery_assessment(
         self,
-        assessment: SharedRecoveryAssessment,
+        artifact: RecoveryArtifact,
+        captured: Iterable[tuple[str, Sdf.Layer | None, Sdf.Layer | None]],
     ) -> SharedRecoveryAssessment:
         """Classify preserved source layers against the currently bound graph."""
         reachable = set(self._graph.reachable_layer_keys())
         layers = []
-        for prior in assessment.layers:
-            source = prior.source_layer
+        for rejected_key, source, snapshot in captured:
             current_key = self._graph.key_for(source) if source is not None else None
             layers.append(
                 SharedRecoveryLayer(
-                    rejected_layer_key=prior.rejected_layer_key,
+                    rejected_layer_key=rejected_key,
                     source_layer=source,
                     current_layer_key=current_key,
                     reachable=current_key in reachable if current_key is not None else False,
-                    rejected_snapshot=prior.rejected_snapshot,
+                    rejected_snapshot=snapshot,
                 )
             )
         return SharedRecoveryAssessment(
-            recovery_artifact=assessment.recovery_artifact,
+            recovery_artifact=artifact,
             layers=tuple(layers),
             checkpoint_seq=self._last_seq,
             graph_generation=self._graph.generation,
@@ -548,7 +545,7 @@ class SharedStageClient:
 
     def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
         """Apply through a fresh shared-stage replay watermark."""
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         reconnect = self._receiver.reconnect
         self._receiver.reconnect = True
         try:
@@ -612,7 +609,7 @@ class SharedStageClient:
     def connect(self, timeout: float | None = None) -> bool:
         """Start and complete both shared-stage handshakes within ``timeout``."""
         self.start()
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         if not self._receiver.wait_connected(timeout):
             if self._receiver.auth_rejected:
                 raise PermissionError("shared-stage receiver authentication rejected")
@@ -623,7 +620,7 @@ class SharedStageClient:
             return False
         if self._receiver.layer_mode_active is not LayerMode.SHARED_STAGE:
             raise RuntimeError("server did not negotiate shared-stage mode")
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         return self._connect_sender(timeout=remaining)
 
     def _connect_sender(self, timeout: float | None = None) -> bool:
@@ -636,9 +633,6 @@ class SharedStageClient:
         return True
 
     def _prepare_sender_token(self) -> None:
-        # A receiver reconnect can obtain a replacement TOFU token.
-        if self._receiver.token is not None:
-            self._sender.token = self._receiver.token
         prepare_sender_token(
             self._sender, self._receiver,
             host=self._host, port=self._port, persist_token=self._persist_token,
@@ -757,11 +751,16 @@ class SharedStageClient:
         if layer is None:
             self._pending_records.append(record)
             return False
-        with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-            with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths([event])):
-                apply_events(self._stage, [event])
-        self._tracker.accept_authoritative_event(layer, event)
+        self._apply_layer_events(layer, [event])
         return True
+
+    def _apply_layer_events(self, layer: Sdf.Layer, events: list[dict]) -> None:
+        """Commit layer content before advancing the tracker's authored baseline."""
+        with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
+            with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths(events)):
+                apply_events(self._stage, events)
+        for event in events:
+            self._tracker.accept_authoritative_event(layer, event)
 
     def _restore_edit_target(self, preferred: Usd.EditTarget) -> None:
         """Restore *preferred* when composed, otherwise select the root layer."""
@@ -791,11 +790,7 @@ class SharedStageClient:
                 groups.append((layer, [record]))
         for layer, records in groups:
             events = [record.event for record in records]
-            with Usd.EditContext(self._stage, Usd.EditTarget(layer)):
-                with atomic_apply(self._stage, prim_paths=atomic_apply_prim_paths(events)):
-                    apply_events(self._stage, events)
-            for record in records:
-                self._tracker.accept_authoritative_event(layer, record.event)
+            self._apply_layer_events(layer, events)
             applied += len(records)
         self._pending_records = retained
         return applied

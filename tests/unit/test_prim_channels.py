@@ -21,7 +21,6 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 
 from openusdconnect.emitter import (
     _BUILTIN_PRIM_CHANNELS,
-    CameraAttrsChannel,
     ConnectableChannel,
     NoticeEmitter,
     PrimChannel,
@@ -115,12 +114,6 @@ class TestNeedsReadGating:
 
     def test_visibility_reads_when_visibility_changed(self):
         assert VisibilityChannel().needs_read({"visibility"}) is True
-
-    def test_camera_reads_when_focal_length_changed(self):
-        assert CameraAttrsChannel().needs_read({"focalLength"}) is True
-
-    def test_camera_skips_when_only_gprim_attr_changed(self):
-        assert CameraAttrsChannel().needs_read({"primvars:displayColor"}) is False
 
 
 class TestMixedChangesPreserveEmissions:

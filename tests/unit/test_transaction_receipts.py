@@ -71,6 +71,31 @@ def test_event_rows_and_producer_progress_commit_atomically_and_survive_reopen(t
     reopened.close()
 
 
+def test_failed_single_append_does_not_poison_subsequent_writes(tmp_path):
+    db = str(tmp_path / "append-rollback.db")
+    store = SqliteEventStore(db)
+    try:
+        store.append(1, b"one", "client", "ensure_prim", "/A")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.append(1, b"duplicate", "client", "ensure_prim", "/B")
+
+        store.append_batch(
+            [(2, b"two", "client", "ensure_prim", "/B")],
+            producer_progress=(ProducerProgress("client", "session", 2),),
+        )
+        store.append(3, b"three", "client", "ensure_prim", "/C")
+    finally:
+        store.close()
+
+    reopened = SqliteEventStore(db)
+    try:
+        assert reopened.get_all_asc() == [(1, b"one"), (2, b"two"), (3, b"three")]
+        assert reopened.get_producer_progress("client", "session") == 2
+        assert reopened.query(kind="ensure_prim", prim_contains="/C") == ([b"three"], 1)
+    finally:
+        reopened.close()
+
+
 def test_grouped_records_and_multiple_producers_commit_atomically(tmp_path):
     store = SqliteEventStore(str(tmp_path / "group.db"))
     store.append_batch(
@@ -500,6 +525,7 @@ def test_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
 
 def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
     server = UsdSyncServer(log_path=str(tmp_path / "group-rename-rollback.db"))
+    append_batch = server.store.append_batch
     server.apply_txn([_event("/World/Old")])
     before = server.edit_layer.ExportToString()
     before_tracking = (
@@ -551,6 +577,24 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
         ) == before_tracking
         assert server.store.get_count() == 0
         assert server._next_seq == 1
+        for request in requests:
+            assert server.producer_committed_through(request.client_id, request.session_id) == 0
+
+        monkeypatch.setattr(server.store, "append_batch", append_batch)
+        server._commit_managed_transaction_group(requests)
+        assert [request.commit.status for request in requests] == ["committed", "committed"]
+        assert not server.stage.GetPrimAtPath("/World/Old").IsValid()
+        assert server.stage.GetPrimAtPath("/World/New").IsValid()
+        assert server.stage.GetPrimAtPath("/World/Other").IsValid()
+        assert server.store.get_count() == 2
+        for request in requests:
+            assert server.producer_committed_through(request.client_id, request.session_id) == 1
+            assert server.store.get_producer_progress(request.client_id, request.session_id) == 1
+
+        server._commit_managed_transaction_group(requests)
+        assert [request.commit.status for request in requests] == ["duplicate", "duplicate"]
+        assert server.store.get_count() == 2
+        assert server._next_seq == 3
     finally:
         server.shutdown()
         server.store.close()

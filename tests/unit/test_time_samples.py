@@ -547,6 +547,70 @@ def test_sample_deletion_survives_log_compaction(tmp_path):
         server.store.close()
 
 
+@pytest.mark.parametrize("target_kind", ["layer", "variant"])
+def test_seeded_samples_preserve_edits_masked_by_stronger_opinions(target_kind):
+    stage = Usd.Stage.CreateInMemory()
+    camera = UsdGeom.Camera.Define(stage, "/Camera")
+    attr = camera.GetFocalLengthAttr()
+    attr.Set(100.0, 1.0)
+    if target_kind == "layer":
+        layer = Sdf.Layer.CreateAnonymous("local-samples")
+        stage.GetRootLayer().subLayerPaths.append(layer.identifier)
+        stage.SetEditTarget(layer)
+    else:
+        variants = camera.GetPrim().GetVariantSets().AddVariantSet("animation")
+        variants.AddVariant("keyed")
+        variants.SetVariantSelection("keyed")
+        stage.SetEditTarget(variants.GetVariantEditTarget())
+    attr.Set(70.0, 1.0)
+    assert attr.Get(1.0) == 100.0
+    emitter = NoticeEmitter(stage)
+    try:
+        emitter.seed_prim_cache(stage, "/Camera")
+        attr.Set(100.0, 1.0)
+
+        events = emitter.build_events_for_dirty()
+
+        assert any(
+            event["k"] == K_SET_GPRIM_ATTRS
+            and event.get("time") == 1.0
+            and event["attrs"].get("focalLength") == 100.0
+            for event in events
+        )
+    finally:
+        emitter.cleanup()
+
+
+@pytest.mark.parametrize("kind", ["transform_matrix", "shader_matrix", "asset", "orientations"])
+def test_seeded_sample_conversion_matches_later_diffs(kind, tmp_path):
+    stage = Usd.Stage.CreateNew(str(tmp_path / "source.usda"))
+    if kind == "transform_matrix":
+        prim = UsdGeom.Xform.Define(stage, "/Prim")
+        attr = prim.AddTransformOp().GetAttr()
+        value = Gf.Matrix4d(1.0)
+    elif kind == "orientations":
+        prim = UsdGeom.PointInstancer.Define(stage, "/Prim")
+        attr = prim.GetOrientationsfAttr()
+        value = [Gf.Quatf(1.0)]
+    else:
+        prim = UsdShade.Shader.Define(stage, "/Prim")
+        type_name = Sdf.ValueTypeNames.Asset if kind == "asset" else Sdf.ValueTypeNames.Matrix4d
+        attr = prim.CreateInput("sampled", type_name).GetAttr()
+        value = Sdf.AssetPath("./missing.exr") if kind == "asset" else Gf.Matrix4d(1.0)
+    attr.Set(value, 1.0)
+    emitter = NoticeEmitter(stage)
+    try:
+        emitter.seed_prim_cache(stage, "/Prim")
+        emitter.mark_dirty("/Prim")
+
+        events = emitter.build_events_for_dirty()
+
+        assert not [event for event in events if event.get("time") is not None]
+        assert any(event["k"] == K_ENSURE_PRIM for event in events)
+    finally:
+        emitter.cleanup()
+
+
 def test_emitter_reads_samples_from_variant_edit_target_spec_path():
     """Layer sample queries must use the edit target's mapped spec path.
 

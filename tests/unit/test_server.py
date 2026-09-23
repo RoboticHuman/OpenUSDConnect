@@ -787,6 +787,17 @@ class TestCompaction:
         assert resync["type"] == "resync"
         assert ready == {"type": "replay_complete", "head_seq": 0, "epoch": 1}
 
+    def test_purge_invalidates_cached_composed_prim_count(self, srv):
+        srv._commit_events([
+            {"k": "ensure_prim", "prim": "/BeforePurge", "typeName": "Xform"},
+        ])
+        assert srv.get_prim_count() == 2  # The base /Root plus the authored prim.
+
+        srv.purge()
+
+        assert not srv.stage.GetPrimAtPath("/BeforePurge")
+        assert srv.get_prim_count() == 1
+
     def test_seq_resets_after_compact(self, srv):
         """After compaction, sequence numbers restart from 1."""
         self._insert_events(

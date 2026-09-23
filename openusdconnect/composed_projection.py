@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import cast
 from weakref import ref
 
 from pxr import Ar, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdUtils
@@ -232,8 +231,7 @@ class _OwnedAdapterStateStage:
         )
         resolver = Ar.GetResolver()
         if not (
-            resolver.IsContextDependentPath(asset_path)
-            or resolver.IsContextDependentPath(anchored)
+            resolver.IsContextDependentPath(asset_path) or resolver.IsContextDependentPath(anchored)
         ):
             return anchored
         resolved = resolver.Resolve(anchored)
@@ -303,7 +301,11 @@ class _OwnedAdapterStateStage:
                 with Usd.EditContext(previous, previous.GetRootLayer()):
                     UsdStageAdapter(previous).apply_events(delivered_events)
                 self._sync_stage_controls()
-            except Exception:
+            except Tf.ErrorException:
+                LOG.warning(
+                    "Could not advance adapter-state stage; rebuilding from the live stage",
+                    exc_info=True,
+                )
                 self._rebuild_previous_stage()
             return
 
@@ -415,9 +417,7 @@ class ComposedProjectionState:
                 stage,
                 previous_stage=previous_stage,
                 advance_previous_stage=advance_previous_stage,
-                resolver_refresh_requires_native_rebuild=(
-                    resolver_refresh_requires_native_rebuild
-                ),
+                resolver_refresh_requires_native_rebuild=(resolver_refresh_requires_native_rebuild),
             )
 
     @property
@@ -488,11 +488,7 @@ class ComposedProjectionState:
         resolver_refresh_requires_native_rebuild: bool = False,
     ) -> None:
         self._ensure_resolver_listener()
-        if (
-            stage is self._live_stage
-            and previous_stage is None
-            and advance_previous_stage is None
-        ):
+        if stage is self._live_stage and previous_stage is None and advance_previous_stage is None:
             return
         if previous_stage is stage:
             raise ValueError("previous adapter-state stage must be distinct")
@@ -517,9 +513,7 @@ class ComposedProjectionState:
             _OwnedAdapterStateStage(stage) if previous_stage is None else None
         )
         self._needs_full_reconcile = False
-        self._resolver_refresh_requires_native_rebuild = (
-            resolver_refresh_requires_native_rebuild
-        )
+        self._resolver_refresh_requires_native_rebuild = resolver_refresh_requires_native_rebuild
         self._native_scene_rebuild_required = False
 
     def acknowledge_native_scene_rebuilt(self) -> None:
@@ -577,113 +571,28 @@ class ComposedProjectionState:
         self._needs_full_reconcile = False
 
 
-@dataclass(frozen=True)
-class _ProjectionStep:
-    """One ordered adapter projection phase and the event kinds it owns."""
-
-    name: str
-    method_name: str
-    event_kinds: frozenset[str] = frozenset()
-    candidate_name: str | None = None
-    collector_name: str | None = None
-
-
-# Order follows adapter dependencies: namespace state precedes authored values,
-# and direct events run after projected composed state. A new event kind must be
-# classified in EVENT_KIND_INFO and owned by exactly one projection step.
-_PROJECTION_STEPS = (
-    _ProjectionStep(
-        "namespace and lifecycle",
-        "_project_namespace_and_lifecycle",
-        event_kinds=frozenset({K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM}),
-        candidate_name="types",
-        collector_name="_collect_type_candidates",
-    ),
-    _ProjectionStep(
-        "composition arcs",
-        "_project_arcs",
-        event_kinds=frozenset({K_SET_REFERENCE, K_SET_PAYLOAD}),
-        candidate_name="arcs",
-        collector_name="_collect_arc_candidates",
-    ),
-    _ProjectionStep("payload load state", "_project_payload_load_state"),
-    _ProjectionStep(
-        "variant selections",
-        "_project_variants",
-        event_kinds=frozenset({K_SET_VARIANT_SELECTIONS}),
-        candidate_name="variants",
-        collector_name="_collect_variant_candidates",
-    ),
-    _ProjectionStep(
-        "transforms",
-        "_project_xforms",
-        event_kinds=frozenset({K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS}),
-        candidate_name="xforms",
-        collector_name="_collect_xform_candidates",
-    ),
-    _ProjectionStep(
-        "geometry attributes",
-        "_project_gprim_attrs",
-        event_kinds=frozenset({K_SET_GPRIM_ATTRS}),
-        candidate_name="gprim",
-        collector_name="_collect_gprim_candidates",
-    ),
-    _ProjectionStep(
-        "point instancers",
-        "_project_point_instancers",
-        event_kinds=frozenset({K_SET_POINT_INSTANCER}),
-        candidate_name="point_instancers",
-        collector_name="_collect_point_instancer_candidates",
-    ),
-    _ProjectionStep(
-        "material bindings",
-        "_project_materials",
-        event_kinds=frozenset({K_SET_MATERIAL_BINDING}),
-        candidate_name="materials",
-        collector_name="_collect_material_candidates",
-    ),
-    _ProjectionStep(
-        "connectable values and edges",
-        "_project_connectables",
-        event_kinds=frozenset({K_SET_CONNECTABLE_INPUT, K_SET_CONNECTABLE_CONNECTION}),
-        candidate_name="connectables",
-        collector_name="_collect_connectable_candidates",
-    ),
-    _ProjectionStep(
-        "active state",
-        "_project_active",
-        event_kinds=frozenset({K_DEACTIVATE_PRIM}),
-        candidate_name="active",
-        collector_name="_collect_active_candidates",
-    ),
-    _ProjectionStep(
-        "visibility",
-        "_project_visibility",
-        event_kinds=frozenset({K_SET_VISIBILITY}),
-        candidate_name="visibility",
-        collector_name="_collect_visibility_candidates",
-    ),
-    _ProjectionStep(
-        "instancing state",
-        "_project_instanceable",
-        event_kinds=frozenset({K_SET_INSTANCEABLE}),
-        candidate_name="instanceable",
-        collector_name="_collect_instanceable_candidates",
-    ),
-    _ProjectionStep("direct events", "_direct_events"),
+# Event kinds handled by the explicit projection calls in build_events.
+_PROJECTOR_EVENT_KINDS = frozenset(
+    {
+        K_ENSURE_PRIM,
+        K_DELETE_PRIM,
+        K_RENAME_PRIM,
+        K_SET_REFERENCE,
+        K_SET_PAYLOAD,
+        K_SET_VARIANT_SELECTIONS,
+        K_ENSURE_XFORM_OPS,
+        K_SET_XFORM_TRS,
+        K_SET_GPRIM_ATTRS,
+        K_SET_POINT_INSTANCER,
+        K_SET_MATERIAL_BINDING,
+        K_SET_CONNECTABLE_INPUT,
+        K_SET_CONNECTABLE_CONNECTION,
+        K_DEACTIVATE_PRIM,
+        K_SET_VISIBILITY,
+        K_SET_INSTANCEABLE,
+    }
 )
 
-_PROJECTOR_EVENT_KINDS = frozenset().union(*(step.event_kinds for step in _PROJECTION_STEPS))
-_PROJECTOR_EVENT_OWNERS = Counter(kind for step in _PROJECTION_STEPS for kind in step.event_kinds)
-
-if any(
-    (step.candidate_name is None) != (step.collector_name is None) for step in _PROJECTION_STEPS
-):
-    raise RuntimeError("native projection steps must pair candidate and collector names")
-if duplicate_kinds := sorted(
-    kind for kind, owner_count in _PROJECTOR_EVENT_OWNERS.items() if owner_count != 1
-):
-    raise RuntimeError(f"native projection event kinds have multiple owners: {duplicate_kinds}")
 if _PROJECTOR_EVENT_KINDS != NATIVE_PROJECTED_KINDS:
     missing = sorted(NATIVE_PROJECTED_KINDS - _PROJECTOR_EVENT_KINDS)
     stale = sorted(_PROJECTOR_EVENT_KINDS - NATIVE_PROJECTED_KINDS)
@@ -885,6 +794,244 @@ def _composed_arc_entries(
     return result
 
 
+def _read_arcs(
+    stage: Usd.Stage,
+    candidates: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], list[dict]]:
+    return {
+        key: _composed_arc_entries(
+            stage,
+            key[0],
+            payload=key[1] == K_SET_PAYLOAD,
+        )
+        for key in candidates
+    }
+
+
+def _read_types(
+    stage: Usd.Stage,
+    prim_paths: Iterable[str],
+) -> dict[str, tuple[str, tuple[str, ...]] | None]:
+    result = {}
+    for prim_path in prim_paths:
+        prim = stage.GetPrimAtPath(prim_path)
+        result[prim_path] = (
+            (str(prim.GetTypeName()), tuple(prim.GetAppliedSchemas()))
+            if _is_projectable_prim(prim)
+            else None
+        )
+    return result
+
+
+def _read_point_instancers(
+    stage: Usd.Stage,
+    candidates: dict[tuple[str, float | None], set[str]],
+) -> dict[tuple[str, float | None], dict[str, object]]:
+    names_by_field: dict[str, set[str]] = defaultdict(set)
+    for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
+        names_by_field[wire_name].add(usd_name)
+    names_by_field["prototypes"].add("prototypes")
+    names_by_field["inactive_ids"].add("inactiveIds")
+
+    result = {}
+    for key, fields in candidates.items():
+        only = set().union(*(names_by_field[field] for field in fields)) if fields else set()
+        values = read_point_instancer(
+            stage,
+            key[0],
+            only=only,
+            time=key[1],
+            transport=False,
+        )
+        result[key] = {field: value for field, value in (values or {}).items() if field in fields}
+    return result
+
+
+def _read_variants(stage: Usd.Stage, prim_paths: Iterable[str]) -> dict[str, dict[str, str]]:
+    return {prim_path: read_variant_selections(stage, prim_path) for prim_path in prim_paths}
+
+
+def _read_materials(
+    stage: Usd.Stage,
+    candidates: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    candidate_list = tuple(candidates)
+    by_prim = {
+        prim_path: read_material_binding(stage, prim_path)
+        for prim_path in {prim_path for prim_path, _purpose in candidate_list}
+    }
+    return {
+        (prim_path, purpose): by_prim[prim_path].get(purpose, "")
+        for prim_path, purpose in candidate_list
+    }
+
+
+def _read_connectables(
+    stage: Usd.Stage,
+    candidates: dict[tuple[str, float | None], set[str]],
+) -> dict[tuple[str, float | None], dict]:
+    result = {}
+    for key, local_attrs in candidates.items():
+        prim_path, time = key
+        prim = stage.GetPrimAtPath(prim_path)
+        if not _is_projectable_prim(prim):
+            result[key] = {
+                "info_id": "",
+                "inputs": {},
+                "types": {},
+                "connections": {},
+            }
+            continue
+        container_kind = connectable_kind(prim)
+        state = {
+            "info_id": "",
+            "inputs": {},
+            "types": {},
+            "connections": {},
+        }
+        if not container_kind:
+            result[key] = state
+            continue
+        connectable = UsdShade.ConnectableAPI(prim)
+        if container_kind == "shader":
+            state["info_id"] = str(UsdShade.Shader(prim).GetIdAttr().Get() or "")
+        include_all = "*" in local_attrs
+        for local_attr in local_attrs:
+            if local_attr == "*":
+                continue
+            namespace, _separator, base_name = local_attr.partition(":")
+            port = (
+                connectable.GetInput(base_name)
+                if namespace == "inputs"
+                else connectable.GetOutput(base_name)
+            )
+            if not port:
+                continue
+            sources, _invalid = port.GetConnectedSources()
+            if sources:
+                state["connections"][local_attr] = {
+                    "source_prim": str(sources[0].source.GetPath()),
+                    "source_attr": connected_source_attr(sources[0]).qualified_name,
+                }
+            if namespace != "inputs":
+                continue
+            value = usd_value_to_python(port.GetAttr().Get(_time_code(time)))
+            if value is not None:
+                state["inputs"][base_name] = value
+                state["types"][base_name] = str(port.GetAttr().GetTypeName())
+        if include_all:
+            _kind, info_id, inputs, types, connections = read_usdshade_connectable(
+                stage,
+                prim_path,
+            )
+            connections.update(state["connections"])
+            state = {
+                "info_id": info_id,
+                "inputs": inputs,
+                "types": types,
+                "connections": connections,
+            }
+            for input_port in connectable.GetInputs():
+                value = usd_value_to_python(input_port.GetAttr().Get(_time_code(time)))
+                if value is None:
+                    continue
+                name = input_port.GetBaseName()
+                state["inputs"][name] = value
+                state["types"][name] = str(input_port.GetAttr().GetTypeName())
+        result[key] = state
+    return result
+
+
+def _read_active(stage: Usd.Stage, prim_paths: Iterable[str]) -> dict[str, bool | None]:
+    result = {}
+    for prim_path in prim_paths:
+        prim = stage.GetPrimAtPath(prim_path)
+        result[prim_path] = prim.IsActive() if _is_projectable_prim(prim) else None
+    return result
+
+
+def _read_visibility(
+    stage: Usd.Stage,
+    candidates: Iterable[tuple[str, float | None]],
+) -> dict[tuple[str, float | None], bool | None]:
+    result = {}
+    for key in candidates:
+        prim = stage.GetPrimAtPath(key[0])
+        imageable = UsdGeom.Imageable(prim) if _is_projectable_prim(prim) else None
+        if not imageable:
+            result[key] = None
+            continue
+        visibility = imageable.GetVisibilityAttr().Get(_time_code(key[1]))
+        result[key] = visibility != UsdGeom.Tokens.invisible
+    return result
+
+
+def _read_instanceable(stage: Usd.Stage, prim_paths: Iterable[str]) -> dict[str, bool | None]:
+    result = {}
+    for prim_path in prim_paths:
+        prim = stage.GetPrimAtPath(prim_path)
+        result[prim_path] = prim.IsInstanceable() if _is_projectable_prim(prim) else None
+    return result
+
+
+def _capture_candidates(stage: Usd.Stage, candidates: _ProjectionCandidates) -> _ProjectionValues:
+    result = _ProjectionValues()
+    for prim_path in candidates.prims:
+        result.ensure(prim_path).valid = _is_projectable_prim(stage.GetPrimAtPath(prim_path))
+    for prim_path, value in _read_types(stage, candidates.types).items():
+        result.ensure(prim_path).type_state = value
+    for (prim_path, time), value in _local_transforms(stage, candidates.xforms).items():
+        state = result.ensure(prim_path)
+        if state.xforms is None:
+            state.xforms = {}
+        state.xforms[time] = value
+    for (prim_path, time), values in _gprim_values(stage, candidates.gprim).items():
+        if values:
+            state = result.ensure(prim_path)
+            if state.gprim is None:
+                state.gprim = {}
+            state.gprim[time] = values
+    for prim_path, values in _read_variants(stage, candidates.variants).items():
+        if values:
+            result.ensure(prim_path).variants = values
+    for (prim_path, purpose), value in _read_materials(stage, candidates.materials).items():
+        if value:
+            state = result.ensure(prim_path)
+            if state.materials is None:
+                state.materials = {}
+            state.materials[purpose] = value
+    for (prim_path, time), values in _read_connectables(stage, candidates.connectables).items():
+        if values.get("info_id") or values.get("inputs") or values.get("connections"):
+            state = result.ensure(prim_path)
+            if state.connectables is None:
+                state.connectables = {}
+            state.connectables[time] = values
+    for prim_path, value in _read_active(stage, candidates.active).items():
+        result.ensure(prim_path).active = value
+    for (prim_path, time), value in _read_visibility(stage, candidates.visibility).items():
+        state = result.ensure(prim_path)
+        if state.visibility is None:
+            state.visibility = {}
+        state.visibility[time] = value
+    for prim_path, value in _read_instanceable(stage, candidates.instanceable).items():
+        result.ensure(prim_path).instanceable = value
+    for (prim_path, time), values in _read_point_instancers(
+        stage, candidates.point_instancers
+    ).items():
+        if values:
+            state = result.ensure(prim_path)
+            if state.point_instancers is None:
+                state.point_instancers = {}
+            state.point_instancers[time] = values
+    for (prim_path, kind), values in _read_arcs(stage, candidates.arcs).items():
+        if values:
+            state = result.ensure(prim_path)
+            if state.arcs is None:
+                state.arcs = {}
+            state.arcs[kind] = values
+    return result
+
+
 class ComposedChangeProjection:
     """Build native adapter events from a layered mirror transaction.
 
@@ -1003,8 +1150,7 @@ class ComposedChangeProjection:
         self._explicit_lifecycle_paths = {
             str(event["prim"])
             for event in events
-            if event.get("prim")
-            and event.get("k") in {K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM}
+            if event.get("prim") and event.get("k") in {K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM}
         }
         self._explicit_lifecycle_paths.update(
             new_path for _old_path, new_path, _event in self._rename_pairs
@@ -1072,94 +1218,21 @@ class ComposedChangeProjection:
     ) -> None:
         candidates = self._candidates
         candidates.prims.update(prim_paths)
-        for step in _PROJECTION_STEPS:
-            if step.collector_name is None:
-                continue
-            collected = getattr(self, step.collector_name)(self._events)
-            getattr(candidates, cast(str, step.candidate_name)).update(collected)
+        events = self._events
+        candidates.types.update(self._collect_type_candidates(events))
+        candidates.arcs.update(self._collect_arc_candidates(events))
+        candidates.variants.update(self._collect_variant_candidates(events))
+        candidates.xforms.update(self._collect_xform_candidates(events))
+        candidates.gprim.update(self._collect_gprim_candidates(events))
+        candidates.point_instancers.update(self._collect_point_instancer_candidates(events))
+        candidates.materials.update(self._collect_material_candidates(events))
+        candidates.connectables.update(self._collect_connectable_candidates(events))
+        candidates.active.update(self._collect_active_candidates(events))
+        candidates.visibility.update(self._collect_visibility_candidates(events))
+        candidates.instanceable.update(self._collect_instanceable_candidates(events))
         candidates.arcs.update(arc_candidates)
         self._add_scene_path_candidates(scene_paths)
         self._add_subtree_candidates(self._subtree_roots)
-
-    def _capture_candidate_values(self) -> _ProjectionValues:
-        stage = self._stage
-        candidates = self._candidates
-        result = _ProjectionValues()
-        for prim_path in candidates.prims:
-            result.ensure(prim_path).valid = _is_projectable_prim(
-                stage.GetPrimAtPath(prim_path)
-            )
-        for prim_path, value in self._read_types(candidates.types).items():
-            result.ensure(prim_path).type_state = value
-        for (prim_path, time), value in _local_transforms(
-            stage, candidates.xforms
-        ).items():
-            state = result.ensure(prim_path)
-            if state.xforms is None:
-                state.xforms = {}
-            state.xforms[time] = value
-        for (prim_path, time), values in _gprim_values(stage, candidates.gprim).items():
-            if values:
-                state = result.ensure(prim_path)
-                if state.gprim is None:
-                    state.gprim = {}
-                state.gprim[time] = values
-        for prim_path, values in self._read_variants(candidates.variants).items():
-            if values:
-                result.ensure(prim_path).variants = values
-        for (prim_path, purpose), value in self._read_materials(
-            candidates.materials
-        ).items():
-            if value:
-                state = result.ensure(prim_path)
-                if state.materials is None:
-                    state.materials = {}
-                state.materials[purpose] = value
-        for (prim_path, time), values in self._read_connectables(
-            candidates.connectables
-        ).items():
-            if values.get("info_id") or values.get("inputs") or values.get("connections"):
-                state = result.ensure(prim_path)
-                if state.connectables is None:
-                    state.connectables = {}
-                state.connectables[time] = values
-        for prim_path, value in self._read_active(candidates.active).items():
-            result.ensure(prim_path).active = value
-        for (prim_path, time), value in self._read_visibility(
-            candidates.visibility
-        ).items():
-            state = result.ensure(prim_path)
-            if state.visibility is None:
-                state.visibility = {}
-            state.visibility[time] = value
-        for prim_path, value in self._read_instanceable(candidates.instanceable).items():
-            result.ensure(prim_path).instanceable = value
-        for (prim_path, time), values in self._read_point_instancers(
-            candidates.point_instancers
-        ).items():
-            if values:
-                state = result.ensure(prim_path)
-                if state.point_instancers is None:
-                    state.point_instancers = {}
-                state.point_instancers[time] = values
-        for (prim_path, kind), values in self._read_arcs(candidates.arcs).items():
-            if values:
-                state = result.ensure(prim_path)
-                if state.arcs is None:
-                    state.arcs = {}
-                state.arcs[kind] = values
-        return result
-
-    @classmethod
-    def _capture_candidates(
-        cls,
-        stage: Usd.Stage,
-        candidates: _ProjectionCandidates,
-    ) -> _ProjectionValues:
-        capture = cls.__new__(cls)
-        capture._stage = stage
-        capture._candidates = candidates
-        return capture._capture_candidate_values()
 
     def _should_reapply_composed(self, prim_path: str) -> bool:
         return self._reapply_all_composed or prim_path in self._reapply_composed_paths
@@ -1442,9 +1515,7 @@ class ComposedChangeProjection:
             )
         if has_xform:
             xformable = UsdGeom.Xformable(prim)
-            candidates.xforms.update(
-                (prim_path, time) for time in xformable.GetTimeSamples()
-            )
+            candidates.xforms.update((prim_path, time) for time in xformable.GetTimeSamples())
 
     def _add_subtree_candidates(
         self,
@@ -1549,8 +1620,7 @@ class ComposedChangeProjection:
 
     def _is_in_native_composition_subtree(self, prim_path: str) -> bool:
         return any(
-            _path_is_at_or_below(prim_path, root)
-            for root in self._native_composition_subtree_roots
+            _path_is_at_or_below(prim_path, root) for root in self._native_composition_subtree_roots
         )
 
     def _remove_native_owned_notice_candidates(self) -> None:
@@ -1567,9 +1637,9 @@ class ComposedChangeProjection:
             values.difference_update(
                 {
                     value
-                for value in values
-                if value not in original
-                and self._is_in_native_composition_subtree(path_of(value))
+                    for value in values
+                    if value not in original
+                    and self._is_in_native_composition_subtree(path_of(value))
                 }
             )
 
@@ -1675,14 +1745,26 @@ class ComposedChangeProjection:
         self._remove_native_owned_notice_candidates()
         self._record_affected_prim_paths()
         if (previous_stage := self._state.previous_stage) is not None:
-            self._previous_values = self._capture_candidates(
+            self._previous_values = _capture_candidates(
                 previous_stage,
                 self._candidates,
             )
 
         adapter_events: list[dict] = []
-        for step in _PROJECTION_STEPS:
-            adapter_events.extend(getattr(self, step.method_name)())
+        # Namespace changes precede values; direct events follow composed state.
+        adapter_events.extend(self._project_namespace_and_lifecycle())
+        adapter_events.extend(self._project_arcs())
+        adapter_events.extend(self._project_payload_load_state())
+        adapter_events.extend(self._project_variants())
+        adapter_events.extend(self._project_xforms())
+        adapter_events.extend(self._project_gprim_attrs())
+        adapter_events.extend(self._project_point_instancers())
+        adapter_events.extend(self._project_materials())
+        adapter_events.extend(self._project_connectables())
+        adapter_events.extend(self._project_active())
+        adapter_events.extend(self._project_visibility())
+        adapter_events.extend(self._project_instanceable())
+        adapter_events.extend(self._direct_events())
         adapter_events = self._order_native_composition_events(adapter_events)
         self._built_adapter_events = adapter_events
         self._delivery_state = "built"
@@ -1715,21 +1797,8 @@ class ComposedChangeProjection:
     def _project_payload_load_state(self) -> list[dict]:
         return [event for event in self._events if event.get("k") in _COMPOSITION_DIRECT_KINDS]
 
-    def _read_arcs(
-        self,
-        candidates: Iterable[tuple[str, str]],
-    ) -> dict[tuple[str, str], list[dict]]:
-        return {
-            key: _composed_arc_entries(
-                self._stage,
-                key[0],
-                payload=key[1] == K_SET_PAYLOAD,
-            )
-            for key in candidates
-        }
-
     def _project_arcs(self) -> list[dict]:
-        after = self._read_arcs(self._candidates.arcs)
+        after = _read_arcs(self._stage, self._candidates.arcs)
         result = []
         for (prim_path, kind), entries in after.items():
             before = (self._previous_prim_values(prim_path).arcs or {}).get(kind, [])
@@ -1747,20 +1816,6 @@ class ComposedChangeProjection:
                     "list_op_authored": True,
                     "list_op_explicit": True,
                 }
-            )
-        return result
-
-    def _read_types(
-        self,
-        prim_paths: Iterable[str],
-    ) -> dict[str, tuple[str, tuple[str, ...]] | None]:
-        result = {}
-        for prim_path in prim_paths:
-            prim = self._stage.GetPrimAtPath(prim_path)
-            result[prim_path] = (
-                (str(prim.GetTypeName()), tuple(prim.GetAppliedSchemas()))
-                if _is_projectable_prim(prim)
-                else None
             )
         return result
 
@@ -1782,7 +1837,7 @@ class ComposedChangeProjection:
         self,
         renamed_paths: set[str],
     ) -> list[dict]:
-        types_after = self._read_types(self._candidates.types)
+        types_after = _read_types(self._stage, self._candidates.types)
         rebuilds = []
         ensures = []
         deletes = []
@@ -1882,33 +1937,8 @@ class ComposedChangeProjection:
             result.append(event)
         return result
 
-    def _read_point_instancers(
-        self,
-        candidates: dict[tuple[str, float | None], set[str]],
-    ) -> dict[tuple[str, float | None], dict[str, object]]:
-        names_by_field: dict[str, set[str]] = defaultdict(set)
-        for usd_name, wire_name in POINT_INSTANCER_USD_TO_WIRE.items():
-            names_by_field[wire_name].add(usd_name)
-        names_by_field["prototypes"].add("prototypes")
-        names_by_field["inactive_ids"].add("inactiveIds")
-
-        result = {}
-        for key, fields in candidates.items():
-            only = set().union(*(names_by_field[field] for field in fields)) if fields else set()
-            values = read_point_instancer(
-                self._stage,
-                key[0],
-                only=only,
-                time=key[1],
-                transport=False,
-            )
-            result[key] = {
-                field: value for field, value in (values or {}).items() if field in fields
-            }
-        return result
-
     def _project_point_instancers(self) -> list[dict]:
-        after = self._read_point_instancers(self._candidates.point_instancers)
+        after = _read_point_instancers(self._stage, self._candidates.point_instancers)
         result = []
         for key, values in after.items():
             prim = self._stage.GetPrimAtPath(key[0])
@@ -1943,13 +1973,8 @@ class ComposedChangeProjection:
             result.append(event)
         return result
 
-    def _read_variants(self, prim_paths: Iterable[str]) -> dict[str, dict[str, str]]:
-        return {
-            prim_path: read_variant_selections(self._stage, prim_path) for prim_path in prim_paths
-        }
-
     def _project_variants(self) -> list[dict]:
-        after = self._read_variants(self._candidates.variants)
+        after = _read_variants(self._stage, self._candidates.variants)
         result = []
         for prim_path, selections in after.items():
             if not _is_projectable_prim(self._stage.GetPrimAtPath(prim_path)):
@@ -1968,22 +1993,8 @@ class ComposedChangeProjection:
             )
         return result
 
-    def _read_materials(
-        self,
-        candidates: Iterable[tuple[str, str]],
-    ) -> dict[tuple[str, str], str]:
-        candidate_list = tuple(candidates)
-        by_prim = {
-            prim_path: read_material_binding(self._stage, prim_path)
-            for prim_path in {prim_path for prim_path, _purpose in candidate_list}
-        }
-        return {
-            (prim_path, purpose): by_prim[prim_path].get(purpose, "")
-            for prim_path, purpose in candidate_list
-        }
-
     def _project_materials(self) -> list[dict]:
-        after = self._read_materials(self._candidates.materials)
+        after = _read_materials(self._stage, self._candidates.materials)
         result = []
         for key, material_path in after.items():
             if not _is_projectable_prim(self._stage.GetPrimAtPath(key[0])):
@@ -2029,83 +2040,8 @@ class ComposedChangeProjection:
                     result[(prim_path, None)].add("*" if name == "info:id" else name)
         return result
 
-    def _read_connectables(
-        self,
-        candidates: dict[tuple[str, float | None], set[str]],
-    ) -> dict[tuple[str, float | None], dict]:
-        result = {}
-        for key, local_attrs in candidates.items():
-            prim_path, time = key
-            prim = self._stage.GetPrimAtPath(prim_path)
-            if not _is_projectable_prim(prim):
-                result[key] = {
-                    "info_id": "",
-                    "inputs": {},
-                    "types": {},
-                    "connections": {},
-                }
-                continue
-            container_kind = connectable_kind(prim)
-            state = {
-                "info_id": "",
-                "inputs": {},
-                "types": {},
-                "connections": {},
-            }
-            if not container_kind:
-                result[key] = state
-                continue
-            connectable = UsdShade.ConnectableAPI(prim)
-            if container_kind == "shader":
-                state["info_id"] = str(UsdShade.Shader(prim).GetIdAttr().Get() or "")
-            include_all = "*" in local_attrs
-            for local_attr in local_attrs:
-                if local_attr == "*":
-                    continue
-                namespace, _separator, base_name = local_attr.partition(":")
-                port = (
-                    connectable.GetInput(base_name)
-                    if namespace == "inputs"
-                    else connectable.GetOutput(base_name)
-                )
-                if not port:
-                    continue
-                sources, _invalid = port.GetConnectedSources()
-                if sources:
-                    state["connections"][local_attr] = {
-                        "source_prim": str(sources[0].source.GetPath()),
-                        "source_attr": connected_source_attr(sources[0]).qualified_name,
-                    }
-                if namespace != "inputs":
-                    continue
-                value = usd_value_to_python(port.GetAttr().Get(_time_code(time)))
-                if value is not None:
-                    state["inputs"][base_name] = value
-                    state["types"][base_name] = str(port.GetAttr().GetTypeName())
-            if include_all:
-                _kind, info_id, inputs, types, connections = read_usdshade_connectable(
-                    self._stage,
-                    prim_path,
-                )
-                connections.update(state["connections"])
-                state = {
-                    "info_id": info_id,
-                    "inputs": inputs,
-                    "types": types,
-                    "connections": connections,
-                }
-                for input_port in connectable.GetInputs():
-                    value = usd_value_to_python(input_port.GetAttr().Get(_time_code(time)))
-                    if value is None:
-                        continue
-                    name = input_port.GetBaseName()
-                    state["inputs"][name] = value
-                    state["types"][name] = str(input_port.GetAttr().GetTypeName())
-            result[key] = state
-        return result
-
     def _project_connectables(self) -> list[dict]:
-        after = self._read_connectables(self._candidates.connectables)
+        after = _read_connectables(self._stage, self._candidates.connectables)
         input_events = []
         connection_events = []
         for key, state in after.items():
@@ -2158,94 +2094,64 @@ class ComposedChangeProjection:
                 )
         return input_events + connection_events
 
-    def _read_active(self, prim_paths: Iterable[str]) -> dict[str, bool | None]:
-        result = {}
-        for prim_path in prim_paths:
-            prim = self._stage.GetPrimAtPath(prim_path)
-            result[prim_path] = prim.IsActive() if _is_projectable_prim(prim) else None
-        return result
-
     def _project_active(self) -> list[dict]:
-        after = self._read_active(self._candidates.active)
-        return [
-            {
+        after = _read_active(self._stage, self._candidates.active)
+        result = []
+        for prim_path, active in after.items():
+            if active is None:
+                continue
+            previous_active = self._previous_prim_values(prim_path).active
+            # A newly observed default needs no explicit activation event.
+            if active is True and previous_active is None:
+                continue
+            if active == previous_active and not self._should_reapply_composed(prim_path):
+                continue
+            result.append({
                 "k": K_DEACTIVATE_PRIM,
                 "prim": prim_path,
                 "active": active,
-            }
-            for prim_path, active in after.items()
-            if active is not None
-            and (
-                active is False
-                or self._previous_prim_values(prim_path).active is not None
-            )
-            and (
-                self._should_reapply_composed(prim_path)
-                or self._previous_prim_values(prim_path).active != active
-            )
-        ]
-
-    def _read_visibility(
-        self,
-        candidates: Iterable[tuple[str, float | None]],
-    ) -> dict[tuple[str, float | None], bool | None]:
-        result = {}
-        for key in candidates:
-            prim = self._stage.GetPrimAtPath(key[0])
-            imageable = UsdGeom.Imageable(prim) if _is_projectable_prim(prim) else None
-            if not imageable:
-                result[key] = None
-                continue
-            visibility = imageable.GetVisibilityAttr().Get(_time_code(key[1]))
-            result[key] = visibility != UsdGeom.Tokens.invisible
+            })
         return result
 
     def _project_visibility(self) -> list[dict]:
-        after = self._read_visibility(self._candidates.visibility)
+        after = _read_visibility(self._stage, self._candidates.visibility)
         result = []
-        for key, visible in after.items():
-            if visible is None or (
-                not self._should_reapply_composed(key[0])
-                and (self._previous_prim_values(key[0]).visibility or {}).get(key[1])
-                == visible
-            ):
+        for (prim_path, sample_time), visible in after.items():
+            if visible is None:
+                continue
+            previous = self._previous_prim_values(prim_path).visibility or {}
+            unchanged = previous.get(sample_time) == visible
+            if unchanged and not self._should_reapply_composed(prim_path):
                 continue
             event = {
                 "k": K_SET_VISIBILITY,
-                "prim": key[0],
+                "prim": prim_path,
                 "visible": visible,
             }
-            if key[1] is not None:
-                event["time"] = key[1]
+            if sample_time is not None:
+                event["time"] = sample_time
             result.append(event)
         return result
 
-    def _read_instanceable(self, prim_paths: Iterable[str]) -> dict[str, bool | None]:
-        result = {}
-        for prim_path in prim_paths:
-            prim = self._stage.GetPrimAtPath(prim_path)
-            result[prim_path] = prim.IsInstanceable() if _is_projectable_prim(prim) else None
-        return result
-
     def _project_instanceable(self) -> list[dict]:
-        after = self._read_instanceable(self._candidates.instanceable)
-        return [
-            {
+        after = _read_instanceable(self._stage, self._candidates.instanceable)
+        result = []
+        for prim_path, instanceable in after.items():
+            if instanceable is None:
+                continue
+            previous_instanceable = self._previous_prim_values(prim_path).instanceable
+            # Ordinary prims need no event until instancing has been observed.
+            if instanceable is False and previous_instanceable is None:
+                continue
+            unchanged = instanceable == previous_instanceable
+            if unchanged and not self._should_reapply_composed(prim_path):
+                continue
+            result.append({
                 "k": K_SET_INSTANCEABLE,
                 "prim": prim_path,
                 "instanceable": instanceable,
-            }
-            for prim_path, instanceable in after.items()
-            if instanceable is not None
-            and (
-                instanceable is True
-                or self._previous_prim_values(prim_path).instanceable is not None
-            )
-            and (
-                self._should_reapply_composed(prim_path)
-                or self._previous_prim_values(prim_path).instanceable != instanceable
-            )
-        ]
+            })
+        return result
 
     def _project_xforms(self) -> list[dict]:
         after = _local_transforms(self._stage, self._candidates.xforms)
@@ -2309,29 +2215,6 @@ class ComposedChangeProjection:
                 continue
             raise RuntimeError(f"event kind has no native projection policy: {kind!r}")
         return result
-
-
-def _validate_projection_steps() -> None:
-    candidate_names = _ProjectionCandidates.__dataclass_fields__
-    for step in _PROJECTION_STEPS:
-        if not hasattr(ComposedChangeProjection, step.method_name):
-            raise RuntimeError(
-                f"native projection step {step.name!r} has no projector {step.method_name!r}"
-            )
-        if step.collector_name is None:
-            continue
-        if step.candidate_name not in candidate_names:
-            raise RuntimeError(
-                f"native projection step {step.name!r} has unknown candidate "
-                f"{step.candidate_name!r}"
-            )
-        if not hasattr(ComposedChangeProjection, step.collector_name):
-            raise RuntimeError(
-                f"native projection step {step.name!r} has no collector {step.collector_name!r}"
-            )
-
-
-_validate_projection_steps()
 
 
 __all__ = ["ComposedChangeProjection", "ComposedProjectionState"]

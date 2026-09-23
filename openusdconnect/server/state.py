@@ -55,8 +55,6 @@ from ..protocol_constants import (
     MSG_REPLAY_COMPLETE,
     MSG_RESYNC,
     NON_COLLABORATION_KINDS,
-    SHARED_STAGE_EVENT_KINDS,
-    SHARED_STAGE_ONLY_KINDS,
     LayerMode,
     event_apply_tier,
 )
@@ -121,13 +119,13 @@ class _TransactionRequest:
 
 @dataclass(slots=True)
 class _PreparedTransaction:
-    request: _TransactionRequest
+    events: list[dict]
     target_layer: Sdf.Layer
     collaboration_paths: set[str]
     has_session_events: bool
     records: list[tuple[dict, bytes]]
     persist_tuples: list[tuple[int, bytes, str | None, str | None, str | None]]
-    progress: ProducerProgress
+    progress: ProducerProgress | None
 
 
 def _managed_rollback_paths(events: list[dict]) -> set[str]:
@@ -280,12 +278,20 @@ def _stage_prim_types(stage: Usd.Stage) -> dict[str, str]:
 
 
 def _stage_live_metadata(stage: Usd.Stage) -> dict | None:
+    """Read and validate the optional identity carried by a VFS snapshot."""
     layer_data = stage.GetRootLayer().customLayerData or {}
     if "openusdconnect" not in layer_data:
         return None
     metadata = layer_data["openusdconnect"]
     if not isinstance(metadata, dict):
         raise InvalidVfsWriteError("uploaded openusdconnect metadata must be a dictionary")
+    scene_id = metadata.get("scene_id")
+    if not isinstance(scene_id, str) or not scene_id:
+        raise InvalidVfsWriteError(
+            "uploaded openusdconnect metadata field 'scene_id' must be a non-empty string"
+        )
+    _metadata_int(metadata, "epoch")
+    _metadata_int(metadata, "snapshot_seq")
     return metadata
 
 
@@ -460,9 +466,7 @@ class UsdSyncServer:
 
         # Department assignment is collaboration policy. The layer stack itself
         # is keyed generically so replay does not depend on department concepts.
-        self.client_layers: dict[str, Sdf.Layer] = {}
         self._client_layer_keys: dict[str, str] = {}
-        self._client_departments: dict[str, str] = {}
         self.department_priority: list[str] = list(department_priority or [])
         if any(not department for department in self.department_priority):
             raise ValueError("department names must be non-empty")
@@ -493,10 +497,6 @@ class UsdSyncServer:
         # same lock also covers live enqueue: a later durable sequence must
         # never become visible before an earlier one.
         self._transaction_commit_lock = threading.RLock()
-        # Shared topology commits participate in the same global persisted/live
-        # sequence order as managed transactions. Conflict detection itself is
-        # per parent layer inside SharedLayerGraph.
-        self._shared_stage_commit_lock = self._transaction_commit_lock
         self.txn_batch_size = max(1, int(txn_batch_size))
         self.txn_batch_delay = max(0.0, float(txn_batch_delay))
         self._transaction_queue: queue.Queue[_TransactionRequest | None] | None = None
@@ -596,13 +596,9 @@ class UsdSyncServer:
                 daemon=True,
             )
 
-        # prim_path → (translate_op, orient_op, scale_op). A cached XformOp is
-        # only valid while the stage edit target is unchanged: any SetEditTarget
-        # (e.g. switching to another department's layer) invalidates it, so a
-        # reused op authors against the wrong layer and the write is silently
-        # lost. _op_cache_for clears the cache whenever the edit target changes;
-        # consecutive edits to the same layer keep it (the single-client fast
-        # path).
+        # prim_path → (translate_op, orient_op, scale_op). Cache hits skip op
+        # setup, including authoring xformOpOrder in the current layer. Clear
+        # on layer changes so each department gets its own transform opinions.
         from cachetools import LRUCache
 
         self.op_cache: LRUCache = LRUCache(
@@ -898,12 +894,12 @@ class UsdSyncServer:
         return layer
 
     def _op_cache_for(self, layer: Sdf.Layer):
-        """Return the op cache for editing *layer*, clearing it when the edit
-        target changed since it was last populated. A cached XformOp is only
-        valid while the edit target is unchanged, so any switch to another layer
-        invalidates every entry; without the clear a reused op authors against
-        the wrong layer and the write is lost. Callers must SetEditTarget to
-        *layer* before authoring."""
+        """Reuse op setup only for consecutive edits to the same layer.
+
+        XformOp.Set uses the stage's current edit target; the op is not bound
+        to a layer. This cache also skips setup of that layer's xformOpOrder,
+        which must run again after switching layers.
+        """
         if self._op_cache_layer != layer.identifier:
             self.op_cache.clear()
             self._op_cache_layer = layer.identifier
@@ -991,10 +987,6 @@ class UsdSyncServer:
                 )
                 if client_id:
                     self._client_layer_keys[client_id] = layer_key
-                    self.client_layers[client_id] = layer
-                    department = _department_for_layer_key(layer_key)
-                    if department:
-                        self._client_departments[client_id] = department
             routed.append((layer, ev))
 
         self._apply_department_order()
@@ -1145,7 +1137,15 @@ class UsdSyncServer:
             return []
         return self.token_store.get_all()
 
-    # -- Per-client layer management ------------------------------------
+    # -- Client assignments to collaboration layers ---------------------
+
+    @property
+    def client_layers(self) -> dict[str, Sdf.Layer]:
+        """Return a snapshot of client assignments to shared collaboration layers."""
+        return {
+            client_id: self.layer_stack.layer_for(layer_key)
+            for client_id, layer_key in self._client_layer_keys.items()
+        }
 
     def get_or_create_client_layer(
         self,
@@ -1161,11 +1161,9 @@ class UsdSyncServer:
         layer_key = _layer_key_for_department(department)
         if department:
             layer = self._get_or_create_department_layer(department)
-            self._client_departments[client_id] = department
         else:
             layer = self.edit_layer
         self._client_layer_keys[client_id] = layer_key
-        self.client_layers[client_id] = layer
         return layer
 
     def _flat_replay_rejection_reason_unlocked(self) -> str:
@@ -1312,13 +1310,15 @@ class UsdSyncServer:
         return True
 
     def merge_layer(self, client_id: str) -> bool:
-        """Merge a client's layer opinions into the root layer, then remove it.
+        """Merge the client's department opinions into the root layer.
 
-        Copies each leaf prim spec individually via Sdf.CopySpec so
+        Releases this client; the department layer remains while other clients
+        use it. Copies each leaf prim spec individually via Sdf.CopySpec so
         existing root opinions on sibling prims are preserved.
         Returns False for clients on the shared edit_layer (no-op).
         """
-        layer = self.client_layers.get(client_id)
+        layer_key = self._client_layer_keys.get(client_id)
+        layer = self.layer_stack.layer_for(layer_key) if layer_key else None
         if not layer or layer is self.edit_layer:
             return False
 
@@ -1357,11 +1357,14 @@ class UsdSyncServer:
         return True
 
     def delete_layer(self, client_id: str) -> bool:
-        """Delete a client's layer and discard all opinions.
+        """Release a client's department assignment.
+
+        The department layer is discarded only when its last client leaves.
 
         Returns False for clients on the shared edit_layer (no-op).
         """
-        layer = self.client_layers.get(client_id)
+        layer_key = self._client_layer_keys.get(client_id)
+        layer = self.layer_stack.layer_for(layer_key) if layer_key else None
         if not layer or layer is self.edit_layer:
             return False
         self._cleanup_client_refs(client_id)
@@ -1376,8 +1379,6 @@ class UsdSyncServer:
         orphaned department layer reference.
         """
         layer_key = self._client_layer_keys.pop(client_id, None)
-        self.client_layers.pop(client_id, None)
-        self._client_departments.pop(client_id, None)
         if not layer_key or layer_key == _DEFAULT_LAYER_KEY:
             return
         if layer_key in self._client_layer_keys.values():
@@ -1541,23 +1542,9 @@ class UsdSyncServer:
                     )
                 )
             self.store.clear_and_rewrite(records)
-        with self._seq_lock:
-            self._event_count = len(records)
-            self._next_seq = len(records) + 1
-            self._seq_at_last_compact = self._next_seq
-            self._snapshot_epoch += 1
-            self._replay_epoch += 1
+        self._reset_replay_history(len(records))
         self._maybe_reclaim_storage()
-
-        self.op_cache.clear()
-        self._op_cache_layer = None
-
-        # Rebuild incremental prim tracking from compacted state.
-        self._prim_paths.clear()
-        self._instanceable_paths.clear()
-        self._point_instancer_paths.clear()
-        for entry in sorted_entries:
-            self._track_prim_event(entry.event)
+        self._rebuild_scene_caches(entry.event for entry in sorted_entries)
 
         LOG.info("Compacted event log: %d -> %d records", original_count, len(records))
 
@@ -1619,19 +1606,10 @@ class UsdSyncServer:
         # producers would be rejected for starting above transaction 1.
         self.store.clear_and_rewrite([])
         self._maybe_reclaim_storage()
-        with self._seq_lock:
-            self._event_count = 0
-            self._next_seq = 1
-            self._seq_at_last_compact = 1
-            self._snapshot_epoch += 1
-            self._replay_epoch += 1
+        self._reset_replay_history(0)
         with self.stage_lock:
             self.layer_stack.clear()
-        self.op_cache.clear()
-        self._op_cache_layer = None
-        self._prim_paths.clear()
-        self._instanceable_paths.clear()
-        self._point_instancer_paths.clear()
+            self._rebuild_scene_caches()
         LOG.info("Purged event log and reset authored collaboration layers")
         replay_epoch, replay_head = self.get_replay_token()
         with self.clients_lock:
@@ -1660,6 +1638,26 @@ class UsdSyncServer:
                 )
                 disconnected.append(handler)
         self._discard_unreachable_receivers(disconnected)
+
+    def _reset_replay_history(self, record_count: int) -> None:
+        """Publish a durable log replacement while holding the exclusive barrier."""
+        with self._seq_lock:
+            self._event_count = record_count
+            self._next_seq = record_count + 1
+            self._seq_at_last_compact = self._next_seq
+            self._snapshot_epoch += 1
+            self._replay_epoch += 1
+
+    def _rebuild_scene_caches(self, events: Iterable[dict] = ()) -> None:
+        """Discard cached USD handles and rebuild indexes from replacement history."""
+        self.op_cache.clear()
+        self._op_cache_layer = None
+        self._prim_paths.clear()
+        self._instanceable_paths.clear()
+        self._point_instancer_paths.clear()
+        for event in events:
+            self._track_prim_event(event)
+        self._prim_count_dirty = True
 
     def assign_seq(self) -> int:
         with self._seq_lock:
@@ -1696,219 +1694,35 @@ class UsdSyncServer:
 
         Returns the number of translated events persisted to the event log.
         """
-        uploaded_meta = _stage_live_metadata(uploaded_stage)
-        if uploaded_meta is None:
-            uploaded_scene_id = None
-            uploaded_epoch = None
-            uploaded_seq = None
-        else:
-            uploaded_scene_id = uploaded_meta.get("scene_id")
-            if not isinstance(uploaded_scene_id, str) or not uploaded_scene_id:
-                raise InvalidVfsWriteError(
-                    "uploaded openusdconnect metadata field 'scene_id' must be a non-empty string"
-                )
-            uploaded_epoch = _metadata_int(uploaded_meta, "epoch")
-            uploaded_seq = _metadata_int(uploaded_meta, "snapshot_seq")
+        from ..event_apply import apply_events
 
+        uploaded_meta = _stage_live_metadata(uploaded_stage)
         self.txn_barrier.acquire_exclusive()
         try:
-            current_epoch, current_seq = self.get_snapshot_token()
-            with self.stage_lock:
-                department_layers = self._ordered_department_names()
-                additional_layers = [
-                    layer_key
-                    for layer_key in self.layer_stack.layer_keys
-                    if layer_key != _DEFAULT_LAYER_KEY
-                    and _department_for_layer_key(layer_key) is None
-                ]
-                before_types = _stage_prim_types(self.stage)
-            uploaded_types = _stage_prim_types(uploaded_stage)
-            before_paths = set(before_types)
-            uploaded_paths = set(uploaded_types)
-            created_paths = sorted(uploaded_paths - before_paths)
-            removed_paths = sorted(
-                before_paths - uploaded_paths,
-                key=lambda p: p.count("/"),
-                reverse=True,
+            analysis = self._validate_stage_snapshot(
+                uploaded_stage,
+                uploaded_meta,
+                reject_stale=reject_stale,
+                reject_ambiguous=reject_ambiguous,
             )
-            type_changed_paths = sorted(
-                p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
-            )
-
-            notes = []
-
-            def _analysis(status: str, status_notes: list[str], event_counts=None):
-                return VfsWriteAnalysis(
-                    status=status,
-                    current_epoch=current_epoch,
-                    current_seq=current_seq,
-                    uploaded_epoch=uploaded_epoch,
-                    uploaded_seq=uploaded_seq,
-                    before_prim_count=len(before_paths),
-                    uploaded_prim_count=len(uploaded_paths),
-                    created_prims=created_paths,
-                    removed_prims=removed_paths,
-                    type_changed_prims=type_changed_paths,
-                    event_counts=event_counts or {},
-                    notes=status_notes,
-                )
-
-            if department_layers or additional_layers:
-                details = []
-                if department_layers:
-                    details.append(f"department layers: {', '.join(department_layers)}")
-                if additional_layers:
-                    details.append(f"collaboration layers: {', '.join(additional_layers)}")
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "translate write fallback is disabled while non-default "
-                        f"collaboration layers are active ({'; '.join(details)})"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "VFS translate writes are disabled while non-default "
-                    "collaboration layers are active"
-                )
-
-            if uploaded_meta is None:
-                analysis = _analysis(
-                    "metadata_rejected",
-                    ["uploaded snapshot is missing openusdconnect metadata"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise InvalidVfsWriteError(
-                    "uploaded VFS snapshot is missing openusdconnect metadata"
-                )
-
-            if uploaded_scene_id != self.scene_id:
-                analysis = _analysis(
-                    "metadata_rejected",
-                    ["uploaded snapshot belongs to a different live scene"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise InvalidVfsWriteError(
-                    "uploaded VFS snapshot scene_id does not match this server: "
-                    f"file={uploaded_scene_id!r}, server={self.scene_id!r}"
-                )
-
-            uploaded_token = (uploaded_epoch, uploaded_seq)
-            current_token = (current_epoch, current_seq)
-            if uploaded_token != current_token:
-                if uploaded_token < current_token and not reject_stale:
-                    notes.append(
-                        "stale snapshot token accepted because stale-write rejection was disabled"
-                    )
-                else:
-                    relation = "older" if uploaded_token < current_token else "newer"
-                    analysis = _analysis(
-                        "stale_rejected" if relation == "older" else "future_rejected",
-                        [f"uploaded snapshot is {relation} than the current live server state"],
-                    )
-                    self.last_vfs_write_analysis = analysis.to_dict()
-                    raise StaleVfsWriteError(
-                        "uploaded VFS snapshot token does not match the current server: "
-                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
-                        f"server epoch/seq={current_epoch}/{current_seq}"
-                    )
-
-            if uploaded_stage.GetEditTarget().GetLayer().subLayerPaths:
-                analysis = _analysis(
-                    "unsupported_rejected",
-                    [
-                        "uploaded snapshot contains sublayer topology, which cannot "
-                        "be mapped into the managed collaboration layer stack"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise UnsupportedVfsWriteError(
-                    "uploaded VFS snapshot contains unsupported sublayer topology"
-                )
-
-            removed_fraction = len(removed_paths) / max(1, len(before_paths))
-            removes_rootish_prim = any(
-                path.count("/") <= 1 and path != "/Root" for path in removed_paths
-            )
-            ambiguous_destructive = bool(removed_paths) and (
-                not uploaded_paths
-                or removes_rootish_prim
-                or (len(before_paths) >= 10 and removed_fraction >= 0.8)
-            )
-            if reject_ambiguous and ambiguous_destructive:
-                analysis = _analysis(
-                    "ambiguous_rejected",
-                    [
-                        "uploaded snapshot removes a root-level prim or most of the scene; "
-                        "refusing automatic fallback translation"
-                    ],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
-                raise AmbiguousVfsWriteError(
-                    "uploaded VFS snapshot looks destructively incomplete; "
-                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
-                )
-
             if unchanged_snapshot:
-                analysis = _analysis(
-                    "unchanged",
-                    ["uploaded bytes match the current virtual snapshot"],
-                )
-                self.last_vfs_write_analysis = analysis.to_dict()
+                self.last_vfs_write_analysis = replace(
+                    analysis,
+                    status="unchanged",
+                    notes=["uploaded bytes match the current virtual snapshot"],
+                ).to_dict()
                 LOG.info("VFS snapshot write is unchanged; no events generated")
                 return 0
 
-            emitter = NoticeEmitter(uploaded_stage)
-            try:
-                events = emitter.snapshot_events()
-            finally:
-                emitter.cleanup()
-
-            # Hide prims that existed in the previous composed stage but are absent
-            # from the uploaded snapshot. This lets full-file saves express deletes
-            # even when the original prim lives in the immutable base layer.
-            for prim_path in removed_paths:
-                events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
-
+            events, replacement_layer, shared_events = self._prepare_stage_snapshot(
+                uploaded_stage, analysis.removed_prims,
+            )
             event_counts: dict[str, int] = {}
-            for ev in events:
-                kind = ev.get("k", "")
+            for event in events:
+                kind = event.get("k", "")
                 if kind:
                     event_counts[kind] = event_counts.get(kind, 0) + 1
-
-            analysis = _analysis("translated", notes, event_counts)
-
-            # Build the complete replacement off-stage first. This validates
-            # every generated event and gives us an authored layer that can be
-            # installed without incrementally mutating authoritative state.
-            from ..event_apply import apply_events
-            from ..sdf_spec_delta import validate_spec_delta
-
-            for event in events:
-                if event.get("k") == K_SET_SDF_SPEC_FIELDS:
-                    validate_spec_delta(event)
-
-            replacement_layer = Sdf.Layer.CreateAnonymous("vfs-replacement-edits")
-            replacement_session = Sdf.Layer.CreateAnonymous("vfs-replacement-session")
-            replacement_session.subLayerPaths = [replacement_layer.identifier]
-            with self.stage_lock:
-                replacement_stage = Usd.Stage.Open(
-                    self.stage.GetRootLayer(),
-                    replacement_session,
-                    self.stage.GetPathResolverContext(),
-                )
-            if replacement_stage is None:
-                raise RuntimeError("failed to create the VFS replacement stage")
-            replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
-            replacement_events = [
-                event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
-            ]
-            shared_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
-            if replacement_events:
-                apply_events(replacement_stage, replacement_events, prevalidated=True)
-            if shared_events:
-                replacement_stage.SetEditTarget(Usd.EditTarget(replacement_stage.GetSessionLayer()))
-                apply_events(replacement_stage, shared_events, prevalidated=True)
+            analysis = replace(analysis, event_counts=event_counts)
 
             records: list[tuple[dict, bytes]] = []
             persist_tuples = []
@@ -1957,21 +1771,8 @@ class UsdSyncServer:
                     finally:
                         self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
 
-            self.op_cache.clear()
-            self._op_cache_layer = None
-            self._prim_paths.clear()
-            self._instanceable_paths.clear()
-            self._point_instancer_paths.clear()
-            for event in events:
-                self._track_prim_event(event)
-            self._prim_count_dirty = True
-
-            with self._seq_lock:
-                self._event_count = len(records)
-                self._next_seq = len(records) + 1
-                self._seq_at_last_compact = self._next_seq
-                self._snapshot_epoch += 1
-                self._replay_epoch += 1
+            self._rebuild_scene_caches(events)
+            self._reset_replay_history(len(records))
 
             self.last_vfs_write_analysis = analysis.to_dict()
             self._maybe_reclaim_storage()
@@ -2004,13 +1805,207 @@ class UsdSyncServer:
                 "Translated VFS snapshot write into %d live events "
                 "(created=%d removed=%d type_changed=%d)",
                 len(events),
-                len(created_paths),
-                len(removed_paths),
-                len(type_changed_paths),
+                len(analysis.created_prims),
+                len(analysis.removed_prims),
+                len(analysis.type_changed_prims),
             )
             return len(events)
         finally:
             self.txn_barrier.release_exclusive()
+
+    def _validate_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        uploaded_meta: dict | None,
+        *,
+        reject_stale: bool,
+        reject_ambiguous: bool,
+    ) -> VfsWriteAnalysis:
+        """Compare an upload with live state while holding the exclusive barrier."""
+        metadata = uploaded_meta or {}
+        uploaded_scene_id = metadata.get("scene_id")
+        uploaded_epoch = metadata.get("epoch")
+        uploaded_seq = metadata.get("snapshot_seq")
+        current_epoch, current_seq = self.get_snapshot_token()
+        with self.stage_lock:
+            department_layers = self._ordered_department_names()
+            additional_layers = [
+                layer_key
+                for layer_key in self.layer_stack.layer_keys
+                if layer_key != _DEFAULT_LAYER_KEY
+                and _department_for_layer_key(layer_key) is None
+            ]
+            before_types = _stage_prim_types(self.stage)
+        uploaded_types = _stage_prim_types(uploaded_stage)
+        before_paths = set(before_types)
+        uploaded_paths = set(uploaded_types)
+        created_paths = sorted(uploaded_paths - before_paths)
+        removed_paths = sorted(
+            before_paths - uploaded_paths,
+            key=lambda p: p.count("/"),
+            reverse=True,
+        )
+        type_changed_paths = sorted(
+            p for p in before_paths & uploaded_paths if before_types[p] != uploaded_types[p]
+        )
+
+        analysis = VfsWriteAnalysis(
+            status="translated",
+            current_epoch=current_epoch,
+            current_seq=current_seq,
+            uploaded_epoch=uploaded_epoch,
+            uploaded_seq=uploaded_seq,
+            before_prim_count=len(before_paths),
+            uploaded_prim_count=len(uploaded_paths),
+            created_prims=created_paths,
+            removed_prims=removed_paths,
+            type_changed_prims=type_changed_paths,
+        )
+
+        def reject(status: str, note: str, error: RuntimeError) -> None:
+            self.last_vfs_write_analysis = replace(
+                analysis, status=status, notes=[note],
+            ).to_dict()
+            raise error
+
+        if department_layers or additional_layers:
+            details = []
+            if department_layers:
+                details.append(f"department layers: {', '.join(department_layers)}")
+            if additional_layers:
+                details.append(f"collaboration layers: {', '.join(additional_layers)}")
+            reject(
+                "unsupported_rejected",
+                "translate write fallback is disabled while non-default "
+                f"collaboration layers are active ({'; '.join(details)})",
+                UnsupportedVfsWriteError(
+                    "VFS translate writes are disabled while non-default "
+                    "collaboration layers are active"
+                ),
+            )
+
+        if uploaded_meta is None:
+            reject(
+                "metadata_rejected",
+                "uploaded snapshot is missing openusdconnect metadata",
+                InvalidVfsWriteError("uploaded VFS snapshot is missing openusdconnect metadata"),
+            )
+
+        if uploaded_scene_id != self.scene_id:
+            reject(
+                "metadata_rejected",
+                "uploaded snapshot belongs to a different live scene",
+                InvalidVfsWriteError(
+                    "uploaded VFS snapshot scene_id does not match this server: "
+                    f"file={uploaded_scene_id!r}, server={self.scene_id!r}"
+                ),
+            )
+
+        uploaded_token = (uploaded_epoch, uploaded_seq)
+        current_token = (current_epoch, current_seq)
+        if uploaded_token != current_token:
+            if uploaded_token < current_token and not reject_stale:
+                analysis = replace(
+                    analysis,
+                    notes=[
+                        "stale snapshot token accepted because stale-write rejection was disabled"
+                    ],
+                )
+            else:
+                relation = "older" if uploaded_token < current_token else "newer"
+                reject(
+                    "stale_rejected" if relation == "older" else "future_rejected",
+                    f"uploaded snapshot is {relation} than the current live server state",
+                    StaleVfsWriteError(
+                        "uploaded VFS snapshot token does not match the current server: "
+                        f"file epoch/seq={uploaded_epoch}/{uploaded_seq}, "
+                        f"server epoch/seq={current_epoch}/{current_seq}"
+                    ),
+                )
+
+        if uploaded_stage.GetEditTarget().GetLayer().subLayerPaths:
+            reject(
+                "unsupported_rejected",
+                "uploaded snapshot contains sublayer topology, which cannot "
+                "be mapped into the managed collaboration layer stack",
+                UnsupportedVfsWriteError(
+                    "uploaded VFS snapshot contains unsupported sublayer topology"
+                ),
+            )
+
+        removed_fraction = len(removed_paths) / max(1, len(before_paths))
+        removes_rootish_prim = any(
+            path.count("/") <= 1 and path != "/Root" for path in removed_paths
+        )
+        ambiguous_destructive = bool(removed_paths) and (
+            not uploaded_paths
+            or removes_rootish_prim
+            or (len(before_paths) >= 10 and removed_fraction >= 0.8)
+        )
+        if reject_ambiguous and ambiguous_destructive:
+            reject(
+                "ambiguous_rejected",
+                "uploaded snapshot removes a root-level prim or most of the scene; "
+                "refusing automatic fallback translation",
+                AmbiguousVfsWriteError(
+                    "uploaded VFS snapshot looks destructively incomplete; "
+                    f"removed {len(removed_paths)} of {len(before_paths)} prims"
+                ),
+            )
+
+        return analysis
+
+    def _prepare_stage_snapshot(
+        self,
+        uploaded_stage: Usd.Stage,
+        removed_paths: list[str],
+    ) -> tuple[list[dict], Sdf.Layer, list[dict]]:
+        """Translate and validate a replacement without changing live USD state."""
+        emitter = NoticeEmitter(uploaded_stage)
+        try:
+            events = emitter.snapshot_events()
+        finally:
+            emitter.cleanup()
+
+        # Hide prims that existed in the previous composed stage but are absent
+        # from the uploaded snapshot. This lets full-file saves express deletes
+        # even when the original prim lives in the immutable base layer.
+        for prim_path in removed_paths:
+            events.append({"k": K_DEACTIVATE_PRIM, "prim": prim_path, "active": False})
+
+        # Build the complete replacement off-stage first. This validates
+        # every generated event and gives us an authored layer that can be
+        # installed without incrementally mutating authoritative state.
+        from ..event_apply import apply_events
+        from ..sdf_spec_delta import validate_spec_delta
+
+        for event in events:
+            if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+                validate_spec_delta(event)
+
+        replacement_layer = Sdf.Layer.CreateAnonymous("vfs-replacement-edits")
+        replacement_session = Sdf.Layer.CreateAnonymous("vfs-replacement-session")
+        replacement_session.subLayerPaths = [replacement_layer.identifier]
+        with self.stage_lock:
+            replacement_stage = Usd.Stage.Open(
+                self.stage.GetRootLayer(),
+                replacement_session,
+                self.stage.GetPathResolverContext(),
+            )
+        if replacement_stage is None:
+            raise RuntimeError("failed to create the VFS replacement stage")
+        replacement_stage.SetEditTarget(Usd.EditTarget(replacement_layer))
+        replacement_events = [
+            event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
+        ]
+        shared_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
+        if replacement_events:
+            apply_events(replacement_stage, replacement_events, prevalidated=True)
+        if shared_events:
+            replacement_stage.SetEditTarget(Usd.EditTarget(replacement_stage.GetSessionLayer()))
+            apply_events(replacement_stage, shared_events, prevalidated=True)
+
+        return events, replacement_layer, shared_events
 
     def _shared_layer_identity_updates(
         self,
@@ -2649,31 +2644,29 @@ class UsdSyncServer:
         with self.stage_lock:
             edit_target = Usd.EditTarget(target)
             session_target = Usd.EditTarget(self.stage.GetSessionLayer())
-            has_layer_opinions = any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events)
+            has_layer_opinions = any(ev["k"] not in NON_COLLABORATION_KINDS for ev in events)
             target_was_muted = self.stage.IsLayerMuted(target.identifier)
             was_muted = has_layer_opinions and target_was_muted
             if was_muted:
                 self.stage.UnmuteLayer(target.identifier)
             try:
                 for ev in events:
-                    if ev.get("k") != K_SET_SDF_SPEC_FIELDS or not ev.get("removed", False):
+                    if ev["k"] != K_SET_SDF_SPEC_FIELDS or not ev["removed"]:
                         continue
-                    event_path = Sdf.Path(ev.get("spec_path", ""))
-                    if not event_path.IsAbsolutePath():
-                        continue
+                    event_path = Sdf.Path(ev["spec_path"])
                     spec = target.GetObjectAtPath(event_path)
                     if spec:
                         ev["fields"] = sorted(
-                            set(ev.get("fields", ())) | {str(key) for key in spec.ListInfoKeys()}
+                            set(ev["fields"]) | {str(key) for key in spec.ListInfoKeys()}
                         )
 
                 start = 0
                 while start < len(events):
-                    non_collaboration = events[start].get("k") in NON_COLLABORATION_KINDS
+                    non_collaboration = events[start]["k"] in NON_COLLABORATION_KINDS
                     end = start + 1
                     while (
                         end < len(events)
-                        and (events[end].get("k") in NON_COLLABORATION_KINDS) == non_collaboration
+                        and (events[end]["k"] in NON_COLLABORATION_KINDS) == non_collaboration
                     ):
                         end += 1
                     run = events[start:end]
@@ -2835,21 +2828,15 @@ class UsdSyncServer:
                     expected_txn_id=expected,
                 )
 
-            first_reserved_seq = self._next_seq
-            try:
-                records = self._process_txn_locked(
-                    events,
-                    client_id=client_id,
-                    origin=origin,
-                    client_addr=client_addr,
-                    layer=layer,
-                    layer_key=layer_key,
-                    transaction_identity=(session_id, txn_id),
-                )
-            except Exception:
-                with self._seq_lock:
-                    self._next_seq = first_reserved_seq
-                raise
+            records = self._process_txn_locked(
+                events,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                layer=layer,
+                layer_key=layer_key,
+                transaction_identity=(session_id, txn_id),
+            )
             self._producer_progress_cache[(client_id, session_id)] = txn_id
             commit = TransactionCommit(
                 "committed",
@@ -2990,79 +2977,30 @@ class UsdSyncServer:
             if not accepted:
                 return
 
-            first_reserved_seq = self._next_seq
-            try:
-                prepared = [self._prepare_managed_transaction(request) for request in accepted]
-                paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
-                snapshot_session = False
-                for transaction in prepared:
-                    if transaction.collaboration_paths:
-                        entry = paths_by_layer.setdefault(
-                            transaction.target_layer.identifier,
-                            (transaction.target_layer, set()),
-                        )
-                        entry[1].update(transaction.collaboration_paths)
-                    snapshot_session = snapshot_session or transaction.has_session_events
+            with self._managed_sequence_reservation():
+                prepared = [
+                    self._prepare_managed_transaction(
+                        request.events,
+                        client_id=request.client_id,
+                        origin=request.origin,
+                        client_addr=request.client_addr,
+                        layer=request.layer,
+                        layer_key=request.layer_key,
+                        transaction_identity=(request.session_id, request.txn_id),
+                    )
+                    for request in accepted
+                ]
+                self._persist_managed_transactions(prepared)
 
-                from ..event_apply import atomic_apply_layer
-
-                with self.stage_lock:
-                    original_target = self.stage.GetEditTarget()
-                    try:
-                        with ExitStack() as rollback:
-                            for target_layer, paths in paths_by_layer.values():
-                                rollback.enter_context(atomic_apply_layer(target_layer, paths))
-                            if snapshot_session:
-                                rollback.enter_context(
-                                    atomic_apply_layer(self.stage.GetSessionLayer())
-                                )
-                            for transaction in prepared:
-                                self._apply_validated_txn(
-                                    transaction.request.events,
-                                    layer=transaction.target_layer,
-                                    update_tracking=False,
-                                )
-                            progress_by_producer = {
-                                (transaction.progress.client_id, transaction.progress.session_id):
-                                    transaction.progress
-                                for transaction in prepared
-                            }
-                            self.store.append_batch(
-                                [
-                                    record
-                                    for transaction in prepared
-                                    for record in transaction.persist_tuples
-                                ],
-                                producer_progress=tuple(progress_by_producer.values()),
-                            )
-                            for transaction in prepared:
-                                self._update_prim_tracking(transaction.request.events)
-                            for producer, progress in progress_by_producer.items():
-                                self._producer_progress_cache[producer] = (
-                                    progress.committed_through
-                                )
-                            with self._seq_lock:
-                                self._event_count += sum(
-                                    len(transaction.persist_tuples)
-                                    for transaction in prepared
-                                )
-                    finally:
-                        self.stage.SetEditTarget(original_target)
-            except Exception:
-                with self._seq_lock:
-                    self._next_seq = first_reserved_seq
-                self.op_cache.clear()
-                self._op_cache_layer = None
-                raise
-
-            for transaction in prepared:
+            self._producer_progress_cache.update(next_by_session)
+            for request, transaction in zip(accepted, prepared, strict=True):
                 records = tuple(transaction.records)
                 commit = TransactionCommit(
                     "committed",
-                    transaction.request.txn_id,
+                    request.txn_id,
                     records,
                 )
-                transaction.request.commit = commit
+                request.commit = commit
             # Persistence and live enqueue are one ordering boundary. Keep
             # this inside _transaction_commit_lock so another transaction can
             # neither reserve a later sequence nor publish ahead of the group.
@@ -3082,46 +3020,67 @@ class UsdSyncServer:
         with self._transaction_commit_lock:
             return self._producer_progress_locked(client_id, session_id)
 
+    @contextmanager
+    def _managed_sequence_reservation(self):
+        """Roll back sequence reservations and op setup if a managed commit fails.
+
+        The caller holds the commit lock throughout preparation and persistence.
+        USD rollback is handled by _persist_managed_transactions.
+        """
+        first_reserved_seq = self._next_seq
+        try:
+            yield
+        except Exception:
+            with self._seq_lock:
+                self._next_seq = first_reserved_seq
+            self.op_cache.clear()
+            self._op_cache_layer = None
+            raise
+
     def _prepare_managed_transaction(
         self,
-        request: _TransactionRequest,
+        events: list[dict],
+        *,
+        client_id: str | None,
+        origin: str | None,
+        client_addr: str | None,
+        layer: Sdf.Layer | None,
+        layer_key: str,
+        transaction_identity: tuple[str, int] | None,
     ) -> _PreparedTransaction:
-        if request.layer_key:
+        """Check routing and encode previously validated managed events.
+
+        Requires the commit lock and _managed_sequence_reservation so failures
+        in this method or subsequent persistence release the reserved sequences.
+        """
+        if layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
-        shared_only = {
-            event.get("k")
-            for event in request.events
-            if event.get("k") in SHARED_STAGE_ONLY_KINDS
-        }
-        if shared_only:
-            raise ValueError(
-                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
-            )
-        target_layer = request.layer or self.edit_layer
+        target_layer = layer or self.edit_layer
         layer_key = self.layer_stack.key_for_layer(target_layer)
         if layer_key is None and any(
-            event.get("k") not in NON_COLLABORATION_KINDS for event in request.events
+            event["k"] not in NON_COLLABORATION_KINDS for event in events
         ):
             raise ValueError("transaction target is not a managed collaboration layer")
 
-        collaboration_paths = _managed_rollback_paths(request.events)
+        collaboration_paths = _managed_rollback_paths(events)
         has_session_events = any(
-            event.get("k") in NON_COLLABORATION_KINDS for event in request.events
+            event["k"] in NON_COLLABORATION_KINDS for event in events
         )
         records, persist_tuples = self._encode_managed_txn_records(
-            request.events,
-            client_id=request.client_id,
-            origin=request.origin,
-            client_addr=request.client_addr,
+            events,
+            client_id=client_id,
+            origin=origin,
+            client_addr=client_addr,
             layer_key=layer_key or "",
         )
-        progress = ProducerProgress(
-            request.client_id,
-            request.session_id,
-            request.txn_id,
-        )
+        progress = None
+        if transaction_identity is not None:
+            if not client_id:
+                raise ValueError("idempotent transaction persistence requires client_id")
+            session_id, txn_id = transaction_identity
+            progress = ProducerProgress(client_id, session_id, txn_id)
         return _PreparedTransaction(
-            request,
+            events,
             target_layer,
             collaboration_paths,
             has_session_events,
@@ -3129,6 +3088,73 @@ class UsdSyncServer:
             persist_tuples,
             progress,
         )
+
+    def _persist_managed_transactions(self, prepared: list[_PreparedTransaction]) -> None:
+        """Apply and persist a group atomically while the commit lock is held.
+
+        Snapshot only touched collaboration prims, plus session state when
+        needed. Internal commits also persist synchronously: rollback must
+        cover a storage failure even without producer progress.
+        """
+        if len(prepared) == 1:
+            transaction = prepared[0]
+            layer_paths = (
+                ((transaction.target_layer, transaction.collaboration_paths),)
+                if transaction.collaboration_paths else ()
+            )
+            snapshot_session = transaction.has_session_events
+            records = transaction.persist_tuples
+            producer_progress = (transaction.progress,) if transaction.progress is not None else ()
+        else:
+            paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
+            snapshot_session = False
+            records = []
+            progress_by_producer = {}
+            for transaction in prepared:
+                if transaction.collaboration_paths:
+                    layer_id = transaction.target_layer.identifier
+                    if layer_id not in paths_by_layer:
+                        paths_by_layer[layer_id] = (
+                            transaction.target_layer, set(transaction.collaboration_paths)
+                        )
+                    else:
+                        _layer, paths = paths_by_layer[layer_id]
+                        paths.update(transaction.collaboration_paths)
+                snapshot_session |= transaction.has_session_events
+                records.extend(transaction.persist_tuples)
+                if (progress := transaction.progress) is not None:
+                    progress_by_producer[(progress.client_id, progress.session_id)] = progress
+            layer_paths = paths_by_layer.values()
+            producer_progress = tuple(progress_by_producer.values())
+
+        from ..event_apply import atomic_apply_layer
+
+        with self.stage_lock:
+            original_target = self.stage.GetEditTarget()
+            try:
+                with ExitStack() as rollback:
+                    for target_layer, paths in layer_paths:
+                        rollback.enter_context(atomic_apply_layer(target_layer, paths))
+                    if snapshot_session:
+                        rollback.enter_context(
+                            atomic_apply_layer(self.stage.GetSessionLayer())
+                        )
+                    for transaction in prepared:
+                        self._apply_validated_txn(
+                            transaction.events,
+                            layer=transaction.target_layer,
+                            update_tracking=False,
+                        )
+                    self.store.append_batch(
+                        records,
+                        producer_progress=producer_progress,
+                    )
+                    for transaction in prepared:
+                        self._update_prim_tracking(transaction.events)
+                    with self._seq_lock:
+                        self._event_count += len(records)
+            finally:
+                self.stage.SetEditTarget(original_target)
 
     def _broadcast_grouped_transactions(
         self,
@@ -3149,13 +3175,6 @@ class UsdSyncServer:
             except Exception:
                 LOG.exception(
                     "Committed transaction group could not be broadcast live"
-                )
-            for request in pending:
-                commit = request.commit
-                request.commit = TransactionCommit(
-                    commit.status,
-                    commit.txn_id,
-                    commit.records,
                 )
             pending.clear()
 
@@ -3183,11 +3202,6 @@ class UsdSyncServer:
                     request.session_id,
                     request.txn_id,
                 )
-            request.commit = TransactionCommit(
-                commit.status,
-                commit.txn_id,
-                commit.records,
-            )
         flush_pending()
 
     def _commit_events(
@@ -3235,7 +3249,9 @@ class UsdSyncServer:
         layer_key: str = "",
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply and durably persist events inside the global commit lock.
+        """Apply validated events and durably persist them under the commit lock.
+
+        Each mode owns sequence rollback if preparation or persistence fails.
 
         Returns encoded broadcast records in input order. Callers that only
         need authoritative state plus a populated log may ignore the result.
@@ -3255,89 +3271,18 @@ class UsdSyncServer:
                 client_addr=client_addr,
                 transaction_identity=transaction_identity,
             )
-        if layer_key:
-            raise ValueError("managed transactions cannot select an arbitrary layer key")
-        shared_only = {
-            event.get("k")
-            for event in events
-            if event.get("k") in SHARED_STAGE_ONLY_KINDS
-        }
-        if shared_only:
-            raise ValueError(
-                f"shared-stage events are unavailable in managed mode: {sorted(shared_only)!r}"
-            )
-
-        target_layer = layer or self.edit_layer
-        layer_key = self.layer_stack.key_for_layer(target_layer)
-        if layer_key is None and any(ev.get("k") not in NON_COLLABORATION_KINDS for ev in events):
-            raise ValueError("transaction target is not a managed collaboration layer")
-
-        # Keep the USD mutation inside the durable failure boundary. Scoped
-        # snapshots make rollback proportional to touched prims rather than to
-        # the full collaboration layer; session metadata uses a full snapshot.
-        from ..event_apply import atomic_apply_layer
-
-        collaboration_paths = _managed_rollback_paths(events)
-        has_session_events = any(
-            event.get("k") in NON_COLLABORATION_KINDS for event in events
-        )
-        with self._seq_lock:
-            first_reserved_seq = self._next_seq
-        try:
-            records, persist_tuples = self._encode_managed_txn_records(
+        with self._managed_sequence_reservation():
+            transaction = self._prepare_managed_transaction(
                 events,
                 client_id=client_id,
                 origin=origin,
                 client_addr=client_addr,
+                layer=layer,
                 layer_key=layer_key,
+                transaction_identity=transaction_identity,
             )
-            producer_progress: tuple[ProducerProgress, ...] = ()
-            if transaction_identity is not None:
-                if not client_id:
-                    raise ValueError(
-                        "idempotent transaction persistence requires client_id"
-                    )
-                session_id, txn_id = transaction_identity
-                producer_progress = (
-                    ProducerProgress(client_id, session_id, txn_id),
-                )
-
-            with self.stage_lock:
-                original_target = self.stage.GetEditTarget()
-                try:
-                    with ExitStack() as rollback:
-                        if collaboration_paths:
-                            rollback.enter_context(
-                                atomic_apply_layer(target_layer, collaboration_paths)
-                            )
-                        if has_session_events:
-                            rollback.enter_context(
-                                atomic_apply_layer(self.stage.GetSessionLayer())
-                            )
-                        self._apply_validated_txn(
-                            events,
-                            layer=target_layer,
-                            update_tracking=False,
-                        )
-                        # In-process commits have no producer progress to force
-                        # the synchronous EventStore path in realtime mode.
-                        # Persist them directly so rollback remains meaningful.
-                        self.store.append_batch(
-                            persist_tuples,
-                            producer_progress=producer_progress,
-                        )
-                        self._update_prim_tracking(events)
-                        with self._seq_lock:
-                            self._event_count += len(persist_tuples)
-                finally:
-                    self.stage.SetEditTarget(original_target)
-        except Exception:
-            with self._seq_lock:
-                self._next_seq = first_reserved_seq
-            self.op_cache.clear()
-            self._op_cache_layer = None
-            raise
-        return records
+            self._persist_managed_transactions([transaction])
+        return transaction.records
 
     def _encode_managed_txn_records(
         self,
@@ -3364,18 +3309,18 @@ class UsdSyncServer:
             }
             if origin:
                 record["origin"] = origin
-            if event.get("k") not in NON_COLLABORATION_KINDS:
+            if event["k"] not in NON_COLLABORATION_KINDS:
                 record["layer_key"] = layer_key
             record_bin = self._broadcast_encoder.encode(record)
             if self.wire_metrics is not None:
-                self.wire_metrics.record(event.get("k", ""), len(record_bin))
+                self.wire_metrics.record(event["k"], len(record_bin))
             records.append((record, record_bin))
             persist_tuples.append(
                 (
                     record["seq"],
                     record_bin,
                     client_id,
-                    event.get("k"),
+                    event["k"],
                     event.get("prim"),
                 )
             )
@@ -3391,7 +3336,7 @@ class UsdSyncServer:
         client_addr: str | None,
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply one exact authored-layer transaction."""
+        """Apply one validated authored-layer transaction against the current graph."""
         from ..event_apply import apply_events, atomic_apply
 
         graph = self.shared_layer_graph
@@ -3405,23 +3350,12 @@ class UsdSyncServer:
                 "stale_layer_graph",
                 f"unknown or unresolved shared layer key {layer_key!r}",
             )
-        unsupported = {
-            event.get("k")
-            for event in events
-            if event.get("k") not in SHARED_STAGE_EVENT_KINDS
-        }
-        if unsupported:
-            raise ValueError(f"unsupported shared-stage events: {sorted(unsupported)!r}")
-        if sum(event.get("k") == K_SET_SUBLAYERS for event in events) > 1:
-            raise ValueError("one shared-stage transaction may replace a parent topology once")
-        if sum(event.get("k") == K_REPLACE_SDF_LAYER_CONTENT for event in events) > 1:
-            raise ValueError("one shared-stage transaction may replace layer content once")
 
         prepared: PreparedSublayers | None = None
         canonical_events = []
         try:
             for event in events:
-                if event.get("k") == K_SET_SUBLAYERS:
+                if event["k"] == K_SET_SUBLAYERS:
                     prepared = graph.canonicalize_sublayers(layer_key, event)
                     canonical = prepared.event
                 else:
@@ -3440,15 +3374,13 @@ class UsdSyncServer:
                 graph.transaction(),
             ):
                 for event in canonical_events:
-                    if event.get("k") != K_SET_SDF_SPEC_FIELDS or not event.get(
-                        "removed", False
-                    ):
+                    if event["k"] != K_SET_SDF_SPEC_FIELDS or not event["removed"]:
                         continue
                     path = Sdf.Path(event["spec_path"])
                     spec = target.GetObjectAtPath(path)
                     if spec:
                         event["fields"] = sorted(
-                            set(event.get("fields", ()))
+                            set(event["fields"])
                             | {str(key) for key in spec.ListInfoKeys()}
                         )
                 with atomic_apply(self.stage):
@@ -3549,7 +3481,7 @@ class UsdSyncServer:
 
         self.txn_barrier.acquire_shared()
         try:
-            with self._shared_stage_commit_lock:
+            with self._transaction_commit_lock:
                 before = set(graph.reachable_layer_keys())
                 with self.stage_lock, graph.transaction():
                     Ar.GetResolver().RefreshContext(self.stage.GetPathResolverContext())

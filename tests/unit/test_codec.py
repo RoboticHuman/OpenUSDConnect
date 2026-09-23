@@ -13,6 +13,7 @@ from openusdconnect.codec import (
     BroadcastEventEncoder,
     PayloadType,
     decode_envelope,
+    decode_hello,
     decode_transaction,
     encode_message,
     is_ping,
@@ -1022,6 +1023,7 @@ def test_optional_hello_prefix_identity(identity):
     decoded = message_to_dict(encode_message(hello))
     assert decoded == hello
     _, table = resolve_payload(decode_envelope(encode_message(hello)))
+    assert decode_hello(table) == hello
     assert table.ReplayEpoch() == (identity[1] if identity else None)
 
 

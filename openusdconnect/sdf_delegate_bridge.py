@@ -28,7 +28,8 @@ from .protocol_constants import (
 from .sdf_layer_tracker import (
     PreparedLayerBatch,
     _bind_topology_base,
-    _copy_prepared_events,
+    _next_routed_batch,
+    _restore_prepared_batches,
     sdf_event_sort_key,
 )
 from .sdf_spec_delta import (
@@ -706,42 +707,14 @@ class NativeSdfLayerChangeTracker:
                 self._prepared[prepared_index] = batch
         return tuple(self._prepared)
 
-    def _events_for(self, batch: PreparedLayerBatch) -> list[dict]:
-        return _copy_prepared_events(batch)
-
     def next_routed_batch(self) -> tuple[PreparedLayerBatch, str, list[dict]] | None:
-        if not self.graph.ready:
-            return None
-        reachable = set(self.graph.reachable_layer_keys())
-        for index, batch in enumerate(self._prepared):
-            layer_key = self.graph.key_for(batch.layer)
-            if layer_key and layer_key in reachable:
-                bound = _bind_topology_base(batch, self.graph)
-                if bound is not batch:
-                    batch = bound
-                    self._prepared[index] = batch
-                return batch, layer_key, self._events_for(batch)
-        return None
+        return _next_routed_batch(self._prepared, self.graph)
 
     def restore_prepared(self) -> None:
         if not self.graph.ready or not self._prepared:
             return
-        from .event_apply import apply_events, atomic_apply, atomic_apply_prim_paths
-
         with self.suppressed():
-            reachable = {
-                layer.identifier for layer in self.stage.GetLayerStack(includeSessionLayers=False)
-            }
-            for batch in self._prepared:
-                if batch.layer.identifier not in reachable:
-                    continue
-                events = self._events_for(batch)
-                with Usd.EditContext(self.stage, Usd.EditTarget(batch.layer)):
-                    with atomic_apply(
-                        self.stage,
-                        prim_paths=atomic_apply_prim_paths(events),
-                    ):
-                        apply_events(self.stage, events)
+            _restore_prepared_batches(self.stage, self._prepared)
             self.sync_graph()
 
     def accept_authoritative_event(self, _layer: Sdf.Layer, _event: dict) -> None:

@@ -234,6 +234,51 @@ def test_incremental_value_block_samples_metadata_clear_and_removal():
     emitter.cleanup()
 
 
+@pytest.mark.parametrize("resync", [False, True], ids=["property-edits", "with-prim-resync"])
+def test_batched_clears_blocks_and_removals_roundtrip(resync):
+    source = Usd.Stage.CreateInMemory()
+    prim = source.DefinePrim("/World/Thing", "Xform")
+    for name in ("cleared", "blocked", "updated", "removed", "unchanged"):
+        attr = prim.CreateAttribute(name, Sdf.ValueTypeNames.Double, True)
+        attr.Set(1.0)
+        attr.SetDocumentation("keep unless cleared")
+    layer = source.GetRootLayer()
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        apply_events(target, emitter.snapshot_events())
+        spec = layer.GetPrimAtPath("/World/Thing")
+        with Sdf.ChangeBlock():
+            spec.attributes["cleared"].ClearDefaultValue()
+            spec.attributes["cleared"].ClearInfo("documentation")
+            spec.attributes["blocked"].default = Sdf.ValueBlock()
+            spec.attributes["updated"].default = 2.0
+            layer.SetTimeSample("/World/Thing.updated", 12.0, 3.0)
+            spec.RemoveProperty(spec.attributes["removed"])
+            if resync:
+                spec.typeName = "Scope"
+
+        apply_events(target, emitter.build_events_for_dirty())
+        for name in ("cleared", "blocked", "updated", "unchanged"):
+            path = f"/World/Thing.{name}"
+            assert _property_info(target.GetRootLayer(), path) == _property_info(layer, path)
+        assert not target.GetRootLayer().GetPropertyAtPath("/World/Thing.removed")
+        assert target.GetPrimAtPath("/World/Thing").GetTypeName() == prim.GetTypeName()
+        cleared_spec = target.GetRootLayer().GetAttributeAtPath("/World/Thing.cleared")
+        assert not cleared_spec.HasDefaultValue()
+        assert isinstance(
+            target.GetRootLayer().GetAttributeAtPath("/World/Thing.blocked").default,
+            Sdf.ValueBlock,
+        )
+
+        # Clearing must also forget the previous value for the next edit.
+        prim.GetAttribute("cleared").Set(1.0)
+        apply_events(target, emitter.build_events_for_dirty())
+        assert target.GetPrimAtPath("/World/Thing").GetAttribute("cleared").Get() == 1.0
+    finally:
+        emitter.cleanup()
+
+
 def test_schema_value_keeps_fast_path_and_metadata_uses_sdf():
     source = Usd.Stage.CreateInMemory()
     sphere = UsdGeom.Sphere.Define(source, "/World/Sphere")
@@ -890,11 +935,13 @@ def test_usd_variant_edit_context_emits_inactive_child_removal():
         source.RemovePrim("/World/Probe")
     variants.SetVariantSelection("active")
     removed = _sdf_events(emitter.build_events_for_dirty())
-    assert [(event["spec_path"], event["removed"]) for event in removed] == [
+    assert [(event["spec_path"], event["removed"]) for event in removed if event["removed"]] == [
         (exact_path, True),
     ]
     apply_events(target, removed)
     assert not target.GetRootLayer().GetPrimAtPath(exact_path)
+    # Variant selection resyncs can also re-send surviving authored specs.
+    assert target.GetRootLayer().ExportToString() == source.GetRootLayer().ExportToString()
     emitter.cleanup()
 
 

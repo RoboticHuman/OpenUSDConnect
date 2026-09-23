@@ -329,12 +329,12 @@ class EventSender:
         self.hello_rejected = False
         self.rejection_reason = ""
         sock: socket.socket | None = None
+        published = False
+        acquired_send = False
         try:
             sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
             with self._condition:
                 if epoch != self._connect_epoch:
-                    self._session.disconnect(generation)
-                    self._close_socket_object(sock)
                     return False
                 self._connecting_socket = sock
             sock.settimeout(max(0.001, deadline - time.monotonic()))
@@ -355,37 +355,23 @@ class EventSender:
             buf = recv_framed(sock)
             with self._condition:
                 if epoch != self._connect_epoch:
-                    self._session.disconnect(generation)
-                    self._close_socket_object(sock)
                     return False
             env = decode_envelope(buf)
             pt = env.PayloadType()
             if not self._accept_handshake_response(sock, env, pt, generation):
-                self._session.disconnect(generation)
-                self._close_socket_object(sock)
                 return False
-        except Exception:
-            LOG.exception("EventSender: handshake failed")
-            self._session.disconnect(generation)
-            self._close_socket_object(sock)
-            return False
 
-        # Serialize publication of the socket with outbox replay. A new
-        # send cannot overtake an older pending transaction here.
-        acquired_send = False
-        try:
+            # Serialize publication of the socket with outbox replay. A new
+            # send cannot overtake an older pending transaction here.
             acquired_send = self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
             if not acquired_send:
-                self._session.disconnect(generation)
-                self._close_socket_object(sock)
                 return False
             with self._condition:
                 if epoch != self._connect_epoch or time.monotonic() >= deadline:
-                    self._session.disconnect(generation)
-                    self._close_socket_object(sock)
                     return False
                 self.sock = sock
                 self._connecting_socket = None
+                published = True
             sock.settimeout(max(0.001, deadline - time.monotonic()))
             replayed = 0
             while pending := self._session.claim_next_unsent(generation):
@@ -396,13 +382,23 @@ class EventSender:
                 send_raw(sock, pending[1])
                 replayed += 1
             sock.settimeout(None)
-        except OSError:
-            LOG.info("EventSender: reconnect replay failed", exc_info=True)
+        except Exception as exc:
+            if not published:
+                LOG.exception("EventSender: handshake failed")
+                return False
             self._close(expected=sock)
+            if not isinstance(exc, OSError):
+                raise
+            LOG.info("EventSender: reconnect replay failed", exc_info=True)
             return False
         finally:
             if acquired_send:
                 self._send_lock.release()
+            # Until publication this attempt owns both resources. Afterwards,
+            # _close(expected=sock) handles failures without closing a newer socket.
+            if not published:
+                self._session.disconnect(generation)
+                self._close_socket_object(sock)
 
         reader = threading.Thread(
             target=self._read_results,

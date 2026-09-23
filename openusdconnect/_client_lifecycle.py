@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ._client_utils import resolve_client_token
@@ -39,11 +40,28 @@ def prepare_sender_token(
     port: int,
     persist_token: bool,
 ) -> None:
-    """Transfer an issued receiver token before starting a producer handshake."""
+    """Fill missing sender credentials; issued tokens are shared by callbacks."""
+    if sender.token is not None:
+        return
+    token = receiver.token if receiver is not None else None
+    if token is None:
+        token = resolve_client_token(host, port, None, persist_token)
+    # A handshake can supply a token while stored credentials are being read.
     if sender.token is None:
-        sender.token = receiver.token if receiver is not None else None
-        if sender.token is None:
-            sender.token = resolve_client_token(host, port, None, persist_token)
+        sender.token = token
+
+
+def share_client_token(
+    token: str,
+    sender: EventSender,
+    receiver: ReceiverThread,
+    callback: Callable[[str], None] | None,
+) -> None:
+    """Update both connections before persistence or application callbacks can fail."""
+    sender.token = token
+    receiver.token = token
+    if callback is not None:
+        callback(token)
 
 
 def stop_receiver(receiver: ReceiverThread) -> None:

@@ -1,8 +1,8 @@
 """FlatBuffers codec for the OpenUSDConnect wire and storage format.
 
 Receiver queues, broadcast relays, and event storage keep encoded bytes
-intact. Typed FlatBuffers accessors read those buffers directly; ingestion
-converts messages to dictionaries once for validation and application.
+intact. Typed FlatBuffers accessors read control fields and routing directly;
+event dictionaries are created for USD validation and adapter application.
 """
 
 from __future__ import annotations
@@ -1734,6 +1734,12 @@ def _decode_fb_string(buf, position: int) -> str:
     return bytes(buf[data_position:data_position + length]).decode("utf-8")
 
 
+def _decode_optional_fb_string(buf, table_position: int, field_offset: int) -> str | None:
+    if not field_offset:
+        return None
+    return _decode_fb_string(buf, table_position + field_offset) or None
+
+
 def _decode_float_vector(buf, position: int, field_name: str) -> list[float]:
     vector_position = _indirect_position(buf, position)
     length = _FB_U32.unpack_from(buf, vector_position)[0]
@@ -1843,37 +1849,17 @@ def decode_broadcast_event(
     *,
     numpy_arrays: bool = False,
 ) -> dict:
-    """Decode a broadcast, fast-pathing its common transform event."""
-    buf = broadcast._tab.Bytes
-    table_position = broadcast._tab.Pos
-    seq_offset, event_offset, origin_offset, client_id_offset, client_offset, layer_offset = (
-        _table_field_offsets(buf, table_position, (4, 6, 8, 10, 12, 14))
-    )
-    message = {
-        "type": MSG_EVENT,
-        "seq": (
-            _FB_I32.unpack_from(buf, table_position + seq_offset)[0]
-            if seq_offset
-            else 0
-        ),
-        "event": {},
-    }
-    if event_offset:
-        message["event"] = _decode_event_wrapper(
-            buf,
-            _indirect_position(buf, table_position + event_offset),
-            numpy_arrays=numpy_arrays,
-        )
-    for key, field_offset in (
-        ("origin", origin_offset),
-        ("client_id", client_id_offset),
-        ("client", client_offset),
-        ("layer_key", layer_offset),
+    """Convert a broadcast to the public dictionary representation."""
+    record = _decode_received_event(broadcast, numpy_arrays=numpy_arrays)
+    message = {"type": MSG_EVENT, "seq": record.seq, "event": record.event}
+    for name, value in (
+        ("origin", record.origin),
+        ("client_id", record.client_id),
+        ("client", record.client),
+        ("layer_key", record.layer_key),
     ):
-        if field_offset:
-            value = _decode_fb_string(buf, table_position + field_offset)
-            if value:
-                message[key] = value
+        if value:
+            message[name] = value
     return message
 
 
@@ -1887,6 +1873,42 @@ class ReceivedEvent:
     origin: str | None = None
     client_id: str | None = None
     client: str | None = None
+
+
+def _decode_received_event(
+    broadcast: BroadcastEvent,
+    *,
+    numpy_arrays: bool,
+) -> ReceivedEvent:
+    """Read routing directly and convert only the event needed by USD/adapters.
+
+    Keep the transform fast path and zero-copy geometry array support shared
+    with the dictionary API.
+    """
+    buf = broadcast._tab.Bytes
+    table_position = broadcast._tab.Pos
+    seq_offset, event_offset, origin_offset, client_id_offset, client_offset, layer_offset = (
+        _table_field_offsets(buf, table_position, (4, 6, 8, 10, 12, 14))
+    )
+    record = ReceivedEvent(
+        seq=(
+            _FB_I32.unpack_from(buf, table_position + seq_offset)[0]
+            if seq_offset
+            else 0
+        ),
+        event={},
+    )
+    if event_offset:
+        record.event = _decode_event_wrapper(
+            buf,
+            _indirect_position(buf, table_position + event_offset),
+            numpy_arrays=numpy_arrays,
+        )
+    record.origin = _decode_optional_fb_string(buf, table_position, origin_offset)
+    record.client_id = _decode_optional_fb_string(buf, table_position, client_id_offset)
+    record.client = _decode_optional_fb_string(buf, table_position, client_offset)
+    record.layer_key = _decode_optional_fb_string(buf, table_position, layer_offset)
+    return record
 
 
 class SequenceGapError(ValueError):
@@ -1929,80 +1951,66 @@ def decode_messages(
     The first decode failure is captured in ``result.errors`` rather than
     raised. Decoding then stops so the caller can apply the valid prefix and
     request replay from ``result.last_seq + 1`` without skipping later events.
+
+    Control fields and routing stay in typed FlatBuffers tables. Dictionaries
+    are built only for events and layer states consumed by USD/adapters.
     """
     result = DecodeResult(last_seq=last_seq)
     for raw in raw_messages:
         try:
-            msg = message_to_dict(raw, numpy_arrays=numpy_arrays)
-        except Exception as exc:  # noqa: BLE001 surfaced via result.errors
-            result.errors.append(exc)
-            break
+            msg_type, payload = resolve_payload(decode_envelope(raw))
+            if msg_type == MSG_RESYNC:
+                result.last_seq = 0
+                result.resync_requested = True
+                if clear_on_resync:
+                    result.received.clear()
+                    result.received_records.clear()
+                    result.layer_stack_states.clear()
+                    result.layer_graph_states.clear()
+                continue
 
-        msg_type = msg.get("type")
-        if msg_type == MSG_RESYNC:
-            result.last_seq = 0
-            result.resync_requested = True
-            if clear_on_resync:
-                result.received.clear()
-                result.received_records.clear()
-                result.layer_stack_states.clear()
-                result.layer_graph_states.clear()
-            continue
+            if msg_type == MSG_LAYER_STACK_STATE:
+                result.layer_stack_states.append(_dict_layer_stack_state(payload, msg_type))
+                continue
 
-        if msg_type == MSG_LAYER_STACK_STATE:
-            result.layer_stack_states.append(msg)
-            continue
+            if msg_type == MSG_RATE_LIMITED:
+                result.rate_limited_retry_after = float(payload.RetryAfter())
+                continue
 
-        if msg_type == MSG_LAYER_GRAPH_STATE:
-            seq = int(msg.get("seq") or 0)
+            if msg_type == MSG_REPLAY_COMPLETE:
+                result.replay_complete = (int(payload.HeadSeq()), int(payload.Epoch()))
+                continue
+
+            if msg_type == MSG_EVENT:
+                record = _decode_received_event(payload, numpy_arrays=numpy_arrays)
+                seq = record.seq
+            elif msg_type == MSG_LAYER_GRAPH_STATE:
+                state = _dict_layer_graph_state(payload, msg_type)
+                seq = state["seq"]
+            else:
+                # Preserve validation of recognized but irrelevant messages.
+                if msg_type == MSG_TXN:
+                    _dict_txn(payload, msg_type, numpy_arrays=numpy_arrays)
+                else:
+                    _DICT_DECODE_DISPATCH[msg_type](payload, msg_type)
+                continue
+
+            # Broadcast events and graph changes share one ordered sequence.
             if seq and seq <= result.last_seq:
                 continue
             if require_contiguous and seq and seq != result.last_seq + 1:
-                result.errors.append(SequenceGapError(result.last_seq + 1, seq))
-                break
+                raise SequenceGapError(result.last_seq + 1, seq)
             if seq:
                 result.last_seq = seq
-            result.layer_graph_states.append(msg)
-            continue
-
-        if msg_type == MSG_RATE_LIMITED:
-            retry_after = msg.get("retry_after")
-            if isinstance(retry_after, (int, float)):
-                result.rate_limited_retry_after = float(retry_after)
-            continue
-
-        if msg_type == MSG_REPLAY_COMPLETE:
-            result.replay_complete = (
-                int(msg.get("head_seq", 0)),
-                int(msg.get("epoch", 0)),
-            )
-            continue
-
-        if msg_type != MSG_EVENT:
-            continue
-
-        seq = int(msg.get("seq") or 0)
-        if seq and seq <= result.last_seq:
-            continue
-        if require_contiguous and seq and seq != result.last_seq + 1:
-            result.errors.append(SequenceGapError(result.last_seq + 1, seq))
+            if msg_type == MSG_LAYER_GRAPH_STATE:
+                result.layer_graph_states.append(state)
+            elif record.event:
+                result.received.append(record.event)
+                if preserve_envelopes:
+                    result.received_records.append(record)
+        except Exception as exc:  # noqa: BLE001 surfaced via result.errors
+            result.errors.append(exc)
             break
-        if seq:
-            result.last_seq = seq
-        event = msg.get("event")
-        if event:
-            result.received.append(event)
-            if preserve_envelopes:
-                result.received_records.append(
-                    ReceivedEvent(
-                        seq=seq,
-                        event=event,
-                        layer_key=msg.get("layer_key"),
-                        origin=msg.get("origin"),
-                        client_id=msg.get("client_id"),
-                        client=msg.get("client"),
-                    )
-                )
 
     return result
 
@@ -2021,28 +2029,35 @@ def _str(val) -> str | None:
 # --- Per-message dict decoders ---
 
 
-def _dict_hello(h, msg_type):
-    msg = {"type": msg_type, "role": _str(h.Role()), "protocol_version": h.ProtocolVersion()}
-    if h.ReplayServerInstance() is not None:
-        msg["replay_server_instance"] = _str(h.ReplayServerInstance())
-    if h.ReplayEpoch() is not None:
-        msg["replay_epoch"] = int(h.ReplayEpoch())
-    sf = h.SyncFrom()
+def decode_hello(hello: Hello) -> dict:
+    """Decode an already-resolved Hello table, preserving optional replay identity."""
+    msg = {
+        "type": MSG_HELLO,
+        "role": _str(hello.Role()),
+        "protocol_version": hello.ProtocolVersion(),
+    }
+    replay_instance = hello.ReplayServerInstance()
+    if replay_instance is not None:
+        msg["replay_server_instance"] = _str(replay_instance)
+    replay_epoch = hello.ReplayEpoch()
+    if replay_epoch is not None:
+        msg["replay_epoch"] = int(replay_epoch)
+    sf = hello.SyncFrom()
     if sf:
         msg["sync_from"] = sf
     for key, getter in [
-        ("client_id", h.ClientId),
-        ("origin", h.Origin),
-        ("department", h.Department),
-        ("token", h.Token),
-        ("producer_session_id", h.ProducerSessionId),
+        ("client_id", hello.ClientId),
+        ("origin", hello.Origin),
+        ("department", hello.Department),
+        ("token", hello.Token),
+        ("producer_session_id", hello.ProducerSessionId),
     ]:
         v = _str(getter())
         if v:
             msg[key] = v
-    if h.LayeredReplay():
+    if hello.LayeredReplay():
         msg["layered_replay"] = True
-    mode = _FB_TO_LAYER_MODE[h.LayerMode()]
+    mode = _FB_TO_LAYER_MODE[hello.LayerMode()]
     if mode != LayerMode.MANAGED.value:
         msg["layer_mode"] = mode
     return msg
@@ -2238,7 +2253,7 @@ def _dict_rate_limited(rl, msg_type):
 
 
 _DICT_DECODE_DISPATCH = {
-    MSG_HELLO: _dict_hello,
+    MSG_HELLO: lambda hello, _msg_type: decode_hello(hello),
     MSG_HELLO_OK: _dict_hello_ok,
     MSG_AUTH_REJECTED: _dict_auth_rejected,
     MSG_HELLO_REJECTED: _dict_hello_rejected,

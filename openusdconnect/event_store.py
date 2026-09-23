@@ -210,13 +210,12 @@ class SqliteEventStore(EventStore):
                client_id: str | None = None,
                kind: str | None = None,
                prim: str | None = None) -> None:
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO events(seq, event_bin, client_id, kind, prim)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (seq, record_bin, client_id, kind, prim),
             )
-            self._conn.commit()
 
     def append_batch(self, records: list[tuple[int, bytes, str | None,
                        str | None, str | None]], *,
@@ -232,16 +231,17 @@ class SqliteEventStore(EventStore):
                     " VALUES (?, ?, ?, ?, ?)",
                     records,
                 )
-                self._conn.executemany(
-                    "INSERT INTO producer_sessions(client_id, session_id, committed_through)"
-                    " VALUES (?, ?, ?) ON CONFLICT(client_id, session_id) DO UPDATE SET"
-                    " committed_through = MAX(producer_sessions.committed_through,"
-                    " excluded.committed_through)",
-                    [
-                        (progress.client_id, progress.session_id, progress.committed_through)
-                        for progress in producer_progress
-                    ],
-                )
+                if producer_progress:
+                    self._conn.executemany(
+                        "INSERT INTO producer_sessions(client_id, session_id, committed_through)"
+                        " VALUES (?, ?, ?) ON CONFLICT(client_id, session_id) DO UPDATE SET"
+                        " committed_through = MAX(producer_sessions.committed_through,"
+                        " excluded.committed_through)",
+                        [
+                            (progress.client_id, progress.session_id, progress.committed_through)
+                            for progress in producer_progress
+                        ],
+                    )
                 if layer_identities:
                     self._conn.executemany(
                         "INSERT INTO shared_layer_identities(identifier, layer_key)"

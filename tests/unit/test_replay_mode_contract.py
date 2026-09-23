@@ -73,7 +73,7 @@ def test_flat_receiver_blocks_layer_stack_changes(server):
 
         assert server.department_priority == []
         assert "artist" not in server.client_layers
-        assert "artist" not in server._client_departments
+        assert "artist" not in server._client_layer_keys
 
         server.set_department_priority([])
         assert server.unmute_layer("default")

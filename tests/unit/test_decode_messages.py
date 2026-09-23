@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 from openusdconnect.codec import (
     SequenceGapError,
     decode_messages,
@@ -63,6 +66,58 @@ def test_layer_stack_state_roundtrip():
 
 
 class TestDecodeMessages:
+    @pytest.mark.parametrize("preserve_envelopes", [False, True])
+    def test_geometry_stays_a_zero_copy_view_of_the_wire_buffer(self, preserve_envelopes):
+        points = np.arange(300, dtype=np.float32).reshape(100, 3)
+        wire = encode_message({
+            "type": "event",
+            "seq": 1,
+            "layer_key": "geometry",
+            "event": {"k": "set_gprim_attrs", "prim": "/Mesh", "attrs": {"points": points}},
+        })
+
+        result = decode_messages(
+            [wire], numpy_arrays=True, preserve_envelopes=preserve_envelopes,
+        )
+
+        assert result.errors == []
+        decoded = result.received[0]["attrs"]["points"]
+        np.testing.assert_array_equal(decoded, points)
+        assert np.shares_memory(decoded, np.frombuffer(wire, dtype=np.uint8))
+        if preserve_envelopes:
+            record = result.received_records[0]
+            assert record.event is result.received[0]
+            assert record.layer_key == "geometry"
+            assert record.origin is record.client_id is record.client is None
+        else:
+            assert result.received_records == []
+
+    def test_graph_and_event_records_share_sequence_validation(self):
+        graph = {
+            "type": "layer_graph_state", "seq": 2, "generation": "session", "revision": 1,
+            "root_layer_key": "root", "layers": [],
+        }
+        result = decode_messages(
+            [
+                _event(1, "/A"),
+                encode_message(graph),
+                encode_message(graph),
+                _event(3, "/B"),
+                encode_message({"type": "replay_complete", "head_seq": 3, "epoch": 0}),
+                encode_message({**graph, "seq": 5}),
+                _event(4, "/AfterGap"),
+            ],
+            require_contiguous=True,
+        )
+
+        assert result.last_seq == 3
+        assert [event["prim"] for event in result.received] == ["/A", "/B"]
+        assert result.layer_graph_states == [graph]
+        assert result.replay_complete == (3, 0)
+        assert len(result.errors) == 1
+        assert isinstance(result.errors[0], SequenceGapError)
+        assert (result.errors[0].expected, result.errors[0].received) == (4, 5)
+
     def test_extracts_events_and_deduplicates_sequence(self):
         result = decode_messages(
             [

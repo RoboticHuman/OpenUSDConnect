@@ -1651,7 +1651,7 @@ def test_distinct_material_root_connections_use_exact_paths(r):
 
 def test_capture_camera_move_emits_trs_only(r):
     """After first encounter, moving the camera emits set_xform_trs but no
-    camera attrs event (params unchanged → CameraAttrsChannel.diff is empty)."""
+    camera attrs event (params unchanged → the attribute diff is empty)."""
     import tempfile
 
     from integrations.blender.capture import BlenderStageAuthor

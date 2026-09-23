@@ -388,6 +388,32 @@ def test_modes_reject_ambiguous_layer_routing(tmp_path):
             shared.purge()
 
 
+def test_repeated_topology_replacement_is_rejected_before_admission(tmp_path, monkeypatch):
+    base = _create_stage(tmp_path)
+    with _shared_server(base, tmp_path / "invalid-transaction.db") as server:
+        graph = server.shared_layer_graph
+        event = {
+            "k": "set_sublayers",
+            "prim": "/",
+            "generation": graph.generation,
+            "revision": graph.parent_revision(graph.root_layer_key),
+            "sublayers": [],
+        }
+
+        def unexpected_admission():
+            pytest.fail("invalid transaction acquired the admission barrier")
+
+        monkeypatch.setattr(server.txn_barrier, "acquire_shared", unexpected_admission)
+        with pytest.raises(ValueError, match="replace a parent topology once"):
+            server.submit_idempotent_txn(
+                [event, event],
+                client_id="client",
+                session_id="producer",
+                txn_id=1,
+                layer_key=graph.root_layer_key,
+            )
+
+
 def test_shared_server_requires_a_portable_root_layer(tmp_path):
     with pytest.raises(ValueError, match="portable root layer"):
         UsdSyncServer(

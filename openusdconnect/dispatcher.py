@@ -58,8 +58,8 @@ class _TrackedAssetEvent:
     dependencies: tuple[tuple[str, str, str], ...]
 
 
-class _SharedStageBinding:
-    """Move shared session metadata and runtime state between bound stages."""
+class _StageSessionState:
+    """Preserve synchronized session opinions and load rules across stage rebinds."""
 
     def __init__(self):
         self._stage: Usd.Stage | None = None
@@ -155,13 +155,11 @@ class _SharedStageBinding:
             return
         moved = []
         for key, event in self._events.items():
-            if key[0] != "payload_load_state" or not _path_is_at_or_below(
-                key[1],
-                old_root,
-            ):
+            kind, prim_path = key
+            if kind != "payload_load_state" or not _path_is_at_or_below(prim_path, old_root):
                 continue
-            new_path = _renamed_path(key[1], old_root, new_name)
-            moved.append((key, (key[0], new_path), {**event, "prim": new_path}))
+            new_path = _renamed_path(prim_path, old_root, new_name)
+            moved.append((key, (kind, new_path), {**event, "prim": new_path}))
         for old_key, new_key, event in moved:
             del self._events[old_key]
             self._events[new_key] = event
@@ -265,10 +263,8 @@ class _LayeredPreviousStage:
         records: Sequence[ReceivedEvent],
         layer_stack_states: Sequence[dict],
     ) -> None:
-        from pxr import Usd
-
         from .adapters import UsdStageAdapter
-        from .logical_layers import LogicalLayerRouter
+        from .logical_layers import LogicalLayerRouter, apply_routed_records
 
         live_stage = self._live_stage
         live_router = self._live_router
@@ -285,41 +281,17 @@ class _LayeredPreviousStage:
         for state in layer_stack_states:
             previous_router.apply_state(state)
 
-        routed = []
-        update_load_rules = False
-        for record in records:
-            event = record.event
-            kind = event.get("k")
-            layer = (
-                None
-                if kind in NON_COLLABORATION_KINDS
-                else previous_router.layer_for(record.layer_key)
-            )
-            routed.append((layer, event))
-            update_load_rules |= kind in {
-                K_LOAD_PAYLOAD,
-                K_RENAME_PRIM,
-                K_UNLOAD_PAYLOAD,
-            }
-
         stage_adapter = UsdStageAdapter(previous_stage)
-        layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
-        with previous_router.writable(layers.values()):
-            start = 0
-            while start < len(routed):
-                layer = routed[start][0]
-                end = start + 1
-                while end < len(routed) and routed[end][0] is layer:
-                    end += 1
-                run = [event for _layer, event in routed[start:end]]
-                edit_target = Usd.EditTarget(
-                    previous_stage.GetSessionLayer() if layer is None else layer
-                )
-                with Usd.EditContext(previous_stage, edit_target):
-                    stage_adapter.apply_events(run)
-                start = end
-
-        if update_load_rules:
+        apply_routed_records(
+            previous_stage,
+            previous_router,
+            records,
+            lambda run, _target: stage_adapter.apply_events(run),
+        )
+        if any(
+            record.event.get("k") in {K_LOAD_PAYLOAD, K_RENAME_PRIM, K_UNLOAD_PAYLOAD}
+            for record in records
+        ):
             previous_stage.SetLoadRules(live_stage.GetLoadRules())
 
     def _copy_full_live_state(self) -> None:
@@ -440,7 +412,7 @@ class EventDispatcher:
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
         self._layer_router: LayerKeyRouter | None = None
-        self._shared_stage = _SharedStageBinding()
+        self._stage_session_state = _StageSessionState()
         self._projection_state = None
         self._layered_previous_stage: _LayeredPreviousStage | None = None
 
@@ -546,7 +518,7 @@ class EventDispatcher:
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
             self._layer_router.bind(stage)
-            self._shared_stage.bind(stage)
+            self._stage_session_state.bind(stage)
             if self._projection_state is not None:
                 self._native_projection_state(stage)
 
@@ -579,7 +551,7 @@ class EventDispatcher:
     def _release_layered_state(self) -> None:
         suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
         with suppress_ctx:
-            self._shared_stage.close()
+            self._stage_session_state.close()
             if self._layer_router is not None:
                 self._layer_router.close()
             if self._projection_state is not None:
@@ -610,7 +582,7 @@ class EventDispatcher:
                 "layered replay requires a Usd.Stage mirror",
             )
         router.bind(stage)
-        self._shared_stage.bind(stage)
+        self._stage_session_state.bind(stage)
         return stage
 
     def _native_projection_state(self, stage: Usd.Stage):
@@ -681,10 +653,9 @@ class EventDispatcher:
         reset_layers: bool = False,
     ) -> int:
         """Apply authored records to their receiver-local logical layers."""
-        from pxr import Usd
-
         from .adapters import UsdStageAdapter
         from .composed_projection import ComposedChangeProjection
+        from .logical_layers import apply_routed_records
 
         router = self._layer_router
         if router is None:
@@ -750,44 +721,19 @@ class EventDispatcher:
         native_adapter_events: list[dict] = []
         with projection_ctx, suppress_ctx:
             if reset_layers:
-                self._shared_stage.reset()
+                self._stage_session_state.reset()
                 router.clear()
             for state in layer_stack_states:
                 router.apply_state(state)
 
-            routed = []
-            shared_state_events = []
-            for record in records:
-                event = record.event
-                kind = event.get("k")
-                if kind in NON_COLLABORATION_KINDS:
-                    layer = None
-                else:
-                    if not record.layer_key:
-                        raise ValueError(
-                            "layered replay record is missing its collaboration layer key"
-                        )
-                    layer = router.layer_for(record.layer_key)
-                if kind in NON_COLLABORATION_KINDS or kind == K_RENAME_PRIM:
-                    shared_state_events.append(event)
-                routed.append((layer, event))
-            layers = {layer.identifier: layer for layer, _event in routed if layer is not None}
-
-            with router.writable(layers.values()):
-                start = 0
-                while start < len(routed):
-                    layer = routed[start][0]
-                    end = start + 1
-                    while end < len(routed) and routed[end][0] is layer:
-                        end += 1
-                    run = [event for _layer, event in routed[start:end]]
-                    target_layer = stage.GetSessionLayer() if layer is None else layer
-                    edit_target = Usd.EditTarget(target_layer)
-                    with Usd.EditContext(stage, edit_target):
-                        _apply_run(run, edit_target)
-                    start = end
-
-            self._shared_stage.remember(shared_state_events)
+            apply_routed_records(stage, router, records, _apply_run)
+            shared_state_events = [
+                record.event
+                for record in records
+                if record.event.get("k") in NON_COLLABORATION_KINDS
+                or record.event.get("k") == K_RENAME_PRIM
+            ]
+            self._stage_session_state.remember(shared_state_events)
 
             if projection is not None:
                 native_adapter_events = projection.build_events()
@@ -1097,24 +1043,23 @@ class EventDispatcher:
         with suppress_ctx:
             self._refresh_resolver_context_suppressed(stage)
             self._discard_stale_asset_events(stage)
-            tracked = [
-                event
-                for event in self._asset_events.values()
-                if any(
-                    (
-                        not resolved_path
-                        if asset_path is None
-                        else self._asset_path_matches(
-                            asset_path,
-                            authored_path,
-                            identifier,
-                            resolved_path,
-                        )
-                    )
-                    for authored_path, identifier, resolved_path in event.dependencies
-                )
-            ]
-            if not tracked:
+            dependencies = {
+                dependency
+                for tracked in self._asset_events.values()
+                for dependency in tracked.dependencies
+            }
+            if asset_path is None:
+                selected_dependencies = {
+                    (authored_path, identifier, resolved_path)
+                    for authored_path, identifier, resolved_path in dependencies
+                    if not resolved_path
+                }
+            else:
+                selected_dependencies = {
+                    dependency for dependency in dependencies
+                    if self._asset_path_matches(asset_path, *dependency)
+                }
+            if not selected_dependencies:
                 return {
                     "status": "not_tracked",
                     "reapplied": 0,
@@ -1123,43 +1068,28 @@ class EventDispatcher:
                 }
             return self._refresh_asset_dependency_suppressed(
                 stage,
-                asset_path,
-                tracked,
+                selected_dependencies,
             )
 
     def _refresh_asset_dependency_suppressed(
         self,
         stage: Usd.Stage,
-        asset_path: str | None,
-        tracked: list[_TrackedAssetEvent],
+        selected_dependencies: set[tuple[str, str, str]],
     ) -> AssetDependencyRefreshResult:
         from pxr import Usd
 
         from .event_apply import apply_events, atomic_apply
 
-        ready: list[_TrackedAssetEvent] = []
-        explicitly_selected = {id(event) for event in tracked}
         resolved_in_refresh: dict[tuple[str, str], tuple[str, str]] = {}
-        refreshed_dependencies: dict[
-            int,
-            tuple[tuple[str, str, str], ...],
-        ] = {}
-        for event in self._asset_events.values():
+        # Keep each original event, its new dependencies, and any required replay
+        # together until application succeeds. Empty replay lists need no USD edit.
+        refreshes = []
+        for tracked in self._asset_events.values():
             event_ready = False
             dependencies: list[tuple[str, str, str]] = []
-            for authored_path, old_identifier, old_resolved_path in event.dependencies:
-                selected = id(event) in explicitly_selected and (
-                    not old_resolved_path
-                    if asset_path is None
-                    else self._asset_path_matches(
-                        asset_path,
-                        authored_path,
-                        old_identifier,
-                        old_resolved_path,
-                    )
-                )
-
-                anchor_layer = event.edit_target.GetLayer()
+            anchor_layer = tracked.edit_target.GetLayer()
+            for dependency in tracked.dependencies:
+                authored_path, _old_identifier, old_resolved_path = dependency
                 cache_key = (anchor_layer.identifier, authored_path)
                 resolved = resolved_in_refresh.get(cache_key)
                 if resolved is None:
@@ -1171,15 +1101,29 @@ class EventDispatcher:
                     resolved_in_refresh[cache_key] = resolved
                 identifier, resolved_path = resolved
                 dependencies.append((authored_path, identifier, resolved_path))
-                if (selected and resolved_path) or resolved_path != old_resolved_path:
+                selected_and_resolved = dependency in selected_dependencies and bool(resolved_path)
+                resolution_changed = resolved_path != old_resolved_path
+                if selected_and_resolved or resolution_changed:
                     event_ready = True
-            refreshed_dependencies[id(event)] = tuple(dependencies)
-            if event_ready:
-                ready.append(event)
 
-        if not ready:
-            for event in self._asset_events.values():
-                event.dependencies = refreshed_dependencies[id(event)]
+            local_events = []
+            if event_ready:
+                event = tracked.event
+                local_events.append(event)
+                if event.get("k") == K_SET_PAYLOAD:
+                    prim = stage.GetPrimAtPath(event.get("prim", ""))
+                    if prim and prim.IsLoaded():
+                        local_events.append({"k": K_LOAD_PAYLOAD, "prim": event["prim"]})
+            refreshes.append((tracked, tuple(dependencies), local_events))
+
+        replays = [
+            (tracked, dependencies, events)
+            for tracked, dependencies, events in refreshes
+            if events
+        ]
+        if not replays:
+            for tracked, dependencies, _events in refreshes:
+                tracked.dependencies = dependencies
             return {
                 "status": "still_missing",
                 "reapplied": 0,
@@ -1187,19 +1131,7 @@ class EventDispatcher:
                 "pending": list(self.pending_asset_dependencies),
             }
 
-        replays: list[tuple[_TrackedAssetEvent, list[dict]]] = []
-        adapter_events: list[dict] = []
-        for tracked_event in ready:
-            event = tracked_event.event
-            local_events = [event]
-            adapter_events.append(event)
-            if event.get("k") == K_SET_PAYLOAD:
-                prim = stage.GetPrimAtPath(event.get("prim", ""))
-                if prim and prim.IsLoaded():
-                    load_event = {"k": K_LOAD_PAYLOAD, "prim": event["prim"]}
-                    local_events.append(load_event)
-                    adapter_events.append(load_event)
-            replays.append((tracked_event, local_events))
+        adapter_events = [event for _tracked, _dependencies, events in replays for event in events]
 
         adapter_handles_stage = self.adapter.targets_stage() is stage
         projection = None
@@ -1221,7 +1153,7 @@ class EventDispatcher:
             if projection is not None:
                 transaction.enter_context(projection)
             snapshotted_layers: set[str] = set()
-            for tracked_event, _local_events in replays:
+            for tracked_event, _dependencies, _local_events in replays:
                 layer = tracked_event.edit_target.GetLayer()
                 if layer.identifier in snapshotted_layers:
                     continue
@@ -1229,13 +1161,13 @@ class EventDispatcher:
                     transaction.enter_context(atomic_apply(stage))
                 snapshotted_layers.add(layer.identifier)
 
-            for tracked_event, local_events in replays:
+            for tracked_event, _dependencies, local_events in replays:
                 with Usd.EditContext(stage, tracked_event.edit_target):
                     # Assigning the same SdfListOp is a no-op, so it cannot
                     # make Pcp retry an asset that was missing when the
                     # opinion was first authored. Clear the tracked opinion
                     # immediately before restoring its exact state.
-                    arc_event = local_events[0]
+                    arc_event = tracked_event.event
                     clear_arc_state(
                         stage,
                         arc_event["prim"],
@@ -1257,12 +1189,12 @@ class EventDispatcher:
                     self.adapter.apply_events(adapter_events)
                 projection.commit()
 
-        for tracked_event, local_events in replays:
+        for tracked_event, dependencies, local_events in replays:
             if self.emitter is not None:
                 with Usd.EditContext(stage, tracked_event.edit_target):
                     for event in local_events:
                         self.emitter.invalidate_for_event(event)
-            tracked_event.dependencies = refreshed_dependencies[id(tracked_event)]
+            tracked_event.dependencies = dependencies
 
         affected = self._run_post_apply_callbacks(
             adapter_events,

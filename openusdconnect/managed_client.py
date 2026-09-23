@@ -19,6 +19,7 @@ from ._client_lifecycle import (
     prepare_sender_token,
     raise_if_rejected,
     remaining_time,
+    share_client_token,
     stop_receiver,
 )
 from ._client_utils import (
@@ -99,6 +100,9 @@ class ManagedClient:
         resolved_token = resolve_client_token(host, port, token, persist_token)
         token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
 
+        def _on_token_issued(token: str) -> None:
+            share_client_token(token, self._sender, self._receiver, token_callback)
+
         self._stage = stage
         self._host = host
         self._port = port
@@ -121,7 +125,7 @@ class ManagedClient:
             origin=connection_origin,
             department=department,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
         )
         self._receiver = ReceiverThread(
             host=host,
@@ -131,7 +135,7 @@ class ManagedClient:
             client_id=stable_client_id,
             origin=connection_origin,
             token=resolved_token,
-            on_token_issued=token_callback,
+            on_token_issued=_on_token_issued,
             on_stage_metadata=on_stage_metadata,
             on_playback_state=on_playback_state,
             on_playback_claimed=on_playback_claimed,
@@ -305,7 +309,7 @@ class ManagedClient:
                 "the active edit target changed during recovery",
             )
 
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         self._refresh_recovery_checkpoint(timeout)
 
         preserved = Sdf.Layer.CreateAnonymous("openusdconnect-recovery-authoring")
@@ -329,7 +333,7 @@ class ManagedClient:
         finally:
             self._emitter.rebind_stage(stage)
         self._transform_coalescing.mark_submitted()
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        remaining = remaining_time(deadline)
         self._resume_sender_after_recovery(remaining)
         return result
 
@@ -344,7 +348,7 @@ class ManagedClient:
 
     def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
         """Replay through a new server head before resolving optimistic state."""
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         reconnect = self._receiver.reconnect
         self._receiver.reconnect = True
         try:
@@ -454,11 +458,11 @@ class ManagedClient:
         Queued replay still requires :meth:`update` on the stage-owning thread.
         """
         self.start()
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        deadline = deadline_after(timeout)
         connected = self._receiver.wait_connected(timeout)
         if connected:
             self._require_layered_replay()
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            remaining = remaining_time(deadline)
             return self._connect_sender(timeout=remaining)
         elif self._receiver.auth_rejected:
             raise PermissionError("authentication rejected")

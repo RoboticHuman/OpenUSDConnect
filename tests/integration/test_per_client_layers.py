@@ -816,12 +816,10 @@ class TestConcurrentDepartmentWrites:
     def test_op_cache_invalidated_on_edit_target_change(self, tmp_path):
         """Deterministic pin for the fix behind the flaky concurrent failures.
 
-        A cached XformOp is only valid while the stage edit target is unchanged.
-        Under concurrent department writes the edit target switches between
-        transactions, so the op cache must be invalidated on every switch; a
-        cache reused across a switch authors against the wrong layer and the
-        write is lost. ``_op_cache_for`` clears on change and keeps the cache
-        for consecutive same-layer edits (the single-client fast path).
+        Cache hits skip op setup, including authoring xformOpOrder in the
+        current layer. ``_op_cache_for`` clears on layer changes so each
+        department gets its own setup, and keeps consecutive same-layer edits
+        fast. XformOp.Set itself always uses the current stage edit target.
         """
         srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
         la = srv.get_or_create_client_layer("alice", "animation")

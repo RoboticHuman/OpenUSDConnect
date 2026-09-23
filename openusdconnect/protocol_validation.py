@@ -12,7 +12,7 @@ from functools import lru_cache
 from numbers import Integral, Real
 
 import numpy as np
-from pxr import Sdf
+from pxr import Sdf, Tf
 
 from .connectable_attrs import split_qualified_attr
 from .events import get as get_event_spec
@@ -550,9 +550,7 @@ def validate_event_or_raise(
         _require_prim_path(event.get("prim"))
     try:
         spec.validate(event)
-    except (TypeError, ValueError):
-        raise
-    except Exception as exc:
+    except Tf.ErrorException as exc:
         raise ValueError(f"invalid {kind} payload: {exc}") from exc
 
 
@@ -569,6 +567,13 @@ def validate_events(
             validate_event_or_raise(event, layer_mode=layer_mode)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"event {index}: {exc}") from exc
+
+    if layer_mode is None or layer_mode == LayerMode.SHARED_STAGE:
+        # These replace complete state, so each may occur only once per transaction.
+        if sum(event["k"] == K_SET_SUBLAYERS for event in events) > 1:
+            _fail("one shared-stage transaction may replace a parent topology once")
+        if sum(event["k"] == K_REPLACE_SDF_LAYER_CONTENT for event in events) > 1:
+            _fail("one shared-stage transaction may replace layer content once")
 
 
 def validate_event(event: dict) -> bool:

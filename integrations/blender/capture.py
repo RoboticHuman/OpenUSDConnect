@@ -714,7 +714,7 @@ class BlenderStageAuthor:
         """Author bpy.types.Camera fields onto the USD camera prim.
 
         Inverse of BlenderAdapter._apply_camera_attrs: Blender mm/metres →
-        USD tenths-of-stage-unit / stage units. The emitter's CameraAttrsChannel
+        USD tenths-of-stage-unit / stage units. The emitter's generic attribute path
         picks up the changed attrs and emits a ``set_gprim_attrs`` event.
         """
         if obj.type != "CAMERA" or obj.data is None:
