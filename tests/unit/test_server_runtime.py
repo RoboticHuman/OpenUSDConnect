@@ -242,7 +242,7 @@ def test_worker_start_failure_stops_started_workers(config, monkeypatch):
 
     states = []
     original = state_module.PeriodicCompactor.start
-    original_initialize = state_module.UsdSyncServer._initialize
+    original_initialize = state_module.UsdSyncServer.__init__
 
     def initialize(self, **kwargs):
         states.append(self)
@@ -254,7 +254,7 @@ def test_worker_start_failure_stops_started_workers(config, monkeypatch):
 
     config.durability = "realtime"
     config.compact_interval = 60
-    monkeypatch.setattr(state_module.UsdSyncServer, "_initialize", initialize)
+    monkeypatch.setattr(state_module.UsdSyncServer, "__init__", initialize)
     monkeypatch.setattr(state_module.PeriodicCompactor, "start", fail)
     with pytest.raises(RuntimeError, match="worker startup failed"):
         start_server(config)

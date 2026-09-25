@@ -102,14 +102,14 @@ def test_txn_during_compaction_survives_via_delta_merge(tmp_path):
         srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         phase1_started = threading.Event()
-        original_build = srv._build_compacted
+        original_build = srv._maintenance.build_compacted
 
         def slow_build(rows):
             phase1_started.set()
             time.sleep(0.4)
             return original_build(rows)
 
-        srv._build_compacted = slow_build
+        srv._maintenance.build_compacted = slow_build
 
         compactor = threading.Thread(target=srv.compact_log)
         compactor.start()

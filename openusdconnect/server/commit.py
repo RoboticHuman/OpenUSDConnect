@@ -23,7 +23,7 @@ from ..protocol_constants import (
 from ..shared_layer_graph import PreparedSublayers, StaleLayerGraphError
 from .journal import EncodedEvents, EventJournal
 from .scene import SceneState, include_removed_spec_fields
-from .transactions import TransactionRequest
+from .transactions import Transaction, TransactionRequest
 from .types import TransactionCommit, TransactionOutcome, TransactionRejectedError
 
 
@@ -52,6 +52,22 @@ def _managed_rollback_paths(events: list[dict]) -> set[str]:
     return paths
 
 
+def _check_transaction_id(
+    request: TransactionRequest, committed_through: int,
+) -> TransactionCommit | TransactionRejectedError | None:
+    """Return a duplicate or rejection; None admits the next producer write."""
+    if request.txn_id <= committed_through:
+        return TransactionCommit("duplicate", committed_through)
+    expected = committed_through + 1
+    if request.txn_id != expected:
+        return TransactionRejectedError(
+            "unexpected_id",
+            f"expected transaction {expected}, received {request.txn_id}",
+            expected_txn_id=expected,
+        )
+    return None
+
+
 class TransactionCommitter:
     def __init__(self, scene: SceneState, journal: EventJournal):
         self.scene = scene
@@ -60,41 +76,19 @@ class TransactionCommitter:
     def commit(self, request: TransactionRequest) -> TransactionCommit:
         """Commit one admitted request inside the caller's journal commit scope."""
 
-        committed_through = self.journal.committed_through(
-            request.client_id,
-            request.session_id,
+        outcome = _check_transaction_id(
+            request, self.journal.committed_through(request.client_id, request.session_id),
         )
-        if request.txn_id <= committed_through:
-            return TransactionCommit("duplicate", committed_through)
+        if isinstance(outcome, TransactionRejectedError):
+            raise outcome
+        if outcome is not None:
+            return outcome
 
-        expected = committed_through + 1
-        if request.txn_id != expected:
-            raise TransactionRejectedError(
-                "unexpected_id",
-                f"expected transaction {expected}, received {request.txn_id}",
-                expected_txn_id=expected,
-            )
-
-        records = self.commit_events(
-            request.events,
-            client_id=request.client_id,
-            origin=request.origin,
-            client_addr=request.client_addr,
-            layer=request.layer,
-            layer_key=request.layer_key,
-            transaction_identity=(request.session_id, request.txn_id),
-        )
+        records = self.commit_events(request)
         self.journal.remember_progress(
-            {
-                (request.client_id, request.session_id): request.txn_id,
-            }
+            {(request.client_id, request.session_id): request.txn_id},
         )
-        commit = TransactionCommit(
-            "committed",
-            request.txn_id,
-            tuple(records),
-        )
-        return commit
+        return TransactionCommit("committed", request.txn_id, tuple(records))
 
     def commit_group(
         self,
@@ -114,17 +108,9 @@ class TransactionCommitter:
             committed_through = next_by_session.get(producer)
             if committed_through is None:
                 committed_through = self.journal.committed_through(*producer)
-            if request.txn_id <= committed_through:
-                outcomes[index] = TransactionCommit("duplicate", committed_through)
-                continue
-
-            expected = committed_through + 1
-            if request.txn_id != expected:
-                outcomes[index] = TransactionRejectedError(
-                    "unexpected_id",
-                    f"expected transaction {expected}, received {request.txn_id}",
-                    expected_txn_id=expected,
-                )
+            outcome = _check_transaction_id(request, committed_through)
+            if outcome is not None:
+                outcomes[index] = outcome
                 continue
             next_by_session[producer] = request.txn_id
             accepted.append((index, request))
@@ -134,49 +120,30 @@ class TransactionCommitter:
 
         with self.journal.reserve_sequences():
             prepared = [
-                self._prepare_managed_transaction(
-                    request.events,
-                    client_id=request.client_id,
-                    origin=request.origin,
-                    client_addr=request.client_addr,
-                    layer=request.layer,
-                    layer_key=request.layer_key,
-                    transaction_identity=(request.session_id, request.txn_id),
-                )
+                self._prepare_managed_transaction(request)
                 for _index, request in accepted
             ]
             self._persist_managed_transactions(prepared)
 
         self.journal.remember_progress(next_by_session)
         for (index, request), transaction in zip(accepted, prepared, strict=True):
-            records = tuple(transaction.encoded.records)
-            commit = TransactionCommit(
-                "committed",
-                request.txn_id,
-                records,
+            outcomes[index] = TransactionCommit(
+                "committed", request.txn_id, tuple(transaction.encoded.records),
             )
-            outcomes[index] = commit
         return [outcomes[index] for index in range(len(requests))]
 
     def _prepare_managed_transaction(
-        self,
-        events: list[dict],
-        *,
-        client_id: str | None,
-        origin: str | None,
-        client_addr: str | None,
-        layer: Sdf.Layer | None,
-        layer_key: str,
-        transaction_identity: tuple[str, int] | None,
+        self, request: Transaction,
     ) -> PreparedTransaction:
         """Check routing and encode previously validated managed events.
 
         Requires the journal commit scope and a sequence reservation so failures
         in this method or subsequent persistence release the reserved sequences.
         """
-        if layer_key:
+        if request.layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
-        target_layer = layer or self.scene.edit_layer
+        events = request.events
+        target_layer = request.layer or self.scene.edit_layer
         layer_key = self.scene.layer_stack.key_for_layer(target_layer)
         if layer_key is None and any(event["k"] not in NON_COLLABORATION_KINDS for event in events):
             raise ValueError("transaction target is not a managed collaboration layer")
@@ -190,23 +157,17 @@ class TransactionCommitter:
                 else ("", event)
                 for event in events
             ),
-            client_id=client_id,
-            origin=origin,
-            client_addr=client_addr,
+            client_id=request.client_id,
+            origin=request.origin,
+            client_addr=request.client_addr,
         )
-        progress = None
-        if transaction_identity is not None:
-            if not client_id:
-                raise ValueError("idempotent transaction persistence requires client_id")
-            session_id, txn_id = transaction_identity
-            progress = ProducerProgress(client_id, session_id, txn_id)
         return PreparedTransaction(
             events,
             target_layer,
             collaboration_paths,
             has_session_events,
             encoded,
-            progress,
+            request.progress,
         )
 
     def _persist_managed_transactions(self, prepared: list[PreparedTransaction]) -> None:
@@ -265,15 +226,7 @@ class TransactionCommitter:
                 self.scene.update_prim_tracking(transaction.events)
 
     def commit_events(
-        self,
-        events: list[dict],
-        *,
-        client_id: str | None = None,
-        origin: str | None = None,
-        client_addr: str | None = None,
-        layer: Sdf.Layer | None = None,
-        layer_key: str = "",
-        transaction_identity: tuple[str, int] | None = None,
+        self, request: Transaction,
     ) -> list[tuple[dict, bytes]]:
         """Apply validated events and persist them in the caller's commit scope.
 
@@ -289,42 +242,21 @@ class TransactionCommitter:
         called; cached client metadata is not authoritative for persistence.
         """
         if self.scene.layer_mode is LayerMode.SHARED_STAGE:
-            if layer is not None:
+            if request.layer is not None:
                 raise ValueError("managed layer routing is unavailable in shared-stage mode")
-            return self._process_shared_txn(
-                events,
-                layer_key=layer_key,
-                client_id=client_id,
-                origin=origin,
-                client_addr=client_addr,
-                transaction_identity=transaction_identity,
-            )
+            return self._process_shared_txn(request)
         with self.journal.reserve_sequences():
-            transaction = self._prepare_managed_transaction(
-                events,
-                client_id=client_id,
-                origin=origin,
-                client_addr=client_addr,
-                layer=layer,
-                layer_key=layer_key,
-                transaction_identity=transaction_identity,
-            )
+            transaction = self._prepare_managed_transaction(request)
             self._persist_managed_transactions([transaction])
         return transaction.encoded.records
 
     def _process_shared_txn(
-        self,
-        events: list[dict],
-        *,
-        layer_key: str,
-        client_id: str | None,
-        origin: str | None,
-        client_addr: str | None,
-        transaction_identity: tuple[str, int] | None = None,
+        self, request: Transaction,
     ) -> list[tuple[dict, bytes]]:
         """Apply one validated authored-layer transaction against the current graph."""
         from ..event_apply import apply_events, atomic_apply
 
+        layer_key = request.layer_key
         graph = self.scene.shared_layer_graph
         if graph is None:
             raise RuntimeError("shared-stage transaction requires a layer graph")
@@ -340,7 +272,7 @@ class TransactionCommitter:
         prepared: PreparedSublayers | None = None
         canonical_events = []
         try:
-            for event in events:
+            for event in request.events:
                 if event["k"] == K_SET_SUBLAYERS:
                     prepared = graph.canonicalize_sublayers(layer_key, event)
                     canonical = prepared.event
@@ -364,13 +296,7 @@ class TransactionCommitter:
                     if prepared is not None:
                         graph.accept_sublayers(prepared)
                         routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
-                    records = self.persist_shared_events(
-                        routed_events,
-                        client_id=client_id,
-                        origin=origin,
-                        client_addr=client_addr,
-                        transaction_identity=transaction_identity,
-                    )
+                    records = self.persist_shared_events(routed_events, request=request)
         except StaleLayerGraphError as exc:
             raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
         self.scene.invalidate_prim_count()
@@ -380,10 +306,7 @@ class TransactionCommitter:
         self,
         routed_events: list[tuple[str, dict]],
         *,
-        client_id: str | None,
-        origin: str | None,
-        client_addr: str | None,
-        transaction_identity: tuple[str, int] | None = None,
+        request: Transaction | None = None,
     ) -> list[tuple[dict, bytes]]:
         """Persist routed records in the caller's commit scope.
 
@@ -392,22 +315,11 @@ class TransactionCommitter:
         """
         encoded = self.journal.encode_events(
             routed_events,
-            client_id=client_id,
-            origin=origin,
-            client_addr=client_addr,
+            client_id=request.client_id if request else None,
+            origin=request.origin if request else None,
+            client_addr=request.client_addr if request else None,
         )
-        producer_progress: tuple[ProducerProgress, ...] = ()
-        if transaction_identity is not None:
-            if not client_id:
-                raise ValueError("idempotent transaction persistence requires client_id")
-            session_id, txn_id = transaction_identity
-            producer_progress = (
-                ProducerProgress(
-                    client_id,
-                    session_id,
-                    txn_id,
-                ),
-            )
+        progress = request.progress if request else None
         topology_keys = set()
         for event_layer_key, event in routed_events:
             if event.get("k") != K_SET_SUBLAYERS:
@@ -421,7 +333,7 @@ class TransactionCommitter:
         )
         self.journal.append_batch(
             encoded.store_rows,
-            producer_progress=producer_progress,
+            producer_progress=(progress,) if progress is not None else (),
             layer_identities=layer_identities,
         )
         return encoded.records

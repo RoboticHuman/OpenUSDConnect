@@ -174,15 +174,28 @@ class EventJournal:
         client_addr: str | None,
     ) -> EncodedEvents:
         encoded = EncodedEvents()
+        encoder = self._encoder.encode
         for layer_key, event in routed_events:
-            record, record_bin = encode_event_record(
-                self.assign_seq(), event, client=client_addr, client_id=client_id,
-                origin=origin, layer_key=layer_key, encoder=self._encoder.encode,
-            )
-            if self._metrics is not None:
-                self._metrics.record(event["k"], len(record_bin))
-            encoded.append(record, record_bin)
+            encoded.append(*self.encode_event(
+                event, client_id=client_id, origin=origin,
+                client_addr=client_addr, layer_key=layer_key, encoder=encoder,
+            ))
         return encoded
+
+    def encode_event(
+        self, event: dict, *, client_id: str | None = None,
+        origin: str | None = None, client_addr: str | None = None,
+        layer_key: str | None = None,
+        encoder: Callable[[dict], bytes] = encode_message,
+    ) -> tuple[dict, bytes]:
+        """Sequence and encode one event within the caller's commit scope."""
+        record, record_bin = encode_event_record(
+            self.assign_seq(), event, client=client_addr, client_id=client_id,
+            origin=origin, layer_key=layer_key, encoder=encoder,
+        )
+        if self._metrics is not None:
+            self._metrics.record(event["k"], len(record_bin))
+        return record, record_bin
 
     def append_record(self, record: dict) -> bytes:
         event = record.get("event", {})

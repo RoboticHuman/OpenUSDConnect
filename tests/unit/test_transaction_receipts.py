@@ -224,6 +224,230 @@ def test_gap_is_rejected_with_expected_transaction(tmp_path):
         server.store.close()
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_producer_order_and_metadata_survive_duplicate_and_gap_requests(tmp_path, grouped):
+    """A rejected gap cannot advance progress or change neighboring writes."""
+    from openusdconnect.codec import message_to_dict
+
+    server = UsdSyncServer(log_path=str(tmp_path / "ordering.db"), txn_batch_size=1)
+    try:
+        layer = server.get_or_create_client_layer("artist", "layout")
+        requests = [
+            TransactionRequest(
+                events=[_event(f"/World/Edit{index}")], client_id="artist",
+                session_id="session", txn_id=txn_id, layer=layer,
+                origin="dcc", client_addr="127.0.0.1:7200",
+            )
+            for index, txn_id in enumerate((1, 1, 3, 2, 1))
+        ]
+        if grouped:
+            outcomes = server._commit_managed_transaction_group(requests)
+        else:
+            outcomes = []
+            for request in requests:
+                try:
+                    outcomes.append(server._process_idempotent_txn_now(request))
+                except TransactionRejectedError as exc:
+                    outcomes.append(exc)
+        assert [outcomes[i].status for i in (0, 1, 3, 4)] == [
+            "committed", "duplicate", "committed", "duplicate",
+        ]
+        assert [outcomes[i].txn_id for i in (0, 1, 3, 4)] == [1, 1, 2, 2]
+        assert isinstance(outcomes[2], TransactionRejectedError)
+        assert outcomes[2].expected_txn_id == 2
+        assert server.store.get_producer_progress("artist", "session") == 2
+        records = [message_to_dict(blob) for _seq, blob in server.store.get_all_asc()]
+        assert [record["event"]["prim"] for record in records] == ["/World/Edit0", "/World/Edit3"]
+        assert [record["seq"] for record in records] == [1, 2]
+        for record in records:
+            assert record["client_id"] == "artist"
+            assert record["origin"] == "dcc"
+            assert record["client"] == "127.0.0.1:7200"
+            assert record["layer_key"] == server.layer_stack.key_for_layer(layer)
+        assert layer.GetPrimAtPath("/World/Edit0") and layer.GetPrimAtPath("/World/Edit3")
+        assert not any(server.stage.GetPrimAtPath(f"/World/Edit{i}") for i in (1, 2, 4))
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("broadcast_fails", [False, True])
+def test_payload_publication_keeps_commit_order_and_durable_outcomes(
+    tmp_path, monkeypatch, grouped, broadcast_fails,
+):
+    server = UsdSyncServer(log_path=str(tmp_path / "publication.db"), txn_batch_size=1)
+    try:
+        server._commit_events([_event("/Payload")])
+        observed = []
+        broadcast = server.broadcast_transaction_group_views
+
+        def publish(transactions):
+            for records in transactions:
+                for record, _encoded in records:
+                    observed.append(record["event"]["prim"])
+                    if broadcast_fails and record["event"]["k"] == "load_payload":
+                        raise OSError("injected broadcast failure")
+            broadcast(transactions)
+
+        monkeypatch.setattr(server, "broadcast_transaction_group_views", publish)
+        monkeypatch.setattr(
+            server, "replay_children_after_load", lambda path: observed.append(path + "/Child"),
+        )
+        requests = [
+            TransactionRequest(events=[event], client_id="client", session_id="s", txn_id=index)
+            for index, event in enumerate([
+                _event("/Before"), {"k": "load_payload", "prim": "/Payload"}, _event("/After"),
+            ], start=1)
+        ]
+        outcomes = (
+            # The coordinator closes each batch at a payload load.
+            server._commit_managed_transaction_group(requests[:2])
+            + server._commit_managed_transaction_group(requests[2:]) if grouped
+            else [server._process_idempotent_txn_now(request) for request in requests]
+        )
+        assert observed == [
+            "/Before", "/Payload", *([] if broadcast_fails else ["/Payload/Child"]), "/After",
+        ]
+        assert [outcome.status for outcome in outcomes] == ["committed"] * 3
+        assert server.store.get_producer_progress("client", "s") == 3
+        assert server.stage.GetPrimAtPath("/After")
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("durability", ["strict", "realtime"])
+def test_child_replay_preserves_routing_and_persists_before_publication(tmp_path, durability):
+    from openusdconnect.codec import message_to_dict
+
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "children.db"), durability=durability, wire_metrics=True,
+    )
+    try:
+        for name in ("A", "B"):
+            layer = server.get_or_create_client_layer(name, department=name)
+            server._commit_events(
+                [_event(f"/Payload/{name}")], client_id=name, origin=f"origin-{name}", layer=layer,
+            )
+        observed = []
+        server.add_event_listener(
+            lambda record: observed.append((record, server.store.get_max_seq())),
+        )
+        before_metrics = server.get_wire_metrics()["total_count"]
+
+        server.replay_children_after_load("/Payload")
+
+        replayed = [message_to_dict(blob) for blob in server.store.get_from_seq_bin(3)]
+        assert [record["seq"] for record in replayed] == [3, 4]
+        assert [record["event"]["prim"] for record in replayed] == ["/Payload/A", "/Payload/B"]
+        assert [record["origin"] for record in replayed] == ["origin-A", "origin-B"]
+        assert [record["layer_key"] for record in replayed] == ["department:A", "department:B"]
+        assert all("client_id" not in record for record in replayed)
+        assert [(record["seq"], head) for record, head in observed] == [(3, 4), (4, 4)]
+        assert server.get_event_count() == 4
+        assert server.get_wire_metrics()["total_count"] == before_metrics + 2
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("batch_size", [1, 8])
+@pytest.mark.parametrize("durability", ["strict", "realtime"])
+def test_child_replay_storage_failure_preserves_parent_commit_and_sequence(
+    tmp_path, monkeypatch, batch_size, durability,
+):
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "replay-failure.db"),
+        txn_batch_size=batch_size, durability=durability,
+    )
+    try:
+        server._commit_events([_event("/Payload"), _event("/Payload/Child")])
+        append = server.store.append_batch
+        observed = []
+        server.add_event_listener(observed.append)
+
+        def fail_replay(rows, **kwargs):
+            if not kwargs.get("producer_progress"):
+                raise OSError("replay persistence failed")
+            return append(rows, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(server.store, "append_batch", fail_replay)
+            outcome = server.process_idempotent_txn(
+                [{"k": "load_payload", "prim": "/Payload"}],
+                client_id="client", session_id="session", txn_id=1,
+            )
+        assert outcome.status == "committed"
+        assert outcome.checkpoint.head_seq == 3
+        assert server.producer_committed_through("client", "session") == 1
+        assert server.get_replay_token()[1] == server.store.get_max_seq() == 3
+        assert server.get_event_count() == server.store.get_count() == 3
+        assert [record["seq"] for record in observed] == [3]
+
+        following = _commit(server, "/Following", client="client", session="session", txn_id=2)
+        assert following.status == "committed"
+        assert following.records[0][0]["seq"] == 4
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("paths,expected", [
+    (["/Before", "/Payload", "/After"], ["/Before", "/Payload", "/Payload/Child", "/After"]),
+    (["/Payload", "/After"], ["/Payload", "/Payload/Child", "/After"]),
+    (["/Payload", "/Payload", "/After"],
+     ["/Payload", "/Payload/Child", "/Payload", "/Payload/Child", "/After"]),
+])
+def test_queued_payload_replay_keeps_wire_sequences_in_commit_order(
+    tmp_path, monkeypatch, paths, expected,
+):
+    import io
+
+    from openusdconnect.codec import message_to_dict
+    from openusdconnect.framing import recv_framed_rfile
+    from openusdconnect.server.transactions import TransactionCoordinator
+    from tests.helpers import ReceiverStub
+
+    # Admit the whole batch before starting the worker, without a timing race.
+    start = TransactionCoordinator.start
+    with monkeypatch.context() as patch:
+        patch.setattr(TransactionCoordinator, "start", lambda self: None)
+        server = UsdSyncServer(log_path=str(tmp_path / "replay-order.db"), txn_batch_size=8)
+    try:
+        server._commit_events([_event("/Payload"), _event("/Payload/Child")])
+        observed = []
+        server.add_event_listener(observed.append)
+        receiver = ReceiverStub()
+        receiver.send_lock = threading.Lock()
+        receiver.client_address = ("replay-order", 0)
+        receiver.request = io.BytesIO()
+        receiver.request.sendall = receiver.request.write
+        server.receivers.add(receiver)
+        requests = [
+            server.submit_idempotent_txn(
+                [{"k": "load_payload", "prim": path} if path == "/Payload" else _event(path)],
+                client_id="client", session_id="session", txn_id=index,
+            )
+            for index, path in enumerate(paths, start=1)
+        ]
+        start(server._transactions)
+        outcomes = [request.wait() for request in requests]
+        assert [outcome.status for outcome in outcomes] == ["committed"] * len(paths)
+        assert [record["event"]["prim"] for record in observed] == expected
+        sequences = list(range(3, 3 + len(expected)))
+        assert [record["seq"] for record in observed] == sequences
+        assert server.store.get_max_seq() == sequences[-1]
+        server._broadcast_queue.join()
+        receiver.request.seek(0)
+        wire = [message_to_dict(recv_framed_rfile(receiver.request)) for _ in expected]
+        assert [record["seq"] for record in wire] == sequences
+        assert receiver.request.read() == b""
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
 def test_invalid_transaction_is_rejected_before_queue_or_sequence_reservation(tmp_path):
     server = UsdSyncServer(log_path=str(tmp_path / "invalid.db"), txn_batch_size=1)
     try:

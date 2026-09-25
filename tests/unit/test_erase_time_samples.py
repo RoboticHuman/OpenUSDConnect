@@ -13,8 +13,8 @@ from openusdconnect.event_apply import (
 )
 from openusdconnect.protocol_validation import validate_event_or_raise
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
-from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.compaction import LogCompaction
+from openusdconnect.server.maintenance import HistoryMaintenance
 from openusdconnect.time_sample_delta import erase_time_samples_event
 
 
@@ -151,7 +151,7 @@ def test_compaction_does_not_move_partial_writes_across_erasure(exact_samples):
     apply_events(expected, events)
     rows = [(seq, _encode(event, seq)) for seq, event in enumerate(events, 1)]
     for _ in range(3):
-        compacted = UsdSyncServer._build_compacted(rows)
+        compacted = HistoryMaintenance.build_compacted(rows)
         replay = [entry.event for entry in compacted.replay_entries()]
         target = Usd.Stage.CreateInMemory()
         apply_events(target, replay)
@@ -166,7 +166,7 @@ def test_compaction_keeps_erasures_in_their_own_layer():
         (3, _encode(_erase(1.0), 3, "strong")),
         (4, _encode(_write(1.0, extent=[[-1.0] * 3, [1.0] * 3]), 4, "strong")),
     ]
-    entries = UsdSyncServer._build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
     for layer_key, expected_times in (("weak", [1.0]), ("strong", [])):
         target = Usd.Stage.CreateInMemory()
         UsdGeom.Cube.Define(target, "/Cube")
@@ -182,7 +182,7 @@ def test_compaction_still_collapses_repeated_exact_table_writes():
     for seq in range(1, 5):
         attr.Set(float(seq), 1.0)
         rows.append((seq, _encode(_spec_event(source.GetRootLayer(), ["timeSamples"]), seq)))
-    entries = UsdSyncServer._build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
     assert len(entries) == 1
     target = Usd.Stage.CreateInMemory()
     apply_events(target, [entries[0].event])
@@ -197,7 +197,7 @@ def test_compaction_does_not_move_exact_tables_past_later_sample_writes():
         _spec_event(source.GetRootLayer(), ["documentation"]),
     ]
     rows = [(seq, _encode(event, seq)) for seq, event in enumerate(events, 1)]
-    entries = UsdSyncServer._build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
     target = Usd.Stage.CreateInMemory()
     apply_events(target, [entry.event for entry in entries])
     assert target.GetAttributeAtPath("/Cube.size").Get(1.0) == 42.0

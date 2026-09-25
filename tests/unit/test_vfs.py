@@ -23,6 +23,7 @@ from openusdconnect.server.types import (
 from openusdconnect.server.vfs import VirtualStageFile, VirtualStageFileSet, WriteMode
 from openusdconnect.server.vfs.provider import VfsSnapshot, VfsStat
 from openusdconnect.server.vfs.webdav import _StageFileResource
+from tests.helpers import ReceiverStub
 
 
 @pytest.fixture
@@ -526,7 +527,7 @@ class TestWriteTranslate:
             def sendall(self, payload):
                 self.payloads.append(payload)
 
-        class CaptureReceiver:
+        class CaptureReceiver(ReceiverStub):
             def __init__(self):
                 self.request = CaptureRequest()
                 self.client_address = ("vfs-capture", 1)

@@ -16,20 +16,26 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Iterable
-from contextlib import contextmanager
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 from pxr import Ar, Sdf, Usd
 
-from ..checkpoints import TransactionCheckpoint
-from ..codec import encode_message, message_to_dict
+from ..codec import (
+    decode_envelope,
+    decode_received_event,
+    encode_message,
+    message_to_dict,
+    resolve_payload,
+)
 from ..emitter import read_stage_metadata
 from ..event_store import EventStore, LayerIdentity, ProducerProgress, SqliteEventStore
 from ..framing import frame_batch
 from ..protocol_constants import (
     K_ERASE_TIME_SAMPLES,
-    K_LOAD_PAYLOAD,
     K_REPLACE_SDF_LAYER_CONTENT,
     K_SET_SDF_SPEC_FIELDS,
     K_SET_SUBLAYERS,
@@ -53,8 +59,8 @@ from .collaboration import (
     label_for_layer_key,
 )
 from .commit import TransactionCommitter
-from .compaction import LogCompaction, child_replay_records
-from .journal import EventJournal
+from .compaction import child_replay_records
+from .journal import EncodedEvents, EventJournal
 from .maintenance import HistoryMaintenance, PeriodicCompactor
 from .metrics import WireMetrics
 from .playback import PlaybackController
@@ -67,7 +73,7 @@ from .snapshots import (
     read_snapshot_metadata,
     validate_stage_snapshot,
 )
-from .transactions import TransactionCoordinator, TransactionRequest
+from .transactions import Transaction, TransactionCoordinator, TransactionRequest
 from .types import (
     ClientInfo,
     TransactionCommit,
@@ -75,6 +81,9 @@ from .types import (
     TransactionRejectedError,
     VfsWriteRejectedError,
 )
+
+if TYPE_CHECKING:
+    from .connection import ConnectionHandler
 
 LOG = logging.getLogger(__name__)
 
@@ -132,16 +141,158 @@ class UsdSyncServer:
         self._broadcast_thread = None
         self._owns_store = event_store is None
         try:
-            self._initialize(
-                base_usd_path=base_usd_path, log_path=log_path, event_store=event_store,
-                op_cache_size=op_cache_size, department_priority=department_priority,
-                require_token=require_token, token_db_path=token_db_path,
-                durability=durability, txn_rate=txn_rate, txn_burst=txn_burst,
-                txn_batch_size=txn_batch_size, txn_batch_delay=txn_batch_delay,
-                compact_interval=compact_interval, reclaim_interval=reclaim_interval,
-                wire_metrics=wire_metrics, stage=stage, resolver_context=resolver_context,
-                layer_mode=layer_mode,
+            if stage is not None and base_usd_path:
+                raise ValueError("stage and base_usd_path are mutually exclusive")
+            if stage is not None and resolver_context is not None:
+                raise ValueError("a supplied stage already owns its resolver context")
+            validate_rate_limit_config(txn_rate, txn_burst)
+
+            self.layer_mode = LayerMode(layer_mode)
+            if self.layer_mode is LayerMode.SHARED_STAGE and department_priority:
+                raise ValueError("department policy is not available in shared-stage mode")
+
+            if stage is not None:
+                self.stage = stage
+            elif base_usd_path:
+                self.stage = (
+                    Usd.Stage.Open(base_usd_path, resolver_context)
+                    if resolver_context is not None
+                    else Usd.Stage.Open(base_usd_path)
+                )
+                if self.stage is None:
+                    raise RuntimeError(f"Failed to open base USD: {base_usd_path}")
+            else:
+                self.stage = (
+                    Usd.Stage.CreateInMemory("openusdconnect-server.usda", resolver_context)
+                    if resolver_context is not None
+                    else Usd.Stage.CreateInMemory()
+                )
+                self.stage.DefinePrim("/Root", "Xform")
+            if self.layer_mode is LayerMode.SHARED_STAGE and Sdf.Layer.IsAnonymousLayerIdentifier(
+                self.stage.GetRootLayer().identifier
+            ):
+                raise ValueError("shared-stage mode requires a portable root layer")
+
+            self._scene = SceneState(
+                self.stage, layer_mode=self.layer_mode,
+                op_cache_size=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
             )
+            self.stage_lock = self._scene.lock
+            self.edit_layer = self._scene.edit_layer
+            self.layer_stack = self._scene.layer_stack
+            self.op_cache = self._scene.op_cache
+
+            self._collaboration = CollaborationPolicy(
+                self._scene, department_priority=department_priority,
+                bump_snapshot_epoch=self.bump_snapshot_epoch,
+                broadcast_layer_stack_state=self.broadcast_layer_stack_state,
+            )
+
+            self.clients_lock = threading.Lock()
+            self.receivers: set[ConnectionHandler] = set()
+            self.clients: dict[str, ClientInfo] = {}
+            self._event_listeners: list = []
+            self._start_time = time.time()
+            self.txn_barrier = _TxnBarrier()
+            self.txn_batch_size = max(1, int(txn_batch_size))
+            self.txn_batch_delay = max(0.0, float(txn_batch_delay))
+
+            # Pluggable event store defaults to SQLite
+            self.store: EventStore = event_store or SqliteEventStore(log_path)
+            self.wire_metrics = WireMetrics() if wire_metrics else None
+            self._journal = EventJournal(
+                self.store, durability=durability, metrics=self.wire_metrics,
+            )
+            self._committer = TransactionCommitter(self._scene, self._journal)
+            self.server_instance = uuid.uuid4().hex
+            self.scene_id = self._make_scene_id(base_usd_path)
+            self.last_vfs_write_analysis: dict | None = None
+
+            # TOFU token authentication
+            self.require_token = require_token
+            self.token_store = None
+            if require_token:
+                from ..token_store import TokenStore
+
+                _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
+                self.token_store = TokenStore(_token_path)
+
+            self._playback = PlaybackController()
+
+            # A dedicated thread sends queued broadcasts. Slow receivers apply
+            # backpressure to publishers when the bounded queue fills.
+            # Each queued item retains the receiver membership captured when the
+            # broadcast was authored. A receiver joining later obtains older
+            # records only through its bounded replay window.
+            # Item: (payload_bytes, receiver_handlers); routing is settled at enqueue.
+            self._broadcast_queue: queue.Queue = queue.Queue(maxsize=_BROADCAST_QUEUE_MAX)
+            self._broadcast_thread = threading.Thread(
+                target=self._broadcast_loop,
+                daemon=True,
+            )
+
+            # Durability mode for writes without producer progress. Idempotent
+            # producer transactions always persist their event and cumulative
+            # high-water mark atomically before acknowledgement and publication.
+            #   "strict" persists every write before broadcast
+            #   "realtime" allows eligible server-internal writes to persist async
+            self.durability = durability
+            # Per-client rate limiting (0 = disabled)
+            self.txn_rate = txn_rate
+            self.txn_burst = txn_burst
+
+            self._maintenance = HistoryMaintenance(
+                self._scene, self._journal, self.txn_barrier,
+                drain_broadcasts=self._broadcast_queue.join,
+                reclaim_interval=reclaim_interval,
+            )
+            self._compactor = PeriodicCompactor(
+                lambda: self.compact_log(), self._journal, compact_interval,
+            )
+            if self.layer_mode is LayerMode.SHARED_STAGE:
+                existing_graph_log = self.store.get_count() > 0
+                self._scene.shared_layer_graph = SharedLayerGraph(
+                    self.stage,
+                    authoritative=not existing_graph_log,
+                )
+                if not existing_graph_log:
+                    self._committer.append_graph_baseline()
+
+            # Rebuild stage from the event log so the composed stage matches
+            # what receivers would get on replay.
+            self._replay_log_into_stage()
+            if self.shared_layer_graph is not None:
+                if existing_graph_log:
+                    identities = self.store.get_layer_identities()
+                    if not identities:
+                        raise ValueError(
+                            "shared-stage database has no durable layer identity registry; "
+                            "recreate databases written before this protocol version"
+                        )
+                    self.shared_layer_graph.restore_identity_records(
+                        (identity.identifier, identity.layer_key)
+                        for identity in identities
+                    )
+                self.shared_layer_graph.authoritative = True
+                self.refresh_shared_layer_dependencies()
+
+            self._transactions = TransactionCoordinator(
+                barrier=self.txn_barrier,
+                commit=self._process_idempotent_txn_now,
+                commit_group=(
+                    self._commit_managed_transaction_group
+                    if self.layer_mode is LayerMode.MANAGED else None
+                ),
+                checkpoint=self._journal.durable_checkpoint,
+                batch_size=self.txn_batch_size,
+                batch_delay=self.txn_batch_delay,
+            )
+
+            # No worker sees partially initialized state or replay in progress.
+            self._broadcast_thread.start()
+            self._journal.start()
+            self._compactor.start()
+            self._transactions.start()
         except BaseException:
             try:
                 self.shutdown()
@@ -149,180 +300,6 @@ class UsdSyncServer:
                 if self._owns_store and hasattr(self, "store"):
                     self.store.close()
             raise
-
-    def _initialize(
-        self,
-        base_usd_path: str | None = None,
-        log_path: str = "usd_events.db",
-        event_store: EventStore | None = None,
-        op_cache_size: int | None = None,
-        department_priority: list[str] | None = None,
-        require_token: bool = False,
-        token_db_path: str | None = None,
-        durability: str = "strict",
-        txn_rate: float = 0,
-        txn_burst: int = 0,
-        txn_batch_size: int = 256,
-        txn_batch_delay: float = 0.0005,
-        wire_metrics: bool = False,
-        compact_interval: float = 0,
-        reclaim_interval: float = 0,
-        stage: Usd.Stage | None = None,
-        resolver_context: Ar.ResolverContext | None = None,
-        layer_mode: LayerMode | str = LayerMode.MANAGED,
-    ):
-        if stage is not None and base_usd_path:
-            raise ValueError("stage and base_usd_path are mutually exclusive")
-        if stage is not None and resolver_context is not None:
-            raise ValueError("a supplied stage already owns its resolver context")
-        validate_rate_limit_config(txn_rate, txn_burst)
-
-        self.layer_mode = LayerMode(layer_mode)
-        if self.layer_mode is LayerMode.SHARED_STAGE and department_priority:
-            raise ValueError("department policy is not available in shared-stage mode")
-
-        if stage is not None:
-            self.stage = stage
-        elif base_usd_path:
-            self.stage = (
-                Usd.Stage.Open(base_usd_path, resolver_context)
-                if resolver_context is not None
-                else Usd.Stage.Open(base_usd_path)
-            )
-            if self.stage is None:
-                raise RuntimeError(f"Failed to open base USD: {base_usd_path}")
-        else:
-            self.stage = (
-                Usd.Stage.CreateInMemory("openusdconnect-server.usda", resolver_context)
-                if resolver_context is not None
-                else Usd.Stage.CreateInMemory()
-            )
-            self.stage.DefinePrim("/Root", "Xform")
-        if self.layer_mode is LayerMode.SHARED_STAGE and Sdf.Layer.IsAnonymousLayerIdentifier(
-            self.stage.GetRootLayer().identifier
-        ):
-            raise ValueError("shared-stage mode requires a portable root layer")
-
-        self._scene = SceneState(
-            self.stage, layer_mode=self.layer_mode,
-            op_cache_size=op_cache_size or self.DEFAULT_OP_CACHE_SIZE,
-        )
-        self.stage_lock = self._scene.lock
-        self.edit_layer = self._scene.edit_layer
-        self.layer_stack = self._scene.layer_stack
-        self.op_cache = self._scene.op_cache
-
-        self._collaboration = CollaborationPolicy(
-            self._scene, department_priority=department_priority,
-            bump_snapshot_epoch=self.bump_snapshot_epoch,
-            broadcast_layer_stack_state=self.broadcast_layer_stack_state,
-        )
-
-        self.clients_lock = threading.Lock()
-        self.receivers: set = set()
-        self.clients: dict[str, ClientInfo] = {}
-        self._event_listeners: list = []
-        self._start_time = time.time()
-        self.txn_barrier = _TxnBarrier()
-        self.txn_batch_size = max(1, int(txn_batch_size))
-        self.txn_batch_delay = max(0.0, float(txn_batch_delay))
-
-        # Pluggable event store defaults to SQLite
-        self.store: EventStore = event_store or SqliteEventStore(log_path)
-        self.wire_metrics = WireMetrics() if wire_metrics else None
-        self._journal = EventJournal(
-            self.store, durability=durability, metrics=self.wire_metrics,
-        )
-        self._committer = TransactionCommitter(self._scene, self._journal)
-        self.server_instance = uuid.uuid4().hex
-        self.scene_id = self._make_scene_id(base_usd_path)
-        self.last_vfs_write_analysis: dict | None = None
-
-        # TOFU token authentication
-        self.require_token = require_token
-        self.token_store = None
-        if require_token:
-            from ..token_store import TokenStore
-
-            _token_path = token_db_path or log_path.replace(".db", "_tokens.db")
-            self.token_store = TokenStore(_token_path)
-
-        self._playback = PlaybackController()
-
-        # A dedicated thread sends queued broadcasts. Slow receivers apply
-        # backpressure to publishers when the bounded queue fills.
-        # Each queued item retains the receiver membership captured when the
-        # broadcast was authored. A receiver joining later obtains older
-        # records only through its bounded replay window.
-        # Item: (payload_bytes, receiver_handlers, exclude_origin, audience)
-        self._broadcast_queue: queue.Queue = queue.Queue(maxsize=_BROADCAST_QUEUE_MAX)
-        self._broadcast_thread = threading.Thread(
-            target=self._broadcast_loop,
-            daemon=True,
-        )
-
-        # Durability mode for writes without producer progress. Idempotent
-        # producer transactions always persist their event and cumulative
-        # high-water mark atomically before acknowledgement and publication.
-        #   "strict" persists every write before broadcast
-        #   "realtime" allows eligible server-internal writes to persist async
-        self.durability = durability
-        # Per-client rate limiting (0 = disabled)
-        self.txn_rate = txn_rate
-        self.txn_burst = txn_burst
-
-        self._maintenance = HistoryMaintenance(
-            self._scene, self._journal, self.txn_barrier,
-            drain_broadcasts=self._broadcast_queue.join,
-            reclaim_interval=reclaim_interval,
-        )
-        self._compactor = PeriodicCompactor(
-            lambda: self.compact_log(), self._journal, compact_interval,
-        )
-        if self.layer_mode is LayerMode.SHARED_STAGE:
-            existing_graph_log = self.store.get_count() > 0
-            self._scene.shared_layer_graph = SharedLayerGraph(
-                self.stage,
-                authoritative=not existing_graph_log,
-            )
-            if not existing_graph_log:
-                self._committer.append_graph_baseline()
-
-        # Rebuild stage from the event log so the composed stage matches
-        # what receivers would get on replay.
-        self._replay_log_into_stage()
-        if self.shared_layer_graph is not None:
-            if existing_graph_log:
-                identities = self.store.get_layer_identities()
-                if not identities:
-                    raise ValueError(
-                        "shared-stage database has no durable layer identity registry; "
-                        "recreate databases written before this protocol version"
-                    )
-                self.shared_layer_graph.restore_identity_records(
-                    (identity.identifier, identity.layer_key)
-                    for identity in identities
-                )
-            self.shared_layer_graph.authoritative = True
-            self.refresh_shared_layer_dependencies()
-
-        self._transactions = TransactionCoordinator(
-            barrier=self.txn_barrier,
-            commit=self._process_idempotent_txn_now,
-            commit_group=(
-                self._commit_managed_transaction_group
-                if self.layer_mode is LayerMode.MANAGED else None
-            ),
-            checkpoint=self._durable_transaction_checkpoint,
-            batch_size=self.txn_batch_size,
-            batch_delay=self.txn_batch_delay,
-        )
-
-        # No worker sees partially initialized state or replay in progress.
-        self._broadcast_thread.start()
-        self._journal.start()
-        self._compactor.start()
-        self._transactions.start()
 
     @property
     def shared_layer_graph(self) -> SharedLayerGraph | None:
@@ -443,21 +420,23 @@ class UsdSyncServer:
 
         routed: list[tuple[Sdf.Layer, dict]] = []
         for _seq, record_bin in rows:
-            rec = message_to_dict(record_bin, numpy_arrays=True)
-            ev = rec.get("event", rec)
-            client_id = rec.get("client_id")
-            if ev.get("k") in NON_COLLABORATION_KINDS:
+            message_type, broadcast = resolve_payload(decode_envelope(record_bin))
+            if message_type != MSG_EVENT:
+                raise ValueError("managed log contains an unsupported record")
+            record = decode_received_event(broadcast, numpy_arrays=True)
+            ev = record.event
+            if ev["k"] in NON_COLLABORATION_KINDS:
                 layer = self.stage.GetSessionLayer()
             else:
-                layer_key = rec.get("layer_key") or ""
+                layer_key = record.layer_key
                 if not layer_key:
                     raise ValueError("persisted collaboration opinion is missing layer_key")
                 layer, _added = self.layer_stack.ensure_layer(
                     layer_key,
                     label=label_for_layer_key(layer_key),
                 )
-                if client_id:
-                    self._collaboration.restore_assignment(client_id, layer_key)
+                if record.client_id:
+                    self._collaboration.restore_assignment(record.client_id, layer_key)
             routed.append((layer, ev))
 
         self._collaboration.apply_department_order()
@@ -476,21 +455,20 @@ class UsdSyncServer:
         current_key = ""
         run: list[dict] = []
 
-        def _apply_run() -> None:
+        def flush_run() -> None:
             if not run:
                 return
             layer = graph.layer_for(current_key)
             if layer is None:
                 raise ValueError(f"persisted event targets unresolved layer key {current_key!r}")
             self._scene.replay_events((layer, event) for event in run)
+            run.clear()
 
         with self.stage_lock:
             for _seq, record_bin in rows:
                 record = message_to_dict(record_bin, numpy_arrays=True)
                 if record.get("type") == MSG_LAYER_GRAPH_STATE:
-                    _apply_run()
-                    run = []
-                    current_key = ""
+                    flush_run()
                     graph.apply_state(record)
                     baseline_seen = True
                     continue
@@ -498,15 +476,13 @@ class UsdSyncServer:
                     raise ValueError("shared-stage log contains an unsupported record")
                 if not baseline_seen:
                     raise ValueError("shared-stage log must begin with a layer graph baseline")
-                event = record.get("event", {})
+                event = record["event"]
                 layer_key = record.get("layer_key") or ""
-                if event.get("k") == K_SET_SUBLAYERS:
-                    _apply_run()
-                    run = []
-                    current_key = ""
+                if event["k"] == K_SET_SUBLAYERS:
+                    flush_run()
                     graph.apply_sublayers(layer_key, event)
                     continue
-                if event.get("k") not in (
+                if event["k"] not in (
                     K_SET_SDF_SPEC_FIELDS,
                     K_ERASE_TIME_SAMPLES,
                     K_REPLACE_SDF_LAYER_CONTENT,
@@ -515,11 +491,10 @@ class UsdSyncServer:
                         f"shared-stage log contains unsupported event {event.get('k')!r}"
                     )
                 if run and layer_key != current_key:
-                    _apply_run()
-                    run = []
+                    flush_run()
                 current_key = layer_key
                 run.append(event)
-            _apply_run()
+            flush_run()
 
         if not baseline_seen:
             raise ValueError("shared-stage log has no layer graph baseline")
@@ -685,7 +660,7 @@ class UsdSyncServer:
         if not rows:
             return
         max_seq = rows[-1][0]
-        compaction = self._build_compacted(rows)
+        compaction = self._maintenance.build_compacted(rows)
         original_count = len(rows)
 
         # Phase 2 merge delta + commit (exclusive, emitters blocked)
@@ -696,50 +671,8 @@ class UsdSyncServer:
                 compaction.add_record(seq, record_bin)
             original_count += len(delta)
 
-            self._commit_compaction(compaction, original_count)
-
-    @staticmethod
-    def _build_compacted(rows: list[tuple[int, bytes]]) -> LogCompaction:
-        return HistoryMaintenance.build_compacted(rows)
-
-    def _commit_compaction(self, compaction: LogCompaction, original_count: int):
-        self._maintenance.commit_compaction(compaction, original_count)
-
-        # Reset and replay each receiver while holding its send lock. Sending
-        # the control message directly avoids an async-broadcast race where
-        # replay records could otherwise overtake the resync.
-        with self.clients_lock:
-            targets = list(self.receivers)
-        disconnected = []
-        for handler in targets:
-            try:
-                with handler.send_lock:
-                    controls = [encode_message({"type": MSG_RESYNC})]
-                    if getattr(handler, "_layered_replay", False):
-                        controls.append(encode_message(self.get_layer_stack_state()))
-                    handler.request.sendall(frame_batch(controls))
-                    self.replay_from(handler, 1)
-                    replay_epoch, replay_head = self.get_replay_token()
-                    handler.request.sendall(
-                        frame_batch(
-                            [
-                                encode_message(
-                                    {
-                                        "type": MSG_REPLAY_COMPLETE,
-                                        "head_seq": replay_head,
-                                        "epoch": replay_epoch,
-                                    }
-                                )
-                            ]
-                        )
-                    )
-            except (OSError, TimeoutError):
-                LOG.info(
-                    "Receiver disconnected during compaction replay: %s",
-                    handler.client_address,
-                )
-                disconnected.append(handler)
-        self._discard_unreachable_receivers(disconnected)
+            self._maintenance.commit_compaction(compaction, original_count)
+            self._resync_receivers()
 
     def purge(self):
         """Clear all events, reset the edit layer, and resync receivers."""
@@ -749,33 +682,38 @@ class UsdSyncServer:
                 "authored opinions are not server-owned"
             )
         with self._maintenance.exclusive():
-            self._purge_inner()
+            self._maintenance.purge()
+            self._resync_receivers()
 
-    def _purge_inner(self):
-        self._maintenance.purge()
-        replay_epoch, replay_head = self.get_replay_token()
+    def _resync_receivers(self) -> None:
+        """Send replaced history while the caller holds the exclusive maintenance window."""
         with self.clients_lock:
             targets = list(self.receivers)
+        if not targets:
+            return
+        replay_epoch, replay_head = self.get_replay_token()
+        reset_bin = encode_message({"type": MSG_RESYNC})
+        complete_bin = encode_message({
+            "type": MSG_REPLAY_COMPLETE, "head_seq": replay_head, "epoch": replay_epoch,
+        })
         disconnected = []
         for handler in targets:
             try:
                 with handler.send_lock:
-                    controls = [encode_message({"type": MSG_RESYNC, "reason": "purge"})]
-                    if getattr(handler, "_layered_replay", False):
+                    controls = [reset_bin]
+                    if handler._layered_replay:
                         controls.append(encode_message(self.get_layer_stack_state()))
-                    controls.append(
-                        encode_message(
-                            {
-                                "type": MSG_REPLAY_COMPLETE,
-                                "head_seq": replay_head,
-                                "epoch": replay_epoch,
-                            }
-                        )
-                    )
+                    # Keep reset, replay and completion in one send-lock window.
+                    # Empty history needs only the control messages.
+                    if replay_head:
+                        handler.request.sendall(frame_batch(controls))
+                        self.replay_from(handler, 1, seq_end=replay_head)
+                        controls.clear()
+                    controls.append(complete_bin)
                     handler.request.sendall(frame_batch(controls))
             except (OSError, TimeoutError):
                 LOG.info(
-                    "Receiver disconnected during purge resync: %s",
+                    "Receiver disconnected during history resync: %s",
                     handler.client_address,
                 )
                 disconnected.append(handler)
@@ -849,12 +787,7 @@ class UsdSyncServer:
                 replacement_stage=replacement_stage,
             )
             events = prepared.events
-            event_counts: dict[str, int] = {}
-            for event in events:
-                kind = event.get("k", "")
-                if kind:
-                    event_counts[kind] = event_counts.get(kind, 0) + 1
-            analysis = replace(analysis, event_counts=event_counts)
+            analysis = replace(analysis, event_counts=dict(Counter(event["k"] for event in events)))
 
             encoded = self._maintenance.replace_snapshot(
                 prepared, client_id=client_id, origin=origin,
@@ -919,6 +852,7 @@ class UsdSyncServer:
 
         Also reactivates children on the server's stage that may have been
         deactivated by _detect_deletions during a previous unload cycle.
+        Transaction callers retain their maintenance barrier through this replay.
         """
         # Reactivate children on the server's stage (clear stale SetActive(False))
         with self.stage_lock:
@@ -928,20 +862,16 @@ class UsdSyncServer:
                     if not child.IsActive():
                         child.SetActive(True)
 
-        records = child_replay_records(self.store, prim_path)
-        for record in records:
-            ev = record.event
-            origin = record.origin
-            layer_key = record.layer_key
-            rec = {"type": MSG_EVENT, "seq": self.assign_seq(), "event": ev}
-            if origin:
-                rec["origin"] = origin
-            if layer_key:
-                rec["layer_key"] = layer_key
-            rec_bin = self.append_log(rec)
-            if self.wire_metrics is not None:
-                self.wire_metrics.record(ev.get("k", ""), len(rec_bin))
-            self.broadcast_transaction_views([(rec, rec_bin)])
+        with self._journal.commit_scope():
+            records = child_replay_records(self.store, prim_path)
+            encoded = EncodedEvents()
+            with self._journal.reserve_sequences():
+                for record in records:
+                    encoded.append(*self._journal.encode_event(
+                        record.event, origin=record.origin, layer_key=record.layer_key,
+                    ))
+                self._journal.append_batch(encoded.store_rows, synchronous=True)
+            self.broadcast_transaction_views(encoded.records)
 
         LOG.info(
             "Replayed %d child events after load_payload %s",
@@ -975,52 +905,42 @@ class UsdSyncServer:
         lock remains held during delivery, so newer broadcasts follow replay
         without network I/O holding the maintenance barrier.
         """
-        self.txn_barrier.acquire_exclusive()
-        send_lock_acquired = False
-        receiver_registered = False
-        try:
-            self._journal.drain()
-            handler.send_lock.acquire()
-            send_lock_acquired = True
-            with self.clients_lock:
-                self.receivers.add(handler)
-                receiver_registered = True
-            replay_end = self.store.get_max_seq()
-            epoch, _latest_seq = self.get_replay_token()
-            # Absent identity fields preserve legacy explicit snapshot cursors.
-            prefix_mismatch = sync_from > 1 and replay_server_instance is not None and (
-                replay_server_instance != self.server_instance or replay_epoch != epoch
-            )
-            resync_reason = None
-            if prefix_mismatch or sync_from > replay_end + 1:
-                resync_reason = "replay_identity_changed" if prefix_mismatch else "seq_overflow"
-                sync_from = 1
-            with self.stage_lock:
-                layer_stack_state = (
-                    encode_message(self.get_layer_stack_state())
-                    if self.layer_mode is LayerMode.MANAGED
-                    and getattr(handler, "_layered_replay", False) else None
-                )
-                # Freeze only the selected suffix. Bytes are retained as-is;
-                # framing stays chunked and happens after the barrier releases.
-                records = tuple(self.store.get_from_seq_bin(sync_from, replay_end))
-            replay = _ReceiverReplay(
-                replay_end, epoch, records, layer_stack_state, resync_reason,
-            )
-        except Exception:
-            if receiver_registered:
+        with ExitStack() as replay_lock:
+            with self.txn_barrier.exclusive():
+                self._journal.drain()
+                replay_lock.enter_context(handler.send_lock)
                 with self.clients_lock:
-                    self.receivers.discard(handler)
-            if send_lock_acquired:
-                handler.send_lock.release()
-            raise
-        finally:
-            self.txn_barrier.release_exclusive()
-
-        try:
+                    self.receivers.add(handler)
+                try:
+                    replay_end = self.store.get_max_seq()
+                    epoch, _latest_seq = self.get_replay_token()
+                    # Absent identity fields preserve legacy explicit snapshot cursors.
+                    prefix_mismatch = sync_from > 1 and replay_server_instance is not None and (
+                        replay_server_instance != self.server_instance or replay_epoch != epoch
+                    )
+                    resync_reason = None
+                    if prefix_mismatch or sync_from > replay_end + 1:
+                        resync_reason = (
+                            "replay_identity_changed" if prefix_mismatch else "seq_overflow"
+                        )
+                        sync_from = 1
+                    with self.stage_lock:
+                        layer_stack_state = (
+                            encode_message(self.get_layer_stack_state())
+                            if self.layer_mode is LayerMode.MANAGED
+                            and handler._layered_replay else None
+                        )
+                        # Freeze only the selected suffix. Bytes are retained as-is;
+                        # framing stays chunked and happens after the barrier releases.
+                        records = tuple(self.store.get_from_seq_bin(sync_from, replay_end))
+                    replay = _ReceiverReplay(
+                        replay_end, epoch, records, layer_stack_state, resync_reason,
+                    )
+                except Exception:
+                    with self.clients_lock:
+                        self.receivers.discard(handler)
+                    raise
             yield replay
-        finally:
-            handler.send_lock.release()
 
     def register_client(
         self,
@@ -1049,14 +969,14 @@ class UsdSyncServer:
 
     def broadcast_transaction_views(
         self,
-        records: list[tuple[dict, bytes]],
+        records: Sequence[tuple[dict, bytes]],
     ) -> None:
         """Deliver one authored transaction to the complete commit stream."""
         self.broadcast_transaction_group_views([records])
 
     def broadcast_transaction_group_views(
         self,
-        transactions: list[list[tuple[dict, bytes]]],
+        transactions: Iterable[Sequence[tuple[dict, bytes]]],
     ) -> None:
         """Deliver a committed group as one complete ordered stream.
 
@@ -1065,67 +985,18 @@ class UsdSyncServer:
         a delivery filter. This gives live delivery the same contract as replay
         and lets every replica apply the server's total order.
         """
-        transactions = [records for records in transactions if records]
-        if not transactions:
-            return
-
-        all_records = [
-            record
-            for records in transactions
-            for record, _encoded in records
-        ]
-        all_payload = frame_batch(
-            [
-                encoded
-                for records in transactions
-                for _record, encoded in records
-            ]
-        )
-        if self.layer_mode is LayerMode.SHARED_STAGE:
-            self.broadcast_bytes(all_payload, all_records)
-            return
-
-        # Keep the managed-mode receiver cohorts separate. They consume the
-        # same complete commit stream, while retaining independently captured
-        # target sets for their different replay/application contracts.
-        has_flat_receivers, has_layered_receivers = self._receiver_audience_presence()
-        if has_layered_receivers:
-            self.broadcast_bytes(
-                all_payload,
-                all_records,
-                audience=_AUDIENCE_LAYERED,
-                notify_listeners=False,
-            )
-        if has_flat_receivers:
-            self.broadcast_bytes(
-                all_payload,
-                all_records,
-                audience=_AUDIENCE_FLAT,
-                notify_listeners=False,
-            )
-        self._notify_event_listeners(all_records)
-
-    @staticmethod
-    def _validate_audience(audience: str) -> None:
-        if audience not in _AUDIENCES:
-            raise ValueError(f"unknown receiver audience {audience!r}")
-
-    def _receiver_audience_presence(self) -> tuple[bool, bool]:
-        """Return whether flat and layered receivers are connected."""
-        with self.clients_lock:
-            has_flat = False
-            has_layered = False
-            for handler in self.receivers:
-                if getattr(handler, "_layered_replay", False):
-                    has_layered = True
-                else:
-                    has_flat = True
-                if has_flat and has_layered:
-                    break
-        return has_flat, has_layered
+        all_records = []
+        encoded_records = []
+        for records in transactions:
+            for record, encoded in records:
+                all_records.append(record)
+                encoded_records.append(encoded)
+        if all_records:
+            self.broadcast_bytes(frame_batch(encoded_records), all_records)
 
     def _has_layered_receivers(self) -> bool:
-        return self._receiver_audience_presence()[1]
+        with self.clients_lock:
+            return any(handler._layered_replay for handler in self.receivers)
 
     def _notify_event_listeners(self, records: list[dict]) -> None:
         """Notify in-process event observers once, in record order."""
@@ -1166,18 +1037,14 @@ class UsdSyncServer:
         """
         if not records:
             return
-        self._validate_audience(audience)
         framed_payloads = [encode_message(rec) for rec in records]
         if self.wire_metrics is not None:
             for rec, buf in zip(records, framed_payloads, strict=True):
                 kind = rec.get("event", {}).get("k") or rec.get("type", "")
                 self.wire_metrics.record(kind, len(buf))
-        payload = frame_batch(framed_payloads)
-        self._enqueue_broadcast(payload, exclude_origin, audience)
-        # Notify event listeners synchronously these are in-process
-        # callbacks (e.g. dashboard) that are fast and must see events
-        # in order.
-        self._notify_event_listeners(records)
+        self.broadcast_bytes(
+            frame_batch(framed_payloads), records, exclude_origin, audience=audience,
+        )
 
     def broadcast_bytes(
         self,
@@ -1189,7 +1056,6 @@ class UsdSyncServer:
         notify_listeners: bool = True,
     ):
         """Enqueue pre-framed payload for broadcast and notify listeners."""
-        self._validate_audience(audience)
         self._enqueue_broadcast(payload, exclude_origin, audience)
         if not notify_listeners:
             return
@@ -1208,7 +1074,6 @@ class UsdSyncServer:
         signals, not USD scene events, so they shouldn't appear in the
         dashboard event log.
         """
-        self._validate_audience(audience)
         payload = frame_batch([encode_message(msg)])
         self._enqueue_broadcast(payload, exclude_origin, audience)
 
@@ -1223,7 +1088,7 @@ class UsdSyncServer:
             audience=audience,
         )
         if targets:
-            self._broadcast_queue.put((payload, targets, exclude_origin, audience))
+            self._broadcast_queue.put((payload, targets))
 
     def _broadcast_loop(self):
         """Dedicated thread: drain the broadcast queue and send to receivers.
@@ -1232,44 +1097,26 @@ class UsdSyncServer:
         Exits cleanly when a None sentinel is enqueued via shutdown().
         """
         _ping_payload = frame_batch([encode_message({"type": MSG_PING})])
-
+        stopping = False
         while True:
             try:
-                item = self._broadcast_queue.get(timeout=_PING_INTERVAL)
+                item = (
+                    self._broadcast_queue.get_nowait() if stopping
+                    else self._broadcast_queue.get(timeout=_PING_INTERVAL)
+                )
             except queue.Empty:
+                if stopping:
+                    return
                 # Idle send pings to detect dead receivers
                 self._send_to_all(_ping_payload)
                 continue
 
-            if item is None:
-                # Drain remaining items before exiting
-                while True:
-                    try:
-                        remaining = self._broadcast_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    if remaining is None:
-                        continue
-                    payload, targets, exclude_origin, audience = remaining
-                    try:
-                        self._send_to_all(
-                            payload,
-                            exclude_origin=exclude_origin,
-                            audience=audience,
-                            targets=targets,
-                        )
-                    except Exception:
-                        LOG.exception("Error draining broadcast queue")
-                return
-
-            payload, targets, exclude_origin, audience = item
             try:
-                self._send_to_all(
-                    payload,
-                    exclude_origin=exclude_origin,
-                    audience=audience,
-                    targets=targets,
-                )
+                if item is None:
+                    stopping = True
+                else:
+                    payload, targets = item
+                    self._send_to_all(payload, targets=targets)
             except Exception:
                 LOG.exception("Unexpected error in broadcast loop")
             finally:
@@ -1278,8 +1125,6 @@ class UsdSyncServer:
     def _send_to_all(
         self,
         payload: bytes,
-        exclude_origin: str | None = None,
-        audience: str = _AUDIENCE_ALL,
         targets: tuple | None = None,
     ):
         """Send payload to matching receivers, removing dead ones.
@@ -1290,10 +1135,7 @@ class UsdSyncServer:
         dead handler's recv loop exits separately once keepalive expires.
         """
         if targets is None:
-            targets = self._receiver_targets(
-                exclude_origin=exclude_origin,
-                audience=audience,
-            )
+            targets = self._receiver_targets()
         dead = []
         for h in targets:
             try:
@@ -1316,15 +1158,17 @@ class UsdSyncServer:
         audience: str = _AUDIENCE_ALL,
     ) -> tuple:
         """Capture receivers matching one broadcast's delivery contract."""
+        if audience not in _AUDIENCES:
+            raise ValueError(f"unknown receiver audience {audience!r}")
         with self.clients_lock:
             targets = []
             for handler in self.receivers:
-                layered = bool(getattr(handler, "_layered_replay", False))
+                layered = handler._layered_replay
                 if audience == _AUDIENCE_LAYERED and not layered:
                     continue
                 if audience == _AUDIENCE_FLAT and layered:
                     continue
-                if exclude_origin and getattr(handler, "_origin", None) == exclude_origin:
+                if exclude_origin and handler._origin == exclude_origin:
                     continue
                 targets.append(handler)
         return tuple(targets)
@@ -1338,15 +1182,8 @@ class UsdSyncServer:
                 self.receivers.discard(handler)
         released_any = False
         for handler in handlers:
-            release_replay = getattr(
-                handler,
-                "release_receiver_replay_reservation",
-                None,
-            )
-            if release_replay is not None:
-                release_replay()
-            client_id = getattr(handler, "_client_id", "") or ""
-            if client_id and self.release_playback(client_id):
+            handler.release_receiver_replay_reservation()
+            if handler._client_id and self.release_playback(handler._client_id):
                 released_any = True
         if released_any:
             self.broadcast_message(
@@ -1435,49 +1272,37 @@ class UsdSyncServer:
         """Wait for a previously submitted transaction's terminal outcome."""
         return request.wait()
 
-    def _durable_transaction_checkpoint(self) -> TransactionCheckpoint:
-        return self._journal.durable_checkpoint()
-
     def _process_idempotent_txn_now(self, request: TransactionRequest) -> TransactionCommit:
         with self._journal.commit_scope():
             commit = self._committer.commit(request)
             if commit.status != "committed":
                 return commit
-            return self._publish_transaction_commit(
-                commit, events=request.events, session_id=request.session_id,
-                txn_id=request.txn_id, origin=request.origin,
-            )
+            self._publish_transaction_commit(request, commit)
+            return commit
 
     def _commit_managed_transaction_group(
         self, requests: list[TransactionRequest],
     ) -> list[TransactionOutcome]:
+        """Commit an admitted batch; the coordinator ends it at any payload load."""
         with self._journal.commit_scope():
             outcomes = self._committer.commit_group(requests)
             self._broadcast_grouped_transactions(requests, outcomes)
             return outcomes
 
     def _publish_transaction_commit(
-        self,
-        commit: TransactionCommit,
-        *,
-        events: list[dict],
-        session_id: str,
-        txn_id: int,
-        origin: str | None,
-    ) -> TransactionCommit:
+        self, request: TransactionRequest, commit: TransactionCommit,
+    ) -> None:
         """Enqueue one durable commit before releasing global commit order."""
         try:
-            self.broadcast_transaction_views(list(commit.records))
-            for event in events:
-                if event.get("k") == K_LOAD_PAYLOAD:
-                    self.replay_children_after_load(event["prim"])
+            self.broadcast_transaction_views(commit.records)
+            for prim_path in request.payload_load_paths:
+                self.replay_children_after_load(prim_path)
         except Exception:
             LOG.exception(
                 "Transaction %s/%d committed but its live broadcast failed",
-                session_id,
-                txn_id,
+                request.session_id,
+                request.txn_id,
             )
-        return commit
 
     def producer_committed_through(self, client_id: str, session_id: str) -> int:
         return self._journal.committed_through(client_id, session_id)
@@ -1487,50 +1312,25 @@ class UsdSyncServer:
         requests: list[TransactionRequest],
         outcomes: list[TransactionOutcome],
     ) -> None:
-        pending: list[TransactionCommit] = []
-
-        def flush_pending() -> None:
-            if not pending:
-                return
-            try:
-                self.broadcast_transaction_group_views(
-                    [
-                        list(commit.records)
-                        for commit in pending
-                    ]
-                )
-            except Exception:
-                LOG.exception(
-                    "Committed transaction group could not be broadcast live"
-                )
-            pending.clear()
-
+        records = []
+        payload_replay = None
         for request, commit in zip(requests, outcomes, strict=True):
             if not isinstance(commit, TransactionCommit):
                 continue
             if commit.status != "committed" or not commit.records:
                 continue
-            load_events = [
-                event for event in request.events if event.get("k") == K_LOAD_PAYLOAD
-            ]
-            if not load_events:
-                pending.append(commit)
-                continue
-
-            # Payload child replay must stay immediately after the transaction
-            # that loaded it, so it forms a boundary between broadcast groups.
-            flush_pending()
-            try:
-                self.broadcast_transaction_views(list(commit.records))
-                for event in load_events:
-                    self.replay_children_after_load(event["prim"])
-            except Exception:
-                LOG.exception(
-                    "Transaction %s/%d committed but its live broadcast failed",
-                    request.session_id,
-                    request.txn_id,
-                )
-        flush_pending()
+            if request.payload_load_paths:
+                # The coordinator ends the batch here, before later transactions
+                # can reserve sequences that would precede the child replay.
+                payload_replay = request, commit
+            else:
+                records.append(commit.records)
+        try:
+            self.broadcast_transaction_group_views(records)
+        except Exception:
+            LOG.exception("Committed transaction group could not be broadcast live")
+        if payload_replay is not None:
+            self._publish_transaction_commit(*payload_replay)
 
     def _commit_events(
         self,
@@ -1553,16 +1353,15 @@ class UsdSyncServer:
         if not events:
             return []
         validate_events(events, layer_mode=self.layer_mode)
-        with self.txn_barrier.shared():
-            with self._journal.commit_scope():
-                return self._committer.commit_events(
-                    events,
-                    client_id=client_id,
-                    origin=origin,
-                    client_addr=client_addr,
-                    layer=layer,
-                    layer_key=layer_key,
-                )
+        with self.txn_barrier.shared(), self._journal.commit_scope():
+            return self._committer.commit_events(Transaction(
+                events=events,
+                client_id=client_id,
+                origin=origin,
+                client_addr=client_addr,
+                layer=layer,
+                layer_key=layer_key,
+            ))
 
     def refresh_shared_layer_dependencies(self) -> tuple[str, ...]:
         """Resolve newly available sublayers and publish their routing state."""
@@ -1577,12 +1376,7 @@ class UsdSyncServer:
                     Ar.GetResolver().RefreshContext(self.stage.GetPathResolverContext())
                     routed_events = list(graph.refresh_resolved_sublayers())
                 if routed_events:
-                    records = self._committer.persist_shared_events(
-                        routed_events,
-                        client_id=None,
-                        origin=None,
-                        client_addr=None,
-                    )
+                    records = self._committer.persist_shared_events(routed_events)
                     self.broadcast_transaction_views(records)
                 return tuple(
                     layer_key

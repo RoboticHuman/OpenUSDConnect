@@ -283,33 +283,24 @@ class CollaborationPolicy:
         """
         with self._scene.lock:
             muted = set(self._scene.stage.GetMutedLayers())
-            layer_keys = self._scene.layer_stack.layer_keys
-            layers = {
-                layer_key: self._scene.layer_stack.layer_for(layer_key) for layer_key in layer_keys
-            }
-            labels = {
-                layer_key: self._scene.layer_stack.label_for(layer_key) for layer_key in layer_keys
-            }
-            client_keys = dict(self._client_layer_keys)
-            authored = {layer_key: not layers[layer_key].empty for layer_key in layer_keys}
-
-        clients_by_key: dict[str, list[str]] = {}
-        for client_id, layer_key in client_keys.items():
-            clients_by_key.setdefault(layer_key, []).append(client_id)
-
-        return [
-            {
-                "layer_key": layer_key,
-                "label": labels[layer_key],
-                "department": department_for_layer_key(layer_key),
-                "clients": clients_by_key.get(layer_key, []),
-                "identifier": layers[layer_key].identifier,
-                "muted": layers[layer_key].identifier in muted,
-                "shared": layer_key == _DEFAULT_LAYER_KEY,
-            }
-            for layer_key in layer_keys
-            if clients_by_key.get(layer_key) or authored[layer_key]
-        ]
+            clients_by_key: dict[str, list[str]] = {}
+            for client_id, layer_key in self._client_layer_keys.items():
+                clients_by_key.setdefault(layer_key, []).append(client_id)
+            rows = []
+            for layer_key in self._scene.layer_stack.layer_keys:
+                layer = self._scene.layer_stack.layer_for(layer_key)
+                clients = clients_by_key.get(layer_key, [])
+                if clients or not layer.empty:
+                    rows.append({
+                        "layer_key": layer_key,
+                        "label": self._scene.layer_stack.label_for(layer_key),
+                        "department": department_for_layer_key(layer_key),
+                        "clients": clients,
+                        "identifier": layer.identifier,
+                        "muted": layer.identifier in muted,
+                        "shared": layer_key == _DEFAULT_LAYER_KEY,
+                    })
+            return rows
 
     def set_muted(self, key: str, muted: bool) -> bool:
         """Change muting only when the admitted receivers can represent it."""

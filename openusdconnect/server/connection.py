@@ -105,6 +105,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     """Handles a single client connection (emitter or receiver)."""
 
     server: ThreadedTCPServer
+    # Set by the validated hello before receiver admission. State consumers
+    # can rely on these fields and release_receiver_replay_reservation().
+    _client_id: str | None
+    _origin: str | None
+    _layered_replay: bool
 
     def setup(self):
         super().setup()

@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, replace
 from pxr import Sdf
 
 from ..checkpoints import TransactionCheckpoint
+from ..event_store import ProducerProgress
+from ..protocol_constants import K_LOAD_PAYLOAD
 from ._txn_barrier import _TxnBarrier
 from .types import TransactionCommit, TransactionOutcome
 
@@ -23,21 +25,44 @@ LOG = logging.getLogger(__name__)
 _QUEUE_MAX = 10_000
 
 
-@dataclass(slots=True)
-class TransactionRequest:
-    """Submitted command and wait handle; only the coordinator sets its outcome."""
+@dataclass(slots=True, kw_only=True)
+class Transaction:
+    """Validated edits and their routing metadata, retained through persistence."""
 
     events: list[dict]
+    client_id: str | None = None
+    origin: str | None = None
+    client_addr: str | None = None
+    layer: Sdf.Layer | None = None
+    layer_key: str = ""
+
+    @property
+    def progress(self) -> ProducerProgress | None:
+        """Internal edits have no producer acknowledgement to persist."""
+        return None
+
+
+@dataclass(slots=True, kw_only=True)
+class TransactionRequest(Transaction):
+    """Producer command and wait handle; only the coordinator sets its outcome."""
+
+    client_id: str = field()
     session_id: str
     txn_id: int
-    client_id: str
-    origin: str | None
-    client_addr: str | None
-    layer: Sdf.Layer | None
-    layer_key: str
     done: threading.Event = field(default_factory=threading.Event)
     commit: TransactionCommit | None = None
     error: BaseException | None = None
+    payload_load_paths: tuple[str, ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        # Derive publication boundaries once, from the admitted command.
+        self.payload_load_paths = tuple(
+            event["prim"] for event in self.events if event["k"] == K_LOAD_PAYLOAD
+        )
+
+    @property
+    def progress(self) -> ProducerProgress:
+        return ProducerProgress(self.client_id, self.session_id, self.txn_id)
 
     def wait(self) -> TransactionCommit:
         """Wait for the durable outcome, propagating a failed commit to its caller."""
@@ -124,7 +149,8 @@ class TransactionCoordinator:
                 return
             requests = [first]
             deadline = time.monotonic() + self._batch_delay
-            while len(requests) < self._batch_size:
+            # Child replay must receive sequences before the next transaction.
+            while len(requests) < self._batch_size and not requests[-1].payload_load_paths:
                 try:
                     request = self._queue.get_nowait()
                 except queue.Empty:
