@@ -150,7 +150,10 @@ def build_prim_tree(
 
 
 def read_prim_detail(stage: Usd.Stage, path: str) -> dict:
-    """Read composed prim details without materializing geometry arrays."""
+    """Read composed details, omitting array values from attribute rows.
+
+    PointInstancer counts additionally read the authored protoIndices array.
+    """
     prim = stage.GetPrimAtPath(path)
     if not prim or not prim.IsValid():
         return {"path": path, "exists": False}

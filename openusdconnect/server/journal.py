@@ -1,7 +1,7 @@
 """Event sequencing, durable history, and optional asynchronous persistence.
 
-The commit lock covers sequence reservations through live publication. The
-smaller state lock protects counters read by observers and maintenance.
+The commit scope serializes sequence reservations through live publication.
+The smaller state lock protects counters read by observers and maintenance.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ class EventJournal:
     def __init__(self, store: EventStore, *, durability: str, metrics: WireMetrics | None):
         self.store = store
         self.lock = threading.Lock()
-        self.commit_lock = threading.RLock()
+        self._commit_lock = threading.RLock()
         self.next_seq = store.get_max_seq() + 1
         self.event_count = store.get_count()
         self.seq_at_last_compact = 1
@@ -88,6 +88,19 @@ class EventJournal:
             self._queue.put(None)
             self._thread.join()
 
+    @contextmanager
+    def commit_scope(self):
+        """Serialize a commit and its publication as one ordering boundary.
+
+        Transaction callers acquire the maintenance barrier first, then this
+        scope, then the scene lock when accessing USD. Keep this scope open
+        until live records are enqueued so later sequences cannot publish first.
+        The journal's counter lock is held only for short state accesses and
+        never while acquiring the barrier, this scope, or the scene lock.
+        """
+        with self._commit_lock:
+            yield
+
     def assign_seq(self) -> int:
         with self.lock:
             sequence = self.next_seq
@@ -96,7 +109,7 @@ class EventJournal:
 
     @contextmanager
     def reserve_sequences(self):
-        """Restore reservations on failure; the caller holds the commit lock."""
+        """Restore reservations on failure inside the caller's commit scope."""
         with self.lock:
             first_sequence = self.next_seq
         try:
@@ -124,6 +137,7 @@ class EventJournal:
             return self.replay_epoch, max(0, self.next_seq - 1)
 
     def durable_checkpoint(self) -> TransactionCheckpoint:
+        """Capture persisted history while the caller excludes maintenance."""
         # Reservations can roll back: visibility must describe persisted history.
         return TransactionCheckpoint(epoch=self.replay_epoch, head_seq=self.store.get_max_seq())
 
@@ -137,7 +151,8 @@ class EventJournal:
             self.replay_epoch += 1
 
     def committed_through(self, client_id: str, session_id: str) -> int:
-        with self.commit_lock:
+        """Read progress safely, including outside a transaction commit scope."""
+        with self._commit_lock:
             producer = (client_id, session_id)
             cached = self._producer_progress.get(producer)
             if cached is None:
@@ -146,8 +161,9 @@ class EventJournal:
             return cached
 
     def remember_progress(self, updates: dict[tuple[str, str], int]) -> None:
-        """Update the high-water cache after persistence, under the commit lock."""
-        self._producer_progress.update(updates)
+        """Cache persisted progress; committing callers retain their outer scope."""
+        with self._commit_lock:
+            self._producer_progress.update(updates)
 
     def encode_events(
         self,
@@ -189,6 +205,11 @@ class EventJournal:
         layer_identities: tuple[LayerIdentity, ...] = (),
         synchronous: bool = False,
     ) -> None:
+        """Persist synchronously when requested or when durable metadata requires it.
+
+        Other writes may be queued in realtime mode. A return from a queued
+        write confirms admission only; use drain() before replacing history.
+        """
         # Producer acknowledgements and graph identities always require a
         # durable commit. Only independent records may use realtime persistence.
         can_queue = self._thread is not None and not (

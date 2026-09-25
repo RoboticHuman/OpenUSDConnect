@@ -59,6 +59,9 @@ class TransactionCommit:
     checkpoint: TransactionCheckpoint | None = None
 
 
+type TransactionOutcome = TransactionCommit | BaseException
+
+
 class TransactionRejectedError(ValueError):
     """A transaction identity or payload cannot be accepted."""
 

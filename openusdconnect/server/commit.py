@@ -1,13 +1,12 @@
 """Atomic USD mutation and durable transaction commits.
 
-The server holds journal.commit_lock through commit and subsequent publication.
+The caller holds journal.commit_scope() through commit and live publication.
 This component owns rollback and durable producer progress; it has no sockets,
 worker threads, or reference back to the server facade.
 """
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 from dataclasses import dataclass
 
 from pxr import Sdf, Usd
@@ -25,7 +24,7 @@ from ..shared_layer_graph import PreparedSublayers, StaleLayerGraphError
 from .journal import EncodedEvents, EventJournal
 from .scene import SceneState, include_removed_spec_fields
 from .transactions import TransactionRequest
-from .types import TransactionCommit, TransactionRejectedError
+from .types import TransactionCommit, TransactionOutcome, TransactionRejectedError
 
 
 @dataclass(slots=True)
@@ -59,7 +58,7 @@ class TransactionCommitter:
         self.journal = journal
 
     def commit(self, request: TransactionRequest) -> TransactionCommit:
-        """Execute one transaction synchronously on the commit worker."""
+        """Commit one admitted request inside the caller's journal commit scope."""
 
         committed_through = self.journal.committed_through(
             request.client_id,
@@ -100,33 +99,38 @@ class TransactionCommitter:
     def commit_group(
         self,
         requests: list[TransactionRequest],
-    ) -> None:
-        """Commit queued managed transactions through one failure boundary."""
-        accepted: list[TransactionRequest] = []
+    ) -> list[TransactionOutcome]:
+        """Return one outcome per request, in input order, without completing them.
+
+        The caller holds the journal commit scope through subsequent publication.
+        Accepted managed transactions share one persistence and rollback boundary.
+        """
+        accepted: list[tuple[int, TransactionRequest]] = []
+        outcomes: dict[int, TransactionOutcome] = {}
         next_by_session: dict[tuple[str, str], int] = {}
 
-        for request in requests:
+        for index, request in enumerate(requests):
             producer = (request.client_id, request.session_id)
             committed_through = next_by_session.get(producer)
             if committed_through is None:
                 committed_through = self.journal.committed_through(*producer)
             if request.txn_id <= committed_through:
-                request.commit = TransactionCommit("duplicate", committed_through)
+                outcomes[index] = TransactionCommit("duplicate", committed_through)
                 continue
 
             expected = committed_through + 1
             if request.txn_id != expected:
-                request.error = TransactionRejectedError(
+                outcomes[index] = TransactionRejectedError(
                     "unexpected_id",
                     f"expected transaction {expected}, received {request.txn_id}",
                     expected_txn_id=expected,
                 )
                 continue
             next_by_session[producer] = request.txn_id
-            accepted.append(request)
+            accepted.append((index, request))
 
         if not accepted:
-            return
+            return [outcomes[index] for index in range(len(requests))]
 
         with self.journal.reserve_sequences():
             prepared = [
@@ -139,19 +143,20 @@ class TransactionCommitter:
                     layer_key=request.layer_key,
                     transaction_identity=(request.session_id, request.txn_id),
                 )
-                for request in accepted
+                for _index, request in accepted
             ]
             self._persist_managed_transactions(prepared)
 
         self.journal.remember_progress(next_by_session)
-        for request, transaction in zip(accepted, prepared, strict=True):
+        for (index, request), transaction in zip(accepted, prepared, strict=True):
             records = tuple(transaction.encoded.records)
             commit = TransactionCommit(
                 "committed",
                 request.txn_id,
                 records,
             )
-            request.commit = commit
+            outcomes[index] = commit
+        return [outcomes[index] for index in range(len(requests))]
 
     def _prepare_managed_transaction(
         self,
@@ -166,7 +171,7 @@ class TransactionCommitter:
     ) -> PreparedTransaction:
         """Check routing and encode previously validated managed events.
 
-        Requires the commit lock and a sequence reservation so failures
+        Requires the journal commit scope and a sequence reservation so failures
         in this method or subsequent persistence release the reserved sequences.
         """
         if layer_key:
@@ -205,7 +210,7 @@ class TransactionCommitter:
         )
 
     def _persist_managed_transactions(self, prepared: list[PreparedTransaction]) -> None:
-        """Apply and persist a group atomically while the commit lock is held.
+        """Apply and persist a group atomically within the journal commit scope.
 
         Snapshot only touched collaboration prims, plus session state when
         needed. Internal commits also persist synchronously: rollback must
@@ -244,38 +249,20 @@ class TransactionCommitter:
             layer_paths = paths_by_layer.values()
             producer_progress = tuple(progress_by_producer.values())
 
-        from ..event_apply import atomic_apply_layer
-
-        with self.scene.lock:
-            original_target = self.scene.stage.GetEditTarget()
-            try:
-                with ExitStack() as rollback:
-                    for target_layer, paths in layer_paths:
-                        rollback.enter_context(atomic_apply_layer(target_layer, paths))
-                    if snapshot_session:
-                        rollback.enter_context(
-                            atomic_apply_layer(self.scene.stage.GetSessionLayer())
-                        )
-                    for transaction in prepared:
-                        self.scene.apply_validated(
-                            transaction.events,
-                            layer=transaction.target_layer,
-                            update_tracking=False,
-                        )
-                    self.journal.append_batch(
-                        records,
-                        producer_progress=producer_progress,
-                        synchronous=True,
-                    )
-                    for transaction in prepared:
-                        self.scene.update_prim_tracking(transaction.events)
-            except Exception:
-                # USD rollback invalidates cached attribute handles. Encoding
-                # failures happen before mutation and need no cache cleanup.
-                self.scene.clear_op_cache()
-                raise
-            finally:
-                self.scene.stage.SetEditTarget(original_target)
+        with self.scene.atomic_edit(layer_paths, include_session=snapshot_session):
+            for transaction in prepared:
+                self.scene.apply_validated(
+                    transaction.events,
+                    layer=transaction.target_layer,
+                    update_tracking=False,
+                )
+            self.journal.append_batch(
+                records,
+                producer_progress=producer_progress,
+                synchronous=True,
+            )
+            for transaction in prepared:
+                self.scene.update_prim_tracking(transaction.events)
 
     def commit_events(
         self,
@@ -288,9 +275,11 @@ class TransactionCommitter:
         layer_key: str = "",
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
-        """Apply validated events and durably persist them under the commit lock.
+        """Apply validated events and persist them in the caller's commit scope.
 
         Each mode owns sequence rollback if preparation or persistence fails.
+        Managed writes and writes with producer progress persist synchronously.
+        Shared-stage internal writes follow the journal's durability policy.
 
         Returns encoded broadcast records in input order. Callers that only
         need authoritative state plus a populated log may ignore the result.
@@ -396,6 +385,11 @@ class TransactionCommitter:
         client_addr: str | None,
         transaction_identity: tuple[str, int] | None = None,
     ) -> list[tuple[dict, bytes]]:
+        """Persist routed records in the caller's commit scope.
+
+        Producer progress and graph identities require synchronous persistence;
+        other records follow the configured journal durability policy.
+        """
         encoded = self.journal.encode_events(
             routed_events,
             client_id=client_id,

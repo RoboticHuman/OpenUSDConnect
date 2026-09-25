@@ -1,4 +1,4 @@
-"""Read-write barrier for serializing compaction against in-flight transactions."""
+"""Read-write barrier separating history maintenance from admitted transactions."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ from contextlib import contextmanager
 
 
 class _TxnBarrier:
-    """Read-write barrier: multiple shared (txn) holders, exclusive for compaction.
+    """Multiple shared transaction holders, exclusive history maintenance.
 
-    Lock ordering: _TxnBarrier is acquired BEFORE stage_lock / _seq_lock.
+    Acquire this barrier before EventJournal.commit_scope() and SceneState.lock.
+    Queued requests retain shared ownership until publication and checkpoint
+    capture finish; maintenance must exclude both queued and active requests.
     """
 
     def __init__(self):

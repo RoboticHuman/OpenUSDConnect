@@ -236,7 +236,7 @@ def test_invalid_transaction_is_rejected_before_queue_or_sequence_reservation(tm
             )
         assert server.store.get_count() == 0
         assert server.store.get_producer_progress("client", "producer") == 0
-        assert server._journal.next_seq == 1
+        assert server.get_replay_token()[1] == 0
     finally:
         server.shutdown()
         server.store.close()
@@ -314,7 +314,7 @@ def test_store_failure_rolls_back_usd_sequence_and_progress(tmp_path, monkeypatc
         assert not server.stage.GetPrimAtPath("/World/Rollback").IsValid()
         assert server.store.get_count() == 0
         assert server.store.get_producer_progress("client", "producer") == 0
-        assert server._journal.next_seq == 1
+        assert server.get_replay_token()[1] == 0
 
         committed = _commit(
             server, "/World/Rollback", client="client", session="producer", txn_id=1
@@ -346,12 +346,7 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
         {"k": "ensure_prim", "prim": "/World/Rollback", "typeName": "PointInstancer"},
         {"k": "set_instanceable", "prim": "/World/Rollback", "instanceable": True},
     ]
-    before = (
-        dict(server._scene._prim_paths),
-        set(server._scene._instanceable_paths),
-        set(server._scene._point_instancer_paths),
-        server._scene._prim_count_dirty,
-    )
+    before = (server.get_prim_tree(), server.get_prim_count(), server.get_instance_count())
     monkeypatch.setattr(server.store, "append_batch", fail_once)
     try:
         with pytest.raises(sqlite3.OperationalError, match="injected tracking"):
@@ -364,10 +359,7 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
 
         assert not server.stage.GetPrimAtPath("/World/Rollback").IsValid()
         assert (
-            server._scene._prim_paths,
-            server._scene._instanceable_paths,
-            server._scene._point_instancer_paths,
-            server._scene._prim_count_dirty,
+            server.get_prim_tree(), server.get_prim_count(), server.get_instance_count()
         ) == before
 
         committed = server.process_idempotent_txn(
@@ -377,9 +369,10 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
             txn_id=1,
         )
         assert committed.status == "committed"
-        assert server._scene._prim_paths["/World/Rollback"] == "PointInstancer"
-        assert server._scene._instanceable_paths == {"/World/Rollback"}
-        assert server._scene._point_instancer_paths == {"/World/Rollback"}
+        prim = next(row for row in server.get_prim_tree() if row["path"] == "/World/Rollback")
+        assert prim["typeName"] == "PointInstancer"
+        assert prim["instanceable"] and prim["is_point_instancer"]
+        assert server.get_instance_count() == 1
     finally:
         server.shutdown()
         server.store.close()
@@ -406,7 +399,7 @@ def test_private_commit_helper_rolls_back_usd_and_sequence(tmp_path, monkeypatch
         assert server.stage.GetPrimAtPath("/World/Old").IsValid()
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.store.get_count() == 1
-        assert server._journal.next_seq == 2
+        assert server.get_replay_token()[1] == 1
 
         monkeypatch.setattr(server.store, "append_batch", append_batch)
         records = server._commit_events([_event("/World/After")], client_id="maintenance")
@@ -482,7 +475,7 @@ def test_private_commit_cannot_overtake_failed_identified_commit(tmp_path, monke
         assert [seq for seq, _payload in server.store.get_all_asc()] == [1]
         assert not server.stage.GetPrimAtPath("/World/Rejected").IsValid()
         assert server.stage.GetPrimAtPath("/World/Private").IsValid()
-        assert server._journal.next_seq == 2
+        assert server.get_replay_token()[1] == 1
     finally:
         release_failure.set()
         identified.join(timeout=5)
@@ -518,7 +511,7 @@ def test_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.store.get_count() == 1
         assert server.store.get_producer_progress("client", "producer") == 1
-        assert server._journal.next_seq == 2
+        assert server.get_replay_token()[1] == 1
     finally:
         server.shutdown()
         server.store.close()
@@ -529,12 +522,7 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
     append_batch = server.store.append_batch
     server.apply_txn([_event("/World/Old")])
     before = server.edit_layer.ExportToString()
-    before_tracking = (
-        dict(server._scene._prim_paths),
-        set(server._scene._instanceable_paths),
-        set(server._scene._point_instancer_paths),
-        server._scene._prim_count_dirty,
-    )
+    before_tracking = (server.get_prim_tree(), server.get_prim_count(), server.get_instance_count())
 
     def fail_group(_records, *, producer_progress=()):
         raise sqlite3.OperationalError("injected grouped persistence failure")
@@ -571,19 +559,18 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert not server.stage.GetPrimAtPath("/World/Other").IsValid()
         assert (
-            server._scene._prim_paths,
-            server._scene._instanceable_paths,
-            server._scene._point_instancer_paths,
-            server._scene._prim_count_dirty,
+            server.get_prim_tree(), server.get_prim_count(), server.get_instance_count()
         ) == before_tracking
         assert server.store.get_count() == 0
-        assert server._journal.next_seq == 1
+        assert server.get_replay_token()[1] == 0
         for request in requests:
             assert server.producer_committed_through(request.client_id, request.session_id) == 0
 
         monkeypatch.setattr(server.store, "append_batch", append_batch)
-        server._commit_managed_transaction_group(requests)
-        assert [request.commit.status for request in requests] == ["committed", "committed"]
+        outcomes = server._commit_managed_transaction_group(requests)
+        assert [outcome.status for outcome in outcomes] == ["committed", "committed"]
+        assert all(request.commit is None and request.error is None for request in requests)
+        assert all(not request.done.is_set() for request in requests)
         assert not server.stage.GetPrimAtPath("/World/Old").IsValid()
         assert server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.stage.GetPrimAtPath("/World/Other").IsValid()
@@ -592,10 +579,10 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
             assert server.producer_committed_through(request.client_id, request.session_id) == 1
             assert server.store.get_producer_progress(request.client_id, request.session_id) == 1
 
-        server._commit_managed_transaction_group(requests)
-        assert [request.commit.status for request in requests] == ["duplicate", "duplicate"]
+        outcomes = server._commit_managed_transaction_group(requests)
+        assert [outcome.status for outcome in outcomes] == ["duplicate", "duplicate"]
         assert server.store.get_count() == 2
-        assert server._journal.next_seq == 3
+        assert server.get_replay_token()[1] == 2
     finally:
         server.shutdown()
         server.store.close()

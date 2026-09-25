@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from heapq import merge
 from typing import NamedTuple
 
 from ..codec import (
@@ -65,26 +66,65 @@ _INSTANCER_ATTRIBUTES = {wire: usd for usd, wire in POINT_INSTANCER_USD_TO_WIRE.
 _CHILD_REPLAY_KINDS = frozenset({
     K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY,
     K_SET_MATERIAL_BINDING, K_SET_CONNECTABLE_INPUT, K_SET_CONNECTABLE_CONNECTION,
+    K_DELETE_PRIM, K_RENAME_PRIM, K_ERASE_TIME_SAMPLES, K_SET_SDF_SPEC_FIELDS,
 })
 
 
 def child_replay_records(store: EventStore, prim_path: str) -> list[ReceivedEvent]:
-    """Reduce child opinions using the same field, time, and layer rules as compaction."""
-    latest: dict[_MergeKey, ReceivedEvent] = {}
-    for blob in store.get_by_prim_prefix(prim_path + "/", _CHILD_REPLAY_KINDS):
-        _message_type, broadcast = resolve_payload(decode_envelope(blob))
-        record = decode_received_event(broadcast, numpy_arrays=True)
-        event = record.event
-        key = _MergeKey.from_event(event, record.layer_key or "")
-        previous = latest.get(key)
-        record.event = _merge_payload(previous.event if previous else None, event)
-        latest[key] = record
-    # This subset has no destructive edits. It needs the shared merge rules,
-    # but not compaction's barrier history or a metadata copy per input record.
-    # Creates precede bindings and connections to siblings. Parents precede
-    # descendants within a tier.
-    ordered = sorted(latest, key=lambda key: (event_apply_tier(key.kind), key.prim))
-    return [latest[key] for key in ordered]
+    """Reduce child opinions without merging across deleted prims or samples."""
+    prefix = prim_path.rstrip("/") + "/"
+
+    def decode(blobs: Iterable[bytes]) -> Iterable[ReceivedEvent]:
+        for blob in blobs:
+            _message_type, broadcast = resolve_payload(decode_envelope(blob))
+            yield decode_received_event(broadcast, numpy_arrays=True)
+
+    descendants = decode(store.get_by_prim_prefix(prefix, _CHILD_REPLAY_KINDS))
+    # Deleting the payload root or one of its ancestors also removes earlier
+    # child opinions. Read these small lifecycle records without scanning the
+    # geometry or shader-array histories of unrelated prims.
+    ancestors = (
+        record for record in decode(
+            store.get_by_prim_prefix("/", {K_DELETE_PRIM, K_RENAME_PRIM})
+        )
+        if prim_path == record.event["prim"]
+        or prim_path.startswith(record.event["prim"].rstrip("/") + "/")
+    )
+    compaction = LogCompaction()
+    for record in merge(descendants, ancestors, key=lambda record: record.seq):
+        metadata = {
+            name: value for name in ("origin", "client", "client_id", "layer_key")
+            if (value := getattr(record, name))
+        }
+        compaction._add_event(record.seq, record.event, metadata)
+
+    ordered: list[CompactedEntry] = []
+    segment: list[CompactedEntry] = []
+
+    def flush_segment() -> None:
+        # Creates precede bindings to siblings; parents precede descendants.
+        ordered.extend(sorted(
+            segment, key=lambda entry: (event_apply_tier(entry.key.kind), entry.key.prim),
+        ))
+        segment.clear()
+
+    for entry in compaction.replay_entries():
+        if (
+            entry.key.kind in (K_DELETE_PRIM, K_RENAME_PRIM)
+            or is_sample_history_barrier(entry.event)
+        ):
+            # Erasures must stay after the values they clear and before later
+            # partial writes. Sorting the entire replay by tier revives samples.
+            flush_segment()
+            if entry.key.prim.startswith(prefix):
+                ordered.append(entry)
+        elif entry.key.prim.startswith(prefix):
+            segment.append(entry)
+    flush_segment()
+    return [
+        ReceivedEvent(seq=entry.sequence, event=entry.event, **entry.metadata)
+        for entry in ordered
+    ]
 
 
 class _MergeKey(NamedTuple):
@@ -140,6 +180,11 @@ class LogCompaction:
             for name in ("origin", "client", "client_id", "layer_key")
             if record.get(name)
         }
+        self._add_event(sequence, event, metadata)
+
+    def _add_event(self, sequence: int, event: dict, metadata: dict) -> None:
+        """Reduce a decoded record shared by full-log and payload-child replay."""
+        kind = event["k"]
         key = _MergeKey.from_event(event, metadata.get("layer_key", ""))
         self._preserve_sample_order(key, event)
 

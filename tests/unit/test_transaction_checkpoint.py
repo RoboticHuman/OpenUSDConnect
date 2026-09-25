@@ -49,7 +49,7 @@ def test_durable_checkpoint_excludes_uncommitted_sequence_reservations(tmp_path,
 
         def fail_persistence(*args, **kwargs):
             assert server.get_replay_token()[1] > head
-            observed.append((server._journal.replay_epoch, server.store.get_max_seq()))
+            observed.append((server.get_replay_token()[0], server.store.get_max_seq()))
             raise RuntimeError("injected persistence failure")
 
         monkeypatch.setattr(server.store, "append_batch", fail_persistence)
@@ -113,7 +113,6 @@ def test_batch_shares_one_checkpoint_for_successful_commits(
 
         read_head.assert_called_once_with()
         assert all(request.done.is_set() for request in requests)
-        assert server.txn_barrier._readers == 0
         duplicate, first, rejected, last = requests
         assert duplicate.commit.status == "duplicate"
         assert duplicate.commit.checkpoint is None

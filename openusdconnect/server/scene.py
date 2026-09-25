@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
+from contextlib import ExitStack, contextmanager
 from itertools import groupby
 from typing import TYPE_CHECKING
 
@@ -62,48 +63,50 @@ class SceneState:
         self._prim_count_dirty = True
 
     def clear_op_cache(self) -> None:
-        self.op_cache.clear()
-        self._op_cache_layer = None
+        """Discard cached attribute handles while excluding scene mutations."""
+        with self.lock:
+            self.op_cache.clear()
+            self._op_cache_layer = None
 
     def invalidate_prim_count(self) -> None:
         with self.lock:
             self._prim_count_dirty = True
 
-    def _create_edit_layer(self, label: str = "server-edits") -> Sdf.Layer:
+    def _create_edit_layer(self) -> Sdf.Layer:
         """Create an override sublayer on the session layer and set it as the edit target.
 
         The session layer is stronger than the entire root layer stack, so
         opinions authored here always compose on top of the base file and
         its sublayers.  The override is inserted as a sublayer of the session
         layer (rather than using the session layer directly) so that
-        multi-user mode can add per-client sublayers alongside it.
-
-        Accepts an optional *label* for the layer identifier this is the
-        extension point for per-client layers.
+        collaboration can add shared department layers alongside it.
         """
-        layer = Sdf.Layer.CreateAnonymous(label)
+        layer = Sdf.Layer.CreateAnonymous("server-edits")
         session = self.stage.GetSessionLayer()
         session.subLayerPaths.insert(0, layer.identifier)
         self.stage.SetEditTarget(Usd.EditTarget(layer))
         return layer
 
-    def op_cache_for(self, layer: Sdf.Layer):
+    def _op_cache_for(self, layer: Sdf.Layer):
         """Reuse op setup only for consecutive edits to the same layer.
 
         XformOp.Set uses the stage's current edit target; the op is not bound
         to a layer. This cache also skips setup of that layer's xformOpOrder,
         which must run again after switching layers.
+
+        The caller holds the scene lock through use of the returned cache.
         """
         if self._op_cache_layer != layer.identifier:
             self.op_cache.clear()
             self._op_cache_layer = layer.identifier
         return self.op_cache
 
-    def track_prim_event(self, ev: dict):
+    def _track_prim_event(self, ev: dict):
         """Update incremental prim trackers from a single event.
 
         Covers ensure/delete/rename plus instancing flags. The dashboard
         relies on this so its tree refresh never has to query pxr.
+        The caller holds the scene lock.
         """
         k = ev.get("k")
         prim = ev.get("prim", "")
@@ -139,13 +142,14 @@ class SceneState:
 
     def update_prim_tracking(self, events: list[dict]) -> None:
         """Publish dashboard indexes for successfully applied events."""
-        for event in events:
-            kind = event.get("k")
-            if kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
-                self._prim_count_dirty = True
-                self.track_prim_event(event)
-            elif kind == K_SET_INSTANCEABLE:
-                self.track_prim_event(event)
+        with self.lock:
+            for event in events:
+                kind = event.get("k")
+                if kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                    self._prim_count_dirty = True
+                    self._track_prim_event(event)
+                elif kind == K_SET_INSTANCEABLE:
+                    self._track_prim_event(event)
 
     def rebuild_caches(self, events: Iterable[dict] = ()) -> None:
         """Discard cached USD handles and rebuild indexes from replacement history."""
@@ -155,8 +159,63 @@ class SceneState:
             self._instanceable_paths.clear()
             self._point_instancer_paths.clear()
             for event in events:
-                self.track_prim_event(event)
+                self._track_prim_event(event)
             self._prim_count_dirty = True
+
+    @contextmanager
+    def atomic_edit(
+        self,
+        layer_paths: Iterable[tuple[Sdf.Layer, set[str]]],
+        *,
+        include_session: bool = False,
+    ):
+        """Roll back touched opinions if mutation or persistence fails.
+
+        Apply with update_tracking=False until persistence succeeds, then
+        publish derived indexes before leaving this scope. Only USD opinions
+        roll back. The scene restores the edit target and invalidates cached
+        USD handles after rollback.
+        """
+        from ..event_apply import atomic_apply_layer
+
+        with self.lock:
+            original_target = self.stage.GetEditTarget()
+            try:
+                with ExitStack() as rollback:
+                    for layer, paths in layer_paths:
+                        rollback.enter_context(atomic_apply_layer(layer, paths))
+                    if include_session:
+                        rollback.enter_context(atomic_apply_layer(self.stage.GetSessionLayer()))
+                    yield
+            except Exception:
+                self.clear_op_cache()
+                raise
+            finally:
+                self.stage.SetEditTarget(original_target)
+
+    def replay_events(self, routed_events: Iterable[tuple[Sdf.Layer, dict]]) -> None:
+        """Restore persisted opinions in order, batching adjacent layer targets."""
+        from ..event_apply import apply_events
+
+        with self.lock:
+            try:
+                for layer, run in groupby(routed_events, key=lambda item: item[0]):
+                    events = [event for _layer, event in run]
+                    with Usd.EditContext(self.stage, Usd.EditTarget(layer)):
+                        apply_events(self.stage, events, op_cache=self._op_cache_for(layer))
+                    self.update_prim_tracking(events)
+            except Exception:
+                self.clear_op_cache()
+                raise
+            finally:
+                self._prim_count_dirty = True
+
+    def snapshot_layer(self, layer: Sdf.Layer) -> Sdf.Layer:
+        """Copy authored content under the scene lock for serialization outside it."""
+        with self.lock:
+            snapshot = Sdf.Layer.CreateAnonymous("server-export.usda")
+            snapshot.TransferContent(layer)
+            return snapshot
 
     def clear_collaboration_layers(self) -> None:
         with self.lock:
@@ -235,7 +294,7 @@ class SceneState:
                     # session targets and copied runs when no routing is needed.
                     self.stage.SetEditTarget(edit_target)
                     apply_events(
-                        self.stage, events, op_cache=self.op_cache_for(target), prevalidated=True,
+                        self.stage, events, op_cache=self._op_cache_for(target), prevalidated=True,
                     )
             finally:
                 self.stage.SetEditTarget(restore_target)
@@ -259,7 +318,7 @@ class SceneState:
             run_layer = session_layer if session_events else target
             self.stage.SetEditTarget(session_target if session_events else edit_target)
             apply_events(
-                self.stage, list(run), op_cache=self.op_cache_for(run_layer), prevalidated=True,
+                self.stage, list(run), op_cache=self._op_cache_for(run_layer), prevalidated=True,
             )
 
     def get_prim_count(self) -> int:
@@ -272,7 +331,8 @@ class SceneState:
 
     def get_tracked_prim_count(self) -> int:
         """Return the number of prims tracked (incremental, no log scan)."""
-        return len(self._prim_paths)
+        with self.lock:
+            return len(self._prim_paths)
 
     def get_prim_tree(self) -> list[dict]:
         """Build inspector tree rows from snapshots of the incremental indexes."""
@@ -293,7 +353,8 @@ class SceneState:
         composition arc; this is the upper bound and matches what the
         tree's badge shows.
         """
-        return len(self._instanceable_paths)
+        with self.lock:
+            return len(self._instanceable_paths)
 
     def get_prototype_count(self) -> int:
         """Number of implicit prototype prims the stage composed."""

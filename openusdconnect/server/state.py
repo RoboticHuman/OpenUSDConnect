@@ -71,14 +71,14 @@ from .transactions import TransactionCoordinator, TransactionRequest
 from .types import (
     ClientInfo,
     TransactionCommit,
+    TransactionOutcome,
     TransactionRejectedError,
     VfsWriteRejectedError,
 )
 
 LOG = logging.getLogger(__name__)
 
-# Bounded queue limits provides natural backpressure when receivers or
-# persistence can't keep up, preventing unbounded memory growth.
+# A bounded queue applies backpressure when receiver delivery can't keep up.
 _BROADCAST_QUEUE_MAX = 10_000
 _PING_INTERVAL = 30.0  # seconds between heartbeat pings during idle
 
@@ -249,9 +249,8 @@ class UsdSyncServer:
 
         self._playback = PlaybackController()
 
-        # Async broadcast emitter threads push to the queue, a dedicated
-        # thread handles the actual network sends so emitters are never
-        # blocked by slow receivers.
+        # A dedicated thread sends queued broadcasts. Slow receivers apply
+        # backpressure to publishers when the bounded queue fills.
         # Each queued item retains the receiver membership captured when the
         # broadcast was authored. A receiver joining later obtains older
         # records only through its bounded replay window.
@@ -435,8 +434,6 @@ class UsdSyncServer:
         order is preserved across layers; adjacent events for one layer are
         batched. Shared session and stage-state events use the session layer.
         """
-        from ..event_apply import apply_events
-
         rows = self.store.get_all_asc()
         if not rows:
             return
@@ -465,38 +462,12 @@ class UsdSyncServer:
 
         self._collaboration.apply_department_order()
 
-        current_layer = None
-        run: list[dict] = []
-
-        def _apply_run():
-            if not run:
-                return
-            self.stage.SetEditTarget(Usd.EditTarget(current_layer))
-            apply_events(
-                self.stage,
-                run,
-                op_cache=self._scene.op_cache_for(current_layer),
-            )
-
-        for layer, ev in routed:
-            if current_layer is not None and layer is not current_layer:
-                _apply_run()
-                run = []
-            current_layer = layer
-            run.append(ev)
-        _apply_run()
-        self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
-
-        # Populate incremental prim tracking from replayed events.
-        for _layer, ev in routed:
-            self._scene.track_prim_event(ev)
+        self._scene.replay_events(routed)
 
         LOG.info("Restored stage from event log: %d events", len(routed))
 
     def _replay_shared_log(self, rows: list[tuple[int, bytes]]) -> None:
         """Restore exact authored-layer opinions in persisted order."""
-        from ..event_apply import apply_events
-
         graph = self.shared_layer_graph
         if graph is None:
             raise RuntimeError("shared-stage replay requires a layer graph")
@@ -511,8 +482,7 @@ class UsdSyncServer:
             layer = graph.layer_for(current_key)
             if layer is None:
                 raise ValueError(f"persisted event targets unresolved layer key {current_key!r}")
-            with Usd.EditContext(self.stage, Usd.EditTarget(layer)):
-                apply_events(self.stage, run)
+            self._scene.replay_events((layer, event) for event in run)
 
         with self.stage_lock:
             for _seq, record_bin in rows:
@@ -553,7 +523,6 @@ class UsdSyncServer:
 
         if not baseline_seen:
             raise ValueError("shared-stage log has no layer graph baseline")
-        self.stage.SetEditTarget(Usd.EditTarget(self.edit_layer))
         self._scene.invalidate_prim_count()
         LOG.info("Restored shared stage from event log: %d records", len(rows))
 
@@ -665,8 +634,7 @@ class UsdSyncServer:
         """Merge the client's department opinions into the root layer.
 
         Releases this client; the department layer remains while other clients
-        use it. Copies each leaf prim spec individually via Sdf.CopySpec so
-        existing root opinions on sibling prims are preserved.
+        use it. Existing root opinions on sibling prims are preserved.
         Returns False for clients on the shared edit_layer (no-op).
         """
         return self._collaboration.merge_layer(client_id)
@@ -1193,8 +1161,8 @@ class UsdSyncServer:
     ):
         """Enqueue records for async broadcast to all receivers.
 
-        The actual network sends happen on the dedicated broadcast thread,
-        so the calling emitter thread is never blocked by slow receivers.
+        Network sends happen on the dedicated broadcast thread. The caller
+        waits for queue capacity if receiver delivery falls behind.
         """
         if not records:
             return
@@ -1471,7 +1439,7 @@ class UsdSyncServer:
         return self._journal.durable_checkpoint()
 
     def _process_idempotent_txn_now(self, request: TransactionRequest) -> TransactionCommit:
-        with self._journal.commit_lock:
+        with self._journal.commit_scope():
             commit = self._committer.commit(request)
             if commit.status != "committed":
                 return commit
@@ -1480,10 +1448,13 @@ class UsdSyncServer:
                 txn_id=request.txn_id, origin=request.origin,
             )
 
-    def _commit_managed_transaction_group(self, requests: list[TransactionRequest]) -> None:
-        with self._journal.commit_lock:
-            self._committer.commit_group(requests)
-            self._broadcast_grouped_transactions(requests)
+    def _commit_managed_transaction_group(
+        self, requests: list[TransactionRequest],
+    ) -> list[TransactionOutcome]:
+        with self._journal.commit_scope():
+            outcomes = self._committer.commit_group(requests)
+            self._broadcast_grouped_transactions(requests, outcomes)
+            return outcomes
 
     def _publish_transaction_commit(
         self,
@@ -1514,8 +1485,9 @@ class UsdSyncServer:
     def _broadcast_grouped_transactions(
         self,
         requests: list[TransactionRequest],
+        outcomes: list[TransactionOutcome],
     ) -> None:
-        pending: list[TransactionRequest] = []
+        pending: list[TransactionCommit] = []
 
         def flush_pending() -> None:
             if not pending:
@@ -1523,8 +1495,8 @@ class UsdSyncServer:
             try:
                 self.broadcast_transaction_group_views(
                     [
-                        list(request.commit.records)
-                        for request in pending
+                        list(commit.records)
+                        for commit in pending
                     ]
                 )
             except Exception:
@@ -1533,15 +1505,16 @@ class UsdSyncServer:
                 )
             pending.clear()
 
-        for request in requests:
-            commit = request.commit
-            if commit is None or commit.status != "committed" or not commit.records:
+        for request, commit in zip(requests, outcomes, strict=True):
+            if not isinstance(commit, TransactionCommit):
+                continue
+            if commit.status != "committed" or not commit.records:
                 continue
             load_events = [
                 event for event in request.events if event.get("k") == K_LOAD_PAYLOAD
             ]
             if not load_events:
-                pending.append(request)
+                pending.append(commit)
                 continue
 
             # Payload child replay must stay immediately after the transaction
@@ -1573,14 +1546,15 @@ class UsdSyncServer:
 
         Network producers must use :meth:`submit_idempotent_txn`. This private
         helper deliberately omits producer identity and acknowledgements, but
-        still participates in the maintenance barrier, global commit order,
-        atomic USD rollback, and synchronous durable persistence.
+        still participates in the maintenance barrier and global commit order.
+        Managed edits persist synchronously within the USD rollback scope.
+        Shared-stage internal edits follow the configured durability policy.
         """
         if not events:
             return []
         validate_events(events, layer_mode=self.layer_mode)
         with self.txn_barrier.shared():
-            with self._journal.commit_lock:
+            with self._journal.commit_scope():
                 return self._committer.commit_events(
                     events,
                     client_id=client_id,
@@ -1597,7 +1571,7 @@ class UsdSyncServer:
             raise RuntimeError("shared layer dependency refresh requires shared-stage mode")
 
         with self.txn_barrier.shared():
-            with self._journal.commit_lock:
+            with self._journal.commit_scope():
                 before = set(graph.reachable_layer_keys())
                 with self.stage_lock, graph.transaction():
                     Ar.GetResolver().RefreshContext(self.stage.GetPathResolverContext())
@@ -1704,13 +1678,10 @@ class UsdSyncServer:
         """Export the server's edit layer as a USDA string (thread-safe).
 
         If *file_path* is given, also writes the layer to disk.  The exported
-        layer contains only the opinions authored by the server the base
+        layer contains only the opinions authored by the server; the base
         layer and its sublayers are not included.
         """
-        # Snapshot layer ref under lock, serialize outside avoids holding
-        # stage_lock during the (potentially slow) ExportToString call.
-        with self.stage_lock:
-            layer = self.edit_layer
+        layer = self._scene.snapshot_layer(self.edit_layer)
         usda = layer.ExportToString()
         if file_path:
             layer.Export(file_path)
@@ -1720,11 +1691,12 @@ class UsdSyncServer:
     def export_layer(self, key: str) -> str:
         """Export one client/department layer as USDA (thread-safe).
 
-        Resolves the layer ref under stage_lock, serializes outside it, the
-        same discipline as export_edit_layer.
+        Copies the layer under the scene lock, then serializes the detached copy.
         """
         with self.stage_lock:
             layer = self.resolve_layer(key)
+            if layer is not None:
+                layer = self._scene.snapshot_layer(layer)
         return layer.ExportToString() if layer else "# layer not found"
 
     def export_flattened(self, file_path: str) -> None:

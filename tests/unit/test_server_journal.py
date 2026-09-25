@@ -2,8 +2,43 @@
 
 import threading
 
+import pytest
+
 from openusdconnect.event_store import SqliteEventStore
 from openusdconnect.server.journal import EventJournal
+
+
+def test_commit_scope_preserves_order_through_publication_after_rollback(tmp_path):
+    store = SqliteEventStore(str(tmp_path / "ordered.db"))
+    journal = EventJournal(store, durability="strict", metrics=None)
+    attempted = threading.Event()
+    entered = threading.Event()
+    next_sequences = []
+
+    def next_commit():
+        attempted.set()
+        with journal.commit_scope():
+            next_sequences.append(journal.assign_seq())
+            entered.set()
+
+    worker = threading.Thread(target=next_commit, daemon=True)
+    try:
+        with journal.commit_scope():
+            with pytest.raises(ValueError, match="rejected"):
+                with journal.reserve_sequences():
+                    assert journal.assign_seq() == 1
+                    worker.start()
+                    assert attempted.wait(5)
+                    raise ValueError("rejected")
+            # Reservation cleanup must not release the outer publication boundary.
+            assert not entered.wait(0.05)
+        assert entered.wait(5)
+        worker.join(5)
+        assert next_sequences == [1]
+    finally:
+        worker.join(5)
+        journal.shutdown()
+        store.close()
 
 
 def test_realtime_shutdown_drains_after_a_failed_write(tmp_path, monkeypatch):
