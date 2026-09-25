@@ -394,6 +394,8 @@ class DCCAdapter(ABC):
         ``info_id`` is the UsdShade ``info:id`` (Sdr identifier) for
         ``UsdShade.Shader`` prims; empty string for non-shader connectables.
         ``time`` selects a USD time sample; ``None`` writes the static opinion.
+        Numeric array values may be NumPy buffer views on the receive path;
+        native adapters can convert them to lists at their authoring boundary.
         """
         raise NotImplementedError
 
