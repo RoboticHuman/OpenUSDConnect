@@ -85,12 +85,12 @@ def test_flat_receiver_is_admitted_only_for_single_layer(
             assert receiver.rejection_code == HelloRejectionCode.LayeredReplayRequired
             assert "department" in receiver.rejection_reason
             assert not receiver.auth_rejected
-            assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+            assert _wait_until(lambda: sync_server._collaboration.flat_receiver_count == 0)
             assert not sync_server.receivers
         else:
             assert _wait_until(lambda: receiver.connected)
             assert not receiver.layered_replay_active
-            assert sync_server._flat_receiver_count == 1
+            assert sync_server._collaboration.flat_receiver_count == 1
     finally:
         receiver.stop()
         receiver.join(timeout=2)
@@ -109,7 +109,7 @@ def test_layered_receiver_is_admitted_for_both_server_modes(server_factory, depa
     try:
         assert _wait_until(lambda: receiver.connected)
         assert receiver.layered_replay_active
-        assert sync_server._flat_receiver_count == 0
+        assert sync_server._collaboration.flat_receiver_count == 0
     finally:
         receiver.stop()
         receiver.join(timeout=2)
@@ -144,7 +144,7 @@ def test_single_layer_flat_receiver_gets_live_and_replayed_records(server_factor
 
         live.stop()
         live.join(timeout=2)
-        assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+        assert _wait_until(lambda: sync_server._collaboration.flat_receiver_count == 0)
 
         late = ReceiverThread(
             port=port,
@@ -211,7 +211,7 @@ def test_flat_receiver_blocks_enabling_department_policy(server_factory):
         receiver.stop()
         receiver.join(timeout=2)
 
-    assert _wait_until(lambda: sync_server._flat_receiver_count == 0)
+    assert _wait_until(lambda: sync_server._collaboration.flat_receiver_count == 0)
     sync_server.set_department_priority(["animation", "layout"])
     assert sync_server.department_priority == ["animation", "layout"]
 
@@ -271,7 +271,7 @@ def test_compaction_replay_failure_releases_flat_reservation(server_factory, mon
         sync_server.compact_log()
 
         assert not sync_server.receivers
-        assert sync_server._flat_receiver_count == 0
+        assert sync_server._collaboration.flat_receiver_count == 0
     finally:
         sender.disconnect()
         receiver.stop()

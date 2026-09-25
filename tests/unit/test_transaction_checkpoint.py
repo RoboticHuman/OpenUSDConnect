@@ -10,7 +10,7 @@ from openusdconnect.codec import decode_envelope, encode_message, message_to_dic
 from openusdconnect.protocol import make_transaction_result
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
-from openusdconnect.server.state import _TransactionRequest
+from openusdconnect.server.transactions import TransactionRequest
 
 
 @pytest.mark.parametrize("batch_size", [1, 8])
@@ -49,7 +49,7 @@ def test_durable_checkpoint_excludes_uncommitted_sequence_reservations(tmp_path,
 
         def fail_persistence(*args, **kwargs):
             assert server.get_replay_token()[1] > head
-            observed.append((server._replay_epoch, server.store.get_max_seq()))
+            observed.append((server._journal.replay_epoch, server.store.get_max_seq()))
             raise RuntimeError("injected persistence failure")
 
         monkeypatch.setattr(server.store, "append_batch", fail_persistence)
@@ -78,7 +78,7 @@ def test_batch_shares_one_checkpoint_for_successful_commits(
             session_id="seed", txn_id=1, client_id="seed",
         )
         requests = [
-            _TransactionRequest(
+            TransactionRequest(
                 events=[{"k": "ensure_prim", "prim": path, "typeName": "Xform"}],
                 session_id=client, txn_id=txn_id, client_id=client,
                 origin=None, client_addr=None, layer=None, layer_key="",
@@ -109,7 +109,7 @@ def test_batch_shares_one_checkpoint_for_successful_commits(
             patch.setattr(server.store, "get_max_seq", read_head)
             for _request in requests:
                 server.txn_barrier.acquire_shared()
-            server._execute_transaction_requests(requests)
+            server._transactions._execute(requests)
 
         read_head.assert_called_once_with()
         assert all(request.done.is_set() for request in requests)

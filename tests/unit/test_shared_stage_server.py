@@ -525,7 +525,7 @@ def test_topology_persistence_failure_rolls_back_new_layer_identity(
         assert graph.identity_records() == identities
         assert server.store.get_layer_identities() == durable_identities
         assert server.store.get_count() == 1
-        assert server._next_seq == 2
+        assert server._journal.next_seq == 2
 
 
 def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
@@ -537,7 +537,7 @@ def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
     with _shared_server(root.identifier, tmp_path / "events.db") as server:
         graph = server.shared_layer_graph
         first_is_ready_to_persist = threading.Event()
-        persist = server._persist_shared_events
+        persist = server._committer.persist_shared_events
 
         def _delayed_persist(routed_events, **kwargs):
             if routed_events[0][1]["revision"] == 2:
@@ -545,7 +545,7 @@ def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
                 time.sleep(0.05)
             return persist(routed_events, **kwargs)
 
-        monkeypatch.setattr(server, "_persist_shared_events", _delayed_persist)
+        monkeypatch.setattr(server._committer, "persist_shared_events", _delayed_persist)
 
         base_revision = graph.parent_revision(graph.root_layer_key)
         failures = []

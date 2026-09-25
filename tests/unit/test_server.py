@@ -2248,4 +2248,4 @@ class TestApplyTxnBookkeeping:
             {"k": "set_visibility", "prim": "/World/X", "visible": False},
         ]
         assert srv.apply_txn(events) is None
-        assert "/World/X" in srv._prim_paths
+        assert "/World/X" in srv._scene._prim_paths

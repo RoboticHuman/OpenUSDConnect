@@ -2,7 +2,7 @@
 
 import pytest
 
-from openusdconnect.codec import message_to_dict
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -19,6 +19,7 @@ from openusdconnect.protocol_constants import (
     MSG_EVENT,
 )
 from openusdconnect.server import UsdSyncServer
+from openusdconnect.server.compaction import LogCompaction
 
 
 def _make_server(tmp_path):
@@ -45,6 +46,34 @@ def _read_log(server):
 
 
 class TestCompaction:
+    @pytest.mark.parametrize(("kind", "first", "second", "values"), [
+        ("set_xform_trs", "t", "s", [[i, i, i] for i in range(1, 6)]),
+        ("set_point_instancer", "positions", "scales", [[[i, i, i]] for i in range(1, 6)]),
+    ])
+    def test_complete_and_partial_updates_can_alternate(self, kind, first, second, values):
+        updates = [
+            {"fields": [first], first: values[0]},
+            {"fields": [first], first: values[1]},
+            {"fields": [second], second: values[2]},
+            {"fields": [first, second], first: values[3], second: values[3]},
+            {"fields": [first], first: values[4]},
+        ]
+        compaction = LogCompaction()
+        for sequence, update in enumerate(updates, start=1):
+            event = {"k": kind, "prim": "/World/A", "time": 1.0, **update}
+            compaction.add_record(sequence, encode_message({
+                "type": MSG_EVENT, "seq": sequence, "event": event,
+            }))
+        entries = compaction.replay_entries()
+        assert len(entries) == 1
+        event = message_to_dict(encode_message({
+            "type": MSG_EVENT, "seq": 1, "event": entries[0].event,
+        }))["event"]
+        assert event["fields"] == [first, second]
+        assert event[first] == values[4]
+        assert event[second] == values[3]
+        assert event["time"] == 1.0
+
     def test_failed_rewrite_preserves_sequence_state(self, tmp_path, monkeypatch):
         srv = _make_server(tmp_path)
         _inject_events(

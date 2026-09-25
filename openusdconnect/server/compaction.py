@@ -6,7 +6,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
-from ..codec import message_to_dict
+from ..codec import (
+    ReceivedEvent,
+    decode_envelope,
+    decode_received_event,
+    message_to_dict,
+    resolve_payload,
+)
+from ..event_store import EventStore
 from ..protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -30,6 +37,7 @@ from ..protocol_constants import (
     MSG_LAYER_GRAPH_STATE,
     NON_COLLABORATION_KINDS,
     STAGE_METADATA_KEYS,
+    event_apply_tier,
 )
 from ..sdf_spec_delta import merge_spec_events
 from ..time_sample_delta import is_sample_history_barrier
@@ -54,6 +62,30 @@ _EXACT_LAYER_KINDS = frozenset(
 _TRS_ATTRIBUTES = {"t": "xformOp:translate", "r": "xformOp:orient", "s": "xformOp:scale"}
 _INSTANCER_ATTRIBUTES = {wire: usd for usd, wire in POINT_INSTANCER_USD_TO_WIRE.items()}
 
+_CHILD_REPLAY_KINDS = frozenset({
+    K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY,
+    K_SET_MATERIAL_BINDING, K_SET_CONNECTABLE_INPUT, K_SET_CONNECTABLE_CONNECTION,
+})
+
+
+def child_replay_records(store: EventStore, prim_path: str) -> list[ReceivedEvent]:
+    """Reduce child opinions using the same field, time, and layer rules as compaction."""
+    latest: dict[_MergeKey, ReceivedEvent] = {}
+    for blob in store.get_by_prim_prefix(prim_path + "/", _CHILD_REPLAY_KINDS):
+        _message_type, broadcast = resolve_payload(decode_envelope(blob))
+        record = decode_received_event(broadcast, numpy_arrays=True)
+        event = record.event
+        key = _MergeKey.from_event(event, record.layer_key or "")
+        previous = latest.get(key)
+        record.event = _merge_payload(previous.event if previous else None, event)
+        latest[key] = record
+    # This subset has no destructive edits. It needs the shared merge rules,
+    # but not compaction's barrier history or a metadata copy per input record.
+    # Creates precede bindings and connections to siblings. Parents precede
+    # descendants within a tier.
+    ordered = sorted(latest, key=lambda key: (event_apply_tier(key.kind), key.prim))
+    return [latest[key] for key in ordered]
+
 
 class _MergeKey(NamedTuple):
     prim: str
@@ -64,20 +96,19 @@ class _MergeKey(NamedTuple):
     material_purpose: str = ""
 
     @classmethod
-    def from_event(cls, event: dict, metadata: dict) -> _MergeKey:
+    def from_event(cls, event: dict, layer_key: str) -> _MergeKey:
         kind = event["k"]
-        return cls(
-            prim=event.get("prim", ""),
-            kind=kind,
-            time=event.get("time"),
-            layer_key="" if kind in NON_COLLABORATION_KINDS else metadata.get("layer_key", ""),
-            spec_path=event["spec_path"]
-            if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES)
-            else "",
-            material_purpose=(event.get("material_purpose") or "")
-            if kind == K_SET_MATERIAL_BINDING
-            else "",
+        prim = event.get("prim", "")
+        time = event.get("time")
+        if kind in NON_COLLABORATION_KINDS:
+            layer_key = ""
+        spec_path = (
+            event["spec_path"] if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES) else ""
         )
+        material_purpose = (
+            (event.get("material_purpose") or "") if kind == K_SET_MATERIAL_BINDING else ""
+        )
+        return cls(prim, kind, time, layer_key, spec_path, material_purpose)
 
 
 @dataclass(slots=True)
@@ -109,7 +140,7 @@ class LogCompaction:
             for name in ("origin", "client", "client_id", "layer_key")
             if record.get(name)
         }
-        key = _MergeKey.from_event(event, metadata)
+        key = _MergeKey.from_event(event, metadata.get("layer_key", ""))
         self._preserve_sample_order(key, event)
 
         if _is_exact_deletion(event):
@@ -236,6 +267,9 @@ def _merge_payload(previous: dict | None, event: dict) -> dict:
     if previous is None:
         return event
     if kind in (K_SET_XFORM_TRS, K_SET_POINT_INSTANCER):
+        if previous["fields"] == event["fields"]:
+            # Every previously authored field is replaced, so no merge is needed.
+            return event
         for name in event.get("fields", ()):
             previous[name] = event[name]
             if name not in previous["fields"]:

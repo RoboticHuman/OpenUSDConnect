@@ -468,11 +468,15 @@ class TestWriteDrop:
 
 
 class TestWriteTranslate:
-    def test_writing_current_snapshot_is_noop(self, srv, translate_vfile):
+    def test_writing_current_snapshot_is_noop(self, srv, translate_vfile, monkeypatch):
         before = translate_vfile.read()
         before_count = srv.get_event_count()
         before_token = srv.get_snapshot_token()
 
+        def unexpected_drain():
+            pytest.fail("an unchanged save must not wait for outgoing traffic")
+
+        monkeypatch.setattr(srv._maintenance, "drain", unexpected_drain)
         translate_vfile.write(before)
 
         assert srv.get_event_count() == before_count

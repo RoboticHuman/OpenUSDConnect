@@ -39,8 +39,8 @@ class TestInstancingTrackers:
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Xform", "typeName": "Xform"},
         ])
-        assert "/PI" in srv._point_instancer_paths
-        assert "/Xform" not in srv._point_instancer_paths
+        assert "/PI" in srv._scene._point_instancer_paths
+        assert "/Xform" not in srv._scene._point_instancer_paths
 
     def test_set_instanceable_toggles_set(self, srv):
         srv._commit_events([
@@ -50,12 +50,12 @@ class TestInstancingTrackers:
              "refs": [{"asset_path": "", "prim_path": "/Proto"}]},
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
         ])
-        assert srv._instanceable_paths == {"/Inst"}
+        assert srv._scene._instanceable_paths == {"/Inst"}
 
         srv._commit_events([
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": False},
         ])
-        assert srv._instanceable_paths == set()
+        assert srv._scene._instanceable_paths == set()
 
     def test_delete_removes_from_all_trackers(self, srv):
         srv._commit_events([
@@ -65,8 +65,8 @@ class TestInstancingTrackers:
             {"k": "delete_prim", "prim": "/Inst"},
             {"k": "delete_prim", "prim": "/PI"},
         ])
-        assert srv._instanceable_paths == set()
-        assert srv._point_instancer_paths == set()
+        assert srv._scene._instanceable_paths == set()
+        assert srv._scene._point_instancer_paths == set()
 
     def test_rename_preserves_flags(self, srv):
         srv._commit_events([
@@ -77,7 +77,7 @@ class TestInstancingTrackers:
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
             {"k": "rename_prim", "prim": "/Inst", "new_name": "Renamed"},
         ])
-        assert srv._instanceable_paths == {"/Renamed"}
+        assert srv._scene._instanceable_paths == {"/Renamed"}
 
     def test_compaction_rebuilds_trackers(self, srv):
         srv._commit_events([
@@ -89,8 +89,8 @@ class TestInstancingTrackers:
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
         ])
         srv.compact_log()
-        assert srv._point_instancer_paths == {"/PI"}
-        assert srv._instanceable_paths == {"/Inst"}
+        assert srv._scene._point_instancer_paths == {"/PI"}
+        assert srv._scene._instanceable_paths == {"/Inst"}
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 
 
 class _TxnBarrier:
@@ -15,6 +16,24 @@ class _TxnBarrier:
         self._cond = threading.Condition(threading.Lock())
         self._readers = 0
         self._exclusive = False
+
+    @contextmanager
+    def shared(self):
+        """Scope a synchronous operation; queued work transfers ownership explicitly."""
+        self.acquire_shared()
+        try:
+            yield
+        finally:
+            self.release_shared()
+
+    @contextmanager
+    def exclusive(self):
+        """Wait for admitted transactions and exclude new ones until exit."""
+        self.acquire_exclusive()
+        try:
+            yield
+        finally:
+            self.release_exclusive()
 
     def acquire_shared(self):
         with self._cond:

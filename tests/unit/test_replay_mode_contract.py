@@ -22,15 +22,15 @@ def test_flat_replay_reservation_is_available_for_default_stack(server):
     accepted, reason = server.reserve_receiver_replay_mode(False)
     assert accepted
     assert reason == ""
-    assert server._flat_receiver_count == 1
+    assert server._collaboration.flat_receiver_count == 1
 
     server.release_receiver_replay_mode(False)
-    assert server._flat_receiver_count == 0
+    assert server._collaboration.flat_receiver_count == 0
 
 
 def test_layered_replay_does_not_reserve_flat_capacity(server):
     assert server.reserve_receiver_replay_mode(True) == (True, "")
-    assert server._flat_receiver_count == 0
+    assert server._collaboration.flat_receiver_count == 0
     server.release_receiver_replay_mode(True)
 
 
@@ -40,7 +40,7 @@ def test_department_policy_requires_layered_replay(server):
     accepted, reason = server.reserve_receiver_replay_mode(False)
     assert not accepted
     assert "department" in reason
-    assert server._flat_receiver_count == 0
+    assert server._collaboration.flat_receiver_count == 0
 
 
 def test_materialized_layer_stack_requires_layered_replay(server):
@@ -73,7 +73,6 @@ def test_flat_receiver_blocks_layer_stack_changes(server):
 
         assert server.department_priority == []
         assert "artist" not in server.client_layers
-        assert "artist" not in server._client_layer_keys
 
         server.set_department_priority([])
         assert server.unmute_layer("default")

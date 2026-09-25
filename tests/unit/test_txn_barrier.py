@@ -2,7 +2,33 @@
 
 import threading
 
+import pytest
+
 from openusdconnect.server._txn_barrier import _TxnBarrier
+
+
+@pytest.mark.parametrize("mode", ["shared", "exclusive"])
+def test_failed_operation_releases_waiting_maintenance(mode):
+    barrier = _TxnBarrier()
+    attempted = threading.Event()
+    entered = threading.Event()
+
+    def maintenance():
+        attempted.set()
+        with barrier.exclusive():
+            entered.set()
+
+    worker = threading.Thread(target=maintenance, daemon=True)
+    with pytest.raises(RuntimeError, match="operation failed"):
+        with getattr(barrier, mode)():
+            worker.start()
+            assert attempted.wait(timeout=5)
+            assert not entered.is_set()
+            raise RuntimeError("operation failed")
+
+    assert entered.wait(timeout=5)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 def test_exclusive_owners_never_overlap():

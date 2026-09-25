@@ -71,7 +71,7 @@ def test_runtime_enable_and_disable(tmp_path):
     srv = UsdSyncServer(log_path=str(tmp_path / "rt.db"))
     calls = _instrument(srv)
     try:
-        assert srv._compact_thread is None
+        assert not srv._compactor.running
         srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         srv.set_compact_interval(0.2)

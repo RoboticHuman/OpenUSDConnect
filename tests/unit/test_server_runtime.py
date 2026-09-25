@@ -30,10 +30,18 @@ def assert_released(runtime):
     if runtime.server is not None:
         assert runtime.server.socket.fileno() == -1
     state = runtime.sync_server
-    for name in ("_broadcast_thread", "_transaction_thread", "_persist_thread", "_compact_thread"):
-        thread = getattr(state, name, None)
-        if thread is not None:
-            assert not thread.is_alive()
+    thread = getattr(state, "_broadcast_thread", None)
+    if thread is not None:
+        assert not thread.is_alive()
+    compactor = getattr(state, "_compactor", None)
+    if compactor is not None:
+        assert not compactor.running
+    coordinator = getattr(state, "_transactions", None)
+    if coordinator is not None:
+        assert not coordinator.running
+    journal = getattr(state, "_journal", None)
+    if journal is not None:
+        assert not journal.running
     if getattr(state, "store", None) is not None:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             state.store.get_count()
@@ -207,9 +215,10 @@ def test_state_constructor_failure_cleans_partial_workers_and_store(config, monk
     assert len(stores) == len(states) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         stores[0].get_count()
-    for name in ("_broadcast_thread", "_persist_thread", "_compact_thread"):
-        thread = getattr(states[0], name)
-        assert thread is None or thread.ident is None
+    assert not states[0]._compactor.running
+    assert not states[0]._journal.running
+    thread = states[0]._broadcast_thread
+    assert thread is None or thread.ident is None
 
 
 def test_failed_state_preserves_caller_owned_store(config, monkeypatch):
@@ -232,21 +241,27 @@ def test_worker_start_failure_stops_started_workers(config, monkeypatch):
     import openusdconnect.server.state as state_module
 
     states = []
-    original = state_module.UsdSyncServer._start_compaction_thread
+    original = state_module.PeriodicCompactor.start
+    original_initialize = state_module.UsdSyncServer._initialize
+
+    def initialize(self, **kwargs):
+        states.append(self)
+        original_initialize(self, **kwargs)
 
     def fail(self):
-        states.append(self)
         original(self)
         raise RuntimeError("worker startup failed")
 
     config.durability = "realtime"
     config.compact_interval = 60
-    monkeypatch.setattr(state_module.UsdSyncServer, "_start_compaction_thread", fail)
+    monkeypatch.setattr(state_module.UsdSyncServer, "_initialize", initialize)
+    monkeypatch.setattr(state_module.PeriodicCompactor, "start", fail)
     with pytest.raises(RuntimeError, match="worker startup failed"):
         start_server(config)
     state = states[0]
-    for name in ("_broadcast_thread", "_persist_thread", "_compact_thread"):
-        assert not getattr(state, name).is_alive()
+    assert not state._compactor.running
+    assert not state._journal.running
+    assert not state._broadcast_thread.is_alive()
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         state.store.get_count()
     state.shutdown()

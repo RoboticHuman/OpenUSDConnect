@@ -578,7 +578,7 @@ class TestReplayWithClientLayers:
 
         srv2 = UsdSyncServer(log_path=db)
         try:
-            assert srv2._ordered_department_names() == ["animation", "layout"]
+            assert srv2._collaboration.ordered_department_names() == ["animation", "layout"]
             assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
             assert srv2.mute_layer("animation")
             assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)
@@ -825,13 +825,13 @@ class TestConcurrentDepartmentWrites:
         la = srv.get_or_create_client_layer("alice", "animation")
         lb = srv.get_or_create_client_layer("bob", "lighting")
 
-        cache = srv._op_cache_for(la)
+        cache = srv._scene.op_cache_for(la)
         cache["/World/P"] = object()
         # switching the edit target invalidates the cache
-        assert "/World/P" not in srv._op_cache_for(lb)
+        assert "/World/P" not in srv._scene.op_cache_for(lb)
         # staying on the same layer keeps it (no needless re-fetch)
-        srv._op_cache_for(lb)["/World/Q"] = object()
-        assert "/World/Q" in srv._op_cache_for(lb)
+        srv._scene.op_cache_for(lb)["/World/Q"] = object()
+        assert "/World/Q" in srv._scene.op_cache_for(lb)
 
     def test_concurrent_writes_to_same_prim(self, tmp_path):
         """Two departments writing to the same prim concurrently.
