@@ -152,7 +152,7 @@ def test_compaction_does_not_move_partial_writes_across_erasure(exact_samples):
     rows = [(seq, _encode(event, seq)) for seq, event in enumerate(events, 1)]
     for _ in range(3):
         compacted = HistoryMaintenance.build_compacted(rows)
-        replay = [entry.event for entry in compacted.replay_entries()]
+        replay = [entry.event for entry in compacted.replay_records()]
         target = Usd.Stage.CreateInMemory()
         apply_events(target, replay)
         assert target.GetRootLayer().ExportToString() == expected.GetRootLayer().ExportToString()
@@ -166,12 +166,12 @@ def test_compaction_keeps_erasures_in_their_own_layer():
         (3, _encode(_erase(1.0), 3, "strong")),
         (4, _encode(_write(1.0, extent=[[-1.0] * 3, [1.0] * 3]), 4, "strong")),
     ]
-    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_records()
     for layer_key, expected_times in (("weak", [1.0]), ("strong", [])):
         target = Usd.Stage.CreateInMemory()
         UsdGeom.Cube.Define(target, "/Cube")
         apply_events(
-            target, [entry.event for entry in entries if entry.metadata["layer_key"] == layer_key]
+            target, [entry.event for entry in entries if entry.layer_key == layer_key]
         )
         assert target.GetAttributeAtPath("/Cube.size").GetTimeSamples() == expected_times
 
@@ -182,7 +182,7 @@ def test_compaction_still_collapses_repeated_exact_table_writes():
     for seq in range(1, 5):
         attr.Set(float(seq), 1.0)
         rows.append((seq, _encode(_spec_event(source.GetRootLayer(), ["timeSamples"]), seq)))
-    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_records()
     assert len(entries) == 1
     target = Usd.Stage.CreateInMemory()
     apply_events(target, [entries[0].event])
@@ -197,7 +197,7 @@ def test_compaction_does_not_move_exact_tables_past_later_sample_writes():
         _spec_event(source.GetRootLayer(), ["documentation"]),
     ]
     rows = [(seq, _encode(event, seq)) for seq, event in enumerate(events, 1)]
-    entries = HistoryMaintenance.build_compacted(rows).replay_entries()
+    entries = HistoryMaintenance.build_compacted(rows).replay_records()
     target = Usd.Stage.CreateInMemory()
     apply_events(target, [entry.event for entry in entries])
     assert target.GetAttributeAtPath("/Cube.size").Get(1.0) == 42.0
@@ -217,11 +217,11 @@ def test_subtree_removal_discards_preserved_history_only_in_its_layer(kind):
     ]
     for seq, (event, layer) in enumerate(records, 1):
         compaction.add_record(seq, _encode(event, seq, layer))
-    entries = compaction.replay_entries()
-    assert [entry.event["k"] for entry in entries if entry.metadata["layer_key"] == "strong"] == [
+    entries = compaction.replay_records()
+    assert [entry.event["k"] for entry in entries if entry.layer_key == "strong"] == [
         kind
     ]
-    assert [entry.event["k"] for entry in entries if entry.metadata["layer_key"] == "weak"] == [
+    assert [entry.event["k"] for entry in entries if entry.layer_key == "weak"] == [
         "set_sdf_spec_fields",
         "erase_time_samples",
     ]
@@ -237,4 +237,4 @@ def test_layer_replacement_discards_preserved_sample_history():
     ]
     for seq, event in enumerate(events, 1):
         compaction.add_record(seq, _encode(event, seq))
-    assert [entry.event for entry in compaction.replay_entries()] == events[-1:]
+    assert [entry.event for entry in compaction.replay_records()] == events[-1:]

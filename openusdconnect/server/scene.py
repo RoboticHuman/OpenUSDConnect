@@ -58,7 +58,6 @@ class SceneState:
         self._op_cache_layer: str | None = None
         self._prim_paths: dict[str, str] = {}
         self._instanceable_paths: set[str] = set()
-        self._point_instancer_paths: set[str] = set()
         self._prim_count = 0
         self._prim_count_dirty = True
 
@@ -111,29 +110,18 @@ class SceneState:
         k = ev.get("k")
         prim = ev.get("prim", "")
         if k == K_ENSURE_PRIM:
-            type_name = ev["typeName"]
-            self._prim_paths[prim] = type_name
-            if type_name == "PointInstancer":
-                self._point_instancer_paths.add(prim)
+            self._prim_paths[prim] = ev["typeName"]
         elif k == K_DELETE_PRIM:
             self._prim_paths.pop(prim, None)
             self._instanceable_paths.discard(prim)
-            self._point_instancer_paths.discard(prim)
         elif k == K_RENAME_PRIM:
             type_name = self._prim_paths.pop(prim, "Xform")
             was_instanceable = prim in self._instanceable_paths
-            was_pi = prim in self._point_instancer_paths
             self._instanceable_paths.discard(prim)
-            self._point_instancer_paths.discard(prim)
-            new_name = ev.get("new_name", "")
-            if new_name:
-                parent = prim.rsplit("/", 1)[0] or "/"
-                new_path = f"{parent}/{new_name}" if parent != "/" else f"/{new_name}"
-                self._prim_paths[new_path] = type_name
-                if was_instanceable:
-                    self._instanceable_paths.add(new_path)
-                if was_pi:
-                    self._point_instancer_paths.add(new_path)
+            new_path = f"{prim.rsplit('/', 1)[0]}/{ev['new_name']}"
+            self._prim_paths[new_path] = type_name
+            if was_instanceable:
+                self._instanceable_paths.add(new_path)
         elif k == K_SET_INSTANCEABLE:
             if ev.get("instanceable", True):
                 self._instanceable_paths.add(prim)
@@ -157,7 +145,6 @@ class SceneState:
             self.clear_op_cache()
             self._prim_paths.clear()
             self._instanceable_paths.clear()
-            self._point_instancer_paths.clear()
             for event in events:
                 self._track_prim_event(event)
             self._prim_count_dirty = True
@@ -339,11 +326,9 @@ class SceneState:
         with self.lock:
             prims = dict(self._prim_paths)
             instanceable_paths = set(self._instanceable_paths)
-            point_instancer_paths = set(self._point_instancer_paths)
         return inspection.build_prim_tree(
             prims,
             instanceable_paths=instanceable_paths,
-            point_instancer_paths=point_instancer_paths,
         )
 
     def get_instance_count(self) -> int:

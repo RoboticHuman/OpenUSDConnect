@@ -46,6 +46,39 @@ def _read_log(server):
 
 
 class TestCompaction:
+    def test_merged_records_retain_latest_routing_and_first_creation_order(self, tmp_path):
+        server = _make_server(tmp_path)
+        try:
+            for department in ("layout", "animation"):
+                layer = server.get_or_create_client_layer(department, department)
+                for author, field, value in (("first", "t", [1, 2, 3]), ("last", "s", [2, 2, 2])):
+                    server._commit_events([
+                        {"k": K_ENSURE_PRIM, "prim": "/Object", "typeName": "Xform"},
+                        {"k": K_SET_XFORM_TRS, "prim": "/Object", "fields": [field], field: value},
+                    ], layer=layer, client_id=author, origin=f"{department}-{author}",
+                        client_addr=f"{author}:1234")
+
+            server.compact_log()
+
+            records = [message_to_dict(blob) for _seq, blob in server.store.get_all_asc()]
+            assert [record["seq"] for record in records] == [1, 2, 3, 4]
+            assert [record["event"]["k"] for record in records] == [
+                K_ENSURE_PRIM, K_SET_XFORM_TRS, K_ENSURE_PRIM, K_SET_XFORM_TRS,
+            ]
+            for record, department in zip(
+                records, ("layout", "layout", "animation", "animation"), strict=True,
+            ):
+                assert record["layer_key"] == f"department:{department}"
+                assert record["origin"] == f"{department}-last"
+                assert record["client_id"] == "last"
+                assert record["client"] == "last:1234"
+                if record["event"]["k"] == K_SET_XFORM_TRS:
+                    assert record["event"]["t"] == [1, 2, 3]
+                    assert record["event"]["s"] == [2, 2, 2]
+        finally:
+            server.shutdown()
+            server.store.close()
+
     @pytest.mark.parametrize(("kind", "first", "second", "values"), [
         ("set_xform_trs", "t", "s", [[i, i, i] for i in range(1, 6)]),
         ("set_point_instancer", "positions", "scales", [[[i, i, i]] for i in range(1, 6)]),
@@ -64,7 +97,7 @@ class TestCompaction:
             compaction.add_record(sequence, encode_message({
                 "type": MSG_EVENT, "seq": sequence, "event": event,
             }))
-        entries = compaction.replay_entries()
+        entries = compaction.replay_records()
         assert len(entries) == 1
         event = message_to_dict(encode_message({
             "type": MSG_EVENT, "seq": 1, "event": entries[0].event,

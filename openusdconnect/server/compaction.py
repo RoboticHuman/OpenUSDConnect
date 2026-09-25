@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from heapq import merge
+from itertools import chain
 from typing import NamedTuple
 
 from ..codec import (
     ReceivedEvent,
     decode_envelope,
     decode_received_event,
-    message_to_dict,
     resolve_payload,
 )
 from ..event_store import EventStore
@@ -35,6 +35,7 @@ from ..protocol_constants import (
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    MSG_EVENT,
     MSG_LAYER_GRAPH_STATE,
     NON_COLLABORATION_KINDS,
     STAGE_METADATA_KEYS,
@@ -92,39 +93,33 @@ def child_replay_records(store: EventStore, prim_path: str) -> list[ReceivedEven
     )
     compaction = LogCompaction()
     for record in merge(descendants, ancestors, key=lambda record: record.seq):
-        metadata = {
-            name: value for name in ("origin", "client", "client_id", "layer_key")
-            if (value := getattr(record, name))
-        }
-        compaction._add_event(record.seq, record.event, metadata)
+        compaction.add_event(record)
 
-    ordered: list[CompactedEntry] = []
-    segment: list[CompactedEntry] = []
+    ordered: list[ReceivedEvent] = []
+    segment: list[ReceivedEvent] = []
 
     def flush_segment() -> None:
         # Creates precede bindings to siblings; parents precede descendants.
         ordered.extend(sorted(
-            segment, key=lambda entry: (event_apply_tier(entry.key.kind), entry.key.prim),
+            segment, key=lambda record: (event_apply_tier(record.event["k"]), record.event["prim"]),
         ))
         segment.clear()
 
-    for entry in compaction.replay_entries():
+    for record in compaction.replay_records():
+        event = record.event
         if (
-            entry.key.kind in (K_DELETE_PRIM, K_RENAME_PRIM)
-            or is_sample_history_barrier(entry.event)
+            event["k"] in (K_DELETE_PRIM, K_RENAME_PRIM)
+            or is_sample_history_barrier(event)
         ):
             # Erasures must stay after the values they clear and before later
             # partial writes. Sorting the entire replay by tier revives samples.
             flush_segment()
-            if entry.key.prim.startswith(prefix):
-                ordered.append(entry)
-        elif entry.key.prim.startswith(prefix):
-            segment.append(entry)
+            if event["prim"].startswith(prefix):
+                ordered.append(record)
+        elif event["prim"].startswith(prefix):
+            segment.append(record)
     flush_segment()
-    return [
-        ReceivedEvent(seq=entry.sequence, event=entry.event, **entry.metadata)
-        for entry in ordered
-    ]
+    return ordered
 
 
 class _MergeKey(NamedTuple):
@@ -151,41 +146,36 @@ class _MergeKey(NamedTuple):
         return cls(prim, kind, time, layer_key, spec_path, material_purpose)
 
 
-@dataclass(slots=True)
-class CompactedEntry:
+class _PreservedEvent(NamedTuple):
     key: _MergeKey
-    event: dict
-    metadata: dict
-    sequence: int
+    record: ReceivedEvent
 
 
 @dataclass
 class LogCompaction:
     """Pending entries can merge; preserved entries keep their replay position."""
 
-    _pending: dict[_MergeKey, CompactedEntry] = field(default_factory=dict)
-    _preserved: list[CompactedEntry] = field(default_factory=list)
+    _pending: dict[_MergeKey, ReceivedEvent] = field(default_factory=dict)
+    _preserved: list[_PreservedEvent] = field(default_factory=list)
 
     def add_record(self, sequence: int, record_bin: bytes) -> None:
         # Keep geometry arrays as buffer views instead of expanding them into lists.
-        record = message_to_dict(record_bin, numpy_arrays=True)
-        if record.get("type") == MSG_LAYER_GRAPH_STATE:
+        message_type, payload = resolve_payload(decode_envelope(record_bin))
+        if message_type == MSG_LAYER_GRAPH_STATE:
             return
-        event = record.get("event", record)
+        if message_type != MSG_EVENT:
+            raise ValueError("event log contains an unsupported record")
+        record = decode_received_event(payload, numpy_arrays=True)
+        record.seq = sequence
+        self.add_event(record)
+
+    def add_event(self, record: ReceivedEvent) -> None:
+        """Take ownership of a decoded record, retaining its routing through merges."""
+        event = record.event
         kind = event["k"]
         if kind == K_SET_SUBLAYERS:
             return
-        metadata = {
-            name: record[name]
-            for name in ("origin", "client", "client_id", "layer_key")
-            if record.get(name)
-        }
-        self._add_event(sequence, event, metadata)
-
-    def _add_event(self, sequence: int, event: dict, metadata: dict) -> None:
-        """Reduce a decoded record shared by full-log and payload-child replay."""
-        kind = event["k"]
-        key = _MergeKey.from_event(event, metadata.get("layer_key", ""))
+        key = _MergeKey.from_event(event, record.layer_key or "")
         self._preserve_sample_order(key, event)
 
         if _is_exact_deletion(event):
@@ -193,7 +183,7 @@ class LogCompaction:
                 self._discard(
                     lambda old: old.layer_key == key.layer_key and old.spec_path == key.spec_path
                 )
-            self._preserved.append(CompactedEntry(key, event, metadata, sequence))
+            self._preserved.append(_PreservedEvent(key, record))
             return
         if kind in (K_DELETE_PRIM, K_RENAME_PRIM):
             self._discard(
@@ -213,20 +203,20 @@ class LogCompaction:
         previous = self._pending.get(key)
         if previous and kind == K_ENSURE_XFORM_OPS:
             return
-        merged = _merge_payload(previous.event if previous else None, event)
+        record.event = _merge_payload(previous.event if previous else None, event)
         if previous and kind == K_ENSURE_PRIM:
             # Creates must still replay before events that use the prim.
-            sequence = previous.sequence
-        self._pending[key] = CompactedEntry(key, merged, metadata, sequence)
+            record.seq = previous.seq
+        self._pending[key] = record
 
-    def replay_entries(self) -> list[CompactedEntry]:
+    def replay_records(self) -> list[ReceivedEvent]:
         return sorted(
-            [*self._preserved, *self._pending.values()],
-            key=lambda entry: entry.sequence,
+            chain((entry.record for entry in self._preserved), self._pending.values()),
+            key=lambda record: record.seq,
         )
 
     def _preserve(self, key: _MergeKey) -> None:
-        self._preserved.append(self._pending.pop(key))
+        self._preserved.append(_PreservedEvent(key, self._pending.pop(key)))
 
     def _discard(self, matches: Callable[[_MergeKey], bool]) -> None:
         self._pending = {key: entry for key, entry in self._pending.items() if not matches(key)}

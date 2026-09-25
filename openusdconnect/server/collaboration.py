@@ -215,50 +215,27 @@ class CollaborationPolicy:
             layer_key = self._scene.layer_stack.key_for_layer(layer)
             return department_for_layer_key(layer_key) if layer_key is not None else None
 
-    def merge_layer(self, client_id: str) -> bool:
-        """Merge the client's department opinions into the root layer.
+    def release_client_layer(self, client_id: str, *, merge_into_root: bool) -> bool:
+        """Release a department assignment, optionally merging its opinions first.
 
-        Releases this client; the department layer remains while other clients
-        use it. Existing root opinions on sibling prims are preserved.
-        Returns False for clients on the shared edit_layer (no-op).
+        Remove the layer only after its last client leaves. Default-layer
+        assignments are unaffected. Publish changes after releasing the scene lock.
         """
         with self._scene.lock:
             layer_key = self._client_layer_keys.get(client_id)
             if not layer_key or layer_key == _DEFAULT_LAYER_KEY:
                 return False
-            layer = self._scene.layer_stack.layer_for(layer_key)
-            self._scene.merge_layer_into_root(layer)
-            removed = self._release_client_locked(client_id)
-        self._bump_snapshot_epoch(f"merge_layer:{client_id}")
+            if merge_into_root:
+                self._scene.merge_layer_into_root(self._scene.layer_stack.layer_for(layer_key))
+            del self._client_layer_keys[client_id]
+            removed = layer_key not in self._client_layer_keys.values()
+            if removed:
+                self._scene.layer_stack.remove_layer(layer_key)
+        action = "merge_layer" if merge_into_root else "delete_layer"
+        self._bump_snapshot_epoch(f"{action}:{client_id}")
         if removed:
             self._broadcast_layer_stack_state()
-        LOG.info("Merged department opinions and released client %s", client_id)
-        return True
-
-    def delete_layer(self, client_id: str) -> bool:
-        """Release a client's department assignment.
-
-        The department layer is discarded only when its last client leaves.
-
-        Returns False for clients on the shared edit_layer (no-op).
-        """
-        with self._scene.lock:
-            layer_key = self._client_layer_keys.get(client_id)
-            if not layer_key or layer_key == _DEFAULT_LAYER_KEY:
-                return False
-            removed = self._release_client_locked(client_id)
-        self._bump_snapshot_epoch(f"delete_layer:{client_id}")
-        if removed:
-            self._broadcast_layer_stack_state()
-        LOG.info("Released department assignment for client %s", client_id)
-        return True
-
-    def _release_client_locked(self, client_id: str) -> bool:
-        """Release a department client; return whether its layer was removed."""
-        layer_key = self._client_layer_keys.pop(client_id)
-        if layer_key in self._client_layer_keys.values():
-            return False
-        self._scene.layer_stack.remove_layer(layer_key)
+        LOG.info("Released department assignment for client %s (%s)", client_id, action)
         return True
 
     def set_department_priority(self, ordered_departments: list[str]) -> None:

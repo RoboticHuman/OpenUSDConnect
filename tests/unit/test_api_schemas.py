@@ -202,7 +202,7 @@ class TestCompactionUnion:
             msg = {"type": MSG_EVENT, "seq": i + 1, "event": ev}
             rows.append((i + 1, encode_message(msg)))
 
-        entries = HistoryMaintenance.build_compacted(rows).replay_entries()
+        entries = HistoryMaintenance.build_compacted(rows).replay_records()
         assert len(entries) == 1
         merged_ev = entries[0].event
         assert sorted(merged_ev["api_schemas"]) == ["ShadowAPI", "ShapingAPI"]
@@ -224,7 +224,7 @@ class TestCompactionUnion:
             msg = {"type": MSG_EVENT, "seq": i + 1, "event": ev}
             rows.append((i + 1, encode_message(msg)))
 
-        entries = HistoryMaintenance.build_compacted(rows).replay_entries()
+        entries = HistoryMaintenance.build_compacted(rows).replay_records()
         assert len(entries) == 1
         merged_ev = entries[0].event
         assert sorted(merged_ev["api_schemas"]) == [

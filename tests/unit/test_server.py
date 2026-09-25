@@ -467,7 +467,7 @@ class TestCompaction:
             ),
         )
 
-        assert [entry.event["k"] for entry in compaction.replay_entries()] == ["unload_payload"]
+        assert [entry.event["k"] for entry in compaction.replay_records()] == ["unload_payload"]
 
     def test_stage_metadata_compaction_merges_sparse_fields(self, srv):
         self._insert_events(

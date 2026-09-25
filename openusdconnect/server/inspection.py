@@ -124,7 +124,6 @@ def build_prim_tree(
     prims: Mapping[str, str],
     *,
     instanceable_paths: Set[str],
-    point_instancer_paths: Set[str],
 ) -> list[dict]:
     """Build tree rows from tracked paths and instancing flags without USD reads."""
     child_counts: dict[str, int] = {}
@@ -143,7 +142,7 @@ def build_prim_tree(
                 "depth": path.count("/"),
                 "has_children": child_counts.get(path, 0) > 0,
                 "instanceable": path in instanceable_paths,
-                "is_point_instancer": path in point_instancer_paths,
+                "is_point_instancer": prims[path] == "PointInstancer",
             }
         )
     return result

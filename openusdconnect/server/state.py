@@ -557,7 +557,7 @@ class UsdSyncServer:
 
     @property
     def department_priority(self) -> list[str]:
-        return list(self._collaboration.department_priority)
+        return self._collaboration.department_priority
 
     @property
     def client_layers(self) -> dict[str, Sdf.Layer]:
@@ -612,7 +612,7 @@ class UsdSyncServer:
         use it. Existing root opinions on sibling prims are preserved.
         Returns False for clients on the shared edit_layer (no-op).
         """
-        return self._collaboration.merge_layer(client_id)
+        return self._collaboration.release_client_layer(client_id, merge_into_root=True)
 
     def delete_layer(self, client_id: str) -> bool:
         """Release a client's department assignment.
@@ -621,7 +621,7 @@ class UsdSyncServer:
 
         Returns False for clients on the shared edit_layer (no-op).
         """
-        return self._collaboration.delete_layer(client_id)
+        return self._collaboration.release_client_layer(client_id, merge_into_root=False)
 
     def set_department_priority(self, ordered_departments: list[str]) -> None:
         """Set department priority ordering (strongest first)."""

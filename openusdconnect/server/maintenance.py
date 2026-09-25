@@ -167,13 +167,11 @@ class HistoryMaintenance:
         original_count: int,
     ):
         """Replace compacted history; the caller holds the exclusive window."""
-        sorted_entries = compaction.replay_entries()
+        compacted = compaction.replay_records()
         graph = self._scene.shared_layer_graph
         if graph is not None:
             reachable = set(graph.reachable_layer_keys())
-            sorted_entries = [
-                entry for entry in sorted_entries if entry.metadata.get("layer_key") in reachable
-            ]
+            compacted = [record for record in compacted if record.layer_key in reachable]
 
         graph_transaction = graph.transaction() if graph is not None else nullcontext()
         with graph_transaction:
@@ -189,11 +187,14 @@ class HistoryMaintenance:
                 first_event_seq = 2
 
             encoded = EncodedEvents()
-            for seq, entry in enumerate(sorted_entries, start=first_event_seq):
-                encoded.append(*encode_event_record(seq, entry.event, **entry.metadata))
+            for seq, record in enumerate(compacted, start=first_event_seq):
+                encoded.append(*encode_event_record(
+                    seq, record.event, origin=record.origin, client=record.client,
+                    client_id=record.client_id, layer_key=record.layer_key,
+                ))
             records.extend(encoded.store_rows)
             self.store.clear_and_rewrite(records)
-        self._scene.rebuild_caches(entry.event for entry in sorted_entries)
+        self._scene.rebuild_caches(record.event for record in compacted)
         self._finish_rewrite(len(records))
 
         LOG.info("Compacted event log: %d -> %d records", original_count, len(records))

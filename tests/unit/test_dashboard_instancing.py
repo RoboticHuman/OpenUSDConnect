@@ -35,6 +35,15 @@ def srv(tmp_path):
 
 
 class TestInstancingTrackers:
+    def test_point_instancer_badge_follows_redefined_type(self, srv):
+        for type_name in ("PointInstancer", "Xform", "PointInstancer"):
+            srv._commit_events([
+                {"k": "ensure_prim", "prim": "/Object", "typeName": type_name},
+            ])
+            row = next(row for row in srv.get_prim_tree() if row["path"] == "/Object")
+            assert row["typeName"] == type_name
+            assert row["is_point_instancer"] == (type_name == "PointInstancer")
+
     def test_ensure_prim_point_instancer_marks_set(self, srv):
         srv._commit_events([
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
