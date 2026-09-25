@@ -24,6 +24,10 @@ class ClientInfo:
 class VfsWriteRejectedError(RuntimeError):
     """Base class for VFS write fallback rejections."""
 
+    def __init__(self, message: str, *, analysis: VfsWriteAnalysis | None = None):
+        super().__init__(message)
+        self.analysis = analysis
+
 
 class StaleVfsWriteError(VfsWriteRejectedError):
     """Raised when an uploaded VFS snapshot is older than server state."""
@@ -53,6 +57,9 @@ class TransactionCommit:
     txn_id: int
     records: tuple[tuple[dict[str, object], bytes], ...] = ()
     checkpoint: TransactionCheckpoint | None = None
+
+
+type TransactionOutcome = TransactionCommit | BaseException
 
 
 class TransactionRejectedError(ValueError):

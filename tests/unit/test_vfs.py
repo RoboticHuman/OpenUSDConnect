@@ -23,6 +23,7 @@ from openusdconnect.server.types import (
 from openusdconnect.server.vfs import VirtualStageFile, VirtualStageFileSet, WriteMode
 from openusdconnect.server.vfs.provider import VfsSnapshot, VfsStat
 from openusdconnect.server.vfs.webdav import _StageFileResource
+from tests.helpers import ReceiverStub
 
 
 @pytest.fixture
@@ -468,11 +469,15 @@ class TestWriteDrop:
 
 
 class TestWriteTranslate:
-    def test_writing_current_snapshot_is_noop(self, srv, translate_vfile):
+    def test_writing_current_snapshot_is_noop(self, srv, translate_vfile, monkeypatch):
         before = translate_vfile.read()
         before_count = srv.get_event_count()
         before_token = srv.get_snapshot_token()
 
+        def unexpected_drain():
+            pytest.fail("an unchanged save must not wait for outgoing traffic")
+
+        monkeypatch.setattr(srv._maintenance, "drain", unexpected_drain)
         translate_vfile.write(before)
 
         assert srv.get_event_count() == before_count
@@ -522,7 +527,7 @@ class TestWriteTranslate:
             def sendall(self, payload):
                 self.payloads.append(payload)
 
-        class CaptureReceiver:
+        class CaptureReceiver(ReceiverStub):
             def __init__(self):
                 self.request = CaptureRequest()
                 self.client_address = ("vfs-capture", 1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 from pxr import Gf, Sdf, Sdr, Usd, UsdShade, Vt
 
 from .connectable_attrs import ConnectableAttr
@@ -34,6 +35,16 @@ def set_connectable_input_value(
         # Empty string clears the asset path.
         inp.Set(Sdf.AssetPath(value) if value else Sdf.AssetPath(), time)
         return
+
+    if isinstance(value, np.ndarray):
+        if type_name == "int[]":
+            inp.Set(Vt.IntArray.FromNumpy(value), time)
+            return
+        if type_name == "float[]":
+            inp.Set(Vt.FloatArray.FromNumpy(value), time)
+            return
+        # Small vectors and matrices use the same USD constructors as lists.
+        value = value.tolist()
 
     if isinstance(value, list):
         if type_name in ("color3f", "float3", "normal3f", "point3f", "vector3f"):

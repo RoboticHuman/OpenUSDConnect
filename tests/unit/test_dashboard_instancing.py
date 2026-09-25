@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(not PXR_AVAILABLE, reason="pxr not available")
 def srv(tmp_path):
     s = UsdSyncServer(log_path=str(tmp_path / "instancing.db"))
     yield s
+    s.shutdown()
     s.store.close()
 
 
@@ -34,13 +35,23 @@ def srv(tmp_path):
 
 
 class TestInstancingTrackers:
+    def test_point_instancer_badge_follows_redefined_type(self, srv):
+        for type_name in ("PointInstancer", "Xform", "PointInstancer"):
+            srv._commit_events([
+                {"k": "ensure_prim", "prim": "/Object", "typeName": type_name},
+            ])
+            row = next(row for row in srv.get_prim_tree() if row["path"] == "/Object")
+            assert row["typeName"] == type_name
+            assert row["is_point_instancer"] == (type_name == "PointInstancer")
+
     def test_ensure_prim_point_instancer_marks_set(self, srv):
         srv._commit_events([
             {"k": "ensure_prim", "prim": "/PI", "typeName": "PointInstancer"},
             {"k": "ensure_prim", "prim": "/Xform", "typeName": "Xform"},
         ])
-        assert "/PI" in srv._point_instancer_paths
-        assert "/Xform" not in srv._point_instancer_paths
+        tree = {row["path"]: row for row in srv.get_prim_tree()}
+        assert tree["/PI"]["is_point_instancer"]
+        assert not tree["/Xform"]["is_point_instancer"]
 
     def test_set_instanceable_toggles_set(self, srv):
         srv._commit_events([
@@ -50,12 +61,12 @@ class TestInstancingTrackers:
              "refs": [{"asset_path": "", "prim_path": "/Proto"}]},
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
         ])
-        assert srv._instanceable_paths == {"/Inst"}
+        assert {row["path"] for row in srv.get_prim_tree() if row["instanceable"]} == {"/Inst"}
 
         srv._commit_events([
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": False},
         ])
-        assert srv._instanceable_paths == set()
+        assert srv.get_instance_count() == 0
 
     def test_delete_removes_from_all_trackers(self, srv):
         srv._commit_events([
@@ -65,8 +76,8 @@ class TestInstancingTrackers:
             {"k": "delete_prim", "prim": "/Inst"},
             {"k": "delete_prim", "prim": "/PI"},
         ])
-        assert srv._instanceable_paths == set()
-        assert srv._point_instancer_paths == set()
+        assert srv.get_instance_count() == 0
+        assert not srv.get_prim_tree()
 
     def test_rename_preserves_flags(self, srv):
         srv._commit_events([
@@ -77,7 +88,7 @@ class TestInstancingTrackers:
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
             {"k": "rename_prim", "prim": "/Inst", "new_name": "Renamed"},
         ])
-        assert srv._instanceable_paths == {"/Renamed"}
+        assert {row["path"] for row in srv.get_prim_tree() if row["instanceable"]} == {"/Renamed"}
 
     def test_compaction_rebuilds_trackers(self, srv):
         srv._commit_events([
@@ -89,8 +100,9 @@ class TestInstancingTrackers:
             {"k": "set_instanceable", "prim": "/Inst", "instanceable": True},
         ])
         srv.compact_log()
-        assert srv._point_instancer_paths == {"/PI"}
-        assert srv._instanceable_paths == {"/Inst"}
+        tree = srv.get_prim_tree()
+        assert {row["path"] for row in tree if row["is_point_instancer"]} == {"/PI"}
+        assert {row["path"] for row in tree if row["instanceable"]} == {"/Inst"}
 
 
 # ---------------------------------------------------------------------------

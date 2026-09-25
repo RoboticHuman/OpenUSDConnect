@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from heapq import merge
+from itertools import chain
 from typing import NamedTuple
 
-from ..codec import message_to_dict
+from ..codec import (
+    ReceivedEvent,
+    decode_envelope,
+    decode_received_event,
+    resolve_payload,
+)
+from ..event_store import EventStore
 from ..protocol_constants import (
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
@@ -27,9 +35,11 @@ from ..protocol_constants import (
     K_SET_VISIBILITY,
     K_SET_XFORM_TRS,
     K_UNLOAD_PAYLOAD,
+    MSG_EVENT,
     MSG_LAYER_GRAPH_STATE,
     NON_COLLABORATION_KINDS,
     STAGE_METADATA_KEYS,
+    event_apply_tier,
 )
 from ..sdf_spec_delta import merge_spec_events
 from ..time_sample_delta import is_sample_history_barrier
@@ -54,6 +64,63 @@ _EXACT_LAYER_KINDS = frozenset(
 _TRS_ATTRIBUTES = {"t": "xformOp:translate", "r": "xformOp:orient", "s": "xformOp:scale"}
 _INSTANCER_ATTRIBUTES = {wire: usd for usd, wire in POINT_INSTANCER_USD_TO_WIRE.items()}
 
+_CHILD_REPLAY_KINDS = frozenset({
+    K_ENSURE_PRIM, K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS, K_SET_VISIBILITY,
+    K_SET_MATERIAL_BINDING, K_SET_CONNECTABLE_INPUT, K_SET_CONNECTABLE_CONNECTION,
+    K_DELETE_PRIM, K_RENAME_PRIM, K_ERASE_TIME_SAMPLES, K_SET_SDF_SPEC_FIELDS,
+})
+
+
+def child_replay_records(store: EventStore, prim_path: str) -> list[ReceivedEvent]:
+    """Reduce child opinions without merging across deleted prims or samples."""
+    prefix = prim_path.rstrip("/") + "/"
+
+    def decode(blobs: Iterable[bytes]) -> Iterable[ReceivedEvent]:
+        for blob in blobs:
+            _message_type, broadcast = resolve_payload(decode_envelope(blob))
+            yield decode_received_event(broadcast, numpy_arrays=True)
+
+    descendants = decode(store.get_by_prim_prefix(prefix, _CHILD_REPLAY_KINDS))
+    # Deleting the payload root or one of its ancestors also removes earlier
+    # child opinions. Read these small lifecycle records without scanning the
+    # geometry or shader-array histories of unrelated prims.
+    ancestors = (
+        record for record in decode(
+            store.get_by_prim_prefix("/", {K_DELETE_PRIM, K_RENAME_PRIM})
+        )
+        if prim_path == record.event["prim"]
+        or prim_path.startswith(record.event["prim"].rstrip("/") + "/")
+    )
+    compaction = LogCompaction()
+    for record in merge(descendants, ancestors, key=lambda record: record.seq):
+        compaction.add_event(record)
+
+    ordered: list[ReceivedEvent] = []
+    segment: list[ReceivedEvent] = []
+
+    def flush_segment() -> None:
+        # Creates precede bindings to siblings; parents precede descendants.
+        ordered.extend(sorted(
+            segment, key=lambda record: (event_apply_tier(record.event["k"]), record.event["prim"]),
+        ))
+        segment.clear()
+
+    for record in compaction.replay_records():
+        event = record.event
+        if (
+            event["k"] in (K_DELETE_PRIM, K_RENAME_PRIM)
+            or is_sample_history_barrier(event)
+        ):
+            # Erasures must stay after the values they clear and before later
+            # partial writes. Sorting the entire replay by tier revives samples.
+            flush_segment()
+            if event["prim"].startswith(prefix):
+                ordered.append(record)
+        elif event["prim"].startswith(prefix):
+            segment.append(record)
+    flush_segment()
+    return ordered
+
 
 class _MergeKey(NamedTuple):
     prim: str
@@ -64,52 +131,51 @@ class _MergeKey(NamedTuple):
     material_purpose: str = ""
 
     @classmethod
-    def from_event(cls, event: dict, metadata: dict) -> _MergeKey:
+    def from_event(cls, event: dict, layer_key: str) -> _MergeKey:
         kind = event["k"]
-        return cls(
-            prim=event.get("prim", ""),
-            kind=kind,
-            time=event.get("time"),
-            layer_key="" if kind in NON_COLLABORATION_KINDS else metadata.get("layer_key", ""),
-            spec_path=event["spec_path"]
-            if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES)
-            else "",
-            material_purpose=(event.get("material_purpose") or "")
-            if kind == K_SET_MATERIAL_BINDING
-            else "",
+        prim = event.get("prim", "")
+        time = event.get("time")
+        if kind in NON_COLLABORATION_KINDS:
+            layer_key = ""
+        spec_path = (
+            event["spec_path"] if kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES) else ""
         )
+        material_purpose = (
+            (event.get("material_purpose") or "") if kind == K_SET_MATERIAL_BINDING else ""
+        )
+        return cls(prim, kind, time, layer_key, spec_path, material_purpose)
 
 
-@dataclass(slots=True)
-class CompactedEntry:
+class _PreservedEvent(NamedTuple):
     key: _MergeKey
-    event: dict
-    metadata: dict
-    sequence: int
+    record: ReceivedEvent
 
 
 @dataclass
 class LogCompaction:
     """Pending entries can merge; preserved entries keep their replay position."""
 
-    _pending: dict[_MergeKey, CompactedEntry] = field(default_factory=dict)
-    _preserved: list[CompactedEntry] = field(default_factory=list)
+    _pending: dict[_MergeKey, ReceivedEvent] = field(default_factory=dict)
+    _preserved: list[_PreservedEvent] = field(default_factory=list)
 
     def add_record(self, sequence: int, record_bin: bytes) -> None:
         # Keep geometry arrays as buffer views instead of expanding them into lists.
-        record = message_to_dict(record_bin, numpy_arrays=True)
-        if record.get("type") == MSG_LAYER_GRAPH_STATE:
+        message_type, payload = resolve_payload(decode_envelope(record_bin))
+        if message_type == MSG_LAYER_GRAPH_STATE:
             return
-        event = record.get("event", record)
+        if message_type != MSG_EVENT:
+            raise ValueError("event log contains an unsupported record")
+        record = decode_received_event(payload, numpy_arrays=True)
+        record.seq = sequence
+        self.add_event(record)
+
+    def add_event(self, record: ReceivedEvent) -> None:
+        """Take ownership of a decoded record, retaining its routing through merges."""
+        event = record.event
         kind = event["k"]
         if kind == K_SET_SUBLAYERS:
             return
-        metadata = {
-            name: record[name]
-            for name in ("origin", "client", "client_id", "layer_key")
-            if record.get(name)
-        }
-        key = _MergeKey.from_event(event, metadata)
+        key = _MergeKey.from_event(event, record.layer_key or "")
         self._preserve_sample_order(key, event)
 
         if _is_exact_deletion(event):
@@ -117,7 +183,7 @@ class LogCompaction:
                 self._discard(
                     lambda old: old.layer_key == key.layer_key and old.spec_path == key.spec_path
                 )
-            self._preserved.append(CompactedEntry(key, event, metadata, sequence))
+            self._preserved.append(_PreservedEvent(key, record))
             return
         if kind in (K_DELETE_PRIM, K_RENAME_PRIM):
             self._discard(
@@ -137,20 +203,20 @@ class LogCompaction:
         previous = self._pending.get(key)
         if previous and kind == K_ENSURE_XFORM_OPS:
             return
-        merged = _merge_payload(previous.event if previous else None, event)
+        record.event = _merge_payload(previous.event if previous else None, event)
         if previous and kind == K_ENSURE_PRIM:
             # Creates must still replay before events that use the prim.
-            sequence = previous.sequence
-        self._pending[key] = CompactedEntry(key, merged, metadata, sequence)
+            record.seq = previous.seq
+        self._pending[key] = record
 
-    def replay_entries(self) -> list[CompactedEntry]:
+    def replay_records(self) -> list[ReceivedEvent]:
         return sorted(
-            [*self._preserved, *self._pending.values()],
-            key=lambda entry: entry.sequence,
+            chain((entry.record for entry in self._preserved), self._pending.values()),
+            key=lambda record: record.seq,
         )
 
     def _preserve(self, key: _MergeKey) -> None:
-        self._preserved.append(self._pending.pop(key))
+        self._preserved.append(_PreservedEvent(key, self._pending.pop(key)))
 
     def _discard(self, matches: Callable[[_MergeKey], bool]) -> None:
         self._pending = {key: entry for key, entry in self._pending.items() if not matches(key)}
@@ -236,6 +302,9 @@ def _merge_payload(previous: dict | None, event: dict) -> dict:
     if previous is None:
         return event
     if kind in (K_SET_XFORM_TRS, K_SET_POINT_INSTANCER):
+        if previous["fields"] == event["fields"]:
+            # Every previously authored field is replaced, so no merge is needed.
+            return event
         for name in event.get("fields", ()):
             previous[name] = event[name]
             if name not in previous["fields"]:

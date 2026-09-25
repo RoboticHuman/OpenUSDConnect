@@ -6,7 +6,8 @@ import threading
 import pytest
 
 from openusdconnect.event_store import LayerIdentity, ProducerProgress, SqliteEventStore
-from openusdconnect.server.state import UsdSyncServer, _TransactionRequest
+from openusdconnect.server.state import UsdSyncServer
+from openusdconnect.server.transactions import TransactionRequest
 from openusdconnect.server.types import TransactionRejectedError
 
 
@@ -223,6 +224,230 @@ def test_gap_is_rejected_with_expected_transaction(tmp_path):
         server.store.close()
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_producer_order_and_metadata_survive_duplicate_and_gap_requests(tmp_path, grouped):
+    """A rejected gap cannot advance progress or change neighboring writes."""
+    from openusdconnect.codec import message_to_dict
+
+    server = UsdSyncServer(log_path=str(tmp_path / "ordering.db"), txn_batch_size=1)
+    try:
+        layer = server.get_or_create_client_layer("artist", "layout")
+        requests = [
+            TransactionRequest(
+                events=[_event(f"/World/Edit{index}")], client_id="artist",
+                session_id="session", txn_id=txn_id, layer=layer,
+                origin="dcc", client_addr="127.0.0.1:7200",
+            )
+            for index, txn_id in enumerate((1, 1, 3, 2, 1))
+        ]
+        if grouped:
+            outcomes = server._commit_managed_transaction_group(requests)
+        else:
+            outcomes = []
+            for request in requests:
+                try:
+                    outcomes.append(server._process_idempotent_txn_now(request))
+                except TransactionRejectedError as exc:
+                    outcomes.append(exc)
+        assert [outcomes[i].status for i in (0, 1, 3, 4)] == [
+            "committed", "duplicate", "committed", "duplicate",
+        ]
+        assert [outcomes[i].txn_id for i in (0, 1, 3, 4)] == [1, 1, 2, 2]
+        assert isinstance(outcomes[2], TransactionRejectedError)
+        assert outcomes[2].expected_txn_id == 2
+        assert server.store.get_producer_progress("artist", "session") == 2
+        records = [message_to_dict(blob) for _seq, blob in server.store.get_all_asc()]
+        assert [record["event"]["prim"] for record in records] == ["/World/Edit0", "/World/Edit3"]
+        assert [record["seq"] for record in records] == [1, 2]
+        for record in records:
+            assert record["client_id"] == "artist"
+            assert record["origin"] == "dcc"
+            assert record["client"] == "127.0.0.1:7200"
+            assert record["layer_key"] == server.layer_stack.key_for_layer(layer)
+        assert layer.GetPrimAtPath("/World/Edit0") and layer.GetPrimAtPath("/World/Edit3")
+        assert not any(server.stage.GetPrimAtPath(f"/World/Edit{i}") for i in (1, 2, 4))
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("broadcast_fails", [False, True])
+def test_payload_publication_keeps_commit_order_and_durable_outcomes(
+    tmp_path, monkeypatch, grouped, broadcast_fails,
+):
+    server = UsdSyncServer(log_path=str(tmp_path / "publication.db"), txn_batch_size=1)
+    try:
+        server._commit_events([_event("/Payload")])
+        observed = []
+        broadcast = server.broadcast_transaction_group_views
+
+        def publish(transactions):
+            for records in transactions:
+                for record, _encoded in records:
+                    observed.append(record["event"]["prim"])
+                    if broadcast_fails and record["event"]["k"] == "load_payload":
+                        raise OSError("injected broadcast failure")
+            broadcast(transactions)
+
+        monkeypatch.setattr(server, "broadcast_transaction_group_views", publish)
+        monkeypatch.setattr(
+            server, "replay_children_after_load", lambda path: observed.append(path + "/Child"),
+        )
+        requests = [
+            TransactionRequest(events=[event], client_id="client", session_id="s", txn_id=index)
+            for index, event in enumerate([
+                _event("/Before"), {"k": "load_payload", "prim": "/Payload"}, _event("/After"),
+            ], start=1)
+        ]
+        outcomes = (
+            # The coordinator closes each batch at a payload load.
+            server._commit_managed_transaction_group(requests[:2])
+            + server._commit_managed_transaction_group(requests[2:]) if grouped
+            else [server._process_idempotent_txn_now(request) for request in requests]
+        )
+        assert observed == [
+            "/Before", "/Payload", *([] if broadcast_fails else ["/Payload/Child"]), "/After",
+        ]
+        assert [outcome.status for outcome in outcomes] == ["committed"] * 3
+        assert server.store.get_producer_progress("client", "s") == 3
+        assert server.stage.GetPrimAtPath("/After")
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("durability", ["strict", "realtime"])
+def test_child_replay_preserves_routing_and_persists_before_publication(tmp_path, durability):
+    from openusdconnect.codec import message_to_dict
+
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "children.db"), durability=durability, wire_metrics=True,
+    )
+    try:
+        for name in ("A", "B"):
+            layer = server.get_or_create_client_layer(name, department=name)
+            server._commit_events(
+                [_event(f"/Payload/{name}")], client_id=name, origin=f"origin-{name}", layer=layer,
+            )
+        observed = []
+        server.add_event_listener(
+            lambda record: observed.append((record, server.store.get_max_seq())),
+        )
+        before_metrics = server.get_wire_metrics()["total_count"]
+
+        server.replay_children_after_load("/Payload")
+
+        replayed = [message_to_dict(blob) for blob in server.store.get_from_seq_bin(3)]
+        assert [record["seq"] for record in replayed] == [3, 4]
+        assert [record["event"]["prim"] for record in replayed] == ["/Payload/A", "/Payload/B"]
+        assert [record["origin"] for record in replayed] == ["origin-A", "origin-B"]
+        assert [record["layer_key"] for record in replayed] == ["department:A", "department:B"]
+        assert all("client_id" not in record for record in replayed)
+        assert [(record["seq"], head) for record, head in observed] == [(3, 4), (4, 4)]
+        assert server.get_event_count() == 4
+        assert server.get_wire_metrics()["total_count"] == before_metrics + 2
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("batch_size", [1, 8])
+@pytest.mark.parametrize("durability", ["strict", "realtime"])
+def test_child_replay_storage_failure_preserves_parent_commit_and_sequence(
+    tmp_path, monkeypatch, batch_size, durability,
+):
+    server = UsdSyncServer(
+        log_path=str(tmp_path / "replay-failure.db"),
+        txn_batch_size=batch_size, durability=durability,
+    )
+    try:
+        server._commit_events([_event("/Payload"), _event("/Payload/Child")])
+        append = server.store.append_batch
+        observed = []
+        server.add_event_listener(observed.append)
+
+        def fail_replay(rows, **kwargs):
+            if not kwargs.get("producer_progress"):
+                raise OSError("replay persistence failed")
+            return append(rows, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(server.store, "append_batch", fail_replay)
+            outcome = server.process_idempotent_txn(
+                [{"k": "load_payload", "prim": "/Payload"}],
+                client_id="client", session_id="session", txn_id=1,
+            )
+        assert outcome.status == "committed"
+        assert outcome.checkpoint.head_seq == 3
+        assert server.producer_committed_through("client", "session") == 1
+        assert server.get_replay_token()[1] == server.store.get_max_seq() == 3
+        assert server.get_event_count() == server.store.get_count() == 3
+        assert [record["seq"] for record in observed] == [3]
+
+        following = _commit(server, "/Following", client="client", session="session", txn_id=2)
+        assert following.status == "committed"
+        assert following.records[0][0]["seq"] == 4
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("paths,expected", [
+    (["/Before", "/Payload", "/After"], ["/Before", "/Payload", "/Payload/Child", "/After"]),
+    (["/Payload", "/After"], ["/Payload", "/Payload/Child", "/After"]),
+    (["/Payload", "/Payload", "/After"],
+     ["/Payload", "/Payload/Child", "/Payload", "/Payload/Child", "/After"]),
+])
+def test_queued_payload_replay_keeps_wire_sequences_in_commit_order(
+    tmp_path, monkeypatch, paths, expected,
+):
+    import io
+
+    from openusdconnect.codec import message_to_dict
+    from openusdconnect.framing import recv_framed_rfile
+    from openusdconnect.server.transactions import TransactionCoordinator
+    from tests.helpers import ReceiverStub
+
+    # Admit the whole batch before starting the worker, without a timing race.
+    start = TransactionCoordinator.start
+    with monkeypatch.context() as patch:
+        patch.setattr(TransactionCoordinator, "start", lambda self: None)
+        server = UsdSyncServer(log_path=str(tmp_path / "replay-order.db"), txn_batch_size=8)
+    try:
+        server._commit_events([_event("/Payload"), _event("/Payload/Child")])
+        observed = []
+        server.add_event_listener(observed.append)
+        receiver = ReceiverStub()
+        receiver.send_lock = threading.Lock()
+        receiver.client_address = ("replay-order", 0)
+        receiver.request = io.BytesIO()
+        receiver.request.sendall = receiver.request.write
+        server.receivers.add(receiver)
+        requests = [
+            server.submit_idempotent_txn(
+                [{"k": "load_payload", "prim": path} if path == "/Payload" else _event(path)],
+                client_id="client", session_id="session", txn_id=index,
+            )
+            for index, path in enumerate(paths, start=1)
+        ]
+        start(server._transactions)
+        outcomes = [request.wait() for request in requests]
+        assert [outcome.status for outcome in outcomes] == ["committed"] * len(paths)
+        assert [record["event"]["prim"] for record in observed] == expected
+        sequences = list(range(3, 3 + len(expected)))
+        assert [record["seq"] for record in observed] == sequences
+        assert server.store.get_max_seq() == sequences[-1]
+        server._broadcast_queue.join()
+        receiver.request.seek(0)
+        wire = [message_to_dict(recv_framed_rfile(receiver.request)) for _ in expected]
+        assert [record["seq"] for record in wire] == sequences
+        assert receiver.request.read() == b""
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
 def test_invalid_transaction_is_rejected_before_queue_or_sequence_reservation(tmp_path):
     server = UsdSyncServer(log_path=str(tmp_path / "invalid.db"), txn_batch_size=1)
     try:
@@ -235,7 +460,7 @@ def test_invalid_transaction_is_rejected_before_queue_or_sequence_reservation(tm
             )
         assert server.store.get_count() == 0
         assert server.store.get_producer_progress("client", "producer") == 0
-        assert server._next_seq == 1
+        assert server.get_replay_token()[1] == 0
     finally:
         server.shutdown()
         server.store.close()
@@ -313,7 +538,7 @@ def test_store_failure_rolls_back_usd_sequence_and_progress(tmp_path, monkeypatc
         assert not server.stage.GetPrimAtPath("/World/Rollback").IsValid()
         assert server.store.get_count() == 0
         assert server.store.get_producer_progress("client", "producer") == 0
-        assert server._next_seq == 1
+        assert server.get_replay_token()[1] == 0
 
         committed = _commit(
             server, "/World/Rollback", client="client", session="producer", txn_id=1
@@ -345,12 +570,7 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
         {"k": "ensure_prim", "prim": "/World/Rollback", "typeName": "PointInstancer"},
         {"k": "set_instanceable", "prim": "/World/Rollback", "instanceable": True},
     ]
-    before = (
-        dict(server._prim_paths),
-        set(server._instanceable_paths),
-        set(server._point_instancer_paths),
-        server._prim_count_dirty,
-    )
+    before = (server.get_prim_tree(), server.get_prim_count(), server.get_instance_count())
     monkeypatch.setattr(server.store, "append_batch", fail_once)
     try:
         with pytest.raises(sqlite3.OperationalError, match="injected tracking"):
@@ -363,10 +583,7 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
 
         assert not server.stage.GetPrimAtPath("/World/Rollback").IsValid()
         assert (
-            server._prim_paths,
-            server._instanceable_paths,
-            server._point_instancer_paths,
-            server._prim_count_dirty,
+            server.get_prim_tree(), server.get_prim_count(), server.get_instance_count()
         ) == before
 
         committed = server.process_idempotent_txn(
@@ -376,9 +593,10 @@ def test_store_failure_does_not_publish_prim_or_instancing_indexes(
             txn_id=1,
         )
         assert committed.status == "committed"
-        assert server._prim_paths["/World/Rollback"] == "PointInstancer"
-        assert server._instanceable_paths == {"/World/Rollback"}
-        assert server._point_instancer_paths == {"/World/Rollback"}
+        prim = next(row for row in server.get_prim_tree() if row["path"] == "/World/Rollback")
+        assert prim["typeName"] == "PointInstancer"
+        assert prim["instanceable"] and prim["is_point_instancer"]
+        assert server.get_instance_count() == 1
     finally:
         server.shutdown()
         server.store.close()
@@ -405,7 +623,7 @@ def test_private_commit_helper_rolls_back_usd_and_sequence(tmp_path, monkeypatch
         assert server.stage.GetPrimAtPath("/World/Old").IsValid()
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.store.get_count() == 1
-        assert server._next_seq == 2
+        assert server.get_replay_token()[1] == 1
 
         monkeypatch.setattr(server.store, "append_batch", append_batch)
         records = server._commit_events([_event("/World/After")], client_id="maintenance")
@@ -481,7 +699,7 @@ def test_private_commit_cannot_overtake_failed_identified_commit(tmp_path, monke
         assert [seq for seq, _payload in server.store.get_all_asc()] == [1]
         assert not server.stage.GetPrimAtPath("/World/Rejected").IsValid()
         assert server.stage.GetPrimAtPath("/World/Private").IsValid()
-        assert server._next_seq == 2
+        assert server.get_replay_token()[1] == 1
     finally:
         release_failure.set()
         identified.join(timeout=5)
@@ -517,7 +735,7 @@ def test_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch):
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.store.get_count() == 1
         assert server.store.get_producer_progress("client", "producer") == 1
-        assert server._next_seq == 2
+        assert server.get_replay_token()[1] == 1
     finally:
         server.shutdown()
         server.store.close()
@@ -528,19 +746,14 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
     append_batch = server.store.append_batch
     server.apply_txn([_event("/World/Old")])
     before = server.edit_layer.ExportToString()
-    before_tracking = (
-        dict(server._prim_paths),
-        set(server._instanceable_paths),
-        set(server._point_instancer_paths),
-        server._prim_count_dirty,
-    )
+    before_tracking = (server.get_prim_tree(), server.get_prim_count(), server.get_instance_count())
 
     def fail_group(_records, *, producer_progress=()):
         raise sqlite3.OperationalError("injected grouped persistence failure")
 
     monkeypatch.setattr(server.store, "append_batch", fail_group)
     requests = [
-        _TransactionRequest(
+        TransactionRequest(
             events=[{"k": "rename_prim", "prim": "/World/Old", "new_name": "New"}],
             session_id="session",
             txn_id=1,
@@ -550,7 +763,7 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
             layer=None,
             layer_key="",
         ),
-        _TransactionRequest(
+        TransactionRequest(
             events=[_event("/World/Other")],
             session_id="session",
             txn_id=1,
@@ -570,19 +783,18 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
         assert not server.stage.GetPrimAtPath("/World/New").IsValid()
         assert not server.stage.GetPrimAtPath("/World/Other").IsValid()
         assert (
-            server._prim_paths,
-            server._instanceable_paths,
-            server._point_instancer_paths,
-            server._prim_count_dirty,
+            server.get_prim_tree(), server.get_prim_count(), server.get_instance_count()
         ) == before_tracking
         assert server.store.get_count() == 0
-        assert server._next_seq == 1
+        assert server.get_replay_token()[1] == 0
         for request in requests:
             assert server.producer_committed_through(request.client_id, request.session_id) == 0
 
         monkeypatch.setattr(server.store, "append_batch", append_batch)
-        server._commit_managed_transaction_group(requests)
-        assert [request.commit.status for request in requests] == ["committed", "committed"]
+        outcomes = server._commit_managed_transaction_group(requests)
+        assert [outcome.status for outcome in outcomes] == ["committed", "committed"]
+        assert all(request.commit is None and request.error is None for request in requests)
+        assert all(not request.done.is_set() for request in requests)
         assert not server.stage.GetPrimAtPath("/World/Old").IsValid()
         assert server.stage.GetPrimAtPath("/World/New").IsValid()
         assert server.stage.GetPrimAtPath("/World/Other").IsValid()
@@ -591,10 +803,10 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
             assert server.producer_committed_through(request.client_id, request.session_id) == 1
             assert server.store.get_producer_progress(request.client_id, request.session_id) == 1
 
-        server._commit_managed_transaction_group(requests)
-        assert [request.commit.status for request in requests] == ["duplicate", "duplicate"]
+        outcomes = server._commit_managed_transaction_group(requests)
+        assert [outcome.status for outcome in outcomes] == ["duplicate", "duplicate"]
         assert server.store.get_count() == 2
-        assert server._next_seq == 3
+        assert server.get_replay_token()[1] == 2
     finally:
         server.shutdown()
         server.store.close()

@@ -43,9 +43,7 @@ class CollaborationLayerStack:
             default_layer.identifier: default_key,
         }
         self._labels: dict[str, str] = {default_key: default_label}
-        self._order: list[str] = [default_key]
-        self._order_view: tuple[str, ...] = (default_key,)
-        self._ordered_layers: tuple[Sdf.Layer, ...] = (default_layer,)
+        self._order: tuple[str, ...] = (default_key,)
         self._generation = uuid.uuid4().hex
         self._revision = 1
         self._install()
@@ -64,11 +62,11 @@ class CollaborationLayerStack:
 
     @property
     def layer_keys(self) -> tuple[str, ...]:
-        return self._order_view
+        return self._order
 
     @property
     def ordered_layers(self) -> tuple[Sdf.Layer, ...]:
-        return self._ordered_layers
+        return tuple(self._layers[key] for key in self._order)
 
     @property
     def managed_layers(self) -> tuple[Sdf.Layer, ...]:
@@ -110,8 +108,7 @@ class CollaborationLayerStack:
         self._layers[layer_key] = layer
         self._keys_by_identifier[layer.identifier] = layer_key
         self._labels[layer_key] = display_label
-        self._order.insert(len(self._order) - 1, layer_key)
-        self._refresh_order_cache()
+        self._order = (*self._order[:-1], layer_key, self._default_key)
         self._revision += 1
         self._install()
         return layer, True
@@ -122,7 +119,7 @@ class CollaborationLayerStack:
         Every managed key must appear exactly once and the default key must be
         last.  Policy code is responsible for preserving unlisted keys.
         """
-        order = list(ordered_keys)
+        order = tuple(ordered_keys)
         order_set = set(order)
         managed_keys = set(self._layers)
         if len(order) != len(order_set):
@@ -140,7 +137,6 @@ class CollaborationLayerStack:
             return False
 
         self._order = order
-        self._refresh_order_cache()
         self._revision += 1
         self._install()
         return True
@@ -170,8 +166,7 @@ class CollaborationLayerStack:
         del self._layers[layer_key]
         del self._keys_by_identifier[removed_identifier]
         del self._labels[layer_key]
-        self._order.remove(layer_key)
-        self._refresh_order_cache()
+        self._order = tuple(key for key in self._order if key != layer_key)
         self._revision += 1
         self._install(detach_identifiers={removed_identifier})
         return layer
@@ -198,22 +193,13 @@ class CollaborationLayerStack:
             ],
         }
 
-    def _managed_identifiers(self) -> set[str]:
-        return {layer.identifier for layer in self._layers.values()}
-
-    def _refresh_order_cache(self) -> None:
-        self._order_view = tuple(self._order)
-        self._ordered_layers = tuple(
-            self._layers[layer_key] for layer_key in self._order
-        )
-
     def _install(
         self,
         *,
         detach_identifiers: set[str] | None = None,
     ) -> None:
         session = self._stage.GetSessionLayer()
-        managed_identifiers = self._managed_identifiers()
+        managed_identifiers = set(self._keys_by_identifier)
         if detach_identifiers:
             managed_identifiers.update(detach_identifiers)
         managed_paths = [

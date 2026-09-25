@@ -578,7 +578,7 @@ class TestReplayWithClientLayers:
 
         srv2 = UsdSyncServer(log_path=db)
         try:
-            assert srv2._ordered_department_names() == ["animation", "layout"]
+            assert srv2._collaboration.ordered_department_names() == ["animation", "layout"]
             assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
             assert srv2.mute_layer("animation")
             assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)
@@ -814,24 +814,21 @@ class TestConcurrentDepartmentWrites:
             )
 
     def test_op_cache_invalidated_on_edit_target_change(self, tmp_path):
-        """Deterministic pin for the fix behind the flaky concurrent failures.
-
-        Cache hits skip op setup, including authoring xformOpOrder in the
-        current layer. ``_op_cache_for`` clears on layer changes so each
-        department gets its own setup, and keeps consecutive same-layer edits
-        fast. XformOp.Set itself always uses the current stage edit target.
-        """
+        """Alternating departments must each author their own transform setup."""
         srv = _make_server(tmp_path, department_priority=["animation", "lighting"])
         la = srv.get_or_create_client_layer("alice", "animation")
         lb = srv.get_or_create_client_layer("bob", "lighting")
 
-        cache = srv._op_cache_for(la)
-        cache["/World/P"] = object()
-        # switching the edit target invalidates the cache
-        assert "/World/P" not in srv._op_cache_for(lb)
-        # staying on the same layer keeps it (no needless re-fetch)
-        srv._op_cache_for(lb)["/World/Q"] = object()
-        assert "/World/Q" in srv._op_cache_for(lb)
+        for layer, value in ((la, 1), (lb, 2), (lb, 3), (la, 4)):
+            srv.apply_txn(_make_trs_events("/World/P", (value, 0, 0)), layer=layer)
+
+        for layer, expected in ((la, 4), (lb, 3)):
+            assert list(layer.GetAttributeAtPath("/World/P.xformOpOrder").default) == [
+                "xformOp:translate", "xformOp:orient", "xformOp:scale",
+            ]
+            assert tuple(layer.GetAttributeAtPath("/World/P.xformOp:translate").default) == (
+                expected, 0, 0,
+            )
 
     def test_concurrent_writes_to_same_prim(self, tmp_path):
         """Two departments writing to the same prim concurrently.

@@ -904,6 +904,9 @@ class BlenderAdapter(DCCAdapter):
     ) -> bool:
         if not BPY_AVAILABLE:
             return True
+        # Native socket/light setters use Python sequences. Keep decoding
+        # buffer-backed and convert once at this boundary, as for geometry.
+        inputs = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in inputs.items()}
         # When ``info_id`` is non-empty, the prim is a UsdShade.Shader and
         # the value is its Sdr identifier, so look up a registered shader
         # mapper. When empty, the prim is a Material, NodeGraph, or UsdLux

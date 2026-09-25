@@ -17,6 +17,17 @@ TESTS_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 
 
+class ReceiverStub:
+    """Receiver metadata and cleanup contract established by a successful hello."""
+
+    _client_id: str | None = None
+    _origin: str | None = None
+    _layered_replay = False
+
+    def release_receiver_replay_reservation(self):
+        pass
+
+
 def _wait_for_server(port, timeout=5):
     """Poll until the server accepts TCP connections."""
     import socket

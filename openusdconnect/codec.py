@@ -1665,7 +1665,7 @@ def _encode_set_sublayers(b, ev):
 def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> dict:
     """Decode FlatBuffers wire bytes to a Python dict.
 
-    With *numpy_arrays*, geometry arrays remain zero-copy views into the
+    With *numpy_arrays*, numeric arrays remain zero-copy views into the
     FlatBuffer. Otherwise they become lists for JSON-safe compatibility.
     """
     envelope = decode_envelope(buf)
@@ -1687,6 +1687,8 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
         return _dict_set_gprim_attrs(obj, kind, numpy_arrays=numpy_arrays)
     if kind == K_SET_POINT_INSTANCER:
         return _dict_set_point_instancer(obj, kind, numpy_arrays=numpy_arrays)
+    if kind == K_SET_CONNECTABLE_INPUT:
+        return _dict_set_connectable_input(obj, kind, numpy_arrays=numpy_arrays)
     spec = _events.get(kind)
     if spec is None or spec.decode is None:
         raise KeyError(f"no registered decoder for event kind {kind!r}")
@@ -1850,7 +1852,7 @@ def decode_broadcast_event(
     numpy_arrays: bool = False,
 ) -> dict:
     """Convert a broadcast to the public dictionary representation."""
-    record = _decode_received_event(broadcast, numpy_arrays=numpy_arrays)
+    record = decode_received_event(broadcast, numpy_arrays=numpy_arrays)
     message = {"type": MSG_EVENT, "seq": record.seq, "event": record.event}
     for name, value in (
         ("origin", record.origin),
@@ -1875,10 +1877,10 @@ class ReceivedEvent:
     client: str | None = None
 
 
-def _decode_received_event(
+def decode_received_event(
     broadcast: BroadcastEvent,
     *,
-    numpy_arrays: bool,
+    numpy_arrays: bool = False,
 ) -> ReceivedEvent:
     """Read routing directly and convert only the event needed by USD/adapters.
 
@@ -1982,7 +1984,7 @@ def decode_messages(
                 continue
 
             if msg_type == MSG_EVENT:
-                record = _decode_received_event(payload, numpy_arrays=numpy_arrays)
+                record = decode_received_event(payload, numpy_arrays=numpy_arrays)
                 seq = record.seq
             elif msg_type == MSG_LAYER_GRAPH_STATE:
                 state = _dict_layer_graph_state(payload, msg_type)
@@ -2508,7 +2510,7 @@ def _dict_set_material_binding(mb, kind):
 
 
 @register_decoder(K_SET_CONNECTABLE_INPUT)
-def _dict_set_connectable_input(sci, kind):
+def _dict_set_connectable_input(sci, kind, numpy_arrays=False):
     inputs = {}
     input_types = {}
     for i in range(sci.InputsLength()):
@@ -2517,9 +2519,15 @@ def _dict_set_connectable_input(sci, kind):
         input_types[name] = _str(civ.TypeName())
         vt = civ.ValueType()
         if vt == ConnectableInputValueType.FloatArray:
-            inputs[name] = [civ.FloatArray(j) for j in range(civ.FloatArrayLength())]
+            inputs[name] = (
+                civ.FloatArrayAsNumpy() if numpy_arrays
+                else [civ.FloatArray(j) for j in range(civ.FloatArrayLength())]
+            )
         elif vt == ConnectableInputValueType.IntArray:
-            inputs[name] = [civ.IntArray(j) for j in range(civ.IntArrayLength())]
+            inputs[name] = (
+                civ.IntArrayAsNumpy() if numpy_arrays
+                else [civ.IntArray(j) for j in range(civ.IntArrayLength())]
+            )
         elif vt == ConnectableInputValueType.StringArray:
             inputs[name] = [_str(civ.StringArray(j)) for j in range(civ.StringArrayLength())]
         elif vt == ConnectableInputValueType.ScalarString:

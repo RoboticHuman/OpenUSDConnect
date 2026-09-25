@@ -12,6 +12,7 @@ from pxr import Ar, Gf, Sdf, Usd, UsdGeom
 from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import NON_COLLABORATION_KINDS
 from openusdconnect.server import TokenBucket, UsdSyncServer
+from tests.helpers import ReceiverStub
 
 
 @pytest.fixture
@@ -466,7 +467,7 @@ class TestCompaction:
             ),
         )
 
-        assert [entry.event["k"] for entry in compaction.replay_entries()] == ["unload_payload"]
+        assert [entry.event["k"] for entry in compaction.replay_records()] == ["unload_payload"]
 
     def test_stage_metadata_compaction_merges_sparse_fields(self, srv):
         self._insert_events(
@@ -676,7 +677,7 @@ class TestCompaction:
             def sendall(self, _payload):
                 raise OSError("receiver disconnected")
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self, request, address):
                 self.request = request
                 self.client_address = address
@@ -712,7 +713,7 @@ class TestCompaction:
             [{"k": "ensure_prim", "prim": "/A", "typeName": "Xform"}],
         )
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -760,17 +761,26 @@ class TestCompaction:
         assert messages[3]["type"] == "replay_complete"
         assert messages[3]["head_seq"] == messages[2]["seq"]
 
-    def test_purge_sends_resync_and_ready_watermark_under_one_send_lock(self, srv):
+    @pytest.mark.parametrize("operation", ["purge", "compact_log"])
+    @pytest.mark.parametrize("layered", [False, True])
+    def test_history_resync_sends_controls_and_records_under_one_send_lock(
+        self, srv, operation, layered,
+    ):
         import io
 
         from openusdconnect.framing import recv_framed_rfile
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
-                self.request.sendall = self.request.write
-                self.client_address = ("purge", 1)
+                self.request.sendall = self.sendall
+                self.client_address = ("resync", 1)
                 self.send_lock = threading.Lock()
+                self._layered_replay = layered
+
+            def sendall(self, payload):
+                assert self.send_lock.locked()
+                self.request.write(payload)
 
         self._insert_events(
             srv,
@@ -779,13 +789,22 @@ class TestCompaction:
         handler = FakeHandler()
         srv.receivers.add(handler)
 
-        srv.purge()
+        getattr(srv, operation)()
 
         handler.request.seek(0)
-        resync = message_to_dict(recv_framed_rfile(handler.request))
-        ready = message_to_dict(recv_framed_rfile(handler.request))
-        assert resync["type"] == "resync"
-        assert ready == {"type": "replay_complete", "head_seq": 0, "epoch": 1}
+        messages = []
+        while handler.request.tell() < len(handler.request.getvalue()):
+            messages.append(message_to_dict(recv_framed_rfile(handler.request)))
+        expected_types = ["resync"]
+        if layered:
+            expected_types.append("layer_stack_state")
+        if operation == "compact_log":
+            expected_types.append("event")
+            assert messages[-2]["event"]["prim"] == "/BeforePurge"
+        assert [message["type"] for message in messages] == [*expected_types, "replay_complete"]
+        assert messages[-1] == {
+            "type": "replay_complete", "head_seq": int(operation == "compact_log"), "epoch": 1,
+        }
 
     def test_purge_invalidates_cached_composed_prim_count(self, srv):
         srv._commit_events([
@@ -840,7 +859,7 @@ class TestReplay:
 
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
 
@@ -877,7 +896,7 @@ class TestReplay:
 
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
 
@@ -912,7 +931,7 @@ class TestReplay:
                 }
             )
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
 
@@ -942,7 +961,7 @@ class TestReplay:
             def sendall(self, _payload):
                 raise OSError("receiver disconnected")
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             request = BrokenRequest()
 
         with pytest.raises(OSError, match="receiver disconnected"):
@@ -955,11 +974,49 @@ class TestReplay:
 
 
 class TestBroadcast:
+    def test_shutdown_drains_playback_release_enqueued_after_stop_marker(self, srv):
+        import io
+
+        from openusdconnect.framing import recv_framed_rfile
+
+        # Drive the queue synchronously to put the disconnect before the stop
+        # marker, and the resulting playback update after it.
+        srv.shutdown()
+
+        class FakeHandler(ReceiverStub):
+            def __init__(self, client_id):
+                self._client_id = client_id
+                self.client_address = (client_id, 1)
+                self.send_lock = threading.Lock()
+                self.request = io.BytesIO()
+                self.request.sendall = self.sendall
+
+            def sendall(self, payload):
+                if self._client_id == "leader":
+                    raise OSError("disconnected")
+                self.request.write(payload)
+
+        leader = FakeHandler("leader")
+        follower = FakeHandler("follower")
+        srv.receivers.update((leader, follower))
+        srv.claim_playback("leader")
+        srv._broadcast_queue.put((b"queued event", (leader,)))
+        srv._broadcast_queue.put(None)
+
+        srv._broadcast_loop()
+
+        assert srv.receivers == {follower}
+        follower.request.seek(0)
+        update = message_to_dict(recv_framed_rfile(follower.request))
+        assert update["type"] == "playback_state"
+        assert not update["leader_client_id"]
+        assert srv._broadcast_queue.unfinished_tasks == 0
+
     def test_broadcast_to_receivers(self, srv):
         """broadcast sends to all registered receivers."""
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
                 self.client_address = ("fake", 0)
@@ -995,7 +1052,7 @@ class TestBroadcast:
     def test_broadcast_removes_dead_receivers(self, srv):
         """broadcast discards receivers whose socket is broken."""
 
-        class DeadHandler:
+        class DeadHandler(ReceiverStub):
             client_address = ("dead", 0)
             send_lock = threading.Lock()
 
@@ -1019,7 +1076,7 @@ class TestBroadcast:
     def test_queued_broadcast_excludes_receivers_that_join_later(self, srv):
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self, address):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1049,7 +1106,7 @@ class TestBroadcast:
     def test_broadcast_targets_negotiated_receiver_audience(self, srv):
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self, layered):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1087,37 +1144,28 @@ class TestBroadcast:
     ):
         import io
 
-        class LayeredHandler:
-            def __init__(self):
+        class FakeHandler(ReceiverStub):
+            def __init__(self, layered):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
-                self.client_address = ("layered", 1)
+                self.client_address = ("fake", int(layered))
                 self.send_lock = threading.Lock()
-                self._layered_replay = True
+                self._layered_replay = layered
 
-        layered = LayeredHandler()
-        srv.receivers.add(layered)
+        flat = FakeHandler(False)
+        layered = FakeHandler(True)
+        srv.receivers.update((flat, layered))
         observed = []
         srv.add_event_listener(observed.append)
 
-        audiences = []
+        deliveries = []
         send_to_all = srv._send_to_all
 
-        def _record_audience(
-            payload,
-            exclude_origin=None,
-            audience="all",
-            targets=None,
-        ):
-            audiences.append(audience)
-            return send_to_all(
-                payload,
-                exclude_origin=exclude_origin,
-                audience=audience,
-                targets=targets,
-            )
+        def record_delivery(payload, targets=None):
+            deliveries.append((payload, targets))
+            return send_to_all(payload, targets=targets)
 
-        monkeypatch.setattr(srv, "_send_to_all", _record_audience)
+        monkeypatch.setattr(srv, "_send_to_all", record_delivery)
         event = {
             "k": "ensure_prim",
             "prim": "/LayeredOnly",
@@ -1128,14 +1176,15 @@ class TestBroadcast:
         srv.broadcast_transaction_views(records)
         srv._broadcast_queue.join()
 
-        assert audiences == ["layered"]
+        assert len(deliveries) == 1
+        assert set(deliveries[0][1]) == {flat, layered}
         assert observed == [records[0][0]]
-        assert layered.request.getvalue()
+        assert flat.request.getvalue() == layered.request.getvalue() == deliveries[0][0]
 
     def test_transaction_includes_the_authoring_origin_for_every_receiver(self, srv):
         import io
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self, layered):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1171,7 +1220,7 @@ class TestBroadcast:
     ):
         import io
 
-        class LayeredHandler:
+        class LayeredHandler(ReceiverStub):
             def __init__(self):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1210,7 +1259,7 @@ class TestBroadcast:
 
         from openusdconnect.framing import recv_framed_rfile
 
-        class FlatHandler:
+        class FlatHandler(ReceiverStub):
             def __init__(self, origin, port):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1272,7 +1321,7 @@ class TestBroadcast:
 
         from openusdconnect.framing import recv_framed_rfile
 
-        class FakeHandler:
+        class FakeHandler(ReceiverStub):
             def __init__(self, layered):
                 self.request = io.BytesIO()
                 self.request.sendall = self.request.write
@@ -1313,6 +1362,19 @@ class TestBroadcast:
 
 
 class TestDBResume:
+    def test_rejects_non_event_record_in_managed_history(self, tmp_path):
+        from openusdconnect.codec import encode_message
+        from openusdconnect.event_store import SqliteEventStore
+
+        store = SqliteEventStore(str(tmp_path / "invalid-history.db"))
+        try:
+            store.append(1, encode_message({"type": "ping"}))
+            with pytest.raises(ValueError, match="managed log contains an unsupported record"):
+                UsdSyncServer(event_store=store)
+            assert store.get_count() == 1
+        finally:
+            store.close()
+
     def test_resumes_seq_from_existing_db(self, tmp_path):
         """Server resumes sequence counter from existing DB."""
         db = str(tmp_path / "resume.db")
@@ -2248,4 +2310,4 @@ class TestApplyTxnBookkeeping:
             {"k": "set_visibility", "prim": "/World/X", "visible": False},
         ]
         assert srv.apply_txn(events) is None
-        assert "/World/X" in srv._prim_paths
+        assert "/World/X" in {row["path"] for row in srv.get_prim_tree()}

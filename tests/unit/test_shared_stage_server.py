@@ -78,6 +78,34 @@ def _child_key(server: UsdSyncServer) -> str:
     return next(key for key in graph.reachable_layer_keys() if key != graph.root_layer_key)
 
 
+def test_restart_preserves_edits_across_layer_runs_and_topology_boundaries(tmp_path):
+    base = _create_stage(tmp_path)
+    db = tmp_path / "interleaved-replay.db"
+    with _shared_server(base, db) as server:
+        graph = server.shared_layer_graph
+        child_key = _child_key(server)
+        child = graph.layer_for(child_key)
+        server._commit_events([_value_event(child, 2.0)], layer_key=graph.root_layer_key)
+        server._commit_events([_value_event(child, 3.0)], layer_key=child_key)
+        for sublayers in ([], [{"authored_path": "./asset.usda"}]):
+            server._commit_events([{
+                "k": "set_sublayers", "prim": "/", "generation": graph.generation,
+                "revision": graph.parent_revision(graph.root_layer_key), "sublayers": sublayers,
+            }], layer_key=graph.root_layer_key)
+        server._commit_events([_value_event(child, 4.0)], layer_key=child_key)
+        expected_layers = {
+            key: graph.layer_for(key).ExportToString() for key in graph.reachable_layer_keys()
+        }
+
+    with _shared_server(base, db) as restored:
+        graph = restored.shared_layer_graph
+        assert {
+            key: graph.layer_for(key).ExportToString() for key in graph.reachable_layer_keys()
+        } == expected_layers
+        assert graph.layer_for(child_key).GetAttributeAtPath("/World.value").default == 4.0
+        assert restored.stage.GetAttributeAtPath("/World.value").Get() == 2.0
+
+
 def test_restart_and_compaction_restore_exact_target_layer(tmp_path):
     base = _create_stage(tmp_path)
     db = tmp_path / "events.db"
@@ -525,7 +553,7 @@ def test_topology_persistence_failure_rolls_back_new_layer_identity(
         assert graph.identity_records() == identities
         assert server.store.get_layer_identities() == durable_identities
         assert server.store.get_count() == 1
-        assert server._next_seq == 2
+        assert server._journal.next_seq == 2
 
 
 def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
@@ -537,7 +565,7 @@ def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
     with _shared_server(root.identifier, tmp_path / "events.db") as server:
         graph = server.shared_layer_graph
         first_is_ready_to_persist = threading.Event()
-        persist = server._persist_shared_events
+        persist = server._committer.persist_shared_events
 
         def _delayed_persist(routed_events, **kwargs):
             if routed_events[0][1]["revision"] == 2:
@@ -545,7 +573,7 @@ def test_concurrent_same_parent_topology_edits_reject_the_stale_base(
                 time.sleep(0.05)
             return persist(routed_events, **kwargs)
 
-        monkeypatch.setattr(server, "_persist_shared_events", _delayed_persist)
+        monkeypatch.setattr(server._committer, "persist_shared_events", _delayed_persist)
 
         base_revision = graph.parent_revision(graph.root_layer_key)
         failures = []

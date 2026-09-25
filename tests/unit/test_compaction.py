@@ -2,7 +2,7 @@
 
 import pytest
 
-from openusdconnect.codec import message_to_dict
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.protocol_constants import (
     K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
@@ -19,6 +19,7 @@ from openusdconnect.protocol_constants import (
     MSG_EVENT,
 )
 from openusdconnect.server import UsdSyncServer
+from openusdconnect.server.compaction import LogCompaction
 
 
 def _make_server(tmp_path):
@@ -45,6 +46,67 @@ def _read_log(server):
 
 
 class TestCompaction:
+    def test_merged_records_retain_latest_routing_and_first_creation_order(self, tmp_path):
+        server = _make_server(tmp_path)
+        try:
+            for department in ("layout", "animation"):
+                layer = server.get_or_create_client_layer(department, department)
+                for author, field, value in (("first", "t", [1, 2, 3]), ("last", "s", [2, 2, 2])):
+                    server._commit_events([
+                        {"k": K_ENSURE_PRIM, "prim": "/Object", "typeName": "Xform"},
+                        {"k": K_SET_XFORM_TRS, "prim": "/Object", "fields": [field], field: value},
+                    ], layer=layer, client_id=author, origin=f"{department}-{author}",
+                        client_addr=f"{author}:1234")
+
+            server.compact_log()
+
+            records = [message_to_dict(blob) for _seq, blob in server.store.get_all_asc()]
+            assert [record["seq"] for record in records] == [1, 2, 3, 4]
+            assert [record["event"]["k"] for record in records] == [
+                K_ENSURE_PRIM, K_SET_XFORM_TRS, K_ENSURE_PRIM, K_SET_XFORM_TRS,
+            ]
+            for record, department in zip(
+                records, ("layout", "layout", "animation", "animation"), strict=True,
+            ):
+                assert record["layer_key"] == f"department:{department}"
+                assert record["origin"] == f"{department}-last"
+                assert record["client_id"] == "last"
+                assert record["client"] == "last:1234"
+                if record["event"]["k"] == K_SET_XFORM_TRS:
+                    assert record["event"]["t"] == [1, 2, 3]
+                    assert record["event"]["s"] == [2, 2, 2]
+        finally:
+            server.shutdown()
+            server.store.close()
+
+    @pytest.mark.parametrize(("kind", "first", "second", "values"), [
+        ("set_xform_trs", "t", "s", [[i, i, i] for i in range(1, 6)]),
+        ("set_point_instancer", "positions", "scales", [[[i, i, i]] for i in range(1, 6)]),
+    ])
+    def test_complete_and_partial_updates_can_alternate(self, kind, first, second, values):
+        updates = [
+            {"fields": [first], first: values[0]},
+            {"fields": [first], first: values[1]},
+            {"fields": [second], second: values[2]},
+            {"fields": [first, second], first: values[3], second: values[3]},
+            {"fields": [first], first: values[4]},
+        ]
+        compaction = LogCompaction()
+        for sequence, update in enumerate(updates, start=1):
+            event = {"k": kind, "prim": "/World/A", "time": 1.0, **update}
+            compaction.add_record(sequence, encode_message({
+                "type": MSG_EVENT, "seq": sequence, "event": event,
+            }))
+        entries = compaction.replay_records()
+        assert len(entries) == 1
+        event = message_to_dict(encode_message({
+            "type": MSG_EVENT, "seq": 1, "event": entries[0].event,
+        }))["event"]
+        assert event["fields"] == [first, second]
+        assert event[first] == values[4]
+        assert event[second] == values[3]
+        assert event["time"] == 1.0
+
     def test_failed_rewrite_preserves_sequence_state(self, tmp_path, monkeypatch):
         srv = _make_server(tmp_path)
         _inject_events(
