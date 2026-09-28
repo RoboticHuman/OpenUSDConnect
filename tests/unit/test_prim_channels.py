@@ -26,9 +26,11 @@ from openusdconnect.emitter import (
     PrimChannel,
     VisibilityChannel,
 )
+from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import (
     K_SET_CONNECTABLE_INPUT,
     K_SET_GPRIM_ATTRS,
+    K_SET_POINT_INSTANCER,
     K_SET_VISIBILITY,
 )
 
@@ -307,3 +309,93 @@ class TestExtraChannels:
 
         with pytest.raises(ValueError, match="Duplicate"):
             NoticeEmitter(stage, extra_channels=[A(), B()])
+
+    def test_channel_can_author_child_metadata_during_build(self, stage):
+        parent = UsdGeom.Xform.Define(stage, "/Parent").GetPrim()
+        child = UsdGeom.PointInstancer.Define(stage, "/Parent/Instances")
+        for prim in (parent, child.GetPrim()):
+            prim.CreateAttribute("customValue", Sdf.ValueTypeNames.Float).Set(0.0)
+
+        class DeactivateChildInstance(PrimChannel):
+            cache_key = "deactivate_child_instance"
+            armed = False
+
+            def read(self, stage, prim_path):
+                if prim_path == "/Parent" and self.armed:
+                    self.armed = False
+                    child.DeactivateId(7)
+                return None
+
+        channel = DeactivateChildInstance()
+        emitter = NoticeEmitter(stage, extra_channels=[channel])
+        target = Usd.Stage.CreateInMemory()
+        try:
+            apply_events(target, emitter.snapshot_events())
+            parent.GetAttribute("customValue").Set(1.0)
+            child.GetPrim().GetAttribute("customValue").Set(1.0)
+            channel.armed = True
+
+            # Both prims start with property-only notices. The parent callback
+            # adds prim metadata before the child is processed in the same batch.
+            events = emitter.build_events_for_dirty()
+            assert any(
+                event["k"] == K_SET_POINT_INSTANCER
+                and event["prim"] == "/Parent/Instances"
+                and event.get("inactive_ids") == [7]
+                for event in events
+            )
+            apply_events(target, events)
+            inactive_ids = target.GetPrimAtPath("/Parent/Instances").GetMetadata("inactiveIds")
+            assert list(inactive_ids.ApplyOperations([])) == [7]
+        finally:
+            emitter.cleanup()
+
+    def test_composed_channel_values_do_not_author_inherited_opinions(self):
+        class ComposedPrimvars(PrimChannel):
+            cache_key = "composed_primvars"
+            watched_attrs = ("primvars:local", "primvars:inherited")
+
+            def read(self, stage, prim_path):
+                prim = stage.GetPrimAtPath(prim_path)
+                return {name: prim.GetAttribute(name).Get() for name in self.watched_attrs}
+
+            def to_event(self, prim_path, diff):
+                return {
+                    "k": K_SET_GPRIM_ATTRS,
+                    "prim": prim_path,
+                    "attrs": diff,
+                    "primvar_meta": {
+                        name: {"typeName": "float", "interpolation": "constant"}
+                        for name in diff
+                    },
+                }
+
+        base = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(base, "/Mesh")
+        primvars = UsdGeom.PrimvarsAPI(mesh)
+        primvars.CreatePrimvar("local", Sdf.ValueTypeNames.Float).Set(1.0)
+        primvars.CreatePrimvar("inherited", Sdf.ValueTypeNames.Float).Set(2.0)
+        source = Usd.Stage.Open(base.GetRootLayer())
+        source.SetEditTarget(source.GetSessionLayer())
+        local_attr = source.GetAttributeAtPath("/Mesh.primvars:local")
+        local_attr.Set(3.0)
+        target = Usd.Stage.Open(base.GetRootLayer())
+        target.SetEditTarget(target.GetSessionLayer())
+        emitter = NoticeEmitter(source, extra_channels=[ComposedPrimvars()])
+        try:
+            events = emitter.snapshot_events()
+            value_event = next(event for event in events if event["k"] == K_SET_GPRIM_ATTRS)
+            assert value_event["attrs"] == {"primvars:local": 3.0}
+            assert set(value_event["primvar_meta"]) == {"primvars:local"}
+            apply_events(target, events)
+            assert target.GetSessionLayer().GetPropertyAtPath("/Mesh.primvars:inherited") is None
+
+            local_attr.Clear()
+            events = emitter.build_events_for_dirty()
+            assert not any(event["k"] == K_SET_GPRIM_ATTRS for event in events)
+            apply_events(target, events)
+            local_spec = target.GetSessionLayer().GetAttributeAtPath("/Mesh.primvars:local")
+            assert local_spec is None or not local_spec.HasDefaultValue()
+            assert target.GetAttributeAtPath("/Mesh.primvars:local").Get() == 1.0
+        finally:
+            emitter.cleanup()
