@@ -556,17 +556,15 @@ def test_set_connectable_input_writes_light_attributes(r):
     r.ok(name)
 
 
-def test_buffer_view_connectable_inputs_update_native_colors(r):
-    """Receiver decoding may keep shader and light colors as NumPy views."""
-    import numpy as np
-
+def test_decoded_connectable_inputs_update_native_colors(r):
+    """Receiver decoding keeps shader and light colors as Python lists."""
     from openusdconnect.codec import encode_message, message_to_dict
 
     _clear_scene()
     adapter = BlenderAdapter()
     adapter.ensure_prim("/World/Light", "SphereLight")
     adapter.ensure_prim("/World/Cube", "Cube")
-    material_path = "/World/Looks/BufferViews"
+    material_path = "/World/Looks/DecodedInputs"
     shader_path = material_path + "/Surface"
     adapter.set_material_binding("/World/Cube", material_path)
     color = [0.25, 0.5, 0.75]
@@ -578,7 +576,7 @@ def test_buffer_view_connectable_inputs_update_native_colors(r):
                  "inputs": {input_name: color}, "input_types": {input_name: "color3f"}}
         wire = encode_message({"type": "event", "seq": 1, "event": event})
         decoded = message_to_dict(wire, numpy_arrays=True)["event"]
-        assert isinstance(decoded["inputs"][input_name], np.ndarray)
+        assert isinstance(decoded["inputs"][input_name], list)
         assert adapter.apply_event(decoded)
 
     light = _find_by_prim(adapter, "/World/Light")
@@ -588,7 +586,7 @@ def test_buffer_view_connectable_inputs_update_native_colors(r):
                       if node.type == "BSDF_PRINCIPLED"
                       and node.get("usd_shader_path") == shader_path)
     assert tuple(principled.inputs["Base Color"].default_value) == (*color, 1.0)
-    r.ok("test_buffer_view_connectable_inputs_update_native_colors")
+    r.ok("test_decoded_connectable_inputs_update_native_colors")
 
 
 def test_set_connectable_input_on_non_light_is_noop(r):
@@ -1841,7 +1839,7 @@ def main():
         test_ensure_prim_skipped_light_types_create_no_object,
         test_ensure_prim_light_with_api_schemas,
         test_set_connectable_input_writes_light_attributes,
-        test_buffer_view_connectable_inputs_update_native_colors,
+        test_decoded_connectable_inputs_update_native_colors,
         test_set_connectable_input_on_non_light_is_noop,
         test_ensure_prim_domelight_sets_up_world_network,
         test_set_connectable_input_domelight_writes_world_shader,

@@ -78,6 +78,21 @@ def _child_key(server: UsdSyncServer) -> str:
     return next(key for key in graph.reachable_layer_keys() if key != graph.root_layer_key)
 
 
+def test_public_graph_assignment_is_used_by_transactions(tmp_path):
+    with _shared_server(_create_stage(tmp_path), tmp_path / "assigned-graph.db") as server:
+        graph = server.shared_layer_graph
+        child_key = _child_key(server)
+        event = _value_event(graph.layer_for(child_key), 8.0)
+
+        server.shared_layer_graph = None
+        with pytest.raises(RuntimeError, match="requires a layer graph"):
+            server._commit_events([event], layer_key=child_key)
+
+        server.shared_layer_graph = graph
+        server._commit_events([event], layer_key=child_key)
+        assert server.stage.GetAttributeAtPath("/World.value").Get() == 8.0
+
+
 def test_restart_preserves_edits_across_layer_runs_and_topology_boundaries(tmp_path):
     base = _create_stage(tmp_path)
     db = tmp_path / "interleaved-replay.db"

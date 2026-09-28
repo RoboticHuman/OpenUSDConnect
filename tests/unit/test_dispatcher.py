@@ -83,6 +83,34 @@ def test_on_applied_optional():
     assert dispatcher._apply([{"k": K_ENSURE_PRIM, "prim": "/World/A", "typeName": "Xform"}]) == 1
 
 
+def test_custom_adapter_receives_connectable_inputs_as_python_lists():
+    received_inputs = []
+
+    class ListInputAdapter(MockAdapter):
+        def set_connectable_input(self, prim_path, info_id, inputs, input_types, time=None):
+            # Existing adapters may use list truthiness or concatenate values.
+            received_inputs.append({name: value + [] for name, value in inputs.items()})
+            return super().set_connectable_input(
+                prim_path, info_id, inputs, input_types, time=time,
+            )
+
+    inputs = {"color": [0.25, 0.5, 1.0], "weights": [0.25, 0.5], "counts": [1, 2]}
+    event = {
+        "k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
+        "inputs": inputs,
+        "input_types": {"color": "color3f", "weights": "float[]", "counts": "int[]"},
+    }
+    receiver = _QueuedReceiver([
+        _event(1, "/Shader"),
+        encode_message({"type": "event", "seq": 2, "event": event}),
+    ])
+    dispatcher = EventDispatcher(receiver=receiver, adapter=ListInputAdapter())
+
+    assert dispatcher.drain_and_apply() == 2
+    assert received_inputs == [inputs]
+    assert receiver.replay_requests == []
+
+
 def test_post_apply_callbacks_run_in_documented_order():
     calls = []
     event = {

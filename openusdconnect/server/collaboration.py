@@ -55,7 +55,7 @@ class CollaborationPolicy:
     ):
         self._scene = scene
         self._client_layer_keys: dict[str, str] = {}
-        self._department_priority = self._validate_priority(department_priority or [])
+        self.department_priority = self._validate_priority(department_priority or [])
         self._flat_receiver_count = 0
         self._bump_snapshot_epoch = bump_snapshot_epoch
         self._broadcast_layer_stack_state = broadcast_layer_stack_state
@@ -73,11 +73,6 @@ class CollaborationPolicy:
         """Restore routing from the durable log before workers start."""
         with self._scene.lock:
             self._client_layer_keys[client_id] = layer_key
-
-    @property
-    def department_priority(self) -> list[str]:
-        with self._scene.lock:
-            return list(self._department_priority)
 
     @property
     def flat_receiver_count(self) -> int:
@@ -124,7 +119,7 @@ class CollaborationPolicy:
 
     def _flat_replay_rejection_reason_locked(self) -> str:
         """Return why a new flat receiver cannot mirror this server."""
-        if self._department_priority:
+        if self.department_priority:
             return "department collaboration requires layered replay"
         if len(self._scene.layer_stack.layer_keys) != 1:
             return "multiple collaboration layers require layered replay"
@@ -166,7 +161,7 @@ class CollaborationPolicy:
 
     def _apply_department_order_locked(self) -> bool:
         priority_keys = []
-        for department in self._department_priority:
+        for department in self.department_priority:
             layer_key = _layer_key_for_department(department)
             if self._scene.layer_stack.has_layer(layer_key):
                 priority_keys.append(layer_key)
@@ -232,10 +227,10 @@ class CollaborationPolicy:
         """Set department priority ordering (strongest first)."""
         ordered_departments = self._validate_priority(ordered_departments)
         with self._scene.lock:
-            policy_changed = ordered_departments != self._department_priority
+            policy_changed = ordered_departments != self.department_priority
             if policy_changed:
                 self._reject_layer_stack_change_for_flat_receivers()
-            self._department_priority = ordered_departments
+            self.department_priority = ordered_departments
             order_changed = self._apply_department_order_locked()
         if not order_changed and not policy_changed:
             return

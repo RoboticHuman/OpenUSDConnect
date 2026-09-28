@@ -24,8 +24,8 @@ class ClientInfo:
 class VfsWriteRejectedError(RuntimeError):
     """Base class for VFS write fallback rejections."""
 
-    def __init__(self, message: str, *, analysis: VfsWriteAnalysis | None = None):
-        super().__init__(message)
+    def __init__(self, *args: object, analysis: VfsWriteAnalysis | None = None):
+        super().__init__(*args)
         self.analysis = analysis
 
 

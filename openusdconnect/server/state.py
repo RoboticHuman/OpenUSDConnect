@@ -285,6 +285,10 @@ class UsdSyncServer:
     def shared_layer_graph(self) -> SharedLayerGraph | None:
         return self._scene.shared_layer_graph
 
+    @shared_layer_graph.setter
+    def shared_layer_graph(self, graph: SharedLayerGraph | None) -> None:
+        self._scene.shared_layer_graph = graph
+
     @staticmethod
     def _make_scene_id(base_usd_path: str | None) -> str:
         """Readable, stable-ish identifier for the currently hosted stage."""
@@ -1278,6 +1282,10 @@ class UsdSyncServer:
     def department_priority(self) -> list[str]:
         return self._collaboration.department_priority
 
+    @department_priority.setter
+    def department_priority(self, ordered_departments: list[str]) -> None:
+        self._collaboration.department_priority = ordered_departments
+
     @property
     def client_layers(self) -> dict[str, Sdf.Layer]:
         """Return a snapshot of client assignments to shared collaboration layers."""
@@ -1365,6 +1373,22 @@ class UsdSyncServer:
         return self._collaboration.get_layer_stack_info()
 
     # -- Playback --
+
+    @property
+    def playback(self) -> dict:
+        return self._playback.state
+
+    @playback.setter
+    def playback(self, state: dict) -> None:
+        self._playback.state = state
+
+    @property
+    def playback_lock(self):
+        return self._playback.lock
+
+    @playback_lock.setter
+    def playback_lock(self, lock) -> None:
+        self._playback.lock = lock
 
     def get_stage_metadata_payload(self) -> dict:
         """Return the stage's authored metadata snapshot for hello_ok."""

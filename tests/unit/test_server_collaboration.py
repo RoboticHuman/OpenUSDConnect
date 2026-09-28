@@ -104,11 +104,15 @@ def test_callbacks_observe_complete_assignments_without_holding_scene_lock(scene
     assert snapshots[-1] == ({}, [])
 
 
-def test_priority_snapshot_cannot_change_policy(scene):
+def test_priority_list_mutation_updates_policy(scene):
     policy = _policy(scene)
     priority = policy.department_priority
     priority.append("animation")
 
-    assert policy.department_priority == []
+    assert policy.department_priority is priority
+    assert policy.reserve_receiver_replay_mode(False) == (
+        False, "department collaboration requires layered replay",
+    )
+    priority.clear()
     assert policy.reserve_receiver_replay_mode(False) == (True, "")
     policy.release_receiver_replay_mode(False)

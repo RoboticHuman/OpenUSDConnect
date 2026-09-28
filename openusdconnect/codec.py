@@ -1665,8 +1665,9 @@ def _encode_set_sublayers(b, ev):
 def message_to_dict(buf: bytes | bytearray, *, numpy_arrays: bool = False) -> dict:
     """Decode FlatBuffers wire bytes to a Python dict.
 
-    With *numpy_arrays*, numeric arrays remain zero-copy views into the
+    With *numpy_arrays*, geometry arrays remain zero-copy views into the
     FlatBuffer. Otherwise they become lists for JSON-safe compatibility.
+    Connectable input values retain Python lists in either mode.
     """
     envelope = decode_envelope(buf)
     msg_type, obj = resolve_payload(envelope)
@@ -1687,8 +1688,6 @@ def event_to_dict(ew: EventWrapper, *, numpy_arrays: bool = False) -> dict:
         return _dict_set_gprim_attrs(obj, kind, numpy_arrays=numpy_arrays)
     if kind == K_SET_POINT_INSTANCER:
         return _dict_set_point_instancer(obj, kind, numpy_arrays=numpy_arrays)
-    if kind == K_SET_CONNECTABLE_INPUT:
-        return _dict_set_connectable_input(obj, kind, numpy_arrays=numpy_arrays)
     spec = _events.get(kind)
     if spec is None or spec.decode is None:
         raise KeyError(f"no registered decoder for event kind {kind!r}")
@@ -2510,7 +2509,7 @@ def _dict_set_material_binding(mb, kind):
 
 
 @register_decoder(K_SET_CONNECTABLE_INPUT)
-def _dict_set_connectable_input(sci, kind, numpy_arrays=False):
+def _dict_set_connectable_input(sci, kind):
     inputs = {}
     input_types = {}
     for i in range(sci.InputsLength()):
@@ -2519,15 +2518,9 @@ def _dict_set_connectable_input(sci, kind, numpy_arrays=False):
         input_types[name] = _str(civ.TypeName())
         vt = civ.ValueType()
         if vt == ConnectableInputValueType.FloatArray:
-            inputs[name] = (
-                civ.FloatArrayAsNumpy() if numpy_arrays
-                else [civ.FloatArray(j) for j in range(civ.FloatArrayLength())]
-            )
+            inputs[name] = civ.FloatArrayAsNumpy().tolist() if civ.FloatArrayLength() else []
         elif vt == ConnectableInputValueType.IntArray:
-            inputs[name] = (
-                civ.IntArrayAsNumpy() if numpy_arrays
-                else [civ.IntArray(j) for j in range(civ.IntArrayLength())]
-            )
+            inputs[name] = civ.IntArrayAsNumpy().tolist() if civ.IntArrayLength() else []
         elif vt == ConnectableInputValueType.StringArray:
             inputs[name] = [_str(civ.StringArray(j)) for j in range(civ.StringArrayLength())]
         elif vt == ConnectableInputValueType.ScalarString:

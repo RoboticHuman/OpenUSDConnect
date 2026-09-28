@@ -1,6 +1,5 @@
 """Payload reload preserves partial opinions, authored layers, and samples."""
 
-import numpy as np
 import pytest
 from pxr import Gf, Sdf, Usd
 
@@ -64,8 +63,8 @@ def test_child_replay_reduces_shader_arrays_and_excludes_non_descendants(server)
     records = child_replay_records(server.store, "/Payload")
     assert len(records) == 1
     values = records[0].event["inputs"]["weights"]
-    np.testing.assert_array_equal(values, [99.0] * 16)
-    assert not values.flags.owndata
+    assert isinstance(values, list)
+    assert values == [99.0] * 16
 
 
 def _replay_events(server, events, prim_path="/Payload"):

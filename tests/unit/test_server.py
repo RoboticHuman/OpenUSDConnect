@@ -24,6 +24,39 @@ def srv(tmp_path):
     s.store.close()
 
 
+class TestPublicDepartmentPriority:
+    def test_assignment_keeps_live_list_without_applying_order(self, srv):
+        original_token = srv.get_snapshot_token()
+        priority = ["animation"]
+
+        srv.department_priority = priority
+        assert srv.department_priority is priority
+        priority.append("layout")
+        assert srv.department_priority == ["animation", "layout"]
+        assert not srv.reserve_receiver_replay_mode(False)[0]
+        assert srv.get_snapshot_token() == original_token
+
+        srv.department_priority.clear()
+        assert priority == []
+        assert srv.reserve_receiver_replay_mode(False) == (True, "")
+        srv.release_receiver_replay_mode(False)
+
+    @pytest.mark.parametrize("priority", [[""], ["animation", "animation"]])
+    def test_raw_assignment_and_validated_update_remain_distinct(self, srv, priority):
+        srv.department_priority = priority
+        assert srv.department_priority is priority
+        with pytest.raises(ValueError):
+            srv.set_department_priority(priority)
+
+    def test_validated_update_copies_input(self, srv):
+        priority = ["animation"]
+        srv.set_department_priority(priority)
+        assert srv.department_priority == priority
+        assert srv.department_priority is not priority
+        priority.clear()
+        assert srv.department_priority == ["animation"]
+
+
 # ---------------------------------------------------------------------------
 # Sequence assignment
 # ---------------------------------------------------------------------------

@@ -1,6 +1,5 @@
 """Public authoring helpers work without protocol event construction."""
 
-import numpy as np
 import pytest
 from pxr import Gf, Sdf, Usd, UsdShade, Vt
 
@@ -68,17 +67,15 @@ def test_converts_python_values(type_name, value, expected):
     ("color3f", [0.25, 0.5, 1], Gf.Vec3f(0.25, 0.5, 1)),
     ("matrix4d", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], Gf.Matrix4d(1)),
 ])
-def test_buffer_view_inputs_roundtrip_and_apply(type_name, value, expected):
+@pytest.mark.parametrize("numpy_arrays", [False, True])
+def test_list_inputs_roundtrip_and_apply(type_name, value, expected, numpy_arrays):
     event = {"k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
              "inputs": {"value": value}, "input_types": {"value": type_name}, "time": 12}
     wire = encode_message({"type": "event", "seq": 1, "event": event})
-    decoded = message_to_dict(wire, numpy_arrays=True)["event"]
+    decoded = message_to_dict(wire, numpy_arrays=numpy_arrays)["event"]
     array = decoded["inputs"]["value"]
-    assert isinstance(array, np.ndarray)
-    assert not array.flags.owndata
-    if value:
-        assert np.shares_memory(array, np.frombuffer(wire, dtype=np.uint8))
-    assert message_to_dict(wire)["event"]["inputs"]["value"] == value
+    assert isinstance(array, list)
+    assert array == value
     assert message_to_dict(encode_message({"type": "event", "seq": 2, "event": decoded}))[
         "event"
     ] == event
