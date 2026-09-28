@@ -1045,55 +1045,49 @@ def _encode_attr_value(b, name: str, value) -> int:
     return _fb.NamedAttrEnd(b)
 
 
+def _write_attr_value(b, value_type, add_value, value, *, stride=None) -> int:
+    """Write a classified value after any string/vector payload is built."""
+    _fb.AttrValueStart(b)
+    _fb.AttrValueAddValueType(b, value_type)
+    add_value(b, value)
+    if stride is not None:
+        _fb.AttrValueAddStride(b, stride)
+    return _fb.AttrValueEnd(b)
+
+
 def _encode_attr_value_inner(b, value) -> int:
     if isinstance(value, bool):
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.ScalarBool)
-        _fb.AttrValueAddScalarBool(b, value)
-        return _fb.AttrValueEnd(b)
-    if isinstance(value, int):
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.ScalarInt)
-        _fb.AttrValueAddScalarInt(b, value)
-        return _fb.AttrValueEnd(b)
-    if isinstance(value, float):
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.ScalarFloat)
-        _fb.AttrValueAddScalarFloat(b, value)
-        return _fb.AttrValueEnd(b)
-    if isinstance(value, str):
-        str_off = b.CreateString(value)
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.ScalarString)
-        _fb.AttrValueAddScalarString(b, str_off)
-        return _fb.AttrValueEnd(b)
-    if isinstance(value, np.ndarray):
+        value_type, add_value = AttrValueType.ScalarBool, _fb.AttrValueAddScalarBool
+    elif isinstance(value, int):
+        value_type, add_value = AttrValueType.ScalarInt, _fb.AttrValueAddScalarInt
+    elif isinstance(value, float):
+        value_type, add_value = AttrValueType.ScalarFloat, _fb.AttrValueAddScalarFloat
+    elif isinstance(value, str):
+        value_type, add_value = AttrValueType.ScalarString, _fb.AttrValueAddScalarString
+        value = b.CreateString(value)
+    elif isinstance(value, np.ndarray):
         return _encode_attr_value_numpy(b, value)
-    if isinstance(value, list):
+    elif isinstance(value, list):
         return _encode_attr_value_list(b, value)
-    # Fallback: JSON
-    json_off = b.CreateString(json.dumps(value))
-    _fb.AttrValueStart(b)
-    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
-    _fb.AttrValueAddNestedJson(b, json_off)
-    return _fb.AttrValueEnd(b)
+    else:
+        return _encode_json_attr_value(b, json.dumps(value))
+    return _write_attr_value(b, value_type, add_value, value)
+
+
+def _encode_json_attr_value(b, json_value: str) -> int:
+    return _write_attr_value(
+        b, AttrValueType.NestedList, _fb.AttrValueAddNestedJson, b.CreateString(json_value)
+    )
 
 
 def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
     if arr.size == 0:
-        json_off = b.CreateString("[]")
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
-        _fb.AttrValueAddNestedJson(b, json_off)
-        return _fb.AttrValueEnd(b)
+        return _encode_json_attr_value(b, "[]")
 
     # Determine stride from array shape (e.g. (N,3) → stride=3, (N,) → stride=1)
     if arr.ndim == 1:
         stride = 1
-    elif arr.ndim == 2:
-        stride = arr.shape[1]
     else:
-        # 3D+ arrays flatten and use stride from last dim
         stride = arr.shape[-1]
 
     # Flatten to 1D for FlatBuffers vector
@@ -1101,56 +1095,38 @@ def _encode_attr_value_numpy(b, arr: np.ndarray) -> int:
 
     if np.issubdtype(arr.dtype, np.floating):
         vec = b.CreateNumpyVector(flat.astype(np.float32, copy=False))
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
-        _fb.AttrValueAddFloatArray(b, vec)
-        _fb.AttrValueAddStride(b, stride)
-        return _fb.AttrValueEnd(b)
+        return _write_attr_value(
+            b, AttrValueType.FloatArray, _fb.AttrValueAddFloatArray, vec, stride=stride
+        )
 
     if np.issubdtype(arr.dtype, np.integer):
         vec = b.CreateNumpyVector(flat.astype(np.int32, copy=False))
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.IntArray)
-        _fb.AttrValueAddIntArray(b, vec)
-        _fb.AttrValueAddStride(b, stride)
-        return _fb.AttrValueEnd(b)
+        return _write_attr_value(
+            b, AttrValueType.IntArray, _fb.AttrValueAddIntArray, vec, stride=stride
+        )
 
     # Fallback for unusual dtypes
-    json_off = b.CreateString(json.dumps(arr.tolist()))
-    _fb.AttrValueStart(b)
-    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
-    _fb.AttrValueAddNestedJson(b, json_off)
-    return _fb.AttrValueEnd(b)
+    return _encode_json_attr_value(b, json.dumps(arr.tolist()))
 
 
 def _encode_attr_value_list(b, value: list) -> int:
     """Encode a list value detect element type, use typed vectors."""
     if not value:
-        json_off = b.CreateString("[]")
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
-        _fb.AttrValueAddNestedJson(b, json_off)
-        return _fb.AttrValueEnd(b)
+        return _encode_json_attr_value(b, "[]")
 
     first = value[0]
 
     # Flat float list
     if isinstance(first, float):
         vec = _create_float_vector(b, value)
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
-        _fb.AttrValueAddFloatArray(b, vec)
-        _fb.AttrValueAddStride(b, 1)
-        return _fb.AttrValueEnd(b)
+        return _write_attr_value(
+            b, AttrValueType.FloatArray, _fb.AttrValueAddFloatArray, vec, stride=1
+        )
 
     # Flat int list
     if isinstance(first, int) and not isinstance(first, bool):
         vec = _create_int_vector(b, value)
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.IntArray)
-        _fb.AttrValueAddIntArray(b, vec)
-        _fb.AttrValueAddStride(b, 1)
-        return _fb.AttrValueEnd(b)
+        return _write_attr_value(b, AttrValueType.IntArray, _fb.AttrValueAddIntArray, vec, stride=1)
 
     # Nested list of numbers (Vec3fArray → [[x,y,z], ...]) → flattened with stride
     if isinstance(first, list) and first and isinstance(first[0], (int, float)):
@@ -1159,18 +1135,12 @@ def _encode_attr_value_list(b, value: list) -> int:
         for sub in value:
             flat.extend(float(v) for v in sub)
         vec = _create_float_vector(b, flat)
-        _fb.AttrValueStart(b)
-        _fb.AttrValueAddValueType(b, AttrValueType.FloatArray)
-        _fb.AttrValueAddFloatArray(b, vec)
-        _fb.AttrValueAddStride(b, stride)
-        return _fb.AttrValueEnd(b)
+        return _write_attr_value(
+            b, AttrValueType.FloatArray, _fb.AttrValueAddFloatArray, vec, stride=stride
+        )
 
     # Fallback
-    json_off = b.CreateString(json.dumps(value))
-    _fb.AttrValueStart(b)
-    _fb.AttrValueAddValueType(b, AttrValueType.NestedList)
-    _fb.AttrValueAddNestedJson(b, json_off)
-    return _fb.AttrValueEnd(b)
+    return _encode_json_attr_value(b, json.dumps(value))
 
 
 @register_encoder(K_SET_GPRIM_ATTRS, fb_tag=EventPayloadType.SetGprimAttrs, fb_class=SetGprimAttrs)
@@ -1390,6 +1360,91 @@ _FLOAT_WIRE_TYPES = frozenset(
 )
 
 
+def _encode_connectable_input_value(b, name: str, type_name: str, value) -> int:
+    """Select one wire slot and build its payload before starting the table."""
+    name_offset = b.CreateString(name)
+    type_offset = b.CreateString(type_name)
+    float_declared = type_name in _FLOAT_WIRE_TYPES
+    add_value = None
+    if isinstance(value, bool):
+        value_type, add_value = (
+            ConnectableInputValueType.ScalarBool,
+            _fb.ConnectableInputValueAddScalarBool,
+        )
+    elif isinstance(value, int):
+        if float_declared:
+            value = float(value)
+            value_type, add_value = (
+                ConnectableInputValueType.ScalarFloat,
+                _fb.ConnectableInputValueAddScalarFloat,
+            )
+        else:
+            value_type, add_value = (
+                ConnectableInputValueType.ScalarInt,
+                _fb.ConnectableInputValueAddScalarInt,
+            )
+    elif isinstance(value, float):
+        value_type, add_value = (
+            ConnectableInputValueType.ScalarFloat,
+            _fb.ConnectableInputValueAddScalarFloat,
+        )
+    elif isinstance(value, str):
+        value_type, add_value = (
+            ConnectableInputValueType.ScalarString,
+            _fb.ConnectableInputValueAddScalarString,
+        )
+        value = b.CreateString(value)
+    elif isinstance(value, (np.ndarray, list)):
+        # Only ordinary 1D arrays can use dtype in place of element inspection.
+        array_kind = value.dtype.kind if type(value) is np.ndarray and value.ndim == 1 else None
+        if len(value) and all(isinstance(item, str) for item in value):
+            offsets = [b.CreateString(item) for item in value]
+            _fb.ConnectableInputValueStartStringArrayVector(b, len(offsets))
+            for offset in reversed(offsets):
+                b.PrependUOffsetTRelative(offset)
+            value = b.EndVector()
+            value_type, add_value = (
+                ConnectableInputValueType.StringArray,
+                _fb.ConnectableInputValueAddStringArray,
+            )
+        elif not float_declared and (
+            array_kind in ("i", "u")
+            or all(
+                isinstance(item, (int, np.integer)) and not isinstance(item, bool) for item in value
+            )
+        ):
+            # Python ints retain range checks that a direct NumPy int32 cast skips.
+            value = _create_int_vector(b, [int(item) for item in value])
+            value_type, add_value = (
+                ConnectableInputValueType.IntArray,
+                _fb.ConnectableInputValueAddIntArray,
+            )
+        else:
+            if array_kind in ("b", "i", "u", "f"):
+                # Match Python float conversion, including wide integers and
+                # extended precision and its independence from NumPy error settings.
+                with np.errstate(all="ignore"):
+                    value = value.astype(np.float64, copy=False)
+                # Casting Python floats to float32 checks overflow, but does not
+                # report underflow or signalling NaNs as an ndarray cast would.
+                with np.errstate(invalid="ignore", under="ignore"):
+                    value = _create_float_vector(b, value)
+            else:
+                value = _create_float_vector(b, [float(item) for item in value])
+            value_type, add_value = (
+                ConnectableInputValueType.FloatArray,
+                _fb.ConnectableInputValueAddFloatArray,
+            )
+
+    _fb.ConnectableInputValueStart(b)
+    _fb.ConnectableInputValueAddName(b, name_offset)
+    _fb.ConnectableInputValueAddTypeName(b, type_offset)
+    if add_value is not None:
+        _fb.ConnectableInputValueAddValueType(b, value_type)
+        add_value(b, value)
+    return _fb.ConnectableInputValueEnd(b)
+
+
 @register_encoder(
     K_SET_CONNECTABLE_INPUT,
     fb_tag=EventPayloadType.SetConnectableInput,
@@ -1398,72 +1453,11 @@ _FLOAT_WIRE_TYPES = frozenset(
 def _encode_set_connectable_input(b, ev):
     prim = b.CreateString(ev["prim"])
     info_id = b.CreateString(ev["info_id"])
-    inputs = ev.get("inputs", {})
     input_types = ev.get("input_types", {})
-
-    civ_offsets = []
-    for name, value in inputs.items():
-        n = b.CreateString(name)
-        type_name = input_types.get(name, "")
-        tn = b.CreateString(type_name)
-        float_declared = type_name in _FLOAT_WIRE_TYPES
-
-        # Coerce numeric sequences (incl. numpy arrays) into a flat float
-        # vector; numpy arrays are not list-typed, but iterate fine.
-        as_seq = None
-        if isinstance(value, (np.ndarray, list)):
-            as_seq = list(value) if isinstance(value, np.ndarray) else value
-
-        str_off = None
-        float_vec = None
-        int_vec = None
-        string_vec = None
-        if isinstance(value, str):
-            str_off = b.CreateString(value)
-        elif as_seq is not None and len(as_seq) > 0 and all(isinstance(v, str) for v in as_seq):
-            str_offs = [b.CreateString(v) for v in as_seq]
-            _fb.ConnectableInputValueStartStringArrayVector(b, len(str_offs))
-            for off in reversed(str_offs):
-                b.PrependUOffsetTRelative(off)
-            string_vec = b.EndVector()
-        elif (
-            as_seq is not None
-            and not float_declared
-            and all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) for v in as_seq)
-        ):
-            int_vec = _create_int_vector(b, [int(v) for v in as_seq])
-        elif as_seq is not None:
-            float_vec = _create_float_vector(b, [float(v) for v in as_seq])
-
-        _fb.ConnectableInputValueStart(b)
-        _fb.ConnectableInputValueAddName(b, n)
-        _fb.ConnectableInputValueAddTypeName(b, tn)
-        if isinstance(value, bool):
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarBool)
-            _fb.ConnectableInputValueAddScalarBool(b, value)
-        elif isinstance(value, int) and not isinstance(value, bool):
-            if float_declared:
-                _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarFloat)
-                _fb.ConnectableInputValueAddScalarFloat(b, float(value))
-            else:
-                _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarInt)
-                _fb.ConnectableInputValueAddScalarInt(b, value)
-        elif isinstance(value, float):
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarFloat)
-            _fb.ConnectableInputValueAddScalarFloat(b, value)
-        elif str_off is not None:
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.ScalarString)
-            _fb.ConnectableInputValueAddScalarString(b, str_off)
-        elif string_vec is not None:
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.StringArray)
-            _fb.ConnectableInputValueAddStringArray(b, string_vec)
-        elif int_vec is not None:
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.IntArray)
-            _fb.ConnectableInputValueAddIntArray(b, int_vec)
-        elif float_vec is not None:
-            _fb.ConnectableInputValueAddValueType(b, ConnectableInputValueType.FloatArray)
-            _fb.ConnectableInputValueAddFloatArray(b, float_vec)
-        civ_offsets.append(_fb.ConnectableInputValueEnd(b))
+    civ_offsets = [
+        _encode_connectable_input_value(b, name, input_types.get(name, ""), value)
+        for name, value in ev.get("inputs", {}).items()
+    ]
 
     _fb.SetConnectableInputStartInputsVector(b, len(civ_offsets))
     for off in reversed(civ_offsets):
@@ -2355,30 +2349,20 @@ def _attr_value_to_python(av, numpy_arrays: bool = False):
         return av.ScalarBool()
     if vt == AttrValueType.ScalarString:
         return _str(av.ScalarString())
-    if vt == AttrValueType.FloatArray:
+    if vt in (AttrValueType.FloatArray, AttrValueType.IntArray):
+        is_float = vt == AttrValueType.FloatArray
         if numpy_arrays:
-            arr = av.FloatArrayAsNumpy()
+            arr = av.FloatArrayAsNumpy() if is_float else av.IntArrayAsNumpy()
             stride = av.Stride()
             if stride > 1:
                 arr = arr.reshape(-1, stride)
             return arr
         stride = av.Stride()
-        length = av.FloatArrayLength()
+        length = av.FloatArrayLength() if is_float else av.IntArrayLength()
+        get_value = av.FloatArray if is_float else av.IntArray
         if stride <= 1:
-            return [av.FloatArray(i) for i in range(length)]
-        return [[av.FloatArray(i + j) for j in range(stride)] for i in range(0, length, stride)]
-    if vt == AttrValueType.IntArray:
-        if numpy_arrays:
-            arr = av.IntArrayAsNumpy()
-            stride = av.Stride()
-            if stride > 1:
-                arr = arr.reshape(-1, stride)
-            return arr
-        stride = av.Stride()
-        length = av.IntArrayLength()
-        if stride <= 1:
-            return [av.IntArray(i) for i in range(length)]
-        return [[av.IntArray(i + j) for j in range(stride)] for i in range(0, length, stride)]
+            return [get_value(i) for i in range(length)]
+        return [[get_value(i + j) for j in range(stride)] for i in range(0, length, stride)]
     if vt == AttrValueType.NestedList:
         return json.loads(_str(av.NestedJson()))
     return None
