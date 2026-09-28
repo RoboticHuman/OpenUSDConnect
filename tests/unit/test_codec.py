@@ -11,6 +11,7 @@ import pytest
 from openusdconnect.codec import (
     AttrValueType,
     BroadcastEventEncoder,
+    ConnectableInputValueType,
     PayloadType,
     decode_envelope,
     decode_hello,
@@ -456,6 +457,66 @@ class TestSetVisibility:
 
 
 class TestSetGprimAttrs:
+    @pytest.mark.parametrize(
+        "value,wire_type,stride,expected",
+        [
+            pytest.param([], AttrValueType.NestedList, 1, [], id="empty-list"),
+            pytest.param(np.empty((0, 3)), AttrValueType.NestedList, 1, [], id="empty-array"),
+            pytest.param([1, 2.5], AttrValueType.IntArray, 1, [1, 2], id="int-first-list"),
+            pytest.param([1.5, 2], AttrValueType.FloatArray, 1, [1.5, 2.0], id="float-first-list"),
+            pytest.param([[1, 2], [3, 4]], AttrValueType.FloatArray, 2, [[1.0, 2.0], [3.0, 4.0]],
+                         id="nested-integer-list"),
+            pytest.param(np.array([True, False]), AttrValueType.NestedList, 1, [True, False],
+                         id="boolean-array"),
+            pytest.param(np.array(["one", "two"]), AttrValueType.NestedList, 1, ["one", "two"],
+                         id="unicode-array"),
+            pytest.param(np.array([1, 2.5], dtype=object), AttrValueType.NestedList, 1, [1, 2.5],
+                         id="object-array"),
+            pytest.param(np.arange(6, dtype=np.int64)[::2], AttrValueType.IntArray, 1, [0, 2, 4],
+                         id="strided-integer-array"),
+            pytest.param(np.arange(12, dtype=np.float64).reshape(2, 6)[:, ::2],
+                         AttrValueType.FloatArray, 3, [[0.0, 2.0, 4.0], [6.0, 8.0, 10.0]],
+                         id="strided-float-array"),
+            pytest.param(np.array([1.5, 2.5], dtype=">f4"), AttrValueType.FloatArray, 1, [1.5, 2.5],
+                         id="big-endian-float-array"),
+            pytest.param(np.array([1, 2], dtype=">i4"), AttrValueType.IntArray, 1, [1, 2],
+                         id="big-endian-integer-array"),
+            pytest.param(np.array([2**31], dtype=np.int64), AttrValueType.IntArray, 1, [-(2**31)],
+                         id="integer-array-narrows-to-int32"),
+            pytest.param(np.array([2**32 - 1], dtype=np.uint64), AttrValueType.IntArray, 1, [-1],
+                         id="unsigned-array-narrows-to-int32"),
+        ],
+    )
+    def test_attribute_wire_value_contract(self, value, wire_type, stride, expected):
+        event = {"k": "set_gprim_attrs", "prim": "/Mesh", "attrs": {"value": value}}
+        wire = encode_message({"type": "txn", "events": [event]})
+        _, txn = resolve_payload(decode_envelope(wire))
+        _, encoded = resolve_event(txn.Events(0))
+        attr = encoded.Attrs(0).Value()
+        assert attr.ValueType() == wire_type
+        assert attr.Stride() == stride
+        for numpy_arrays in (False, True):
+            decoded_event = message_to_dict(wire, numpy_arrays=numpy_arrays)["events"][0]
+            decoded = decoded_event["attrs"]["value"]
+            if numpy_arrays and wire_type in (AttrValueType.IntArray, AttrValueType.FloatArray):
+                assert isinstance(decoded, np.ndarray)
+                assert not decoded.flags.writeable
+                decoded = decoded.tolist()
+            else:
+                assert isinstance(decoded, list)
+            assert decoded == expected
+
+    @pytest.mark.parametrize("value", [np.int64(3), np.float32(1.5), np.bool_(True), object()])
+    def test_unsupported_attribute_scalar_is_rejected(self, value):
+        event = {"k": "set_gprim_attrs", "prim": "/Mesh", "attrs": {"value": value}}
+        with pytest.raises(TypeError):
+            encode_message({"type": "txn", "events": [event]})
+
+    def test_attribute_integer_list_overflow_is_rejected(self):
+        event = {"k": "set_gprim_attrs", "prim": "/Mesh", "attrs": {"value": [2**31]}}
+        with pytest.raises(OverflowError):
+            encode_message({"type": "txn", "events": [event]})
+
     def test_scalar_attrs(self):
         ev = {
             "k": "set_gprim_attrs",
@@ -674,6 +735,139 @@ class TestSetMaterialBinding:
 
 
 class TestSetConnectableInput:
+    @pytest.mark.parametrize(
+        "value,type_name,wire_type,expected",
+        [
+            pytest.param(False, "float", ConnectableInputValueType.ScalarBool, False,
+                         id="bool-stays-bool-with-float-declaration"),
+            pytest.param(3, "float", ConnectableInputValueType.ScalarFloat, 3.0,
+                         id="integer-with-float-declaration"),
+            pytest.param(3, "int", ConnectableInputValueType.ScalarInt, 3,
+                         id="integer-with-integer-declaration"),
+            pytest.param([], "", ConnectableInputValueType.IntArray, [], id="empty-list"),
+            pytest.param([], "float[]", ConnectableInputValueType.FloatArray, [],
+                         id="empty-list-with-float-declaration"),
+            pytest.param(np.array([], dtype=np.float32), "", ConnectableInputValueType.IntArray, [],
+                         id="empty-float-array-without-declaration"),
+            pytest.param(np.array([], dtype="U1"), "token[]", ConnectableInputValueType.IntArray,
+                         [], id="empty-unicode-array"),
+            pytest.param([1, 2.5], "", ConnectableInputValueType.FloatArray, [1.0, 2.5],
+                         id="mixed-numeric-list"),
+            pytest.param([True, False], "", ConnectableInputValueType.FloatArray, [1.0, 0.0],
+                         id="boolean-list"),
+            pytest.param(np.array([True, False]), "", ConnectableInputValueType.FloatArray,
+                         [1.0, 0.0], id="boolean-array"),
+            pytest.param(np.array(["one", "two"]), "token[]", ConnectableInputValueType.StringArray,
+                         ["one", "two"], id="unicode-array"),
+            pytest.param(np.array([1, 2], dtype=object), "", ConnectableInputValueType.IntArray,
+                         [1, 2], id="object-integer-array"),
+            pytest.param(np.array([1, 2.5], dtype=object), "", ConnectableInputValueType.FloatArray,
+                         [1.0, 2.5], id="object-mixed-array"),
+            pytest.param(np.arange(6, dtype=np.int64)[::2], "", ConnectableInputValueType.IntArray,
+                         [0, 2, 4], id="strided-integer-array"),
+            pytest.param(np.arange(6, dtype=np.float64)[::2], "",
+                         ConnectableInputValueType.FloatArray, [0.0, 2.0, 4.0],
+                         id="strided-float-array"),
+            pytest.param(np.array([1, 2], dtype=">i4"), "", ConnectableInputValueType.IntArray,
+                         [1, 2], id="big-endian-integer-array"),
+            pytest.param(np.array([1.5, 2.5], dtype=">f4"), "",
+                         ConnectableInputValueType.FloatArray, [1.5, 2.5],
+                         id="big-endian-float-array"),
+            pytest.param(np.array([2**31], dtype=np.int64), "float[]",
+                         ConnectableInputValueType.FloatArray, [float(2**31)],
+                         id="wide-integer-array-with-float-declaration"),
+        ],
+    )
+    def test_connectable_wire_value_contract(self, value, type_name, wire_type, expected):
+        event = {
+            "k": "set_connectable_input",
+            "prim": "/Shader",
+            "info_id": "TestShader",
+            "inputs": {"value": value},
+            "input_types": {"value": type_name},
+        }
+        _, encoded = _txn_zerocopy(event)
+        assert encoded.Inputs(0).ValueType() == wire_type
+        decoded = _txn_roundtrip(event)
+        assert decoded["input_types"] == {"value": type_name}
+        assert decoded["inputs"]["value"] == expected
+        assert type(decoded["inputs"]["value"]) is type(expected)
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, np.int64(3), np.float32(1.5), np.bool_(True), object()],
+    )
+    def test_unsupported_connectable_scalar_keeps_type_without_value(self, value):
+        event = {
+            "k": "set_connectable_input",
+            "prim": "/Shader",
+            "info_id": "TestShader",
+            "inputs": {"value": value},
+            "input_types": {"value": "float"},
+        }
+        _, encoded = _txn_zerocopy(event)
+        assert encoded.Inputs(0).ValueType() == ConnectableInputValueType.None_
+        decoded = _txn_roundtrip(event)
+        assert decoded["inputs"] == {}
+        assert decoded["input_types"] == {"value": "float"}
+
+    @pytest.mark.parametrize(
+        "value",
+        [[2**31], np.array([2**31], dtype=np.int64), np.array([2**32 - 1], dtype=np.uint64)],
+    )
+    def test_connectable_integer_array_overflow_is_rejected(self, value):
+        event = {
+            "k": "set_connectable_input",
+            "prim": "/Shader",
+            "info_id": "TestShader",
+            "inputs": {"value": value},
+            "input_types": {"value": "int[]"},
+        }
+        with pytest.raises(OverflowError):
+            encode_message({"type": "txn", "events": [event]})
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.int32])
+    @pytest.mark.parametrize("type_name", ["", "float[]"])
+    def test_masked_connectable_array_does_not_reveal_hidden_values(self, dtype, type_name):
+        value = np.ma.array([1, 99, 3], mask=[False, True, False], dtype=dtype)
+        event = {
+            "k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
+            "inputs": {"value": value}, "input_types": {"value": type_name},
+        }
+        with pytest.warns(UserWarning, match="masked element"):
+            decoded, wire = _roundtrip({"type": "txn", "events": [event]})
+        _, txn = resolve_payload(decode_envelope(wire))
+        _, encoded = resolve_event(txn.Events(0))
+        assert encoded.Inputs(0).ValueType() == ConnectableInputValueType.FloatArray
+        np.testing.assert_array_equal(decoded["events"][0]["inputs"]["value"], [1.0, np.nan, 3.0])
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            pytest.param(np.array([0x7F800001], dtype=np.uint32).view(np.float32), [np.nan],
+                         id="float32-signaling-nan"),
+            pytest.param(np.array([0x7FF0000000000001], dtype=np.uint64).view(np.float64), [np.nan],
+                         id="float64-signaling-nan"),
+            pytest.param(np.array([1e-300]), [0.0], id="float64-underflow"),
+        ],
+    )
+    def test_connectable_float_array_with_numpy_error_policy(self, value, expected):
+        event = {
+            "k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
+            "inputs": {"value": value}, "input_types": {"value": "float[]"},
+        }
+        with np.errstate(all="raise"):
+            decoded = _txn_roundtrip(event)
+        np.testing.assert_array_equal(decoded["inputs"]["value"], expected)
+
+    def test_connectable_float_overflow_preserves_numpy_error_policy(self):
+        event = {
+            "k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
+            "inputs": {"value": np.array([1e300])}, "input_types": {"value": "float[]"},
+        }
+        with np.errstate(over="raise"), pytest.raises(FloatingPointError):
+            encode_message({"type": "txn", "events": [event]})
+
     @pytest.mark.parametrize("numpy_arrays", [False, True])
     def test_numeric_inputs_remain_python_lists(self, numpy_arrays):
         event = {
