@@ -615,82 +615,11 @@ def _sdf_property_path(event: dict) -> Sdf.Path | None:
     return path if path.IsPropertyPath() else None
 
 
-def _is_xform_spec_event(event: dict) -> bool:
-    path = _sdf_property_path(event)
-    if path is None:
-        return False
-    name = str(path.name)
-    return name == "xformOpOrder" or name.startswith("xformOp:")
-
-
-def _is_gprim_property_name(name: str) -> bool:
-    return (
-        name != "xformOpOrder"
-        and not name.startswith("xformOp:")
-        and name != "visibility"
-        and name != "info:id"
-        and not name.startswith(("inputs:", "outputs:"))
-    )
-
-
-def _is_gprim_spec_event(event: dict) -> bool:
-    path = _sdf_property_path(event)
-    if path is None or event.get("spec_kind", "attribute") != "attribute":
-        return False
-    name = str(path.name)
-    return _is_gprim_property_name(name)
-
-
-def _is_connectable_spec_event(event: dict) -> bool:
-    path = _sdf_property_path(event)
-    if path is None or event.get("spec_kind", "attribute") != "attribute":
-        return False
-    name = str(path.name)
-    return name == "info:id" or name.startswith(("inputs:", "outputs:"))
-
-
-def _is_variant_spec_event(event: dict) -> bool:
-    return (
-        event.get("k") == K_SET_SDF_SPEC_FIELDS
-        and event.get("spec_kind") == "prim"
-        and "variantSelection" in event.get("fields", ())
-    )
-
-
-def _is_active_spec_event(event: dict) -> bool:
-    return (
-        event.get("k") == K_SET_SDF_SPEC_FIELDS
-        and event.get("spec_kind") == "prim"
-        and "active" in event.get("fields", ())
-    )
-
-
-def _is_instanceable_spec_event(event: dict) -> bool:
-    return (
-        event.get("k") == K_SET_SDF_SPEC_FIELDS
-        and event.get("spec_kind") == "prim"
-        and "instanceable" in event.get("fields", ())
-    )
-
-
 def _material_purpose_from_name(name: str) -> str | None:
     if name == "material:binding":
         return ""
     prefix = "material:binding:"
     return name[len(prefix) :] if name.startswith(prefix) else None
-
-
-def _material_purpose(event: dict) -> str | None:
-    if event.get("k") == K_SET_MATERIAL_BINDING:
-        return str(event.get("material_purpose") or "")
-    path = _sdf_property_path(event)
-    if path is None or event.get("spec_kind") != "relationship":
-        return None
-    return _material_purpose_from_name(str(path.name))
-
-
-def _is_material_event(event: dict) -> bool:
-    return _material_purpose(event) is not None
 
 
 def _time_code(value: float | None) -> Usd.TimeCode:
@@ -1063,8 +992,6 @@ class ComposedChangeProjection:
         self._resynced_paths: set[Sdf.Path] = set()
         self._changed_info_paths: set[Sdf.Path] = set()
         self._asset_resync_paths: set[Sdf.Path] = set()
-        self._resync_prim_roots: set[str] = set()
-        self._affected_prim_paths: set[str] = set()
         self._built_adapter_events: list[dict] | None = None
         self._delivery_state = "open"
         self._notice_key = None
@@ -1075,15 +1002,8 @@ class ComposedChangeProjection:
             reapply_all_composed=reapply_all_composed,
             reapply_composed_paths=reapply_composed_paths,
         )
-        initial_prim_paths, initial_scene_paths = self._prepare_scene_scope(
-            extra_scene_paths,
-        )
         self._candidates = _ProjectionCandidates()
-        self._collect_initial_candidates(
-            initial_prim_paths,
-            initial_scene_paths,
-            extra_arc_candidates,
-        )
+        self._collect_initial_candidates(extra_scene_paths, extra_arc_candidates)
         self._pre_notice_candidates = (
             _copy_projection_candidates(self._candidates)
             if self._native_composition_subtree_roots
@@ -1190,209 +1110,121 @@ class ComposedChangeProjection:
             and str(event["prim"]) in self._local_lifecycle_paths
         }
 
-    def _prepare_scene_scope(
-        self,
-        extra_scene_paths: Iterable[str | Sdf.Path],
-    ) -> tuple[set[str], set[Sdf.Path]]:
-        stack_scene_paths = {Sdf.Path(path) for path in extra_scene_paths}
-        self._event_scene_paths = {
-            path for event in self._events if (path := _sdf_property_path(event)) is not None
-        }
-        stack_prim_paths = {
-            str(path.GetPrimPath())
-            for path in stack_scene_paths
-            if path.GetPrimPath() != Sdf.Path.absoluteRootPath
-        }
-        event_paths = {
-            str(event.get("prim") or "")
-            for event in self._events
-            if event.get("prim") and event.get("k") != K_RENAME_PRIM
-        }
-        return event_paths | stack_prim_paths, stack_scene_paths | self._event_scene_paths
-
     def _collect_initial_candidates(
         self,
-        prim_paths: Iterable[str],
-        scene_paths: Iterable[Sdf.Path],
+        scene_paths: Iterable[str | Sdf.Path],
         arc_candidates: Iterable[tuple[str, str]],
     ) -> None:
+        """Classify transaction events before widening to scene paths and subtrees."""
+        scene_paths = {Sdf.Path(path) for path in scene_paths}
         candidates = self._candidates
-        candidates.prims.update(prim_paths)
-        events = self._events
-        candidates.types.update(self._collect_type_candidates(events))
-        candidates.arcs.update(self._collect_arc_candidates(events))
-        candidates.variants.update(self._collect_variant_candidates(events))
-        candidates.xforms.update(self._collect_xform_candidates(events))
-        candidates.gprim.update(self._collect_gprim_candidates(events))
-        candidates.point_instancers.update(self._collect_point_instancer_candidates(events))
-        candidates.materials.update(self._collect_material_candidates(events))
-        candidates.connectables.update(self._collect_connectable_candidates(events))
-        candidates.active.update(self._collect_active_candidates(events))
-        candidates.visibility.update(self._collect_visibility_candidates(events))
-        candidates.instanceable.update(self._collect_instanceable_candidates(events))
+        self._event_scene_paths: set[Sdf.Path] = set()
+        for event in self._events:
+            kind = event.get("k")
+            property_path = _sdf_property_path(event)
+            if property_path is not None:
+                self._event_scene_paths.add(property_path)
+            prim_path = str(event.get("prim") or "")
+            if not prim_path:
+                continue
+            if kind != K_RENAME_PRIM:
+                candidates.prims.add(prim_path)
+            time = event.get("time")
+            if kind == K_ENSURE_PRIM:
+                candidates.types.add(prim_path)
+            elif kind in (K_SET_REFERENCE, K_SET_PAYLOAD):
+                candidates.arcs.add((prim_path, kind))
+            elif kind == K_SET_VARIANT_SELECTIONS:
+                candidates.variants.add(prim_path)
+            elif kind in (K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS):
+                candidates.xforms.add((prim_path, time))
+            elif kind == K_SET_GPRIM_ATTRS:
+                candidates.gprim[(prim_path, time)].update(event.get("attrs", ()))
+            elif kind == K_SET_POINT_INSTANCER:
+                candidates.point_instancers[(prim_path, time)].update(event.get("fields", ()))
+            elif kind == K_SET_MATERIAL_BINDING:
+                candidates.materials.add((prim_path, str(event.get("material_purpose") or "")))
+            elif kind == K_SET_CONNECTABLE_INPUT:
+                candidates.connectables[(prim_path, time)].update(
+                    f"inputs:{name}" for name in event.get("inputs", ())
+                )
+            elif kind == K_SET_CONNECTABLE_CONNECTION:
+                attrs = candidates.connectables[(prim_path, None)]
+                attrs.update(event.get("connections", ()))
+                attrs.update(event.get("disconnections", ()))
+            elif kind == K_DEACTIVATE_PRIM:
+                candidates.active.add(prim_path)
+            elif kind == K_SET_VISIBILITY:
+                candidates.visibility.add((prim_path, time))
+            elif kind == K_SET_INSTANCEABLE:
+                candidates.instanceable.add(prim_path)
+            elif kind in (K_SET_SDF_SPEC_FIELDS, K_ERASE_TIME_SAMPLES):
+                if kind == K_SET_SDF_SPEC_FIELDS and event.get("spec_kind") == "prim":
+                    self._add_prim_field_candidates(prim_path, event.get("fields", ()))
+                if property_path is not None:
+                    self._add_spec_property_candidates(prim_path, property_path, event)
+
+        candidates.prims.update(
+            str(path.GetPrimPath())
+            for path in scene_paths
+            if path.GetPrimPath() != Sdf.Path.absoluteRootPath
+        )
         candidates.arcs.update(arc_candidates)
-        self._add_scene_path_candidates(scene_paths)
+        self._add_scene_path_candidates(scene_paths | self._event_scene_paths)
         self._add_subtree_candidates(self._subtree_roots)
 
     def _should_reapply_composed(self, prim_path: str) -> bool:
         return self._reapply_all_composed or prim_path in self._reapply_composed_paths
 
-    @staticmethod
-    def _collect_type_candidates(events: list[dict]) -> set[str]:
-        return {
-            str(event["prim"])
-            for event in events
-            if event.get("prim")
-            and (
-                event.get("k") == K_ENSURE_PRIM
-                or (
-                    event.get("k") == K_SET_SDF_SPEC_FIELDS
-                    and event.get("spec_kind") == "prim"
-                    and {"apiSchemas", "specifier", "typeName"} & set(event.get("fields", ()))
-                )
-            )
-        }
-
-    @staticmethod
-    def _collect_variant_candidates(events: list[dict]) -> set[str]:
-        return {
-            str(event["prim"])
-            for event in events
-            if event.get("prim")
-            and (event.get("k") == K_SET_VARIANT_SELECTIONS or _is_variant_spec_event(event))
-        }
-
-    @staticmethod
-    def _collect_material_candidates(events: list[dict]) -> set[tuple[str, str]]:
-        return {
-            (str(event["prim"]), purpose)
-            for event in events
-            if event.get("prim")
-            if (purpose := _material_purpose(event)) is not None
-        }
-
-    @staticmethod
-    def _collect_active_candidates(events: list[dict]) -> set[str]:
-        return {
-            str(event["prim"])
-            for event in events
-            if event.get("prim")
-            and (event.get("k") == K_DEACTIVATE_PRIM or _is_active_spec_event(event))
-        }
-
-    @staticmethod
-    def _collect_visibility_candidates(events: list[dict]) -> set[_PrimTime]:
-        return {
-            (str(event["prim"]), event.get("time"))
-            for event in events
-            if event.get("prim")
-            and (
-                event.get("k") == K_SET_VISIBILITY
-                or (
-                    (path := _sdf_property_path(event)) is not None
-                    and str(path.name) == "visibility"
-                )
-            )
-        }
-
-    @staticmethod
-    def _collect_instanceable_candidates(events: list[dict]) -> set[str]:
-        return {
-            str(event["prim"])
-            for event in events
-            if event.get("prim")
-            and (event.get("k") == K_SET_INSTANCEABLE or _is_instanceable_spec_event(event))
-        }
-
-    @staticmethod
-    def _collect_xform_candidates(events: list[dict]) -> set[tuple[str, float | None]]:
-        result = set()
-        for event in events:
-            if event.get("k") in {K_ENSURE_XFORM_OPS, K_SET_XFORM_TRS} or (
-                _is_xform_spec_event(event)
-            ):
-                prim_path = str(event.get("prim") or "")
-                if prim_path:
-                    result.add((prim_path, event.get("time")))
-        return result
-
-    def _collect_gprim_candidates(
-        self,
-        events: list[dict],
-    ) -> dict[tuple[str, float | None], set[str]]:
-        result: dict[tuple[str, float | None], set[str]] = defaultdict(set)
-        for event in events:
-            prim_path = str(event.get("prim") or "")
-            if not prim_path:
-                continue
-            if event.get("k") == K_SET_GPRIM_ATTRS:
-                result[(prim_path, event.get("time"))].update(
-                    event.get("attrs", ()),
-                )
-            elif _is_gprim_spec_event(event):
-                path = _sdf_property_path(event)
-                if path is not None:
-                    name = str(path.name)
-                    prim = self._stage.GetPrimAtPath(prim_path)
-                    if (
-                        _is_projectable_prim(prim)
-                        and prim.IsA(UsdGeom.PointInstancer)
-                        and name in POINT_INSTANCER_USD_TO_WIRE
-                    ):
-                        continue
-                    result[(prim_path, None)].add(name)
-        return result
-
-    def _collect_point_instancer_candidates(
-        self,
-        events: list[dict],
-    ) -> dict[tuple[str, float | None], set[str]]:
-        result: dict[tuple[str, float | None], set[str]] = defaultdict(set)
-        for event in events:
-            prim_path = str(event.get("prim") or "")
-            if not prim_path:
-                continue
-            if event.get("k") == K_SET_POINT_INSTANCER:
-                result[(prim_path, event.get("time"))].update(event.get("fields", ()))
-                continue
-            path = _sdf_property_path(event)
+    def _add_prim_field_candidates(self, prim_path: str, fields: Iterable[str]) -> None:
+        """One exact prim edit may affect several kinds of composed state."""
+        candidates = self._candidates
+        if {"apiSchemas", "specifier", "typeName"}.intersection(fields):
+            candidates.types.add(prim_path)
+        if "references" in fields:
+            candidates.arcs.add((prim_path, K_SET_REFERENCE))
+        if "payload" in fields:
+            candidates.arcs.add((prim_path, K_SET_PAYLOAD))
+        if "variantSelection" in fields:
+            candidates.variants.add(prim_path)
+        if "active" in fields:
+            candidates.active.add(prim_path)
+        if "instanceable" in fields:
+            candidates.instanceable.add(prim_path)
+        if "inactiveIds" in fields:
             prim = self._stage.GetPrimAtPath(prim_path)
-            is_point_instancer = bool(
-                _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer)
-            )
-            if path is not None and is_point_instancer:
-                field = POINT_INSTANCER_USD_TO_WIRE.get(str(path.name))
-                if field:
-                    result[(prim_path, None)].add(field)
-            if (
-                is_point_instancer
-                and event.get("k") == K_SET_SDF_SPEC_FIELDS
-                and event.get("spec_kind") == "prim"
-                and "inactiveIds" in event.get("fields", ())
-            ):
-                result[(prim_path, None)].add("inactive_ids")
-        return result
+            if _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer):
+                candidates.point_instancers[(prim_path, None)].add("inactive_ids")
 
-    @staticmethod
-    def _collect_arc_candidates(events: list[dict]) -> set[tuple[str, str]]:
-        result = {
-            (str(event["prim"]), str(event["k"]))
-            for event in events
-            if event.get("prim") and event.get("k") in {K_SET_REFERENCE, K_SET_PAYLOAD}
-        }
-        for event in events:
-            if (
-                event.get("k") != K_SET_SDF_SPEC_FIELDS
-                or event.get("spec_kind") != "prim"
-                or not event.get("prim")
-            ):
-                continue
-            fields = set(event.get("fields", ()))
-            if "references" in fields:
-                result.add((str(event["prim"]), K_SET_REFERENCE))
-            if "payload" in fields:
-                result.add((str(event["prim"]), K_SET_PAYLOAD))
-        return result
+    def _add_spec_property_candidates(
+        self,
+        prim_path: str,
+        path: Sdf.Path,
+        event: dict,
+    ) -> None:
+        candidates = self._candidates
+        name = str(path.name)
+        spec_kind = event.get("spec_kind", "attribute")
+        if name == "xformOpOrder" or name.startswith("xformOp:"):
+            candidates.xforms.add((prim_path, event.get("time")))
+        elif name == "visibility":
+            candidates.visibility.add((prim_path, event.get("time")))
+        elif name == "info:id" or name.startswith(("inputs:", "outputs:")):
+            if spec_kind == "attribute":
+                candidates.connectables[(prim_path, None)].add("*" if name == "info:id" else name)
+        else:
+            field = POINT_INSTANCER_USD_TO_WIRE.get(name)
+            if field is not None:
+                prim = self._stage.GetPrimAtPath(prim_path)
+                if _is_projectable_prim(prim) and prim.IsA(UsdGeom.PointInstancer):
+                    candidates.point_instancers[(prim_path, None)].add(field)
+                    return
+            if spec_kind == "attribute":
+                candidates.gprim[(prim_path, None)].add(name)
+            elif spec_kind == "relationship":
+                purpose = _material_purpose_from_name(name)
+                if purpose is not None:
+                    candidates.materials.add((prim_path, purpose))
 
     def _add_scene_path_candidates(
         self,
@@ -1475,7 +1307,7 @@ class ComposedChangeProjection:
             candidates.point_instancers[(prim_path, None)].add(field)
             for time in sample_times:
                 candidates.point_instancers[(prim_path, time)].add(field)
-        elif _is_gprim_property_name(name):
+        else:
             candidates.gprim[(prim_path, None)].add(name)
             for time in sample_times:
                 candidates.gprim[(prim_path, time)].add(name)
@@ -1553,7 +1385,6 @@ class ComposedChangeProjection:
 
     def _add_notice_candidates(self) -> None:
         subtree_roots = set(self._subtree_roots)
-        exact_paths: set[str] = set()
         exact_scene_paths: set[Sdf.Path] = set()
 
         for path in self._resynced_paths | self._asset_resync_paths:
@@ -1563,29 +1394,19 @@ class ComposedChangeProjection:
             if path == Sdf.Path.absoluteRootPath or path.IsPrimPath():
                 subtree_roots.add(prim_path)
             else:
-                exact_paths.add(prim_path)
                 exact_scene_paths.add(path)
 
-        for path in self._changed_info_paths:
-            if prim_path := self._notice_prim_path(path):
-                exact_paths.add(prim_path)
-            exact_scene_paths.add(path)
-
-        self._resync_prim_roots = self._minimal_roots(subtree_roots)
-        exact_paths = {
-            path
-            for path in exact_paths
-            if not any(_path_is_at_or_below(path, root) for root in self._resync_prim_roots)
-        }
+        exact_scene_paths.update(self._changed_info_paths)
+        resync_prim_roots = self._minimal_roots(subtree_roots)
 
         previous_stage = self._state.previous_stage
         if previous_stage is None:
             raise RuntimeError("composed projection state has no previous stage")
         self._add_subtree_candidates(
-            self._resync_prim_roots,
+            resync_prim_roots,
             stage=previous_stage,
         )
-        self._add_subtree_candidates(self._resync_prim_roots)
+        self._add_subtree_candidates(resync_prim_roots)
         prim_scene_paths = {path for path in exact_scene_paths if not path.IsPropertyPath()}
         property_scene_paths = exact_scene_paths - prim_scene_paths
         self._add_scene_path_candidates(prim_scene_paths)
@@ -1602,21 +1423,6 @@ class ComposedChangeProjection:
             include_prim_state=False,
             stage=previous_stage,
         )
-
-    def _record_affected_prim_paths(self) -> None:
-        candidates = self._candidates
-        paths = set(candidates.prims) | set(candidates.types)
-        paths.update(key[0] for key in candidates.xforms)
-        paths.update(key[0] for key in candidates.gprim)
-        paths.update(candidates.variants)
-        paths.update(key[0] for key in candidates.materials)
-        paths.update(key[0] for key in candidates.connectables)
-        paths.update(candidates.active)
-        paths.update(key[0] for key in candidates.visibility)
-        paths.update(candidates.instanceable)
-        paths.update(key[0] for key in candidates.point_instancers)
-        paths.update(key[0] for key in candidates.arcs)
-        self._affected_prim_paths = {path for path in paths if path and path != "/"}
 
     def _is_in_native_composition_subtree(self, prim_path: str) -> bool:
         return any(
@@ -1692,10 +1498,10 @@ class ComposedChangeProjection:
             prim_path = str(event.get("prim") or "")
             if event.get("k") not in control_kinds:
                 continue
-            for root in self._native_composition_subtree_roots:
-                if prim_path == root:
-                    last_control[root] = index
+            if prim_path in self._native_composition_subtree_roots:
+                last_control[prim_path] = index
 
+        ordered_roots = sorted(last_control, key=len, reverse=True)
         deferred = defaultdict(list)
         retained = []
         for index, event in enumerate(events):
@@ -1703,13 +1509,8 @@ class ComposedChangeProjection:
             owner = next(
                 (
                     root
-                    for root in sorted(
-                        self._native_composition_subtree_roots,
-                        key=len,
-                        reverse=True,
-                    )
-                    if root in last_control
-                    and prim_path != root
+                    for root in ordered_roots
+                    if prim_path != root
                     and _path_is_at_or_below(prim_path, root)
                 ),
                 None,
@@ -1719,12 +1520,13 @@ class ComposedChangeProjection:
                 continue
             retained.append((index, event))
 
+        root_at_control = {index: root for root, index in last_control.items()}
         result = []
         for index, event in retained:
             result.append(event)
-            for root, control_index in last_control.items():
-                if control_index == index:
-                    result.extend(deferred[root])
+            root = root_at_control.get(index)
+            if root is not None:
+                result.extend(deferred[root])
         return result
 
     def _previous_prim_values(self, prim_path: str) -> _PrimProjectionValues:
@@ -1743,7 +1545,6 @@ class ComposedChangeProjection:
         if self._subtree_roots:
             self._add_subtree_candidates(self._subtree_roots)
         self._remove_native_owned_notice_candidates()
-        self._record_affected_prim_paths()
         if (previous_stage := self._state.previous_stage) is not None:
             self._previous_values = _capture_candidates(
                 previous_stage,
@@ -1851,6 +1652,10 @@ class ComposedChangeProjection:
             valid_after = _is_projectable_prim(prim)
             before_state = self._previous_prim_values(prim_path)
             valid_before = before_state.valid
+            if not valid_after:
+                if valid_before:
+                    deletes.append({"k": K_DELETE_PRIM, "prim": prim_path})
+                continue
             before_type = before_state.type_state
             after_type = types_after.get(prim_path)
             type_changed = bool(
@@ -1871,24 +1676,25 @@ class ComposedChangeProjection:
                 )
             )
             schema_changed = prim_path in self._candidates.types and before_type != after_type
+            needs_rebuild = type_changed or local_rebuild
+            needs_ensure = self._reset or not valid_before or schema_changed
+            if not (needs_rebuild or needs_ensure):
+                continue
             ensure = {
                 "k": K_ENSURE_PRIM,
                 "prim": prim_path,
-                "typeName": str(prim.GetTypeName()) if valid_after else "",
-                "api_schemas": list(prim.GetAppliedSchemas()) if valid_after else [],
+                "typeName": str(prim.GetTypeName()),
+                "api_schemas": list(prim.GetAppliedSchemas()),
             }
-            if valid_after and (type_changed or local_rebuild):
+            if needs_rebuild:
                 rebuilds.extend(
                     [
                         {"k": K_DELETE_PRIM, "prim": prim_path},
                         ensure,
                     ]
                 )
-                continue
-            if valid_after and (self._reset or not valid_before or schema_changed):
+            else:
                 ensures.append(ensure)
-            elif valid_before and not valid_after:
-                deletes.append({"k": K_DELETE_PRIM, "prim": prim_path})
         deletes.sort(key=lambda event: (-event["prim"].count("/"), event["prim"]))
         return rebuilds + ensures + deletes
 
@@ -2014,30 +1820,6 @@ class ComposedChangeProjection:
             if purpose:
                 event["material_purpose"] = purpose
             result.append(event)
-        return result
-
-    @staticmethod
-    def _collect_connectable_candidates(
-        events: list[dict],
-    ) -> dict[tuple[str, float | None], set[str]]:
-        result: dict[tuple[str, float | None], set[str]] = defaultdict(set)
-        for event in events:
-            prim_path = str(event.get("prim") or "")
-            if not prim_path:
-                continue
-            kind = event.get("k")
-            if kind == K_SET_CONNECTABLE_INPUT:
-                result[(prim_path, event.get("time"))].update(
-                    f"inputs:{name}" for name in event.get("inputs", ())
-                )
-            elif kind == K_SET_CONNECTABLE_CONNECTION:
-                result[(prim_path, None)].update(event.get("connections", ()))
-                result[(prim_path, None)].update(event.get("disconnections", ()))
-            elif _is_connectable_spec_event(event):
-                path = _sdf_property_path(event)
-                if path is not None:
-                    name = str(path.name)
-                    result[(prim_path, None)].add("*" if name == "info:id" else name)
         return result
 
     def _project_connectables(self) -> list[dict]:
@@ -2167,15 +1949,10 @@ class ComposedChangeProjection:
             key=lambda item: (item[0].count("/"), item[0], -1.0 if item[1] is None else item[1]),
         ):
             prim_path, time = key
-            prim = self._stage.GetPrimAtPath(prim_path)
-            if not _is_projectable_prim(prim):
+            local = after[key]
+            if local is None:
                 continue
-            xformable = UsdGeom.Xformable(prim)
-            if not xformable:
-                continue
-            changed = (self._previous_prim_values(prim_path).xforms or {}).get(
-                time,
-            ) != after.get(key)
+            changed = (self._previous_prim_values(prim_path).xforms or {}).get(time) != local
             reapply_composed = self._should_reapply_composed(prim_path)
             if not (reapply_composed or changed or prim_path in ensure_ops):
                 continue
@@ -2184,7 +1961,6 @@ class ComposedChangeProjection:
                 ensured.add(prim_path)
             if not (reapply_composed or changed):
                 continue
-            local = as_matrix(xformable.GetLocalTransformation(_time_code(time)))
             t, r, s = decompose_trs_from_matrix(local)
             event = {
                 "k": K_SET_XFORM_TRS,
