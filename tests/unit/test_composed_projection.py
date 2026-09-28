@@ -8,9 +8,10 @@ import sys
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pxr
 import pytest
-from pxr import Sdf, Tf, Usd, UsdGeom, UsdShade, UsdUtils
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.codec import encode_message
@@ -58,6 +59,123 @@ def _exact_spec_event(
         ),
         "removed": False,
     }
+
+
+def test_exact_prim_delta_projects_all_changed_native_channels():
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Thing", "Xform")
+    variants = prim.GetVariantSets().AddVariantSet("look")
+    for name in ("old", "new"):
+        variants.AddVariant(name)
+    variants.SetVariantSelection("old")
+    incoming = Sdf.Layer.CreateAnonymous("multi-field.usda")
+    incoming.TransferContent(stage.GetRootLayer())
+    incoming_stage = Usd.Stage.Open(incoming)
+    changed = incoming_stage.GetPrimAtPath("/Thing")
+    changed.SetTypeName("Cube")
+    changed.SetInstanceable(True)
+    UsdShade.MaterialBindingAPI.Apply(changed)
+    changed.GetVariantSets().GetVariantSet("look").SetVariantSelection("new")
+    event = _exact_spec_event(
+        incoming, "/Thing", "prim", ["typeName", "apiSchemas", "variantSelection", "instanceable"],
+    )
+    with ComposedChangeProjection(stage, [event]) as projection:
+        apply_events(stage, [event])
+        projected = projection.build_events()
+    adapter = MockAdapter()
+    adapter.ensure_prim("/Thing", "Xform")
+    adapter.apply_events(projected)
+    result = adapter.get_prim("/Thing")
+    assert result["typeName"] == "Cube"
+    assert "MaterialBindingAPI" in result["api_schemas"]
+    assert result["variant_selections"] == {"look": "new"}
+    assert result["instanceable"] is True
+
+
+@pytest.mark.parametrize(
+    "prim_type,attr_name,type_name,first,second,event_kind,expected",
+    [
+        ("Xform", "xformOp:translate", Sdf.ValueTypeNames.Double3, (1, 0, 0), (2, 0, 0),
+         "set_xform_trs", {"t": [1.0, 0.0, 0.0]}),
+        ("Xform", "visibility", Sdf.ValueTypeNames.Token, "inherited", "invisible",
+         "set_visibility", {"visible": True}),
+        ("Shader", "inputs:roughness", Sdf.ValueTypeNames.Float, 0.25, 0.75,
+         "set_connectable_input", {"inputs": {"roughness": 0.25}}),
+        ("PointInstancer", "positions", Sdf.ValueTypeNames.Point3fArray, [(1, 0, 0)], [(2, 0, 0)],
+         "set_point_instancer", {"positions": [[1.0, 0.0, 0.0]]}),
+    ],
+)
+def test_erased_sample_projects_resolved_value_in_its_native_channel(
+    prim_type, attr_name, type_name, first, second, event_kind, expected,
+):
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Thing", prim_type)
+    attr = prim.CreateAttribute(attr_name, type_name)
+    if attr_name == "xformOp:translate":
+        UsdGeom.Xformable(prim).SetXformOpOrder([UsdGeom.XformOp(attr)])
+    if prim_type == "Shader":
+        UsdShade.Shader(prim).CreateIdAttr("TestShader")
+    attr.Set(first, 1.0)
+    attr.Set(second, 2.0)
+    event = {"k": "erase_time_samples", "prim": "/Thing", "spec_path": str(attr.GetPath()),
+             "times": [2.0]}
+    with ComposedChangeProjection(stage, [event]) as projection:
+        apply_events(stage, [event])
+        projected = projection.build_events()
+    assert all(item["k"] != "erase_time_samples" for item in projected)
+    sample = next(item for item in projected if item["k"] == event_kind and item.get("time") == 2.0)
+    for field, value in expected.items():
+        np.testing.assert_equal(sample[field], value)
+
+
+def test_masked_chained_rename_reapplies_each_native_destination():
+    stage = Usd.Stage.CreateInMemory()
+    for path, translation in (("/A", 1.0), ("/B", 2.0), ("/C", 3.0)):
+        UsdGeom.Xform.Define(stage, path).AddTranslateOp().Set((translation, 0, 0))
+    weak = Sdf.Layer.CreateAnonymous("renamed.usda")
+    weak_prim = Sdf.CreatePrimInLayer(weak, "/A")
+    weak_prim.specifier = Sdf.SpecifierDef
+    weak_prim.typeName = "Xform"
+    stage.GetRootLayer().subLayerPaths.append(weak.identifier)
+    stage.SetEditTarget(weak)
+    events = [
+        {"k": "rename_prim", "prim": "/A", "new_name": "B"},
+        {"k": "rename_prim", "prim": "/B", "new_name": "C"},
+    ]
+    with ComposedChangeProjection(stage, events, reapply_composed_paths=["/A"]) as projection:
+        apply_events(stage, events)
+        projected = projection.build_events()
+    restored = {event["prim"]: event["t"] for event in projected if event["k"] == "set_xform_trs"}
+    assert restored == {"/A": [1.0, 0.0, 0.0], "/B": [2.0, 0.0, 0.0], "/C": [3.0, 0.0, 0.0]}
+
+
+@pytest.mark.parametrize("sample_time", [None, 2.0])
+def test_matrix_op_delta_projects_equivalent_native_trs(sample_time):
+    stage = Usd.Stage.CreateInMemory()
+    op = UsdGeom.Xform.Define(stage, "/Thing").AddTransformOp()
+    time = Usd.TimeCode.Default() if sample_time is None else Usd.TimeCode(sample_time)
+    op.Set(Gf.Matrix4d(1), time)
+    incoming = Sdf.Layer.CreateAnonymous("matrix-edit.usda")
+    incoming.TransferContent(stage.GetRootLayer())
+    incoming_stage = Usd.Stage.Open(incoming)
+    transform = Gf.Transform()
+    transform.SetTranslation(Gf.Vec3d(5, 6, 7))
+    transform.SetRotation(Gf.Rotation(Gf.Vec3d(0, 1, 0), 35))
+    transform.SetScale(Gf.Vec3d(2, 3, 4))
+    incoming_stage.GetAttributeAtPath(op.GetAttr().GetPath()).Set(transform.GetMatrix(), time)
+    event = _exact_spec_event(
+        incoming, str(op.GetAttr().GetPath()), "attribute",
+        ["default" if sample_time is None else "timeSamples"],
+    )
+    event["prim"] = "/Thing"
+    with ComposedChangeProjection(stage, [event]) as projection:
+        apply_events(stage, [event])
+        projected = projection.build_events()
+    receiver = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(receiver, "/Thing")
+    apply_events(receiver, projected)
+    actual = UsdGeom.Xformable(receiver.GetPrimAtPath("/Thing")).GetLocalTransformation(time)
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(transform.GetMatrix()), atol=1e-6)
 
 
 @pytest.mark.parametrize("field", ["inheritPaths", "specializes"])
@@ -284,6 +402,36 @@ def test_projection_events_can_only_be_built_once():
             projection.build_events()
     finally:
         projection.close()
+
+
+def test_reset_restores_unchanged_composed_prims_to_empty_native_scene():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World", "Xform")
+    UsdShade.MaterialBindingAPI.Apply(stage.DefinePrim("/World/Thing", "Cube"))
+    state = ComposedProjectionState(stage)
+    paths = ["/World/Thing", "/World"]
+    with ComposedChangeProjection(stage, [], state=state, extra_scene_paths=paths) as unchanged:
+        assert unchanged.build_events() == []
+    with ComposedChangeProjection(
+        stage,
+        [],
+        state=state,
+        extra_scene_paths=paths,
+        reset=True,
+    ) as reset:
+        events = reset.build_events()
+        assert [event["prim"] for event in events if event["k"] == "ensure_prim"] == [
+            "/World",
+            "/World/Thing",
+        ]
+        assert all(event["k"] != "delete_prim" for event in events)
+        adapter = MockAdapter()
+        adapter.apply_events(events)
+        assert adapter.get_prim("/World")["typeName"] == "Xform"
+        assert adapter.get_prim("/World/Thing")["typeName"] == "Cube"
+        assert "MaterialBindingAPI" in adapter.get_prim("/World/Thing")["api_schemas"]
+        reset.commit()
+    state.close()
 
 
 def test_shared_root_projection_pauses_after_resolver_refresh(caplog):
@@ -2111,6 +2259,38 @@ def test_native_import_precedes_explicit_new_descendant(tmp_path):
         ("set_reference", "/World/Asset"),
         ("ensure_prim", "/World/Asset/AddedLocally"),
     ]
+
+
+def test_multiple_native_roots_order_descendants_after_their_last_control(tmp_path):
+    asset_path = _native_import_projection_fixture(tmp_path)
+    stage = Usd.Stage.CreateInMemory()
+    roots = ("/World/A", "/World/AB")
+    events = [
+        {"k": "ensure_prim", "prim": path, "typeName": "Xform"}
+        for root in roots
+        for path in (root, f"{root}/AddedLocally")
+    ]
+    events.append({"k": "ensure_prim", "prim": "/World/Aardvark", "typeName": "Xform"})
+    events.extend(
+        {"k": "set_reference", "prim": root,
+         "refs": [{"asset_path": str(asset_path), "prim_path": "/Asset"}]}
+        for root in roots
+    )
+    events.append({"k": "load_payload", "prim": roots[0]})
+    with ComposedChangeProjection(
+        stage, events, native_composition_subtree_roots=roots,
+    ) as projection:
+        apply_events(stage, events)
+        projected = projection.build_events()
+    order = [(event["k"], event.get("prim")) for event in projected]
+    for root in roots:
+        controls = [index for index, (kind, path) in enumerate(order)
+                    if path == root and kind in {"set_reference", "load_payload"}]
+        assert controls
+        assert order.index(("ensure_prim", root)) < min(controls)
+        assert order.index(("ensure_prim", f"{root}/AddedLocally")) > max(controls)
+    first_import = min(order.index(("set_reference", root)) for root in roots)
+    assert order.index(("ensure_prim", "/World/Aardvark")) < first_import
 
 
 def test_layered_dispatcher_projects_composed_shader_input_to_native_adapter():
