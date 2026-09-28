@@ -12,29 +12,29 @@ from dataclasses import dataclass
 from pxr import Sdf, Usd
 
 from ..codec import encode_message
-from ..event_store import LayerIdentity, ProducerProgress
+from ..event_store import LayerIdentity
 from ..protocol_constants import (
     K_RENAME_PRIM,
+    K_SET_SDF_SPEC_FIELDS,
     K_SET_SUBLAYERS,
     MSG_LAYER_GRAPH_STATE,
     NON_COLLABORATION_KINDS,
     LayerMode,
 )
 from ..shared_layer_graph import PreparedSublayers, StaleLayerGraphError
-from .journal import EncodedEvents, EventJournal
-from .scene import SceneState, include_removed_spec_fields
+from .journal import EncodedEvents, EncodedRecord, EventJournal
+from .scene import SceneState, apply_with_deletion_fields
 from .transactions import Transaction, TransactionRequest
 from .types import TransactionCommit, TransactionOutcome, TransactionRejectedError
 
 
 @dataclass(slots=True)
 class PreparedTransaction:
-    events: list[dict]
+    request: Transaction
     target_layer: Sdf.Layer
+    layer_key: str
     collaboration_paths: set[str]
     has_session_events: bool
-    encoded: EncodedEvents
-    progress: ProducerProgress | None
 
 
 def _managed_rollback_paths(events: list[dict]) -> set[str]:
@@ -123,23 +123,19 @@ class TransactionCommitter:
                 self._prepare_managed_transaction(request)
                 for _index, request in accepted
             ]
-            self._persist_managed_transactions(prepared)
+            encoded_transactions = self._apply_and_persist_managed(prepared)
 
         self.journal.remember_progress(next_by_session)
-        for (index, request), transaction in zip(accepted, prepared, strict=True):
+        for (index, request), encoded in zip(accepted, encoded_transactions, strict=True):
             outcomes[index] = TransactionCommit(
-                "committed", request.txn_id, tuple(transaction.encoded.records),
+                "committed", request.txn_id, tuple(encoded.records),
             )
         return [outcomes[index] for index in range(len(requests))]
 
     def _prepare_managed_transaction(
         self, request: Transaction,
     ) -> PreparedTransaction:
-        """Check routing and encode previously validated managed events.
-
-        Requires the journal commit scope and a sequence reservation so failures
-        in this method or subsequent persistence release the reserved sequences.
-        """
+        """Resolve routing and rollback coverage without mutating the scene."""
         if request.layer_key:
             raise ValueError("managed transactions cannot select an arbitrary layer key")
         events = request.events
@@ -150,27 +146,31 @@ class TransactionCommitter:
 
         collaboration_paths = _managed_rollback_paths(events)
         has_session_events = any(event["k"] in NON_COLLABORATION_KINDS for event in events)
-        encoded = self.journal.encode_events(
+        return PreparedTransaction(
+            request,
+            target_layer,
+            layer_key or "",
+            collaboration_paths,
+            has_session_events,
+        )
+
+    def _encode_managed(self, transaction: PreparedTransaction) -> EncodedEvents:
+        request = transaction.request
+        return self.journal.assign_and_encode_events(
             (
-                (layer_key or "", event)
+                (transaction.layer_key, event)
                 if event["k"] not in NON_COLLABORATION_KINDS
                 else ("", event)
-                for event in events
+                for event in request.events
             ),
             client_id=request.client_id,
             origin=request.origin,
             client_addr=request.client_addr,
         )
-        return PreparedTransaction(
-            events,
-            target_layer,
-            collaboration_paths,
-            has_session_events,
-            encoded,
-            request.progress,
-        )
 
-    def _persist_managed_transactions(self, prepared: list[PreparedTransaction]) -> None:
+    def _apply_and_persist_managed(
+        self, prepared: list[PreparedTransaction],
+    ) -> list[EncodedEvents]:
         """Apply and persist a group atomically within the journal commit scope.
 
         Snapshot only touched collaboration prims, plus session state when
@@ -185,12 +185,11 @@ class TransactionCommitter:
                 else ()
             )
             snapshot_session = transaction.has_session_events
-            records = transaction.encoded.store_rows
-            producer_progress = (transaction.progress,) if transaction.progress is not None else ()
+            progress = transaction.request.progress
+            producer_progress = (progress,) if progress is not None else ()
         else:
             paths_by_layer: dict[str, tuple[Sdf.Layer, set[str]]] = {}
             snapshot_session = False
-            records = []
             progress_by_producer = {}
             for transaction in prepared:
                 if transaction.collaboration_paths:
@@ -204,30 +203,50 @@ class TransactionCommitter:
                         _layer, paths = paths_by_layer[layer_id]
                         paths.update(transaction.collaboration_paths)
                 snapshot_session |= transaction.has_session_events
-                records.extend(transaction.encoded.store_rows)
-                if (progress := transaction.progress) is not None:
+                if (progress := transaction.request.progress) is not None:
                     progress_by_producer[(progress.client_id, progress.session_id)] = progress
             layer_paths = paths_by_layer.values()
             producer_progress = tuple(progress_by_producer.values())
 
+        needs_scene_fields = any(
+            event["k"] == K_SET_SDF_SPEC_FIELDS and event["removed"]
+            for transaction in prepared
+            for event in transaction.request.events
+        )
+        # Keep large geometry encoding outside the scene lock. If any deletion
+        # needs authored fields, apply and encode the entire batch in order so
+        # later requests cannot reserve sequences ahead of that deletion.
+        encoded_transactions = (
+            [] if needs_scene_fields
+            else [self._encode_managed(transaction) for transaction in prepared]
+        )
         with self.scene.atomic_edit(layer_paths, include_session=snapshot_session):
             for transaction in prepared:
+                request = transaction.request
                 self.scene.apply_validated(
-                    transaction.events,
+                    request.events,
                     layer=transaction.target_layer,
                     update_tracking=False,
                 )
+                if needs_scene_fields:
+                    encoded_transactions.append(self._encode_managed(transaction))
+            records = (
+                encoded_transactions[0].store_rows
+                if len(encoded_transactions) == 1
+                else [row for encoded in encoded_transactions for row in encoded.store_rows]
+            )
             self.journal.append_batch(
                 records,
                 producer_progress=producer_progress,
                 synchronous=True,
             )
             for transaction in prepared:
-                self.scene.update_prim_tracking(transaction.events)
+                self.scene.update_prim_tracking(transaction.request.events)
+        return encoded_transactions
 
     def commit_events(
         self, request: Transaction,
-    ) -> list[tuple[dict, bytes]]:
+    ) -> list[EncodedRecord]:
         """Apply validated events and persist them in the caller's commit scope.
 
         Each mode owns sequence rollback if preparation or persistence fails.
@@ -244,17 +263,17 @@ class TransactionCommitter:
         if self.scene.layer_mode is LayerMode.SHARED_STAGE:
             if request.layer is not None:
                 raise ValueError("managed layer routing is unavailable in shared-stage mode")
-            return self._process_shared_txn(request)
+            return self._commit_shared(request)
         with self.journal.reserve_sequences():
             transaction = self._prepare_managed_transaction(request)
-            self._persist_managed_transactions([transaction])
-        return transaction.encoded.records
+            (encoded,) = self._apply_and_persist_managed([transaction])
+        return encoded.records
 
-    def _process_shared_txn(
+    def _commit_shared(
         self, request: Transaction,
-    ) -> list[tuple[dict, bytes]]:
+    ) -> list[EncodedRecord]:
         """Apply one validated authored-layer transaction against the current graph."""
-        from ..event_apply import apply_events, atomic_apply
+        from ..event_apply import atomic_apply
 
         layer_key = request.layer_key
         graph = self.scene.shared_layer_graph
@@ -290,16 +309,15 @@ class TransactionCommitter:
                 Usd.EditContext(self.scene.stage, Usd.EditTarget(target)),
                 graph.transaction(),
             ):
-                include_removed_spec_fields(target, canonical_events)
                 with atomic_apply(self.scene.stage):
-                    apply_events(self.scene.stage, canonical_events, prevalidated=True)
+                    apply_with_deletion_fields(self.scene.stage, target, canonical_events)
                     if prepared is not None:
                         graph.accept_sublayers(prepared)
                         routed_events.extend(graph.discover_sublayer_states(prepared.mappings))
                     records = self.persist_shared_events(routed_events, request=request)
+                self.scene.invalidate_prim_count()
         except StaleLayerGraphError as exc:
             raise TransactionRejectedError("stale_layer_graph", str(exc)) from exc
-        self.scene.invalidate_prim_count()
         return records
 
     def persist_shared_events(
@@ -307,13 +325,13 @@ class TransactionCommitter:
         routed_events: list[tuple[str, dict]],
         *,
         request: Transaction | None = None,
-    ) -> list[tuple[dict, bytes]]:
+    ) -> list[EncodedRecord]:
         """Persist routed records in the caller's commit scope.
 
         Producer progress and graph identities require synchronous persistence;
         other records follow the configured journal durability policy.
         """
-        encoded = self.journal.encode_events(
+        encoded = self.journal.assign_and_encode_events(
             routed_events,
             client_id=request.client_id if request else None,
             origin=request.origin if request else None,

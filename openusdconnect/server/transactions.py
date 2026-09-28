@@ -149,7 +149,9 @@ class TransactionCoordinator:
                 return
             requests = [first]
             deadline = time.monotonic() + self._batch_delay
-            # Child replay must receive sequences before the next transaction.
+            # Loading a payload ends the batch: publication appends its child
+            # replay, which must receive sequences before the next transaction.
+            # The group callback can therefore handle payload replay once, last.
             while len(requests) < self._batch_size and not requests[-1].payload_load_paths:
                 try:
                     request = self._queue.get_nowait()

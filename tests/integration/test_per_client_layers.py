@@ -578,7 +578,9 @@ class TestReplayWithClientLayers:
 
         srv2 = UsdSyncServer(log_path=db)
         try:
-            assert srv2._collaboration.ordered_department_names() == ["animation", "layout"]
+            assert srv2.layer_stack.layer_keys == (
+                "department:animation", "department:layout", "default",
+            )
             assert _read_translate(srv2.stage, "/World/Cube") == (1, 0, 0)
             assert srv2.mute_layer("animation")
             assert _read_translate(srv2.stage, "/World/Cube") == (2, 0, 0)

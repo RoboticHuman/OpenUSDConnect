@@ -46,7 +46,7 @@ class CollaborationLayerStack:
         self._order: tuple[str, ...] = (default_key,)
         self._generation = uuid.uuid4().hex
         self._revision = 1
-        self._install()
+        self._update_session_sublayers()
 
     @property
     def default_key(self) -> str:
@@ -110,7 +110,7 @@ class CollaborationLayerStack:
         self._labels[layer_key] = display_label
         self._order = (*self._order[:-1], layer_key, self._default_key)
         self._revision += 1
-        self._install()
+        self._update_session_sublayers()
         return layer, True
 
     def set_order(self, ordered_keys: Iterable[str]) -> bool:
@@ -138,7 +138,7 @@ class CollaborationLayerStack:
 
         self._order = order
         self._revision += 1
-        self._install()
+        self._update_session_sublayers()
         return True
 
     def set_muted(self, layer_key: str, muted: bool) -> bool:
@@ -168,7 +168,7 @@ class CollaborationLayerStack:
         del self._labels[layer_key]
         self._order = tuple(key for key in self._order if key != layer_key)
         self._revision += 1
-        self._install(detach_identifiers={removed_identifier})
+        self._update_session_sublayers(detach_identifiers={removed_identifier})
         return layer
 
     def clear(self) -> None:
@@ -193,7 +193,7 @@ class CollaborationLayerStack:
             ],
         }
 
-    def _install(
+    def _update_session_sublayers(
         self,
         *,
         detach_identifiers: set[str] | None = None,

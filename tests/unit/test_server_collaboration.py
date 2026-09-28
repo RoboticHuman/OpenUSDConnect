@@ -48,7 +48,7 @@ def test_join_cannot_lose_layer_to_last_client_departure(scene, monkeypatch, mer
     def depart():
         departure_started.set()
         try:
-            return policy.release_client_layer("leaving", merge_into_root=merge_into_root)
+            return policy.release_client_assignment("leaving", merge_into_root=merge_into_root)
         finally:
             departure_finished.set()
 
@@ -96,11 +96,11 @@ def test_callbacks_observe_complete_assignments_without_holding_scene_lock(scene
     policy.set_department_priority(["animation"])
     assert policy.set_muted("artist", True)
     assert policy.set_muted("artist", False)
-    assert policy.release_client_layer("artist", merge_into_root=True)
+    assert policy.release_client_assignment("artist", merge_into_root=True)
     assert snapshots[-1] == ({}, [])
 
     policy.get_or_create_client_layer("artist", "animation")
-    assert policy.release_client_layer("artist", merge_into_root=False)
+    assert policy.release_client_assignment("artist", merge_into_root=False)
     assert snapshots[-1] == ({}, [])
 
 

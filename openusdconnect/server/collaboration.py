@@ -180,16 +180,6 @@ class CollaborationPolicy:
             [*priority_keys, *unlisted_keys, _DEFAULT_LAYER_KEY]
         )
 
-    def ordered_department_names(self) -> list[str]:
-        """Return department policy entries in composed strength order."""
-        with self._scene.lock:
-            departments = []
-            for layer_key in self._scene.layer_stack.layer_keys:
-                department = department_for_layer_key(layer_key)
-                if department:
-                    departments.append(department)
-            return departments
-
     def resolve_layer_key(self, key: str) -> str | None:
         """Resolve a client ID, department name, or layer key."""
         with self._scene.lock:
@@ -215,7 +205,7 @@ class CollaborationPolicy:
             layer_key = self._scene.layer_stack.key_for_layer(layer)
             return department_for_layer_key(layer_key) if layer_key is not None else None
 
-    def release_client_layer(self, client_id: str, *, merge_into_root: bool) -> bool:
+    def release_client_assignment(self, client_id: str, *, merge_into_root: bool) -> bool:
         """Release a department assignment, optionally merging its opinions first.
 
         Remove the layer only after its last client leaves. Default-layer

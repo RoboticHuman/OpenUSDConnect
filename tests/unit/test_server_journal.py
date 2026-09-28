@@ -57,7 +57,7 @@ def test_realtime_shutdown_drains_after_a_failed_write(tmp_path, monkeypatch):
     journal.start()
     try:
         for path in ("/Failed", "/Persisted"):
-            encoded = journal.encode_events(
+            encoded = journal.assign_and_encode_events(
                 [("default", {"k": "ensure_prim", "prim": path, "typeName": "Xform"})],
                 client_id=None, origin=None, client_addr=None,
             )

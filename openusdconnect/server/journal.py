@@ -21,13 +21,14 @@ from .metrics import WireMetrics
 
 LOG = logging.getLogger(__name__)
 type StoreRow = tuple[int, bytes, str | None, str | None, str | None]
+type EncodedRecord = tuple[dict, bytes]
 
 
 def encode_event_record(
     sequence: int, event: dict, *, client: str | None = None,
     client_id: str | None = None, origin: str | None = None,
     layer_key: str | None = None, encoder: Callable[[dict], bytes] = encode_message,
-) -> tuple[dict, bytes]:
+) -> EncodedRecord:
     """Encode an explicit sequence without allocating it or changing journal state."""
     record = {"type": MSG_EVENT, "seq": sequence, "event": event,
               "client": client, "client_id": client_id}
@@ -40,7 +41,7 @@ def encode_event_record(
 
 @dataclass(slots=True)
 class EncodedEvents:
-    records: list[tuple[dict, bytes]] = field(default_factory=list)
+    records: list[EncodedRecord] = field(default_factory=list)
     store_rows: list[StoreRow] = field(default_factory=list)
 
     def append(self, record: dict, record_bin: bytes) -> None:
@@ -59,6 +60,8 @@ class EventJournal:
         self.next_seq = store.get_max_seq() + 1
         self.event_count = store.get_count()
         self.seq_at_last_compact = 1
+        # Epochs invalidate identities independently of the sequence head:
+        # snapshots also expire on layer changes, replay only on history rewrites.
         self.snapshot_epoch = 0
         self.replay_epoch = 0
         self._producer_progress: dict[tuple[str, str], int] = {}
@@ -165,7 +168,7 @@ class EventJournal:
         with self._commit_lock:
             self._producer_progress.update(updates)
 
-    def encode_events(
+    def assign_and_encode_events(
         self,
         routed_events: Iterable[tuple[str, dict]],
         *,
@@ -176,18 +179,18 @@ class EventJournal:
         encoded = EncodedEvents()
         encoder = self._encoder.encode
         for layer_key, event in routed_events:
-            encoded.append(*self.encode_event(
+            encoded.append(*self.assign_and_encode_event(
                 event, client_id=client_id, origin=origin,
                 client_addr=client_addr, layer_key=layer_key, encoder=encoder,
             ))
         return encoded
 
-    def encode_event(
+    def assign_and_encode_event(
         self, event: dict, *, client_id: str | None = None,
         origin: str | None = None, client_addr: str | None = None,
         layer_key: str | None = None,
         encoder: Callable[[dict], bytes] = encode_message,
-    ) -> tuple[dict, bytes]:
+    ) -> EncodedRecord:
         """Sequence and encode one event within the caller's commit scope."""
         record, record_bin = encode_event_record(
             self.assign_seq(), event, client=client_addr, client_id=client_id,

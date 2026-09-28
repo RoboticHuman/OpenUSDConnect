@@ -108,7 +108,7 @@ class HistoryMaintenance:
         self._last_reclaim = time.monotonic()
 
     @contextmanager
-    def exclusive(self):
+    def rewrite_window(self):
         """Drain earlier transactions before rewriting or publishing a new history."""
         with self._barrier.exclusive():
             self.drain()
@@ -158,7 +158,7 @@ class HistoryMaintenance:
     def build_compacted(rows: list[tuple[int, bytes]]) -> LogCompaction:
         compaction = LogCompaction()
         for seq, record_bin in rows:
-            compaction.add_record(seq, record_bin)
+            compaction.add_stored_record(seq, record_bin)
         return compaction
 
     def commit_compaction(
@@ -208,7 +208,7 @@ class HistoryMaintenance:
         self._finish_rewrite(0)
         LOG.info("Purged event log and reset authored collaboration layers")
 
-    def replace_snapshot(
+    def commit_snapshot(
         self, prepared: PreparedSnapshot, *, client_id: str, origin: str,
     ) -> EncodedEvents:
         """Persist a prepared snapshot before changing the authoritative scene."""

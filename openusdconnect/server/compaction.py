@@ -93,7 +93,7 @@ def child_replay_records(store: EventStore, prim_path: str) -> list[ReceivedEven
     )
     compaction = LogCompaction()
     for record in merge(descendants, ancestors, key=lambda record: record.seq):
-        compaction.add_event(record)
+        compaction.add_decoded_record(record)
 
     ordered: list[ReceivedEvent] = []
     segment: list[ReceivedEvent] = []
@@ -158,7 +158,7 @@ class LogCompaction:
     _pending: dict[_MergeKey, ReceivedEvent] = field(default_factory=dict)
     _preserved: list[_PreservedEvent] = field(default_factory=list)
 
-    def add_record(self, sequence: int, record_bin: bytes) -> None:
+    def add_stored_record(self, sequence: int, record_bin: bytes) -> None:
         # Keep geometry arrays as buffer views instead of expanding them into lists.
         message_type, payload = resolve_payload(decode_envelope(record_bin))
         if message_type == MSG_LAYER_GRAPH_STATE:
@@ -167,9 +167,9 @@ class LogCompaction:
             raise ValueError("event log contains an unsupported record")
         record = decode_received_event(payload, numpy_arrays=True)
         record.seq = sequence
-        self.add_event(record)
+        self.add_decoded_record(record)
 
-    def add_event(self, record: ReceivedEvent) -> None:
+    def add_decoded_record(self, record: ReceivedEvent) -> None:
         """Take ownership of a decoded record, retaining its routing through merges."""
         event = record.event
         kind = event["k"]

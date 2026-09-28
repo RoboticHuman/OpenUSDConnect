@@ -118,7 +118,7 @@ def test_transport_metrics_count_actual_receiver_fanout():
     receivers = (FakeHandler(), FakeHandler())
     payload = b"framed-payload"
 
-    s._send_to_all(payload, targets=receivers)
+    s._send_to_receivers(payload, targets=receivers)
 
     transport = s.get_wire_metrics()["transport"]
     assert transport["receiver_egress"] == {

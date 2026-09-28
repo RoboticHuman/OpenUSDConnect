@@ -4,8 +4,12 @@ import sqlite3
 import threading
 
 import pytest
+from pxr import Sdf
 
+from openusdconnect.codec import message_to_dict
 from openusdconnect.event_store import LayerIdentity, ProducerProgress, SqliteEventStore
+from openusdconnect.protocol_constants import LayerMode
+from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.server.state import UsdSyncServer
 from openusdconnect.server.transactions import TransactionRequest
 from openusdconnect.server.types import TransactionRejectedError
@@ -22,6 +26,189 @@ def _commit(server, path: str, *, client: str, session: str, txn_id: int):
         session_id=session,
         txn_id=txn_id,
     )
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_removed_spec_fields_match_listener_wire_and_history(tmp_path, grouped):
+    server = UsdSyncServer(log_path=str(tmp_path / "deletion-fields.db"), txn_batch_size=1)
+    source = Sdf.Layer.CreateAnonymous()
+    prim = Sdf.CreatePrimInLayer(source, "/World")
+    attribute = Sdf.AttributeSpec(prim, "value", Sdf.ValueTypeNames.Float)
+    attribute.default = 5.0
+    expected_fields = sorted(str(key) for key in attribute.ListInfoKeys())
+    create = {
+        "k": "set_sdf_spec_fields", "prim": "/World", "spec_path": "/World.value",
+        "spec_kind": "attribute", "fields": expected_fields,
+        "fragment": serialize_spec_fields(
+            source, "/World.value", "attribute", expected_fields,
+        ),
+        "removed": False,
+    }
+    remove = {
+        "k": "set_sdf_spec_fields", "prim": "/World", "spec_path": "/World.value",
+        "spec_kind": "property", "fields": [], "fragment": "", "removed": True,
+    }
+    requests = [
+        TransactionRequest(
+            events=[event], client_id="client", session_id="session", txn_id=txn_id,
+        )
+        for txn_id, event in enumerate((create, remove), start=1)
+    ]
+    observed = []
+    server.add_event_listener(observed.append)
+    try:
+        if grouped:
+            # The second request must see fields authored by the first request
+            # in this same batch, rather than its initial empty scene.
+            outcomes = server._commit_and_publish_batch(requests)
+        else:
+            outcomes = [server._commit_and_publish(request) for request in requests]
+
+        assert [outcome.status for outcome in outcomes] == ["committed", "committed"]
+        assert not server.stage.GetPropertyAtPath("/World.value")
+        record, record_bytes = outcomes[-1].records[0]
+        stored_bytes = server.store.get_all_asc()[-1][1]
+        assert record_bytes == stored_bytes
+        assert observed[-1]["event"]["fields"] == expected_fields
+        assert record["event"]["fields"] == expected_fields
+        assert message_to_dict(record_bytes)["event"]["fields"] == expected_fields
+        assert message_to_dict(stored_bytes)["event"]["fields"] == expected_fields
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("layer_mode", list(LayerMode))
+def test_removed_spec_fields_follow_edits_in_the_same_transaction(tmp_path, layer_mode):
+    root = Sdf.Layer.CreateNew(str(tmp_path / "root.usda"))
+    root.Save()
+    server = UsdSyncServer(
+        base_usd_path=root.identifier,
+        layer_mode=layer_mode,
+        log_path=str(tmp_path / "ordered-deletion-fields.db"),
+        txn_batch_size=1,
+    )
+    source = Sdf.Layer.CreateAnonymous()
+    prim = Sdf.CreatePrimInLayer(source, "/World")
+    attribute = Sdf.AttributeSpec(prim, "value", Sdf.ValueTypeNames.Float)
+    attribute.default = 5.0
+    events = []
+    expected_fields = []
+    for documentation in (None, "recreated property"):
+        if documentation is not None:
+            attribute.documentation = documentation
+        fields = sorted(str(key) for key in attribute.ListInfoKeys())
+        expected_fields.append(fields)
+        events.extend([
+            {
+                "k": "set_sdf_spec_fields", "prim": "/World",
+                "spec_path": "/World.value", "spec_kind": "attribute", "fields": fields,
+                "fragment": serialize_spec_fields(source, "/World.value", "attribute", fields),
+                "removed": False,
+            },
+            {
+                "k": "set_sdf_spec_fields", "prim": "/World",
+                "spec_path": "/World.value", "spec_kind": "property", "fields": [],
+                "fragment": "", "removed": True,
+            },
+        ])
+    events.append(dict(events[0]))
+    graph = server.shared_layer_graph
+    observed = []
+    server.add_event_listener(observed.append)
+    try:
+        outcome = server.process_idempotent_txn(
+            events, client_id="client", session_id="session", txn_id=1,
+            layer_key=graph.root_layer_key if graph is not None else "",
+        )
+        assert outcome.status == "committed"
+        assert server.stage.GetAttributeAtPath("/World.value").Get() == 5.0
+        assert not server.stage.GetAttributeAtPath("/World.value").GetDocumentation()
+        stored_rows = server.store.get_all_asc()[-len(events):]
+        for index, fields in zip((1, 3), expected_fields, strict=True):
+            record, wire_bytes = outcome.records[index]
+            assert record["event"]["fields"] == fields
+            assert observed[index]["event"]["fields"] == fields
+            assert message_to_dict(wire_bytes)["event"]["fields"] == fields
+            assert stored_rows[index][1] == wire_bytes
+    finally:
+        server.shutdown()
+        server.store.close()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("with_deletion", [False, True])
+def test_encoding_failure_preserves_scene_history_and_allows_retry(
+    tmp_path, monkeypatch, grouped, with_deletion,
+):
+    from openusdconnect.server import journal
+
+    server = UsdSyncServer(log_path=str(tmp_path / "encoding-failure.db"), txn_batch_size=1)
+    server._commit_events([_event("/World/Existing")])
+    before_layer = server.edit_layer.ExportToString()
+    before_rows = server.store.get_all_asc()
+    before_token = server.get_replay_token()
+    before_tree = server.get_prim_tree()
+    events = [_event("/World/First")]
+    if with_deletion:
+        events.append({
+            "k": "set_sdf_spec_fields", "prim": "/World/Existing",
+            "spec_path": "/World/Existing", "spec_kind": "prim",
+            "fields": [], "fragment": "", "removed": True,
+        })
+    events.append(_event("/World/Second"))
+    requests = [
+        TransactionRequest(
+            events=batch, client_id="client", session_id="session", txn_id=txn_id,
+        )
+        for txn_id, batch in enumerate(
+            [[event] for event in events] if grouped else [events], start=1,
+        )
+    ]
+    encode = journal.encode_event_record
+
+    def fail_second(sequence, event, **kwargs):
+        if event["prim"] == "/World/Second":
+            if with_deletion:
+                assert server.stage.GetPrimAtPath("/World/First")
+                assert not server.stage.GetPrimAtPath("/World/Existing")
+            raise RuntimeError("injected encoding failure")
+        return encode(sequence, event, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(journal, "encode_event_record", fail_second)
+            with pytest.raises(RuntimeError, match="injected encoding failure"):
+                if grouped:
+                    server._commit_and_publish_batch(requests)
+                else:
+                    server._commit_and_publish(requests[0])
+
+        assert not server.stage.GetPrimAtPath("/World/First")
+        assert not server.stage.GetPrimAtPath("/World/Second")
+        assert server.edit_layer.ExportToString() == before_layer
+        assert server.get_prim_tree() == before_tree
+        assert server.store.get_all_asc() == before_rows
+        assert server.get_replay_token() == before_token
+        assert server.producer_committed_through("client", "session") == 0
+
+        outcomes = (
+            server._commit_and_publish_batch(requests)
+            if grouped else [server._commit_and_publish(requests[0])]
+        )
+        assert all(outcome.status == "committed" for outcome in outcomes)
+        assert server.stage.GetPrimAtPath("/World/First")
+        assert server.stage.GetPrimAtPath("/World/Second")
+        assert bool(server.stage.GetPrimAtPath("/World/Existing")) is not with_deletion
+        records = [record for outcome in outcomes for record, _bytes in outcome.records]
+        assert [record["seq"] for record in records] == list(range(2, 2 + len(events)))
+        assert [record["event"]["prim"] for record in records] == [
+            event["prim"] for event in events
+        ]
+        assert server.get_replay_token()[1] == 1 + len(events)
+    finally:
+        server.shutdown()
+        server.store.close()
 
 
 def _run_concurrently(calls):
@@ -241,12 +428,12 @@ def test_producer_order_and_metadata_survive_duplicate_and_gap_requests(tmp_path
             for index, txn_id in enumerate((1, 1, 3, 2, 1))
         ]
         if grouped:
-            outcomes = server._commit_managed_transaction_group(requests)
+            outcomes = server._commit_and_publish_batch(requests)
         else:
             outcomes = []
             for request in requests:
                 try:
-                    outcomes.append(server._process_idempotent_txn_now(request))
+                    outcomes.append(server._commit_and_publish(request))
                 except TransactionRejectedError as exc:
                     outcomes.append(exc)
         assert [outcomes[i].status for i in (0, 1, 3, 4)] == [
@@ -302,9 +489,9 @@ def test_payload_publication_keeps_commit_order_and_durable_outcomes(
         ]
         outcomes = (
             # The coordinator closes each batch at a payload load.
-            server._commit_managed_transaction_group(requests[:2])
-            + server._commit_managed_transaction_group(requests[2:]) if grouped
-            else [server._process_idempotent_txn_now(request) for request in requests]
+            server._commit_and_publish_batch(requests[:2])
+            + server._commit_and_publish_batch(requests[2:]) if grouped
+            else [server._commit_and_publish(request) for request in requests]
         )
         assert observed == [
             "/Before", "/Payload", *([] if broadcast_fails else ["/Payload/Child"]), "/After",
@@ -776,7 +963,7 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
     ]
     try:
         with pytest.raises(sqlite3.OperationalError, match="injected grouped"):
-            server._commit_managed_transaction_group(requests)
+            server._commit_and_publish_batch(requests)
 
         assert server.edit_layer.ExportToString() == before
         assert server.stage.GetPrimAtPath("/World/Old").IsValid()
@@ -791,7 +978,7 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
             assert server.producer_committed_through(request.client_id, request.session_id) == 0
 
         monkeypatch.setattr(server.store, "append_batch", append_batch)
-        outcomes = server._commit_managed_transaction_group(requests)
+        outcomes = server._commit_and_publish_batch(requests)
         assert [outcome.status for outcome in outcomes] == ["committed", "committed"]
         assert all(request.commit is None and request.error is None for request in requests)
         assert all(not request.done.is_set() for request in requests)
@@ -803,7 +990,7 @@ def test_group_store_failure_rolls_back_both_rename_paths(tmp_path, monkeypatch)
             assert server.producer_committed_through(request.client_id, request.session_id) == 1
             assert server.store.get_producer_progress(request.client_id, request.session_id) == 1
 
-        outcomes = server._commit_managed_transaction_group(requests)
+        outcomes = server._commit_and_publish_batch(requests)
         assert [outcome.status for outcome in outcomes] == ["duplicate", "duplicate"]
         assert server.store.get_count() == 2
         assert server.get_replay_token()[1] == 2

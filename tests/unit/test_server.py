@@ -446,7 +446,7 @@ class TestCompaction:
         from openusdconnect.server.compaction import LogCompaction
 
         compaction = LogCompaction()
-        compaction.add_record(
+        compaction.add_stored_record(
             1,
             encode_message(
                 {
@@ -456,7 +456,7 @@ class TestCompaction:
                 }
             ),
         )
-        compaction.add_record(
+        compaction.add_stored_record(
             2,
             encode_message(
                 {
@@ -1159,13 +1159,13 @@ class TestBroadcast:
         srv.add_event_listener(observed.append)
 
         deliveries = []
-        send_to_all = srv._send_to_all
+        send_to_receivers = srv._send_to_receivers
 
         def record_delivery(payload, targets=None):
             deliveries.append((payload, targets))
-            return send_to_all(payload, targets=targets)
+            return send_to_receivers(payload, targets=targets)
 
-        monkeypatch.setattr(srv, "_send_to_all", record_delivery)
+        monkeypatch.setattr(srv, "_send_to_receivers", record_delivery)
         event = {
             "k": "ensure_prim",
             "prim": "/LayeredOnly",
@@ -1233,13 +1233,13 @@ class TestBroadcast:
         observed = []
         srv.add_event_listener(observed.append)
         send_calls = []
-        send_to_all = srv._send_to_all
+        send_to_receivers = srv._send_to_receivers
 
         def observe_send(payload, **kwargs):
             send_calls.append(payload)
-            return send_to_all(payload, **kwargs)
+            return send_to_receivers(payload, **kwargs)
 
-        monkeypatch.setattr(srv, "_send_to_all", observe_send)
+        monkeypatch.setattr(srv, "_send_to_receivers", observe_send)
         first = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/First", "typeName": "Xform"}]
         )
@@ -1274,13 +1274,13 @@ class TestBroadcast:
         other = FlatHandler("other-origin", 4)
         srv.receivers.update((plain_a, plain_b, author, other))
         send_calls = []
-        send_to_all = srv._send_to_all
+        send_to_receivers = srv._send_to_receivers
 
         def observe_send(payload, **kwargs):
             send_calls.append((payload, kwargs["targets"]))
-            return send_to_all(payload, **kwargs)
+            return send_to_receivers(payload, **kwargs)
 
-        monkeypatch.setattr(srv, "_send_to_all", observe_send)
+        monkeypatch.setattr(srv, "_send_to_receivers", observe_send)
         first = srv._commit_events(
             [{"k": "ensure_prim", "prim": "/FirstFlat", "typeName": "Xform"}]
         )

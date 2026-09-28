@@ -1,6 +1,7 @@
 """Tests for server event log compaction."""
 
 import pytest
+from pxr import Usd
 
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.protocol_constants import (
@@ -94,7 +95,7 @@ class TestCompaction:
         compaction = LogCompaction()
         for sequence, update in enumerate(updates, start=1):
             event = {"k": kind, "prim": "/World/A", "time": 1.0, **update}
-            compaction.add_record(sequence, encode_message({
+            compaction.add_stored_record(sequence, encode_message({
                 "type": MSG_EVENT, "seq": sequence, "event": event,
             }))
         entries = compaction.replay_records()
@@ -106,6 +107,62 @@ class TestCompaction:
         assert event[first] == values[4]
         assert event[second] == values[3]
         assert event["time"] == 1.0
+
+    @pytest.mark.parametrize("replacement", ["purge", "snapshot"])
+    def test_history_replacement_during_compaction_preserves_new_history(
+        self, tmp_path, monkeypatch, replacement,
+    ):
+        server = _make_server(tmp_path)
+        replacement_rows = []
+        replacement_token = None
+        try:
+            server._commit_events([
+                {"k": K_ENSURE_PRIM, "prim": "/Old", "typeName": "Xform"},
+            ])
+            original_build = server._maintenance.build_compacted
+
+            def replace_history_during_build(rows):
+                nonlocal replacement_rows, replacement_token
+                compacted = original_build(rows)
+                if replacement == "purge":
+                    server.purge()
+                else:
+                    uploaded = Usd.Stage.CreateInMemory()
+                    uploaded.DefinePrim("/Replacement", "Xform")
+                    epoch, seq = server.get_snapshot_token()
+                    uploaded.GetRootLayer().customLayerData = {"openusdconnect": {
+                        "scene_id": server.scene_id, "epoch": epoch, "snapshot_seq": seq,
+                    }}
+                    server.replace_from_stage_snapshot(
+                        uploaded, reject_ambiguous=False,
+                    )
+                replacement_rows = server.store.get_all_asc()
+                replacement_token = server.get_replay_token()
+                return compacted
+
+            # Interleave at the off-lock calculation boundary without timing
+            # assumptions. The completed plan belongs to the discarded history.
+            monkeypatch.setattr(
+                server._maintenance, "build_compacted", replace_history_during_build,
+            )
+            server.compact_log()
+
+            assert server.store.get_all_asc() == replacement_rows
+            assert server.get_replay_token() == replacement_token
+            assert not server.stage.GetPrimAtPath("/Old")
+            assert bool(server.stage.GetPrimAtPath("/Replacement")) == (replacement == "snapshot")
+        finally:
+            server.shutdown()
+            server.store.close()
+
+        restarted = _make_server(tmp_path)
+        try:
+            assert not restarted.stage.GetPrimAtPath("/Old")
+            replacement_prim = restarted.stage.GetPrimAtPath("/Replacement")
+            assert bool(replacement_prim) == (replacement == "snapshot")
+        finally:
+            restarted.shutdown()
+            restarted.store.close()
 
     def test_failed_rewrite_preserves_sequence_state(self, tmp_path, monkeypatch):
         srv = _make_server(tmp_path)

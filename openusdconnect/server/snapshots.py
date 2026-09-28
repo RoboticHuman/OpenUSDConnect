@@ -14,6 +14,7 @@ from pxr import Sdf, Usd
 from ..emitter import NoticeEmitter
 from ..protocol_constants import K_DEACTIVATE_PRIM, K_SET_SDF_SPEC_FIELDS, NON_COLLABORATION_KINDS
 from . import inspection
+from .collaboration import department_for_layer_key
 from .types import (
     AmbiguousVfsWriteError,
     InvalidVfsWriteError,
@@ -37,8 +38,7 @@ class SnapshotState:
     epoch: int
     seq: int
     prim_types: dict[str, str]
-    department_layers: list[str]
-    additional_layers: list[str]
+    non_default_layers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +90,6 @@ def validate_stage_snapshot(
     uploaded_epoch = uploaded_meta.epoch if uploaded_meta else None
     uploaded_seq = uploaded_meta.seq if uploaded_meta else None
     current_epoch, current_seq = current.epoch, current.seq
-    department_layers = current.department_layers
-    additional_layers = current.additional_layers
     before_types = current.prim_types
     uploaded_types = inspection.read_prim_types(uploaded_stage)
     before_paths = set(before_types)
@@ -123,7 +121,15 @@ def validate_stage_snapshot(
         error.analysis = replace(analysis, status=status, notes=[note])
         raise error
 
-    if department_layers or additional_layers:
+    if current.non_default_layers:
+        department_layers = []
+        additional_layers = []
+        for layer_key in current.non_default_layers:
+            department = department_for_layer_key(layer_key)
+            if department:
+                department_layers.append(department)
+            else:
+                additional_layers.append(layer_key)
         details = []
         if department_layers:
             details.append(f"department layers: {', '.join(department_layers)}")
@@ -253,15 +259,18 @@ def prepare_stage_snapshot(
     from ..event_apply import apply_events
     from ..sdf_spec_delta import validate_spec_delta
 
+    replacement_events = []
+    session_events = []
     for event in events:
-        if event.get("k") == K_SET_SDF_SPEC_FIELDS:
+        kind = event["k"]
+        if kind == K_SET_SDF_SPEC_FIELDS:
             validate_spec_delta(event)
+        if kind in NON_COLLABORATION_KINDS:
+            session_events.append(event)
+        else:
+            replacement_events.append(event)
 
     replacement_layer = replacement_stage.GetEditTarget().GetLayer()
-    replacement_events = [
-        event for event in events if event.get("k") not in NON_COLLABORATION_KINDS
-    ]
-    session_events = [event for event in events if event.get("k") in NON_COLLABORATION_KINDS]
     if replacement_events:
         apply_events(replacement_stage, replacement_events, prevalidated=True)
     if session_events:

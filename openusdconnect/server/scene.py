@@ -7,6 +7,7 @@ durable persistence, and network publication belong to the caller.
 from __future__ import annotations
 
 import threading
+from bisect import bisect_left
 from collections.abc import Iterable
 from contextlib import ExitStack, contextmanager
 from itertools import groupby
@@ -15,12 +16,14 @@ from typing import TYPE_CHECKING
 from pxr import Sdf, Usd
 
 from ..protocol_constants import (
+    K_DEACTIVATE_PRIM,
     K_DELETE_PRIM,
     K_ENSURE_PRIM,
     K_RENAME_PRIM,
     K_SET_INSTANCEABLE,
     K_SET_SDF_SPEC_FIELDS,
     NON_COLLABORATION_KINDS,
+    STRUCTURAL_EVENT_KINDS,
     LayerMode,
 )
 from ..shared_layer_graph import SharedLayerGraph
@@ -31,16 +34,41 @@ if TYPE_CHECKING:
     from .snapshots import PreparedSnapshot
 
 
-def include_removed_spec_fields(layer: Sdf.Layer, events: list[dict]) -> None:
-    """Include existing authored fields when a spec deletion must erase them."""
-    for event in events:
+_PRIM_COUNT_CHANGE_KINDS = STRUCTURAL_EVENT_KINDS | {
+    K_DELETE_PRIM, K_DEACTIVATE_PRIM, K_RENAME_PRIM,
+}
+
+
+def apply_with_deletion_fields(
+    stage: Usd.Stage, layer: Sdf.Layer, events: list[dict], op_cache=None,
+) -> None:
+    """Complete deletion fields after preceding edits, then remove the spec.
+
+    Removals are already application barriers. Split only there, preserving
+    dependency ordering and the original event list for ordinary transactions.
+    """
+    from ..event_apply import apply_events
+
+    if op_cache is None:
+        op_cache = {}
+    start = 0
+    for index, event in enumerate(events):
         if event["k"] != K_SET_SDF_SPEC_FIELDS or not event["removed"]:
             continue
+        if index > start:
+            apply_events(stage, events[start:index], op_cache=op_cache, prevalidated=True)
         spec = layer.GetObjectAtPath(Sdf.Path(event["spec_path"]))
         if spec:
             event["fields"] = sorted(
                 set(event["fields"]) | {str(key) for key in spec.ListInfoKeys()}
             )
+        apply_events(stage, [event], op_cache=op_cache, prevalidated=True)
+        start = index + 1
+    if start < len(events):
+        apply_events(
+            stage, events if start == 0 else events[start:],
+            op_cache=op_cache, prevalidated=True,
+        )
 
 
 class SceneState:
@@ -58,8 +86,10 @@ class SceneState:
         self._op_cache_layer: str | None = None
         self._prim_paths: dict[str, str] = {}
         self._instanceable_paths: set[str] = set()
+        self._namespace_paths: tuple[str, ...] | None = None
         self._prim_count = 0
         self._prim_count_dirty = True
+        self._prim_count_layer_revision = -1
 
     def clear_op_cache(self) -> None:
         """Discard cached attribute handles while excluding scene mutations."""
@@ -100,31 +130,54 @@ class SceneState:
             self._op_cache_layer = layer.identifier
         return self.op_cache
 
+    def _tracked_subtree(self, prim: str) -> Iterable[str]:
+        """Find tracked descendants without scanning the whole tree per deletion."""
+        if self._namespace_paths is None:
+            self._namespace_paths = tuple(sorted(
+                self._prim_paths.keys() | self._instanceable_paths,
+            ))
+        paths = self._namespace_paths
+        yield prim
+        prefix = prim + "/"
+        index = bisect_left(paths, prefix)
+        while index < len(paths) and paths[index].startswith(prefix):
+            yield paths[index]
+            index += 1
+
     def _track_prim_event(self, ev: dict):
         """Update incremental prim trackers from a single event.
 
-        Covers ensure/delete/rename plus instancing flags. The dashboard
-        relies on this so its tree refresh never has to query pxr.
+        This is the specialized-event tree, not a traversal of base or referenced
+        content. The dashboard can refresh it without querying pxr.
         The caller holds the scene lock.
         """
         k = ev.get("k")
         prim = ev.get("prim", "")
         if k == K_ENSURE_PRIM:
             self._prim_paths[prim] = ev["typeName"]
-        elif k == K_DELETE_PRIM:
-            self._prim_paths.pop(prim, None)
-            self._instanceable_paths.discard(prim)
-        elif k == K_RENAME_PRIM:
-            type_name = self._prim_paths.pop(prim, "Xform")
-            was_instanceable = prim in self._instanceable_paths
-            self._instanceable_paths.discard(prim)
-            new_path = f"{prim.rsplit('/', 1)[0]}/{ev['new_name']}"
-            self._prim_paths[new_path] = type_name
-            if was_instanceable:
-                self._instanceable_paths.add(new_path)
+            self._namespace_paths = None
+        elif k in (K_DELETE_PRIM, K_RENAME_PRIM):
+            new_root = (
+                f"{prim.rsplit('/', 1)[0]}/{ev['new_name']}" if k == K_RENAME_PRIM else None
+            )
+            for path in self._tracked_subtree(prim):
+                type_name = self._prim_paths.pop(path, None)
+                was_instanceable = path in self._instanceable_paths
+                self._instanceable_paths.discard(path)
+                if new_root is not None:
+                    if type_name is not None:
+                        self._prim_paths[new_root + path[len(prim):]] = type_name
+                    if was_instanceable:
+                        self._instanceable_paths.add(new_root + path[len(prim):])
+            if new_root is not None:
+                self._prim_paths.setdefault(new_root, "Xform")
+                self._namespace_paths = None
+            # Deleted entries can stay in the index until the next insertion;
+            # subsequent deletes skip them without rebuilding a large tree.
         elif k == K_SET_INSTANCEABLE:
             if ev.get("instanceable", True):
                 self._instanceable_paths.add(prim)
+                self._namespace_paths = None
             else:
                 self._instanceable_paths.discard(prim)
 
@@ -133,10 +186,9 @@ class SceneState:
         with self.lock:
             for event in events:
                 kind = event.get("k")
-                if kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM):
+                if kind in _PRIM_COUNT_CHANGE_KINDS:
                     self._prim_count_dirty = True
-                    self._track_prim_event(event)
-                elif kind == K_SET_INSTANCEABLE:
+                if kind in (K_ENSURE_PRIM, K_DELETE_PRIM, K_RENAME_PRIM, K_SET_INSTANCEABLE):
                     self._track_prim_event(event)
 
     def rebuild_caches(self, events: Iterable[dict] = ()) -> None:
@@ -145,6 +197,7 @@ class SceneState:
             self.clear_op_cache()
             self._prim_paths.clear()
             self._instanceable_paths.clear()
+            self._namespace_paths = None
             for event in events:
                 self._track_prim_event(event)
             self._prim_count_dirty = True
@@ -232,6 +285,7 @@ class SceneState:
                         Sdf.CopySpec(layer, prop.path, root, prop.path)
                 else:
                     Sdf.CopySpec(layer, path, root, path)
+            self._prim_count_dirty = True
 
     def install_snapshot(self, prepared: PreparedSnapshot) -> None:
         """Install a prepared snapshot after its history has been persisted."""
@@ -256,47 +310,46 @@ class SceneState:
         *,
         update_tracking: bool = True,
     ) -> None:
-        """Apply events admitted by a public transaction boundary."""
-        from ..event_apply import apply_events
+        """Complete deletion fields and apply admitted events under the scene lock.
 
+        Spec deletions acquire field names from the current scene, including
+        preceding edits in this request. Encode those events only after this method returns.
+        """
         target = layer or self.edit_layer
 
         with self.lock:
             edit_target = Usd.EditTarget(target)
             target_was_muted = self.stage.IsLayerMuted(target.identifier)
-            was_muted = target_was_muted and any(
+            needs_unmute = target_was_muted and any(
                 ev["k"] not in NON_COLLABORATION_KINDS for ev in events
             )
-            restore_target = (
+            post_apply_target = (
                 Usd.EditTarget(self.stage.GetSessionLayer()) if target_was_muted else edit_target
             )
-            if was_muted:
+            if needs_unmute:
                 self.stage.UnmuteLayer(target.identifier)
             try:
-                include_removed_spec_fields(target, events)
                 if any(event["k"] in NON_COLLABORATION_KINDS for event in events):
-                    self._apply_session_runs(events, target, edit_target)
+                    self._apply_routed_runs(events, target, edit_target)
                 else:
                     # Most transactions author one collaboration layer. Avoid
                     # session targets and copied runs when no routing is needed.
                     self.stage.SetEditTarget(edit_target)
-                    apply_events(
-                        self.stage, events, op_cache=self._op_cache_for(target), prevalidated=True,
+                    apply_with_deletion_fields(
+                        self.stage, target, events, op_cache=self._op_cache_for(target),
                     )
             finally:
-                self.stage.SetEditTarget(restore_target)
-                if was_muted:
+                self.stage.SetEditTarget(post_apply_target)
+                if needs_unmute:
                     self.stage.MuteLayer(target.identifier)
 
             if update_tracking:
                 self.update_prim_tracking(events)
 
-    def _apply_session_runs(
+    def _apply_routed_runs(
         self, events: list[dict], target: Sdf.Layer, edit_target: Usd.EditTarget,
     ) -> None:
         """Route consecutive runs without reordering session and layer opinions."""
-        from ..event_apply import apply_events
-
         session_layer = self.stage.GetSessionLayer()
         session_target = Usd.EditTarget(session_layer)
         for session_events, run in groupby(
@@ -304,16 +357,20 @@ class SceneState:
         ):
             run_layer = session_layer if session_events else target
             self.stage.SetEditTarget(session_target if session_events else edit_target)
-            apply_events(
-                self.stage, list(run), op_cache=self._op_cache_for(run_layer), prevalidated=True,
+            apply_with_deletion_fields(
+                self.stage, run_layer, list(run), op_cache=self._op_cache_for(run_layer),
             )
 
     def get_prim_count(self) -> int:
         """Return the number of prims on the composed stage (thread-safe, cached)."""
         with self.lock:
-            if self._prim_count_dirty:
+            if (
+                self._prim_count_dirty
+                or self._prim_count_layer_revision != self.layer_stack.revision
+            ):
                 self._prim_count = sum(1 for _ in self.stage.Traverse())
                 self._prim_count_dirty = False
+                self._prim_count_layer_revision = self.layer_stack.revision
             return self._prim_count
 
     def get_tracked_prim_count(self) -> int:

@@ -216,7 +216,7 @@ def test_subtree_removal_discards_preserved_history_only_in_its_layer(kind):
         ({"k": kind, "prim": "/Cube", "new_name": "Renamed"}, "strong"),
     ]
     for seq, (event, layer) in enumerate(records, 1):
-        compaction.add_record(seq, _encode(event, seq, layer))
+        compaction.add_stored_record(seq, _encode(event, seq, layer))
     entries = compaction.replay_records()
     assert [entry.event["k"] for entry in entries if entry.layer_key == "strong"] == [
         kind
@@ -236,5 +236,5 @@ def test_layer_replacement_discards_preserved_sample_history():
         {"k": "replace_sdf_layer_content", "prim": "/", "fragment": "#usda 1.0\n"},
     ]
     for seq, event in enumerate(events, 1):
-        compaction.add_record(seq, _encode(event, seq))
+        compaction.add_stored_record(seq, _encode(event, seq))
     assert [entry.event for entry in compaction.replay_records()] == events[-1:]
