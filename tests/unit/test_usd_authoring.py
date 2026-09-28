@@ -4,6 +4,7 @@ import pytest
 from pxr import Gf, Sdf, Usd, UsdShade, Vt
 
 from openusdconnect import event_apply
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.connectable_attrs import input_attr, output_attr
 from openusdconnect.usd_authoring import (
     resolve_shader_port_type,
@@ -56,6 +57,35 @@ def test_converts_python_values(type_name, value, expected):
     inp = connectable.GetInput("value")
     assert inp.GetTypeName() == Sdf.ValueTypeNames.Find(type_name)
     assert inp.Get() == expected
+
+
+@pytest.mark.parametrize(("type_name", "value", "expected"), [
+    ("float[]", [0.25, 0.5], Vt.FloatArray([0.25, 0.5])),
+    ("int[]", [1, 2], Vt.IntArray([1, 2])),
+    ("float[]", [], Vt.FloatArray()),
+    ("int[]", [], Vt.IntArray()),
+    ("color3f", [0.25, 0.5, 1], Gf.Vec3f(0.25, 0.5, 1)),
+    ("matrix4d", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], Gf.Matrix4d(1)),
+])
+@pytest.mark.parametrize("numpy_arrays", [False, True])
+def test_list_inputs_roundtrip_and_apply(type_name, value, expected, numpy_arrays):
+    event = {"k": "set_connectable_input", "prim": "/Shader", "info_id": "TestShader",
+             "inputs": {"value": value}, "input_types": {"value": type_name}, "time": 12}
+    wire = encode_message({"type": "event", "seq": 1, "event": event})
+    decoded = message_to_dict(wire, numpy_arrays=numpy_arrays)["event"]
+    array = decoded["inputs"]["value"]
+    assert isinstance(array, list)
+    assert array == value
+    assert message_to_dict(encode_message({"type": "event", "seq": 2, "event": decoded}))[
+        "event"
+    ] == event
+    stage = Usd.Stage.CreateInMemory()
+    shader = UsdShade.Shader.Define(stage, "/Shader")
+    event_apply.apply_events(stage, [decoded])
+    inp = shader.GetInput("value")
+    assert inp.GetTypeName() == Sdf.ValueTypeNames.Find(type_name)
+    assert inp.Get(Usd.TimeCode(12)) == expected
+    assert inp.GetAttr().GetTimeSamples() == [12.0]
 
 
 def test_asset_paths_can_be_set_and_cleared():

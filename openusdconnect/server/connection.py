@@ -48,6 +48,7 @@ from .rate_limit import TokenBucket
 
 if TYPE_CHECKING:
     from .state import UsdSyncServer
+    from .transactions import TransactionRequest
 from .types import TransactionRejectedError
 
 LOG = logging.getLogger(__name__)
@@ -57,8 +58,8 @@ _SEND_TIMEOUT_S = 10.0  # send-only timeout for receiver sockets (seconds)
 
 @dataclass(slots=True)
 class _PendingTransactionResult:
-    request: object | None
-    result: dict | None
+    request: TransactionRequest | None
+    reply: dict | None
     txn_id: int
     event_count: int
 
@@ -79,6 +80,21 @@ def _transaction_rejection(txn_id: int, error: TypeError | ValueError) -> dict:
         rejection_code="invalid_transaction",
         reason=str(error),
     )
+
+
+def _resolve_transaction_reply(
+    sync_server: UsdSyncServer, request: TransactionRequest,
+) -> dict:
+    """Map a durable outcome to a protocol reply, preserving unexpected errors."""
+    try:
+        commit = sync_server.wait_for_transaction(request)
+        return make_transaction_result(
+            commit.txn_id,
+            status="acknowledged",
+            checkpoint=commit.checkpoint,
+        )
+    except (TypeError, ValueError) as exc:
+        return _transaction_rejection(request.txn_id, exc)
 
 
 def _send_transaction_results(
@@ -105,6 +121,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     """Handles a single client connection (emitter or receiver)."""
 
     server: ThreadedTCPServer
+    # Set by the validated hello before receiver admission. State consumers
+    # can rely on these fields and release_receiver_replay_reservation().
+    _client_id: str | None
+    _origin: str | None
+    _layered_replay: bool
 
     def setup(self):
         super().setup()
@@ -384,30 +405,30 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
 
     def _run_pipelined_read_loop(self, sync_server: UsdSyncServer) -> None:
         """Read producer transactions while an ordered worker delivers results."""
-        results: queue.Queue[_PendingTransactionResult | None] = queue.Queue(
+        pending_replies: queue.Queue[_PendingTransactionResult | None] = queue.Queue(
             # One producer can fill one durable group, but cannot monopolize
             # the coordinator with an arbitrarily deep per-connection backlog.
             maxsize=max(1, sync_server.txn_batch_size),
         )
         worker = threading.Thread(
             target=self._transaction_result_loop,
-            args=(sync_server, results),
+            args=(sync_server, pending_replies),
             name=f"ouc-results-{self._client_id}",
             daemon=True,
         )
         worker.start()
         try:
-            self._read_loop(sync_server, results)
+            self._read_loop(sync_server, pending_replies)
         finally:
             # FIFO placement after the last submitted request makes the result
             # worker drain every commit/barrier even after an abrupt peer close.
-            results.put(None)
+            pending_replies.put(None)
             worker.join()
 
     def _read_loop(
         self,
         sync_server: UsdSyncServer,
-        results: queue.Queue[_PendingTransactionResult | None] | None,
+        pending_replies: queue.Queue[_PendingTransactionResult | None] | None,
     ):
         while True:
             try:
@@ -470,11 +491,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     )
                     continue
 
-            if results is None:
+            if pending_replies is None:
                 LOG.warning("Receiver connection attempted to submit a transaction")
                 break
 
-            result = None
+            reply = None
             request = None
             try:
                 request = sync_server.submit_idempotent_txn(
@@ -488,11 +509,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                     layer_key=txn_layer_key,
                 )
             except (TypeError, ValueError) as exc:
-                result = _transaction_rejection(txn_id, exc)
-            results.put(
+                reply = _transaction_rejection(txn_id, exc)
+            pending_replies.put(
                 _PendingTransactionResult(
                     request=request,
-                    result=result,
+                    reply=reply,
                     txn_id=txn_id,
                     event_count=len(events),
                 )
@@ -506,11 +527,11 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
     def _transaction_result_loop(
         self,
         sync_server: UsdSyncServer,
-        results: queue.Queue[_PendingTransactionResult | None],
+        pending_replies: queue.Queue[_PendingTransactionResult | None],
     ) -> None:
         delivery_failed = False
         while True:
-            pending = results.get()
+            pending = pending_replies.get()
             if pending is None:
                 return
             outgoing: list[dict] = []
@@ -519,17 +540,10 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             max_batch = max(1, sync_server.txn_batch_size)
             while pending is not None and processed < max_batch:
                 processed += 1
-                result = pending.result
-                if result is None:
+                reply = pending.reply
+                if pending.request is not None:
                     try:
-                        commit = sync_server.wait_for_transaction(pending.request)
-                        result = make_transaction_result(
-                            commit.txn_id,
-                            status="acknowledged",
-                            checkpoint=commit.checkpoint,
-                        )
-                    except (TypeError, ValueError) as exc:
-                        result = _transaction_rejection(pending.txn_id, exc)
+                        reply = _resolve_transaction_reply(sync_server, pending.request)
                     except Exception:
                         LOG.exception(
                             "Transaction %s/%d failed without a protocol result",
@@ -538,28 +552,29 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
                         )
                         delivery_failed = True
                         self._shutdown_request_socket()
-                        result = None
+                        reply = None
 
-                if result is not None:
+                if reply is not None:
+                    acknowledged = reply["status"] == "acknowledged"
                     if (
-                        result.get("status") == "acknowledged"
+                        acknowledged
                         and outgoing
-                        and outgoing[-1].get("status") == "acknowledged"
+                        and outgoing[-1]["status"] == "acknowledged"
                     ):
-                        outgoing[-1] = result
+                        outgoing[-1] = reply
                     else:
-                        outgoing.append(result)
+                        outgoing.append(reply)
                     with sync_server.clients_lock:
                         info = sync_server.clients.get(self._addr_key)
                         if info:
                             info.last_activity = time.time()
-                            if result.get("status") == "acknowledged":
+                            if acknowledged:
                                 info.event_count += pending.event_count
 
                 if processed >= max_batch:
                     break
                 try:
-                    pending = results.get_nowait()
+                    pending = pending_replies.get_nowait()
                 except queue.Empty:
                     break
                 if pending is None:

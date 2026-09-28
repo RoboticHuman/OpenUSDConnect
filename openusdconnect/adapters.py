@@ -394,6 +394,7 @@ class DCCAdapter(ABC):
         ``info_id`` is the UsdShade ``info:id`` (Sdr identifier) for
         ``UsdShade.Shader`` prims; empty string for non-shader connectables.
         ``time`` selects a USD time sample; ``None`` writes the static opinion.
+        Numeric array values use Python lists on the receive path.
         """
         raise NotImplementedError
 

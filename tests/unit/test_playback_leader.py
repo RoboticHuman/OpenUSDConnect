@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 try:
@@ -40,6 +42,46 @@ def test_initial_playback_state(server):
         "rate": 1.0,
         "leader_client_id": "",
     }
+
+
+def test_public_playback_dictionary_stays_live(server):
+    state = server.playback
+    assert state["leader_client_id"] is None
+    with server.playback_lock:
+        state["time"] = 42.0
+        state["rate"] = 2.0
+
+    assert server.get_playback_state()["time"] == 42.0
+    assert server.get_playback_state()["rate"] == 2.0
+    assert server.claim_playback("leader") == (True, "leader")
+    assert state["leader_client_id"] == "leader"
+    server.apply_playback_control("leader", "play")
+    assert state["playing"] is True
+    assert server.release_playback("leader")
+    assert state["leader_client_id"] is None
+    assert server.get_playback_state()["leader_client_id"] == ""
+
+
+def test_public_playback_assignment_replaces_state_and_lock(server):
+    lock = threading.Lock()
+
+    class LockedState(dict):
+        def __getitem__(self, key):
+            assert lock.locked(), "playback access ignored the assigned lock"
+            return super().__getitem__(key)
+
+    state = LockedState(time=12.0, playing=False, rate=1.5, leader_client_id=None)
+    server.playback = state
+    server.playback_lock = lock
+    assert server.playback is state
+    assert server.playback_lock is lock
+    assert server.claim_playback("leader") == (True, "leader")
+    assert server.get_playback_state()["time"] == 12.0
+    accepted, snapshot, _leader = server.apply_playback_control("leader", "play")
+    assert accepted
+    assert snapshot["playing"] is True
+    assert snapshot["rate"] == 1.5
+    assert server.release_playback("leader")
 
 
 def test_first_claim_grants(server):

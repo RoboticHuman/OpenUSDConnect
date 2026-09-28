@@ -12,6 +12,7 @@ from openusdconnect.sender import EventSender
 from openusdconnect.server import connection as connection_module
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
 from openusdconnect.server.state import UsdSyncServer
+from tests.helpers import ReceiverStub
 
 EVENTS = [
     {"k": "ensure_prim", "prim": "/World/A", "typeName": "Xform"},
@@ -106,7 +107,7 @@ def test_records_server_broadcasts_by_message_type():
 
 
 def test_transport_metrics_count_actual_receiver_fanout():
-    class FakeHandler:
+    class FakeHandler(ReceiverStub):
         def __init__(self):
             self.request = io.BytesIO()
             self.request.sendall = self.request.write
@@ -117,7 +118,7 @@ def test_transport_metrics_count_actual_receiver_fanout():
     receivers = (FakeHandler(), FakeHandler())
     payload = b"framed-payload"
 
-    s._send_to_all(payload, targets=receivers)
+    s._send_to_receivers(payload, targets=receivers)
 
     transport = s.get_wire_metrics()["transport"]
     assert transport["receiver_egress"] == {

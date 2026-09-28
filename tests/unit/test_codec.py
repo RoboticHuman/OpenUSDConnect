@@ -14,8 +14,10 @@ from openusdconnect.codec import (
     PayloadType,
     decode_envelope,
     decode_hello,
+    decode_messages,
     decode_transaction,
     encode_message,
+    event_to_dict,
     is_ping,
     message_to_dict,
     payload_type,
@@ -672,6 +674,51 @@ class TestSetMaterialBinding:
 
 
 class TestSetConnectableInput:
+    @pytest.mark.parametrize("numpy_arrays", [False, True])
+    def test_numeric_inputs_remain_python_lists(self, numpy_arrays):
+        event = {
+            "k": "set_connectable_input",
+            "prim": "/Shader",
+            "info_id": "TestShader",
+            "inputs": {
+                "color": [0.25, 0.5, 1.0],
+                "weights": [0.25, 0.5],
+                "counts": [1, 2],
+                "empty_weights": [],
+                "empty_counts": [],
+            },
+            "input_types": {
+                "color": "color3f",
+                "weights": "float[]",
+                "counts": "int[]",
+                "empty_weights": "float[]",
+                "empty_counts": "int[]",
+            },
+        }
+        broadcast = encode_message({"type": "event", "seq": 1, "event": event})
+        transaction = encode_message({"type": "txn", "events": [event]})
+        _, payload = resolve_payload(decode_envelope(broadcast))
+        decoded = [
+            message_to_dict(broadcast, numpy_arrays=numpy_arrays)["event"],
+            message_to_dict(transaction, numpy_arrays=numpy_arrays)["events"][0],
+            event_to_dict(payload.Event(), numpy_arrays=numpy_arrays),
+        ]
+        for preserve_envelopes in (False, True):
+            result = decode_messages(
+                [broadcast], numpy_arrays=numpy_arrays,
+                preserve_envelopes=preserve_envelopes,
+            )
+            assert result.errors == []
+            decoded.extend(result.received)
+            if preserve_envelopes:
+                decoded.append(result.received_records[0].event)
+        for item in decoded:
+            assert all(isinstance(value, list) for value in item["inputs"].values())
+            assert all(isinstance(value, float) for value in item["inputs"]["color"])
+            assert all(isinstance(value, float) for value in item["inputs"]["weights"])
+            assert all(isinstance(value, int) for value in item["inputs"]["counts"])
+            assert item == event
+
     def test_roundtrip(self):
         ev = {
             "k": "set_connectable_input",

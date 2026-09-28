@@ -47,12 +47,21 @@ def test_reorder_and_mute_change_composition_without_moving_opinions():
     _set_value(stage, default, 0)
     _set_value(stage, layout, 1)
     _set_value(stage, animation, 2)
+    original_keys = stack.layer_keys
+    original_layers = stack.ordered_layers
     attribute = stage.GetAttributeAtPath(
         "/World/Thing.userProperties:value"
     )
     assert attribute.Get() == 2
 
     assert stack.set_order(["layout", "animation", "default"])
+    assert stack.layer_keys == ("layout", "animation", "default")
+    assert stack.ordered_layers == (layout, animation, default)
+    assert original_keys == ("animation", "layout", "default")
+    assert original_layers == (animation, layout, default)
+    revision = stack.revision
+    assert not stack.set_order(iter(stack.layer_keys))
+    assert stack.revision == revision
     assert attribute.Get() == 1
     assert stack.set_muted("layout", True)
     assert attribute.Get() == 2

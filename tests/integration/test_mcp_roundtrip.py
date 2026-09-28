@@ -37,14 +37,14 @@ def test_foreign_commit_cannot_confirm_blocked_own_commit(tmp_path, monkeypatch)
     foreign = EventSender("127.0.0.1", tcp.server_address[1], client_id="foreign")
     observed_foreign = threading.Event()
     release_own = threading.Event()
-    apply = state._apply_validated_txn
+    apply = state._scene.apply_validated
 
     def gated_apply(events, *args, **kwargs):
         if any(event.get("prim") == "/Own" for event in events):
             assert release_own.wait(5)
         return apply(events, *args, **kwargs)
 
-    monkeypatch.setattr(state, "_apply_validated_txn", gated_apply)
+    monkeypatch.setattr(state._scene, "apply_validated", gated_apply)
 
     def release_after_foreign():
         if observed_foreign.wait(5):

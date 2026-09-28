@@ -13,6 +13,7 @@ from openusdconnect.protocol import make_hello
 from openusdconnect.sender import EventSender
 from openusdconnect.server import connection as connection_mod
 from tests.helpers import (
+    ReceiverStub,
     ensure_prim_event,
     in_process_server,
     mcp_session_with_receiver,
@@ -128,7 +129,7 @@ def test_layer_stack_is_captured_before_replay_delivery(monkeypatch):
             assert updated_stack["layers"][0]["muted"] is True
 
 
-class _CaptureHandler:
+class _CaptureHandler(ReceiverStub):
     _layered_replay = True
 
     def __init__(self):

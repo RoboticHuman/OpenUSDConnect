@@ -97,7 +97,7 @@ def test_compaction_reclaims_when_interval_elapsed(tmp_path):
     try:
         grown = _disk_size(db)
         assert grown > 1_000_000
-        srv._last_reclaim = time.monotonic() - 7200
+        srv._maintenance._last_reclaim = time.monotonic() - 7200
         srv.compact_log()
         assert _disk_size(db) < grown / 4, "compaction did not reclaim"
     finally:
@@ -121,7 +121,7 @@ def test_purge_reclaims_when_due(tmp_path):
     try:
         grown = _disk_size(db)
         srv.set_reclaim_interval(3600)
-        srv._last_reclaim = time.monotonic() - 7200
+        srv._maintenance._last_reclaim = time.monotonic() - 7200
         srv.purge()
         assert srv.get_event_count() == 0
         assert _disk_size(db) < grown / 4, "purge did not reclaim"

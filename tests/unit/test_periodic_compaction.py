@@ -71,7 +71,7 @@ def test_runtime_enable_and_disable(tmp_path):
     srv = UsdSyncServer(log_path=str(tmp_path / "rt.db"))
     calls = _instrument(srv)
     try:
-        assert srv._compact_thread is None
+        assert not srv._compactor.running
         srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         srv.set_compact_interval(0.2)
@@ -102,14 +102,14 @@ def test_txn_during_compaction_survives_via_delta_merge(tmp_path):
         srv._commit_events(EVENTS, client_id="c", origin="o", client_addr="a:1")
 
         phase1_started = threading.Event()
-        original_build = srv._build_compacted
+        original_build = srv._maintenance.build_compacted
 
         def slow_build(rows):
             phase1_started.set()
             time.sleep(0.4)
             return original_build(rows)
 
-        srv._build_compacted = slow_build
+        srv._maintenance.build_compacted = slow_build
 
         compactor = threading.Thread(target=srv.compact_log)
         compactor.start()

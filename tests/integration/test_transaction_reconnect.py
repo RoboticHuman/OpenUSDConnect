@@ -390,14 +390,14 @@ def test_pipeline_rejection_preserves_result_order_and_quarantines_suffix(
     monkeypatch,
 ):
     state, port = transaction_server
-    apply_txn = state._apply_validated_txn
+    apply_txn = state._scene.apply_validated
 
     def reject_second(events, *args, **kwargs):
         if any(event.get("prim") == "/World/Reject2" for event in events):
             raise ValueError("injected invalid transaction")
         return apply_txn(events, *args, **kwargs)
 
-    monkeypatch.setattr(state, "_apply_validated_txn", reject_second)
+    monkeypatch.setattr(state._scene, "apply_validated", reject_second)
     sender = EventSender(
         "127.0.0.1",
         port,
