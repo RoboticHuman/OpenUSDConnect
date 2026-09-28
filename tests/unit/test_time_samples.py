@@ -342,6 +342,157 @@ def test_emitter_clears_samples_and_can_restore_identical_values(kind, with_defa
         emitter.cleanup()
 
 
+@pytest.mark.parametrize("kind", ["size", "translate", "input"])
+@pytest.mark.parametrize("seed_cache", [False, True], ids=["snapshot", "seed"])
+@pytest.mark.parametrize("finish", ["clear", "restore", "keep_another_block"])
+def test_mixed_numeric_and_blocked_samples_roundtrip(kind, seed_cache, finish):
+    source = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(source, "/Cube")
+    if kind == "size":
+        attr = cube.GetSizeAttr()
+        values = (1.0, 2.0, 3.0)
+    elif kind == "translate":
+        attr = cube.AddTranslateOp().GetAttr()
+        values = tuple(Gf.Vec3d(value, 0, 0) for value in (1, 2, 3))
+    else:
+        shader = UsdShade.Shader.Define(source, "/Surface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        attr = shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).GetAttr()
+        values = (0.25, 0.5, 0.75)
+    attr.Set(values[0])
+    attr.Set(values[0], 1.0)
+    attr.Set(Sdf.ValueBlock(), 2.0)
+    attr.Set(values[2], 3.0)
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        events = emitter.snapshot_events()
+        for batch_index in range(3):
+            if batch_index == 1:
+                # Replace the old block with a value and block a different key.
+                attr.Set(values[1], 2.0)
+                attr.Set(Sdf.ValueBlock(), 3.0)
+                events = emitter.build_events_for_dirty()
+            elif batch_index == 2:
+                if seed_cache:
+                    emitter.cleanup()
+                    emitter = NoticeEmitter(source)
+                    emitter.seed_prim_cache(source, str(attr.GetPrimPath()))
+                if finish == "restore":
+                    # This numeric value was cached before the key was blocked.
+                    attr.Set(values[2], 3.0)
+                else:
+                    if finish == "keep_another_block":
+                        attr.Set(Sdf.ValueBlock(), 4.0)
+                    attr.ClearAtTime(3.0)
+                events = emitter.build_events_for_dirty()
+            apply_events(target, [_round_trip(event) for event in events])
+            target_attr = target.GetAttributeAtPath(attr.GetPath())
+            assert target_attr.Get() == values[0]
+            assert target_attr.GetTimeSamples() == attr.GetTimeSamples()
+            for time in attr.GetTimeSamples():
+                authored = source.GetRootLayer().QueryTimeSample(attr.GetPath(), time)
+                received = target.GetRootLayer().QueryTimeSample(attr.GetPath(), time)
+                if isinstance(authored, Sdf.ValueBlock):
+                    assert isinstance(received, Sdf.ValueBlock)
+                    assert target_attr.Get(time) is None
+                else:
+                    assert received == authored
+            assert emitter.build_events_for_dirty() == []
+    finally:
+        emitter.cleanup()
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["numeric", "blocked"])
+@pytest.mark.parametrize("in_variant", [False, True], ids=["root", "variant"])
+def test_locally_erasing_a_received_exact_sample(blocked, in_variant):
+    source = Usd.Stage.CreateInMemory()
+    cube = UsdGeom.Cube.Define(source, "/Cube")
+    if in_variant:
+        variants = cube.GetPrim().GetVariantSets().AddVariantSet("animation")
+        variants.AddVariant("keyed")
+        variants.SetVariantSelection("keyed")
+        source.SetEditTarget(variants.GetVariantEditTarget())
+    attr = cube.GetSizeAttr()
+    attr.Set(1.0, 1.0)
+    attr.Set(2.0, 2.0)
+    emitter = NoticeEmitter(source)
+    emitter.snapshot_events()
+    target_layer = Sdf.Layer.CreateAnonymous("received-samples")
+    target_layer.TransferContent(source.GetRootLayer())
+    target = Usd.Stage.Open(target_layer)
+    if in_variant:
+        variants = target.GetPrimAtPath("/Cube").GetVariantSets().GetVariantSet("animation")
+        target.SetEditTarget(variants.GetVariantEditTarget())
+    remote_attr = target.GetAttributeAtPath(attr.GetPath())
+    remote_attr.Set(Sdf.ValueBlock() if blocked else 20.0, 2.0)
+    try:
+        # An exact table can arrive from another peer regardless of whether
+        # its values could also have been represented by specialized events.
+        from openusdconnect.sdf_spec_delta import serialize_spec_fields
+
+        path = source.GetEditTarget().MapToSpecPath(attr.GetPath())
+        event = {
+            "k": "set_sdf_spec_fields",
+            "prim": "/Cube",
+            "spec_path": str(path),
+            "spec_kind": "attribute",
+            "fields": ["timeSamples"],
+            "fragment": serialize_spec_fields(
+                target.GetRootLayer(), path, "attribute", ["timeSamples"],
+            ),
+        }
+        event = _round_trip(event)
+        with emitter.suppressed():
+            apply_events(source, [event])
+            emitter.invalidate_for_event(event)
+        assert emitter.build_events_for_dirty() == []
+
+        attr.ClearAtTime(2.0)
+        events = emitter.build_events_for_dirty()
+        assert events
+        apply_events(target, [_round_trip(event) for event in events])
+        assert remote_attr.GetTimeSamples() == attr.GetTimeSamples() == [1.0]
+        assert remote_attr.Get(1.0) == 1.0
+    finally:
+        emitter.cleanup()
+
+
+@pytest.mark.parametrize("kind", ["matrix", "orientations"])
+@pytest.mark.parametrize("erasure_order", [(2.0, 3.0), (3.0, 2.0)])
+def test_blocked_sample_erasure_preserves_remapped_output(kind, erasure_order):
+    source = Usd.Stage.CreateInMemory()
+    if kind == "matrix":
+        attr = UsdGeom.Xform.Define(source, "/Rig").AddTransformOp().GetAttr()
+        values = [Gf.Matrix4d().SetTranslate(Gf.Vec3d(time, 0, 0)) for time in (1, 2, 3)]
+        output_path = "/Rig.xformOp:translate"
+    else:
+        attr = UsdGeom.PointInstancer.Define(source, "/Instances").GetOrientationsAttr()
+        values = [[Gf.Quath(1)] for _ in range(3)]
+        output_path = "/Instances.orientationsf"
+    for time, value in enumerate(values, 1):
+        attr.Set(Sdf.ValueBlock() if time == 2 else value, float(time))
+    emitter = NoticeEmitter(source)
+    target = Usd.Stage.CreateInMemory()
+    try:
+        apply_events(target, [_round_trip(event) for event in emitter.snapshot_events()])
+        assert target.GetRootLayer().ListTimeSamplesForPath(attr.GetPath()) == [1.0, 2.0, 3.0]
+        # Numeric keys authored through the exact table must also disappear,
+        # even when later value events use a different attribute representation.
+        for time in erasure_order:
+            attr.ClearAtTime(time)
+            apply_events(target, [_round_trip(event) for event in emitter.build_events_for_dirty()])
+            assert target.GetRootLayer().ListTimeSamplesForPath(attr.GetPath()) == (
+                attr.GetTimeSamples()
+            )
+        assert target.GetRootLayer().ListTimeSamplesForPath(attr.GetPath()) == [1.0]
+        assert 3.0 not in target.GetAttributeAtPath(output_path).GetTimeSamples()
+        if kind == "matrix":
+            _assert_local_transform_parity(source, target, "/Rig", (1.0, 2.0, 3.0))
+    finally:
+        emitter.cleanup()
+
+
 def test_emitter_mixed_sample_edits_leave_unchanged_keys_alone():
     source = Usd.Stage.CreateInMemory()
     attr = UsdGeom.Cube.Define(source, "/Cube").GetSizeAttr()
@@ -483,7 +634,8 @@ def test_emitter_clearing_matrix_sample_rebuilds_remaining_transform_samples():
         emitter.cleanup()
 
 
-def test_sample_clear_uses_variant_spec_path():
+@pytest.mark.parametrize("blocked", [False, True], ids=["numeric", "blocked"])
+def test_sample_clear_uses_variant_spec_path(blocked):
     source = Usd.Stage.CreateInMemory()
     cube = UsdGeom.Cube.Define(source, "/Cube")
     variants = cube.GetPrim().GetVariantSets().AddVariantSet("animation")
@@ -491,7 +643,7 @@ def test_sample_clear_uses_variant_spec_path():
     variants.SetVariantSelection("keyed")
     source.SetEditTarget(variants.GetVariantEditTarget())
     attr = cube.GetSizeAttr()
-    attr.Set(1.0, 1.0)
+    attr.Set(Sdf.ValueBlock() if blocked else 1.0, 1.0)
     attr.Set(2.0, 2.0)
     target_layer = Sdf.Layer.CreateAnonymous("variant-target")
     target_layer.TransferContent(source.GetRootLayer())
@@ -545,6 +697,33 @@ def test_sample_deletion_survives_log_compaction(tmp_path):
         emitter.cleanup()
         server.shutdown()
         server.store.close()
+
+
+def test_seed_reads_samples_after_custom_filter_callbacks():
+    stage = Usd.Stage.CreateInMemory()
+    size = UsdGeom.Cube.Define(stage, "/Cube").CreateSizeAttr(1.0)
+    size.Set(1.0, 1.0)
+    armed = False
+
+    def attr_filter(name):
+        nonlocal armed
+        if name == "size" and armed:
+            armed = False
+            size.Set(2.0, 1.0)
+        return name == "size"
+
+    emitter = NoticeEmitter(stage, attr_filter=attr_filter)
+    try:
+        emitter.snapshot_events()
+        armed = True
+        emitter.seed_prim_cache(stage, "/Cube")
+
+        assert size.Get(1.0) == 2.0
+        # Seeding includes samples authored by a custom filter during the
+        # default-value pass, so the next batch must not echo them.
+        assert emitter.build_events_for_dirty() == []
+    finally:
+        emitter.cleanup()
 
 
 @pytest.mark.parametrize("target_kind", ["layer", "variant"])
@@ -1099,33 +1278,47 @@ def test_default_edit_does_not_reread_sample_tables(monkeypatch):
     cube = UsdGeom.Cube.Define(stage, "/Cube")
     xf = UsdGeom.Xformable(cube)
     t_op = xf.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble)
-    t_op.Set(Gf.Vec3d(10, 0, 0), Usd.TimeCode(24.0))
-    t_op.Set(Gf.Vec3d(20, 0, 0), Usd.TimeCode(48.0))
+    for time in range(1, 2001):
+        t_op.Set(Gf.Vec3d(time, 0, 0), Usd.TimeCode(time))
     emitter.build_events_for_dirty()
 
     calls: list[str] = []
+    table_reads: list[str] = []
     real = emitter_mod._diff_time_samples
+    real_get_info = Sdf.AttributeSpec.GetInfo
 
     def _spy(attr, cached, layer=None, convert=None):
         calls.append(attr.GetName())
         return real(attr, cached, layer, convert=convert)
 
+    def _get_info(spec, field):
+        if field == "timeSamples":
+            table_reads.append(str(spec.path))
+        return real_get_info(spec, field)
+
     monkeypatch.setattr(emitter_mod, "_diff_time_samples", _spy)
+    monkeypatch.setattr(Sdf.AttributeSpec, "GetInfo", _get_info)
 
-    # Default-time write: emits a TRS diff but reads no sample tables.
-    t_op.Set(Gf.Vec3d(1, 2, 3))
-    events = emitter.build_events_for_dirty()
-    assert calls == []
-    default_trs = [e for e in events if e.get("k") == K_SET_XFORM_TRS and e.get("time") is None]
-    assert len(default_trs) == 1
+    try:
+        # Default-time writes must avoid both diffing and copying the table.
+        t_op.Set(Gf.Vec3d(1, 2, 3))
+        events = emitter.build_events_for_dirty()
+        assert calls == []
+        assert table_reads == []
+        default_trs = [e for e in events if e.get("k") == K_SET_XFORM_TRS and e.get("time") is None]
+        assert len(default_trs) == 1
+        assert t_op.GetAttr().GetNumTimeSamples() == 2000
 
-    # Sample write: the table is re-read and only the changed key emits.
-    t_op.Set(Gf.Vec3d(30, 0, 0), Usd.TimeCode(48.0))
-    events = emitter.build_events_for_dirty()
-    assert "xformOp:translate" in calls
-    sampled = [e for e in events if e.get("time") == 48.0]
-    assert len(sampled) == 1
-    assert sampled[0]["t"] == pytest.approx([30.0, 0.0, 0.0])
+        # Sample write: the table is re-read and only the changed key emits.
+        t_op.Set(Gf.Vec3d(30, 0, 0), Usd.TimeCode(48.0))
+        events = emitter.build_events_for_dirty()
+        assert "xformOp:translate" in calls
+        assert "/Cube.xformOp:translate" in table_reads
+        sampled = [e for e in events if e.get("time") == 48.0]
+        assert len(sampled) == 1
+        assert sampled[0]["t"] == pytest.approx([30.0, 0.0, 0.0])
+    finally:
+        emitter.cleanup()
 
 
 def test_emitter_invalidate_suppresses_reemit_after_remote_apply():

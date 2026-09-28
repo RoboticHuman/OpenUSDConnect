@@ -352,14 +352,16 @@ def test_bare_usdshade_ports_roundtrip_as_sdf_declarations():
     emitter.cleanup()
 
 
-def test_composed_custom_attribute_emits_only_local_override():
+@pytest.mark.parametrize("custom", [True, False], ids=["custom", "noncustom"])
+@pytest.mark.parametrize("time", [None, 1.0], ids=["default", "sample"])
+def test_composed_unknown_attribute_emits_only_local_override(custom, time):
     asset_layer = Sdf.Layer.CreateAnonymous("asset.usda")
     asset = Usd.Stage.Open(asset_layer)
     asset_prim = asset.DefinePrim("/Asset", "Xform")
     asset_prim.CreateAttribute(
         "userProperties:weight",
         Sdf.ValueTypeNames.Double,
-        True,
+        custom,
     ).Set(1.25)
 
     source = Usd.Stage.CreateInMemory()
@@ -376,11 +378,19 @@ def test_composed_custom_attribute_emits_only_local_override():
         if event["k"] == K_SET_GPRIM_ATTRS and "userProperties:weight" in event.get("attrs", {})
     ]
 
-    prim.GetAttribute("userProperties:weight").Set(2.5)
-    override = _sdf_events(emitter.build_events_for_dirty())
+    target = Usd.Stage.CreateInMemory()
+    apply_events(target, events)
+    time_code = Usd.TimeCode.Default() if time is None else Usd.TimeCode(time)
+    prim.GetAttribute("userProperties:weight").Set(2.5, time_code)
+    changes = emitter.build_events_for_dirty()
+    override = _sdf_events(changes)
     assert len(override) == 1
     assert override[0]["spec_path"] == "/World/Thing.userProperties:weight"
-    assert "default" in override[0]["fields"]
+    assert ("default" if time is None else "timeSamples") in override[0]["fields"]
+    assert not any(event["k"] == K_SET_GPRIM_ATTRS for event in changes)
+    apply_events(target, changes)
+    assert target.GetAttributeAtPath("/World/Thing.userProperties:weight").Get(time_code) == 2.5
+    assert asset_prim.GetAttribute("userProperties:weight").Get() == 1.25
     emitter.cleanup()
 
 
