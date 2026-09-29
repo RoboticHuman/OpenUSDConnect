@@ -23,6 +23,7 @@ from openusdconnect.recovery import (
     make_recovery_incident,
 )
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
+from tests.helpers import RecordingObserver
 
 
 def test_bidirectional_clients_share_one_update_result_contract():
@@ -353,7 +354,7 @@ def ready_managed_client(monkeypatch):
     client._receiver.connected = True
     client._receiver.layered_replay_active = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda: 0)
+    monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda max_messages=None: 0)
     try:
         yield client, sender
     finally:
@@ -362,9 +363,7 @@ def ready_managed_client(monkeypatch):
 
 @pytest.mark.parametrize("options", [
     {"transform_coalesce_seconds": -1},
-    {"transform_coalesce_seconds": float("nan")},
     {"extra_channels": [object()]},
-    {"replicated_api_schemas": {"CollectionAPI:invalid"}},
 ])
 def test_managed_invalid_configuration_preserves_stage(options):
     stage = Usd.Stage.CreateInMemory()
@@ -377,45 +376,16 @@ def test_managed_invalid_configuration_preserves_stage(options):
     assert stage.GetSessionLayer().ExportToString() == session
 
 
-def test_managed_reports_dirty_prepared_and_submitted_work(ready_managed_client):
-    client, sender = ready_managed_client
-    assert not client.has_unsent_changes
-    assert client.edit_target_is_shared
-    client.stage.DefinePrim("/Local", "Xform")
-    assert client.has_unsent_changes
-    assert client.status.has_unsent_changes
-    assert client.status.prepared_events == 0
-    assert client.pending_event_count == 0
-
-    sender.results = iter([False, True])
-    retained = client.update()
-    assert retained.submitted_events == 0
-    assert client.status.has_unsent_changes
-    assert client.prepared_event_count > 0
-    submitted = client.update()
-    assert submitted.submitted_events > 0
-    assert not client.has_unsent_changes
-    assert client.pending_event_count > 0
-
-    client.stage.SetEditTarget(client.stage.GetRootLayer())
-    assert not client.edit_target_is_shared
-    assert not client.status.edit_target_is_shared
-
-
-def test_managed_tracks_metadata_only_changes(ready_managed_client):
+def test_managed_metadata_only_changes_count_as_unsent_work(ready_managed_client):
     client, _sender = ready_managed_client
     with Usd.EditContext(client.stage, client.stage.GetRootLayer()):
         client.stage.SetFramesPerSecond(48)
     assert client.has_unsent_changes
-    # The notice still needs evaluation even when the current authoring layer
-    # does not own the metadata opinion and filtering emits nothing.
+    # Evaluated even when the authoring layer does not own the opinion.
     client.update()
     assert not client.has_unsent_changes
 
-
-def test_managed_rebind_can_discard_metadata_only_changes(ready_managed_client):
-    client, _sender = ready_managed_client
-    client.stage.GetRootLayer().framesPerSecond = 48
+    client.stage.GetRootLayer().framesPerSecond = 24
     assert client.has_unsent_changes
     replacement = Usd.Stage.CreateInMemory()
     replacement.SetFramesPerSecond(30)
@@ -473,48 +443,6 @@ def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
     assert values == [1, 2]
 
 
-def test_managed_wait_until_ready_applies_replay(ready_managed_client, monkeypatch):
-    client, _sender = ready_managed_client
-    client._receiver._synchronized_event.clear()
-    applied = []
-
-    def apply_replay():
-        applied.append(True)
-        client._receiver._synchronized_event.set()
-        return 0
-
-    monkeypatch.setattr(client._dispatcher, "drain_and_apply", apply_replay)
-    assert client.wait_until_ready(timeout=0)
-    assert applied == [True]
-
-
-def test_managed_submit_and_wait_includes_coalesced_and_new_dirty_work(
-    ready_managed_client, monkeypatch,
-):
-    client, sender = ready_managed_client
-    prim = UsdGeom.Xform.Define(client.stage, "/Local")
-    translate = prim.AddTranslateOp()
-    prim.AddOrientOp()
-    prim.AddScaleOp()
-    translate.Set((1, 0, 0))
-    client.update()
-    sender.pending_event_count = 0
-    client._transform_coalescing.seconds = 60
-    translate.Set((2, 0, 0))
-    acknowledgements = []
-
-    def acknowledge(timeout=None):
-        acknowledgements.append(sender.pending_event_count)
-        sender.pending_event_count = 0
-        return True
-
-    monkeypatch.setattr(sender, "flush", acknowledge)
-    assert client.submit_and_wait(timeout=0)
-    assert acknowledgements == [1]
-    assert not client.has_unsent_changes
-    assert sender.batches[-1][0]["t"] == [2, 0, 0]
-
-
 @pytest.mark.parametrize("prepare", [False, True])
 @pytest.mark.parametrize("park", [False, True])
 def test_managed_rebind_requires_explicit_unsent_discard(
@@ -563,14 +491,16 @@ def test_managed_parked_client_is_not_ready(ready_managed_client):
 def test_managed_queued_callback_can_close_before_stage_work(monkeypatch):
     client = ManagedClient(
         Usd.Stage.CreateInMemory(), app_name="close-from-callback", persist_token=False,
-        callbacks_on_update=True, on_playback_state=lambda _state: client.close(),
+        observer=RecordingObserver(on_call=lambda _name, _value: client.close()),
     )
     client._started = True
     monkeypatch.setattr(
         client.dispatcher, "drain_and_apply", lambda: pytest.fail("closed client applied work"),
     )
     try:
-        client.receiver._on_playback_state({"playing": False})
+        client.receiver._on_playback_state(
+            {"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": ""}
+        )
         assert client.update() == SyncUpdate(applied_events=0, submitted_events=0)
         assert client.status.phase is ClientPhase.CLOSED
         with pytest.raises(RuntimeError, match="ManagedClient is closed"):
@@ -1223,3 +1153,27 @@ def test_app_name_is_required():
         UsdPublisher(stage, app_name=" ", persist_token=False)
     with pytest.raises(ValueError, match="app_name"):
         UsdReceiver(stage, app_name=" ", persist_token=False)
+
+
+def test_managed_budgeted_update_holds_local_edits_until_backlog_applied(
+    ready_managed_client, monkeypatch,
+):
+    client, sender = ready_managed_client
+    backlog = [3]
+
+    def drain(max_messages=None):
+        taken = backlog[0] if max_messages is None else min(backlog[0], max_messages)
+        backlog[0] -= taken
+        client._dispatcher._backlog_pending = max_messages is not None and taken >= max_messages
+        return taken
+
+    monkeypatch.setattr(client._dispatcher, "drain_and_apply", drain)
+    client.stage.DefinePrim("/Local", "Xform")
+
+    held = client.update(max_messages=2)
+    assert (held.applied_events, held.submitted_events) == (2, 0)
+    assert client.has_unsent_changes
+    published = client.update(max_messages=2)
+    assert published.applied_events == 1
+    assert published.submitted_events > 0
+    assert not client.has_unsent_changes

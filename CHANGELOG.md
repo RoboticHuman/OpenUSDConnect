@@ -25,11 +25,6 @@ but do not receive replay-identity validation or checkpoints.
 - **Breaking:** `UsdReceiver.update()` and `UsdPublisher.update()` return a
   `SyncUpdate` instead of an `int`, like the bidirectional clients. Read
   `applied_events` or `submitted_events`.
-- **Breaking:** token, stage-metadata, and playback callbacks of the
-  high-level clients run during `update()` on the calling thread by default.
-  A raising callback propagates out of `update()`; later notifications stay
-  queued. Pass `callbacks_on_update=False` to keep delivery on network
-  threads, for example when nothing pumps `update()`.
 - **Breaking:** `UsdPublisher.update()` raises before `start()`. While
   disconnected it schedules a background handshake instead of doing nothing;
   `disconnect()` pauses those attempts until `connect()`.
@@ -40,9 +35,18 @@ but do not receive replay-identity validation or checkpoints.
 - **Breaking:** `ManagedClient.rebind_stage()` refuses unsent or
   unacknowledged work. Finish with `submit_and_wait()`, or pass
   `discard_unsent=True` to drop unsent edits.
-- High-level clients write transactions from a background thread by default
-  (`background_send=True`). `EventSender` keeps synchronous writes unless
-  constructed with `background_send=True`.
+- **Breaking:** `connect()` and `flush()` on the high-level clients default to
+  a 10 second timeout instead of waiting indefinitely. Pass `timeout=None` to
+  wait without a limit.
+- **Breaking:** the high-level clients take one `observer=ClientObserver`
+  instead of nine `on_*` callback arguments; every observer method runs during
+  `update()`. Migrate `on_applied`, `on_applied_events`, and `on_imported` to
+  `on_applied(batch)` (`batch.prim_paths`, `batch.events`,
+  `batch.imported_paths`, `batch.seq`), and `on_playback_claimed` /
+  `on_playback_rejected` to `on_playback_claim(result)`. Metadata and playback
+  payloads are typed (`StageMetadata`, `PlaybackState`, `PlaybackClaim`), and
+  `client.stage_metadata` returns `StageMetadata`. The low-level
+  `EventDispatcher`, `ReceiverThread`, and `EventSender` keep plain callables.
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1` instead of
   0, so integrations no longer need to seed `last_seq` for continuation.
 - `ManagedClient` and `UsdReceiver` report `ClientPhase.PARKED` while no stage
@@ -51,8 +55,14 @@ but do not receive replay-identity validation or checkpoints.
   maintenance owners; emitter, codec, and composed projection internals are
   simplified. No public behavior change.
 
+### Removed
+
+- `UsdReceiver.applying_seq`; use `AppliedBatch.seq` inside `on_applied`.
+
 ### Added
 
+- `ClientObserver`, `AppliedBatch`, `StageMetadata`, `PlaybackState`, and
+  `PlaybackClaim` at the package root.
 - `wait_until_ready(timeout)` on every high-level client and
   `submit_and_wait(timeout)` on every publishing client. Both default to a
   10 second timeout, return `False` only when it expires, and raise
@@ -67,8 +77,16 @@ but do not receive replay-identity validation or checkpoints.
 - `SharedStageClient.auth_rejected`, `connection_rejected`,
   `claim_playback()`, and `send_playback_control()`;
   `UsdPublisher.connection_rejected`.
-- `EventSender(background_send=True)` moves transaction writes and reconnect
-  replay to a worker thread while preserving transaction order.
+- `update(max_messages=)` on `ManagedClient` and `SharedStageClient` bounds
+  one call's receive work so a reconnect backlog spreads over frames;
+  `EventDispatcher.backlog_pending` reports a truncated drain.
+- `ClientStatus.can_author` combines readiness, role, and edit-target scope.
+- `background_send=True` on `EventSender` and the publishing clients moves
+  transaction writes and reconnect replay to a worker thread while preserving
+  transaction order. It stays opt-in: the worker needs the GIL, which adds
+  about 5 ms per write while the host's main thread runs Python.
+- `EventSender(token_provider=)` resolves missing credentials once per
+  connection attempt, on the connecting thread.
 - Receiver replay identity (`server_instance`, replay epoch) and optional
   post-commit transaction checkpoints.
 
@@ -82,6 +100,10 @@ but do not receive replay-identity validation or checkpoints.
   resync.
 - Property edits absorbed by a prim resync in the same change block were
   dropped by the emitter.
+- Bidirectional clients read the token file on every `update()` while their
+  sender was reconnecting.
+- Connection attempts to an unreachable server logged a traceback per retry;
+  they log one line.
 - `NoticeEmitter.rebind_stage()` compared stage metadata against the previous
   stage, and `cleanup()` kept pending stage-metadata changes.
 - A `ManagedClient` constructed with invalid options left its authoring

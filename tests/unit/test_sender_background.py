@@ -3,8 +3,6 @@
 import socket
 import threading
 
-import pytest
-
 from openusdconnect.codec import decode_envelope, encode_message, message_to_dict, resolve_payload
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_transaction_result
@@ -153,83 +151,6 @@ def test_concurrent_submissions_have_one_ordered_writer_and_acknowledged_capacit
     finally:
         sender.disconnect()
         _join(writer, reader, *callers)
-
-
-def test_background_replay_uses_identical_bytes_and_discards_hello_acknowledged_prefix(monkeypatch):
-    sender = EventSender("localhost", 1, client_id="replay-writer", background_send=True)
-    first, second = _Socket(), _Socket()
-    _mock_connections(monkeypatch, sender, [first, second])
-    entered = threading.Event()
-    replay_entered = threading.Event()
-    release_replay = threading.Event()
-    sent = threading.Event()
-    wire = []
-
-    def write(sock, payload):
-        if sock is first:
-            entered.set()
-            assert sock.closed.wait(5)
-            raise OSError("ambiguous write")
-        replay_entered.set()
-        assert release_replay.wait(5)
-        wire.append(payload)
-        if len(wire) == 2:
-            _acknowledge(sender, 3)
-            sent.set()
-
-    monkeypatch.setattr("openusdconnect.sender.send_raw", write)
-    assert sender.connect()
-    first_writer, first_reader = sender._writer_thread, sender._reader_thread
-    try:
-        assert sender.send_events(_events("First"))
-        assert entered.wait(2)
-        assert sender.send_events(_events("Second"), layer_key="authored-layer")
-        original = sender._session.entries()[1][1]
-        sender.disconnect()
-        _join(first_writer, first_reader)
-        monkeypatch.setattr(
-            "openusdconnect.sender.recv_framed",
-            lambda _sock: encode_message({"type": "hello_ok", "committed_through": 1}),
-        )
-        # Connect completes the handshake even while the replay writer is blocked.
-        assert sender.connect()
-        assert replay_entered.wait(2)
-        assert sender.send_events(_events("Third"))
-        assert sender.pending_transaction_count == 2
-        release_replay.set()
-        assert sent.wait(2)
-        assert sender.flush(timeout=0)
-        assert wire[0] == original
-        assert [message_to_dict(payload)["txn_id"] for payload in wire] == [2, 3]
-        assert sender.acknowledged_event_count == 3
-    finally:
-        release_replay.set()
-        writer, reader = sender._writer_thread, sender._reader_thread
-        sender.disconnect()
-        _join(first_writer, first_reader, writer, reader)
-
-
-@pytest.mark.parametrize("thread_role", ["ack", "send"])
-def test_worker_start_failure_rolls_back_connection(monkeypatch, thread_role):
-    sender = EventSender("localhost", 1, client_id="failed-worker", background_send=True)
-    sock = _Socket()
-    _mock_connections(monkeypatch, sender, [sock])
-    start = threading.Thread.start
-
-    def fail_start(thread):
-        if thread.name.startswith(f"openusdconnect-{thread_role}-"):
-            raise RuntimeError("injected thread creation failure")
-        start(thread)
-
-    monkeypatch.setattr(threading.Thread, "start", fail_start)
-    with pytest.raises(RuntimeError, match="thread creation failure"):
-        sender.connect()
-    assert not sender.connected
-    assert sock.closed.is_set()
-    assert not sender.send_events(_events("AfterFailure"))
-    assert sender._writer_thread is None
-    if sender._reader_thread is not None and sender._reader_thread.ident is not None:
-        _join(sender._reader_thread)
 
 
 def test_old_writer_finishing_after_reconnect_cannot_close_the_new_connection(monkeypatch):

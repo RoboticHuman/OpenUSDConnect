@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,9 +14,9 @@ from ._client_lifecycle import (
     DEFAULT_WAIT_TIMEOUT_S,
     ClientCallbackQueue,
     deadline_after,
-    prepare_sender_token,
     raise_if_rejected,
     remaining_time,
+    sender_token_provider,
     share_client_token,
     stop_receiver,
     submit_and_wait,
@@ -29,6 +29,12 @@ from ._client_utils import (
     resolve_client_token,
 )
 from .client_id import make_stable_client_id
+from .client_observer import (
+    ClientObserver,
+    StageMetadata,
+    observer_callbacks,
+    stage_metadata_from_message,
+)
 from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .codec import ReceivedEvent, decode_messages
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
@@ -142,13 +148,8 @@ class SharedStageClient:
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
-        callbacks_on_update: bool = True,
-        background_send: bool = True,
-        on_stage_metadata: Callable[[dict], None] | None = None,
-        on_playback_state: Callable[[dict], None] | None = None,
-        on_playback_claimed: Callable[[dict], None] | None = None,
-        on_playback_rejected: Callable[[dict], None] | None = None,
-        on_token_issued: Callable[[str], None] | None = None,
+        background_send: bool = False,
+        observer: ClientObserver | None = None,
         delegate_bridge_path: str | Path | None = None,
     ):
         if not isinstance(stage, Usd.Stage):
@@ -159,9 +160,10 @@ class SharedStageClient:
         stable_client_id = client_id or make_stable_client_id(app_name)
         connection_origin = origin or client_origin(app_name, "shared")
         resolved_token = resolve_client_token(host, port, token, persist_token)
-        self._callbacks = ClientCallbackQueue(callbacks_on_update)
+        self._callbacks = ClientCallbackQueue()
+        observed = observer_callbacks(observer, self._callbacks.wrap, lambda: self._last_seq)
         token_callback = client_token_handlers(
-            host, port, persist_token, self._callbacks.wrap(on_token_issued)
+            host, port, persist_token, observed.get("on_token_issued"),
         )
 
         def _on_token_issued(token: str) -> None:
@@ -187,10 +189,10 @@ class SharedStageClient:
             origin=connection_origin,
             token=resolved_token,
             on_token_issued=_on_token_issued,
-            on_stage_metadata=self._callbacks.wrap(on_stage_metadata),
-            on_playback_state=self._callbacks.wrap(on_playback_state),
-            on_playback_claimed=self._callbacks.wrap(on_playback_claimed),
-            on_playback_rejected=self._callbacks.wrap(on_playback_rejected),
+            on_stage_metadata=observed.get("on_stage_metadata"),
+            on_playback_state=observed.get("on_playback_state"),
+            on_playback_claimed=observed.get("on_playback_claimed"),
+            on_playback_rejected=observed.get("on_playback_rejected"),
             layered_replay=False,
             layer_mode=LayerMode.SHARED_STAGE,
         )
@@ -202,9 +204,14 @@ class SharedStageClient:
             token=resolved_token,
             on_token_issued=_on_token_issued,
             layer_mode=LayerMode.SHARED_STAGE,
+            token_provider=sender_token_provider(
+                lambda: self._receiver.token,
+                host=host, port=port, persist_token=persist_token,
+            ),
             background_send=background_send,
         )
         self._last_seq = 0
+        self._backlog_pending = False
         self._pending_records: list[ReceivedEvent] = []
         self._last_recovery_assessment: SharedRecoveryAssessment | None = None
         self._recovery_rebind_artifact: RecoveryArtifact | None = None
@@ -649,7 +656,7 @@ class SharedStageClient:
         finally:
             self._receiver.reconnect = reconnect
 
-    def flush(self, timeout: float | None = None) -> bool:
+    def flush(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
         """Wait for every submitted layer edit to be durably committed."""
         if self._closed:
             raise RuntimeError("SharedStageClient is closed")
@@ -664,8 +671,8 @@ class SharedStageClient:
         return submit_and_wait(self, timeout)
 
     @property
-    def stage_metadata(self) -> dict:
-        return dict(self._receiver.stage_metadata)
+    def stage_metadata(self) -> StageMetadata:
+        return stage_metadata_from_message(self._receiver.stage_metadata)
 
     @property
     def last_seq(self) -> int:
@@ -700,7 +707,7 @@ class SharedStageClient:
             self._started = True
         return self
 
-    def connect(self, timeout: float | None = None) -> bool:
+    def connect(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
         """Start and complete both shared-stage handshakes within ``timeout``."""
         self.start()
         deadline = deadline_after(timeout)
@@ -720,17 +727,10 @@ class SharedStageClient:
     def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
             return True
-        self._prepare_sender_token()
         if not self._sender.connect(timeout=timeout):
             raise_if_rejected(self._sender, "shared-stage sender")
             return False
         return True
-
-    def _prepare_sender_token(self) -> None:
-        prepare_sender_token(
-            self._sender, self._receiver,
-            host=self._host, port=self._port, persist_token=self._persist_token,
-        )
 
     def claim_playback(self, time: float | None = None) -> bool:
         """Request the shared-playback leader role."""
@@ -750,8 +750,12 @@ class SharedStageClient:
             raise RuntimeError("SharedStageClient is closed")
         return self._sender.send_playback_control(action, time=time, rate=rate)
 
-    def update(self) -> SyncUpdate:
-        """Apply queued authoritative records, then publish local layer edits."""
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Apply queued authoritative records, then publish local layer edits.
+
+        ``max_messages`` bounds one call's receive work; local edits are held
+        until the backlog queued before them has been applied.
+        """
         if self._closed:
             raise RuntimeError("SharedStageClient is closed")
         if not self._started:
@@ -766,14 +770,18 @@ class SharedStageClient:
             )
         self._tracker.prepare_local_changes()
         try:
-            received = self._apply_incoming()
+            received = self._apply_incoming(max_messages)
         finally:
             self._tracker.restore_prepared()
         sent = 0
         if self._graph.ready and self._receiver.connected and not self._sender.connected:
-            self._prepare_sender_token()
             self._sender.request_connect()
-        if self._sender.connected and self._graph.ready and self.synchronized:
+        if (
+            self._sender.connected
+            and self._graph.ready
+            and self.synchronized
+            and not self._backlog_pending
+        ):
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
                 if not self._sender.send_events(events, layer_key=layer_key):
@@ -788,8 +796,9 @@ class SharedStageClient:
             recovery=self._sender.recovery_incident,
         )
 
-    def _apply_incoming(self) -> int:
-        buffers = self._receiver.drain_queue()
+    def _apply_incoming(self, max_messages: int | None = None) -> int:
+        buffers = self._receiver.drain_queue(max_messages)
+        self._backlog_pending = max_messages is not None and len(buffers) >= max_messages
         if not buffers:
             self._receiver.mark_replay_applied()
             return 0

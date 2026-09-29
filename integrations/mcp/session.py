@@ -14,6 +14,7 @@ import time
 import uuid
 
 from openusdconnect import token_client
+from openusdconnect.client_observer import AppliedBatch, ClientObserver, PlaybackState
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import K_SET_STAGE_METADATA, STAGE_METADATA_KEYS
 from openusdconnect.sender import EventSender, TransactionRejectedError
@@ -23,6 +24,20 @@ from .config import McpConfig
 from .errors import ToolError
 from .introspection import select_changes
 
+
+class _MirrorObserver(ClientObserver):
+    """Feed changes_since() and playback_status() from the mirror receiver."""
+
+    def __init__(self, session: ConnectionSession):
+        self._session = session
+
+    def on_applied(self, batch: AppliedBatch) -> None:
+        # A whole drain shares its final seq; enough for "changed since N".
+        for path in batch.prim_paths:
+            self._session._dirty[path] = batch.seq
+
+    def on_playback_state(self, state: PlaybackState) -> None:
+        self._session._playback_state = state
 
 class ConnectionSession:
     """Owns the network client and the mirror stage for one MCP process."""
@@ -38,7 +53,7 @@ class ConnectionSession:
         # on_applied hook; powers changes_since() diff queries.
         self._dirty: dict[str, int] = {}
         # Latest PlaybackState the server broadcast, set on the receiver thread.
-        self._playback_state: dict | None = None
+        self._playback_state: PlaybackState | None = None
 
     @property
     def connected(self) -> bool:
@@ -123,30 +138,9 @@ class ConnectionSession:
             origin=f"{self._origin_base}-recv",
             token=recv_token,
             persist_token=False,
-            on_playback_state=self._on_playback_state,
-            on_applied=self._on_applied,
-            callbacks_on_update=False,
+            observer=_MirrorObserver(self),
         )
         self.receiver.start()
-
-    def _on_applied(self, prim_paths: list) -> None:
-        """Stamp each applied prim with the current sequence so changes_since can
-        report it. Coarse at drain granularity (a whole drain shares its final
-        seq), which is fine for 'what changed since N' polling."""
-        seq = self.receiver.applying_seq if self.receiver else 0
-        for path in prim_paths:
-            self._dirty[path] = seq
-
-    def _on_playback_state(self, msg: dict) -> None:
-        """Store the latest shared-playhead snapshot. Runs on the receiver
-        thread, so assign a fresh dict (an atomic reference swap) rather than
-        mutating in place."""
-        self._playback_state = {
-            "playing": msg.get("playing"),
-            "time": msg.get("time"),
-            "rate": msg.get("rate"),
-            "leader_client_id": msg.get("leader_client_id") or "",
-        }
 
     def _seed_metadata(self, metadata: dict | None) -> None:
         payload = {k: v for k, v in (metadata or {}).items() if k in STAGE_METADATA_KEYS}
@@ -299,16 +293,17 @@ class ConnectionSession:
         mirror's receiver; disabled under --no-mirror)."""
         if not self.connected:
             raise ToolError("not connected, call usd_connect first", code="not_connected")
+        self.pump()
         state = self._playback_state
         if state is None:
             return {"ok": True, "observed": False}
-        leader = state.get("leader_client_id") or ""
+        leader = state.leader_client_id
         return {
             "ok": True,
             "observed": True,
-            "playing": bool(state.get("playing")),
-            "time": state.get("time"),
-            "rate": state.get("rate"),
+            "playing": state.playing,
+            "time": state.time,
+            "rate": state.rate,
             "leader_client_id": leader,
             "has_leader": bool(leader),
             "is_leader": bool(leader) and leader == self.config.client_id,

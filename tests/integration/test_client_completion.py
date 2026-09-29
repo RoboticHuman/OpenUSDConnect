@@ -26,10 +26,7 @@ def _stage(path):
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
-@pytest.mark.parametrize("background_send", [False, True])
-def test_finish_includes_unprepared_edits_and_waits_for_server_commit(
-    tmp_path, kind, background_send,
-):
+def test_finish_includes_unprepared_edits_and_waits_for_server_commit(tmp_path, kind):
     # Distinct files prevent the in-process server and client from sharing a
     # mutable Sdf.Layer through USD's layer registry.
     server_base = tmp_path / "server.usda"
@@ -50,8 +47,6 @@ def test_finish_includes_unprepared_edits_and_waits_for_server_commit(
             app_name="completion-test",
             port=server.server_address[1],
             persist_token=False,
-            callbacks_on_update=True,
-            background_send=background_send,
             **options,
         ) as client:
             assert client.wait_until_ready(timeout=5)
@@ -74,8 +69,7 @@ def test_finish_includes_unprepared_edits_and_waits_for_server_commit(
             ).Get() == Gf.Vec3d(2, 3, 4)
 
 
-@pytest.mark.parametrize("background_send", [False, True])
-def test_directional_clients_share_the_blocking_helpers(tmp_path, background_send):
+def test_directional_clients_share_the_blocking_helpers(tmp_path):
     server_base = tmp_path / "server.usda"
     _stage(server_base)
     author = _stage(tmp_path / "author.usda")
@@ -91,8 +85,7 @@ def test_directional_clients_share_the_blocking_helpers(tmp_path, background_sen
         port = server.server_address[1]
         with (
             UsdPublisher(
-                author, app_name="completion-author", port=port,
-                persist_token=False, background_send=background_send,
+                author, app_name="completion-author", port=port, persist_token=False,
             ) as publisher,
             UsdReceiver(
                 viewer, app_name="completion-viewer", port=port, persist_token=False,

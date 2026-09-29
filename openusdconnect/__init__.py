@@ -24,6 +24,13 @@ from .adapters import (
     UsdStageAdapter,
 )
 from .checkpoints import MirrorCheckpoint, TransactionCheckpoint
+from .client_observer import (
+    AppliedBatch,
+    ClientObserver,
+    PlaybackClaim,
+    PlaybackState,
+    StageMetadata,
+)
 from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .codec import (
     DecodeResult,
@@ -68,6 +75,8 @@ from .shared_stage_client import (
 from .usd_client import UsdPublisher, UsdReceiver
 
 __all__ = [
+    "AppliedBatch",
+    "ClientObserver",
     "DCCAdapter",
     "ClientPhase",
     "ClientStatus",
@@ -82,6 +91,8 @@ __all__ = [
     "MirrorCheckpoint",
     "MockAdapter",
     "NoticeEmitter",
+    "PlaybackClaim",
+    "PlaybackState",
     "PluginEnvironmentError",
     "PluginEnvironmentResult",
     "ReceiverThread",
@@ -97,6 +108,7 @@ __all__ = [
     "SharedRecoveryAssessment",
     "SharedRecoveryLayer",
     "SharedStageClient",
+    "StageMetadata",
     "SyncUpdate",
     "TransactionRejectedError",
     "TransactionFailure",

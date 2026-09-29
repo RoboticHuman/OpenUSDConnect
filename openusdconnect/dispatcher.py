@@ -409,6 +409,7 @@ class EventDispatcher:
         self.on_applied_events = on_applied_events
         # A receiver resuming after sequence N already holds 1..N.
         self._last_seq = receiver.sync_from - 1
+        self._backlog_pending = False
         self._applying_seq: int | None = None
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
@@ -420,6 +421,11 @@ class EventDispatcher:
     @property
     def last_seq(self) -> int:
         return self._last_seq
+
+    @property
+    def backlog_pending(self) -> bool:
+        """Whether the last drain stopped at its ``max_messages`` budget."""
+        return self._backlog_pending
 
     @last_seq.setter
     def last_seq(self, value: int) -> None:
@@ -454,6 +460,7 @@ class EventDispatcher:
             if max_messages is None
             else self.receiver.drain_queue(max_messages=max_messages)
         )
+        self._backlog_pending = max_messages is not None and len(bufs) >= max_messages
         if not bufs:
             self.receiver.mark_replay_applied()
             return 0

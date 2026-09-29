@@ -62,6 +62,12 @@ def _patch_net(monkeypatch, started, stopped):
             assert self in stopped
             self.joined = True
 
+        def drain_queue(self, max_messages=None):
+            return []
+
+        def mark_replay_applied(self):
+            return False
+
     monkeypatch.setattr(session_mod, "EventSender", _FakeSender)
     monkeypatch.setattr(usd_client, "ReceiverThread", _FakeReceiver)
     monkeypatch.setattr(session_mod.token_client, "load_token", lambda host, port: None)
@@ -112,17 +118,14 @@ def test_playback_status_reflects_broadcast(monkeypatch):
 
     assert session.playback_status()["observed"] is False  # nothing broadcast yet
 
-    session._on_playback_state(
-        {"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"}
-    )
+    notify = session.receiver.receiver.options["on_playback_state"]
+    notify({"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"})
     st = session.playback_status()
     assert st["observed"] and st["playing"] is True
     assert st["time"] == 12.0 and st["rate"] == 2.0
     assert st["has_leader"] is True and st["is_leader"] is True
 
-    session._on_playback_state(
-        {"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"}
-    )
+    notify({"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"})
     st2 = session.playback_status()
     assert st2["is_leader"] is False
     assert st2["leader_client_id"] == "someone-else"
@@ -383,12 +386,14 @@ def test_mirror_preserves_identity_token_and_callbacks(monkeypatch, saved_token)
         assert options["client_id"] == "mcp-identity"
         assert options["origin"] == f"{session._origin_base}-recv"
         assert options["layered_replay"] is True
-        options["on_playback_state"]({"playing": True})
+        options["on_playback_state"](
+            {"playing": True, "time": 1.0, "rate": 1.0, "leader_client_id": ""}
+        )
         assert session.playback_status()["playing"] is True
         dispatcher = session.receiver.dispatcher
         dispatcher.last_seq = 3
         dispatcher._applying_seq = 7
-        dispatcher.on_applied(["/World"])
+        dispatcher.on_applied_events([{"k": "ensure_prim", "prim": "/World"}])
         assert session._dirty == {"/World": 7}
         assert session.receiver.last_seq == 3
     finally:

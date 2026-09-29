@@ -79,6 +79,7 @@ class EventSender:
         handshake_timeout: float = _HANDSHAKE_TIMEOUT_S,
         on_token_issued: Callable[[str], None] | None = None,
         on_stage_metadata: Callable[[dict], None] | None = None,
+        token_provider: Callable[[], str | None] | None = None,
         layer_mode: LayerMode | str = LayerMode.MANAGED,
         session_id: str | None = None,
         max_pending_transactions: int = _MAX_PENDING_TRANSACTIONS,
@@ -105,6 +106,7 @@ class EventSender:
         self._background_send = background_send
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
+        self._token_provider = token_provider
 
         self.sock: socket.socket | None = None
         self.auth_rejected = False
@@ -320,6 +322,7 @@ class EventSender:
             if self._session.recovery_required or time.monotonic() < self._retry_after_until:
                 return False
 
+        self._fill_missing_token()
         connect_timeout = deadline - time.monotonic()
         if connect_timeout <= 0.0:
             return False
@@ -390,7 +393,11 @@ class EventSender:
             sock.settimeout(None)
         except Exception as exc:
             if not published:
-                LOG.exception("EventSender: handshake failed")
+                if isinstance(exc, OSError):
+                    # An unreachable server is expected while retrying.
+                    LOG.info("EventSender: connect to %s:%d failed: %s", self.host, self.port, exc)
+                else:
+                    LOG.exception("EventSender: handshake failed")
                 return False
             self._close(expected=sock)
             if not isinstance(exc, OSError):
@@ -438,6 +445,15 @@ class EventSender:
             replayed,
         )
         return True
+
+    def _fill_missing_token(self) -> None:
+        """Ask the provider for credentials once per connect attempt."""
+        if self.token is not None or self._token_provider is None:
+            return
+        token = self._token_provider()
+        # A handshake on another connection can issue a token meanwhile.
+        if self.token is None:
+            self.token = token
 
     def _accept_handshake_response(
         self, sock: socket.socket, env, payload_type: int, generation: int

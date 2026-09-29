@@ -39,9 +39,9 @@ class _QueuedReceiver:
         self.messages = list(messages)
         self.replay_requests = []
 
-    def drain_queue(self):
-        messages = self.messages
-        self.messages = []
+    def drain_queue(self, max_messages=None):
+        count = len(self.messages) if max_messages is None else max_messages
+        messages, self.messages = self.messages[:count], self.messages[count:]
         return messages
 
     def request_replay_from(self, seq_start):
@@ -321,3 +321,14 @@ def test_sdf_spec_batches_use_full_layer_atomic_rollback():
         dispatcher._apply([valid, invalid])
 
     assert mirror.GetRootLayer().documentation == "original"
+
+
+def test_budgeted_drain_reports_remaining_backlog():
+    receiver = _QueuedReceiver([_event(seq, f"/World/P{seq}") for seq in (1, 2, 3)])
+    dispatcher = EventDispatcher(receiver=receiver, adapter=MockAdapter())
+
+    assert dispatcher.drain_and_apply(max_messages=2) == 2
+    assert dispatcher.backlog_pending
+    assert dispatcher.drain_and_apply(max_messages=2) == 1
+    assert not dispatcher.backlog_pending
+    assert dispatcher.last_seq == 3

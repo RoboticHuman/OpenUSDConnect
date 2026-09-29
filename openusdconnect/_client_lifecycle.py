@@ -91,18 +91,14 @@ def submit_and_wait(client, timeout: float | None) -> bool:
 
 
 class ClientCallbackQueue:
-    """Optionally deliver application transport notifications during update()."""
+    """Deliver notifications raised on network threads during update()."""
 
-    def __init__(self, enabled: bool):
-        self._enabled = enabled
+    def __init__(self):
         self._queue = queue.SimpleQueue()
         self._lock = threading.Lock()
         self._closed = False
 
-    def wrap(self, callback):
-        if callback is None or not self._enabled:
-            return callback
-
+    def wrap(self, callback: Callable) -> Callable:
         def enqueue(value):
             with self._lock:
                 if not self._closed:
@@ -134,23 +130,22 @@ def raise_if_rejected(endpoint, role: str) -> None:
         raise ConnectionError(endpoint.rejection_reason or f"{role} connection rejected")
 
 
-def prepare_sender_token(
-    sender: EventSender,
-    receiver: ReceiverThread | None,
+def sender_token_provider(
+    receiver_token: Callable[[], str | None] | None,
     *,
     host: str,
     port: int,
     persist_token: bool,
-) -> None:
-    """Fill missing sender credentials; issued tokens are shared by callbacks."""
-    if sender.token is not None:
-        return
-    token = receiver.token if receiver is not None else None
-    if token is None:
-        token = resolve_client_token(host, port, None, persist_token)
-    # A handshake can supply a token while stored credentials are being read.
-    if sender.token is None:
-        sender.token = token
+) -> Callable[[], str | None]:
+    """Credentials for a sender connect attempt: the receiver's, else stored ones."""
+
+    def provide() -> str | None:
+        token = receiver_token() if receiver_token is not None else None
+        return token if token is not None else resolve_client_token(
+            host, port, None, persist_token,
+        )
+
+    return provide
 
 
 def share_client_token(

@@ -1,9 +1,9 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Call `update()` from the stage-owning thread. Networking, including
-transaction writes (unless `background_send=False`), runs on background
-threads; encoding and USD work stay on the calling thread.
+Call `update()` from the stage-owning thread. Socket reads and reconnects run
+on background threads; encoding, USD work, and (by default) transaction writes
+run on the calling thread.
 
 ## Choose an API
 
@@ -35,16 +35,16 @@ All high-level clients share one lifecycle:
    `UsdPublisher` opens its socket on the first `update()`.
 2. `wait_until_ready(timeout)` pumps `update()` until the client is `READY`.
    `connect(timeout)` only completes the handshakes.
-3. `update()` applies incoming work and submits local work. While a sender is
-   disconnected it schedules a background handshake with backoff; rejections
-   stop the retries.
+3. `update(max_messages=None)` applies incoming work and submits local work.
+   While a sender is disconnected it schedules a background handshake with
+   backoff; rejections stop the retries.
 4. `submit_and_wait(timeout)` publishes pending edits and waits until they are
    durable. `flush(timeout)` only waits for work already submitted.
 5. `close()` stops networking without flushing.
 
-The blocking helpers default to a 10 second timeout and return `False` only
-when it expires; the work stays queued. States that more updates cannot fix
-raise, as `connect()` and `flush()` do:
+Blocking calls (`connect`, `flush`, `wait_until_ready`, `submit_and_wait`)
+default to a 10 second timeout and return `False` only when it expires; the
+work stays queued. States that more updates cannot fix raise:
 
 | State | Exception |
 | --- | --- |
@@ -55,9 +55,9 @@ raise, as `connect()` and `flush()` do:
 
 `client.status` is an immutable `ClientStatus`. Its `phase` is `OFFLINE`,
 `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`, `PARKED`
-(no bound stage), or `CLOSED`; enable editing only in `READY`. It also reports
-unsent (`has_unsent_changes`) and unacknowledged (`pending_events`) work and
-whether the edit target is synchronized (`edit_target_is_shared`). Per-role
+(no bound stage), or `CLOSED`. `status.can_author` tells a UI whether edits to
+the current edit target will be published now. The status also reports unsent
+(`has_unsent_changes`) and unacknowledged (`pending_events`) work. Per-role
 connection fields are `None` for a role the client lacks. `ClientPhase`,
 `ClientStatus`, and `SyncUpdate` are importable from the package root.
 
@@ -69,13 +69,30 @@ connection fields are `None` for a role the client lacks. `ClientPhase`,
 - `pending_events`: currently submitted but unacknowledged events
 - `recovery`: a deterministic rejection that requires application action
 
-Application callbacks run during `update()` on the calling thread, including
-token, metadata, and playback notifications queued by the network threads. A
-raising callback propagates out of `update()`; later notifications wait for
-the next call. Pass `callbacks_on_update=False` to receive transport
-notifications on network threads instead. Inside an apply callback,
-`receiver.applying_seq` is the batch being applied; `last_seq` advances only
-after the whole apply succeeds.
+### Observing the client
+
+Pass one `ClientObserver` subclass as `observer=` and override only what the
+host needs. Every method runs inside `update()` on the calling thread, and the
+client wires only overridden methods, so unused notifications cost nothing:
+
+```python
+class HostObserver(ClientObserver):
+    def on_applied(self, batch):             # AppliedBatch: seq, events, prim_paths
+        refresh_host_ui(batch.prim_paths)
+
+    def on_playback_state(self, state):      # PlaybackState
+        set_host_time(state.time)
+
+client = ManagedClient(stage, app_name="my-editor", observer=HostObserver())
+```
+
+`on_applied` and `on_resync` are part of delivery: raising rolls the batch back
+and replays it, so they must be safe to retry. `on_stage_metadata`,
+`on_playback_state`, `on_playback_claim`, and `on_token_issued` only observe:
+raising propagates out of `update()` and later notifications wait for the next
+call. Methods that do not apply to a client never fire; `UsdPublisher` reports
+only tokens and stage metadata, and `SharedStageClient` has no delivery
+methods.
 
 An adapter-backed `UsdReceiver` enters `RECOVERY_REQUIRED` when resolver
 recomposition makes incremental projection unsafe. Rebuild the native scene,
@@ -89,18 +106,24 @@ GUI hosts drive the client from a timer instead of waiting:
 client = ManagedClient(stage, app_name="my-editor").start()
 
 def on_timer():
-    if not client.edit_target_is_shared:
-        # ManagedClient publishes only from client.authoring_layer.
-        set_editing_enabled(False)
-        return
-    client.update()
-    set_editing_enabled(client.status.phase is ClientPhase.READY)
+    if client.edit_target_is_shared:  # ManagedClient publishes only its authoring layer
+        client.update(max_messages=256)
+    set_editing_enabled(client.status.can_author)
 ```
 
+Pass `max_messages` in interactive hosts. Without it, `update()` applies the
+whole queued backlog in one call: about 20 µs per transform event, so a
+reconnect with 10,000 queued events stalls one frame for about 200 ms. With a
+budget the backlog spreads over frames at the same total cost, and local edits
+are held until the backlog queued before them has been applied.
 `SharedStageClient` accepts any edit target (session-layer edits stay local),
-so its loop calls `update()` unconditionally. Bidirectional updates apply the
-whole queued replay before publishing, so one update during a large replay can
-take several frames.
+so its loop calls `update()` unconditionally.
+
+`background_send=True` moves transaction writes to a worker so a full socket
+buffer cannot block the UI thread. The worker needs the GIL: while the host's
+main thread runs Python, each write waits for Python's thread switch interval
+(about 5 ms), so keep the default for latency-sensitive editing on fast links.
+
 Before closing, stop authoring and call `submit_and_wait()`. Success means the
 edits are durable, not that their echo has been applied locally.
 
@@ -122,11 +145,8 @@ with UsdReceiver(stage, app_name="my-viewer") as receiver:
         show_loading(receiver.status.phase is not ClientPhase.READY)
 ```
 
-Interactive receive-only applications may bound one tick's work with
-`receiver.update(max_messages=500)`. Ordered replay remains pending until all
-messages preceding the server's synchronization watermark have been applied.
-Bidirectional clients intentionally drain their complete queued prefix before
-publishing local edits, so this budget applies only to `UsdReceiver`.
+Ordered replay remains pending until all messages preceding the server's
+synchronization watermark have been applied, however `max_messages` splits it.
 
 `UsdReceiver` always requests managed layered replay from sequence 1. It owns
 anonymous collaboration layers at the strong end of the stage's session-layer
@@ -160,7 +180,7 @@ with UsdReceiver(
     mirror_stage,
     app_name="my-host",
     adapter=adapter,
-    on_resync=adapter.reset,
+    observer=MyHostObserver(adapter),  # on_resync resets the adapter
 ) as client:
     while application_is_running():
         client.update()  # call from the host's scene/UI thread
@@ -408,7 +428,8 @@ belong to one integration should use the same `app_name` or explicit
 
 TOFU tokens are loaded and saved by default. Set `persist_token=False` for
 ephemeral tools or tests, pass `token=` when the host owns credential storage,
-and use `on_token_issued` to integrate with a host-specific store.
+and override `ClientObserver.on_token_issued` to integrate with a host-specific
+store.
 
 ## Low-level APIs
 

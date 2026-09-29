@@ -211,3 +211,40 @@ def mcp_session_with_receiver(port):
     # These tests drive one connection attempt directly to control reconnect timing.
     session.receiver._started = True
     return session
+
+
+class RecordingObserver:
+    """ClientObserver double recording (method, value, thread id) per call."""
+
+    def __new__(cls, *args, **kwargs):
+        from openusdconnect.client_observer import ClientObserver
+
+        class _Recording(ClientObserver):
+            def __init__(self, on_call=None):
+                self.calls = []
+                self._on_call = on_call
+
+            def _record(self, name, value):
+                self.calls.append((name, value, threading.get_ident()))
+                if self._on_call is not None:
+                    self._on_call(name, value)
+
+            def on_applied(self, batch):
+                self._record("applied", batch)
+
+            def on_resync(self):
+                self._record("resync", None)
+
+            def on_stage_metadata(self, metadata):
+                self._record("stage_metadata", metadata)
+
+            def on_playback_state(self, state):
+                self._record("playback_state", state)
+
+            def on_playback_claim(self, result):
+                self._record("playback_claim", result)
+
+            def on_token_issued(self, token):
+                self._record("token_issued", token)
+
+        return _Recording(*args, **kwargs)

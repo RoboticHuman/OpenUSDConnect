@@ -18,9 +18,9 @@ from ._client_lifecycle import (
     DEFAULT_WAIT_TIMEOUT_S,
     ClientCallbackQueue,
     deadline_after,
-    prepare_sender_token,
     raise_if_rejected,
     remaining_time,
+    sender_token_provider,
     share_client_token,
     stop_receiver,
     submit_and_wait,
@@ -35,6 +35,12 @@ from ._client_utils import (
 )
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
+from .client_observer import (
+    ClientObserver,
+    StageMetadata,
+    observer_callbacks,
+    stage_metadata_from_message,
+)
 from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .coalescing import TransformCoalescingWindow
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
@@ -80,21 +86,12 @@ class ManagedClient:
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
-        on_imported: Callable[[list[str]], None] | None = None,
-        on_resync: Callable[[], None] | None = None,
-        on_applied: Callable[[list[str]], None] | None = None,
-        on_applied_events: Callable[[list[dict]], None] | None = None,
-        on_stage_metadata: Callable[[dict], None] | None = None,
-        on_playback_state: Callable[[dict], None] | None = None,
-        on_playback_claimed: Callable[[dict], None] | None = None,
-        on_playback_rejected: Callable[[dict], None] | None = None,
-        on_token_issued: Callable[[str], None] | None = None,
+        observer: ClientObserver | None = None,
         attr_filter: Callable[[str], bool] | None = None,
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
-        callbacks_on_update: bool = True,
-        background_send: bool = True,
+        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -102,12 +99,15 @@ class ManagedClient:
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
         self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
-        self._callbacks = ClientCallbackQueue(callbacks_on_update)
+        self._callbacks = ClientCallbackQueue()
+        observed = observer_callbacks(
+            observer, self._callbacks.wrap, lambda: self._dispatcher.applying_seq,
+        )
         stable_client_id = client_id or make_stable_client_id(app_name)
         connection_origin = origin or client_origin(app_name, "sync")
         resolved_token = resolve_client_token(host, port, token, persist_token)
         token_callback = client_token_handlers(
-            host, port, persist_token, self._callbacks.wrap(on_token_issued),
+            host, port, persist_token, observed.get("on_token_issued"),
         )
 
         def _on_token_issued(token: str) -> None:
@@ -135,6 +135,10 @@ class ManagedClient:
             department=department,
             token=resolved_token,
             on_token_issued=_on_token_issued,
+            token_provider=sender_token_provider(
+                lambda: self._receiver.token,
+                host=host, port=port, persist_token=persist_token,
+            ),
             background_send=background_send,
         )
         self._receiver = ReceiverThread(
@@ -146,20 +150,18 @@ class ManagedClient:
             origin=connection_origin,
             token=resolved_token,
             on_token_issued=_on_token_issued,
-            on_stage_metadata=self._callbacks.wrap(on_stage_metadata),
-            on_playback_state=self._callbacks.wrap(on_playback_state),
-            on_playback_claimed=self._callbacks.wrap(on_playback_claimed),
-            on_playback_rejected=self._callbacks.wrap(on_playback_rejected),
+            on_stage_metadata=observed.get("on_stage_metadata"),
+            on_playback_state=observed.get("on_playback_state"),
+            on_playback_claimed=observed.get("on_playback_claimed"),
+            on_playback_rejected=observed.get("on_playback_rejected"),
             layered_replay=True,
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
             adapter=adapter,
             emitter=self._emitter,
-            on_imported=on_imported,
-            on_resync=on_resync,
-            on_applied=on_applied,
-            on_applied_events=on_applied_events,
+            on_resync=observed.get("on_resync"),
+            on_applied_events=observed.get("on_applied_events"),
         )
         self._started = False
         self._closed = False
@@ -430,7 +432,7 @@ class ManagedClient:
             )
         return failure
 
-    def flush(self, timeout: float | None = None) -> bool:
+    def flush(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
         """Submit any coalesced transform, then wait for durable acknowledgement."""
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
@@ -461,8 +463,8 @@ class ManagedClient:
         return self._dispatcher.last_seq
 
     @property
-    def stage_metadata(self) -> dict:
-        return dict(self._receiver.stage_metadata)
+    def stage_metadata(self) -> StageMetadata:
+        return stage_metadata_from_message(self._receiver.stage_metadata)
 
     @property
     def prepared_event_count(self) -> int:
@@ -485,7 +487,7 @@ class ManagedClient:
             self._started = True
         return self
 
-    def connect(self, timeout: float | None = None) -> bool:
+    def connect(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
         """Start and complete both handshakes within ``timeout``.
 
         Queued replay still requires :meth:`update` on the stage-owning thread.
@@ -519,17 +521,10 @@ class ManagedClient:
     def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:
             return True
-        self._prepare_sender_token()
         if not self._sender.connect(timeout=timeout):
             raise_if_rejected(self._sender, "sender")
             return False
         return True
-
-    def _prepare_sender_token(self) -> None:
-        prepare_sender_token(
-            self._sender, self._receiver,
-            host=self._host, port=self._port, persist_token=self._persist_token,
-        )
 
     def _send(self, events: list[dict]) -> int:
         if not events:
@@ -561,8 +556,12 @@ class ManagedClient:
             raise RuntimeError("ManagedClient is closed")
         return self._sender.send_playback_control(action, time=time, rate=rate)
 
-    def update(self) -> SyncUpdate:
-        """Freeze local edits, apply the commit stream, then publish them."""
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Freeze local edits, apply the commit stream, then publish them.
+
+        ``max_messages`` bounds one call's receive work; local edits are held
+        until the backlog queued before them has been applied.
+        """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
@@ -589,13 +588,12 @@ class ManagedClient:
         # prepare/apply/restore ordering at the Sdf-layer level.
         self._validate_authoring_target()
         outgoing = self._prepare_outgoing_events()
-        received = self._dispatcher.drain_and_apply()
+        received = self._dispatcher.drain_and_apply(max_messages=max_messages)
 
         sent = 0
         if self._receiver.connected and not self._sender.connected:
-            self._prepare_sender_token()
             self._sender.request_connect()
-        if self._sender.connected and self.synchronized:
+        if self._sender.connected and self.synchronized and not self._dispatcher.backlog_pending:
             sent = self._send(outgoing)
 
         return SyncUpdate(

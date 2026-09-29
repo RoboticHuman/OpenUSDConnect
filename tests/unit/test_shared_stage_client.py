@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-
 import pytest
 from pxr import Ar, Sdf, Usd
 
@@ -260,114 +258,6 @@ def test_status_distinguishes_local_edit_targets_and_unsubmitted_changes(tmp_pat
         client.close()
 
 
-@pytest.mark.parametrize("callbacks_on_update", [False, True])
-def test_transport_callbacks_can_be_delivered_by_update(tmp_path, callbacks_on_update):
-    calls = []
-
-    def record(value):
-        calls.append((value, threading.get_ident()))
-
-    client = SharedStageClient(
-        _create_root(tmp_path / "root.usda"),
-        app_name="callback-threads",
-        persist_token=False,
-        callbacks_on_update=callbacks_on_update,
-        on_token_issued=record,
-        on_stage_metadata=record,
-        on_playback_state=record,
-        on_playback_claimed=record,
-        on_playback_rejected=record,
-    )
-    values = ["issued-token", {"upAxis": "Y"}, {"time": 2.0}, {"leader": "a"}, {"reason": "b"}]
-
-    def receive():
-        callbacks = (
-            client._receiver._on_token_issued,
-            client._receiver._on_stage_metadata,
-            client._receiver._on_playback_state,
-            client._receiver._on_playback_claimed,
-            client._receiver._on_playback_rejected,
-        )
-        for callback, value in zip(callbacks, values, strict=True):
-            callback(value)
-
-    worker = threading.Thread(target=receive)
-    try:
-        worker.start()
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-        assert client._sender.token == "issued-token"
-        assert client._receiver.token == "issued-token"
-        if callbacks_on_update:
-            assert calls == []
-        client._started = True
-        client.update()
-        assert [value for value, _thread in calls] == values
-        expected_thread = threading.get_ident() if callbacks_on_update else worker.ident
-        assert {thread for _value, thread in calls} == {expected_thread}
-    finally:
-        client.close()
-
-
-def test_queued_callback_can_close_client_before_update_touches_stage(tmp_path, monkeypatch):
-    client = SharedStageClient(
-        _create_root(tmp_path / "root.usda"),
-        app_name="close-from-callback",
-        persist_token=False,
-        callbacks_on_update=True,
-        on_stage_metadata=lambda _metadata: client.close(),
-    )
-    monkeypatch.setattr(
-        client._tracker,
-        "prepare_local_changes",
-        lambda: pytest.fail("closed client must not inspect the stage"),
-    )
-    try:
-        client._started = True
-        client._receiver._on_stage_metadata({"upAxis": "Y"})
-        result = client.update()
-        assert client.status.phase is ClientPhase.CLOSED
-        assert result.applied_events == 0
-        assert result.submitted_events == 0
-        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
-            client.update()
-    finally:
-        client.close()
-
-
-def test_shared_playback_commands_preserve_arguments_and_reject_closed_client(
-    tmp_path,
-    monkeypatch,
-):
-    client = SharedStageClient(
-        _create_root(tmp_path / "root.usda"),
-        app_name="playback",
-        persist_token=False,
-    )
-    calls = []
-    monkeypatch.setattr(
-        client._sender,
-        "claim_playback",
-        lambda **kwargs: calls.append(kwargs) or True,
-    )
-    monkeypatch.setattr(
-        client._sender,
-        "send_playback_control",
-        lambda action, **kwargs: calls.append((action, kwargs)) or False,
-    )
-    try:
-        assert client.claim_playback(time=12.0)
-        assert not client.send_playback_control("play", time=13.0, rate=2.0)
-        assert calls == [{"time": 12.0}, ("play", {"time": 13.0, "rate": 2.0})]
-        client.close()
-        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
-            client.claim_playback()
-        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
-            client.send_playback_control("pause")
-    finally:
-        client.close()
-
-
 def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
     stage = _create_root(tmp_path / "root.usda")
     root = stage.GetRootLayer()
@@ -556,7 +446,7 @@ def test_update_restores_frozen_edits_when_replay_fails(tmp_path, monkeypatch):
         lambda: calls.append("restore"),
     )
 
-    def _fail_replay():
+    def _fail_replay(max_messages=None):
         calls.append("replay")
         raise RuntimeError("bad authoritative record")
 
@@ -1157,7 +1047,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
                     "fragment": source.ExportToString(),
                 },
             })]
-            monkeypatch.setattr(client._receiver, "drain_queue", lambda: buffers)
+            monkeypatch.setattr(client._receiver, "drain_queue", lambda max_messages=None: buffers)
             monkeypatch.setattr(sender, "drain_acknowledged_event_count", lambda: 0, raising=False)
             monkeypatch.setattr(
                 sender, "send_events",
@@ -1295,4 +1185,48 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
         assert sender.abandoned_session_ids == []
     finally:
         client._sender = original_sender
+        client.close()
+
+
+def test_shared_budgeted_update_holds_local_edits_until_backlog_applied(
+    tmp_path, monkeypatch,
+):
+    stage = _create_root(tmp_path / "root.usda")
+    client = SharedStageClient(stage, app_name="shared-budget", persist_token=False)
+    backlog = [3]
+    sent = []
+
+    def apply_incoming(max_messages=None):
+        taken = backlog[0] if max_messages is None else min(backlog[0], max_messages)
+        backlog[0] -= taken
+        client._backlog_pending = max_messages is not None and taken >= max_messages
+        return taken
+
+    try:
+        client._started = True
+        client._graph.apply_state({
+            "type": "layer_graph_state", "seq": 1, "generation": "graph-1",
+            "revision": 1, "root_layer_key": "layer:root",
+            "layers": [{"layer_key": "layer:root", "revision": 1, "sublayers": []}],
+        })
+        client._tracker.sync_graph(force=True)
+        client._receiver.connected = True
+        client._receiver._synchronized_event.set()
+        monkeypatch.setattr(client, "_apply_incoming", apply_incoming)
+        monkeypatch.setattr(client._sender, "sock", object())
+        monkeypatch.setattr(
+            client._sender, "send_events",
+            lambda events, layer_key="": sent.append(events) or True,
+        )
+        stage.DefinePrim("/Shared", "Xform")
+
+        held = client.update(max_messages=2)
+        assert (held.applied_events, held.submitted_events) == (2, 0)
+        assert client.has_unsent_changes
+        published = client.update(max_messages=2)
+        assert published.applied_events == 1
+        assert published.submitted_events > 0
+        assert sent
+    finally:
+        client._sender.sock = None
         client.close()

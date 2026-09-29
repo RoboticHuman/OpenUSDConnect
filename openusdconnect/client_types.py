@@ -51,6 +51,15 @@ class ClientStatus:
     edit_target_is_shared: bool | None = None
     recovery_stage_pending: bool = False
 
+    @property
+    def can_author(self) -> bool:
+        """Whether edits to the current edit target will be published now."""
+        return (
+            self.phase is ClientPhase.READY
+            and self.sender_connected is not None
+            and self.edit_target_is_shared is not False
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SyncUpdate:

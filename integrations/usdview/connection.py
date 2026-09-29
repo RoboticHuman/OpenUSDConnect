@@ -19,6 +19,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from openusdconnect.cli_common import parse_bool  # noqa: E402
+from openusdconnect.client_observer import AppliedBatch, ClientObserver  # noqa: E402
 from openusdconnect.defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT  # noqa: E402
 from openusdconnect.usd_client import UsdReceiver  # noqa: E402
 
@@ -105,8 +106,7 @@ def start(
             host=host,
             port=port,
             token=token,
-            on_applied=_on_applied if _translate_openpbr else None,
-            on_applied_events=_on_applied_events,
+            observer=_ViewerObserver(),
         )
     except ValueError as exc:
         LOG.error("Cannot start receiver: %s", exc)
@@ -157,7 +157,7 @@ def _tick() -> None:
     """Drain the receive queue each frame.
 
     Post-apply fixups (interface-input forwarding, OpenPBR translation) are
-    driven by the receiver's ``on_applied`` callback, scoped to the prims
+    driven by ``_ViewerObserver.on_applied``, scoped to the prims
     each batch actually changed.
     """
     if _receiver is not None:
@@ -199,26 +199,18 @@ def _forward_interface_edits(stage, events: list[dict]) -> None:
                     consumer.Set(value)
 
 
-def _on_applied_events(events: list[dict]) -> None:
-    """Post-apply conditioning scoped to what each event edited."""
-    if _usdview_api is None:
-        return
-    stage = _usdview_api.dataModel.stage
-    if stage is None:
-        return
-    _forward_interface_edits(stage, events)
+class _ViewerObserver(ClientObserver):
+    """Condition each applied batch for usdview's renderer."""
 
+    def on_applied(self, batch: AppliedBatch) -> None:
+        stage = _usdview_api.dataModel.stage if _usdview_api is not None else None
+        if stage is None:
+            return
+        _forward_interface_edits(stage, batch.events)
+        if _translate_openpbr:
+            from integrations.openpbr_translate import translate_openpbr_for_paths
 
-def _on_applied(prim_paths: list[str]) -> None:
-    """Translate OpenPBR materials owning the just-applied prims."""
-    if _usdview_api is None:
-        return
-    stage = _usdview_api.dataModel.stage
-    if stage is None:
-        return
-    from integrations.openpbr_translate import translate_openpbr_for_paths
-
-    translate_openpbr_for_paths(stage, prim_paths)
+            translate_openpbr_for_paths(stage, batch.prim_paths)
 
 
 def refresh_asset_dependency(asset_path: str | None = None) -> dict:
