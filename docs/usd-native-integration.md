@@ -1,9 +1,10 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Call `update()` from the stage-owning thread. Socket readers and automatic
-reconnect attempts run on background threads; event submission still performs
-a socket write on the calling thread.
+Call `update()` from the stage-owning thread. Socket readers, automatic
+reconnect attempts, and (by default, `background_send=True`) transaction socket
+writes run on background threads. Encoding and USD work stay on the calling
+thread; an update is not a bounded-time task.
 
 ## Choose an API
 
@@ -16,7 +17,10 @@ a socket write on the calling thread.
 
 Use `ManagedClient` by default. Choose a directional client for send-only or
 receive-only work, or `SharedStageClient` when the application must edit its
-existing authored-layer graph.
+existing authored-layer graph. These bidirectional clients observe a USD stage;
+they do not capture edits to a host's native objects. Native-scene integrations
+use an adapter-backed receiver and their own outbound capture bridge, as
+described in [Adapter destination contract](#adapter-destination-contract).
 
 Managed clients must open equivalent base content and resolve referenced assets
 compatibly. The server synchronizes collaboration opinions and their ordered
@@ -32,35 +36,59 @@ All high-level clients use the same lifecycle:
    state.
 2. `start()` returns immediately. It starts the background receiver for
    `UsdReceiver`, `ManagedClient`, and `SharedStageClient`; `UsdPublisher`
-   merely enters its nonblocking lifecycle. Entering a context manager calls
-   `start()`.
-3. `connect(timeout)` waits for the applicable handshakes. For receiving
-   clients, it does not apply queued replay.
-4. `update()` applies incoming work and, for bidirectional clients, submits
-   local work without waiting for a durable acknowledgement. If the sender
-   disconnects, it schedules a background handshake after the receiver has
-   connected. Repeated calls use a single attempt with retry backoff. Auth,
-   protocol, and recovery rejections stop automatic retries.
-5. `flush(timeout)` waits for already submitted work. Call `update()` first if
-   the stage may still contain unsent edits.
+   opens no socket until its first `update()`. Entering a context manager
+   calls `start()`.
+3. `wait_until_ready(timeout)` starts the client and pumps `update()` until
+   it reaches `READY`. `connect(timeout)` only waits for the handshakes; for
+   receiving clients it does not apply queued replay.
+4. `update()` applies incoming work and submits local work without waiting
+   for a durable acknowledgement. Every call returns a `SyncUpdate`. While a
+   sender is disconnected, `update()` schedules a background handshake (after
+   the receiver has connected, for bidirectional clients). Repeated calls use a
+   single attempt with retry backoff. Auth, protocol, and recovery rejections
+   stop automatic retries.
+5. `flush(timeout)` waits for already submitted work. It can succeed while
+   unsubmitted stage edits remain. `submit_and_wait(timeout)` publishes noticed
+   edits, then waits for durability.
 6. `close()` stops networking. It does not implicitly turn every pending edit
    into a blocking flush.
 
 `client.status` is an immutable `ClientStatus`; `phase` is one of
 `OFFLINE`, `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`,
-or `CLOSED`. Bidirectional applications should enable editing only in `READY`.
-The directional connection fields distinguish partial connectivity from a
-role that is not present.
+`PARKED`, or `CLOSED`. `PARKED` means a `ManagedClient` or `UsdReceiver` has no
+bound stage, even if its networking is connected. Enable synchronized editing
+only in `READY`. The directional connection fields distinguish partial
+connectivity from a role that is not present.
+
+The blocking helpers `wait_until_ready()` and `submit_and_wait()` default to a
+10 second timeout and return `False` only when it expires. States that more
+updates cannot resolve raise instead, matching `connect()` and `flush()`:
+`PermissionError` for authentication rejection, `ConnectionError` for a
+rejected handshake, `TransactionRejectedError` for a rejected transaction, and
+`RuntimeError` for a closed client, a parked stage, or a required native-scene
+rebuild. GUI integrations should use the timer-driven pattern below instead of
+waiting.
+
+`status.has_unsent_changes` includes dirty edits not yet prepared and retained
+publication batches. `status.pending_events` counts submitted edits awaiting
+acknowledgement. Neither count alone establishes that local work is finished.
+`status.edit_target_is_shared` indicates whether the current USD edit target
+participates in this client's publication scope, independently of readiness.
 
 `ClientPhase`, `ClientStatus`, and `SyncUpdate` are available from
 `openusdconnect.client_types` and the package root. `client.client_id` exposes
 the connection identity without accessing an underlying transport object.
 
-Keep lifecycle and stage operations on the host's owning thread. Apply callbacks
-(`on_imported`, `on_resync`, `on_applied`, `on_applied_events`) run during
-`update()` on that thread. Token, metadata, and playback callbacks run on the
-thread handling the handshake or incoming message, which may be a worker.
-Queue UI and USD work back to the owning thread from those callbacks.
+Keep lifecycle and stage operations on the host's owning thread. Every
+application callback runs during `update()` on that thread: apply callbacks
+(`on_imported`, `on_resync`, `on_applied`, `on_applied_events`) and, by
+default, token, metadata, and playback notifications, which the client queues
+from its network threads. Internal credential sharing and persistence remain
+immediate. A raising callback propagates out of `update()`; notifications
+queued after it are delivered by the next `update()`. Closing discards
+undelivered notifications. Pass `callbacks_on_update=False` only when the
+callbacks are thread-safe and must observe network events without an update
+pump; they then run on the thread handling the handshake or message.
 Inside a receiver's apply callback, `receiver.applying_seq` is the candidate
 batch tail; `last_seq` advances only after the complete apply succeeds.
 
@@ -68,13 +96,73 @@ An adapter-backed `UsdReceiver` also enters `RECOVERY_REQUIRED` when resolver
 recomposition makes incremental projection unsafe. Rebuild the native scene,
 then call `acknowledge_native_scene_rebuilt()`.
 
-`ManagedClient.update()` and `SharedStageClient.update()` return `SyncUpdate`:
+`update()` returns a `SyncUpdate` describing the work done by that call;
+directional clients report zero for the direction they lack. Read state such
+as unsent work or deferred records from `client.status`.
 
 - `applied_events`: authoritative events applied during this call
 - `submitted_events`: local events accepted by the sender outbox
 - `acknowledged_events_delta`: newly consumed durable acknowledgements
 - `pending_events`: currently submitted but unacknowledged events
 - `recovery`: a deterministic rejection that requires application action
+
+### GUI scheduling
+
+The host owns its timer and USD thread. Construction and `start()` do not wait
+for synchronization:
+
+```python
+client = ManagedClient(stage, app_name="my-editor").start()
+
+def on_timer():
+    if not client.edit_target_is_shared:
+        # ManagedClient.update() refuses to publish from another layer.
+        set_editing_enabled(False)
+        show_error("restore client.authoring_layer as the edit target")
+        return
+    client.update()
+    status = client.status
+    set_editing_enabled(status.phase is ClientPhase.READY)
+    show_sync_status(status)
+```
+
+`SharedStageClient` accepts any edit target: session-layer edits stay local,
+and `status.edit_target_is_shared` lets its UI distinguish them from
+synchronized edits, so its loop calls `update()` unconditionally.
+
+Background transaction sending uses the existing bounded outbox and preserves
+transaction order and reconnect replay. It does not make encoding, USD replay,
+explicit `connect()`, recovery, or playback commands asynchronous. Bidirectional
+updates still apply the complete queued authoritative prefix before publishing;
+large replays can take multiple frame budgets of CPU time. Pass
+`background_send=False` to write transactions on the calling thread instead.
+
+### Finish local work and close
+
+Stop authoring before a blocking finish operation, and call it on the stage's
+owning thread:
+
+```python
+if not client.submit_and_wait(timeout=5):
+    show_unfinished_changes(client.status)
+else:
+    client.close()
+```
+
+The helper keeps pumping replay and retained local batches, releases
+transform coalescing, and waits for durable acknowledgements. It returns
+`False` only on timeout, leaving work retained for retry, and raises for the
+blocked states listed above. The budget bounds waiting between updates; it
+cannot interrupt USD work or synchronous writes when background sending is
+disabled. Callbacks must not continue creating edits indefinitely while
+finishing.
+
+Completion guarantees publication durability, not that the receive stage has
+already applied the acknowledgement's authoritative echo or resolved every
+asset. In a GUI that must remain interactive during shutdown, disable authoring
+and keep its timer running until both unsent and pending work are empty, then
+close. Present rejection and timeout choices to the user instead of discarding
+outstanding work implicitly.
 
 ## Receive into a stage
 
@@ -86,8 +174,8 @@ from openusdconnect import ClientPhase, UsdReceiver
 stage = Usd.Stage.Open("shot.usda")
 
 with UsdReceiver(stage, app_name="my-viewer") as receiver:
-    if not receiver.connect(timeout=5):
-        raise ConnectionError("OpenUSDConnect server is unavailable")
+    if not receiver.wait_until_ready(timeout=5):
+        raise TimeoutError("OpenUSDConnect replay did not finish in time")
 
     while application_is_running():
         receiver.update()
@@ -111,12 +199,8 @@ history over it would duplicate opinions. Snapshot continuation is a separate
 flat integration path used by the live-open host plugins.
 
 Use `rebind_stage(new_stage)` when a host replaces its stage. Passing `None`
-parks stage application while the network queue continues to receive data.
-
-Application callbacks such as `on_applied` and `on_applied_events` run inside
-`update()` on the calling thread. Transport callbacks, including token,
-metadata, and playback notifications, may run on a background connection
-thread and must be marshalled before touching a UI.
+parks stage application (phase `PARKED`) while the network queue continues to
+receive data.
 
 ### Receive into an application-owned scene
 
@@ -162,14 +246,13 @@ stage = Usd.Stage.Open("shot.usda")
 stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
 
 with UsdPublisher(stage, app_name="layout") as publisher:
-    if not publisher.connect(timeout=5):
-        raise ConnectionError("OpenUSDConnect server is unavailable")
+    if not publisher.wait_until_ready(timeout=5):
+        raise TimeoutError("OpenUSDConnect server is unavailable")
 
     sphere = UsdGeom.Sphere.Define(stage, "/World/Sphere")
     UsdGeom.Xformable(sphere).AddTranslateOp().Set(Gf.Vec3d(1, 2, 3))
-    publisher.update()
 
-    if not publisher.flush(timeout=5):
+    if not publisher.submit_and_wait(timeout=5):
         raise TimeoutError("changes were not durably acknowledged")
 ```
 
@@ -183,13 +266,15 @@ failure after an ambiguous write retains the exact transaction and resends it
 with the same producer session and transaction ID after reconnection. The
 server either commits it once or reports the existing durable high-water mark.
 
-`UsdPublisher.update()` does not initiate a reconnect. While disconnected it
-returns zero and leaves noticed edits dirty; call `connect()` and then
-`update()` to submit them.
+While disconnected, `UsdPublisher.update()` leaves noticed edits dirty and
+schedules a background handshake; a later `update()` submits them.
+`disconnect()` closes the socket and pauses those automatic attempts until the
+next `connect()`.
 
 Use `publish_current_edit_target()` when attaching to a layer that was already
 authored before the publisher existed. It publishes authored opinions, not a
-flattened composed stage. Retry any retained batch with `update()` first.
+flattened composed stage. While disconnected, the snapshot stays prepared until
+an `update()` can submit it. Retry any retained batch with `update()` first.
 
 For high-frequency default-time transforms, set
 `transform_coalesce_seconds` to a small host-appropriate window. Only repeated
@@ -213,8 +298,8 @@ with ManagedClient(
     department="layout",
     transform_coalesce_seconds=0.02,
 ) as client:
-    if not client.connect(timeout=5):
-        raise ConnectionError("OpenUSDConnect server is unavailable")
+    if not client.wait_until_ready(timeout=5):
+        raise TimeoutError("OpenUSDConnect replay did not finish in time")
 
     translate = None
 
@@ -233,6 +318,32 @@ while the client is active. `update()` freezes local edits, applies the queued
 authoritative prefix, then submits the frozen local batch. The dispatcher
 suppresses and invalidates the emitter while applying server records, so
 authoritative echoes do not become new local submissions.
+
+`publish_current_edit_target()` explicitly captures the current authoring layer
+and follows the same replay/readiness gate as ordinary updates. A zero return
+may mean the snapshot is retained until a later update can submit it.
+
+`rebind_stage(new_stage)` and `rebind_stage(None)` refuse unfinished local work.
+Use `submit_and_wait()` before switching documents. If the host deliberately
+abandons unsent edits, pass `discard_unsent=True`; submitted transactions still
+need acknowledgement before rebinding. A new stage receives a fresh authoring
+layer, and `None` parks stage application while networking remains active.
+
+Closing a managed client detaches its authoritative collaboration layers. It
+leaves the local authoring layer and selected edit target on the old stage, so
+the composed scene may reveal older local opinions. To preserve the composition
+currently visible to the user, explicitly create an independent snapshot before
+closing, then let the host adopt or export it:
+
+```python
+visible_snapshot = Usd.Stage.Open(client.stage.Flatten())
+client.close()
+replace_stage_in_host(visible_snapshot)
+```
+
+This deliberately flattens the currently composed scene; it is not a replacement
+for preserving authored layer structure or finishing outstanding publications.
+`SharedStageClient.close()` leaves application-owned authored layers in place.
 
 Use separate `UsdPublisher` and `UsdReceiver` stages when the host intentionally
 authors persistent layers or changes edit targets. Attaching those two
@@ -291,11 +402,11 @@ from openusdconnect import ClientPhase, SharedStageClient
 stage = Usd.Stage.Open("shot.usda")
 
 with SharedStageClient(stage, app_name="layer-editor") as client:
-    if not client.connect(timeout=5):
-        raise ConnectionError("OpenUSDConnect server is unavailable")
+    if not client.wait_until_ready(timeout=5):
+        raise TimeoutError("OpenUSDConnect replay did not finish in time")
 
     while application_is_running():
-        result = client.update()
+        client.update()
         set_editing_enabled(client.status.phase is ClientPhase.READY)
 ```
 
@@ -316,6 +427,15 @@ graph, and non-portable sublayer paths in the resolvable graph. Missing
 sublayers may resolve later; call `refresh_layer_graph()` after resolver or
 asset availability changes. Use `is_layer_reachable(layer)` before authoring
 into a newly attached layer.
+
+`READY` means the replay checkpoint has been processed, even if some records
+must wait for unresolved layers. `status.deferred_events` and
+`status.deferred_layer_keys` expose that incomplete content without preventing
+editing of available layers. `refresh_layer_graph()` retries these records.
+Remote topology edits can select the root edit target if the previous target
+is no longer in the layer stack; read `stage.GetEditTarget()` when refreshing
+the host's layer UI. Both clients expose `claim_playback()` and
+`send_playback_control()` alongside the playback callbacks.
 
 The portable Python tracker keeps full in-memory layer snapshots. Native hosts
 can build an optional bridge against the exact OpenUSD installation they load:

@@ -62,6 +62,9 @@ class EventSender:
     acknowledgement covers it. The same encoded bytes and Hello-bound producer
     identity are replayed after reconnect, so an ACK lost after commit cannot
     apply the USD edits twice.
+
+    Set ``background_send=True`` to move transaction socket writes and reconnect
+    replay to a worker. Validation and encoding remain on the calling thread.
     """
 
     def __init__(
@@ -80,6 +83,7 @@ class EventSender:
         layer_mode: LayerMode | str = LayerMode.MANAGED,
         session_id: str | None = None,
         max_pending_transactions: int = _MAX_PENDING_TRANSACTIONS,
+        background_send: bool = False,
     ):
         if role != "emitter":
             raise ValueError("EventSender role must be 'emitter'")
@@ -99,6 +103,7 @@ class EventSender:
         if not self.session_id or len(self.session_id) > 128:
             raise ValueError("session_id must contain 1-128 characters")
         self.max_pending_transactions = max_pending_transactions
+        self._background_send = background_send
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
 
@@ -118,6 +123,7 @@ class EventSender:
         self._connect_retry_delay = 1.0
         self._send_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
+        self._writer_thread: threading.Thread | None = None
         self._socket_generation = 0
         self._session = _client_backend.ProducerSession(max_pending_transactions)
         self._failure: TransactionFailure | None = None
@@ -275,7 +281,8 @@ class EventSender:
         """Handshake, start the result reader, and replay the exact outbox.
 
         ``timeout`` bounds this attempt and never extends the configured
-        handshake timeout.
+        handshake timeout. Background sending replays on its writer after the
+        handshake completes; use :meth:`flush` to wait for acknowledgement.
         """
         with self._condition:
             epoch = self._connect_epoch
@@ -374,13 +381,14 @@ class EventSender:
                 published = True
             sock.settimeout(max(0.001, deadline - time.monotonic()))
             replayed = 0
-            while pending := self._session.claim_next_unsent(generation):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("reconnect replay timed out")
-                sock.settimeout(remaining)
-                send_raw(sock, pending[1])
-                replayed += 1
+            if not self._background_send:
+                while pending := self._session.claim_next_unsent(generation):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("reconnect replay timed out")
+                    sock.settimeout(remaining)
+                    send_raw(sock, pending[1])
+                    replayed += 1
             sock.settimeout(None)
         except Exception as exc:
             if not published:
@@ -406,9 +414,24 @@ class EventSender:
             name=f"openusdconnect-ack-{self.client_id}",
             daemon=True,
         )
-        with self._condition:
-            self._reader_thread = reader
-        reader.start()
+        try:
+            with self._condition:
+                if self.sock is not sock or generation != self._socket_generation:
+                    return False
+                self._reader_thread = reader
+                reader.start()
+                if self._background_send:
+                    writer = threading.Thread(
+                        target=self._write_pending,
+                        args=(sock, generation),
+                        name=f"openusdconnect-send-{self.client_id}",
+                        daemon=True,
+                    )
+                    writer.start()
+                    self._writer_thread = writer
+        except Exception:
+            self._close(expected=sock)
+            raise
         LOG.info(
             "EventSender connected to %s:%d (session=%s, pending=%d)",
             self.host,
@@ -498,6 +521,10 @@ class EventSender:
     def disconnect(self) -> None:
         """Close the socket while retaining unacknowledged transactions."""
         self.cancel_connect()
+        if self._background_send:
+            # Shutdown must interrupt a blocked writer, not wait for its lock.
+            self._close()
+            return
         with self._condition:
             if self.sock is None:
                 return
@@ -519,15 +546,19 @@ class EventSender:
         if the socket fails during this call. ``False`` means no ownership was
         taken (disconnected before submission, empty input, full outbox, or a
         terminal rejection).
+
+        With ``background_send=True``, only validation, encoding, and bounded
+        outbox submission run on the caller; a worker performs transaction
+        writes and replay. Non-transaction messages still write synchronously.
         """
         if not events:
             return False
         validate_events(events, layer_mode=self.layer_mode)
+        submission_lock = self._condition if self._background_send else self._send_lock
         try:
-            # Transaction identity and wire order are one operation. Without
-            # this outer lock, concurrent callers can allocate IDs 1 then 2
-            # but acquire the socket lock and transmit them as 2 then 1.
-            with self._send_lock:
+            # Synchronous callers allocate IDs in socket order. Background
+            # callers only append; the writer claims that same ordered outbox.
+            with submission_lock:
                 with self._condition:
                     if self.sock is None or self._failure is not None:
                         return False
@@ -547,6 +578,9 @@ class EventSender:
                     )
                     if result != _client_backend.ProducerResult.ACCEPTED:
                         return False
+                    if self._background_send:
+                        self._condition.notify_all()
+                        return True
                     sock = self.sock
                 if sock is not None:
                     send_raw(sock, payload)
@@ -557,6 +591,37 @@ class EventSender:
             )
             self._close(expected=sock)
         return True
+
+    def _write_pending(self, sock: socket.socket, generation: int) -> None:
+        """Send the native outbox in order for exactly one socket generation."""
+        try:
+            while True:
+                with self._condition:
+                    if (
+                        self.sock is not sock
+                        or self._socket_generation != generation
+                        or self._failure is not None
+                    ):
+                        return
+                    pending = self._session.claim_next_unsent(generation)
+                    if pending is None:
+                        self._condition.wait()
+                        continue
+                with self._send_lock:
+                    with self._condition:
+                        if self.sock is not sock or self._socket_generation != generation:
+                            return
+                    send_raw(sock, pending[1])
+        except OSError:
+            LOG.info("EventSender: background send failed; retaining transaction", exc_info=True)
+        except Exception:
+            LOG.exception("EventSender: background writer failed")
+        finally:
+            self._close(expected=sock)
+            with self._condition:
+                if self._writer_thread is threading.current_thread():
+                    self._writer_thread = None
+                self._condition.notify_all()
 
     def repair_rejected_transaction(self, events: list, *, layer_key: str = "") -> int:
         """Replace a recoverable rejected transaction at the same ordered ID.
@@ -731,6 +796,8 @@ class EventSender:
         txn_id = int(result.TxnId())
         rejected_socket = None
         with self._condition:
+            if generation != self._socket_generation or self.sock is None:
+                return
             status_value = int(result.Status())
             if status_value == TransactionStatus.Acknowledged:
                 accepted = self._session.acknowledge_through(generation, txn_id)

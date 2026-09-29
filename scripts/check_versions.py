@@ -111,6 +111,9 @@ def collect_errors() -> list[str]:
 
     if not SEMVER.fullmatch(release):
         errors.append(f"OpenUSDConnect release must use X.Y.Z SemVer, got {release!r}")
+    newest_entry = re.search(r"^## \[([^\]]+)\]", _read("CHANGELOG.md"), re.MULTILINE)
+    if newest_entry is None or newest_entry.group(1) != release:
+        errors.append(f"CHANGELOG.md must start with a '## [{release}]' section")
     if pyproject["project"].get("dynamic") != ["version"]:
         errors.append("pyproject project.version must be dynamic")
     if pyproject.get("tool", {}).get("hatch", {}).get("version", {}).get("path") != (

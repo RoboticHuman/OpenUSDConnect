@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from pxr import Ar, Sdf, Usd
 
 from openusdconnect import ClientPhase, RecoveryError
-from openusdconnect.codec import ReceivedEvent, TransactionRejectionCode
+from openusdconnect.codec import ReceivedEvent, TransactionRejectionCode, encode_message
 from openusdconnect.recovery import (
     QuarantinedTransaction,
     RecoveryArtifact,
@@ -36,6 +38,8 @@ class _RecoverySender:
         self.recovery_incident = make_recovery_incident(artifact)
         self.recovery_required = True
         self.pending_transaction_count = len(artifact.transactions)
+        self.pending_event_count = artifact.event_count
+        self.acknowledged_event_count = 0
         self.abandoned_session_ids: list[str | None] = []
 
     def abandon_rejected_session(self, *, session_id=None):
@@ -184,6 +188,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
         acknowledged_event_count = 3
         recovery_required = False
         recovery_incident = None
+        recovery_artifact = None
 
     sender = _StatusSender()
     client._sender = sender
@@ -223,6 +228,143 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
         assert status.reason == str(artifact.failure)
     finally:
         client._sender = original_sender
+        client.close()
+
+
+def test_status_distinguishes_local_edit_targets_and_unsubmitted_changes(tmp_path):
+    stage = _create_root(tmp_path / "root.usda")
+    client = SharedStageClient(stage, app_name="authoring-scope", persist_token=False)
+    try:
+        assert client.edit_target_is_shared
+        stage.SetEditTarget(stage.GetSessionLayer())
+        stage.DefinePrim("/Local", "Xform")
+        assert not client.status.edit_target_is_shared
+        assert not client.has_unsent_changes
+
+        stage.SetEditTarget(stage.GetRootLayer())
+        stage.DefinePrim("/Shared", "Xform")
+        assert client.status.edit_target_is_shared
+        assert client.status.has_unsent_changes
+        assert client.prepared_event_count == 0
+        assert client.pending_event_count == 0
+
+        client._started = True
+        result = client.update()
+        assert client.status.has_unsent_changes
+        assert result.submitted_events == 0
+        assert client.prepared_event_count > 0
+        client.close()
+        assert not client.has_unsent_changes
+        assert not client.status.has_unsent_changes
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("callbacks_on_update", [False, True])
+def test_transport_callbacks_can_be_delivered_by_update(tmp_path, callbacks_on_update):
+    calls = []
+
+    def record(value):
+        calls.append((value, threading.get_ident()))
+
+    client = SharedStageClient(
+        _create_root(tmp_path / "root.usda"),
+        app_name="callback-threads",
+        persist_token=False,
+        callbacks_on_update=callbacks_on_update,
+        on_token_issued=record,
+        on_stage_metadata=record,
+        on_playback_state=record,
+        on_playback_claimed=record,
+        on_playback_rejected=record,
+    )
+    values = ["issued-token", {"upAxis": "Y"}, {"time": 2.0}, {"leader": "a"}, {"reason": "b"}]
+
+    def receive():
+        callbacks = (
+            client._receiver._on_token_issued,
+            client._receiver._on_stage_metadata,
+            client._receiver._on_playback_state,
+            client._receiver._on_playback_claimed,
+            client._receiver._on_playback_rejected,
+        )
+        for callback, value in zip(callbacks, values, strict=True):
+            callback(value)
+
+    worker = threading.Thread(target=receive)
+    try:
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert client._sender.token == "issued-token"
+        assert client._receiver.token == "issued-token"
+        if callbacks_on_update:
+            assert calls == []
+        client._started = True
+        client.update()
+        assert [value for value, _thread in calls] == values
+        expected_thread = threading.get_ident() if callbacks_on_update else worker.ident
+        assert {thread for _value, thread in calls} == {expected_thread}
+    finally:
+        client.close()
+
+
+def test_queued_callback_can_close_client_before_update_touches_stage(tmp_path, monkeypatch):
+    client = SharedStageClient(
+        _create_root(tmp_path / "root.usda"),
+        app_name="close-from-callback",
+        persist_token=False,
+        callbacks_on_update=True,
+        on_stage_metadata=lambda _metadata: client.close(),
+    )
+    monkeypatch.setattr(
+        client._tracker,
+        "prepare_local_changes",
+        lambda: pytest.fail("closed client must not inspect the stage"),
+    )
+    try:
+        client._started = True
+        client._receiver._on_stage_metadata({"upAxis": "Y"})
+        result = client.update()
+        assert client.status.phase is ClientPhase.CLOSED
+        assert result.applied_events == 0
+        assert result.submitted_events == 0
+        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
+            client.update()
+    finally:
+        client.close()
+
+
+def test_shared_playback_commands_preserve_arguments_and_reject_closed_client(
+    tmp_path,
+    monkeypatch,
+):
+    client = SharedStageClient(
+        _create_root(tmp_path / "root.usda"),
+        app_name="playback",
+        persist_token=False,
+    )
+    calls = []
+    monkeypatch.setattr(
+        client._sender,
+        "claim_playback",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        client._sender,
+        "send_playback_control",
+        lambda action, **kwargs: calls.append((action, kwargs)) or False,
+    )
+    try:
+        assert client.claim_playback(time=12.0)
+        assert not client.send_playback_control("play", time=13.0, rate=2.0)
+        assert calls == [{"time": 12.0}, ("play", {"time": 13.0, "rate": 2.0})]
+        client.close()
+        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
+            client.claim_playback()
+        with pytest.raises(RuntimeError, match="SharedStageClient is closed"):
+            client.send_playback_control("pause")
+    finally:
         client.close()
 
 
@@ -279,6 +421,11 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
         assert client.deferred_event_count == 1
+        client._receiver.connected = True
+        client._receiver._synchronized_event.set()
+        assert client.synchronized
+        assert client.status.deferred_events == 1
+        assert client.status.deferred_layer_keys == (child_key,)
 
         late = Sdf.Layer.CreateNew(str(tmp_path / "late.usda"))
         Sdf.CreatePrimInLayer(late, "/Late")
@@ -287,6 +434,8 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
 
         assert mapped == (child_key,)
         assert client.deferred_event_count == 0
+        assert client.status.deferred_events == 0
+        assert client.status.deferred_layer_keys == ()
         assert late.GetAttributeAtPath("/Late.value").default == 8
     finally:
         client.close()
@@ -942,6 +1091,116 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
         assert not sender.recovery_required
         assert sender.connected
         assert sender.connect_timeouts
+    finally:
+        client._sender = original_sender
+        client.close()
+
+
+@pytest.mark.parametrize("after_timeout", ["resume", "update", "local_edits", "different_incident"])
+def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
+    tmp_path,
+    monkeypatch,
+    after_timeout,
+):
+    old_stage = _create_root(tmp_path / "old-root.usda")
+    old_child = Sdf.Layer.CreateNew(str(tmp_path / "old-child.usda"))
+    Sdf.CreatePrimInLayer(old_child, "/Rejected")
+    old_child.Save()
+    old_stage.GetRootLayer().subLayerPaths.append("./old-child.usda")
+    client = SharedStageClient(old_stage, app_name="resume-recovery", persist_token=False)
+    with client._tracker.suppressed():
+        _bind_child_graph(client)
+    original_sender = client._sender
+    sender = _RecoverySender(_stale_artifact("layer:child"))
+    client._sender = sender
+    client._started = True
+
+    fresh_stage = _create_root(tmp_path / "fresh-root.usda")
+    fresh_child = Sdf.Layer.CreateNew(str(tmp_path / "fresh-child.usda"))
+    fresh_child.Save()
+    fresh_stage.GetRootLayer().subLayerPaths.append("./fresh-child.usda")
+    checkpoints = []
+
+    def refresh(_timeout):
+        checkpoints.append(client.stage)
+        client._receiver.connected = True
+        client._receiver._synchronized_event.set()
+        if len(checkpoints) == 2:
+            with client._tracker.suppressed():
+                _bind_child_graph(client)
+                client.stage.DefinePrim("/Replayed", "Xform")
+            client._last_seq = 3
+            raise TimeoutError("replacement replay timed out")
+        if len(checkpoints) == 3:
+            assert client.last_seq == (4 if after_timeout == "update" else 3)
+            assert client.stage.GetPrimAtPath("/Replayed")
+            client._last_seq += 1
+
+    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", refresh)
+    try:
+        with pytest.raises(TimeoutError, match="replacement replay timed out"):
+            client.recover_use_server(clean_stage=fresh_stage)
+
+        assert client.stage is fresh_stage
+        assert client.recovery_stage_pending
+        assert client.status.recovery_stage_pending
+        assert client.status.phase is ClientPhase.RECOVERY_REQUIRED
+        assert sender.abandoned_session_ids == []
+
+        if after_timeout == "update":
+            source = Sdf.Layer.CreateAnonymous()
+            Sdf.CreatePrimInLayer(source, "/BetweenAttempts")
+            buffers = [encode_message({
+                "type": "event", "seq": 4, "layer_key": "layer:child",
+                "event": {
+                    "k": "replace_sdf_layer_content", "prim": "/",
+                    "fragment": source.ExportToString(),
+                },
+            })]
+            monkeypatch.setattr(client._receiver, "drain_queue", lambda: buffers)
+            monkeypatch.setattr(sender, "drain_acknowledged_event_count", lambda: 0, raising=False)
+            monkeypatch.setattr(
+                sender, "send_events",
+                lambda *_args, **_kwargs: pytest.fail("pending recovery must not publish"),
+                raising=False,
+            )
+            sender.connected = True
+            assert client.update().applied_events == 1
+            assert fresh_stage.GetPrimAtPath("/BetweenAttempts")
+            assert client.last_seq == 4
+            assert client.recovery_stage_pending
+            assert client.status.phase is ClientPhase.RECOVERY_REQUIRED
+
+        if after_timeout == "local_edits":
+            fresh_stage.DefinePrim("/Unsubmitted", "Xform")
+            with pytest.raises(RecoveryError) as error:
+                client.resume_recovery()
+            assert error.value.code == "local_changes_pending"
+            assert checkpoints == [old_stage, fresh_stage]
+            assert sender.recovery_required
+        elif after_timeout == "different_incident":
+            sender.recovery_artifact = _stale_artifact("layer:root")
+            assert not client.recovery_stage_pending
+            with pytest.raises(RecoveryError) as error:
+                client.resume_recovery()
+            assert error.value.code == "no_pending_recovery_stage"
+            with pytest.raises(RecoveryError) as error:
+                client.recover_use_server(clean_stage=fresh_stage)
+            assert error.value.code == "invalid_clean_stage"
+            assert checkpoints == [old_stage, fresh_stage]
+        else:
+            with pytest.raises(RecoveryError, match=r"resume_recovery\(\)") as error:
+                client.recover_use_server(clean_stage=fresh_stage)
+            assert error.value.code == "invalid_clean_stage"
+            result = client.resume_recovery()
+            assert checkpoints == [old_stage, fresh_stage, fresh_stage]
+            assert result.layers[0].source_layer is old_child
+            assert result.rejected_snapshots[0].GetPrimAtPath("/Rejected")
+            assert result.checkpoint_seq == (5 if after_timeout == "update" else 4)
+            assert client.stage is fresh_stage
+            assert not client.recovery_stage_pending
+            assert not client.status.recovery_stage_pending
+            assert not sender.recovery_required
     finally:
         client._sender = original_sender
         client.close()

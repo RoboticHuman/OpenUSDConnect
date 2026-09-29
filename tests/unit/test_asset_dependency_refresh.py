@@ -27,6 +27,7 @@ from openusdconnect.sdf_arc_state import (
 
 class _NullReceiver:
     layered_replay_active = False
+    sync_from = 1
     origin = None
 
     def drain_queue(self):
@@ -41,6 +42,7 @@ class _NullReceiver:
 
 class _QueueReceiver:
     layered_replay_active = False
+    sync_from = 1
     origin = None
 
     def __init__(self):

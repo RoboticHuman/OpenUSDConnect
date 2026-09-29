@@ -17,6 +17,7 @@ from openusdconnect.sdf_spec_delta import serialize_spec_fields
 
 class _NullReceiver:
     layered_replay_active = False
+    sync_from = 1
     origin = None
 
     def drain_queue(self):
@@ -31,6 +32,7 @@ class _NullReceiver:
 
 class _QueuedReceiver:
     layered_replay_active = False
+    sync_from = 1
     origin = None
 
     def __init__(self, messages):
@@ -108,6 +110,18 @@ def test_custom_adapter_receives_connectable_inputs_as_python_lists():
 
     assert dispatcher.drain_and_apply() == 2
     assert received_inputs == [inputs]
+    assert receiver.replay_requests == []
+
+
+def test_cursor_starts_at_the_receiver_continuation_point():
+    receiver = _QueuedReceiver([_event(6, "/World/Continued")])
+    receiver.sync_from = 6
+    adapter = MockAdapter()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=adapter)
+
+    assert dispatcher.last_seq == 5
+    assert dispatcher.drain_and_apply() == 1
+    assert dispatcher.last_seq == 6
     assert receiver.replay_requests == []
 
 

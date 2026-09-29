@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect import UsdPublisher  # noqa: E402, I001
+from openusdconnect import TransactionRejectedError, UsdPublisher  # noqa: E402, I001
 from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: E402
 
 BASE_USD = Path(__file__).with_name("empty.usda")
@@ -52,10 +52,17 @@ def main() -> int:
             department="lookdev",
             persist_token=False,
         ) as publisher:
-            if not publisher.connect(timeout=5):
-                raise ConnectionError("OpenUSDConnect server is unavailable")
+            if not publisher.wait_until_ready(timeout=5):
+                print("OpenUSDConnect server is unavailable", file=sys.stderr)
+                return 1
             sent = publisher.publish_current_edit_target()
-    except ConnectionError as exc:
+            if not publisher.submit_and_wait(timeout=5):
+                print("peer cube was not durably acknowledged", file=sys.stderr)
+                return 1
+    except TransactionRejectedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except (PermissionError, ConnectionError) as exc:
         print(f"peer could not connect: {exc}", file=sys.stderr)
         return 1
 

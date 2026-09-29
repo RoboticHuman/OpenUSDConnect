@@ -407,7 +407,8 @@ class EventDispatcher:
         self.on_resync = on_resync
         self.on_applied = on_applied
         self.on_applied_events = on_applied_events
-        self._last_seq = 0
+        # A receiver resuming after sequence N already holds 1..N.
+        self._last_seq = receiver.sync_from - 1
         self._applying_seq: int | None = None
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}

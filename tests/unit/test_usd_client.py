@@ -15,6 +15,7 @@ from openusdconnect import (
 )
 from openusdconnect import coalescing as coalescing_module
 from openusdconnect.codec import TransactionRejectionCode
+from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.managed_client import ManagedClient
 from openusdconnect.recovery import (
     QuarantinedTransaction,
@@ -56,6 +57,7 @@ class _SenderStub:
         self.connect_result = True
         self.repaired: list[tuple[list[dict], str]] = []
         self.abandoned_session_ids: list[str | None] = []
+        self.connect_requests = 0
 
     def send_events(self, events: list[dict]) -> bool:
         self.batches.append(events)
@@ -90,6 +92,10 @@ class _SenderStub:
         self.connect_timeouts.append(timeout)
         self.connected = self.connect_result
         return self.connect_result
+
+    def request_connect(self, timeout=2.0) -> bool:
+        self.connect_requests += 1
+        return True
 
     def repair_rejected_transaction(self, events: list[dict], *, layer_key="") -> int:
         self.repaired.append((events, layer_key))
@@ -127,7 +133,7 @@ def test_receiver_parks_without_invalidating_dispatcher_adapter():
         receiver._started = True
 
         assert receiver._dispatcher.adapter is adapter
-        assert receiver.update() == 0
+        assert receiver.update().applied_events == 0
     finally:
         receiver.close()
 
@@ -148,7 +154,7 @@ def test_receiver_update_forwards_message_budget(monkeypatch):
             lambda *, max_messages=None: calls.append(max_messages) or 3,
         )
 
-        assert receiver.update(max_messages=128) == 3
+        assert receiver.update(max_messages=128).applied_events == 3
         assert calls == [128]
     finally:
         receiver.close()
@@ -266,7 +272,7 @@ def test_receiver_status_distinguishes_connecting_replay_and_ready():
     assert receiver.status.phase is ClientPhase.CLOSED
 
 
-def test_publisher_context_start_is_nonblocking_and_connect_is_explicit():
+def test_publisher_context_start_is_nonblocking_and_update_connects_in_background():
     publisher = UsdPublisher(
         Usd.Stage.CreateInMemory(),
         app_name="lifecycle-publisher",
@@ -275,11 +281,21 @@ def test_publisher_context_start_is_nonblocking_and_connect_is_explicit():
     sender = _SenderStub([])
     sender.connected = False
     publisher._sender = sender
+    assert publisher.status.phase is ClientPhase.OFFLINE
 
     with publisher as entered:
         assert entered is publisher
         assert sender.connect_timeouts == []
+        assert publisher.status.phase is ClientPhase.CONNECTING
+        assert publisher.update().submitted_events == 0
+        assert sender.connect_requests == 1
+        assert sender.connect_timeouts == []
+
+        publisher.disconnect()
         assert publisher.status.phase is ClientPhase.OFFLINE
+        publisher.update()
+        assert sender.connect_requests == 1
+
         assert publisher.connect(timeout=0.25)
         assert sender.connect_timeouts == [0.25]
         assert publisher.status.phase is ClientPhase.READY
@@ -322,6 +338,243 @@ def test_managed_status_exposes_partial_connection_and_event_counts():
 
         sender.connected = True
         assert client.status.phase is ClientPhase.READY
+    finally:
+        client.close()
+
+
+@pytest.fixture
+def ready_managed_client(monkeypatch):
+    client = ManagedClient(
+        Usd.Stage.CreateInMemory(), app_name="managed-api", persist_token=False,
+    )
+    sender = _SenderStub([True] * 10)
+    client._sender = sender
+    client._started = True
+    client._receiver.connected = True
+    client._receiver.layered_replay_active = True
+    client._receiver._synchronized_event.set()
+    monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda: 0)
+    try:
+        yield client, sender
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("options", [
+    {"transform_coalesce_seconds": -1},
+    {"transform_coalesce_seconds": float("nan")},
+    {"extra_channels": [object()]},
+    {"replicated_api_schemas": {"CollectionAPI:invalid"}},
+])
+def test_managed_invalid_configuration_preserves_stage(options):
+    stage = Usd.Stage.CreateInMemory()
+    stage.SetEditTarget(stage.GetSessionLayer())
+    target = stage.GetEditTarget()
+    session = stage.GetSessionLayer().ExportToString()
+    with pytest.raises((TypeError, ValueError)):
+        ManagedClient(stage, app_name="invalid-options", persist_token=False, **options)
+    assert stage.GetEditTarget() == target
+    assert stage.GetSessionLayer().ExportToString() == session
+
+
+def test_managed_reports_dirty_prepared_and_submitted_work(ready_managed_client):
+    client, sender = ready_managed_client
+    assert not client.has_unsent_changes
+    assert client.edit_target_is_shared
+    client.stage.DefinePrim("/Local", "Xform")
+    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
+    assert client.status.prepared_events == 0
+    assert client.pending_event_count == 0
+
+    sender.results = iter([False, True])
+    retained = client.update()
+    assert retained.submitted_events == 0
+    assert client.status.has_unsent_changes
+    assert client.prepared_event_count > 0
+    submitted = client.update()
+    assert submitted.submitted_events > 0
+    assert not client.has_unsent_changes
+    assert client.pending_event_count > 0
+
+    client.stage.SetEditTarget(client.stage.GetRootLayer())
+    assert not client.edit_target_is_shared
+    assert not client.status.edit_target_is_shared
+
+
+def test_managed_tracks_metadata_only_changes(ready_managed_client):
+    client, _sender = ready_managed_client
+    with Usd.EditContext(client.stage, client.stage.GetRootLayer()):
+        client.stage.SetFramesPerSecond(48)
+    assert client.has_unsent_changes
+    # The notice still needs evaluation even when the current authoring layer
+    # does not own the metadata opinion and filtering emits nothing.
+    client.update()
+    assert not client.has_unsent_changes
+
+
+def test_managed_rebind_can_discard_metadata_only_changes(ready_managed_client):
+    client, _sender = ready_managed_client
+    client.stage.GetRootLayer().framesPerSecond = 48
+    assert client.has_unsent_changes
+    replacement = Usd.Stage.CreateInMemory()
+    replacement.SetFramesPerSecond(30)
+    client.rebind_stage(replacement, discard_unsent=True)
+    assert not client.has_unsent_changes
+    assert client.update().submitted_events == 0
+
+
+def test_emitter_rebind_seeds_replacement_metadata_baseline():
+    old_stage = Usd.Stage.CreateInMemory()
+    emitter = NoticeEmitter(old_stage)
+    old_stage.SetFramesPerSecond(48)
+    replacement = Usd.Stage.CreateInMemory()
+    replacement.SetFramesPerSecond(30)
+    UsdGeom.SetStageUpAxis(replacement, UsdGeom.Tokens.z)
+    try:
+        emitter.rebind_stage(replacement)
+        assert not emitter.has_local_changes
+        UsdGeom.SetStageUpAxis(replacement, UsdGeom.Tokens.y)
+        assert emitter.build_events_for_dirty() == [
+            {"k": "set_stage_metadata", "upAxis": "Y"},
+        ]
+    finally:
+        emitter.cleanup()
+
+
+def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
+    ready_managed_client, monkeypatch,
+):
+    client, sender = ready_managed_client
+    starts = []
+    client._started = False
+    monkeypatch.setattr(client._receiver, "start", lambda: starts.append(True))
+    client._receiver._synchronized_event.clear()
+    value = UsdGeom.Sphere.Define(client.stage, "/Local").GetRadiusAttr()
+    value.Set(1)
+
+    assert client.publish_current_edit_target() == 0
+    assert starts == [True]
+    assert sender.batches == []
+    assert client.has_unsent_changes
+    with pytest.raises(RuntimeError, match="earlier publisher batch"):
+        client.publish_current_edit_target()
+    value.Set(2)
+    client._receiver._synchronized_event.set()
+    assert client.update().submitted_events > 0
+    assert client.has_unsent_changes
+    assert client.update().submitted_events > 0
+    assert not client.has_unsent_changes
+    values = [
+        event["attrs"]["radius"]
+        for batch in sender.batches for event in batch
+        if event["k"] == "set_gprim_attrs" and "radius" in event["attrs"]
+    ]
+    assert values == [1, 2]
+
+
+def test_managed_wait_until_ready_applies_replay(ready_managed_client, monkeypatch):
+    client, _sender = ready_managed_client
+    client._receiver._synchronized_event.clear()
+    applied = []
+
+    def apply_replay():
+        applied.append(True)
+        client._receiver._synchronized_event.set()
+        return 0
+
+    monkeypatch.setattr(client._dispatcher, "drain_and_apply", apply_replay)
+    assert client.wait_until_ready(timeout=0)
+    assert applied == [True]
+
+
+def test_managed_submit_and_wait_includes_coalesced_and_new_dirty_work(
+    ready_managed_client, monkeypatch,
+):
+    client, sender = ready_managed_client
+    prim = UsdGeom.Xform.Define(client.stage, "/Local")
+    translate = prim.AddTranslateOp()
+    prim.AddOrientOp()
+    prim.AddScaleOp()
+    translate.Set((1, 0, 0))
+    client.update()
+    sender.pending_event_count = 0
+    client._transform_coalescing.seconds = 60
+    translate.Set((2, 0, 0))
+    acknowledgements = []
+
+    def acknowledge(timeout=None):
+        acknowledgements.append(sender.pending_event_count)
+        sender.pending_event_count = 0
+        return True
+
+    monkeypatch.setattr(sender, "flush", acknowledge)
+    assert client.submit_and_wait(timeout=0)
+    assert acknowledgements == [1]
+    assert not client.has_unsent_changes
+    assert sender.batches[-1][0]["t"] == [2, 0, 0]
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+@pytest.mark.parametrize("park", [False, True])
+def test_managed_rebind_requires_explicit_unsent_discard(
+    ready_managed_client, prepare, park,
+):
+    client, _sender = ready_managed_client
+    old_stage = client.stage
+    old_stage.DefinePrim("/Local", "Xform")
+    if prepare:
+        client.emitter.prepare_events_for_send()
+    replacement = None if park else Usd.Stage.CreateInMemory()
+    with pytest.raises(RuntimeError, match="unsent changes"):
+        client.rebind_stage(replacement)
+    assert client.stage is old_stage
+    assert client.has_unsent_changes
+    client.rebind_stage(replacement, discard_unsent=True)
+    assert client.stage is replacement
+    assert not client.has_unsent_changes
+    assert client.edit_target_is_shared is not park
+
+
+def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
+    client, _sender = ready_managed_client
+    old_stage = client.stage
+    old_stage.DefinePrim("/Local", "Xform")
+    assert client.update().submitted_events > 0
+    with pytest.raises(RuntimeError, match="submitted work pending"):
+        client.rebind_stage(None, discard_unsent=True)
+    assert client.stage is old_stage
+
+
+def test_managed_parked_client_is_not_ready(ready_managed_client):
+    client, _sender = ready_managed_client
+    client.rebind_stage(None)
+    assert client.connected
+    assert not client.synchronized
+    assert client.status.phase is ClientPhase.PARKED
+    assert not client.status.synchronized
+    assert not client.edit_target_is_shared
+    with pytest.raises(RuntimeError, match="no bound stage"):
+        client.wait_until_ready()
+    with pytest.raises(RuntimeError, match="no bound stage"):
+        client.submit_and_wait()
+
+
+def test_managed_queued_callback_can_close_before_stage_work(monkeypatch):
+    client = ManagedClient(
+        Usd.Stage.CreateInMemory(), app_name="close-from-callback", persist_token=False,
+        callbacks_on_update=True, on_playback_state=lambda _state: client.close(),
+    )
+    client._started = True
+    monkeypatch.setattr(
+        client.dispatcher, "drain_and_apply", lambda: pytest.fail("closed client applied work"),
+    )
+    try:
+        client.receiver._on_playback_state({"playing": False})
+        assert client.update() == SyncUpdate(applied_events=0, submitted_events=0)
+        assert client.status.phase is ClientPhase.CLOSED
+        with pytest.raises(RuntimeError, match="ManagedClient is closed"):
+            client.update()
     finally:
         client.close()
 
@@ -566,6 +819,7 @@ def test_publisher_retains_exact_batch_until_send_succeeds():
     )
     sender = _SenderStub([False, True, True])
     publisher._sender = sender
+    publisher.start()
     try:
         prim = stage.DefinePrim("/World/Thing", "Xform")
         value = prim.CreateAttribute(
@@ -575,15 +829,15 @@ def test_publisher_retains_exact_batch_until_send_succeeds():
         )
         value.Set(1)
 
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         assert publisher.prepared_event_count > 0
 
         value.Set(2)
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
         assert sender.batches[1] is sender.batches[0]
         assert publisher.prepared_event_count == 0
 
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
         assert sender.batches[2] is not sender.batches[1]
     finally:
         publisher.close()
@@ -606,6 +860,7 @@ def _publisher_with_transform(monkeypatch, results):
     )
     sender = _SenderStub(results)
     publisher._sender = sender
+    publisher.start()
     return publisher, sender, translate, clock
 
 
@@ -616,17 +871,18 @@ def test_publisher_coalesces_latest_default_time_transform_before_submission(mon
     )
     try:
         translate.Set((1, 0, 0))
-        assert publisher.update() == 3  # definition and op-order barriers publish immediately
+        # Definition and op-order barriers publish immediately.
+        assert publisher.update().submitted_events == 3
 
         translate.Set((2, 0, 0))
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         translate.Set((3, 0, 0))
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         assert len(sender.batches) == 1
         assert publisher.prepared_event_count == 1
 
         clock[0] = 0.11
-        assert publisher.update() == 1
+        assert publisher.update().submitted_events == 1
         assert sender.batches[-1] == [
             {
                 "k": "set_xform_trs",
@@ -646,19 +902,19 @@ def test_publisher_coalesced_batch_survives_failure_and_reconnect(monkeypatch):
     )
     try:
         translate.Set((1, 0, 0))
-        assert publisher.update() == 3
+        assert publisher.update().submitted_events == 3
 
         translate.Set((2, 0, 0))
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         clock[0] = 0.11
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         failed_batch = sender.batches[-1]
 
         sender.connected = False
         translate.Set((3, 0, 0))
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         sender.connected = True
-        assert publisher.update() == 1
+        assert publisher.update().submitted_events == 1
         assert sender.batches[-1] is failed_batch
         assert sender.batches[-1][0]["t"] == [3.0, 0.0, 0.0]
     finally:
@@ -672,9 +928,9 @@ def test_publisher_flush_forces_a_buffered_transform_to_sender(monkeypatch):
     )
     try:
         translate.Set((1, 0, 0))
-        assert publisher.update() == 3
+        assert publisher.update().submitted_events == 3
         translate.Set((2, 0, 0))
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
 
         assert publisher.flush(timeout=1.0)
         assert len(sender.batches) == 2
@@ -805,14 +1061,17 @@ def test_publisher_does_not_consume_edits_while_disconnected():
     sender = _SenderStub([True])
     sender.connected = False
     publisher._sender = sender
+    publisher.start()
     try:
         stage.DefinePrim("/World/Thing", "Xform")
 
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         assert publisher.prepared_event_count == 0
+        assert publisher.has_unsent_changes
+        assert sender.connect_requests == 1
 
         sender.connected = True
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
     finally:
         publisher.close()
 
@@ -873,9 +1132,10 @@ def test_publisher_requires_a_prepared_batch_to_be_retried_before_snapshot():
         persist_token=False,
     )
     publisher._sender = _SenderStub([False])
+    publisher.start()
     try:
         stage.DefinePrim("/World/Thing", "Xform")
-        assert publisher.update() == 0
+        assert publisher.update().submitted_events == 0
         assert publisher.prepared_event_count > 0
 
         with pytest.raises(RuntimeError, match=r"call update\(\)"):
@@ -915,7 +1175,7 @@ def test_current_edit_target_publication_is_retained_for_update_retry():
         assert publisher.publish_current_edit_target() == 0
         assert publisher.prepared_event_count > 0
 
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
         assert sender.batches[1] is sender.batches[0]
         assert publisher.prepared_event_count == 0
     finally:

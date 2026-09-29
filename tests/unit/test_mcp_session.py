@@ -9,6 +9,7 @@ from integrations.mcp.config import McpConfig
 from integrations.mcp.errors import ToolError
 from openusdconnect import usd_client
 from openusdconnect.checkpoints import MirrorCheckpoint
+from openusdconnect.client_types import SyncUpdate
 
 
 class _FakeSender:
@@ -30,6 +31,10 @@ class _FakeSender:
         self.is_connected = False
 
 
+def _applied(count: int) -> SyncUpdate:
+    return SyncUpdate(applied_events=count, submitted_events=0)
+
+
 def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
         synchronized = True
@@ -41,6 +46,7 @@ def _patch_net(monkeypatch, started, stopped):
         def __init__(self, **kwargs):
             self.options = kwargs
             self.token = kwargs["token"]
+            self.sync_from = kwargs["sync_from"]
             self.joined = False
 
         def start(self):
@@ -162,7 +168,7 @@ def test_concurrent_foreign_write_cannot_confirm_own_transaction(monkeypatch):
     def apply_foreign_write():
         session.mirror_stage.DefinePrim("/Foreign", "Xform")
         session.receiver.dispatcher.last_seq += 1
-        return 1
+        return _applied(1)
 
     monkeypatch.setattr(session.receiver, "update", apply_foreign_write)
     try:
@@ -196,7 +202,7 @@ def test_confirmation_requires_matching_applied_checkpoint(
     def apply():
         session.receiver.dispatcher.last_seq = 1
         session.receiver.receiver.synchronized = ready
-        return 0
+        return _applied(0)
 
     monkeypatch.setattr(session.receiver, "update", apply)
     try:
@@ -225,7 +231,7 @@ def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
     def apply():
         updates.append(True)
         session.receiver.dispatcher.last_seq = 50 if len(updates) >= 2 else 1
-        return 1
+        return _applied(1)
 
     monkeypatch.setattr(session.sender, "flush", flush)
     monkeypatch.setattr(session.receiver, "update", apply)
@@ -256,7 +262,7 @@ def test_ack_arriving_during_apply_is_confirmed_without_sleep(monkeypatch, appli
         acknowledged = True
         session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
         session.receiver.dispatcher.last_seq = 1
-        return applied
+        return _applied(applied)
 
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     monkeypatch.setattr(session.sender, "flush", flush)
@@ -283,7 +289,7 @@ def test_confirmation_respects_budget_with_or_without_progress(monkeypatch, appl
         nonlocal elapsed
         elapsed += 0.001
         session.receiver.dispatcher.last_seq += applied
-        return applied
+        return _applied(applied)
 
     def sleep(seconds):
         nonlocal elapsed
@@ -313,7 +319,7 @@ def test_pending_ack_times_out_without_false_confirmation(monkeypatch):
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     monkeypatch.setattr(session.sender, "flush", lambda timeout: False)
     session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
-    monkeypatch.setattr(session.receiver, "update", lambda: 0)
+    monkeypatch.setattr(session.receiver, "update", lambda: _applied(0))
     session.receiver.dispatcher.last_seq = 100
     try:
         assert not session.send([{}])["mirror_synced"]
@@ -335,7 +341,7 @@ def test_rejected_transaction_is_reported_as_tool_error(monkeypatch, after_apply
     def apply():
         nonlocal applied
         applied = True
-        return 0
+        return _applied(0)
 
     def reject(timeout):
         if after_apply and not applied:

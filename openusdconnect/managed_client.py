@@ -15,12 +15,16 @@ from dataclasses import dataclass
 from pxr import Sdf, Usd
 
 from ._client_lifecycle import (
+    DEFAULT_WAIT_TIMEOUT_S,
+    ClientCallbackQueue,
     deadline_after,
     prepare_sender_token,
     raise_if_rejected,
     remaining_time,
     share_client_token,
     stop_receiver,
+    submit_and_wait,
+    wait_until_ready,
 )
 from ._client_utils import (
     client_origin,
@@ -89,16 +93,22 @@ class ManagedClient:
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
+        callbacks_on_update: bool = True,
+        background_send: bool = True,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
             raise TypeError("ManagedClient requires a Usd.Stage")
         adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
+        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
+        self._callbacks = ClientCallbackQueue(callbacks_on_update)
         stable_client_id = client_id or make_stable_client_id(app_name)
         connection_origin = origin or client_origin(app_name, "sync")
         resolved_token = resolve_client_token(host, port, token, persist_token)
-        token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
+        token_callback = client_token_handlers(
+            host, port, persist_token, self._callbacks.wrap(on_token_issued),
+        )
 
         def _on_token_issued(token: str) -> None:
             share_client_token(token, self._sender, self._receiver, token_callback)
@@ -108,9 +118,8 @@ class ManagedClient:
         self._port = port
         self._persist_token = persist_token
         self._app_name = app_name
-        self._authoring_layer = self._create_authoring_layer(stage, app_name)
+        self._authoring_layer: Sdf.Layer | None = None
         self._last_recovery_result: ManagedRecoveryResult | None = None
-        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
 
         self._emitter = NoticeEmitter(
             stage,
@@ -126,6 +135,7 @@ class ManagedClient:
             department=department,
             token=resolved_token,
             on_token_issued=_on_token_issued,
+            background_send=background_send,
         )
         self._receiver = ReceiverThread(
             host=host,
@@ -136,10 +146,10 @@ class ManagedClient:
             origin=connection_origin,
             token=resolved_token,
             on_token_issued=_on_token_issued,
-            on_stage_metadata=on_stage_metadata,
-            on_playback_state=on_playback_state,
-            on_playback_claimed=on_playback_claimed,
-            on_playback_rejected=on_playback_rejected,
+            on_stage_metadata=self._callbacks.wrap(on_stage_metadata),
+            on_playback_state=self._callbacks.wrap(on_playback_state),
+            on_playback_claimed=self._callbacks.wrap(on_playback_claimed),
+            on_playback_rejected=self._callbacks.wrap(on_playback_rejected),
             layered_replay=True,
         )
         self._dispatcher = EventDispatcher(
@@ -153,6 +163,8 @@ class ManagedClient:
         )
         self._started = False
         self._closed = False
+        with self._emitter.suppressed():
+            self._authoring_layer = self._create_authoring_layer(stage, app_name)
 
     @property
     def stage(self) -> Usd.Stage | None:
@@ -177,6 +189,8 @@ class ManagedClient:
             phase = ClientPhase.RECOVERY_REQUIRED
         elif self.auth_rejected or self.connection_rejected:
             phase = ClientPhase.REJECTED
+        elif self._stage is None:
+            phase = ClientPhase.PARKED
         elif self._receiver.connected and not self._receiver.synchronized:
             phase = ClientPhase.REPLAYING
         elif self.connected and self.synchronized:
@@ -197,6 +211,8 @@ class ManagedClient:
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
+            has_unsent_changes=self.has_unsent_changes,
+            edit_target_is_shared=self.edit_target_is_shared,
         )
 
     @property
@@ -226,6 +242,19 @@ class ManagedClient:
         return self._authoring_layer
 
     @property
+    def has_unsent_changes(self) -> bool:
+        """Whether local notices or a prepared batch still need submission."""
+        return not self._closed and self._stage is not None and self._emitter.has_local_changes
+
+    @property
+    def edit_target_is_shared(self) -> bool:
+        """Whether edits currently target this client's synchronized authoring layer."""
+        return (
+            self._stage is not None
+            and self._stage.GetEditTarget().GetLayer() is self._authoring_layer
+        )
+
+    @property
     def connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
@@ -233,7 +262,10 @@ class ManagedClient:
     def synchronized(self) -> bool:
         """Whether the local stage applied replay through the server watermark."""
         return (
-            not self._closed and self._receiver.synchronized and not self._sender.recovery_required
+            not self._closed
+            and self._stage is not None
+            and self._receiver.synchronized
+            and not self._sender.recovery_required
         )
 
     @property
@@ -446,8 +478,9 @@ class ManagedClient:
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
-            if self._receiver.token is None and self._persist_token:
-                self._receiver.token = resolve_client_token(self._host, self._port, None, True)
+            self._receiver.token = resolve_client_token(
+                self._host, self._port, self._receiver.token, self._persist_token,
+            )
             self._receiver.start()
             self._started = True
         return self
@@ -469,6 +502,21 @@ class ManagedClient:
         elif self._receiver.hello_rejected:
             raise ConnectionError(self._receiver.rejection_reason or "connection rejected")
         return False
+
+    def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
+        """Pump updates on the owning thread until connection and replay are ready.
+
+        Returns ``False`` only on timeout. Rejection, a transaction failure, a
+        parked stage, or a closed client raise instead.
+        """
+        return wait_until_ready(self, timeout)
+
+    def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
+        """Submit local changes and wait for durability while applying incoming work.
+
+        Returns ``False`` only on timeout, with the work retained for retry.
+        """
+        return submit_and_wait(self, timeout)
 
     def _require_layered_replay(self) -> None:
         if self._receiver.connected and not self._receiver.layered_replay_active:
@@ -526,6 +574,11 @@ class ManagedClient:
             raise RuntimeError("ManagedClient is closed")
         if not self._started:
             raise RuntimeError("ManagedClient has not been started")
+        self._callbacks.drain()
+        if self._closed:
+            return SyncUpdate(
+                applied_events=0, submitted_events=0, pending_events=self.pending_event_count,
+            )
         if self._stage is None:
             return SyncUpdate(
                 applied_events=0,
@@ -563,45 +616,55 @@ class ManagedClient:
     def publish_current_edit_target(self) -> int:
         """Publish all opinions currently authored in the active edit target.
 
-        An earlier retained batch must be retried with :meth:`update` first.
-        This keeps one call from ambiguously mixing two transport transactions.
+        Starts the client if needed. The snapshot remains prepared while replay
+        or connection setup is pending; subsequent :meth:`update` calls send it
+        when ready. An earlier retained batch must be retried first.
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if self._stage is None:
             return 0
         self._validate_authoring_target()
-        if not self._sender.connected:
-            try:
-                self._connect_sender()
-            except (PermissionError, ConnectionError):
-                return 0
         if self._emitter.prepared_event_count:
             raise RuntimeError(
                 "an earlier publisher batch is still prepared; call update() "
                 "before publishing the current edit target"
             )
-        return self._send(self._emitter.prepare_snapshot_events_for_send())
+        self.start()
+        self._emitter.prepare_snapshot_events_for_send()
+        return self.update().submitted_events
 
-    def rebind_stage(self, stage: Usd.Stage | None) -> None:
+    def rebind_stage(self, stage: Usd.Stage | None, *, discard_unsent: bool = False) -> None:
         """Move sending and receiving to a new stage and select a fresh authoring layer.
 
         Pass ``None`` to park: the receiver stays connected and the queue
         continues to fill, but ``update()`` returns zero until a new stage
-        is bound.
+        is bound. Submit local work first, or explicitly discard unsubmitted
+        work with ``discard_unsent=True``. Submitted work must be acknowledged
+        before rebinding; use :meth:`submit_and_wait`.
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
-        if self._emitter.prepared_event_count:
-            raise RuntimeError("cannot rebind while a prepared publisher batch is pending")
+        adapter = None
+        if stage is not None:
+            adapter = UsdStageAdapter(stage)
+            validate_layered_source(stage)
+        if self.pending_event_count:
+            raise RuntimeError("cannot rebind with submitted work pending; call submit_and_wait()")
+        if self.has_unsent_changes and not discard_unsent:
+            raise RuntimeError(
+                "cannot rebind with unsent changes; call submit_and_wait() "
+                "or pass discard_unsent=True"
+            )
+        if discard_unsent:
+            self._emitter.discard_prepared_events()
+            self._transform_coalescing.mark_submitted()
         if stage is None:
             self._dispatcher.unbind_stage()
             self._emitter.cleanup()
             self._stage = None
             self._authoring_layer = None
             return
-        adapter = UsdStageAdapter(stage)
-        validate_layered_source(stage)
         self._dispatcher.adapter = adapter
         self._dispatcher.bind_layered_stage(stage)
         self._authoring_layer = self._create_authoring_layer(stage, self._app_name)
@@ -645,6 +708,7 @@ class ManagedClient:
         """Stop networking and release receiver-owned collaboration layers."""
         if self._closed:
             return
+        self._callbacks.close()
         self._sender.disconnect()
         stop_receiver(self._receiver)
         self._dispatcher.close()

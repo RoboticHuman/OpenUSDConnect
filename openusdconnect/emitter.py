@@ -1939,7 +1939,6 @@ class NoticeEmitter:
         self._renamed_prims: list[tuple[str, str]] = []  # (old_path, new_path)
         self._suppress_depth: int = 0
         self._suppressed_edit_target: Usd.EditTarget | None = None
-        self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
         self._prim_cache: dict[str, dict] = {}
         # Unfiltered info-only attr names. Channels use this for read gating;
         # the gprim attr scan applies _attr_filter later.
@@ -2003,6 +2002,7 @@ class NoticeEmitter:
         # User-provided attr_filter wins; otherwise derive it from the active
         # channel set.
         self._attr_filter = attr_filter or _make_attr_filter(self._channels)
+        self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
 
     def _local_prim_spec(self, prim_path: str):
         return _edit_target_prim_spec(self.stage, prim_path)
@@ -2311,6 +2311,8 @@ class NoticeEmitter:
         self._sdf_spec_fields.clear()
         self._local_property_spec_fields.clear()
         self._local_prim_states.clear()
+        self._stage_metadata_dirty = False
+        self._stage_metadata_cache.clear()
         self._prepared_events = None
         self._suppress_depth = 0
         self._suppressed_edit_target = None
@@ -2328,6 +2330,7 @@ class NoticeEmitter:
             raise RuntimeError("cannot rebind an emitter while a prepared batch is pending")
         self.cleanup()
         self.stage = stage
+        self._stage_metadata_cache = read_stage_metadata(stage)
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
 
     def seed_prim_cache(self, stage: Usd.Stage, prim_path: str):
@@ -2424,17 +2427,24 @@ class NoticeEmitter:
         """Return a reentrant notice-suppression context manager."""
         return _SuppressScope(self)
 
+    def _pending_notice_state(self) -> tuple:
+        """Containers of noticed changes not yet built into events."""
+        return (
+            self.dirty,
+            self._pending_deactivations,
+            self._removed_local_definition_prims,
+            self._renamed_prims,
+            self._dirty_attrs,
+            self._sample_dirty_attrs,
+            self._notice_resynced_prims,
+            self._dirty_sdf_specs,
+            self._dirty_sdf_subtrees,
+        )
+
     def clear_all(self):
         """Discard pending prim notices, retaining diff caches and any prepared batch."""
-        self.dirty.clear()
-        self._pending_deactivations.clear()
-        self._removed_local_definition_prims.clear()
-        self._renamed_prims.clear()
-        self._dirty_attrs.clear()
-        self._sample_dirty_attrs.clear()
-        self._notice_resynced_prims.clear()
-        self._dirty_sdf_specs.clear()
-        self._dirty_sdf_subtrees.clear()
+        for pending in self._pending_notice_state():
+            pending.clear()
         self._clear_pending_context()
 
     def _clear_pending_context(self) -> None:
@@ -4171,6 +4181,16 @@ class NoticeEmitter:
         if incoming:
             merge_latest_transform_events(self._prepared_events, incoming)
         return self._prepared_events
+
+    @property
+    def has_local_changes(self) -> bool:
+        """Whether notices or a prepared batch still need evaluation or submission."""
+        return bool(
+            self._prepared_events
+            or self._full_sdf_spec_scan
+            or self._stage_metadata_dirty
+            or any(self._pending_notice_state())
+        )
 
     @property
     def prepared_event_count(self) -> int:

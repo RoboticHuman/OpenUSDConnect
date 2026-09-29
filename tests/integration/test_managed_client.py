@@ -65,6 +65,9 @@ def _client_stage(tmp_path, name="client"):
 
 
 def _translation(prim: Usd.Prim):
+    """Local translation, or ``None`` before the prim has arrived."""
+    if not prim:
+        return None
     m = UsdGeom.Xformable(prim).GetLocalTransformation(Usd.TimeCode.Default())
     return (m[3][0], m[3][1], m[3][2])
 
@@ -108,11 +111,12 @@ def test_managed_client_tight_loop_round_trips_without_crash(live_server, tmp_pa
     try:
         assert _drain_until(
             client,
-            lambda: _translation(sync_server.stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+            lambda: _translation(sync_server.stage.GetPrimAtPath("/World/Test"))
+            == (199.0, 0.0, 0.0),
         )
         assert _drain_until(
             client,
-            lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+            lambda: _translation(stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0),
         )
         assert _translation(sync_server.stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
         assert _translation(stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
@@ -154,7 +158,9 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
     for i in range(50):
         tr.Set(Gf.Vec3d(float(i), 0, 0))
         client.update()
-    _drain_until(client, lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 49.0)
+    _drain_until(
+        client, lambda: _translation(stage.GetPrimAtPath("/World/Test")) == (49.0, 0.0, 0.0),
+    )
     client.close()
 
     # /World and /World/Test are both locally defined by the first

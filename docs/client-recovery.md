@@ -90,13 +90,32 @@ This operation requires an equivalent clean stage whose loaded
 
 ```python
 clean_stage = open_clean_equivalent_stage()
-assessment = client.recover_use_server(clean_stage=clean_stage, timeout=5)
+previous_stage = client.stage
+try:
+    assessment = client.recover_use_server(clean_stage=clean_stage, timeout=5)
+finally:
+    # Recovery may bind the replacement before replay completes.
+    if client.stage is not previous_stage:
+        replace_stage_in_host(client.stage)
 
 for index, snapshot in enumerate(assessment.rejected_snapshots):
     snapshot.Export(f"rejected-work-{index}.usda")
 
-replace_stage_in_host(client.stage)
 ```
+
+If replay times out after replacement, `client.recovery_stage_pending` (also
+available in `client.status`) is `True`. The host must keep authoring disabled
+and stay bound to `client.stage`. Resume that same recovery attempt with:
+
+```python
+assessment = client.resume_recovery(timeout=5)
+```
+
+This continues replay on the replacement and preserves the original rejected
+snapshots. It raises `RecoveryError` with code `no_pending_recovery_stage`
+when no replacement belongs to the active incident. If the operation failed
+before replacement, call `recover_use_server()` again with the original clean
+stage instead. Completion clears `recovery_stage_pending`.
 
 Opening the same asset path again in the same process is usually not enough.
 OpenUSD's layer registry may return the same loaded `Sdf.Layer` objects.
@@ -156,6 +175,7 @@ failures:
 ```python
 from openusdconnect import RecoveryError
 
+previous_stage = client.stage
 try:
     assessment = client.recover_use_server(
         clean_stage=open_clean_equivalent_stage(),
@@ -165,12 +185,16 @@ except RecoveryError as exc:
     show_recovery_error(exc.code, str(exc))
 except (TimeoutError, ConnectionError):
     show_retry_later()
+finally:
+    if client.stage is not previous_stage:
+        replace_stage_in_host(client.stage)
 ```
 
 Stable codes include `no_incident`, `wrong_recovery_kind`,
 `stale_assessment`, `stage_not_synchronized`, `invalid_clean_stage`,
 `shared_loaded_layers`, `invalid_repair_target`, `local_changes_pending`,
-`transactions_pending`, `stage_unavailable`, and `edit_target_changed`.
+`transactions_pending`, `no_pending_recovery_stage`, `stage_unavailable`, and
+`edit_target_changed`.
 
 ## UI guidance
 

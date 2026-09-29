@@ -11,12 +11,16 @@ from pathlib import Path
 from pxr import Sdf, Usd
 
 from ._client_lifecycle import (
+    DEFAULT_WAIT_TIMEOUT_S,
+    ClientCallbackQueue,
     deadline_after,
     prepare_sender_token,
     raise_if_rejected,
     remaining_time,
     share_client_token,
     stop_receiver,
+    submit_and_wait,
+    wait_until_ready,
 )
 from ._client_utils import (
     client_origin,
@@ -45,7 +49,6 @@ from .recovery import (
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
 from .shared_layer_graph import SharedLayerGraph
-from .token_client import load_token
 
 LOG = logging.getLogger(__name__)
 
@@ -139,6 +142,8 @@ class SharedStageClient:
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
+        callbacks_on_update: bool = True,
+        background_send: bool = True,
         on_stage_metadata: Callable[[dict], None] | None = None,
         on_playback_state: Callable[[dict], None] | None = None,
         on_playback_claimed: Callable[[dict], None] | None = None,
@@ -154,7 +159,10 @@ class SharedStageClient:
         stable_client_id = client_id or make_stable_client_id(app_name)
         connection_origin = origin or client_origin(app_name, "shared")
         resolved_token = resolve_client_token(host, port, token, persist_token)
-        token_callback = client_token_handlers(host, port, persist_token, on_token_issued)
+        self._callbacks = ClientCallbackQueue(callbacks_on_update)
+        token_callback = client_token_handlers(
+            host, port, persist_token, self._callbacks.wrap(on_token_issued)
+        )
 
         def _on_token_issued(token: str) -> None:
             share_client_token(token, self._sender, self._receiver, token_callback)
@@ -179,10 +187,10 @@ class SharedStageClient:
             origin=connection_origin,
             token=resolved_token,
             on_token_issued=_on_token_issued,
-            on_stage_metadata=on_stage_metadata,
-            on_playback_state=on_playback_state,
-            on_playback_claimed=on_playback_claimed,
-            on_playback_rejected=on_playback_rejected,
+            on_stage_metadata=self._callbacks.wrap(on_stage_metadata),
+            on_playback_state=self._callbacks.wrap(on_playback_state),
+            on_playback_claimed=self._callbacks.wrap(on_playback_claimed),
+            on_playback_rejected=self._callbacks.wrap(on_playback_rejected),
             layered_replay=False,
             layer_mode=LayerMode.SHARED_STAGE,
         )
@@ -194,10 +202,12 @@ class SharedStageClient:
             token=resolved_token,
             on_token_issued=_on_token_issued,
             layer_mode=LayerMode.SHARED_STAGE,
+            background_send=background_send,
         )
         self._last_seq = 0
         self._pending_records: list[ReceivedEvent] = []
         self._last_recovery_assessment: SharedRecoveryAssessment | None = None
+        self._recovery_rebind_artifact: RecoveryArtifact | None = None
         self._started = False
         self._closed = False
 
@@ -233,12 +243,7 @@ class SharedStageClient:
             phase = ClientPhase.CLOSED
         elif failure is not None:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif (
-            self._receiver.auth_rejected
-            or self._sender.auth_rejected
-            or self._receiver.hello_rejected
-            or self._sender.hello_rejected
-        ):
+        elif self.auth_rejected or self.connection_rejected:
             phase = ClientPhase.REJECTED
         elif self._receiver.connected and not self._receiver.synchronized:
             phase = ClientPhase.REPLAYING
@@ -260,6 +265,11 @@ class SharedStageClient:
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
+            has_unsent_changes=self.has_unsent_changes,
+            deferred_events=self.deferred_event_count,
+            deferred_layer_keys=self.deferred_layer_keys,
+            edit_target_is_shared=self.edit_target_is_shared,
+            recovery_stage_pending=self.recovery_stage_pending,
         )
 
     @property
@@ -277,14 +287,45 @@ class SharedStageClient:
         )
 
     @property
+    def auth_rejected(self) -> bool:
+        return self._receiver.auth_rejected or self._sender.auth_rejected
+
+    @property
+    def connection_rejected(self) -> bool:
+        return self._receiver.hello_rejected or self._sender.hello_rejected
+
+    @property
     def pending_event_count(self) -> int:
         """Number of submitted events not yet durably acknowledged."""
         return self._sender.pending_event_count
 
     @property
+    def has_unsent_changes(self) -> bool:
+        """Whether tracked local edits have not yet entered the sender outbox."""
+        return not self._closed and self._tracker.has_local_changes
+
+    @property
+    def edit_target_is_shared(self) -> bool:
+        """Whether the current edit target belongs to the root/sublayer stack.
+
+        Session-layer edits remain local. This describes authoring scope, not
+        connection readiness or whether a new layer has its authoritative key.
+        """
+        target = self._stage.GetEditTarget().GetLayer()
+        return target in self._stage.GetLayerStack(includeSessionLayers=False)
+
+    @property
     def recovery_artifact(self) -> RecoveryArtifact | None:
         """Exact quarantined transactions for integration-owned recovery."""
         return self._sender.recovery_artifact
+
+    @property
+    def recovery_stage_pending(self) -> bool:
+        """Whether a replacement stage is bound but recovery is incomplete."""
+        return (
+            self._recovery_rebind_artifact is not None
+            and self._recovery_rebind_artifact is self._sender.recovery_artifact
+        )
 
     def repair_and_resume(self, events: list[dict], *, layer: Sdf.Layer) -> int:
         """Replace a recoverable layer transaction and resume its outbox.
@@ -304,6 +345,7 @@ class SharedStageClient:
         self._require_recoverable_artifact()
         txn_id = self._sender.repair_rejected_transaction(events, layer_key=layer_key)
         self._last_recovery_assessment = None
+        self._recovery_rebind_artifact = None
         if not self._connect_sender():
             raise ConnectionError(
                 f"transaction {txn_id} repaired but reconnect to "
@@ -363,12 +405,54 @@ class SharedStageClient:
         preserved in the returned assessment before the new stage is replayed.
         Producer reconnect is attempted within the same timeout budget; if it
         cannot complete, the normal update loop retries.
+
+        Once the replacement is bound, replay failure leaves it bound and sets
+        ``recovery_stage_pending``. Keep the host bound to ``client.stage`` even
+        if this call raises, and continue with :meth:`resume_recovery`. Do not
+        author into the replacement until recovery completes.
         """
-        self._validate_clean_recovery_stage(clean_stage)
         deadline = deadline_after(timeout)
+        self._validate_clean_recovery_stage(clean_stage)
         assessment = self.refresh_recovery_assessment(timeout=timeout)
         self._validate_clean_recovery_stage(clean_stage, assessment=assessment)
         self._rebind_stage_for_recovery(clean_stage)
+        self._recovery_rebind_artifact = assessment.recovery_artifact
+        return self._finish_use_server(assessment, session_id=session_id, deadline=deadline)
+
+    def resume_recovery(
+        self,
+        *,
+        session_id: str | None = None,
+        timeout: float | None = 10.0,
+    ) -> SharedRecoveryAssessment:
+        """Continue a Use Server recovery whose replacement replay did not finish.
+
+        Rejected snapshots captured by the original attempt are preserved.
+        """
+        self._require_recoverable_artifact()
+        if not self.recovery_stage_pending:
+            raise RecoveryError(
+                "no_pending_recovery_stage",
+                "no replacement stage is waiting for recovery to complete",
+            )
+        if self._tracker.has_local_changes:
+            raise RecoveryError(
+                "local_changes_pending",
+                "cannot resume replacement-stage recovery while unsent edits remain",
+            )
+        return self._finish_use_server(
+            self._last_recovery_assessment,
+            session_id=session_id,
+            deadline=deadline_after(timeout),
+        )
+
+    def _finish_use_server(
+        self,
+        assessment: SharedRecoveryAssessment,
+        *,
+        session_id: str | None,
+        deadline: float | None,
+    ) -> SharedRecoveryAssessment:
         remaining = remaining_time(deadline)
         self._refresh_recovery_checkpoint(remaining)
         assessment = self._build_recovery_assessment(
@@ -397,9 +481,14 @@ class SharedStageClient:
         if not isinstance(clean_stage, Usd.Stage):
             raise TypeError("SharedStageClient requires a Usd.Stage")
         if clean_stage is self._stage:
+            hint = (
+                "; call resume_recovery() to continue the pending replacement"
+                if self.recovery_stage_pending
+                else ""
+            )
             raise RecoveryError(
                 "invalid_clean_stage",
-                "Use Server recovery requires a different clean stage",
+                f"Use Server recovery requires a different clean stage{hint}",
             )
         if Sdf.Layer.IsAnonymousLayerIdentifier(clean_stage.GetRootLayer().identifier):
             raise RecoveryError(
@@ -531,6 +620,7 @@ class SharedStageClient:
         self._validate_recovery_assessment(assessment)
         self._sender.abandon_rejected_session(session_id=session_id)
         self._last_recovery_assessment = None
+        self._recovery_rebind_artifact = None
         self._tracker.sync_graph(force=True)
         return assessment
 
@@ -570,6 +660,21 @@ class SharedStageClient:
             raise RuntimeError("SharedStageClient is closed")
         return self._sender.flush(timeout)
 
+    def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
+        """Pump replay on the stage-owning thread until ready.
+
+        Returns ``False`` only on timeout; rejection and recovery raise.
+        Readiness does not imply that unresolved layers have become available.
+        """
+        return wait_until_ready(self, timeout)
+
+    def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
+        """Pump local edits and replay, then wait for durable acknowledgement.
+
+        Call from the stage-owning thread. Returns ``False`` only on timeout.
+        """
+        return submit_and_wait(self, timeout)
+
     @property
     def stage_metadata(self) -> dict:
         return dict(self._receiver.stage_metadata)
@@ -600,8 +705,9 @@ class SharedStageClient:
         if self._closed:
             raise RuntimeError("SharedStageClient is closed")
         if not self._started:
-            if self._receiver.token is None and self._persist_token:
-                self._receiver.token = load_token(self._host, self._port)
+            self._receiver.token = resolve_client_token(
+                self._host, self._port, self._receiver.token, self._persist_token,
+            )
             self._receiver.start()
             self._started = True
         return self
@@ -638,6 +744,24 @@ class SharedStageClient:
             host=self._host, port=self._port, persist_token=self._persist_token,
         )
 
+    def claim_playback(self, time: float | None = None) -> bool:
+        """Request the shared-playback leader role."""
+        if self._closed:
+            raise RuntimeError("SharedStageClient is closed")
+        return self._sender.claim_playback(time=time)
+
+    def send_playback_control(
+        self,
+        action: str,
+        *,
+        time: float | None = None,
+        rate: float | None = None,
+    ) -> bool:
+        """Drive the shared playhead (leader only)."""
+        if self._closed:
+            raise RuntimeError("SharedStageClient is closed")
+        return self._sender.send_playback_control(action, time=time, rate=rate)
+
     def update(self) -> SyncUpdate:
         """Apply queued authoritative records, then publish local layer edits."""
         if self._closed:
@@ -645,6 +769,13 @@ class SharedStageClient:
         if not self._started:
             raise RuntimeError("SharedStageClient has not been started")
 
+        self._callbacks.drain()
+        if self._closed:
+            return SyncUpdate(
+                applied_events=0,
+                submitted_events=0,
+                pending_events=self.pending_event_count,
+            )
         self._tracker.prepare_local_changes()
         try:
             received = self._apply_incoming()
@@ -855,10 +986,12 @@ class SharedStageClient:
     def close(self) -> None:
         if self._closed:
             return
+        self._callbacks.close()
         self._sender.disconnect()
         stop_receiver(self._receiver)
         self._tracker.close()
         self._last_recovery_assessment = None
+        self._recovery_rebind_artifact = None
         self._closed = True
 
     def __enter__(self) -> SharedStageClient:

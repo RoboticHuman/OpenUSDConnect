@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect import ManagedClient  # noqa: E402, I001
+from openusdconnect import ClientPhase, ManagedClient, TransactionRejectedError  # noqa: E402, I001
 from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: E402
 
 BASE_USD = Path(__file__).with_name("empty.usda")
@@ -54,8 +54,8 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
 
     try:
         with client:
-            if not client.connect(timeout=5):
-                print("could not connect", file=sys.stderr)
+            if not client.wait_until_ready(timeout=5):
+                print(f"client did not become ready: {client.status.phase.value}", file=sys.stderr)
                 return 1
 
             sphere = UsdGeom.Sphere.Define(stage, LOCAL_SPHERE_PATH)
@@ -63,9 +63,7 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
             sphere.CreateDisplayColorAttr([Gf.Vec3f(0.08, 0.45, 1.0)])
             translate = UsdGeom.Xformable(sphere).AddTranslateOp()
             translate.Set(Gf.Vec3d(0.0, 1.25, 0.0))
-            if client.update().submitted_events == 0:
-                print("initial sphere batch was not sent", file=sys.stderr)
-                return 1
+            client.update()
 
             expected_paths = [LOCAL_SPHERE_PATH]
             if expect_peer:
@@ -92,8 +90,13 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
             print("publishing LocalSphere and receiving PeerCube; press Ctrl+C to stop")
             while args.seconds <= 0 or time.monotonic() - started < args.seconds:
                 elapsed = time.monotonic() - started
-                translate.Set(Gf.Vec3d(math.sin(elapsed) * 2.5, 1.25, 0.0))
                 update = client.update()
+                status = client.status
+                if status.phase in (ClientPhase.RECOVERY_REQUIRED, ClientPhase.REJECTED):
+                    print(status.reason or status.phase.value, file=sys.stderr)
+                    return 2
+                if status.phase is ClientPhase.READY:
+                    translate.Set(Gf.Vec3d(math.sin(elapsed) * 2.5, 1.25, 0.0))
 
                 now = time.monotonic()
                 if now >= next_report:
@@ -110,7 +113,16 @@ def run(args: argparse.Namespace, *, expect_peer: bool = False) -> int:
                 next_tick += interval
                 if (sleep_for := next_tick - time.monotonic()) > 0:
                     time.sleep(sleep_for)
+            if not client.submit_and_wait(timeout=5):
+                print("local edits were not durably acknowledged", file=sys.stderr)
+                return 1
             return 0
+    except (PermissionError, ConnectionError) as exc:
+        print(f"server rejected the client: {exc}", file=sys.stderr)
+        return 1
+    except TransactionRejectedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 0
 

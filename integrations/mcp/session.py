@@ -125,6 +125,7 @@ class ConnectionSession:
             persist_token=False,
             on_playback_state=self._on_playback_state,
             on_applied=self._on_applied,
+            callbacks_on_update=False,
         )
         self.receiver.start()
 
@@ -201,7 +202,7 @@ class ConnectionSession:
             # A nonblocking poll avoids a reconnect handshake extending the read budget.
             try:
                 acknowledged = self.sender.flush(timeout=0)
-                applied = self.receiver.update()
+                applied = self.receiver.update().applied_events
                 if not acknowledged:
                     # The acknowledgement may arrive while queued events are applied.
                     acknowledged = self.sender.flush(timeout=0)
@@ -239,7 +240,7 @@ class ConnectionSession:
         """Non-blocking drain so introspection reflects recent foreign edits."""
         if self.receiver is None:
             return 0
-        return self.receiver.update()
+        return self.receiver.update().applied_events
 
     def require_mirror(self):
         """Return the mirror stage or raise if introspection is unavailable."""
